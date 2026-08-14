@@ -39,7 +39,10 @@ export function RepositoryWebhooksPanel({ repositoryId, fullPath, provider }: Re
   const covered = coverage.data?.scope === "Connection";
 
   return (
-    <div style={{ margin: "16px 0 28px", display: "flex", flexDirection: "column", gap: 10 }}>
+    // The same inset every sibling tab uses (.ov is 24px 28px 32px). `.rd-body` is a bare scroll
+    // container with no padding of its own, so a tab that only sets vertical margin sits hard
+    // against both edges — further left than the tab strip that selected it.
+    <div style={{ padding: "24px 28px 32px", display: "flex", flexDirection: "column", gap: 10 }}>
       <div className="cn-field-h" style={{ maxWidth: "56em" }}>
         {covered
           ? connectionCoverageNote(coverage.data?.ownerPath ?? null, provider)

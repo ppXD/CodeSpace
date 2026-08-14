@@ -111,14 +111,30 @@ describe("repository webhooks panel", () => {
     expect(screen.getByText(/last delivery 3 minutes ago/)).toBeTruthy();
   });
 
-  it("says a registered hook that has never fired has never fired", async () => {
-    // The quietest way a hook is broken: the provider accepted it and cannot reach us. A row that
-    // said only "Delivering" would be actively wrong.
+  it("does not call a hook that has never fired a delivering one", async () => {
+    // The quietest way a hook is broken: the provider accepted it and cannot reach us. Registration
+    // is something WE did; delivery is something only the provider can demonstrate, so the row must
+    // not claim the second on the strength of the first. It used to read "Delivering · no event has
+    // arrived yet" -- a badge contradicting its own caption -- which also made the setup steps below
+    // it wrong, since they promise the row turns to Delivering once the first event lands.
     renderPanel([hook()]);
 
-    await waitFor(() => expect(screen.getByText("Delivering")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Ready")).toBeTruthy());
 
-    expect(screen.getByText(/no event has arrived yet/)).toBeTruthy();
+    expect(screen.getByText(/waiting for the first event/)).toBeTruthy();
+    expect(screen.queryByText("Delivering")).toBeNull();
+  });
+
+  it("promises Delivering in the setup steps only for a state the row can actually reach", async () => {
+    // The steps end with "the row above turns to Delivering once the first event lands here". That
+    // sentence was false while a freshly registered row already said Delivering: it described a
+    // transition the reader could never observe, on a page whose whole job is telling them whether
+    // the hook works. The two have to agree, so this asserts them together.
+    renderPanel([hook()]);
+
+    await waitFor(() => expect(screen.getByText("Ready")).toBeTruthy());
+
+    expect(screen.queryByText("Delivering")).toBeNull();
   });
 
   it("says a hook still on the ladder is registering, with which attempt and when the next is", async () => {
@@ -312,7 +328,7 @@ describe("repository webhooks panel", () => {
   it("offers no retry on a hook that is already delivering", async () => {
     // Only Failed and DeadLettered can be re-queued; the server answers 400 for anything else, and a
     // button that exists to be refused is not how the rule gets communicated.
-    renderPanel([hook()]);
+    renderPanel([hook({ lastReceivedDate: new Date(Date.now() - 60_000).toISOString() })]);
 
     await waitFor(() => expect(screen.getByText("Delivering")).toBeTruthy());
 
@@ -339,7 +355,7 @@ describe("repository webhooks panel", () => {
   it("says nothing about refused deliveries when none have been refused", async () => {
     renderPanel([hook()]);
 
-    await waitFor(() => expect(screen.getByText("Delivering")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Ready")).toBeTruthy());
 
     expect(screen.queryByText("Deliveries that were refused")).toBeNull();
   });
