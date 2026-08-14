@@ -28,7 +28,7 @@ public sealed class GitLabProviderModule : IProviderModule
         typeof(GitLabIssueEventSubscription)
     };
 
-    public IReadOnlyList<Type> AuxiliaryServices { get; } = new[] { typeof(GitLabSignatureVerifier), typeof(GitLabEventNormalizer) };
+    public IReadOnlyList<Type> AuxiliaryServices { get; } = new[] { typeof(GitLabSignatureVerifier), typeof(GitLabEventNormalizer), typeof(GitLabWebhookRepositoryIdentifier) };
 
     /// <summary>Scopes GitLab OAuth needs that aren't a capability requirement. None today — <c>api</c>
     /// (required by the capabilities below) also covers profile/identity reads.</summary>
@@ -86,6 +86,12 @@ public sealed class GitLabProviderModule : IProviderModule
 
         // Webhook registration: only `api` works on GitLab. No narrower alternative exists.
         [typeof(IWebhookRegistrationCapability)] = ScopeRequirement.Of(GitLabScopes.Api),
+
+        // Group hooks need nothing beyond what project hooks already need — GitLab gates them by
+        // PLAN and by group membership, neither of which a token can be re-issued with. So consent
+        // is unchanged, and there is nothing a pre-flight could check: only the call settles whether
+        // the instance will answer.
+        [typeof(IConnectionWebhookRegistrationCapability)] = ScopeRequirement.Of(GitLabScopes.Api),
 
         // Probe calls /user — any scope that hits the API (`api`, `read_api`, or `read_user`).
         [typeof(ICredentialProbeCapability)] = ScopeRequirement.AnyOf(GitLabScopes.Api, GitLabScopes.ReadApi, GitLabScopes.ReadUser)

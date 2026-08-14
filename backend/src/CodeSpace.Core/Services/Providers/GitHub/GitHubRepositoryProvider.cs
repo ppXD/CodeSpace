@@ -21,19 +21,21 @@ using RepositoryRole = CodeSpace.Messages.Enums.RepositoryRole;
 
 namespace CodeSpace.Core.Services.Providers.GitHub;
 
-public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IIssueCatalogCapability, IIssueWriteCapability, IReleaseCatalogCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, IRepositoryHistoryCapability, IRepositoryMarkdownRenderCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed partial class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IIssueCatalogCapability, IIssueWriteCapability, IReleaseCatalogCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, IRepositoryHistoryCapability, IRepositoryMarkdownRenderCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     private readonly IProviderAuthResolver _authResolver;
     private readonly IExternalCallResilience _resilience;
     private readonly GitHubSignatureVerifier _signatureVerifier;
     private readonly GitHubEventNormalizer _eventNormalizer;
+    private readonly GitHubWebhookRepositoryIdentifier _repositoryIdentifier;
 
-    public GitHubRepositoryProvider(IProviderAuthResolver authResolver, IExternalCallResilience resilience, GitHubSignatureVerifier signatureVerifier, GitHubEventNormalizer eventNormalizer)
+    public GitHubRepositoryProvider(IProviderAuthResolver authResolver, IExternalCallResilience resilience, GitHubSignatureVerifier signatureVerifier, GitHubEventNormalizer eventNormalizer, GitHubWebhookRepositoryIdentifier repositoryIdentifier)
     {
         _authResolver = authResolver;
         _resilience = resilience;
         _signatureVerifier = signatureVerifier;
         _eventNormalizer = eventNormalizer;
+        _repositoryIdentifier = repositoryIdentifier;
     }
 
     public ProviderKind Kind => ProviderKind.GitHub;

@@ -67,6 +67,35 @@ public class WebhookIngestionAuditFlowTests
     }
 
     [Fact]
+    public async Task A_rejection_from_the_per_repository_path_names_its_repository()
+    {
+        // The Webhook tab reads refusals BY repository, so a row without one is a refusal nobody
+        // standing on a repository page will ever see. Asserted end-to-end through the ingestion
+        // service rather than by calling the auditor directly, because the id is the service's to
+        // supply — and it is precisely what a rewrite of that service can drop without breaking a
+        // single compile.
+        var (teamId, webhookId) = await SeedActiveWebhookAsync();
+
+        using (var scope = _fixture.BeginScope())
+        {
+            await scope.Resolve<IWebhookIngestionService>().IngestAsync(
+                webhookId,
+                body: """{"event_type":"deployment"}""",
+                headers: new Dictionary<string, string> { ["X-GitHub-Delivery"] = Guid.NewGuid().ToString("N") },
+                CancellationToken.None);
+        }
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var expectedRepositoryId = await db.RepositoryWebhook.AsNoTracking().Where(w => w.Id == webhookId).Select(w => w.RepositoryId).SingleAsync();
+        var rejected = await db.WorkflowRunRequest.AsNoTracking().SingleAsync(r => r.TeamId == teamId && r.Status == WorkflowRunRequestStatus.Rejected);
+
+        rejected.RepositoryId.ShouldBe(expectedRepositoryId,
+            customMessage: "A refusal on the per-repository path always knows its repository — the hook row IS the answer. A null here is a row the repository's Webhook tab cannot show.");
+    }
+
+    [Fact]
     public async Task Inactive_webhook_writes_rejected_audit_row_via_ingestion_service()
     {
         var (teamId, webhookId) = await SeedInactiveWebhookAsync();

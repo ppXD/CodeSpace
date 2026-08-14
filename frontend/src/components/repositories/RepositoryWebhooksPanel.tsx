@@ -2,11 +2,11 @@ import { Fragment, useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { ApiError } from "@/api/request";
-import type { ProviderKind, RejectedDelivery, RepositoryWebhookAttemptDetail, RepositoryWebhookDetail } from "@/api/types";
-import { useRepositoryRejectedDeliveries, useRepositoryWebhooks, useRetryWebhookRegistration, useRevealWebhookSecret } from "@/hooks/use-repository-webhooks";
+import type { ProviderKind, RejectedDelivery, RepositoryWebhookAttemptDetail, RepositoryWebhookCoverage, RepositoryWebhookDetail } from "@/api/types";
+import { useRepositoryRejectedDeliveries, useRepositoryWebhookCoverage, useRepositoryWebhooks, useRetryWebhookRegistration, useRevealWebhookSecret } from "@/hooks/use-repository-webhooks";
 import { TeamPermissions, useTeamPermissions } from "@/hooks/use-team-management";
 import { relativeTime } from "@/lib/codeTree";
-import { attemptOutcome, canRetryWebhook, rejectedDeliveriesNote, rejectionCopy, UNPLACED_DELIVERY_NOTE, webhookDiagnosis, webhookSetupSteps, webhookState, type WebhookSetupStep } from "@/lib/webhookState";
+import { attemptOutcome, canRetryWebhook, connectionCoverageNote, rejectedDeliveriesNote, rejectionCopy, UNPLACED_DELIVERY_NOTE, webhookDiagnosis, webhookSetupSteps, webhookState, type WebhookSetupStep } from "@/lib/webhookState";
 
 /**
  * Repository → Webhook. What the repository's hooks are doing, why they are not, and how to finish
@@ -29,15 +29,21 @@ interface RepositoryWebhooksPanelProps {
 
 export function RepositoryWebhooksPanel({ repositoryId, fullPath, provider }: RepositoryWebhooksPanelProps) {
   const webhooks = useRepositoryWebhooks(repositoryId);
+  const coverage = useRepositoryWebhookCoverage(repositoryId);
   const mayManage = useTeamPermissions().can(TeamPermissions.ReposManage);
 
   const hooks = webhooks.data ?? [];
+  // Under connection-wide scope this repository legitimately has no hook of its own, and the empty
+  // list below is not the answer — the covering hook is. Reading `scope` rather than inferring from
+  // the empty list is the whole point: the two look identical and one of them means all is well.
+  const covered = coverage.data?.scope === "Connection";
 
   return (
     <div style={{ margin: "16px 0 28px", display: "flex", flexDirection: "column", gap: 10 }}>
       <div className="cn-field-h" style={{ maxWidth: "56em" }}>
-        CodeSpace registers these itself when a repository is bound. Nothing here needs setting up by
-        hand until one of them fails to register — and then this is where the reason is.
+        {covered
+          ? connectionCoverageNote(coverage.data?.ownerPath ?? null, provider)
+          : "CodeSpace registers these itself when a repository is bound. Nothing here needs setting up by hand until one of them fails to register — and then this is where the reason is."}
       </div>
 
       {webhooks.isLoading && <div className="ct-empty"><div className="ct-empty-h">Loading…</div></div>}
@@ -49,7 +55,9 @@ export function RepositoryWebhooksPanel({ repositoryId, fullPath, provider }: Re
         </div>
       )}
 
-      {!webhooks.isLoading && hooks.length === 0 && (
+      {covered && <ConnectionCoverage coverage={coverage.data!} provider={provider} />}
+
+      {!covered && !webhooks.isLoading && hooks.length === 0 && (
         <div className="ct-empty">
           <div className="ct-empty-h">This repository has no webhook</div>
           <div className="ct-empty-p">Nothing will arrive from {provider} until one exists. Binding the repository again creates one.</div>
@@ -63,6 +71,63 @@ export function RepositoryWebhooksPanel({ repositoryId, fullPath, provider }: Re
       )}
 
       <RejectedDeliveries repositoryId={repositoryId} provider={provider} />
+    </div>
+  );
+}
+
+/**
+ * The group / organization hook that covers this repository, in the row the tab already uses. Same
+ * `webhookState` sentence and same diagnosis card as a repository hook, because it is the same
+ * lifecycle and the reader is asking the same question — are events arriving, and if not why.
+ *
+ * <p>What it deliberately does NOT offer: reveal-the-secret and the by-hand setup steps. This hook's
+ * secret is the connection's, not this repository's, and re-creating it by hand is a connection
+ * operation done once for every repository under the owner — offering either here would put a
+ * connection-wide action behind a per-repository page.</p>
+ */
+function ConnectionCoverage({ coverage, provider }: { coverage: RepositoryWebhookCoverage; provider: ProviderKind }) {
+  const [open, setOpen] = useState(false);
+
+  // Connection-wide scope with nothing covering the repository is a real state, not a gap in the
+  // read: registration never ran, or the hook was retired. Silence here would be the blank tab again.
+  if (coverage.hook == null) {
+    return (
+      <div className="ct-empty">
+        <div className="ct-empty-h">No hook covers this repository</div>
+        <div className="ct-empty-p">This connection registers one hook per group at {provider}, and none exists for this repository's owner. Nothing will arrive until one is registered.</div>
+      </div>
+    );
+  }
+
+  const state = webhookState(coverage.hook, provider);
+  const diagnosis = webhookDiagnosis(coverage.hook, provider);
+
+  return (
+    <div className="cn-list">
+      <div className="cn-row hk-row" data-tone={state.tone}>
+        <div className="cn-row-head">
+          <div className="cn-mark" data-p={provider.toLowerCase()}><Ic.Bell size={14} /></div>
+
+          <div className="cn-meta">
+            <div className="cn-name">
+              {coverage.ownerPath ?? "Connection webhook"}
+              <span className={state.tone === "idle" ? "cn-status" : `cn-status hk-status-${state.tone}`}><span className="cn-status-dot" />{state.label}</span>
+            </div>
+            <div className="cn-sub"><span>{state.detail}</span></div>
+          </div>
+
+          <button className={state.tone === "bad" ? "btn btn-primary" : "btn"} aria-expanded={open} onClick={() => setOpen(!open)}>
+            {state.tone === "bad" ? "Why, and how to fix it" : open ? "Hide details" : "Details"}
+          </button>
+        </div>
+
+        {open && (
+          <div className="hk-open">
+            {diagnosis && <WebhookDiagnosisCard hook={coverage.hook} cause={diagnosis.cause} pattern={diagnosis.pattern} />}
+            <div className="cn-field-h">This hook is registered on {coverage.ownerPath} and covers every repository under it. Its secret and its registration are managed on the connection, not here.</div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

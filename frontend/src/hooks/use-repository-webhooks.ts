@@ -22,6 +22,20 @@ export function useRepositoryWebhooks(repositoryId: string | null) {
 }
 
 /**
+ * What covers the repository, on the same clock as the list. Read together because under
+ * connection-wide scope the list is legitimately empty and this is the whole answer — a stale
+ * coverage read beside a fresh empty list is exactly the blank tab this exists to prevent.
+ */
+export function useRepositoryWebhookCoverage(repositoryId: string | null) {
+  return useQuery({
+    queryKey: ["repository", repositoryId, "webhook-coverage"],
+    queryFn: () => repositoriesApi.getWebhookCoverage(repositoryId!),
+    enabled: repositoryId != null,
+    refetchInterval: WEBHOOK_POLL_MS,
+  });
+}
+
+/**
  * Reveal is a mutation, not a query, so the secret is never in the query cache and never refetched
  * behind the operator's back — that is the whole reason the endpoint is separate.
  *

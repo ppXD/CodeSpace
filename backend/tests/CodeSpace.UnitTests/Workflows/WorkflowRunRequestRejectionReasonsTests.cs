@@ -17,6 +17,8 @@ public class WorkflowRunRequestRejectionReasonsTests
     [InlineData("event_not_mapped",       nameof(WorkflowRunRequestRejectionReasons.EventNotMapped))]
     [InlineData("malformed_payload",      nameof(WorkflowRunRequestRejectionReasons.MalformedPayload))]
     [InlineData("no_matching_activation", nameof(WorkflowRunRequestRejectionReasons.NoMatchingActivation))]
+    [InlineData("repository_not_bound",   nameof(WorkflowRunRequestRejectionReasons.RepositoryNotBound))]
+    [InlineData("webhook_retired",        nameof(WorkflowRunRequestRejectionReasons.WebhookRetired))]
     public void Rejection_reason_string_form_is_pinned(string expected, string constantName)
     {
         var actual = typeof(WorkflowRunRequestRejectionReasons).GetField(constantName)!.GetValue(null) as string;

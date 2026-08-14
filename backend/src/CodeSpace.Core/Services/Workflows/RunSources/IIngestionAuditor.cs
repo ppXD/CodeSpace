@@ -65,6 +65,18 @@ public sealed record WebhookRejectionContext
     /// <summary>Delivery id from the provider's header (X-GitHub-Delivery, etc). Null if we couldn't extract it before failing.</summary>
     public string? ExternalEventId { get; init; }
 
+    /// <summary>
+    /// Overrides what this row is deduplicated ON. Null — the default — dedups per delivery, which
+    /// is what every per-repository rejection wants: each delivery is its own event and a provider
+    /// retry of the same one must not insert twice.
+    ///
+    /// <para>Set it when the rejection is EXPECTED traffic rather than an incident, and one row per
+    /// delivery would bury every other refusal in the list. A key that collapses a window of
+    /// deliveries into one row makes the unique index do the rate limiting, atomically, so two
+    /// deliveries arriving together cannot both decide they are the first.</para>
+    /// </summary>
+    public string? DedupKey { get; init; }
+
     /// <summary>Headers with secret/auth values stripped — captured pre-failure for triage.</summary>
     public string? RawHeadersRedactedJson { get; init; }
 

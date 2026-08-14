@@ -30,6 +30,8 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork, IDataProtectionKeyCont
     public DbSet<Repository> Repository => Set<Repository>();
     public DbSet<RepositoryWebhook> RepositoryWebhook => Set<RepositoryWebhook>();
     public DbSet<RepositoryWebhookAttempt> RepositoryWebhookAttempt => Set<RepositoryWebhookAttempt>();
+    public DbSet<ConnectionWebhook> ConnectionWebhook => Set<ConnectionWebhook>();
+    public DbSet<ConnectionWebhookAttempt> ConnectionWebhookAttempt => Set<ConnectionWebhookAttempt>();
     public DbSet<Project> Project => Set<Project>();
     public DbSet<ProjectRepository> ProjectRepository => Set<ProjectRepository>();
     public DbSet<Role> Role => Set<Role>();
