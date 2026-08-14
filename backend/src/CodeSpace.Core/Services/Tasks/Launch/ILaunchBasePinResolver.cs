@@ -16,5 +16,5 @@ public interface ILaunchBasePinResolver
     /// disjunction cannot be expressed as one commit), or when its remote is empty. A HARD ref that is missing or an
     /// unreachable remote fails the launch LOUD (the clone would fail identically later). Null when nothing pinned.
     /// </summary>
-    Task<IReadOnlyDictionary<Guid, string>?> ResolveVectorAsync(Guid teamId, TaskLaunchSeed seed, ResolvedAgentProfile profile, IReadOnlyDictionary<Guid, string> sessionBaseRefs, CancellationToken cancellationToken);
+    Task<IReadOnlyDictionary<Guid, string>?> ResolveVectorAsync(Guid teamId, TaskLaunchSeed seed, ResolvedAgentProfile profile, IReadOnlyDictionary<Guid, SessionStartRef> sessionBaseRefs, CancellationToken cancellationToken);
 }

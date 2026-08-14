@@ -26,7 +26,7 @@ public sealed class LaunchBasePinResolver : ILaunchBasePinResolver, IScopedDepen
         _tips = tips;
     }
 
-    public async Task<IReadOnlyDictionary<Guid, string>?> ResolveVectorAsync(Guid teamId, TaskLaunchSeed seed, ResolvedAgentProfile profile, IReadOnlyDictionary<Guid, string> sessionBaseRefs, CancellationToken cancellationToken)
+    public async Task<IReadOnlyDictionary<Guid, string>?> ResolveVectorAsync(Guid teamId, TaskLaunchSeed seed, ResolvedAgentProfile profile, IReadOnlyDictionary<Guid, SessionStartRef> sessionBaseRefs, CancellationToken cancellationToken)
     {
         var scope = CollectScope(seed, profile, sessionBaseRefs);
 
@@ -54,7 +54,7 @@ public sealed class LaunchBasePinResolver : ILaunchBasePinResolver, IScopedDepen
     }
 
     /// <summary>The (repositoryId → hard authored ref, null = default branch) pairs to pin: the primary (the operator's BaseBranch pin) + each related repo (its authored ref). A repo riding a SESSION-soft ref is excluded — its branch-or-default disjunction cannot be one commit. Internal static so the eligibility policy is unit-pinned directly.</summary>
-    internal static IReadOnlyDictionary<Guid, string?> CollectScope(TaskLaunchSeed seed, ResolvedAgentProfile profile, IReadOnlyDictionary<Guid, string> sessionBaseRefs)
+    internal static IReadOnlyDictionary<Guid, string?> CollectScope(TaskLaunchSeed seed, ResolvedAgentProfile profile, IReadOnlyDictionary<Guid, SessionStartRef> sessionBaseRefs)
     {
         var scope = new Dictionary<Guid, string?>();
 

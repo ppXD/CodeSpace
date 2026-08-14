@@ -162,7 +162,7 @@ public sealed class AgentCodeNode : INodeRuntime
 
         var cwdMode = WorkspaceCwdModeWire.FromWire(ReadOptionalString(context.Config, "cwdMode")) ?? WorkspaceCwdMode.Auto;
 
-        var workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(repositoryId, related, ReadBaseRef(context), ReadBaseRefFromSession(context), cwdMode, ReadPinnedSha(context));
+        var workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(repositoryId, related, ReadBaseRef(context), ReadBaseRefFromSession(context), cwdMode, ReadPinnedSha(context), ReadBaseRefRecoverySha(context));
 
         if (!TryReadAcceptance(context.Config, out var acceptance, out var acceptanceError)) return Fail(acceptanceError!);
 
@@ -412,6 +412,12 @@ public sealed class AgentCodeNode : INodeRuntime
     /// <summary>Read the optional <c>baseRefFromSession</c> input — true ONLY when the launch projection set <c>baseRef</c> from a SESSION-inherited prior branch (a transient branch a merged PR can delete). Marks the primary ref SOFT so the clone falls back to the default branch if it was pruned. An author-pinned baseRef never carries this ⇒ stays HARD (fail loud if gone). Absent / non-true → false.</summary>
     private static bool ReadBaseRefFromSession(NodeRunContext context) =>
         context.Inputs.TryGetValue("baseRefFromSession", out var v) && v.ValueKind == JsonValueKind.True;
+
+    /// <summary>Read the optional <c>baseRefRecoverySha</c> input — the confirmed commit the SESSION baseRef pointed at when recorded (P4 session branch recovery): the clone's detach anchor when the prior branch has vanished. Absent / blank / non-string → null (recovery unavailable — the soft fallback degrades to the default branch).</summary>
+    private static string? ReadBaseRefRecoverySha(NodeRunContext context) =>
+        context.Inputs.TryGetValue("baseRefRecoverySha", out var v) && v.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(v.GetString())
+            ? v.GetString()
+            : null;
 
     /// <summary>Read the optional <c>pinnedSha</c> input — the primary repo's launch-resolved base pin (S1): the EXACT commit the workspace materializes. Absent / blank / non-string → null (tip-of-ref, byte-identical).</summary>
     private static string? ReadPinnedSha(NodeRunContext context) =>

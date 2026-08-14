@@ -89,7 +89,7 @@ public sealed class SessionTurnsContextSource : IContextSource, IScopedDependenc
         var result = SessionTurnText.ReadResult(row.OutputsJson);
         if (result != null) sb.AppendLine($"Result: {result}");
 
-        var branch = SessionManifestBranches.ResolveSingleRepoBranch(manifests) ?? SessionTurnText.ReadString(row.OutputsJson, "branch");
+        var branch = SessionManifestBranches.ResolveSingleRepoBranch(manifests)?.Branch ?? SessionTurnText.ReadString(row.OutputsJson, "branch");
         if (branch != null) sb.AppendLine($"Produced branch: {branch}");
 
         return new RenderedTurn(row.Turn, sb.ToString().TrimEnd());

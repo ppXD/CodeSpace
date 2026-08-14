@@ -34,4 +34,7 @@ public sealed record WorkspaceRequest
 
     /// <summary>S1 — the EXACT commit to materialize after cloning (see <c>WorkspaceRepositorySpec.PinnedSha</c>): a hard detached checkout of this sha, deepening the clone only when the tip advanced past the pin; fails LOUD when the pin is missing/unreachable. Null → the tip of <see cref="Ref"/> (byte-identical legacy behaviour).</summary>
     public string? PinnedSha { get; init; }
+
+    /// <summary>P4 (session branch recovery): the confirmed commit the SOFT ref pointed at when recorded — consulted ONLY when the soft fallback fired (the prior branch vanished): the provider clones the default branch, then best-effort detaches onto this anchor so the prior work survives. Unlike <see cref="PinnedSha"/> this never fails the provision — an unrecoverable anchor stays on the default branch with a loud warning. Null → today's fallback behaviour, byte-identical.</summary>
+    public string? RefRecoverySha { get; init; }
 }

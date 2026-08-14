@@ -37,19 +37,19 @@ internal static class SessionManifestBranches
         return rows.GroupBy(m => m.RepositoryId).SelectMany(g => g.Key is null ? g : g.OrderByDescending(m => m.CreatedDate).Take(1)).ToList();
     }
 
-    /// <summary>The FLAT single-repo branch — set only when the run produced exactly ONE live branch (a multi-repo run's rows surface through <see cref="ResolveRepositoryBranches"/> instead, never here — mirrors the pre-existing OutputsJson.branch / repositoryResults[] mutual exclusivity).</summary>
-    internal static string? ResolveSingleRepoBranch(IReadOnlyList<PublishManifest>? manifests)
+    /// <summary>The FLAT single-repo branch (+ its confirmed push tip, the recovery anchor) — set only when the run produced exactly ONE live branch (a multi-repo run's rows surface through <see cref="ResolveRepositoryBranches"/> instead, never here — mirrors the pre-existing OutputsJson.branch / repositoryResults[] mutual exclusivity).</summary>
+    internal static (string Branch, string? CommitSha)? ResolveSingleRepoBranch(IReadOnlyList<PublishManifest>? manifests)
     {
         var rows = Authoritative(manifests);
-        return rows.Count == 1 ? rows[0].Branch : null;
+        return rows.Count == 1 ? (rows[0].Branch!, rows[0].CommitSha) : null;
     }
 
-    /// <summary>The per-repo (repositoryId, branch) pairs for a MULTI-repo run — empty when the run produced 0 or exactly 1 live branch (the single case surfaces through <see cref="ResolveSingleRepoBranch"/> instead). A row with no resolvable repository id is skipped — it can't be attributed to a specific repo.</summary>
-    internal static IReadOnlyList<(Guid RepositoryId, string Branch)> ResolveRepositoryBranches(IReadOnlyList<PublishManifest>? manifests)
+    /// <summary>The per-repo (repositoryId, branch, confirmed sha) triples for a MULTI-repo run — empty when the run produced 0 or exactly 1 live branch (the single case surfaces through <see cref="ResolveSingleRepoBranch"/> instead). A row with no resolvable repository id is skipped — it can't be attributed to a specific repo.</summary>
+    internal static IReadOnlyList<(Guid RepositoryId, string Branch, string? CommitSha)> ResolveRepositoryBranches(IReadOnlyList<PublishManifest>? manifests)
     {
         var rows = Authoritative(manifests);
-        if (rows.Count <= 1) return Array.Empty<(Guid, string)>();
+        if (rows.Count <= 1) return Array.Empty<(Guid, string, string?)>();
 
-        return rows.Where(m => m.RepositoryId is not null).Select(m => (m.RepositoryId!.Value, m.Branch!)).ToList();
+        return rows.Where(m => m.RepositoryId is not null).Select(m => (m.RepositoryId!.Value, m.Branch!, m.CommitSha)).ToList();
     }
 }

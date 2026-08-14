@@ -86,12 +86,13 @@ public class AgentWorkspaceAuthoringTests
             new WorkspaceRepositorySpec { Alias = "web", RepositoryId = notInMap, Access = WorkspaceAccess.Read },
         };
 
-        var serialized = AgentWorkspaceAuthoring.SerializeRelatedRepositories(related, new Dictionary<Guid, string> { [inMap] = "run-1/api" });
+        var serialized = AgentWorkspaceAuthoring.SerializeRelatedRepositories(related, new Dictionary<Guid, CodeSpace.Messages.Tasks.SessionStartRef> { [inMap] = new() { Branch = "run-1/api", CommitSha = "def456def456" } });
         var reparsed = AgentWorkspaceAuthoring.ParseRelatedRepositories(Json(JsonSerializer.Serialize(serialized)));
 
         var apiSpec = reparsed.Single(r => r.RepositoryId == inMap);
         apiSpec.Ref.ShouldBe("run-1/api");
         apiSpec.RefSoftFallback.ShouldBeTrue("a related repo with a session base-ref is SOFT end to end (Correction-4 parity with the primary)");
+        apiSpec.RefRecoverySha.ShouldBe("def456def456", "the confirmed tip round-trips with its soft ref — dropping it would silently disable recovery for related repos");
 
         var webSpec = reparsed.Single(r => r.RepositoryId == notInMap);
         webSpec.Ref.ShouldBeNull();
@@ -261,7 +262,7 @@ public class AgentWorkspaceAuthoringTests
     public void SerializeRelatedRepositories_emits_a_per_repo_ref_from_the_base_refs_map()
     {
         // Session branch continuity: the baseRefs map supplies each repo's prior produced branch as its clone ref.
-        var baseRefs = new Dictionary<Guid, string> { [Guid.Parse(RepoA)] = "run-1/api" };   // RepoB has none
+        var baseRefs = new Dictionary<Guid, CodeSpace.Messages.Tasks.SessionStartRef> { [Guid.Parse(RepoA)] = new() { Branch = "run-1/api" } };   // RepoB has none
 
         var json = AgentWorkspaceAuthoring.SerializeRelatedRepositories(new[]
         {

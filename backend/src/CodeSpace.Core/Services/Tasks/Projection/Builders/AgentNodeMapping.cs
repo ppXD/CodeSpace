@@ -149,7 +149,7 @@ internal static class AgentNodeMapping
         if (repositoryId is { } primaryId)
         {
             var primaryBaseRef = BaseRefFor(baseRefs, primaryId);
-            AddIfPresent(inputs, "baseRef", primaryBaseRef ?? NullIfBlank(context.Seed.BaseBranch));
+            AddIfPresent(inputs, "baseRef", primaryBaseRef?.Branch ?? NullIfBlank(context.Seed.BaseBranch));
 
             // The primary baseRef came from the SESSION base-refs map (a transient prior produced branch), so mark it
             // SOFT — the clone falls back to the default branch if it was pruned (a merged PR deletes it). Set only
@@ -157,18 +157,28 @@ internal static class AgentNodeMapping
             // stays a HARD ref — a missing pinned branch fails LOUD, never a silent default-branch fallback.
             if (primaryBaseRef is not null) inputs["baseRefFromSession"] = true;
 
+            // P4 (session branch recovery): the confirmed commit the session ref pointed at when recorded — the
+            // clone's detach anchor when the prior branch has VANISHED, so the continuing turn still builds on the
+            // prior work instead of silently rebasing onto the default. Absent for a legacy turn with no recorded
+            // tip (recovery unavailable — the soft fallback degrades to the default branch as before).
+            AddIfPresent(inputs, "baseRefRecoverySha", primaryBaseRef?.CommitSha);
+
             // S1: the primary's launch-resolved base pin — the exact commit every participant of this run materializes.
             // Never set alongside a SESSION baseRef (the launch resolver skips soft-ref repos — a pin cannot express
             // the soft ref's branch-or-default disjunction); absent ⇒ omitted ⇒ tip-of-ref (byte-identical).
-            AddIfPresent(inputs, "pinnedSha", BaseRefFor(context.PinnedShas, primaryId));
+            AddIfPresent(inputs, "pinnedSha", PinFor(context.PinnedShas, primaryId));
         }
 
         return JsonSerializer.SerializeToElement(inputs);
     }
 
-    /// <summary>The clone ref for a repo from the session base-refs map (null = absent ⇒ the repo's default branch).</summary>
-    private static string? BaseRefFor(IReadOnlyDictionary<Guid, string>? baseRefs, Guid repositoryId) =>
-        baseRefs is not null && baseRefs.TryGetValue(repositoryId, out var br) ? NullIfBlank(br) : null;
+    /// <summary>The clone start ref for a repo from the session base-refs map (null = absent / blank branch ⇒ the repo's default branch).</summary>
+    private static SessionStartRef? BaseRefFor(IReadOnlyDictionary<Guid, SessionStartRef>? baseRefs, Guid repositoryId) =>
+        baseRefs is not null && baseRefs.TryGetValue(repositoryId, out var br) && !string.IsNullOrWhiteSpace(br.Branch) ? br : null;
+
+    /// <summary>The launch-resolved base pin for a repo (S1) — null when unpinned.</summary>
+    private static string? PinFor(IReadOnlyDictionary<Guid, string>? pinnedShas, Guid repositoryId) =>
+        pinnedShas is not null && pinnedShas.TryGetValue(repositoryId, out var pin) ? NullIfBlank(pin) : null;
 
     /// <summary>The profile's harness, else the shared platform default (<see cref="AgentHarnessDefaults.DefaultHarness"/> — operator-overridable, codex-cli floor; the same source the supervisor spawn + planner projector use).</summary>
     private static string Harness(ResolvedAgentProfile? profile) =>

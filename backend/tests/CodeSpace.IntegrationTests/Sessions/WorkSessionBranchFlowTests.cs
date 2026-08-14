@@ -94,6 +94,12 @@ public class WorkSessionBranchFlowTests
 
         (await ReadAgentBaseRefAsync(result.RunId)).ShouldBe("codespace/agent/real",
             "the manifest's branch wins over OutputsJson's — I2's single source of truth applies to session continuity, not just the room's own display");
+
+        // P4 (session branch recovery): the manifest's confirmed tip rides the projection as the clone's detach
+        // anchor — the whole recovery ladder is wired launch → inputs → spec → provider off this one key.
+        var agent = await ReadAgentNodeAsync(result.RunId);
+        agent.GetProperty("inputs").GetProperty("baseRefRecoverySha").GetString().ShouldBe("c0ffee123456",
+            "the recorded confirmed tip must reach the agent inputs, or a vanished branch silently rebases the continue onto the default");
     }
 
     [Fact]
@@ -348,7 +354,8 @@ public class WorkSessionBranchFlowTests
         using var scope = _fixture.BeginScope();
         var resolved = await scope.Resolve<ISessionBranchResolver>().ResolveStartRefsAsync(sessionId, teamId, new[] { repoId }, CancellationToken.None);
 
-        resolved[repoId].ShouldBe("run-2/x", "the resolver returns the newest produced branch for the repo");
+        resolved[repoId].Branch.ShouldBe("run-2/x", "the resolver returns the newest produced branch for the repo");
+        resolved[repoId].CommitSha.ShouldBeNull("a legacy raw-JSON turn recorded no confirmed tip — recovery is honestly unavailable, never fabricated");
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -499,7 +506,7 @@ public class WorkSessionBranchFlowTests
         db.PublishManifest.Add(new PublishManifest
         {
             Id = Guid.NewGuid(), TeamId = teamId, Kind = PublishManifestKind.Agent, WorkflowRunId = runId, RepositoryAlias = "primary",
-            RepositoryId = repoId, Branch = manifestBranch, PublishStateValue = PublishState.Pushed,
+            RepositoryId = repoId, Branch = manifestBranch, CommitSha = "c0ffee123456", PublishStateValue = PublishState.Pushed,
             CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
         });
 

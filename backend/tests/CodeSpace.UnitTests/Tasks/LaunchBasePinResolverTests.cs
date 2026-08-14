@@ -15,7 +15,7 @@ public sealed class LaunchBasePinResolverTests
     private static readonly Guid Primary = Guid.NewGuid();
     private static readonly Guid Api = Guid.NewGuid();
 
-    private static readonly IReadOnlyDictionary<Guid, string> NoSessionRefs = new Dictionary<Guid, string>();
+    private static readonly IReadOnlyDictionary<Guid, SessionStartRef> NoSessionRefs = new Dictionary<Guid, SessionStartRef>();
 
     private static TaskLaunchSeed Seed(string? baseBranch = null) =>
         new() { Goal = "g", SurfaceKind = "chat", TeamId = Guid.NewGuid(), BaseBranch = baseBranch };
@@ -62,7 +62,7 @@ public sealed class LaunchBasePinResolverTests
             RelatedRepositories = new[] { new WorkspaceRepositorySpec { Alias = "api", RepositoryId = Api, Access = WorkspaceAccess.Write } },
         };
 
-        var scope = LaunchBasePinResolver.CollectScope(Seed(), profile, new Dictionary<Guid, string> { [Primary] = "run-1/primary" });
+        var scope = LaunchBasePinResolver.CollectScope(Seed(), profile, new Dictionary<Guid, SessionStartRef> { [Primary] = new() { Branch = "run-1/primary" } });
 
         scope.ContainsKey(Primary).ShouldBeFalse("the primary continues on a session branch — unpinned by design");
         scope.ContainsKey(Api).ShouldBeTrue("the related repo has no session ref — it still pins");

@@ -45,8 +45,11 @@ public static class AgentWorkspaceAuthoring
             var refSoftFallback = element.TryGetProperty("refSoftFallback", out var softEl) && softEl.ValueKind == JsonValueKind.True;
             // S1: the immutable-base pin round-trips too — dropping it here would be the silent tip fallback the pin forbids.
             var pinnedSha = element.TryGetProperty("pinnedSha", out var pinEl) && pinEl.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(pinEl.GetString()) ? pinEl.GetString() : null;
+            // P4 (session branch recovery): the confirmed tip round-trips with its soft ref — the clone's detach
+            // anchor when the branch has vanished (dropping it here would silently disable recovery for related repos).
+            var refRecoverySha = element.TryGetProperty("refRecoverySha", out var recEl) && recEl.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(recEl.GetString()) ? recEl.GetString() : null;
 
-            list.Add(new WorkspaceRepositorySpec { Alias = alias, RepositoryId = repoId, Access = access, Ref = @ref, RefSoftFallback = refSoftFallback, PinnedSha = pinnedSha });
+            list.Add(new WorkspaceRepositorySpec { Alias = alias, RepositoryId = repoId, Access = access, Ref = @ref, RefSoftFallback = refSoftFallback, RefRecoverySha = refRecoverySha, PinnedSha = pinnedSha });
         }
 
         return list;
@@ -76,7 +79,7 @@ public static class AgentWorkspaceAuthoring
     /// over a spec-carried pin (the launch vector is fresher than a spec authored earlier); null map / a repo absent
     /// from it falls back to the spec's own <see cref="WorkspaceRepositorySpec.PinnedSha"/> round-trip (byte-identical).</para>
     /// </summary>
-    public static IReadOnlyList<Dictionary<string, object?>>? SerializeRelatedRepositories(IReadOnlyList<WorkspaceRepositorySpec>? related, IReadOnlyDictionary<Guid, string>? baseRefs = null, IReadOnlyDictionary<Guid, string>? pinnedShas = null)
+    public static IReadOnlyList<Dictionary<string, object?>>? SerializeRelatedRepositories(IReadOnlyList<WorkspaceRepositorySpec>? related, IReadOnlyDictionary<Guid, Messages.Tasks.SessionStartRef>? baseRefs = null, IReadOnlyDictionary<Guid, string>? pinnedShas = null)
     {
         if (related is not { Count: > 0 }) return null;
 
@@ -89,12 +92,15 @@ public static class AgentWorkspaceAuthoring
                 ["access"] = r.Access == WorkspaceAccess.Write ? "write" : "read",
             };
 
-            if (baseRefs is not null && baseRefs.TryGetValue(r.RepositoryId, out var br) && !string.IsNullOrWhiteSpace(br))
+            if (baseRefs is not null && baseRefs.TryGetValue(r.RepositoryId, out var br) && !string.IsNullOrWhiteSpace(br.Branch))
             {
-                entry["ref"] = br;
+                entry["ref"] = br.Branch;
                 // The related ref came from the SESSION base-refs map (a transient prior produced branch) → mark it
                 // SOFT so the clone falls back to the default branch if it was pruned (parity with the primary baseRef).
                 entry["refSoftFallback"] = true;
+                // P4 (session branch recovery): the confirmed tip the ref pointed at when recorded — the clone's
+                // detach anchor when the branch has vanished (parity with the primary's baseRefRecoverySha).
+                if (!string.IsNullOrWhiteSpace(br.CommitSha)) entry["refRecoverySha"] = br.CommitSha;
             }
 
             // S1: the pin survives the projection round-trip — the launch vector's entry when present, else the
@@ -124,14 +130,14 @@ public static class AgentWorkspaceAuthoring
     /// it stays null (byte-identical — the executor derives <c>FromRepository(id)</c> at the default branch). So:
     /// related repos ⇒ the multi-repo spec; else a pinned ref or base commit ⇒ <c>FromRepository(id, ref, …, sha)</c>; else null.</para>
     /// </summary>
-    public static WorkspaceSpec? ResolveAuthoredWorkspace(Guid? primaryRepositoryId, IReadOnlyList<WorkspaceRepositorySpec> relatedRepositories, string? primaryRef = null, bool primaryRefSoftFallback = false, WorkspaceCwdMode cwdMode = WorkspaceCwdMode.Auto, string? primaryPinnedSha = null)
+    public static WorkspaceSpec? ResolveAuthoredWorkspace(Guid? primaryRepositoryId, IReadOnlyList<WorkspaceRepositorySpec> relatedRepositories, string? primaryRef = null, bool primaryRefSoftFallback = false, WorkspaceCwdMode cwdMode = WorkspaceCwdMode.Auto, string? primaryPinnedSha = null, string? primaryRefRecoverySha = null)
     {
         if (primaryRepositoryId is not { } primaryId) return null;
 
         // cwdMode only bites a MULTI-repo workspace; a single-repo run always runs at the repo root (the single-repo
         // invariant), so the pinned single-repo branch below ignores it (byte-identical).
-        if (relatedRepositories.Count > 0) return WorkspaceSpec.FromAuthoredRepos(primaryId, primaryRef, relatedRepositories, primaryRefSoftFallback, cwdMode, primaryPinnedSha);
+        if (relatedRepositories.Count > 0) return WorkspaceSpec.FromAuthoredRepos(primaryId, primaryRef, relatedRepositories, primaryRefSoftFallback, cwdMode, primaryPinnedSha, primaryRefRecoverySha);
 
-        return string.IsNullOrWhiteSpace(primaryRef) && string.IsNullOrWhiteSpace(primaryPinnedSha) ? null : WorkspaceSpec.FromRepository(primaryId, primaryRef, primaryRefSoftFallback, primaryPinnedSha);
+        return string.IsNullOrWhiteSpace(primaryRef) && string.IsNullOrWhiteSpace(primaryPinnedSha) ? null : WorkspaceSpec.FromRepository(primaryId, primaryRef, primaryRefSoftFallback, primaryPinnedSha, primaryRefRecoverySha);
     }
 }

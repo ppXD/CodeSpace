@@ -35,7 +35,7 @@ public sealed record TaskBuildContext
     public string? CompletionMode { get; init; }
 
     /// <summary>Per-repo (repositoryId → branch/ref) clone overrides — session branch continuity: a follow-up turn starts each repo from the prior turn's produced branch for THAT repo (primary + each related). A repo ABSENT from the map clones at its default branch. Null / empty = a fresh launch (byte-identical — every repo default).</summary>
-    public IReadOnlyDictionary<Guid, string>? BaseRefs { get; init; }
+    public IReadOnlyDictionary<Guid, SessionStartRef>? BaseRefs { get; init; }
 
     /// <summary>S1 — the launch's immutable base: per-repo (repositoryId → commit sha) tip pins resolved ONCE at launch, so the planner, the grounded plan reviewer, and every agent the run dispatches materialize the SAME base commit regardless of when they clone (a remote that advances mid-run can no longer skew participants onto different trees). A repo ABSENT from the map is unpinned (legacy tip-of-ref behaviour): a repo with no clone URL, or one riding a SESSION-soft <see cref="BaseRefs"/> ref — a soft ref's contract is "the prior branch, or the default if pruned", a disjunction a single pinned commit cannot express. Null / empty = nothing pinned (byte-identical).</summary>
     public IReadOnlyDictionary<Guid, string>? PinnedShas { get; init; }

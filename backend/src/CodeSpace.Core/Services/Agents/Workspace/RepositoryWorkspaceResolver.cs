@@ -54,6 +54,10 @@ public sealed class RepositoryWorkspaceResolver : IAgentWorkspaceResolver, IScop
             var clone = await ResolveByRepositoryIdAsync(repo.RepositoryId, teamId, cancellationToken, repo.Ref, repo.RefSoftFallback, repo.PinnedSha).ConfigureAwait(false)
                 ?? throw new WorkspaceException($"Repository {repo.RepositoryId} could not be resolved.");
 
+            // P4 (session branch recovery): the confirmed tip rides the request as the soft ref's detach anchor —
+            // best-effort by contract, so a malformed recorded sha drops to null instead of failing the provision.
+            if (repo.RefRecoverySha is not null) clone = clone with { RefRecoverySha = TryValidateSha(repo.RefRecoverySha) };
+
             provisions.Add(new WorkspaceRepositoryProvision { Alias = repo.Alias, CloneRequest = clone, Path = repo.Path, Access = repo.Access, IsPrimary = repo.IsPrimary });
         }
 
@@ -92,6 +96,16 @@ public sealed class RepositoryWorkspaceResolver : IAgentWorkspaceResolver, IScop
             // git argv as a flag-shaped positional, then forced through a full clone + hard checkout by the provider.
             PinnedSha = ValidatePinnedSha(pinnedSha),
         };
+    }
+
+    /// <summary>The recovery-anchor variant of <see cref="ValidatePinnedSha"/>: null for blank OR malformed (recovery is best-effort — a bad recorded sha silently disables recovery instead of failing the continuing run; the same hex check still keeps flag-shaped garbage out of the git argv).</summary>
+    internal static string? TryValidateSha(string? sha)
+    {
+        if (string.IsNullOrWhiteSpace(sha)) return null;
+
+        var trimmed = sha.Trim().ToLowerInvariant();
+
+        return trimmed.Length is >= 4 and <= 64 && trimmed.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f') ? trimmed : null;
     }
 
     /// <summary>Null for blank; a trimmed 4-64 lowercase-hex commit id otherwise (64 = a sha256-object-format repo) — anything else fails LOUD (the pin's contract is an EXACT commit; a malformed pin is a caller bug, and rejecting it here also keeps flag-shaped garbage out of the git argv).</summary>

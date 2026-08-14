@@ -57,7 +57,7 @@ internal static class SessionProjection
                 : ReadRepositoryResults(effective.OutputsJson);
 
             var producedBranch = repositoryResults == null
-                ? SessionManifestBranches.ResolveSingleRepoBranch(manifests) ?? SessionTurnText.ReadString(effective.OutputsJson, "branch")
+                ? SessionManifestBranches.ResolveSingleRepoBranch(manifests)?.Branch ?? SessionTurnText.ReadString(effective.OutputsJson, "branch")
                 : null;
 
             turns.Add(new SessionTurn

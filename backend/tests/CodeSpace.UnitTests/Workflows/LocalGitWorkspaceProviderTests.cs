@@ -204,6 +204,56 @@ public sealed class LocalGitWorkspaceProviderTests
     }
 
     [Fact]
+    public async Task A_pruned_soft_ref_with_a_recovery_anchor_detaches_at_the_prior_tip()
+    {
+        // P4 (session branch recovery): the prior branch is GONE but its confirmed tip is still reachable on the
+        // remote (the canonical merged-PR shape — providers keep the commit alive via other refs). The clone falls
+        // back to the default branch, then the recovery rungs fetch the anchor and DETACH onto it — the continuing
+        // run builds on the prior work instead of silently rebasing onto main. The full ladder is exercised for
+        // real: the shallow single-branch clone lacks the commit, fetch-by-sha is refused on a plain file:// origin,
+        // unshallow only deepens main — only the full-refspec rung finds it.
+        if (!await GitAvailableAsync()) return;
+
+        using var origin = new TempDir();
+        await SeedOriginAsync(origin.Path, "README.md", "main-content");
+        await RunGitAsync(origin.Path, "checkout", "-b", "feature");
+        await WriteAndCommitAsync(origin.Path, "feature.txt", "feature-content");
+        var priorTip = await ReadGitStdoutAsync(origin.Path, "rev-parse", "HEAD");
+        await RunGitAsync(origin.Path, "branch", "keeper");          // reachability survives the prune (a provider's PR ref)
+        await RunGitAsync(origin.Path, "checkout", "main");
+        await RunGitAsync(origin.Path, "branch", "-D", "feature");   // the prior branch is now pruned on the remote
+
+        await using var handle = await NewProvider().PrepareAsync(
+            WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path), Ref = "feature", DefaultRef = "main", RefRecoverySha = priorTip }), CancellationToken.None);
+
+        File.Exists(Path.Combine(handle.Directory, "feature.txt")).ShouldBeTrue("the prior work is IN the workspace — recovered off the confirmed tip, not silently discarded");
+        (await ReadGitStdoutAsync(handle.Directory, "rev-parse", "HEAD")).ShouldBe(priorTip, "the workspace is detached at the recorded anchor exactly");
+    }
+
+    [Fact]
+    public async Task An_unrecoverable_recovery_anchor_stays_on_the_default_branch()
+    {
+        // The anchor is GONE for good (GC'd on the remote — simulated by a well-formed sha that never existed
+        // anywhere; a merely-unreferenced commit is still fetchable over the local file:// transport) — recovery is
+        // best-effort by contract: the run keeps the default-branch workspace with a loud warning, never a failed
+        // provision.
+        if (!await GitAvailableAsync()) return;
+
+        using var origin = new TempDir();
+        await SeedOriginAsync(origin.Path, "README.md", "main-content");
+        await RunGitAsync(origin.Path, "checkout", "-b", "feature");
+        await WriteAndCommitAsync(origin.Path, "feature.txt", "feature-content");
+        await RunGitAsync(origin.Path, "checkout", "main");
+        await RunGitAsync(origin.Path, "branch", "-D", "feature");   // the prior branch is pruned…
+
+        await using var handle = await NewProvider().PrepareAsync(
+            WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path), Ref = "feature", DefaultRef = "main", RefRecoverySha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" }), CancellationToken.None);
+
+        File.Exists(Path.Combine(handle.Directory, "README.md")).ShouldBeTrue("the run still got a workspace — the default branch");
+        File.Exists(Path.Combine(handle.Directory, "feature.txt")).ShouldBeFalse("…and the anchor could not be materialized — recovery degrades to the default branch, never throws");
+    }
+
+    [Fact]
     public async Task A_pruned_hard_ref_still_fails_loud()
     {
         // A HARD ref (DefaultRef null — no session fallback) that is gone must STILL fail the clone, byte-identical to
@@ -914,6 +964,17 @@ public sealed class LocalGitWorkspaceProviderTests
 
         if (result.Status != SandboxStatus.Success)
             throw new InvalidOperationException($"git {string.Join(' ', args)} failed: {result.Stderr}");
+    }
+
+    private static async Task<string> ReadGitStdoutAsync(string workdir, params string[] args)
+    {
+        var result = await new LocalProcessRunner().RunAsync(
+            new SandboxSpec { Command = "git", Args = args, WorkingDirectory = workdir, TimeoutSeconds = 60 }, CancellationToken.None);
+
+        if (result.Status != SandboxStatus.Success)
+            throw new InvalidOperationException($"git {string.Join(' ', args)} failed: {result.Stderr}");
+
+        return result.Stdout.Trim();
     }
 
     private sealed class TempDir : IDisposable

@@ -297,7 +297,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     {
         var url = BuildAuthenticatedUrl(request.RepositoryUrl, request.TokenUsername, request.Token);
 
-        var checkoutRef = await ResolveCheckoutRefAsync(request, url, cancellationToken).ConfigureAwait(false);
+        var (checkoutRef, softRefFellBack) = await ResolveCheckoutRefAsync(request, url, cancellationToken).ConfigureAwait(false);
 
         var args = new List<string> { "clone" };
 
@@ -314,6 +314,46 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
 
         if (!string.IsNullOrWhiteSpace(request.PinnedSha))
             await MaterializePinAsync(request, directory, cancellationToken).ConfigureAwait(false);
+        else if (softRefFellBack && !string.IsNullOrWhiteSpace(request.RefRecoverySha))
+            await MaterializeRecoveryAsync(request, directory, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// P4 (session branch recovery): the soft session ref VANISHED and the clone fell back to the default branch —
+    /// detach onto the recorded confirmed tip so the continuing turn still builds on the prior work instead of a
+    /// silent rebase. Same fetch rungs as the pin, but BEST-EFFORT terminal: an unrecoverable anchor (GC'd, never
+    /// reachable) stays on the default branch with a loud warning — a recovery hint must never fail the run.
+    /// </summary>
+    private async Task MaterializeRecoveryAsync(WorkspaceRequest request, string directory, CancellationToken cancellationToken)
+    {
+        var sha = request.RefRecoverySha!;
+
+        await FetchCommitBestEffortAsync(directory, sha, request.Depth, cancellationToken).ConfigureAwait(false);
+
+        var checkout = await RunGitAsync(new[] { "-C", directory, "checkout", "--detach", sha }, cancellationToken).ConfigureAwait(false);
+
+        if (checkout.Status == SandboxStatus.Success)
+            _logger.LogInformation("Session continuity: the prior branch '{PriorRef}' is gone — recovered the prior work by detaching at its confirmed tip {Sha}", request.Ref, sha);
+        else
+            _logger.LogWarning("Session continuity: the prior branch '{PriorRef}' is gone AND its confirmed tip {Sha} could not be recovered from the remote; the continuing run starts from the default branch '{DefaultRef}' — prior work is not in this workspace", request.Ref, sha, request.DefaultRef);
+    }
+
+    /// <summary>The pin/recovery fetch rungs, cheapest first: local object check → fetch-by-sha (servers without allow-*-sha1-in-want refuse; best-effort) → unshallow → full ref space. Shared by the LOUD pin and the best-effort recovery so the two can never drift on how a commit is materialized.</summary>
+    private async Task FetchCommitBestEffortAsync(string directory, string sha, int depth, CancellationToken cancellationToken)
+    {
+        if (await CommitExistsLocallyAsync(directory, sha, cancellationToken).ConfigureAwait(false)) return;
+
+        await RunGitAsync(new[] { "-C", directory, "fetch", "origin", sha }, cancellationToken).ConfigureAwait(false);   // best-effort; the checkout is the arbiter
+
+        if (!await CommitExistsLocallyAsync(directory, sha, cancellationToken).ConfigureAwait(false) && depth > 0)
+        {
+            await RunGitAsync(new[] { "-C", directory, "fetch", "--unshallow", "origin" }, cancellationToken).ConfigureAwait(false);
+
+            // The shallow clone was SINGLE-BRANCH — a commit living on a branch the clone never fetched needs the
+            // full ref space before the checkout can arbitrate.
+            if (!await CommitExistsLocallyAsync(directory, sha, cancellationToken).ConfigureAwait(false))
+                await RunGitAsync(new[] { "-C", directory, "fetch", "origin", "+refs/heads/*:refs/remotes/origin/*" }, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -329,21 +369,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     {
         var pin = request.PinnedSha!;
 
-        if (!await CommitExistsLocallyAsync(directory, pin, cancellationToken).ConfigureAwait(false))
-        {
-            await RunGitAsync(new[] { "-C", directory, "fetch", "origin", pin }, cancellationToken).ConfigureAwait(false);   // best-effort; the checkout below is the arbiter
-
-            if (!await CommitExistsLocallyAsync(directory, pin, cancellationToken).ConfigureAwait(false) && request.Depth > 0)
-            {
-                await RunGitAsync(new[] { "-C", directory, "fetch", "--unshallow", "origin" }, cancellationToken).ConfigureAwait(false);
-
-                // The shallow clone was SINGLE-BRANCH — a pin living on a branch the clone never fetched (a ref/pin
-                // context mismatch, or a reviewer cloning the default while the pin rides the operator's branch)
-                // needs the full ref space before the checkout can arbitrate.
-                if (!await CommitExistsLocallyAsync(directory, pin, cancellationToken).ConfigureAwait(false))
-                    await RunGitAsync(new[] { "-C", directory, "fetch", "origin", "+refs/heads/*:refs/remotes/origin/*" }, cancellationToken).ConfigureAwait(false);
-            }
-        }
+        await FetchCommitBestEffortAsync(directory, pin, request.Depth, cancellationToken).ConfigureAwait(false);
 
         var checkout = await RunGitAsync(new[] { "-C", directory, "checkout", "--detach", pin }, cancellationToken).ConfigureAwait(false);
 
@@ -361,17 +387,17 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     /// default branch itself, or any ref with no fallback) is returned verbatim, so an explicit ref is never silently
     /// rewritten and the clone fails loud if it is gone. Byte-identical to before for every hard ref (no pre-flight runs).
     /// </summary>
-    private async Task<string?> ResolveCheckoutRefAsync(WorkspaceRequest request, string url, CancellationToken cancellationToken)
+    private async Task<(string? CheckoutRef, bool SoftRefFellBack)> ResolveCheckoutRefAsync(WorkspaceRequest request, string url, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(request.Ref) || string.IsNullOrWhiteSpace(request.DefaultRef) || string.Equals(request.Ref, request.DefaultRef, StringComparison.Ordinal))
-            return request.Ref;
+            return (request.Ref, false);
 
         if (await RefExistsOnRemoteAsync(url, request.Ref!, cancellationToken).ConfigureAwait(false))
-            return request.Ref;
+            return (request.Ref, false);
 
         _logger.LogWarning("Session continuity: the prior branch '{PriorRef}' no longer exists on the remote for {RepositoryUrl}; starting the continuing run from the default branch '{DefaultRef}' instead", request.Ref, request.RepositoryUrl, request.DefaultRef);
 
-        return request.DefaultRef;
+        return (request.DefaultRef, true);
     }
 
     /// <summary>
