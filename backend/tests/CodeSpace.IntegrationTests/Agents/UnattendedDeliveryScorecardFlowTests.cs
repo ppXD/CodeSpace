@@ -61,6 +61,33 @@ public class UnattendedDeliveryScorecardFlowTests
     }
 
     [Fact]
+    public async Task A_typed_artifact_capture_counts_as_delivered_for_a_repo_less_run()
+    {
+        // DC-4: a repo-less run delivers by durable CAPTURE — its current artifact rows ARE the arrival (there is
+        // no external remote). Before this arm the north-star structurally could not see non-git delivery.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
+        await SeedTypedArtifactAsync(teamId, runId, superseded: false);
+        await SeedMetricAssessmentAsync(teamId, runId, metricOutcome: "Solved");
+
+        var run = (await ComputeAsync(teamId)).Runs.Single(r => r.WorkflowRunId == runId);
+        run.Delivered.ShouldBeTrue("a current typed artifact row is the repo-less lane's delivery fact");
+        run.UnattendedSolvedWithDelivery.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task A_superseded_only_typed_artifact_is_history_not_an_arrival()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
+        await SeedTypedArtifactAsync(teamId, runId, superseded: true);
+        await SeedMetricAssessmentAsync(teamId, runId, metricOutcome: "Solved");
+
+        (await ComputeAsync(teamId)).Runs.Single(r => r.WorkflowRunId == runId)
+            .Delivered.ShouldBeFalse("a superseded row with no current successor recorded here attests nothing deliverable");
+    }
+
+    [Fact]
     public async Task A_solved_but_undelivered_run_is_not_unattended()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -621,6 +648,20 @@ public class UnattendedDeliveryScorecardFlowTests
 
         await db.SaveChangesAsync();
         return runId;
+    }
+
+    private async Task SeedTypedArtifactAsync(Guid teamId, Guid runId, bool superseded)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.ArtifactManifest.Add(new ArtifactManifest
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, AgentRunId = Guid.NewGuid(), WorkflowRunId = runId, FenceEpoch = 1,
+            Kind = ArtifactManifestKind.Document, LogicalPath = "report.md", ContentArtifactId = Guid.NewGuid(),
+            Sha256 = "abc123", SizeBytes = 10, ContentType = "text/markdown",
+            SupersededByManifestId = superseded ? Guid.NewGuid() : null,
+        });
+        await db.SaveChangesAsync();
     }
 
     private async Task SeedManifestAsync(Guid teamId, Guid runId, PublishAcceptanceState acceptance, PublishState publishState, string alias = "primary", int? prNumber = null)
