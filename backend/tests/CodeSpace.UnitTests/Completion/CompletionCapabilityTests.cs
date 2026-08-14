@@ -17,9 +17,11 @@ public class CompletionCapabilityTests
     {
         var registry = new CompletionCapabilityRegistry();
 
-        registry.Resolve(CapabilityKeys.GitBranch)!.Qualification.ShouldBe(QualificationStatus.ShadowEvaluation);
-        registry.Resolve(CapabilityKeys.GitPatch)!.Qualification.ShouldBe(QualificationStatus.ShadowEvaluation);
-        registry.Resolve(CapabilityKeys.InlineAnswer)!.Qualification.ShouldBe(QualificationStatus.OpenDevelopment);
+        registry.Resolve(CapabilityKeys.GitBranch)!.Readiness.ShouldBe(ProtocolReadiness.Shadow);
+        registry.Resolve(CapabilityKeys.GitBranch)!.Performance.ShouldBe(PerformanceQualification.Shadow);
+        registry.Resolve(CapabilityKeys.GitPatch)!.Readiness.ShouldBe(ProtocolReadiness.Shadow);
+        registry.Resolve(CapabilityKeys.InlineAnswer)!.Readiness.ShouldBe(ProtocolReadiness.Open);
+        registry.Resolve(CapabilityKeys.InlineAnswer)!.Performance.ShouldBe(PerformanceQualification.Unmeasured);
 
         registry.Resolve("image").ShouldBeNull("a novel ask is honestly UNKNOWN — the authority parks it as Unsupported, never a silent attempt");
         registry.Resolve("GIT-BRANCH").ShouldBeNull("keys are exact — the vocabulary is closed, not fuzzy");

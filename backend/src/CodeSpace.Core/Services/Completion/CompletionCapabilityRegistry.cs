@@ -15,15 +15,15 @@ public interface ICompletionCapabilityRegistry
 /// shadow evidence; the inline answer is still open development (its verifier — "the answer itself is the
 /// deliverable" — has no oracle floor yet). A key outside this table resolves null → the terminal authority
 /// reads Unsupported, so a novel ask (image, spreadsheet, external effect) parks honestly instead of
-/// terminalizing a fake Success. Statuses are pinned by test; SealedQualification is unreachable until Q runs.
+/// terminalizing a fake Success. Both axes are pinned by test; Sealed performance is unreachable until the hidden qualification runner mints receipts.
 /// </summary>
 public sealed class CompletionCapabilityRegistry : ICompletionCapabilityRegistry, ISingletonDependency
 {
     private static readonly IReadOnlyDictionary<string, CapabilityDescriptor> Registered = new[]
     {
-        new CapabilityDescriptor { Key = CapabilityKeys.GitBranch, Qualification = QualificationStatus.ShadowEvaluation },
-        new CapabilityDescriptor { Key = CapabilityKeys.GitPatch, Qualification = QualificationStatus.ShadowEvaluation },
-        new CapabilityDescriptor { Key = CapabilityKeys.InlineAnswer, Qualification = QualificationStatus.OpenDevelopment },
+        new CapabilityDescriptor { Key = CapabilityKeys.GitBranch, Readiness = ProtocolReadiness.Shadow, Performance = PerformanceQualification.Shadow },
+        new CapabilityDescriptor { Key = CapabilityKeys.GitPatch, Readiness = ProtocolReadiness.Shadow, Performance = PerformanceQualification.Shadow },
+        new CapabilityDescriptor { Key = CapabilityKeys.InlineAnswer, Readiness = ProtocolReadiness.Open, Performance = PerformanceQualification.Unmeasured },
     }.ToDictionary(d => d.Key, StringComparer.Ordinal);
 
     public CapabilityDescriptor? Resolve(string capabilityKey) => Registered.GetValueOrDefault(capabilityKey);

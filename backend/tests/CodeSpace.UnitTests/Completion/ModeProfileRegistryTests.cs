@@ -18,14 +18,15 @@ public class ModeProfileRegistryTests
     private static readonly ModeProfileRegistry Registry = new();
 
     [Theory]
-    [InlineData(RunModeKeys.Supervisor, QualificationStatus.ShadowEvaluation)]
-    [InlineData(RunModeKeys.PlanMap, QualificationStatus.OpenDevelopment)]
-    [InlineData(RunModeKeys.SingleAgent, QualificationStatus.ShadowEvaluation)]
-    public void The_registered_lanes_declare_total_stage_maps(string mode, QualificationStatus expected)
+    [InlineData(RunModeKeys.Supervisor, ProtocolReadiness.Shadow, PerformanceQualification.Shadow)]
+    [InlineData(RunModeKeys.PlanMap, ProtocolReadiness.Open, PerformanceQualification.Unmeasured)]
+    [InlineData(RunModeKeys.SingleAgent, ProtocolReadiness.Shadow, PerformanceQualification.Shadow)]
+    public void The_registered_lanes_declare_total_stage_maps(string mode, ProtocolReadiness readiness, PerformanceQualification performance)
     {
         var profile = Registry.Resolve(mode).ShouldNotBeNull();
 
-        profile.Qualification.ShouldBe(expected);
+        profile.Readiness.ShouldBe(readiness);
+        profile.Performance.ShouldBe(performance, "the two axes are orthogonal — a protocol can be enforceable before any performance number stands");
         profile.Stages.Keys.ShouldBe(Enum.GetValues<CompletionStage>(), ignoreOrder: true, customMessage: "every stage declared — a new stage must break here, never sit silently unmapped");
     }
 

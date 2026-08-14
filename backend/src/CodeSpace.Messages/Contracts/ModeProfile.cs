@@ -43,6 +43,9 @@ public sealed record ModeProfile
     /// <summary>Every stage's declared requiredness — total over <see cref="CompletionStage"/>; the registry validates totality at construction so a new stage cannot be silently unmapped.</summary>
     public required IReadOnlyDictionary<CompletionStage, StageRequiredness> Stages { get; init; }
 
-    /// <summary>The mode's qualification standing, same vocabulary as capabilities — Enforced graduation is argued per (mode, capability) on accumulated evidence.</summary>
-    public required QualificationStatus Qualification { get; init; }
+    /// <summary>The mode's PROTOCOL axis — can its fail-close conformance chain be trusted (Enforced graduation is argued per (mode, capability) on accumulated evidence).</summary>
+    public required ProtocolReadiness Readiness { get; init; }
+
+    /// <summary>The mode's PERFORMANCE axis — whether a measured claim stands for it.</summary>
+    public required PerformanceQualification Performance { get; init; }
 }

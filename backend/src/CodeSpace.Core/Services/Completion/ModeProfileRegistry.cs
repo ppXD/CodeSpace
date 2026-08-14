@@ -36,7 +36,7 @@ public sealed class ModeProfileRegistry : IModeProfileRegistry, ISingletonDepend
         // The supervisor lane exercises the FULL chain: contracts staked at spawn, plans on the tape, integration
         // via merge/resolve, per-unit + stop verification, capture + publish + handoff receipts, assessment + the
         // arbitrated terminal.
-        Profile(RunModeKeys.Supervisor, QualificationStatus.ShadowEvaluation, required: new[]
+        Profile(RunModeKeys.Supervisor, ProtocolReadiness.Shadow, PerformanceQualification.Shadow, required: new[]
         {
             CompletionStage.Contract, CompletionStage.Plan, CompletionStage.Execute, CompletionStage.Integrate,
             CompletionStage.Verify, CompletionStage.Capture, CompletionStage.Deliver, CompletionStage.Handoff,
@@ -45,14 +45,14 @@ public sealed class ModeProfileRegistry : IModeProfileRegistry, ISingletonDepend
         // Plan-map fans out per item and synthesizes — no in-run integration of branches yet (the P4 PlanMap
         // integrated-candidate arc adds it); the stage is authorized off by SERVER POLICY until that lands,
         // never silently absent.
-        Profile(RunModeKeys.PlanMap, QualificationStatus.OpenDevelopment, required: new[]
+        Profile(RunModeKeys.PlanMap, ProtocolReadiness.Open, PerformanceQualification.Unmeasured, required: new[]
         {
             CompletionStage.Contract, CompletionStage.Plan, CompletionStage.Execute,
             CompletionStage.Verify, CompletionStage.Capture, CompletionStage.Deliver, CompletionStage.Handoff,
             CompletionStage.Assess, CompletionStage.Terminal,
         }),
         // Single-agent has no plan and nothing to integrate — one unit, its own branch.
-        Profile(RunModeKeys.SingleAgent, QualificationStatus.ShadowEvaluation, required: new[]
+        Profile(RunModeKeys.SingleAgent, ProtocolReadiness.Shadow, PerformanceQualification.Shadow, required: new[]
         {
             CompletionStage.Contract, CompletionStage.Execute,
             CompletionStage.Verify, CompletionStage.Capture, CompletionStage.Deliver, CompletionStage.Handoff,
@@ -62,13 +62,13 @@ public sealed class ModeProfileRegistry : IModeProfileRegistry, ISingletonDepend
 
     public ModeProfile? Resolve(string mode) => Registered.GetValueOrDefault(mode);
 
-    private static ModeProfile Profile(string mode, QualificationStatus qualification, CompletionStage[] required)
+    private static ModeProfile Profile(string mode, ProtocolReadiness readiness, PerformanceQualification performance, CompletionStage[] required)
     {
         var stages = Enum.GetValues<CompletionStage>().ToDictionary(
             s => s,
             s => required.Contains(s) ? StageRequiredness.Required : StageRequiredness.ServerPolicyAuthorizedNotApplicable);
 
-        return new ModeProfile { Mode = mode, Stages = stages, Qualification = qualification };
+        return new ModeProfile { Mode = mode, Stages = stages, Readiness = readiness, Performance = performance };
     }
 }
 
