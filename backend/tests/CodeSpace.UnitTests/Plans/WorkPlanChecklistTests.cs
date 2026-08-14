@@ -40,6 +40,26 @@ public class WorkPlanChecklistTests
         WorkPlanItemStates.Derive(agentStatus, acceptancePassed).ShouldBe(expected);
     }
 
+    [Theory]
+    [InlineData("Succeeded")]   // the laundering case: Status=Succeeded + AcceptancePassed=null read `null == false` → Completed
+    [InlineData("Failed")]
+    [InlineData("Running")]
+    public void A_waived_unit_derives_needs_review_never_a_green(string agentStatus)
+    {
+        // B2's invariant at the CHECKLIST grain: a human-authorized "forgo verification" is a human-must-look
+        // state — the one surface the six gate doors don't cover must not render it as Completed.
+        WorkPlanItemStates.Derive(agentStatus, acceptancePassed: null, CodeSpace.Messages.Contracts.VerificationDisposition.Waived)
+            .ShouldBe(WorkPlanItemStates.NeedsReview, "WAIVED ≠ verified — the checklist chip must demand a human look, never show a green");
+    }
+
+    [Fact]
+    public void A_null_verdict_keeps_every_pre_waive_mapping_byte_identical()
+    {
+        WorkPlanItemStates.Derive("Succeeded", null, acceptanceVerdict: null).ShouldBe(WorkPlanItemStates.Completed);
+        WorkPlanItemStates.Derive("Succeeded", null, CodeSpace.Messages.Contracts.VerificationDisposition.Passed).ShouldBe(WorkPlanItemStates.Completed,
+            customMessage: "only the WAIVED member re-routes — a graded disposition never overrides the bool lane");
+    }
+
     [Fact]
     public void Every_agent_run_status_has_a_deliberate_state_mapping()
     {
