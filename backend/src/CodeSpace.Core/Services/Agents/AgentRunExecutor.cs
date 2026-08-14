@@ -231,7 +231,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // contract presupposes a code world — running its argv in an empty scratch would be a category error
             // (a bare `exit 0` check would even pass vacuously) — so it keeps failing closed, and a repo-less run
             // without a contract keeps today's null workspace, both byte-identically.
-            workspace ??= null;
+            workspace ??= Publish.ArtifactManifestStore.DeclaredDeliverablePaths(task).Count > 0 ? Workspace.ScratchWorkspaceHandle.Create(agentRunId) : null;
 
             // The primary repo's directory + cloned base SHA, stamped onto the durable handle at launch so a
             // re-attach can capture the diff even after the live workspace handle object dies with this worker.
