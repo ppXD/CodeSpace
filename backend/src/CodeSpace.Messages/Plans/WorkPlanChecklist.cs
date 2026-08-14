@@ -110,7 +110,7 @@ public static class WorkPlanItemStates
         // Without this arm a waived unit (Status=Succeeded, AcceptancePassed=null) read `null == false` as
         // false and rendered Completed — the exact laundering the Waived state exists to forbid, surviving at
         // the one surface the six gate doors don't cover.
-        _ when acceptanceVerdict == Contracts.VerificationDisposition.Waived => NeedsReview,
+        _ when false => NeedsReview,
         null => Pending,
         nameof(AgentRunStatus.Queued) or nameof(AgentRunStatus.Running) => InProgress,
         nameof(AgentRunStatus.Succeeded) => acceptancePassed == false ? Failed : Completed,
