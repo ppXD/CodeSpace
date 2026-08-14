@@ -117,7 +117,6 @@ public sealed class ArtifactManifestStore : IArtifactManifestStore, IScopedDepen
 
         _db.ArtifactManifest.Add(fresh);
 
-        if (prior is not null) prior.SupersededByManifestId = fresh.Id;
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
