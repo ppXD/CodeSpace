@@ -34,6 +34,20 @@ export function useRevealWebhookSecret(repositoryId: string | null) {
   return useMutation({ mutationFn: (webhookId: string) => repositoriesApi.revealWebhookSecret(repositoryId!, webhookId), gcTime: 0 });
 }
 
+/**
+ * The refusals, on the same clock as the list above them. The two are read together — a hook that
+ * says "Delivering" while every delivery is being discarded is the exact contradiction this section
+ * exists to expose, and it would not show if one side of it were stale.
+ */
+export function useRepositoryRejectedDeliveries(repositoryId: string | null) {
+  return useQuery({
+    queryKey: ["repository", repositoryId, "rejected-deliveries"],
+    queryFn: () => repositoriesApi.listRejectedDeliveries(repositoryId!),
+    enabled: repositoryId != null,
+    refetchInterval: WEBHOOK_POLL_MS,
+  });
+}
+
 export function useRetryWebhookRegistration(repositoryId: string | null) {
   const queryClient = useQueryClient();
 

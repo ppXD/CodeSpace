@@ -70,6 +70,7 @@ public sealed class WebhookIngestionService : IWebhookIngestionService, IScopedD
         await _auditor.WriteWebhookRejectedAsync(new WebhookRejectionContext
         {
             TeamId = webhook.Repository.TeamId,
+            RepositoryId = webhook.RepositoryId,
             Reason = WorkflowRunRequestRejectionReasons.WebhookInactive,
             Detail = $"webhook {webhook.Id} is configured as inactive",
             SourceType = $"{WorkflowRunSourceTypes.ProviderPrefix}{webhook.Repository.ProviderInstance.Provider.ToString().ToLowerInvariant()}",
@@ -93,6 +94,7 @@ public sealed class WebhookIngestionService : IWebhookIngestionService, IScopedD
         await _auditor.WriteWebhookRejectedAsync(new WebhookRejectionContext
         {
             TeamId = webhook.Repository.TeamId,
+            RepositoryId = webhook.RepositoryId,
             Reason = WorkflowRunRequestRejectionReasons.SignatureInvalid,
             Detail = $"signature did not validate for webhook {webhook.Id}",
             SourceType = $"{WorkflowRunSourceTypes.ProviderPrefix}{webhook.Repository.ProviderInstance.Provider.ToString().ToLowerInvariant()}",
@@ -149,6 +151,7 @@ public sealed class WebhookIngestionService : IWebhookIngestionService, IScopedD
         await _auditor.WriteWebhookRejectedAsync(new WebhookRejectionContext
         {
             TeamId = webhook.Repository.TeamId,
+            RepositoryId = webhook.RepositoryId,
             Reason = WorkflowRunRequestRejectionReasons.MalformedPayload,
             Detail = $"normalizer could not parse the payload for provider {webhook.Repository.ProviderInstance.Provider}: {error.GetType().Name}",
             SourceType = $"{WorkflowRunSourceTypes.ProviderPrefix}{webhook.Repository.ProviderInstance.Provider.ToString().ToLowerInvariant()}",
@@ -169,6 +172,7 @@ public sealed class WebhookIngestionService : IWebhookIngestionService, IScopedD
         await _auditor.WriteWebhookRejectedAsync(new WebhookRejectionContext
         {
             TeamId = webhook.Repository.TeamId,
+            RepositoryId = webhook.RepositoryId,
             Reason = WorkflowRunRequestRejectionReasons.EventNotMapped,
             Detail = $"normalizer for provider {webhook.Repository.ProviderInstance.Provider} returned null for this payload",
             SourceType = $"{WorkflowRunSourceTypes.ProviderPrefix}{webhook.Repository.ProviderInstance.Provider.ToString().ToLowerInvariant()}",

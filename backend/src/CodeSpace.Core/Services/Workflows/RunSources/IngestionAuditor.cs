@@ -32,6 +32,7 @@ public sealed class IngestionAuditor : IIngestionAuditor, IScopedDependency
         {
             Id = Guid.NewGuid(),
             TeamId = context.TeamId,
+            RepositoryId = context.RepositoryId,
             SourceType = context.SourceType,
             ExternalEventId = context.ExternalEventId,
             // Phase 3.0 — dedup via the per-row uq_wrr_idempotency_key partial unique index.
@@ -72,6 +73,10 @@ public sealed class IngestionAuditor : IIngestionAuditor, IScopedDependency
         {
             Id = Guid.NewGuid(),
             TeamId = teamId,
+            // The normalised event names its repository as a required field, so this branch is
+            // never the unattributed one — and it is the branch an operator most needs attributed,
+            // because "verified, understood, nobody listening" is the one rejection that is not a fault.
+            RepositoryId = normalizedEvent.RepositoryId,
             SourceType = sourceType,
             ExternalEventId = normalizedEvent.ProviderEventId,
             IdempotencyKey = BuildRejectedDedupKey(sourceType, normalizedEvent.ProviderEventId),

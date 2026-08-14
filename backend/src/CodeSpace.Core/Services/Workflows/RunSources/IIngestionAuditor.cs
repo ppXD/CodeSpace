@@ -37,6 +37,17 @@ public sealed record WebhookRejectionContext
 {
     public required Guid TeamId { get; init; }
 
+    /// <summary>
+    /// The repository the delivery was for. Set it wherever the caller holds one — the Webhook tab
+    /// reads these rows by repository, and a row without it is a refusal nobody standing on a
+    /// repository page will ever see.
+    ///
+    /// <para>Optional rather than required because a rejection can precede the webhook lookup: a
+    /// delivery to an id that resolves to nothing has no repository to name. Those rows still
+    /// surface, marked as unattributed.</para>
+    /// </summary>
+    public Guid? RepositoryId { get; init; }
+
     /// <summary>String from <see cref="CodeSpace.Messages.Constants.WorkflowRunRequestRejectionReasons"/>.</summary>
     public required string Reason { get; init; }
 

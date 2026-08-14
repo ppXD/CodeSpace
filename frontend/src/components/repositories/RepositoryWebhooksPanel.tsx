@@ -2,10 +2,11 @@ import { Fragment, useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { ApiError } from "@/api/request";
-import type { ProviderKind, RepositoryWebhookAttemptDetail, RepositoryWebhookDetail } from "@/api/types";
-import { useRepositoryWebhooks, useRetryWebhookRegistration, useRevealWebhookSecret } from "@/hooks/use-repository-webhooks";
+import type { ProviderKind, RejectedDelivery, RepositoryWebhookAttemptDetail, RepositoryWebhookDetail } from "@/api/types";
+import { useRepositoryRejectedDeliveries, useRepositoryWebhooks, useRetryWebhookRegistration, useRevealWebhookSecret } from "@/hooks/use-repository-webhooks";
 import { TeamPermissions, useTeamPermissions } from "@/hooks/use-team-management";
-import { attemptOutcome, canRetryWebhook, webhookDiagnosis, webhookSetupSteps, webhookState, type WebhookSetupStep } from "@/lib/webhookState";
+import { relativeTime } from "@/lib/codeTree";
+import { attemptOutcome, canRetryWebhook, rejectedDeliveriesNote, rejectionCopy, UNPLACED_DELIVERY_NOTE, webhookDiagnosis, webhookSetupSteps, webhookState, type WebhookSetupStep } from "@/lib/webhookState";
 
 /**
  * Repository → Webhook. What the repository's hooks are doing, why they are not, and how to finish
@@ -60,8 +61,118 @@ export function RepositoryWebhooksPanel({ repositoryId, fullPath, provider }: Re
           {hooks.map((hook) => <WebhookRow key={hook.id} hook={hook} repositoryId={repositoryId} fullPath={fullPath} provider={provider} mayManage={mayManage} />)}
         </div>
       )}
+
+      <RejectedDeliveries repositoryId={repositoryId} provider={provider} />
     </div>
   );
+}
+
+/**
+ * The deliveries that arrived and were refused — the other half of "why isn't my webhook working".
+ * Everything above answers the case where the hook was never created; this answers the case where it
+ * was, the provider is sending, and CodeSpace is throwing each one away.
+ *
+ * <p>Absent when nothing has been refused. An empty section on every healthy repository would train
+ * the reader to skip past the one place where it is not empty.</p>
+ */
+function RejectedDeliveries({ repositoryId, provider }: { repositoryId: string; provider: ProviderKind }) {
+  const refusals = useRepositoryRejectedDeliveries(repositoryId);
+  const answer = refusals.data;
+
+  // A read that FAILED is not a repository with nothing refused, and rendering nothing for both says
+  // the second. This section exists to answer "is anything arriving and being thrown away" — leaving
+  // that question silently unanswered is the shape of bug this whole tab was built to end.
+  if (refusals.isError) {
+    return (
+      <div style={{ marginTop: 8 }} className="cn-banner cn-banner-err">
+        <div className="cn-banner-p">Could not load refused deliveries. Nothing here says whether any arrived — reload to ask again.</div>
+      </div>
+    );
+  }
+
+  if (!answer || answer.deliveries.length === 0) return null;
+
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div className="cn-listhead">
+        <div className="cn-listhead-l">Deliveries that were refused</div>
+        {/* The cap is the server's number, said out loud: a list that silently stopped at fifty
+            would read as "fifty happened", and an unreachable instance writes thousands. */}
+        <div className="cn-listhead-c">{rejectedDeliveriesNote(answer.deliveries.length, answer.cap)}</div>
+      </div>
+
+      <div className="cn-list">
+        {answer.deliveries.map((delivery) => <RejectedDeliveryRow key={delivery.id} delivery={delivery} provider={provider} />)}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * One refusal. The tone is carried by `rejectionCopy` rather than chosen here, because the five
+ * reasons are not one severity and the row would lie by looking the same for all of them — a
+ * signature mismatch is broken, an unsubscribed event is noise, and "nothing was listening" is the
+ * system doing what it was told.
+ */
+function RejectedDeliveryRow({ delivery, provider }: { delivery: RejectedDelivery; provider: ProviderKind }) {
+  const [open, setOpen] = useState(false);
+  const copy = rejectionCopy(delivery.reason, provider);
+
+  return (
+    <div className="cn-row hk-row" data-tone={copy.tone}>
+      <div className="cn-row-head">
+        <div className="cn-mark" data-p={provider.toLowerCase()}><Ic.Bell size={14} /></div>
+
+        <div className="cn-meta">
+          <div className="cn-name">
+            {copy.headline}
+            <span className="hk-rej-when">{relativeTime(delivery.receivedAt)}</span>
+          </div>
+          <div className="cn-sub"><span>{copy.remedy}</span></div>
+          <div className="hk-rej-id">{deliveryLabel(delivery)}</div>
+
+          {/* Said on the row, not tucked into the details: a delivery nobody could place is exactly
+              the one an operator must not mistake for someone else's problem. */}
+          {delivery.repositoryId == null && <div className="hk-rej-unplaced">{UNPLACED_DELIVERY_NOTE}</div>}
+        </div>
+
+        <button className="btn" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? "Hide details" : "Details"}</button>
+      </div>
+
+      {open && <RejectedDeliveryRecord delivery={delivery} />}
+    </div>
+  );
+}
+
+/**
+ * Everything that was kept of the delivery, verbatim. All three blocks render even when empty: an
+ * absent section reads as something withheld, and "no diagnostic was recorded" is itself an answer —
+ * the verifier only writes one when a signature actually fails.
+ */
+function RejectedDeliveryRecord({ delivery }: { delivery: RejectedDelivery }) {
+  const headers = parseHeaders(delivery.rawHeadersRedactedJson);
+
+  return (
+    <div className="hk-open">
+      <div className="hk-rej-doc">
+        <div className="hk-pre-h">What was recorded</div>
+        <pre className="hk-pre">{delivery.detail || "Nothing beyond the reason itself."}</pre>
+
+        <div className="hk-pre-h">Headers, as they arrived</div>
+        {/* Values were stripped at capture, so this is the whole record — the token that signed the
+            delivery is not in it and never was. */}
+        <pre className="hk-pre">{headers.length === 0 ? "No headers were kept for this delivery." : headers.map(([name, value]) => `${name}: ${value}`).join("\n")}</pre>
+
+        <div className="hk-pre-h">Signature check</div>
+        <pre className="hk-pre">{delivery.verificationResultJson ?? "No diagnostic — one is written only when a signature fails, so this delivery was refused for something else."}</pre>
+      </div>
+    </div>
+  );
+}
+
+/** The provider's own id for the delivery, which is how this refusal is found again on the provider's side. */
+function deliveryLabel(delivery: RejectedDelivery): string {
+  return delivery.externalEventId ? `Delivery ${delivery.externalEventId}` : "No delivery id was kept";
 }
 
 interface WebhookRowProps extends RepositoryWebhooksPanelProps {
