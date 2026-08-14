@@ -29,5 +29,8 @@ CREATE TABLE artifact_manifest (
     last_modified_by uuid NOT NULL
 );
 
-CREATE UNIQUE INDEX ux_artifact_manifest_attempt_path ON artifact_manifest (agent_run_id, fence_epoch, logical_path);
+-- Unique over CURRENT rows only: a changed re-capture APPENDS (history intact) and retires the prior row via
+-- the supersession pointer — the partial predicate is what lets the chain grow while "one current per
+-- (attempt, path)" stays machine-enforced.
+CREATE UNIQUE INDEX ux_artifact_manifest_attempt_path ON artifact_manifest (agent_run_id, fence_epoch, logical_path) WHERE superseded_by_manifest_id IS NULL;
 CREATE INDEX idx_artifact_manifest_workflow_run ON artifact_manifest (workflow_run_id) WHERE workflow_run_id IS NOT NULL;

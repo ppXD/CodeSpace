@@ -115,10 +115,17 @@ public sealed class ArtifactManifestStore : IArtifactManifestStore, IScopedDepen
         // Same coordinates, same bytes ⇒ the exactly-once no-op (a re-compose/re-capture lands on the first row).
         if (prior is not null && prior.Sha256 == fresh.Sha256) return;
 
+        // TWO steps, retire-then-install: the current-rows-only unique index means the fresh row can't insert
+        // while the prior is still current, and EF's statement ordering inside one SaveChanges is not a contract.
+        // fresh.Id is pre-generated, so the pointer written first stays consistent; a crash between the steps
+        // leaves a visibly dangling pointer (no current row) — fail-visible, and the next capture self-heals it.
+        if (prior is not null)
+        {
+            prior.SupersededByManifestId = fresh.Id;
+            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         _db.ArtifactManifest.Add(fresh);
-
-        if (prior is not null) prior.SupersededByManifestId = fresh.Id;
-
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
 
