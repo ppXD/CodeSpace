@@ -41,7 +41,7 @@ internal static class SessionManifestBranches
     internal static (string Branch, string? CommitSha)? ResolveSingleRepoBranch(IReadOnlyList<PublishManifest>? manifests)
     {
         var rows = Authoritative(manifests);
-        return rows.Count == 1 ? (rows[0].Branch!, rows[0].CommitSha) : null;
+        return rows.Count == 1 ? (rows[0].Branch!, (string?)null) : null;
     }
 
     /// <summary>The per-repo (repositoryId, branch, confirmed sha) triples for a MULTI-repo run — empty when the run produced 0 or exactly 1 live branch (the single case surfaces through <see cref="ResolveSingleRepoBranch"/> instead). A row with no resolvable repository id is skipped — it can't be attributed to a specific repo.</summary>
