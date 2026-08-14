@@ -231,6 +231,55 @@ public sealed class LocalGitWorkspaceProviderTests
     }
 
     [Fact]
+    public async Task A_force_pushed_soft_ref_detaches_back_at_the_recorded_tip()
+    {
+        // P4 (force-push divergence): the branch still EXISTS but was REWRITTEN — its tip no longer descends from
+        // the recorded anchor, so continuing on it would silently drop the session's own work. Until this check
+        // the rewrite was completely invisible (the name-existence probe passed). The clone detaches back onto the
+        // anchor; the rewritten branch stays untouched on the remote.
+        if (!await GitAvailableAsync()) return;
+
+        using var origin = new TempDir();
+        await SeedOriginAsync(origin.Path, "README.md", "main-content");
+        await RunGitAsync(origin.Path, "checkout", "-b", "feature");
+        await WriteAndCommitAsync(origin.Path, "prior-work.txt", "the session's recorded work");
+        var anchor = await ReadGitStdoutAsync(origin.Path, "rev-parse", "HEAD");
+        await RunGitAsync(origin.Path, "branch", "keeper");                          // the anchor stays reachable (provider PR-ref shape)
+        await RunGitAsync(origin.Path, "reset", "--hard", "main");                   // REWRITE the branch…
+        await WriteAndCommitAsync(origin.Path, "rewrite.txt", "unrelated rewrite");  // …with different history
+
+        await using var handle = await NewProvider().PrepareAsync(
+            WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path), Ref = "feature", DefaultRef = "main", RefRecoverySha = anchor }), CancellationToken.None);
+
+        (await ReadGitStdoutAsync(handle.Directory, "rev-parse", "HEAD")).ShouldBe(anchor, "the workspace is detached at the recorded anchor — the session's thread, not the rewrite");
+        File.Exists(Path.Combine(handle.Directory, "prior-work.txt")).ShouldBeTrue("the session's recorded work is IN the workspace");
+        File.Exists(Path.Combine(handle.Directory, "rewrite.txt")).ShouldBeFalse("the rewrite's history is not what the continue builds on");
+    }
+
+    [Fact]
+    public async Task A_forward_moved_soft_ref_keeps_the_branch_tip()
+    {
+        // The benign twin: the branch moved FORWARD past the anchor (another turn / a human pushed on top) — the
+        // anchor is an ancestor, the thread is intact, and the continue must take the NEWEST work, never detach
+        // backwards onto a stale anchor.
+        if (!await GitAvailableAsync()) return;
+
+        using var origin = new TempDir();
+        await SeedOriginAsync(origin.Path, "README.md", "main-content");
+        await RunGitAsync(origin.Path, "checkout", "-b", "feature");
+        await WriteAndCommitAsync(origin.Path, "prior-work.txt", "the session's recorded work");
+        var anchor = await ReadGitStdoutAsync(origin.Path, "rev-parse", "HEAD");
+        await WriteAndCommitAsync(origin.Path, "newer-work.txt", "a later turn's work on top");
+        var newTip = await ReadGitStdoutAsync(origin.Path, "rev-parse", "HEAD");
+
+        await using var handle = await NewProvider().PrepareAsync(
+            WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path), Ref = "feature", DefaultRef = "main", RefRecoverySha = anchor }), CancellationToken.None);
+
+        (await ReadGitStdoutAsync(handle.Directory, "rev-parse", "HEAD")).ShouldBe(newTip, "a forward move keeps the branch tip — the newest work wins");
+        File.Exists(Path.Combine(handle.Directory, "newer-work.txt")).ShouldBeTrue();
+    }
+
+    [Fact]
     public async Task An_unrecoverable_recovery_anchor_stays_on_the_default_branch()
     {
         // The anchor is GONE for good (GC'd on the remote — simulated by a well-formed sha that never existed
