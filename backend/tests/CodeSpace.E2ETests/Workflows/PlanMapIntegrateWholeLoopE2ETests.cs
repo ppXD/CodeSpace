@@ -12,6 +12,7 @@ using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Credentials;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
@@ -104,6 +105,77 @@ public sealed class PlanMapIntegrateWholeLoopE2ETests
         outputs.GetProperty("integrationStatus").GetString().ShouldBe("Clean");
         outputs.GetProperty("integratedBranch").GetString().ShouldBe(integrationBranch);
         outputs.GetProperty("combined").GetString().ShouldNotBeNullOrWhiteSpace("the synth still narrates — the code reduce rides beside it, not instead of it");
+    }
+
+    [Fact]
+    public async Task A_conflicted_candidate_parks_for_review_and_resumes_to_an_honest_finish()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitAvailableAsync()) return;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (_, plannerRowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "workplan-model", provider: DeterministicWorkPlanLlmClient.ProviderTag);
+
+        // Two items steered onto the SAME file with different content — their patches REALLY conflict on apply.
+        using (var knob = _fixture.BeginScope())
+            knob.Resolve<WorkPlanPlanScript>().Instructions = new[] { "update the alpha side", "update the beta side" };
+
+        try
+        {
+            using var cli = new ConflictThenResolveFakeCli();
+
+            using var remote = new BareRemote();
+            await remote.SeedBaseAsync(ConflictThenResolveFakeCli.SharedFile);
+            var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+
+            var jobClient = ResolveJobClient();
+            jobClient.Clear();
+            jobClient.AutoExecute = true;
+
+            var runId = await ProjectAndStartAsync(teamId, userId, plannerRowId, repoId);
+
+            await RunEngineAsync(runId);
+            await jobClient.WaitForPendingAsync();
+
+            using var mid = _fixture.BeginScope();
+            var db = mid.Resolve<CodeSpaceDbContext>();
+
+            // "conflict ⇒ park": the run is Suspended on a REAL approval wait whose payload names the conflict.
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+                .ShouldBe(WorkflowRunStatus.Suspended, "a conflicted candidate must park for a human, never narrate past silently");
+
+            var wait = await db.WorkflowRunWait.AsNoTracking()
+                .SingleAsync(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending);
+            wait.WaitKind.ShouldBe(WorkflowWaitKinds.Approval);
+            wait.PayloadJson!.ShouldContain(ConflictThenResolveFakeCli.SharedFile, customMessage: "the wait payload names the conflicted file — the review is actionable off the run surface");
+
+            // The human ships the fragments (reject) — the resumed pass re-integrates (still conflicted: nothing
+            // changed on the remote) and the run finishes HONESTLY: Success, Conflicted candidate, review trail.
+            (await mid.Resolve<Core.Services.Workflows.IWorkflowService>().ApproveRunAsync(runId, teamId, userId, approved: false, comment: "ship the fragments", CancellationToken.None))
+                .ShouldBeTrue("the run-level approve verb resolves the integrate node's park");
+
+            await jobClient.WaitForPendingAsync();
+
+            using var verify = _fixture.BeginScope();
+            var run = await verify.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+
+            run.Status.ShouldBe(WorkflowRunStatus.Success, $"after the review the run finishes — error: {run.Error}");
+
+            var outputs = JsonDocument.Parse(run.OutputsJson!).RootElement;
+            outputs.GetProperty("integrationStatus").GetString().ShouldBe("Conflicted", "the candidate stays honestly conflicted — reviewed, never laundered");
+            outputs.GetProperty("integratedBranch").ValueKind.ShouldBe(JsonValueKind.Null);
+
+            (await verify.Resolve<CodeSpaceDbContext>().PublishManifest.AsNoTracking()
+                .Where(m => m.WorkflowRunId == runId && m.Kind == PublishManifestKind.Integration).AnyAsync())
+                .ShouldBeFalse("no clean candidate ⇒ no candidate row");
+
+            (await remote.RemoteHasBranchAsync($"codespace/integration/{runId:N}")).ShouldBeFalse("nothing was pushed for a conflicted set — the fragments stay the only branches");
+        }
+        finally
+        {
+            using var reset = _fixture.BeginScope();
+            reset.Resolve<WorkPlanPlanScript>().Reset();
+        }
     }
 
     // ─── Projection (the production builder, planner pinned to the work-plan fake, synth retargeted) ───
@@ -202,7 +274,7 @@ public sealed class PlanMapIntegrateWholeLoopE2ETests
 
         public string Url => new Uri(_bare).AbsoluteUri;
 
-        public async Task SeedBaseAsync()
+        public async Task SeedBaseAsync(string? extraFile = null)
         {
             await Git(_root, "init", "--bare", "-b", "main", _bare);
 
@@ -213,6 +285,7 @@ public sealed class PlanMapIntegrateWholeLoopE2ETests
             await Git(seed, "config", "user.name", "Test");
             await Git(seed, "config", "commit.gpgsign", "false");
             await File.WriteAllTextAsync(Path.Combine(seed, "base.txt"), "base\n");
+            if (extraFile is not null) await File.WriteAllTextAsync(Path.Combine(seed, extraFile), "base\n");
             await Git(seed, "add", "-A");
             await Git(seed, "commit", "-m", "seed");
             await Git(seed, "push", "origin", "main");

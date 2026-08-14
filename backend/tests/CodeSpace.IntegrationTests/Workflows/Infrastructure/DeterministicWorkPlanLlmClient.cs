@@ -86,6 +86,8 @@ public sealed class DeterministicWorkPlanLlmClient : ILLMClient, IStructuredLLMC
                 new { id = "s1", title = "First", instruction = "do the first thing", kind = "research" },
                 new { id = "s2", title = "Second", instruction = "do the second thing", dependsOn = new[] { "s1" }, acceptance = new { command = AcceptanceCommand, kind = "TestsPass", description = "the unit check" }, acceptanceCriteria = new[] { "covers edge cases" } },
             };
+        else if (_script.Instructions is { Count: > 0 } custom)
+            subtasks = custom.Select((instruction, i) => (object)new { id = $"c{i + 1}", title = instruction, instruction }).ToArray();
         else
             subtasks = new object[]
             {
@@ -143,6 +145,9 @@ public sealed class WorkPlanPlanScript
     /// <summary>The judge pool row the rubric-contract plan pins (the test seeds the row, then sets this — the fake can't know the guid).</summary>
     public Guid? RubricJudgeModelId { get; set; }
 
+    /// <summary>Custom plan instructions (one subtask per entry, no contracts) — for arms that need goal-keyed CLI behavior (e.g. a same-file conflict via alpha/beta markers). Null ⇒ the default two-item plan, byte-identical.</summary>
+    public IReadOnlyList<string>? Instructions { get; set; }
+
     public void Reset()
     {
         AuthorContract = false;
@@ -151,5 +156,6 @@ public sealed class WorkPlanPlanScript
         AuthorHeterogeneousKinds = false;
         AuthorRubricContract = false;
         RubricJudgeModelId = null;
+        Instructions = null;
     }
 }

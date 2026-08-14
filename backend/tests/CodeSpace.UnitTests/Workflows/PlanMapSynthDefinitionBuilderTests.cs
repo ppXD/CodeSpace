@@ -87,6 +87,7 @@ public class PlanMapSynthDefinitionBuilderTests
         var integrate = def.Nodes.Single(n => n.Id == "integrate");
         integrate.TypeKey.ShouldBe("git.integrate_run");
         integrate.Inputs.GetProperty("repositoryId").GetString().ShouldBe(repositoryId.ToString());
+        integrate.Config.GetProperty("parkOnConflict").GetBoolean().ShouldBeTrue("a conflicted candidate parks for review — fragments never narrate past a human silently");
 
         def.Edges.Select(e => (e.From, e.To)).ShouldContain(("map", "integrate"));
         def.Edges.Select(e => (e.From, e.To)).ShouldContain(("integrate", "synth"));

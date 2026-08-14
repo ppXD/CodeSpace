@@ -74,9 +74,12 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
         // (the node derives contributions from the run's own publish ledger), so nothing new threads through map
         // outputs. A conflict is a routable outcome the synth then narrates over; a repo-less task emits no node
         // and stays byte-identical.
+        // parkOnConflict: a conflicted candidate PARKS for review (the wait carries the conflict detail; the
+        // resumed pass re-integrates) — fragments never narrate past a human silently ("conflict ⇒ park").
         if (context.AgentProfile?.RepositoryId is { } repositoryId)
             nodes.Add(new() { Id = "integrate", TypeKey = "git.integrate_run", Label = "Integrate",
-                              Config = Empty(), Inputs = JsonSerializer.SerializeToElement(new { repositoryId = repositoryId.ToString() }) });
+                              Config = JsonSerializer.SerializeToElement(new { parkOnConflict = true }),
+                              Inputs = JsonSerializer.SerializeToElement(new { repositoryId = repositoryId.ToString() }) });
 
         nodes.AddRange(new NodeDefinition[]
         {
