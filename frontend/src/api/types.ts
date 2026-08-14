@@ -250,6 +250,28 @@ export interface RepositoryWebhookDetail {
   attemptTimeline: RepositoryWebhookAttemptDetail[];
 }
 
+/**
+ * Where a connection registers its hooks. `Repository` is the default and what every connection that
+ * predates the setting keeps; `Connection` means one group / organization hook covers every
+ * repository under an owner and the repositories themselves have no hook of their own.
+ */
+export type ProviderWebhookScope = "Repository" | "Connection";
+
+/**
+ * What delivers a repository's events when it has no hook of its own.
+ *
+ * <para>The hook comes back as a `RepositoryWebhookDetail` on purpose — same lifecycle, same attempt
+ * timeline, same questions — so the page reads it with `webhookState` and `webhookDiagnosis` rather
+ * than a second set of words for the same seven states.</para>
+ */
+export interface RepositoryWebhookCoverage {
+  scope: ProviderWebhookScope;
+  /** The group / organization the covering hook sits on. Null under per-repository scope, and null when nothing covers this repository yet. */
+  ownerPath: string | null;
+  /** Null when the connection is connection-wide and nothing covers this repository — a reportable state, not an empty answer. */
+  hook: RepositoryWebhookDetail | null;
+}
+
 /** The decrypted signing secret, from the reveal endpoint. Never part of a list read. */
 export interface RepositoryWebhookSecret {
   webhookId: string;
@@ -268,6 +290,7 @@ export interface RepositoryWebhookSecret {
  */
 export type RejectionReason =
   | "signature_invalid" | "webhook_inactive" | "event_not_mapped" | "malformed_payload" | "no_matching_activation"
+  | "repository_not_bound" | "webhook_retired"
   | (string & {});
 
 /** One delivery that arrived and was refused. Every field here was captured at rejection with secrets already stripped. */

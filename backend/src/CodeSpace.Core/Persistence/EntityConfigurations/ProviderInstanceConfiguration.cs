@@ -12,6 +12,10 @@ public class ProviderInstanceConfiguration : IEntityTypeConfiguration<ProviderIn
 
         builder.Property(p => p.Provider).HasConversion<string>();
 
+        // Text, like every other enum here: a psql reader sees the word, and reordering the C# enum
+        // cannot silently repoint existing rows onto a different mode.
+        builder.Property(p => p.WebhookScope).HasConversion<string>().HasMaxLength(32);
+
         builder.HasOne(p => p.Team).WithMany().HasForeignKey(p => p.TeamId);
 
         builder.HasIndex(p => new { p.TeamId, p.Provider, p.BaseUrl }).IsUnique();

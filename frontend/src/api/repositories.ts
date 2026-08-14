@@ -1,5 +1,5 @@
 import { fetchJson } from "./request";
-import type { BulkBindResult, IssueState, PullRequestReviewVerdict, PullRequestState, RemoteBranch, RemoteIssue, RemoteIssueComment, RemoteIssueCounts, RemoteIssueEvent, RemoteRelease, RemoteTag, RemoteCommitSummary, RemoteFileContent, RemoteLanguage, RemotePullRequest, RemotePullRequestCheck, RemotePullRequestCommit, RemotePullRequestCounts, RemotePullRequestFile, RemotePullRequestReview, RemoteRenderedMarkdown, RemoteRepositoryPage, RemoteRepositoryStats, RemoteTreeEntry, RepositoryDetail, RepositoryRejectedDeliveries, RepositorySummary, RepositoryWebhookDetail, RepositoryWebhookSecret } from "./types";
+import type { BulkBindResult, IssueState, PullRequestReviewVerdict, PullRequestState, RemoteBranch, RemoteIssue, RemoteIssueComment, RemoteIssueCounts, RemoteIssueEvent, RemoteRelease, RemoteTag, RemoteCommitSummary, RemoteFileContent, RemoteLanguage, RemotePullRequest, RemotePullRequestCheck, RemotePullRequestCommit, RemotePullRequestCounts, RemotePullRequestFile, RemotePullRequestReview, RemoteRenderedMarkdown, RemoteRepositoryPage, RemoteRepositoryStats, RemoteTreeEntry, RepositoryDetail, RepositoryRejectedDeliveries, RepositorySummary, RepositoryWebhookCoverage, RepositoryWebhookDetail, RepositoryWebhookSecret } from "./types";
 
 export interface BindRepositoryInput {
   providerInstanceId: string;
@@ -73,6 +73,11 @@ export const repositoriesApi = {
   // Member can open the Webhook tab and read why nothing is arriving.
   listWebhooks: (repositoryId: string) =>
     fetchJson<RepositoryWebhookDetail[]>(`/api/repositories/${encodeURIComponent(repositoryId)}/webhooks`),
+
+  // What covers the repository when it has no hook of its own. Always answers, so the tab can render
+  // one thing instead of inferring a mode from an empty list.
+  getWebhookCoverage: (repositoryId: string) =>
+    fetchJson<RepositoryWebhookCoverage>(`/api/repositories/${encodeURIComponent(repositoryId)}/webhooks/coverage`),
 
   // The signing secret, on its own call because it is the one field that authenticates an inbound
   // delivery — the tab must be openable without it ever reaching the browser. POST, not GET: the

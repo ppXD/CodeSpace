@@ -48,7 +48,7 @@ public sealed class IngestionAuditor : IIngestionAuditor, IScopedDependency
             // Use the "rejected:" prefix so this keyspace can never collide with RunStarter's
             // {sourceType}:{deliveryId}:{activationId} form (which has 3+ colons + a GUID
             // suffix and is only emitted for fan-out into specific activations).
-            IdempotencyKey = BuildRejectedDedupKey(context.SourceType, context.ExternalEventId),
+            IdempotencyKey = context.DedupKey ?? BuildRejectedDedupKey(context.SourceType, context.ExternalEventId),
             ActorType = WorkflowRunActorTypes.Webhook,
             ActorId = null,
             NormalizedPayloadJson = "{}",

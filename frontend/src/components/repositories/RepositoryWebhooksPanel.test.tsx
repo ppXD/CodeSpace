@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { MeResponse, MeTeam, ProviderKind, RejectedDelivery, RepositoryWebhookAttemptDetail, RepositoryWebhookDetail } from "@/api/types";
+import type { MeResponse, MeTeam, ProviderKind, RejectedDelivery, RepositoryWebhookAttemptDetail, RepositoryWebhookCoverage, RepositoryWebhookDetail } from "@/api/types";
 import { rejectionCopy } from "@/lib/webhookState";
 import { RepositoryWebhooksPanel } from "./RepositoryWebhooksPanel";
 
@@ -78,11 +78,12 @@ describe("repository webhooks panel", () => {
     }));
   }
 
-  function renderPanel(hooks: RepositoryWebhookDetail[], { provider = "GitLab" as ProviderKind, permissions = ["repos.manage"], secret = "s3cr3t-from-the-server", refusals = [] as RejectedDelivery[], cap = 50 } = {}) {
+  function renderPanel(hooks: RepositoryWebhookDetail[], { provider = "GitLab" as ProviderKind, permissions = ["repos.manage"], secret = "s3cr3t-from-the-server", refusals = [] as RejectedDelivery[], cap = 50, coverage = { scope: "Repository", ownerPath: null, hook: null } as RepositoryWebhookCoverage } = {}) {
     localStorage.setItem("codespace.jwt", "test-jwt");
     localStorage.setItem("codespace.activeTeamId", "t1");
 
     stub({
+      "/webhooks/coverage": coverage,
       "/webhooks/w1/secret": { webhookId: "w1", secret },
       "/webhooks": hooks,
       "/rejected-deliveries": { deliveries: refusals, cap },
@@ -456,5 +457,73 @@ describe("repository webhooks panel", () => {
 
     expect(screen.getByText(/does not have wording for/)).toBeTruthy();
     expect(document.body.textContent).not.toContain("throttled:");
+  });
+
+  it("names the connection hook that covers a repository with none of its own", async () => {
+    // Under connection-wide scope the repository's own list is empty and everything is fine. A tab
+    // that rendered "This repository has no webhook" there would be telling the operator to go and
+    // fix a working connection — the exact blankness the tab exists to end.
+    renderPanel([], {
+      coverage: {
+        scope: "Connection",
+        ownerPath: "acme/platform",
+        hook: hook({ id: "c1", lastReceivedDate: new Date(Date.now() - 2 * 60_000).toISOString() }),
+      },
+    });
+
+    await waitFor(() => expect(screen.getByText("acme/platform")).toBeTruthy());
+
+    expect(screen.queryByText("This repository has no webhook")).toBeNull();
+    expect(screen.getByText("Delivering")).toBeTruthy();
+    expect(screen.getByText(/One hook on acme\/platform at GitLab covers it/)).toBeTruthy();
+  });
+
+  it("gives the covering hook the same diagnosis a repository hook would get", async () => {
+    // Same lifecycle, same question, so the same words — and the attempt timeline has to come with
+    // it, or the operator can see that nothing is arriving and nothing about why.
+    renderPanel([], {
+      coverage: {
+        scope: "Connection",
+        ownerPath: "acme",
+        hook: hook({ id: "c1", registrationStatus: "DeadLettered", attempts: 10, attemptTimeline: [attempt(1, 403)] }),
+      },
+    });
+
+    await waitFor(() => expect(screen.getByText("Not delivering")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "Why, and how to fix it" }));
+
+    expect(screen.getByText(/refused to create the hook/)).toBeTruthy();
+    expect(screen.getByText("All 1 attempt answered 403.")).toBeTruthy();
+  });
+
+  it("says so when connection-wide scope has nothing covering the repository", async () => {
+    // The state that is neither "has a hook" nor "per-repository". Silence here is the blank tab again.
+    renderPanel([], { coverage: { scope: "Connection", ownerPath: null, hook: null } });
+
+    await waitFor(() => expect(screen.getByText("No hook covers this repository")).toBeTruthy());
+
+    expect(screen.getByText(/Nothing will arrive until one is registered/)).toBeTruthy();
+  });
+
+  it("reads a delivery for an unbound repository as expected traffic, not a fault", async () => {
+    // A group hook carries every project under the owner. Rendering that in the same alarmed tone as
+    // a signature mismatch would send an operator hunting a fault that does not exist.
+    renderPanel([hook()], { refusals: [refusal({ reason: "repository_not_bound", detail: "connection webhook 7f3a delivered an event for acme/someone-elses-project, which is not bound in CodeSpace" })] });
+
+    await waitFor(() => expect(screen.getByText("For a repository nothing here has bound")).toBeTruthy());
+
+    expect(toneOf("For a repository nothing here has bound")).toBe("idle");
+    // The cap is said out loud: one row a day standing for many must not be counted as one delivery.
+    expect(screen.getByText(/At most one of these is recorded per repository per day/)).toBeTruthy();
+  });
+
+  it("tells a retired hook apart from one an operator switched off", async () => {
+    renderPanel([hook()], { refusals: [refusal({ reason: "webhook_retired", detail: "webhook 7f3a was retired (Cancelled) and no longer accepts deliveries" })] });
+
+    await waitFor(() => expect(screen.getByText("The hook was retired and is still sending")).toBeTruthy());
+
+    expect(toneOf("The hook was retired and is still sending")).toBe("bad");
+    expect(screen.getByText(/Remove the hook by hand at GitLab/)).toBeTruthy();
   });
 });

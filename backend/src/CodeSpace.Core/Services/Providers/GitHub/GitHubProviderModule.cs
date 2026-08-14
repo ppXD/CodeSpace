@@ -22,7 +22,7 @@ public sealed class GitHubProviderModule : IProviderModule
         typeof(GitHubIssuesEventSubscription)
     };
 
-    public IReadOnlyList<Type> AuxiliaryServices { get; } = new[] { typeof(GitHubSignatureVerifier), typeof(GitHubEventNormalizer) };
+    public IReadOnlyList<Type> AuxiliaryServices { get; } = new[] { typeof(GitHubSignatureVerifier), typeof(GitHubEventNormalizer), typeof(GitHubWebhookRepositoryIdentifier) };
 
     /// <summary>
     /// The minimum scope set that covers BOTH catalog and webhook capabilities in one consent
@@ -39,7 +39,7 @@ public sealed class GitHubProviderModule : IProviderModule
 
     // DERIVED from CapabilityScopeRequirements (broadest scope per capability = `repo`) + ExtraOAuthScopes →
     // [repo, read:user] today; a new capability needing another scope extends it automatically (no drift).
-    public IReadOnlyList<string> DefaultOAuthScopes => OAuthScopeDefaults.Compute(ExtraOAuthScopes, CapabilityScopeRequirements);
+    public IReadOnlyList<string> DefaultOAuthScopes => OAuthScopeDefaults.Compute(ExtraOAuthScopes, CapabilityScopeRequirements, typeof(IConnectionWebhookRegistrationCapability));
 
     public IReadOnlyDictionary<Type, ScopeRequirement> CapabilityScopeRequirements { get; } = new Dictionary<Type, ScopeRequirement>
     {
@@ -86,6 +86,12 @@ public sealed class GitHubProviderModule : IProviderModule
 
         // Webhook registration: `repo` is the superset; `admin:repo_hook` is the narrow grant.
         [typeof(IWebhookRegistrationCapability)] = ScopeRequirement.AnyOf(GitHubScopes.Repo, GitHubScopes.AdminRepoHook),
+
+        // Organization hooks sit ABOVE the repository, and `repo` does not reach there — it is a
+        // superset of admin:repo_hook and of nothing else. Accepting it here would pass a credential
+        // that cannot create the hook, turning a legible pre-flight refusal into a dead-lettered
+        // registration hours later. Declared but deliberately kept out of DefaultOAuthScopes.
+        [typeof(IConnectionWebhookRegistrationCapability)] = ScopeRequirement.Of(GitHubScopes.AdminOrgHook),
 
         // Probe just calls /user — any valid token works, no specific scope required.
         [typeof(ICredentialProbeCapability)] = ScopeRequirement.None

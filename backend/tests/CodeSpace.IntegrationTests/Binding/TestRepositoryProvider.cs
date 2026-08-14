@@ -28,6 +28,15 @@ public sealed class TestRemoteHookStore
     public int RegisterCallCount { get; private set; }
 
     /// <summary>
+    /// Owner paths a CONNECTION hook was registered on, in order. The owner is the assertion that
+    /// matters for connection-wide scope: a hook on the wrong level looks registered and delivers
+    /// nothing, or delivers everything twice.
+    /// </summary>
+    public IReadOnlyList<string> ConnectionOwnerPaths { get { lock (_lock) { return _connectionOwnerPaths.ToList(); } } }
+
+    private readonly List<string> _connectionOwnerPaths = new();
+
+    /// <summary>
     /// Set it and the next registration is refused instead of registered. Null means "the remote
     /// works", which is what every test that isn't about failure wants.
     /// </summary>
@@ -45,6 +54,13 @@ public sealed class TestRemoteHookStore
         {
             return _byCallbackUrl.TryGetValue(callbackUrl, out var hook) ? hook : null;
         }
+    }
+
+    public RemoteWebhook RegisterForOwner(string ownerPath, WebhookRegistration request)
+    {
+        lock (_lock) { _connectionOwnerPaths.Add(ownerPath); }
+
+        return Register(request);
     }
 
     public RemoteWebhook Register(WebhookRegistration request)
@@ -71,6 +87,7 @@ public sealed class TestRemoteHookStore
         lock (_lock)
         {
             _byCallbackUrl.Clear();
+            _connectionOwnerPaths.Clear();
             RegisterCallCount = 0;
             _refusal = null;
         }
@@ -111,7 +128,7 @@ public sealed class TestPullRequestOpenCapture
     }
 }
 
-public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICredentialProbeCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IIssueCatalogCapability, IIssueWriteCapability, IReleaseCatalogCapability, IRepositoryInsightsCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICredentialProbeCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IIssueCatalogCapability, IIssueWriteCapability, IReleaseCatalogCapability, IRepositoryInsightsCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IWebhookRegistrationCapability, IConnectionWebhookRegistrationCapability, IWebhookRepositoryIdentifier, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     /// <summary>The deterministic root-tree entries the source capability returns — grounding tests assert these surface in the planner's grounding string.</summary>
     public static readonly IReadOnlyList<string> RootEntryNames = new[] { "src", "README.md" };
@@ -399,6 +416,32 @@ public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICred
     }
 
     public Task DeleteWebhookAsync(ProviderContext context, RemoteRepository repository, string externalWebhookId, CancellationToken cancellationToken) => Task.CompletedTask;
+
+    // ── IConnectionWebhookRegistrationCapability — the same store, keyed by owner instead of repository ──
+
+    public Task<RemoteWebhook?> FindConnectionWebhookByCallbackUrlAsync(ProviderContext context, string ownerPath, string callbackUrl, CancellationToken cancellationToken) =>
+        Task.FromResult(_hookStore.Find(callbackUrl));
+
+    public Task<RemoteWebhook> RegisterConnectionWebhookAsync(ProviderContext context, string ownerPath, WebhookRegistration request, CancellationToken cancellationToken) =>
+        Task.FromResult(_hookStore.RegisterForOwner(ownerPath, request));
+
+    public Task DeleteConnectionWebhookAsync(ProviderContext context, string ownerPath, string externalWebhookId, CancellationToken cancellationToken) => Task.CompletedTask;
+
+    /// <summary>
+    /// Reads the same two fields the real providers read, out of a deliberately provider-neutral
+    /// shape, so a connection-scope test can drive routing without pretending to be GitLab.
+    /// </summary>
+    public WebhookRepositoryIdentity? Identify(string body, IReadOnlyDictionary<string, string> headers)
+    {
+        using var doc = JsonDocument.Parse(body);
+
+        if (doc.RootElement.ValueKind != JsonValueKind.Object) return null;
+
+        var externalId = doc.RootElement.TryGetProperty("repository_external_id", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null;
+        var fullPath = doc.RootElement.TryGetProperty("repository_full_path", out var path) && path.ValueKind == JsonValueKind.String ? path.GetString() : null;
+
+        return externalId == null && fullPath == null ? null : new WebhookRepositoryIdentity { ExternalId = externalId, FullPath = fullPath };
+    }
 
     public bool VerifySignature(string body, IReadOnlyDictionary<string, string> headers, string secret) => true;
 

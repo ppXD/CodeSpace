@@ -3,7 +3,9 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Identity;
+using CodeSpace.Core.Middlewares.Transactional;
 using CodeSpace.Core.Services.RepositoryBinding;
+using CodeSpace.Core.Services.Webhooks.Scope;
 using CodeSpace.Messages.Commands.ProviderInstances;
 using CodeSpace.Messages.Dtos.ProviderInstances;
 using CodeSpace.Messages.Enums;
@@ -18,14 +20,18 @@ public sealed class ProviderInstanceService : IProviderInstanceService, IScopedD
     private readonly ICurrentTeam _currentTeam;
     private readonly IPayloadEncryptor _encryptor;
     private readonly IRepositoryBindingService _binding;
+    private readonly IWebhookScopeTransitionService _webhookScope;
+    private readonly IPostCommitActions _postCommit;
     private readonly TimeProvider _clock;
 
-    public ProviderInstanceService(CodeSpaceDbContext db, ICurrentTeam currentTeam, IPayloadEncryptor encryptor, IRepositoryBindingService binding, TimeProvider clock)
+    public ProviderInstanceService(CodeSpaceDbContext db, ICurrentTeam currentTeam, IPayloadEncryptor encryptor, IRepositoryBindingService binding, IWebhookScopeTransitionService webhookScope, IPostCommitActions postCommit, TimeProvider clock)
     {
         _db = db;
         _currentTeam = currentTeam;
         _encryptor = encryptor;
         _binding = binding;
+        _webhookScope = webhookScope;
+        _postCommit = postCommit;
         _clock = clock;
     }
 
@@ -117,7 +123,26 @@ public sealed class ProviderInstanceService : IProviderInstanceService, IScopedD
 
         if (baseUrlChanged || clientIdChanged) await EnsureUniquenessKeyAvailableAsync(instance, newBaseUrl, newClientId, cancellationToken).ConfigureAwait(false);
 
+        var previousScope = instance.WebhookScope;
+
         ApplyEdits(instance, request);
+
+        await ApplyWebhookScopeChangeAsync(instance, previousScope, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Deferred to after the edit commits, for the reason a bind defers its registration: the
+    /// transition reads the new scope off the row and dispatches registrations against it, and a
+    /// worker that got there first would read the old value and register the mode the operator just
+    /// left. No-ops when the scope did not move, which is every ordinary edit.
+    /// </summary>
+    private async Task ApplyWebhookScopeChangeAsync(ProviderInstance instance, ProviderWebhookScope previousScope, CancellationToken cancellationToken)
+    {
+        if (instance.WebhookScope == previousScope) return;
+
+        var instanceId = instance.Id;
+
+        await _postCommit.RunAfterCommitAsync(ct => _webhookScope.ApplyAsync(instanceId, previousScope, ct), cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<DeleteProviderInstanceResult> DeleteAsync(Guid providerInstanceId, bool force, CancellationToken cancellationToken)
@@ -216,6 +241,7 @@ public sealed class ProviderInstanceService : IProviderInstanceService, IScopedD
         if (request.WebUrl != null) instance.WebUrl = string.IsNullOrWhiteSpace(request.WebUrl) ? null : request.WebUrl;
         if (request.OauthClientId != null) instance.OauthClientId = string.IsNullOrWhiteSpace(request.OauthClientId) ? null : request.OauthClientId;
         if (!string.IsNullOrEmpty(request.OauthClientSecret)) instance.OauthClientSecretEnc = _encryptor.Encrypt(request.OauthClientSecret);
+        if (request.WebhookScope != null) instance.WebhookScope = request.WebhookScope.Value;
         if (request.OauthRedirectPath != null) instance.OauthRedirectPath = string.IsNullOrWhiteSpace(request.OauthRedirectPath) ? null : request.OauthRedirectPath;
         if (request.OauthDefaultScopes != null) instance.OauthDefaultScopes = request.OauthDefaultScopes.ToList();
     }

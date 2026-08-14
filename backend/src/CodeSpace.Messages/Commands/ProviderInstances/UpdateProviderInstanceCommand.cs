@@ -1,5 +1,6 @@
 using CodeSpace.Messages.Authorization;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Mediation;
 using MediatR;
 
@@ -30,4 +31,11 @@ public sealed record UpdateProviderInstanceCommand : ICommand<Unit>, IRequireTea
 
     public string? OauthRedirectPath { get; init; }
     public IReadOnlyList<string>? OauthDefaultScopes { get; init; }
+
+    /// <summary>
+    /// Where this connection registers its hooks. Null keeps the current mode, like every other
+    /// field here. Changing it retires the outgoing mode's hooks BEFORE registering the incoming
+    /// one, so the two never both deliver — see <c>IWebhookScopeTransitionService</c>.
+    /// </summary>
+    public ProviderWebhookScope? WebhookScope { get; init; }
 }

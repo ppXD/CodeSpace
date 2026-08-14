@@ -20,19 +20,21 @@ using ProviderInstance = CodeSpace.Core.Persistence.Entities.ProviderInstance;
 
 namespace CodeSpace.Core.Services.Providers.GitLab;
 
-public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IIssueCatalogCapability, IIssueWriteCapability, IReleaseCatalogCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, IRepositoryHistoryCapability, IRepositoryMarkdownRenderCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IIssueCatalogCapability, IIssueWriteCapability, IReleaseCatalogCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, IRepositoryHistoryCapability, IRepositoryMarkdownRenderCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     private readonly IProviderAuthResolver _authResolver;
     private readonly IExternalCallResilience _resilience;
     private readonly GitLabSignatureVerifier _signatureVerifier;
     private readonly GitLabEventNormalizer _eventNormalizer;
+    private readonly GitLabWebhookRepositoryIdentifier _repositoryIdentifier;
 
-    public GitLabRepositoryProvider(IProviderAuthResolver authResolver, IExternalCallResilience resilience, GitLabSignatureVerifier signatureVerifier, GitLabEventNormalizer eventNormalizer)
+    public GitLabRepositoryProvider(IProviderAuthResolver authResolver, IExternalCallResilience resilience, GitLabSignatureVerifier signatureVerifier, GitLabEventNormalizer eventNormalizer, GitLabWebhookRepositoryIdentifier repositoryIdentifier)
     {
         _authResolver = authResolver;
         _resilience = resilience;
         _signatureVerifier = signatureVerifier;
         _eventNormalizer = eventNormalizer;
+        _repositoryIdentifier = repositoryIdentifier;
     }
 
     public ProviderKind Kind => ProviderKind.GitLab;

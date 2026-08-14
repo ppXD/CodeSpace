@@ -20,6 +20,14 @@ public static class GitHubScopes
     /// <summary>Repository hook management (subset of repo). GitHub treats `repo` as a superset.</summary>
     public const string AdminRepoHook = "admin:repo_hook";
 
+    /// <summary>
+    /// Organization hook administration. NOT a subset of <see cref="Repo"/> — `repo` covers
+    /// admin:repo_hook and nothing above the repository — which is exactly why connection-wide scope
+    /// needs its own grant and why declaring it is what lets a bind pre-flight refuse legibly instead
+    /// of dead-lettering a registration hours later.
+    /// </summary>
+    public const string AdminOrgHook = "admin:org_hook";
+
     /// <summary>Read profile info — needed for ProbeCredential to identify the user.</summary>
     public const string ReadUser = "read:user";
 }

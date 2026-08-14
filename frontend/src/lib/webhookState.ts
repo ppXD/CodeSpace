@@ -216,6 +216,21 @@ const REJECTION_COPY: Record<string, (who: string) => RejectionCopy> = {
     headline: "An event nothing here acts on",
     remedy: `Harmless. ${who} is sending an event type CodeSpace does not react to. Narrow the hook's subscription at ${who} if you would rather it stopped sending them; ignoring it costs nothing.`,
   }),
+  // The expected traffic of a group hook, and the one refusal that is neither a fault nor rare: the
+  // hook covers every project under the owner and only some of them are bound. Said plainly, with
+  // the rate limit named, so a reader does not count the rows and conclude it happened twice today.
+  repository_not_bound: (who) => ({
+    tone: "idle",
+    headline: "For a repository nothing here has bound",
+    remedy: `Not a fault. This connection registers one hook per group at ${who}, so it receives every project under that group — including ones CodeSpace does not track. Bind the repository named below if it should be tracked; otherwise ignore it. At most one of these is recorded per repository per day, however many arrive.`,
+  }),
+  // Distinct from webhook_inactive: nobody switched this off, the connection moved off it. The hook
+  // is still live at the provider, which is the thing the operator has to go and remove.
+  webhook_retired: (who) => ({
+    tone: "bad",
+    headline: "The hook was retired and is still sending",
+    remedy: `CodeSpace asked ${who} to delete this hook when the connection changed webhook scope, and could not. ${who} is still delivering to it and every delivery is discarded. Remove the hook by hand at ${who} — nothing here will run off it again.`,
+  }),
   // Deliberately the friendliest of the five. This is not a failure — it is the delivery arriving,
   // being verified, being understood, and finding that nothing asked for it.
   no_matching_activation: () => ({
@@ -329,4 +344,19 @@ function inWords(ms: number): string {
 
 function plural(n: number, unit: string): string {
   return n === 1 ? unit : `${unit}s`;
+}
+
+/**
+ * What the tab says at the top when the repository has no hook of its own because the connection
+ * registers above it. Stated rather than left to be inferred from an empty list: the two look
+ * identical to a reader, and one of them means everything is fine.
+ */
+export function connectionCoverageNote(ownerPath: string | null, provider: ProviderKind): string {
+  const who = providerName(provider);
+
+  if (ownerPath == null) {
+    return `This connection registers one hook per group at ${who}, so this repository has none of its own — and no hook covering it exists yet. Nothing is arriving for it.`;
+  }
+
+  return `This repository has no hook of its own. One hook on ${ownerPath} at ${who} covers it, along with every other repository under that owner.`;
 }

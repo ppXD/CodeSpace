@@ -13,6 +13,12 @@ public class ProviderInstance : IEntity<Guid>, IAuditable
     public string? ApiUrl { get; set; }
     public string? WebUrl { get; set; }
 
+    /// <summary>
+    /// Where this connection registers its hooks. Defaults to <see cref="ProviderWebhookScope.Repository"/>,
+    /// which is what every connection that predates the setting keeps.
+    /// </summary>
+    public ProviderWebhookScope WebhookScope { get; set; } = ProviderWebhookScope.Repository;
+
     public string? OauthClientId { get; set; }
     public string? OauthClientSecretEnc { get; set; }
     public string? OauthRedirectPath { get; set; }

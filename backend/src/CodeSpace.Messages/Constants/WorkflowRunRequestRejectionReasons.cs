@@ -26,4 +26,19 @@ public static class WorkflowRunRequestRejectionReasons
 
     /// <summary>No <c>workflow_activation</c> row matched the normalised event. Workflow exists but doesn't subscribe to this event shape OR the filter (repository_id, etc.) excludes it.</summary>
     public const string NoMatchingActivation = "no_matching_activation";
+
+    /// <summary>
+    /// A connection-scoped (group / organization) hook delivered an event for a repository nobody
+    /// bound. The ordinary case for a group hook rather than a fault — it covers every project under
+    /// the owner and we asked for some of them — so it is recorded at most once per repository per
+    /// day instead of once per delivery.
+    /// </summary>
+    public const string RepositoryNotBound = "repository_not_bound";
+
+    /// <summary>
+    /// The hook is still switched on but the connection has moved off it — a scope switch or a
+    /// teardown retired it, and the provider is delivering to a hook we asked to have deleted.
+    /// Distinct from <see cref="WebhookInactive"/>, which is an operator turning a live hook off.
+    /// </summary>
+    public const string WebhookRetired = "webhook_retired";
 }

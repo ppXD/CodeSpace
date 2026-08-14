@@ -50,6 +50,14 @@ public static class FailureCodes
     public const string InvitationRequiresSignIn = "invitation_requires_sign_in";
     public const string InvitationRoleExceedsGranter = "invitation_role_exceeds_granter";
     public const string PersonalTeamNotInvitable = "personal_team_not_invitable";
+
+    /// <summary>
+    /// The provider refused because the account's PLAN does not include the feature, not because the
+    /// credential lacks a scope. Distinct from a permission failure because re-issuing the token cannot
+    /// help — GitLab group webhooks are Premium, and a Free instance answers the same 403 a
+    /// wrongly-scoped token would.
+    /// </summary>
+    public const string ProviderPlanRequired = "provider_plan_required";
     public const string InvitationAlreadyPending = "invitation_already_pending";
     public const string AlreadyTeamMember = "already_team_member";
 

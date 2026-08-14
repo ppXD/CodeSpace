@@ -34,6 +34,7 @@ public class RequestAuthorizationInventoryTests
     {
         ["SignInCommand"] = "the call that mints the JWT; proof is the password.",
         ["ReceiveWebhookCommand"] = "provider-signed inbound; proof is the HMAC verified against the per-webhook secret.",
+        ["ReceiveConnectionWebhookCommand"] = "the same inbound, from a group/organization hook; proof is the HMAC verified against THAT hook's own secret, never a repository's.",
         ["ResumeWorkflowCallbackCommand"] = "proof is the single-use high-entropy callback token in the URL.",
         ["CompleteCredentialOAuthCommand"] = "the provider redirect carries no JWT; proof is the one-time OAuthPendingState row.",
         ["AcceptInvitationCommand"] = "the invitee has no account yet; proof is the single-use invitation token in the route.",

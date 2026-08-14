@@ -342,6 +342,19 @@ public class RepositoriesController : ControllerBase
     }
 
     /// <summary>
+    /// What covers this repository when it has no hook of its own. Under connection-wide scope the
+    /// list above is empty for a repository that is working perfectly, and an empty Webhook tab is
+    /// the invisibility the tab exists to end — so this names the group hook and hands back its state
+    /// and its attempt timeline in the same shape a repository hook uses.
+    /// </summary>
+    [HttpGet("{repositoryId:guid}/webhooks/coverage")]
+    public async Task<IActionResult> GetWebhookCoverage([FromRoute] Guid repositoryId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetRepositoryWebhookCoverageQuery { RepositoryId = repositoryId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>
     /// The deliveries that arrived and were refused, newest first and capped — the other half of
     /// "why isn't my webhook working". The list above says whether the hook was ever created; this
     /// says what happens to what the provider sends once it has been.

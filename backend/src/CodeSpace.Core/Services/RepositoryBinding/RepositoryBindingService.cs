@@ -28,12 +28,14 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
     private readonly IPayloadEncryptor _encryptor;
     private readonly IScopeChecker _scopeChecker;
     private readonly IRepositoryWebhookRegistrationDispatcher _registrationDispatcher;
+    private readonly IConnectionWebhookProvisioner _connectionProvisioner;
+    private readonly IConnectionWebhookRegistrationDispatcher _connectionDispatcher;
     private readonly IProjectService _projectService;
     private readonly WebhookBaseUrlSetting _webhookBaseUrl;
     private readonly IPostCommitActions _postCommit;
     private readonly ILogger<RepositoryBindingService> _logger;
 
-    public RepositoryBindingService(CodeSpaceDbContext db, IProviderRegistry registry, IProviderEventSubscriptionRegistry subscriptionRegistry, IPayloadEncryptor encryptor, IScopeChecker scopeChecker, IRepositoryWebhookRegistrationDispatcher registrationDispatcher, IProjectService projectService, WebhookBaseUrlSetting webhookBaseUrl, IPostCommitActions postCommit, ILogger<RepositoryBindingService> logger)
+    public RepositoryBindingService(CodeSpaceDbContext db, IProviderRegistry registry, IProviderEventSubscriptionRegistry subscriptionRegistry, IPayloadEncryptor encryptor, IScopeChecker scopeChecker, IRepositoryWebhookRegistrationDispatcher registrationDispatcher, IConnectionWebhookProvisioner connectionProvisioner, IConnectionWebhookRegistrationDispatcher connectionDispatcher, IProjectService projectService, WebhookBaseUrlSetting webhookBaseUrl, IPostCommitActions postCommit, ILogger<RepositoryBindingService> logger)
     {
         _db = db;
         _registry = registry;
@@ -41,6 +43,8 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
         _encryptor = encryptor;
         _scopeChecker = scopeChecker;
         _registrationDispatcher = registrationDispatcher;
+        _connectionProvisioner = connectionProvisioner;
+        _connectionDispatcher = connectionDispatcher;
         _projectService = projectService;
         _webhookBaseUrl = webhookBaseUrl;
         _postCommit = postCommit;
@@ -105,14 +109,37 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
         // defers while a transaction is open), so the registrar job can't run before the
         // RepositoryWebhook row is visible. No webhook row exists when re-using an already-active repo
         // (only a project link was added), so there's nothing to register then.
-        if (!ctx.ReusingActiveRepository)
-        {
-            var webhookId = ctx.NewWebhookId;
-            await _postCommit.RunAfterCommitAsync(ct => _registrationDispatcher.DispatchAsync(webhookId, ct), cancellationToken).ConfigureAwait(false);
-        }
+        if (!ctx.ReusingActiveRepository) await DispatchWebhookRegistrationAsync(ctx, cancellationToken).ConfigureAwait(false);
 
         return repository;
     }
+
+    /// <summary>
+    /// Whichever hook covers the repository just bound. Under the default scope that is its own,
+    /// staged in the same unit of work above; under connection-wide scope it is the one group hook
+    /// that already covers every project under the owner, and this repository may well need nothing
+    /// registered at all — which is the whole point of the mode.
+    /// </summary>
+    private async Task DispatchWebhookRegistrationAsync(BindContext ctx, CancellationToken cancellationToken)
+    {
+        if (RegistersPerRepository(ctx.Instance))
+        {
+            var webhookId = ctx.NewWebhookId;
+            await _postCommit.RunAfterCommitAsync(ct => _registrationDispatcher.DispatchAsync(webhookId, ct), cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        var connectionHookId = await _connectionProvisioner.EnsureForOwnerAsync(ctx.Instance, ctx.Credential.Id, ctx.Remote.NamespacePath, cancellationToken).ConfigureAwait(false);
+
+        if (connectionHookId == null) return;
+
+        // Flushed here for the same reason the repository row is: the dispatcher's CAS is a raw
+        // UPDATE and cannot see a row that is still only in the change tracker.
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        await _postCommit.RunAfterCommitAsync(ct => _connectionDispatcher.DispatchAsync(connectionHookId.Value, ct), cancellationToken).ConfigureAwait(false);
+    }
+
+    private static bool RegistersPerRepository(ProviderInstance instance) => instance.WebhookScope == ProviderWebhookScope.Repository;
 
     /// <summary>
     /// Two capabilities matter during bind:
@@ -125,7 +152,13 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
     private void EnsureCredentialCoversBindCapabilities(BindContext ctx)
     {
         _scopeChecker.EnsureCapability(ctx.Credential, ctx.Instance.Provider, typeof(IRepositoryCatalogCapability));
-        _scopeChecker.EnsureCapability(ctx.Credential, ctx.Instance.Provider, typeof(IWebhookRegistrationCapability));
+
+        // The hook this bind will actually need. Checking the per-repository grant under
+        // connection-wide scope would pass a credential that cannot create a group hook and refuse
+        // one that can — GitHub's `repo` covers admin:repo_hook and nothing above the repository.
+        var webhookCapability = RegistersPerRepository(ctx.Instance) ? typeof(IWebhookRegistrationCapability) : typeof(IConnectionWebhookRegistrationCapability);
+
+        _scopeChecker.EnsureCapability(ctx.Credential, ctx.Instance.Provider, webhookCapability);
     }
 
     /// <summary>
@@ -177,17 +210,29 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
     }
 
     /// <summary>
-    /// Delete the repo's remote webhooks (best-effort) and soft-delete the row. For Registered rows,
-    /// hard-delete the local record (the remote hook is gone, no audit value). Non-terminal rows
-    /// (Pending / Enqueued / Registering / Failed) CAS to Cancelled so any in-flight registrar /
-    /// dispatcher tick sees the terminal state and no-ops. DeadLettered rows stay for operator triage.
+    /// Delete the repo's remote webhooks (best-effort) and soft-delete the row. Registered rows are
+    /// hard-deleted locally (the remote hook is gone, no audit value); everything else in service
+    /// CASes to Cancelled so any in-flight registrar / dispatcher tick sees the terminal state and
+    /// no-ops.
+    ///
+    /// <para>The remote delete is selected by whether the row NAMES a remote hook, not by whether it
+    /// reached Registered. A row can carry an ExternalId and still be Failed or DeadLettered — the
+    /// provider call landed and the follow-up did not — and skipping those leaves a hook firing at
+    /// the provider for a repository this instance has just unbound.</para>
+    ///
+    /// <para>DeadLettered used to be left untouched here, for operator triage. An unbound repository
+    /// has nothing left to triage against, and under the shared in-service rule the surviving row
+    /// still claims to cover the repository, so a later re-bind or scope switch reads it as live
+    /// coverage and stages nothing. The triage record is the attempt timeline, which is append-only
+    /// and unaffected by this CAS.</para>
     /// </summary>
     private async Task TearDownRepositoryAsync(Repository repo, CancellationToken cancellationToken)
     {
         var webhooks = await LoadAllWebhooksAsync(repo.Id, cancellationToken).ConfigureAwait(false);
+        var remotelyPresent = webhooks.Where(w => !string.IsNullOrEmpty(w.ExternalId)).ToList();
         var registeredWebhooks = webhooks.Where(w => w.RegistrationStatus == RepositoryWebhookRegistrationStatus.Registered).ToList();
 
-        await BestEffortDeleteRemoteWebhooksAsync(repo, registeredWebhooks, cancellationToken).ConfigureAwait(false);
+        await BestEffortDeleteRemoteWebhooksAsync(repo, remotelyPresent, cancellationToken).ConfigureAwait(false);
         await CancelNonTerminalWebhooksAsync(repo.Id, cancellationToken).ConfigureAwait(false);
 
         _db.RepositoryWebhook.RemoveRange(registeredWebhooks);
@@ -362,7 +407,11 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
 
         // A re-used active repo already has a registered webhook delivering its events — registering
         // a second would duplicate deliveries. Only new + resurrected rows need a fresh webhook.
-        if (!ctx.ReusingActiveRepository)
+        //
+        // Under connection-wide scope no per-repository row is staged AT ALL: the group hook already
+        // covers this project, and a second hook on the same events is not redundancy, it is every
+        // push starting two runs.
+        if (!ctx.ReusingActiveRepository && RegistersPerRepository(ctx.Instance))
             _db.RepositoryWebhook.Add(BuildPendingWebhookEntity(ctx, repository.Id));
     }
 
@@ -507,16 +556,9 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
     /// </summary>
     private async Task CancelNonTerminalWebhooksAsync(Guid repositoryId, CancellationToken cancellationToken)
     {
-        var nonTerminal = new[]
-        {
-            RepositoryWebhookRegistrationStatus.Pending,
-            RepositoryWebhookRegistrationStatus.Enqueued,
-            RepositoryWebhookRegistrationStatus.Registering,
-            RepositoryWebhookRegistrationStatus.Failed
-        };
 
         await _db.RepositoryWebhook
-            .Where(w => w.RepositoryId == repositoryId && nonTerminal.Contains(w.RegistrationStatus))
+            .Where(w => w.RepositoryId == repositoryId && WebhookRegistrationLifecycle.RetirableToCancelled.Contains(w.RegistrationStatus))
             .ExecuteUpdateAsync(s => s
                 .SetProperty(w => w.RegistrationStatus, RepositoryWebhookRegistrationStatus.Cancelled), cancellationToken)
             .ConfigureAwait(false);
