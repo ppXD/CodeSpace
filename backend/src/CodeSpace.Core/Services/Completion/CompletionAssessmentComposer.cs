@@ -317,7 +317,7 @@ public sealed class CompletionAssessmentComposer : ICompletionAssessmentComposer
         // row), Unknown disposition, the kernel's hash-upgrade hook is the only lift. DB-only facts by nature —
         // the tape-side mint (SupervisorDeliveryReceipts) honestly under-settles here, erring toward MORE
         // unresolved, exactly like its documented patch-artifact gap.
-        // await MintTypedArtifactOutputReceiptsAsync(runId, teamId, stakedOutput, attemptsWithUnits, cancellationToken).ConfigureAwait(false);
+        await MintTypedArtifactOutputReceiptsAsync(runId, teamId, stakedOutput, attemptsWithUnits, cancellationToken).ConfigureAwait(false);
 
         var ids = attemptsWithUnits.Select(a => a.AttemptId).ToList();
         var manifests = await _db.PublishManifest.AsNoTracking()
