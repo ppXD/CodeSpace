@@ -67,34 +67,48 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
 
             new() { Id = "agent", TypeKey = "agent.run", Label = "Work the subtask", ParentId = "map", Retry = AgentNodeMapping.DefaultRetry,
                     Config = AgentNodeMapping.BuildAgentConfig(BranchGoal, context.AgentProfile, BranchMode, grounding: context.GroundingContext, acceptance: "{{item.acceptance}}"), Inputs = AgentNodeMapping.BuildAgentInputs(context) },
+        });
 
+        // P4 (the plan-map integrated candidate): a repo-bound fan-out integrates its produced work into ONE
+        // reviewable branch before the narration reduce — "integrate, not narrate" for the code half. Run-sourced
+        // (the node derives contributions from the run's own publish ledger), so nothing new threads through map
+        // outputs. A conflict is a routable outcome the synth then narrates over; a repo-less task emits no node
+        // and stays byte-identical.
+        if (context.AgentProfile?.RepositoryId is { } repositoryId)
+            nodes.Add(new() { Id = "integrate", TypeKey = "git.integrate_run", Label = "Integrate",
+                              Config = Empty(), Inputs = JsonSerializer.SerializeToElement(new { repositoryId = repositoryId.ToString() }) });
+
+        nodes.AddRange(new NodeDefinition[]
+        {
             new() { Id = "synth", TypeKey = "llm.complete", Label = "Synthesize",
                     Config = SynthConfig(context), Inputs = SynthInputs(context) },
 
-            new() { Id = "done", TypeKey = "builtin.terminal", Label = "Done", Config = Empty(), Inputs = DoneInputs() },
+            new() { Id = "done", TypeKey = "builtin.terminal", Label = "Done", Config = Empty(), Inputs = DoneInputs(context) },
         });
 
         return nodes;
     }
 
-    private static IReadOnlyList<EdgeDefinition> BuildEdges(TaskBuildContext context) => context.RequirePlanConfirmation
-        ? new List<EdgeDefinition>
-        {
-            new() { From = "start", To = "planner" },
-            new() { From = "planner", To = "confirm" },
-            new() { From = "confirm", To = "map" },
-            new() { From = "map", To = "synth" },
-            new() { From = "synth", To = "done" },
-            new() { From = "ms", To = "agent" },
-        }
-        : new List<EdgeDefinition>
-        {
-            new() { From = "start", To = "planner" },
-            new() { From = "planner", To = "map" },
-            new() { From = "map", To = "synth" },
-            new() { From = "synth", To = "done" },
-            new() { From = "ms", To = "agent" },
-        };
+    private static IReadOnlyList<EdgeDefinition> BuildEdges(TaskBuildContext context)
+    {
+        var edges = new List<EdgeDefinition> { new() { From = "start", To = "planner" } };
+
+        if (context.RequirePlanConfirmation)
+            edges.AddRange(new EdgeDefinition[] { new() { From = "planner", To = "confirm" }, new() { From = "confirm", To = "map" } });
+        else
+            edges.Add(new() { From = "planner", To = "map" });
+
+        // The integrate step sequences between the fan-out and the narration reduce (map → integrate → synth);
+        // a repo-less graph keeps the original map → synth edge byte-identically.
+        if (context.AgentProfile?.RepositoryId is not null)
+            edges.AddRange(new EdgeDefinition[] { new() { From = "map", To = "integrate" }, new() { From = "integrate", To = "synth" } });
+        else
+            edges.Add(new() { From = "map", To = "synth" });
+
+        edges.AddRange(new EdgeDefinition[] { new() { From = "synth", To = "done" }, new() { From = "ms", To = "agent" } });
+
+        return edges;
+    }
 
     /// <summary>The plan.author Config — always a FLAT plan (the parallel map cannot honor ordering), plus the launch's pinned planner model row + the operator's planner critic (reviewMode / reviewerModelId, omitted when off — byte-identical).</summary>
     private static JsonElement PlannerConfig(TaskBuildContext context)
@@ -176,11 +190,22 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
         userPrompt = $"Goal: {context.Seed.Goal}\n\nPer-subtask results:\n{{{{nodes.map.outputs.results}}}}",
     });
 
-    /// <summary>The done terminal Inputs — bind the synth's reduced <c>text</c> output into the run's <c>combined</c> output (the llm.complete node's output key is <c>text</c>).</summary>
-    private static JsonElement DoneInputs() => JsonSerializer.SerializeToElement(new
+    /// <summary>The done terminal Inputs — bind the synth's reduced <c>text</c> output into the run's <c>combined</c> output (the llm.complete node's output key is <c>text</c>). A repo-bound graph also surfaces the integrated candidate (branch + whole-set status) as run outputs, so the reviewable head is readable off the run row, not just the node ledger.</summary>
+    private static JsonElement DoneInputs(TaskBuildContext context)
     {
-        combined = "{{nodes.synth.outputs.text}}",
-    });
+        var inputs = new Dictionary<string, object?>
+        {
+            ["combined"] = "{{nodes.synth.outputs.text}}",
+        };
+
+        if (context.AgentProfile?.RepositoryId is not null)
+        {
+            inputs["integrationStatus"] = "{{nodes.integrate.outputs.status}}";
+            inputs["integratedBranch"] = "{{nodes.integrate.outputs.integratedBranch}}";
+        }
+
+        return JsonSerializer.SerializeToElement(inputs);
+    }
 
     protected static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
 

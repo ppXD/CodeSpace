@@ -32,6 +32,7 @@ public class PlanMapDynamicDefinitionBuilderTests
         new FlowMapNode(),
         new FlowMapStartNode(),
         new AgentCodeNode(),
+        new GitIntegrateRunNode(null!, null!, null!, null!),
         new TerminalNode(),
     }));
 
