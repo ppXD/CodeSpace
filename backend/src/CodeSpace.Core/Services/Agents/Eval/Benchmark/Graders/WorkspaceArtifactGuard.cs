@@ -76,6 +76,43 @@ internal static class WorkspaceArtifactGuard
         return true;
     }
 
+    /// <summary>
+    /// Read a deliverable FILE's exact BYTES under the same containment rules as <see cref="ExistsWithin"/> —
+    /// the typed-artifact capture's variant (DC-4). Unlike <see cref="TryReadWithin"/> an over-cap file is
+    /// SKIPPED, never truncated: a judged prompt tolerates a truncation marker, but a captured artifact's bytes
+    /// ARE the deliverable — a silently-clipped dataset is a lie, absence is honest.
+    /// </summary>
+    public static bool TryReadBytesWithin(string root, string relativePath, long maxBytes, out byte[] bytes, out string? error)
+    {
+        bytes = Array.Empty<byte>();
+        error = null;
+
+        if (!ExistsWithin(root, relativePath))
+        {
+            error = $"artifact-missing: {relativePath}";
+            return false;
+        }
+
+        var full = Path.GetFullPath(Path.Combine(root, relativePath));
+
+        if (Directory.Exists(full))
+        {
+            error = $"artifact-not-a-file: {relativePath}";
+            return false;
+        }
+
+        var info = new FileInfo(full);
+
+        if (info.Length > maxBytes)
+        {
+            error = $"artifact-over-cap: {relativePath} is {info.Length} bytes (cap {maxBytes})";
+            return false;
+        }
+
+        bytes = File.ReadAllBytes(full);
+        return true;
+    }
+
     /// <summary>True when <paramref name="candidate"/> lives STRICTLY under <paramref name="root"/> (a proper descendant — not root itself, not an escape).</summary>
     public static bool IsStrictlyWithin(string root, string candidate) =>
         candidate.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal);

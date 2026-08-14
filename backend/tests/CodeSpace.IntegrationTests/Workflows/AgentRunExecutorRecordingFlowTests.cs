@@ -85,7 +85,7 @@ public class AgentRunExecutorRecordingFlowTests
         scope.Resolve<IStructuredCritic>(),
         scope.Resolve<IArtifactOffloader>(),
         scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactStore>(),
-        scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Agents.Capture.ICaptureIntentService>(),
+        scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IArtifactManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Agents.Capture.ICaptureIntentService>(),
         scope.Resolve<IEnumerable<CodeSpace.Core.Services.Agents.Publish.IPublishGuard>>(),
         NullLogger<AgentRunExecutor>.Instance);
 
