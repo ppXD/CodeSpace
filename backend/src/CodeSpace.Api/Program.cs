@@ -52,6 +52,22 @@ public class Program
                 environment,
                 string.IsNullOrWhiteSpace(seqDestination) ? "none — Seq is off, set " + SerilogServerUrlSetting.ConfigurationKey + " to enable it" : seqDestination);
 
+            // Where the links this server MINTS will point. It is the SPA's origin, not this API's,
+            // and the two are usually different hosts -- an invite pointed at the API opens a path
+            // only the SPA has, which is a 404 from a server the invitee has no account on. Printing
+            // it costs a line and turns that into something an operator sees before sending one.
+            //
+            // The RAW key, deliberately, not PublicBaseUrlSetting: that type throws outside
+            // Development when the key is unset, and it is resolved lazily today -- only by the two
+            // request-scoped services that mint links. Constructing it here would move that failure
+            // to boot, for both roles, and Main catches it into a Fatal log and returns 0, so the
+            // container would exit CLEANLY and every restart would look like a healthy stop. A line
+            // that reports configuration must not be able to change what configuration does.
+            Log.Information("Invite and password-reset links will point at {PublicBaseUrl} (this must be the web app, not this API)",
+                configuration[PublicBaseUrlSetting.ConfigurationKey] is { Length: > 0 } configured
+                    ? configured
+                    : $"(unset — set {PublicBaseUrlSetting.ConfigurationKey}; outside Development, minting a link will fail)");
+
             Log.Information("Configuring {Application} host...", application);
 
             new DbUpRunner(new CodeSpaceConnectionString(configuration).Value).Run();

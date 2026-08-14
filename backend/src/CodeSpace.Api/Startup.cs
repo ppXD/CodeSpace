@@ -1,5 +1,6 @@
 using System.Text.Json.Serialization;
 using CodeSpace.Api.Extensions;
+using CodeSpace.Messages.Failures;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Api.Filters;
@@ -128,6 +129,31 @@ public class Startup
 
             endpoints.MapControllers();
             if (env.IsDevelopment()) endpoints.MapOpenApi();
+
+            // A path this server does not serve answers 404, not 401. The global FallbackPolicy
+            // requires an authenticated user for any endpoint without an explicit [Authorize] --
+            // deliberately -- and it applied to requests that matched NOTHING too, where the answer
+            // is a lie: the request was refused for want of a route, not a session, and adding one
+            // would not have helped. That cost a real diagnosis, an invite link built from a
+            // misconfigured App:PublicBaseUrl pointed at this API instead of the SPA, so opening it
+            // asked here for /invite/{token} -- a path only the SPA has -- and the 401 sent everyone
+            // hunting a broken authorization rule on an endpoint that was already anonymous.
+            //
+            // A fallback ENDPOINT rather than middleware before UseAuthorization, because only the
+            // endpoint form composes with branch middleware. Hangfire's dashboard is mounted by
+            // app.Map (above, line ~124), which never registers an endpoint, so a middleware keyed
+            // on "GetEndpoint() == null" would have swallowed /hangfire whole. Routing reaches this
+            // only after every real endpoint AND every earlier branch has declined.
+            endpoints.MapFallback(async context =>
+            {
+                context.Response.StatusCode = StatusCodes.Status404NotFound;
+
+                await context.Response.WriteAsJsonAsync(new Dictionary<string, object?>
+                {
+                    ["code"] = FailureCodes.NotFound,
+                    ["message"] = $"This server has no {context.Request.Path.Value}. Check the host — the API and the web app are different origins."
+                });
+            }).AllowAnonymous();
         });
     }
 }
