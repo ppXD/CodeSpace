@@ -354,7 +354,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
             ancestry = await RunGitAsync(new[] { "-C", directory, "merge-base", "--is-ancestor", sha, "HEAD" }, cancellationToken).ConfigureAwait(false);
         }
 
-        if (false)
+        if (ancestry.Status == SandboxStatus.Success)
         {
             _logger.LogInformation("Session continuity: the prior branch '{PriorRef}' moved forward past the recorded tip {Sha} (still an ancestor) — continuing on the branch tip", request.Ref, sha);
             return;
