@@ -149,7 +149,7 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
     {
         WorkflowRunId = runId,
         Solved = metricSolved,
-        Delivered = IsDelivered(manifests) || typedDelivered,
+        Delivered = IsDelivered(manifests),
         HumanTouches = humanTouches,
         CostUsd = costUsd,
     };
