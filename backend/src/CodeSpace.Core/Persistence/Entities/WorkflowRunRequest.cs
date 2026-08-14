@@ -30,6 +30,18 @@ public class WorkflowRunRequest : IEntity<Guid>
     public string? ActivationSnapshotJson { get; set; }
 
     /// <summary>
+    /// The repository this request was for, when it could be told. Set at every webhook rejection
+    /// site (the ingestion path holds the webhook with its repository) and at the dispatcher's
+    /// no-match site (the normalised event carries it).
+    ///
+    /// <para>Null means nothing had resolved a repository yet when the request was rejected — a
+    /// delivery to an unknown webhook id, or a source that has no repository at all. Readers show
+    /// those rows and say they are unattributed rather than dropping them: a delivery that arrived
+    /// and was discarded is the thing the operator came looking for.</para>
+    /// </summary>
+    public Guid? RepositoryId { get; set; }
+
+    /// <summary>
     /// Open string discriminator. Examples: "manual", "replay", "schedule.cron", "api",
     /// "provider.github.pull_request". See <see cref="Messages.Constants.WorkflowRunSourceTypes"/>
     /// for the well-known constants. Stored as TEXT — adding a new source is zero schema churn.

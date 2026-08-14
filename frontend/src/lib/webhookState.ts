@@ -1,4 +1,4 @@
-import type { ProviderKind, RepositoryWebhookAttemptDetail, RepositoryWebhookDetail } from "@/api/types";
+import type { ProviderKind, RejectionReason, RepositoryWebhookAttemptDetail, RepositoryWebhookDetail } from "@/api/types";
 import { relativeTime } from "./codeTree";
 
 /**
@@ -168,6 +168,93 @@ function outcomeVerb(statusCode: number | null): string {
 /** The outcome as it appears in the timeline column. Shares `null ⇒ no answer` with the sentence above so the two can't disagree. */
 export function attemptOutcome(attempt: RepositoryWebhookAttemptDetail): string {
   return attempt.statusCode == null ? "no answer" : String(attempt.statusCode);
+}
+
+export interface RejectionCopy {
+  tone: WebhookTone;
+  /** What happened, in the reader's terms. Never the stored reason string — "signature_invalid" is an identifier, not news. */
+  headline: string;
+  /** What to actually do. The sentence that either sends someone to fix something or tells them there is nothing to fix. */
+  remedy: string;
+}
+
+/**
+ * What a refusal means, and what to do about it.
+ *
+ * <p>The whole point of this function is that the five reasons are NOT one severity, and the page
+ * would lie by presenting them as one. A signature mismatch is broken and someone has to go and
+ * change a secret. An unsubscribed event type is noise and the right action is usually none. And
+ * "no workflow was listening" is the system doing exactly what it was configured to do — rendering
+ * that in the same alarmed tone as the first would send an operator hunting a fault that does not
+ * exist, which is a worse outcome than not showing the row at all.</p>
+ *
+ * <p>So the tone is part of the answer, not decoration on it, and each remedy names the thing to go
+ * and change rather than restating the reason in longer words.</p>
+ */
+export function rejectionCopy(reason: RejectionReason, provider: ProviderKind): RejectionCopy {
+  return REJECTION_COPY[reason]?.(providerName(provider)) ?? unrecognisedRejection();
+}
+
+const REJECTION_COPY: Record<string, (who: string) => RejectionCopy> = {
+  signature_invalid: (who) => ({
+    tone: "bad",
+    headline: "The signature did not match",
+    remedy: `The secret held at ${who} is not the one CodeSpace signs against, so every delivery is refused unread. Open the hook above and re-paste the current secret into the hook's own secret field at ${who}.`,
+  }),
+  webhook_inactive: (who) => ({
+    tone: "bad",
+    headline: "The hook is switched off here",
+    remedy: `${who} is still sending, and CodeSpace discards every delivery on arrival. Nothing will run off this repository until the hook is switched back on.`,
+  }),
+  malformed_payload: (who) => ({
+    tone: "bad",
+    headline: "The body was not the shape it should be",
+    remedy: `The delivery was signed correctly but did not carry what ${who}'s format promises. That is almost always something between ${who} and here rewriting the request — a proxy, a gateway, a filter that touches the body.`,
+  }),
+  event_not_mapped: (who) => ({
+    tone: "idle",
+    headline: "An event nothing here acts on",
+    remedy: `Harmless. ${who} is sending an event type CodeSpace does not react to. Narrow the hook's subscription at ${who} if you would rather it stopped sending them; ignoring it costs nothing.`,
+  }),
+  // Deliberately the friendliest of the five. This is not a failure — it is the delivery arriving,
+  // being verified, being understood, and finding that nothing asked for it.
+  no_matching_activation: () => ({
+    tone: "good",
+    headline: "Nothing was listening for it",
+    remedy: "Not a fault. The delivery was verified and read, and no workflow subscribes to this event for this repository. If something should have run, add an activation for this event to that workflow.",
+  }),
+};
+
+/**
+ * A reason this build has no words for — a server that is ahead of this page. Says exactly that
+ * rather than inventing a diagnosis, and points at the recorded detail, which is all there is.
+ */
+function unrecognisedRejection(): RejectionCopy {
+  return {
+    tone: "idle",
+    headline: "Refused on arrival",
+    remedy: "CodeSpace refused this delivery for a reason this page does not have wording for. What was recorded is below, verbatim.",
+  };
+}
+
+/**
+ * Said on every row that could not be placed. It is shown rather than hidden on purpose: a delivery
+ * that arrived and was thrown away is the thing being looked for, and dropping the ones we cannot
+ * attribute would drop them exactly when ingestion is failing earliest.
+ */
+export const UNPLACED_DELIVERY_NOTE = "CodeSpace could not tell which repository this was for — it was refused before anything resolved one.";
+
+/**
+ * What the list is, in the corner above it. At the cap it has to say so: an unreachable instance
+ * retries on a ladder and writes thousands of these in an afternoon, and a list that silently
+ * stopped at fifty would read as "fifty happened".
+ *
+ * <p>"The list stops there" rather than "older ones are not shown", because a full page can also be
+ * exactly the whole of it — the read asks for the cap and cannot tell the two apart. Claiming there
+ * is more would be the same kind of lie in the other direction.</p>
+ */
+export function rejectedDeliveriesNote(count: number, cap: number): string {
+  return count >= cap ? `Newest ${cap} — the list stops there` : `${count} ${plural(count, "refusal")}`;
 }
 
 /**

@@ -1,5 +1,5 @@
 import { fetchJson } from "./request";
-import type { BulkBindResult, IssueState, PullRequestReviewVerdict, PullRequestState, RemoteBranch, RemoteIssue, RemoteIssueComment, RemoteIssueCounts, RemoteIssueEvent, RemoteRelease, RemoteTag, RemoteCommitSummary, RemoteFileContent, RemoteLanguage, RemotePullRequest, RemotePullRequestCheck, RemotePullRequestCommit, RemotePullRequestCounts, RemotePullRequestFile, RemotePullRequestReview, RemoteRenderedMarkdown, RemoteRepositoryPage, RemoteRepositoryStats, RemoteTreeEntry, RepositoryDetail, RepositorySummary, RepositoryWebhookDetail, RepositoryWebhookSecret } from "./types";
+import type { BulkBindResult, IssueState, PullRequestReviewVerdict, PullRequestState, RemoteBranch, RemoteIssue, RemoteIssueComment, RemoteIssueCounts, RemoteIssueEvent, RemoteRelease, RemoteTag, RemoteCommitSummary, RemoteFileContent, RemoteLanguage, RemotePullRequest, RemotePullRequestCheck, RemotePullRequestCommit, RemotePullRequestCounts, RemotePullRequestFile, RemotePullRequestReview, RemoteRenderedMarkdown, RemoteRepositoryPage, RemoteRepositoryStats, RemoteTreeEntry, RepositoryDetail, RepositoryRejectedDeliveries, RepositorySummary, RepositoryWebhookDetail, RepositoryWebhookSecret } from "./types";
 
 export interface BindRepositoryInput {
   providerInstanceId: string;
@@ -84,6 +84,11 @@ export const repositoriesApi = {
   // row so the caller can swap the row in place; 400 names the actual state when it is neither.
   retryWebhookRegistration: (repositoryId: string, webhookId: string) =>
     fetchJson<RepositoryWebhookDetail>(`/api/repositories/${encodeURIComponent(repositoryId)}/webhooks/${encodeURIComponent(webhookId)}/retry`, { method: "POST" }),
+
+  // The deliveries that arrived and were refused, newest first and capped by the server. Not under
+  // /webhooks: a refusal that never resolved a webhook still belongs to the repository.
+  listRejectedDeliveries: (repositoryId: string) =>
+    fetchJson<RepositoryRejectedDeliveries>(`/api/repositories/${encodeURIComponent(repositoryId)}/rejected-deliveries`),
 
   accessibleFor: (credentialId: string, search?: string, page = 1, perPage = 30) => {
     const params = new URLSearchParams();

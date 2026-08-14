@@ -256,6 +256,44 @@ export interface RepositoryWebhookSecret {
   secret: string;
 }
 
+/**
+ * Why a delivery that arrived was thrown away. Mirrors backend
+ * <c>CodeSpace.Messages.Constants.WorkflowRunRequestRejectionReasons</c>.
+ *
+ * <para>Not one severity. `signature_invalid` means something is broken, `event_not_mapped` is
+ * harmless noise, and `no_matching_activation` is the system working exactly as configured. Nothing
+ * renders these strings — every surface goes through `rejectionCopy()`, which is where that
+ * difference is spent. The union stays open (`(string & {})`) because a reason added on the server
+ * must arrive as an unrecognised reason and not as a type error in a build nobody is running.</para>
+ */
+export type RejectionReason =
+  | "signature_invalid" | "webhook_inactive" | "event_not_mapped" | "malformed_payload" | "no_matching_activation"
+  | (string & {});
+
+/** One delivery that arrived and was refused. Every field here was captured at rejection with secrets already stripped. */
+export interface RejectedDelivery {
+  id: string;
+  receivedAt: string;
+  /** Null when nothing had resolved a repository before the refusal — the row is shown and said to be unplaceable, not hidden. */
+  repositoryId: string | null;
+  reason: RejectionReason;
+  /** What the failing site had to say, with the reason prefix already removed. Never the sole basis for what the reader is told. */
+  detail: string;
+  /** The provider's delivery id, so this refusal can be matched against the delivery in the provider's own UI. */
+  externalEventId: string | null;
+  /** A JSON object serialized as a string, values already redacted. Passed through as stored. */
+  rawHeadersRedactedJson: string | null;
+  /** The verifier's diagnostic — algorithm tried, key id. Present for signature failures. */
+  verificationResultJson: string | null;
+}
+
+/** One repository's recent refusals, newest first, plus the ceiling the answer stopped at. */
+export interface RepositoryRejectedDeliveries {
+  deliveries: RejectedDelivery[];
+  /** A full list cannot be told apart from exactly-the-cap, so the page says the list stops here rather than claiming more exist. It uses this number rather than one of its own. */
+  cap: number;
+}
+
 export interface RemoteRepository {
   externalId: string;
   namespacePath: string;

@@ -342,6 +342,21 @@ public class RepositoriesController : ControllerBase
     }
 
     /// <summary>
+    /// The deliveries that arrived and were refused, newest first and capped — the other half of
+    /// "why isn't my webhook working". The list above says whether the hook was ever created; this
+    /// says what happens to what the provider sends once it has been.
+    ///
+    /// Not under /webhooks: a refusal that never resolved a webhook still belongs to the repository,
+    /// and nesting it would promise an attribution the row does not always have.
+    /// </summary>
+    [HttpGet("{repositoryId:guid}/rejected-deliveries")]
+    public async Task<IActionResult> ListRejectedDeliveries([FromRoute] Guid repositoryId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new ListRepositoryRejectedDeliveriesQuery { RepositoryId = repositoryId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>
     /// Put a Failed or DeadLettered registration back in the queue now. Returns the webhook as it
     /// stands after the revival; 400 when it is in any other state.
     /// </summary>

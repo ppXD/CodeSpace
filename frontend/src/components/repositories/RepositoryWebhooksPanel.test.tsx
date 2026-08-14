@@ -2,7 +2,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { MeResponse, MeTeam, ProviderKind, RepositoryWebhookAttemptDetail, RepositoryWebhookDetail } from "@/api/types";
+import type { MeResponse, MeTeam, ProviderKind, RejectedDelivery, RepositoryWebhookAttemptDetail, RepositoryWebhookDetail } from "@/api/types";
+import { rejectionCopy } from "@/lib/webhookState";
 import { RepositoryWebhooksPanel } from "./RepositoryWebhooksPanel";
 
 /**
@@ -49,6 +50,21 @@ describe("repository webhooks panel", () => {
     ...over,
   });
 
+  const refusal = (over: Partial<RejectedDelivery> = {}): RejectedDelivery => ({
+    id: "d1",
+    receivedAt: new Date(Date.now() - 4 * 60_000).toISOString(),
+    repositoryId: "r1",
+    reason: "signature_invalid",
+    detail: "signature did not validate for webhook 6f3a91c4-2d8e-4b17-9a05-c8e1f2b7d340",
+    externalEventId: "5f8a1c22-9b0e-4d31-8e77-1a2b3c4d5e6f",
+    rawHeadersRedactedJson: '{"X-Gitlab-Event":"Push Hook","X-Gitlab-Token":"[REDACTED]"}',
+    verificationResultJson: '{"validated":false,"verifier_class":"GitLabRepositoryProvider"}',
+    ...over,
+  });
+
+  /** The tone the row wears, read off the DOM rather than off the copy — the colour is half of what the section says. */
+  const toneOf = (headline: string) => screen.getByText(headline).closest(".hk-row")?.getAttribute("data-tone");
+
   /** `find` walks insertion order, so the more specific webhook route has to be declared first. */
   function stub(routes: Record<string, unknown>) {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
@@ -62,11 +78,16 @@ describe("repository webhooks panel", () => {
     }));
   }
 
-  function renderPanel(hooks: RepositoryWebhookDetail[], { provider = "GitLab" as ProviderKind, permissions = ["repos.manage"], secret = "s3cr3t-from-the-server" } = {}) {
+  function renderPanel(hooks: RepositoryWebhookDetail[], { provider = "GitLab" as ProviderKind, permissions = ["repos.manage"], secret = "s3cr3t-from-the-server", refusals = [] as RejectedDelivery[], cap = 50 } = {}) {
     localStorage.setItem("codespace.jwt", "test-jwt");
     localStorage.setItem("codespace.activeTeamId", "t1");
 
-    stub({ "/webhooks/w1/secret": { webhookId: "w1", secret }, "/webhooks": hooks, "/api/users/me": me(team(permissions)) });
+    stub({
+      "/webhooks/w1/secret": { webhookId: "w1", secret },
+      "/webhooks": hooks,
+      "/rejected-deliveries": { deliveries: refusals, cap },
+      "/api/users/me": me(team(permissions)),
+    });
 
     const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
 
@@ -305,5 +326,135 @@ describe("repository webhooks panel", () => {
     await waitFor(() => expect(screen.getByText("Not delivering")).toBeTruthy());
 
     expect(screen.getByText(/Turned off here/)).toBeTruthy();
+  });
+
+  // ── Deliveries that arrived and were refused ───────────────────────────────────
+  //
+  // The section's whole reason for existing is that these are not one severity. A signature mismatch
+  // is broken, an unsubscribed event is noise, and "nothing was listening" is the system working —
+  // so the tests below assert the TONE alongside the words, because a page that presented all three
+  // the same way would send an operator chasing a fault that does not exist.
+
+  it("says nothing about refused deliveries when none have been refused", async () => {
+    renderPanel([hook()]);
+
+    await waitFor(() => expect(screen.getByText("Delivering")).toBeTruthy());
+
+    expect(screen.queryByText("Deliveries that were refused")).toBeNull();
+  });
+
+  it("reads a signature mismatch as broken, and points at the secret as the thing to change", async () => {
+    renderPanel([hook()], { refusals: [refusal()] });
+
+    await waitFor(() => expect(screen.getByText("The signature did not match")).toBeTruthy());
+
+    expect(toneOf("The signature did not match")).toBe("bad");
+    expect(screen.getByText(/The secret held at GitLab is not the one CodeSpace signs against/)).toBeTruthy();
+    // The provider's own id for the delivery, so this refusal can be found again on GitLab's screen.
+    expect(screen.getByText("Delivery 5f8a1c22-9b0e-4d31-8e77-1a2b3c4d5e6f")).toBeTruthy();
+    expect(screen.getByText("4 minutes ago")).toBeTruthy();
+    // Never the stored discriminator: "signature_invalid" is an identifier, not news.
+    expect(document.body.textContent).not.toContain("signature_invalid");
+  });
+
+  it("names a malformed payload as something in front of us, not something either end did", async () => {
+    // The only one of the five reasons with no test at all before this, and the one whose cause sits
+    // furthest from the reader: a body that is not what the provider's own format promises is almost
+    // always something between them rewriting the request.
+    renderPanel([hook()], { refusals: [refusal({ reason: "malformed_payload" })] });
+
+    await waitFor(() => expect(screen.getByText(rejectionCopy("malformed_payload", "GitLab").headline)).toBeTruthy());
+
+    expect(toneOf(rejectionCopy("malformed_payload", "GitLab").headline)).toBe("bad");
+    expect(document.body.textContent).not.toContain("malformed_payload");
+  });
+
+  it("reads an unsubscribed event type as noise rather than as a fault", async () => {
+    renderPanel([hook()], { refusals: [refusal({ reason: "event_not_mapped", detail: "normalizer for provider GitLab returned null for this payload" })] });
+
+    await waitFor(() => expect(screen.getByText("An event nothing here acts on")).toBeTruthy());
+
+    expect(toneOf("An event nothing here acts on")).toBe("idle");
+    expect(screen.getByText(/Harmless\./)).toBeTruthy();
+    expect(screen.getByText(/ignoring it costs nothing/)).toBeTruthy();
+  });
+
+  it("reads a delivery nobody was listening for as the system working, not as a failure", async () => {
+    // The distinction the section exists for. This one is green on purpose: the delivery was
+    // verified, read and understood, and nothing subscribed to it. Colouring it like a fault would
+    // send an operator hunting something that is not broken.
+    renderPanel([hook()], { refusals: [refusal({ reason: "no_matching_activation", detail: "event PushReceivedEvent had no matching enabled activation", verificationResultJson: null })] });
+
+    await waitFor(() => expect(screen.getByText("Nothing was listening for it")).toBeTruthy());
+
+    expect(toneOf("Nothing was listening for it")).toBe("good");
+    expect(screen.getByText(/Not a fault\./)).toBeTruthy();
+    expect(screen.getByText(/add an activation for this event to that workflow/)).toBeTruthy();
+  });
+
+  it("shows the redacted headers and the verifier's diagnostic when a refusal is expanded", async () => {
+    renderPanel([hook()], { refusals: [refusal()] });
+
+    await waitFor(() => expect(screen.getByText("The signature did not match")).toBeTruthy());
+    fireEvent.click(screen.getAllByRole("button", { name: "Details" }).at(-1)!);
+
+    expect(screen.getByText(/X-Gitlab-Token: \[REDACTED\]/)).toBeTruthy();
+    expect(screen.getByText(/X-Gitlab-Event: Push Hook/)).toBeTruthy();
+    expect(screen.getByText(/verifier_class/)).toBeTruthy();
+    expect(screen.getByText(/signature did not validate for webhook/)).toBeTruthy();
+  });
+
+  it("says so when there is no verifier diagnostic rather than dropping the section", async () => {
+    // An absent block reads as something withheld. "No diagnostic" is itself the answer: one is
+    // only written when a signature fails, so its absence says the refusal was for something else.
+    renderPanel([hook()], { refusals: [refusal({ reason: "webhook_inactive", verificationResultJson: null, rawHeadersRedactedJson: null })] });
+
+    await waitFor(() => expect(screen.getByText("The hook is switched off here")).toBeTruthy());
+    fireEvent.click(screen.getAllByRole("button", { name: "Details" }).at(-1)!);
+
+    expect(screen.getByText(/No diagnostic — one is written only when a signature fails/)).toBeTruthy();
+    expect(screen.getByText("No headers were kept for this delivery.")).toBeTruthy();
+  });
+
+  it("keeps a refusal it could not place, and says on the row that it could not place it", async () => {
+    // Hiding it would drop the evidence exactly when ingestion is failing earliest — the moment the
+    // operator most needs to know that deliveries are arriving and being thrown away.
+    renderPanel([hook()], { refusals: [refusal({ repositoryId: null })] });
+
+    await waitFor(() => expect(screen.getByText("The signature did not match")).toBeTruthy());
+
+    expect(screen.getByText(/CodeSpace could not tell which repository this was for/)).toBeTruthy();
+  });
+
+  it("says a full list is only the newest, not the whole count", async () => {
+    // An unreachable instance retries on a ladder and writes thousands of these in an afternoon, and
+    // a list that silently stopped at fifty would read as "fifty happened".
+    const many = Array.from({ length: 50 }, (_, i) => refusal({ id: `d${i}`, externalEventId: `delivery-${i}` }));
+
+    renderPanel([hook()], { refusals: many, cap: 50 });
+
+    await waitFor(() => expect(screen.getByText("Deliveries that were refused")).toBeTruthy());
+
+    // Not "there are older ones": a full page can also be exactly the whole of it, and the read
+    // cannot tell the two apart. Saying what the list DOES is true either way.
+    expect(screen.getByText("Newest 50 — the list stops there")).toBeTruthy();
+  });
+
+  it("counts the refusals plainly when the list is short of the cap", async () => {
+    renderPanel([hook()], { refusals: [refusal(), refusal({ id: "d2", reason: "event_not_mapped" })], cap: 50 });
+
+    await waitFor(() => expect(screen.getByText("Deliveries that were refused")).toBeTruthy());
+
+    expect(screen.getByText("2 refusals")).toBeTruthy();
+  });
+
+  it("says a reason it has no wording for is a reason it has no wording for", async () => {
+    // A server ahead of this build. Inventing a diagnosis would be worse than admitting there isn't one.
+    renderPanel([hook()], { refusals: [refusal({ reason: "throttled", detail: "too many deliveries in the window" })] });
+
+    await waitFor(() => expect(screen.getByText("Refused on arrival")).toBeTruthy());
+
+    expect(screen.getByText(/does not have wording for/)).toBeTruthy();
+    expect(document.body.textContent).not.toContain("throttled:");
   });
 });

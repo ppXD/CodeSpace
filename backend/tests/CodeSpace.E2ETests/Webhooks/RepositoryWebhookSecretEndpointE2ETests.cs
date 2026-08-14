@@ -108,6 +108,46 @@ public sealed class RepositoryWebhookSecretEndpointE2ETests : IClassFixture<Task
         response.StatusCode.ShouldBe(HttpStatusCode.Forbidden, await DescribeAsync(response, "403 — the team is never inferred from the repository, so no header is a refusal"));
     }
 
+    /// <summary>
+    /// The refused-deliveries read, on the wire. It carries the provider's own headers and the verifier's
+    /// diagnostic, so who may see it is a contract and not an implementation detail — and, like the tab
+    /// read above, a Member must be able to: the refusals ARE the diagnosis.
+    /// </summary>
+    [Fact]
+    public async Task A_member_can_read_the_refusals()
+    {
+        var seed = await SeedAsync();
+
+        var response = await SendAsync(HttpMethod.Get, RefusalsUrl(seed), seed.Member, seed.TeamId);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.OK, await DescribeAsync(response, "200 — a refusal is what the operator came to read"));
+
+        var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
+        body.TryGetProperty("deliveries", out _).ShouldBeTrue(customMessage: "the shape the tab consumes");
+        body.TryGetProperty("cap", out _).ShouldBeTrue(customMessage: "the page says the cap out loud rather than inventing one");
+    }
+
+    [Fact]
+    public async Task Another_teams_refusals_are_refused()
+    {
+        var seed = await SeedAsync();
+        var outsider = await SeedAsync();
+
+        var response = await SendAsync(HttpMethod.Get, RefusalsUrl(seed), outsider.Admin, outsider.TeamId);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.Forbidden, await DescribeAsync(response, "403 — refused deliveries carry the provider's headers for someone else's repository"));
+    }
+
+    [Fact]
+    public async Task Reading_refusals_without_a_session_is_unauthorized()
+    {
+        var seed = await SeedAsync();
+
+        var response = await _factory.CreateClient().GetAsync(RefusalsUrl(seed));
+
+        response.StatusCode.ShouldBe(HttpStatusCode.Unauthorized, await DescribeAsync(response, "401 — behind the global fallback policy, unlike the receiver"));
+    }
+
     [Fact]
     public async Task Without_a_session_it_is_unauthorized()
     {
@@ -119,6 +159,8 @@ public sealed class RepositoryWebhookSecretEndpointE2ETests : IClassFixture<Task
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────────
+
+    private static string RefusalsUrl(SeededWebhook seed) => $"/api/repositories/{seed.RepositoryId}/rejected-deliveries";
 
     private static string SecretUrl(SeededWebhook seed) => $"/api/repositories/{seed.RepositoryId}/webhooks/{seed.WebhookId}/secret";
 
