@@ -57,6 +57,7 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
         var latestAssessments = await LatestAssessmentsAsync(teamId, runIds, cancellationToken).ConfigureAwait(false);
 
         var manifestsByRun = await _manifests.ListForWorkflowRunsAsync(runIds, teamId, cancellationToken).ConfigureAwait(false);
+        var typedDeliveredRuns = await TypedDeliveredRunIdsAsync(runIds, teamId, cancellationToken).ConfigureAwait(false);
         var touchesByRun = await _humanTouches.CountByWorkflowRunAsync(runIds, teamId, cancellationToken).ConfigureAwait(false);
         var costsByRun = await _cost.ComputeRunsAsync(teamId, runIds, cancellationToken).ConfigureAwait(false);
         var degradedStopRuns = await DegradedStopRunIdsAsync(_db, runIds, teamId, cancellationToken).ConfigureAwait(false);
@@ -67,7 +68,7 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
             .ToHashSet();
 
         var outcomes = runs
-            .Select(r => ProjectRun(r.Id, metricSolvedRuns.Contains(r.Id), manifestsByRun.GetValueOrDefault(r.Id, EmptyManifests), touchesByRun.GetValueOrDefault(r.Id), costsByRun.GetValueOrDefault(r.Id)?.EstimatedCostUsd))
+            .Select(r => ProjectRun(r.Id, metricSolvedRuns.Contains(r.Id), manifestsByRun.GetValueOrDefault(r.Id, EmptyManifests), typedDeliveredRuns.Contains(r.Id), touchesByRun.GetValueOrDefault(r.Id), costsByRun.GetValueOrDefault(r.Id)?.EstimatedCostUsd))
             .ToList();
 
         var card = UnattendedDeliveryScorer.Compute(outcomes);
@@ -143,12 +144,12 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
         return await query.CountAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Project one run's metric@1 solve bit + manifests + human-touch count + cost into the pure scorer's input noun.</summary>
-    private static UnattendedDeliveryRunOutcome ProjectRun(Guid runId, bool metricSolved, IReadOnlyList<PublishManifest> manifests, int humanTouches, decimal? costUsd) => new()
+    /// <summary>Project one run's metric@1 solve bit + manifests + typed-delivery bit + human-touch count + cost into the pure scorer's input noun.</summary>
+    private static UnattendedDeliveryRunOutcome ProjectRun(Guid runId, bool metricSolved, IReadOnlyList<PublishManifest> manifests, bool typedDelivered, int humanTouches, decimal? costUsd) => new()
     {
         WorkflowRunId = runId,
         Solved = metricSolved,
-        Delivered = IsDelivered(manifests),
+        Delivered = IsDelivered(manifests) || typedDelivered,
         HumanTouches = humanTouches,
         CostUsd = costUsd,
     };
@@ -208,9 +209,18 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
             .ToHashSet();
     }
 
-    /// <summary>At least one manifest actually left the sandbox — pushed to a remote branch, or (a stronger signal) has an opened PR/MR.</summary>
+    /// <summary>At least one manifest actually left the sandbox — pushed to a remote branch, or (a stronger signal) has an opened PR/MR. The TYPED half (DC-4): a repo-less run delivers by durable CAPTURE — its current (unsuperseded) artifact-manifest rows ARE the arrival, there being no external remote — OR'd in by the caller so this git predicate stays pure over its own ledger.</summary>
     private static bool IsDelivered(IReadOnlyList<PublishManifest> manifests) =>
         manifests.Any(m => m.PublishStateValue == PublishState.Pushed || m.PullRequestNumber != null);
+
+    /// <summary>The runs whose attempts captured at least one CURRENT typed artifact — the repo-less lane's delivery fact (a superseded row alone is history, not an arrival).</summary>
+    private async Task<HashSet<Guid>> TypedDeliveredRunIdsAsync(IReadOnlyList<Guid> runIds, Guid teamId, CancellationToken cancellationToken) =>
+        (await _db.ArtifactManifest.AsNoTracking()
+            .Where(m => m.TeamId == teamId && m.WorkflowRunId != null && runIds.Contains(m.WorkflowRunId.Value) && m.SupersededByManifestId == null)
+            .Select(m => m.WorkflowRunId!.Value)
+            .Distinct()
+            .ToListAsync(cancellationToken).ConfigureAwait(false))
+        .ToHashSet();
 
     private static UnattendedDeliveryScorecard Empty() => new()
     {
