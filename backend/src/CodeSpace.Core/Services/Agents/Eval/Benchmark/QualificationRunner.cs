@@ -104,7 +104,7 @@ public sealed class QualificationRunner : IQualificationRunner, DependencyInject
 
     /// <summary>The grant fold: Sealed only when the LOWER BOUND clears the bar AND the evaluator itself was healthy — an infra-riddled round or a thin suite mints Shadow evidence, never a sealed claim.</summary>
     internal static PerformanceQualification Grant(QualificationSpec spec, CorpusCellScore score, double lowerBound) =>
-        score.Total > 0 && lowerBound >= spec.MinSolveRateLowerBound
+        score.Total > 0 && lowerBound >= spec.MinSolveRateLowerBound && score.EvaluatorHealth >= spec.MinEvaluatorHealth
             ? PerformanceQualification.Sealed
             : PerformanceQualification.Shadow;
 }
