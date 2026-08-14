@@ -298,7 +298,7 @@ export function webhookSetupSteps(provider: ProviderKind, fullPath: string): Web
     { kind: "say", text: `Open the webhook settings for ${fullPath} at your provider and add a new hook.` },
     { kind: "paste", label: "URL", into: "url" },
     { kind: "paste", label: "Secret", into: "secret" },
-    { kind: "say", text: "Subscribe it to push and pull-request events only — CodeSpace rejects anything it did not ask for." },
+    { kind: "say", text: "Subscribe it to every event the provider offers. CodeSpace registers its own hooks that way so a feature added later needs no return visit." },
     { kind: "say", text: "Save, then send a test event. The row above turns to **Delivering** on its own once the first one lands here." },
   ];
 }
@@ -308,7 +308,7 @@ function gitLabSteps(fullPath: string): WebhookSetupStep[] {
     { kind: "say", text: `In GitLab, open **${fullPath} → Settings → Webhooks** and click **Add new webhook**.` },
     { kind: "paste", label: "URL", into: "url" },
     { kind: "paste", label: "Secret token", into: "secret" },
-    { kind: "say", text: "Under **Trigger**, tick **Push events** and **Merge request events**. Leave the rest clear — CodeSpace rejects deliveries it did not subscribe to." },
+    { kind: "say", text: "Under **Trigger**, tick **every** box. CodeSpace registers its own hooks this way so a feature added later needs no return visit; the events nothing acts on yet are ignored." },
     { kind: "say", text: "Save, then use **Test → Push events** in GitLab. The row above turns to **Delivering** on its own once the first event lands here." },
   ];
 }
@@ -321,7 +321,7 @@ function gitHubSteps(fullPath: string): WebhookSetupStep[] {
     // not parse, and a hook that is otherwise perfect fails silently on every delivery because of it.
     { kind: "say", text: "Set **Content type** to **application/json**. GitHub's default is a form encoding CodeSpace does not read." },
     { kind: "paste", label: "Secret", into: "secret" },
-    { kind: "say", text: "Choose **Let me select individual events**, then tick **Pushes** and **Pull requests** only." },
+    { kind: "say", text: "Choose **Send me everything**. CodeSpace registers its own hooks that way so a feature added later needs no return visit; the events nothing acts on yet are ignored." },
     { kind: "say", text: "Save, then use **Recent Deliveries → Redeliver** to send a test event. The row above turns to **Delivering** on its own once the first one lands here." },
   ];
 }

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Providers.Events;
+using CodeSpace.Core.Services.Providers.GitLab;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Events;
 using CodeSpace.Messages.Events.Issue;
@@ -9,7 +10,7 @@ namespace CodeSpace.Core.Services.Providers.GitLab.Events;
 public sealed class GitLabIssueEventSubscription : IProviderEventSubscription
 {
     public ProviderKind Kind => ProviderKind.GitLab;
-    public string RawEventName => "Issue Hook";
+    public string RawEventName => GitLabHookEvents.Issue;
 
     public NormalizedEvent? Normalize(Guid repositoryId, JsonElement root, IReadOnlyDictionary<string, string> headers)
     {

@@ -754,7 +754,7 @@ public sealed partial class GitHubRepositoryProvider : IRepositoryCatalogCapabil
         {
             return await _resilience.ExecuteAsync(context.Instance, nameof(RegisterWebhookAsync), async _ =>
             {
-                var newHook = new NewRepositoryHook("web", config) { Active = true, Events = request.SubscribedEvents.ToArray() };
+                var newHook = new NewRepositoryHook("web", config) { Active = true, Events = GitHubHookEvents.All.ToArray() };
                 var created = await client.Repository.Hooks.Create(repositoryId, newHook).ConfigureAwait(false);
 
                 return new RemoteWebhook
@@ -768,7 +768,7 @@ public sealed partial class GitHubRepositoryProvider : IRepositoryCatalogCapabil
         }
         catch (Exception ex)
         {
-            var body = JsonSerializer.Serialize(new { name = "web", config, events = request.SubscribedEvents, active = true });
+            var body = JsonSerializer.Serialize(new { name = "web", config, events = GitHubHookEvents.All, active = true });
             throw new ProviderWebhookRegistrationException(DescribeHookFailure(ex, CaptureHookRequest("POST", baseAddress, repositoryId, token, body)), ex);
         }
     }

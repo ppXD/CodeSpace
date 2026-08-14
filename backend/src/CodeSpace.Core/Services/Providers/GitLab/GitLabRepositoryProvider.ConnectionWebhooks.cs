@@ -141,27 +141,29 @@ public sealed partial class GitLabRepositoryProvider : IConnectionWebhookRegistr
         return new RemoteWebhook { ExternalId = match.Id.ToString(), CallbackUrl = match.Url ?? callbackUrl, SubscribedEvents = ReadSubscribedEvents(match), Active = true };
     }
 
-    private static List<string> ReadSubscribedEvents(GitLabGroupHook hook)
-    {
-        var subscribed = new List<string>();
-
-        if (hook.PushEvents) subscribed.Add("push");
-        if (hook.MergeRequestsEvents) subscribed.Add("merge_request");
-        if (hook.IssuesEvents) subscribed.Add("issue");
-
-        return subscribed;
-    }
+    private static List<string> ReadSubscribedEvents(GitLabGroupHook hook) =>
+        GitLabHookEvents.Names(hook.PushEvents, hook.MergeRequestsEvents, hook.IssuesEvents);
 
     /// <summary>Same boolean-per-event shape the project endpoint takes, which is why the mapping reads the same as <c>BuildHookUpsert</c>.</summary>
-    private static object BuildGroupHookUpsert(WebhookRegistration request) => new
+    /// <summary>
+    /// Every event a group hook can carry, subscribed. See <see cref="GitLabHookEvents.GroupHookAttributes"/>
+    /// for why the set is the provider's rather than the three this system reads. Built as a
+    /// dictionary because the attribute list is data, and an anonymous type would have to restate it
+    /// as sixteen hand-written properties that can drift from it.
+    /// </summary>
+    private static object BuildGroupHookUpsert(WebhookRegistration request)
     {
-        url = request.CallbackUrl,
-        token = request.Secret,
-        push_events = request.SubscribedEvents.Any(e => e.Contains("push", StringComparison.OrdinalIgnoreCase)),
-        merge_requests_events = request.SubscribedEvents.Any(e => e.Contains("merge_request", StringComparison.OrdinalIgnoreCase)),
-        issues_events = request.SubscribedEvents.Any(e => e.Contains("issue", StringComparison.OrdinalIgnoreCase)),
-        enable_ssl_verification = true
-    };
+        var body = new Dictionary<string, object>
+        {
+            ["url"] = request.CallbackUrl,
+            ["token"] = request.Secret,
+            ["enable_ssl_verification"] = true
+        };
+
+        foreach (var attribute in GitLabHookEvents.GroupHookAttributes) body[attribute] = true;
+
+        return body;
+    }
 
     private sealed record GroupHookAnswer(HttpStatusCode Status, string Body);
 

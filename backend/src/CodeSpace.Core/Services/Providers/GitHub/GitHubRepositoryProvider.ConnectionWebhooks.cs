@@ -50,7 +50,7 @@ public sealed partial class GitHubRepositoryProvider : IConnectionWebhookRegistr
         {
             return await _resilience.ExecuteAsync(context.Instance, nameof(RegisterConnectionWebhookAsync), async _ =>
             {
-                var newHook = new NewOrganizationHook("web", config) { Active = true, Events = request.SubscribedEvents.ToArray() };
+                var newHook = new NewOrganizationHook("web", config) { Active = true, Events = GitHubHookEvents.All.ToArray() };
                 var created = await client.Organization.Hook.Create(ownerPath, newHook).ConfigureAwait(false);
 
                 return new RemoteWebhook
@@ -64,7 +64,7 @@ public sealed partial class GitHubRepositoryProvider : IConnectionWebhookRegistr
         }
         catch (Exception ex)
         {
-            var body = JsonSerializer.Serialize(new { name = "web", config, events = request.SubscribedEvents, active = true });
+            var body = JsonSerializer.Serialize(new { name = "web", config, events = GitHubHookEvents.All, active = true });
             throw new ProviderWebhookRegistrationException(DescribeHookFailure(ex, CaptureOrgHookRequest("POST", baseAddress, ownerPath, token, body)), ex);
         }
     }

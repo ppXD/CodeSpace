@@ -267,12 +267,11 @@ describe("repository webhooks panel", () => {
     expect(screen.getByText("Secret token")).toBeTruthy();
     expect(screen.getByText("URL")).toBeTruthy();
     expect(screen.getByText("Trigger")).toBeTruthy();
-    expect(screen.getByText("Merge request events")).toBeTruthy();
     expect(screen.getByText("Add new webhook")).toBeTruthy();
 
     // GitHub's words must not appear on a GitLab screen — they are what the reader would hunt for.
     expect(screen.queryByText("Payload URL")).toBeNull();
-    expect(screen.queryByText("Let me select individual events")).toBeNull();
+    expect(screen.queryByText("Send me everything")).toBeNull();
   });
 
   it("uses GitHub's own field labels for a GitHub repository", async () => {
@@ -285,7 +284,10 @@ describe("repository webhooks panel", () => {
     expect(screen.getByText("Secret")).toBeTruthy();
     expect(screen.getByText("Content type")).toBeTruthy();
     expect(screen.getByText("application/json")).toBeTruthy();
-    expect(screen.getByText("Let me select individual events")).toBeTruthy();
+    // GitHub's own label for the radio that subscribes to every event, which is what CodeSpace
+    // registers its own hooks with — a hook cannot be re-synced, so a narrow one needs a hand visit
+    // the day something reads one more event type.
+    expect(screen.getByText("Send me everything")).toBeTruthy();
 
     // And the 403 sentence names GitHub's requirement, not GitLab's.
     expect(screen.getByText(/Creating a repository hook needs admin rights/)).toBeTruthy();

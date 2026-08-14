@@ -1199,15 +1199,12 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
             var hookUrl = hook.Url?.ToString();
             if (string.IsNullOrEmpty(hookUrl) || !string.Equals(hookUrl, callbackUrl, StringComparison.OrdinalIgnoreCase)) continue;
 
-            // GitLab ProjectHook doesn't expose the flag-style "subscribed_events"
-            // string array we model — events are individual booleans on the hook
-            // record. Surface the boolean → string mapping that mirrors what
-            // RegisterWebhookAsync set up, so a later code path can decide whether
-            // to re-register with a wider subscription if the set has grown.
-            var subscribed = new List<string>();
-            if (hook.PushEvents) subscribed.Add("push");
-            if (hook.MergeRequestsEvents) subscribed.Add("merge_request");
-            if (hook.IssuesEvents) subscribed.Add("issue");
+            // GitLab ProjectHook doesn't expose the flag-style "subscribed_events" string array we
+            // model — events are individual booleans on the hook record. Named through the shared
+            // mapping so a hook read back here and one we staged locally describe their events
+            // identically; while this listed its own short names, "the set has grown" could never be
+            // decided by comparing them.
+            var subscribed = GitLabHookEvents.Names(hook.PushEvents, hook.MergeRequestsEvents, hook.IssuesEvents);
 
             return new RemoteWebhook { ExternalId = hook.Id.ToString(), CallbackUrl = hookUrl, SubscribedEvents = subscribed, Active = true };
         }
@@ -1220,38 +1217,64 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
         var (client, host, token) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
         var projectId = int.Parse(repository.ExternalId);
         var upsert = BuildHookUpsert(request);
+        var payload = JsonSerializer.Serialize(upsert);
+        var url = $"{host.TrimEnd('/')}/api/v4/projects/{projectId}/hooks";
 
         try
         {
-            return await _resilience.ExecuteAsync(context.Instance, nameof(RegisterWebhookAsync), _ =>
+            return await _resilience.ExecuteAsync(context.Instance, nameof(RegisterWebhookAsync), async _ =>
             {
-                var created = client.GetRepository(projectId).ProjectHooks.Create(upsert);
+                using var message = new HttpRequestMessage(HttpMethod.Post, url) { Content = new StringContent(payload, System.Text.Encoding.UTF8, "application/json") };
+                message.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
+                message.Headers.TryAddWithoutValidation("PRIVATE-TOKEN", token);
 
-                return Task.FromResult(new RemoteWebhook
+                using var response = await _countsHttpClient.SendAsync(message, cancellationToken).ConfigureAwait(false);
+                var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+
+                if (!response.IsSuccessStatusCode)
+                    throw new ProviderWebhookRegistrationException(
+                        DescribeHookFailure(new HttpRequestException($"GitLab refused the hook with {(int)response.StatusCode}: {body}"), CaptureHookRequest("POST", host, projectId, token, payload)),
+                        new HttpRequestException($"{(int)response.StatusCode}: {body}"));
+
+                return new RemoteWebhook
                 {
-                    ExternalId = created.Id.ToString(),
+                    ExternalId = JsonDocument.Parse(body).RootElement.GetProperty("id").GetRawText(),
                     CallbackUrl = request.CallbackUrl,
-                    SubscribedEvents = request.SubscribedEvents.ToList(),
+                    SubscribedEvents = GitLabHookEvents.ProjectHookAttributes.ToList(),
                     Active = true
-                });
+                };
             }, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            var sent = CaptureHookRequest("POST", host, projectId, token, JsonSerializer.Serialize(upsert, _snakeCaseJson));
+            var sent = CaptureHookRequest("POST", host, projectId, token, payload);
             throw new ProviderWebhookRegistrationException(DescribeHookFailure(ex, sent), ex);
         }
     }
 
-    private static ProjectHookUpsert BuildHookUpsert(WebhookRegistration request) => new()
+    /// <summary>
+    /// Every event a project hook can carry, subscribed. See
+    /// <see cref="GitLabHookEvents.ProjectHookAttributes"/> for why the set is the provider's rather
+    /// than the three this system reads.
+    ///
+    /// <para>NGitLab's <c>ProjectHookUpsert</c> types only a handful of the booleans, so the ones it
+    /// does expose are set here and the rest are unreachable through it. That is why registration
+    /// posts the body itself — a typed model that silently omits an attribute is the same failure as
+    /// a substring test that silently omits one.</para>
+    /// </summary>
+    private static Dictionary<string, object> BuildHookUpsert(WebhookRegistration request)
     {
-        Url = new Uri(request.CallbackUrl),
-        Token = request.Secret,
-        PushEvents = request.SubscribedEvents.Any(e => e.Contains("push", StringComparison.OrdinalIgnoreCase)),
-        MergeRequestsEvents = request.SubscribedEvents.Any(e => e.Contains("merge_request", StringComparison.OrdinalIgnoreCase)),
-        IssuesEvents = request.SubscribedEvents.Any(e => e.Contains("issue", StringComparison.OrdinalIgnoreCase)),
-        EnableSslVerification = true
-    };
+        var body = new Dictionary<string, object>
+        {
+            ["url"] = request.CallbackUrl,
+            ["token"] = request.Secret,
+            ["enable_ssl_verification"] = true
+        };
+
+        foreach (var attribute in GitLabHookEvents.ProjectHookAttributes) body[attribute] = true;
+
+        return body;
+    }
 
     /// <summary>
     /// What we sent, for an operator to read months later. NGitLab hands back neither the URL it
