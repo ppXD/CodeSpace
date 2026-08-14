@@ -29,7 +29,7 @@ public class AgentRunExecutorAcceptanceTests
     {
         var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "unused" });
 
-        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(acceptance: null), Succeeded(), CancellationToken.None);
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(acceptance: null), Succeeded(), workspace: null, CancellationToken.None);
 
         result.AcceptancePassed.ShouldBeNull();
         grader.Calls.ShouldBe(0, "no contract ⇒ the grader is never invoked");
@@ -40,7 +40,7 @@ public class AgentRunExecutorAcceptanceTests
     {
         var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "ok" });
 
-        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec(" ", "")), Succeeded(), CancellationToken.None);
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec(" ", "")), Succeeded(), workspace: null, CancellationToken.None);
 
         result.AcceptancePassed.ShouldBeNull();
         grader.Calls.ShouldBe(0);
@@ -52,7 +52,7 @@ public class AgentRunExecutorAcceptanceTests
         var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "ok" });
 
         var failed = Succeeded() with { Status = AgentRunStatus.Failed };
-        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), failed, CancellationToken.None);
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), failed, workspace: null, CancellationToken.None);
 
         result.ShouldBe(failed, "a failed run is already the truth — nothing to gate");
         grader.Calls.ShouldBe(0);
@@ -75,7 +75,7 @@ public class AgentRunExecutorAcceptanceTests
             },
         };
 
-        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), multi, CancellationToken.None);
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), multi, workspace: null, CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Succeeded);
         result.AcceptancePassed.ShouldBe(true, "every repo's own check passed — the run's acceptance is no longer left null on a multi-repo result");
@@ -98,7 +98,7 @@ public class AgentRunExecutorAcceptanceTests
             },
         };
 
-        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), multi, CancellationToken.None);
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), multi, workspace: null, CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Failed, "a contract binds the WHOLE change — one repo failing its check fails the run, exactly like a single-repo failure");
         result.ExitReason.ShouldBe("acceptance-failed");
@@ -125,7 +125,7 @@ public class AgentRunExecutorAcceptanceTests
             },
         };
 
-        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), multi, CancellationToken.None);
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), multi, workspace: null, CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Failed);
         result.AcceptancePassed.ShouldBe(false);
@@ -153,7 +153,7 @@ public class AgentRunExecutorAcceptanceTests
             },
         };
 
-        var graded = await executor.GradeAcceptanceIfPresentAsync(run, task, multi, CancellationToken.None);
+        var graded = await executor.GradeAcceptanceIfPresentAsync(run, task, multi, workspace: null, CancellationToken.None);
         await executor.PersistPublishManifestAsync(run.Id, run, task, graded, claimedEpoch: 7, CancellationToken.None);
 
         manifests.Upserts.Count.ShouldBe(2, "one upsert per repo");
@@ -171,7 +171,7 @@ public class AgentRunExecutorAcceptanceTests
             RepositoryResults = new[] { new RepositoryRunResult { RepositoryId = Guid.NewGuid(), Alias = "docs" } },
         };
 
-        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh"), expectsChanges: false), multi, CancellationToken.None);
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh"), expectsChanges: false), multi, workspace: null, CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Succeeded);
         result.AcceptancePassed.ShouldBe(true, "the correctly-predicted no-diff outcome is a pass, never a failure — same rule as the single-repo path");
@@ -189,7 +189,7 @@ public class AgentRunExecutorAcceptanceTests
             RepositoryResults = new[] { new RepositoryRunResult { RepositoryId = Guid.NewGuid(), Alias = "docs" } },
         };
 
-        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), multi, CancellationToken.None);
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), multi, workspace: null, CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Failed);
         result.AcceptanceDetail.ShouldBe("no-branch-or-repo");
@@ -202,7 +202,7 @@ public class AgentRunExecutorAcceptanceTests
         var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "ok" });
 
         var noBranch = Succeeded() with { ProducedBranch = null };
-        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), noBranch, CancellationToken.None);
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), noBranch, workspace: null, CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Failed);
         result.ExitReason.ShouldBe("acceptance-failed");
@@ -221,7 +221,7 @@ public class AgentRunExecutorAcceptanceTests
         var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "exit 0" });
 
         var patchOnly = SucceededPatchOnly();
-        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), patchOnly, CancellationToken.None);
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), patchOnly, workspace: null, CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Succeeded, "the patch was gradeable — no reason to fail closed");
         result.AcceptancePassed.ShouldBe(true);
@@ -237,7 +237,7 @@ public class AgentRunExecutorAcceptanceTests
     {
         var (executor, _) = NewExecutor(new BenchmarkGrade { Passed = false, Detail = "exit 1" });
 
-        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), SucceededPatchOnly(), CancellationToken.None);
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), SucceededPatchOnly(), workspace: null, CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Failed);
         result.ExitReason.ShouldBe("acceptance-failed");
@@ -253,7 +253,7 @@ public class AgentRunExecutorAcceptanceTests
         var artifactId = Guid.NewGuid();
 
         await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")),
-            SucceededPatchOnly() with { Patch = "diff --git a/x b/x", PatchArtifactId = artifactId }, CancellationToken.None);
+            SucceededPatchOnly() with { Patch = "diff --git a/x b/x", PatchArtifactId = artifactId }, workspace: null, CancellationToken.None);
 
         grader.PatchCalls.ShouldBe(1, "an inline patch OR an artifact id both count as gradeable — either is threaded to GradePatchAsync, which resolves whichever the offloader needs");
     }
@@ -266,7 +266,7 @@ public class AgentRunExecutorAcceptanceTests
         var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "unused" });
 
         var noWork = Succeeded() with { ProducedBranch = null };
-        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh"), expectsChanges: false), noWork, CancellationToken.None);
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh"), expectsChanges: false), noWork, workspace: null, CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Succeeded, "nothing about the run itself went wrong — the STATUS is untouched");
         result.AcceptancePassed.ShouldBe(true, "the correctly-predicted no-diff outcome is a PASS, never a failure");
@@ -282,7 +282,7 @@ public class AgentRunExecutorAcceptanceTests
         var (executor, _) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "unused" });
 
         var noWork = Succeeded() with { ProducedBranch = null };
-        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh"), expectsChanges: true), noWork, CancellationToken.None);
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh"), expectsChanges: true), noWork, workspace: null, CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Failed);
         result.AcceptanceDetail.ShouldBe("no-branch-or-repo");
@@ -294,7 +294,7 @@ public class AgentRunExecutorAcceptanceTests
         // false only excuses an ABSENCE — it never suppresses grading real, present work.
         var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "exit 0" });
 
-        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh"), expectsChanges: false), Succeeded(), CancellationToken.None);
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh"), expectsChanges: false), Succeeded(), workspace: null, CancellationToken.None);
 
         result.AcceptancePassed.ShouldBe(true);
         result.AcceptanceDetail.ShouldBe("exit 0", "the branch was graded for real — not waved through as not-applicable");
@@ -306,7 +306,7 @@ public class AgentRunExecutorAcceptanceTests
     {
         var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "exit 0" });
 
-        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), Succeeded(), CancellationToken.None);
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), Succeeded(), workspace: null, CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Succeeded);
         result.AcceptancePassed.ShouldBe(true);
@@ -322,7 +322,7 @@ public class AgentRunExecutorAcceptanceTests
         var (executor, _) = NewExecutor(new BenchmarkGrade { Passed = false, Detail = "exit 1" });
 
         var succeeded = Succeeded();
-        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), succeeded, CancellationToken.None);
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), succeeded, workspace: null, CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Failed, "an objective oracle failing means the contract was NOT met — Failed is the truth");
         result.ExitReason.ShouldBe("acceptance-failed");
@@ -339,7 +339,7 @@ public class AgentRunExecutorAcceptanceTests
         var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "ok" });
         grader.Throw = new InvalidOperationException("clone exploded");
 
-        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), Succeeded(), CancellationToken.None);
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), Succeeded(), workspace: null, CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Failed);
         result.AcceptanceDetail.ShouldStartWith("grade-error:");
@@ -351,7 +351,7 @@ public class AgentRunExecutorAcceptanceTests
     {
         var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "ok" });
 
-        await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", " ", "check.sh", "")), Succeeded(), CancellationToken.None);
+        await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", " ", "check.sh", "")), Succeeded(), workspace: null, CancellationToken.None);
 
         grader.LastCommand.ShouldBe(new[] { "sh", "check.sh" });
     }

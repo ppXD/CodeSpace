@@ -162,7 +162,7 @@ public sealed class SupervisorAcceptanceGradeFlowTests
         var run = new AgentRun { Id = Guid.NewGuid(), TeamId = teamId, Status = AgentRunStatus.Succeeded, TaskJson = System.Text.Json.JsonSerializer.Serialize(task, CodeSpace.Core.Services.Agents.AgentJson.Options) };
         var succeeded = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", ProducedBranch = "acc/slow" };
 
-        var graded = await executor.GradeAcceptanceIfPresentAsync(run, task, succeeded, CancellationToken.None);
+        var graded = await executor.GradeAcceptanceIfPresentAsync(run, task, succeeded, workspace: null, CancellationToken.None);
 
         graded.AcceptancePassed.ShouldBe(false);
         graded.AcceptanceDetail.ShouldBe("tests-timed-out", "the 1s contract-authored timeout fired — the server's 300s default would have let the 3s sleep finish and pass");
@@ -226,7 +226,7 @@ public sealed class SupervisorAcceptanceGradeFlowTests
             },
         };
 
-        var graded = await executor.GradeAcceptanceIfPresentAsync(run, task, succeeded, CancellationToken.None);
+        var graded = await executor.GradeAcceptanceIfPresentAsync(run, task, succeeded, workspace: null, CancellationToken.None);
 
         graded.Status.ShouldBe(AgentRunStatus.Failed, "the 'api' repo's real check exits 1 — a contract binds the WHOLE multi-repo change, so the run must fail closed rather than stay Succeeded on self-report");
         graded.AcceptancePassed.ShouldBe(false);

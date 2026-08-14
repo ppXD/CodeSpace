@@ -224,6 +224,15 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             var workspaceProvision = await _workspaceResolver.ResolveAsync(task, run.TeamId, cancellationToken).ConfigureAwait(false);
             workspace = workspaceProvision is null ? null : await _workspaces.Resolve(runnerKind).PrepareAsync(workspaceProvision, cancellationToken).ConfigureAwait(false);
 
+            // DC-4 slice 2: a REPO-LESS run with a DELIVERABLE-shaped contract (ArtifactPresent/LlmJudge — the
+            // kinds whose Command is a path list) still needs a WORLD — a scratch working directory the harness
+            // runs in, the declared-artifact capture reads from, and the oracle grades against. Without it the
+            // deliverable dies with the process and the contract fails closed on "no-branch-or-repo". A TestsPass
+            // contract presupposes a code world — running its argv in an empty scratch would be a category error
+            // (a bare `exit 0` check would even pass vacuously) — so it keeps failing closed, and a repo-less run
+            // without a contract keeps today's null workspace, both byte-identically.
+            workspace ??= Publish.ArtifactManifestStore.DeclaredDeliverablePaths(task).Count > 0 ? Workspace.ScratchWorkspaceHandle.Create(agentRunId) : null;
+
             // The primary repo's directory + cloned base SHA, stamped onto the durable handle at launch so a
             // re-attach can capture the diff even after the live workspace handle object dies with this worker.
             var primaryRepo = workspace?.Repositories.FirstOrDefault(r => r.Alias == workspace.PrimaryAlias);
@@ -442,8 +451,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             // S5: the acceptance invariant holds on THIS terminal path too — a contract-bearing run that completed
             // across a worker restart has no published branch to grade (see the no-push note above), so it fails
-            // CLOSED rather than landing Succeeded ungraded because a crash happened at the right moment.
-            result = await GradeAcceptanceIfPresentAsync(run, task, result, cancellationToken).ConfigureAwait(false);
+            // CLOSED rather than landing Succeeded ungraded because a crash happened at the right moment. The live
+            // workspace handle (repo clone OR scratch) died with the worker, so the repo-less lane has no world
+            // here either — null keeps the fail-closed posture.
+            result = await GradeAcceptanceIfPresentAsync(run, task, result, workspace: null, cancellationToken).ConfigureAwait(false);
 
             // Publish-or-park (I1/I2): record what the re-attach path recovered, exactly like the live path.
             await PersistPublishManifestAsync(agentRunId, run, task, result, expectedEpoch, cancellationToken).ConfigureAwait(false);
@@ -725,7 +736,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
     private async Task<AgentRunResult> EnrichWithWorkspaceChangesAsync(Guid runId, Guid teamId, AgentTask task, AgentRunResult result, IWorkspaceHandle? workspace, CancellationToken cancellationToken)
     {
-        if (workspace is null) return result;
+        // A scratch (repo-less) workspace has no git to diff — its residue is the typed artifact capture, not a patch.
+        if (workspace is null || workspace.Repositories.Count == 0) return result;
 
         try
         {
@@ -1111,7 +1123,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         result = await MintPublishEvidenceAsync(runId, run.TeamId, result, cancellationToken).ConfigureAwait(false);
 
-        result = await GradeAcceptanceIfPresentAsync(run, task, result, cancellationToken).ConfigureAwait(false);
+        result = await GradeAcceptanceIfPresentAsync(run, task, result, workspace, cancellationToken).ConfigureAwait(false);
 
         // Publish-or-park (I1/I2): record what this pass produced + published REGARDLESS of Status — a Failed or
         // TimedOut run's captured diff gets a row exactly like a Succeeded one. Idempotent (upserts), so an S6 revise
@@ -1350,7 +1362,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// decide the outcome: <c>false</c> is the correctly-predicted no-diff case (a vacuous pass, never a failure);
     /// otherwise (the byte-identical default) it fails closed exactly as before this field existed.</para>
     /// </summary>
-    internal async Task<AgentRunResult> GradeAcceptanceIfPresentAsync(AgentRun run, AgentTask task, AgentRunResult result, CancellationToken cancellationToken)
+    internal async Task<AgentRunResult> GradeAcceptanceIfPresentAsync(AgentRun run, AgentTask task, AgentRunResult result, IWorkspaceHandle? workspace, CancellationToken cancellationToken)
     {
         if (!AgentAcceptanceContract.RequiresGrade(task)) return result;
         if (result.Status != AgentRunStatus.Succeeded) return result;
@@ -1372,6 +1384,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         if (task.RepositoryId is not { } repositoryId)
         {
+            // DC-4 slice 2 (the repo-less lane): the scratch workspace IS the world — grade the oracle directly
+            // against it while the handle is still alive (the agent process has exited; grading its left-behind
+            // directory is equivalent to grading a clone). Only a contract with truly no world fails closed.
+            if (workspace is { Repositories.Count: 0 } scratch)
+                return await GradeScratchAsync(run, spec with { Command = command }, result, scratch, cancellationToken).ConfigureAwait(false);
+
             _logger.LogWarning("Agent run {RunId}: an acceptance contract is present but there is no repository to grade against — failing closed", run.Id);
 
             return AcceptanceFailed(result, "no-branch-or-repo");
@@ -1419,6 +1437,36 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
 
         _logger.LogWarning("Agent run {RunId}: the acceptance check FAILED ({Detail}) — re-grading the run to Failed", run.Id, grade.Detail);
+
+        return AcceptanceFailed(result, grade.Detail) with { AcceptanceEvidenceId = grade.EvidenceArtifactId };
+    }
+
+    /// <summary>The repo-less grade fold: the same per-kind oracle over the still-alive scratch directory, the same pass/fail stamping as the branch/patch lanes — a grader escape degrades to not-accepted, never a crash.</summary>
+    private async Task<AgentRunResult> GradeScratchAsync(AgentRun run, SupervisorAcceptanceSpec spec, AgentRunResult result, IWorkspaceHandle scratch, CancellationToken cancellationToken)
+    {
+        BenchmarkGrade grade;
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var grader = scope.ServiceProvider.GetRequiredService<ISupervisorAcceptanceGrader>();
+            var timeoutSeconds = spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds;
+
+            grade = await grader.GradeDirectoryAsync(scratch.Directory, spec, run.TeamId, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Agent run {RunId}: the scratch acceptance grade failed unexpectedly; recording not-accepted", run.Id);
+            grade = new BenchmarkGrade { Passed = false, Detail = $"grade-error: {ex.Message}", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault };
+        }
+
+        if (grade.Passed)
+        {
+            _logger.LogInformation("Agent run {RunId}: the scratch acceptance check passed ({Detail})", run.Id, grade.Detail);
+
+            return result with { AcceptancePassed = true, AcceptanceDetail = grade.Detail, AcceptanceEvidenceId = grade.EvidenceArtifactId };
+        }
+
+        _logger.LogWarning("Agent run {RunId}: the scratch acceptance check FAILED ({Detail}) — re-grading the run to Failed", run.Id, grade.Detail);
 
         return AcceptanceFailed(result, grade.Detail) with { AcceptanceEvidenceId = grade.EvidenceArtifactId };
     }
