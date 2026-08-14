@@ -120,13 +120,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private readonly Workflows.Artifacts.IArtifactStore _artifacts;
     // The publish-or-park ledger: upserted at the end of every verification pass, regardless of the run's status.
     private readonly IPublishManifestStore _manifests;
+    private readonly IArtifactManifestStore _artifactManifests;
     private readonly Capture.ICaptureIntentService _captureIntents;
     // The publish guard chain (Order ascending) — see EvaluatePublishGuardsAsync. Sorted once at construction so
     // production reads a stable sequence regardless of DI registration order.
     private readonly IReadOnlyList<IPublishGuard> _publishGuards;
     private readonly ILogger<AgentRunExecutor> _logger;
 
-    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, Workflows.Artifacts.IArtifactStore artifacts, IPublishManifestStore manifests, Capture.ICaptureIntentService captureIntents, IEnumerable<IPublishGuard> publishGuards, ILogger<AgentRunExecutor> logger)
+    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, Workflows.Artifacts.IArtifactStore artifacts, IPublishManifestStore manifests, IArtifactManifestStore artifactManifests, Capture.ICaptureIntentService captureIntents, IEnumerable<IPublishGuard> publishGuards, ILogger<AgentRunExecutor> logger)
     {
         _runs = runs;
         _harnesses = harnesses;
@@ -142,6 +143,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         _offloader = offloader;
         _artifacts = artifacts;
         _manifests = manifests;
+        _artifactManifests = artifactManifests;
         _captureIntents = captureIntents;
         // Tolerate a null enumerable (a hand-built test double that never exercises the push path) — zero guards
         // registered is a legitimate state (every push clears), not a constructor-time crash.
@@ -1103,6 +1105,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         result = await EnrichWithWorkspaceChangesAsync(runId, run.TeamId, task, result, workspace, cancellationToken).ConfigureAwait(false);
 
+        result = await CaptureDeclaredArtifactsAsync(runId, run, task, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
+
         result = await PushProducedBranchIfEnabledAsync(runId, task, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
 
         result = await MintPublishEvidenceAsync(runId, run.TeamId, result, cancellationToken).ConfigureAwait(false);
@@ -1166,6 +1170,29 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
     }
 
+    /// <summary>
+    /// DC-4: capture the DECLARED deliverable files (a non-TestsPass acceptance's path list) as TYPED artifact-manifest
+    /// rows — inside the already-open capture-intent window, best-effort like every sibling capture step (a store
+    /// hiccup must never flip an otherwise-successful run). The count rides the result so the promise's facts stop
+    /// reading a typed capture as "empty".
+    /// </summary>
+    private async Task<AgentRunResult> CaptureDeclaredArtifactsAsync(Guid runId, AgentRun run, AgentTask task, AgentRunResult result, IWorkspaceHandle? workspace, long claimedEpoch, CancellationToken cancellationToken)
+    {
+        if (workspace is null) return result;
+
+        try
+        {
+            var captured = await _artifactManifests.CaptureDeclaredAsync(task, workspace.Directory, runId, run.WorkflowRunId, run.TeamId, claimedEpoch, cancellationToken).ConfigureAwait(false);
+
+            return captured == 0 ? result : result with { CapturedArtifactCount = captured };
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Agent run {RunId}: failed to capture declared deliverable artifacts; the acceptance oracle still grades them on the produced branch", runId);
+            return result;
+        }
+    }
+
     /// <summary>The capture promise's commit-time observation (P2 saga) — the compact JSON facts of what the capture sequence actually persisted, INCLUDING the explicit empty (a confirmed fact, never an absence). Pure + internal so it is unit-pinned without a database.</summary>
     internal static string CaptureFactsOf(AgentRunResult result) => JsonSerializer.Serialize(new
     {
@@ -1175,7 +1202,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         branch = result.ProducedBranch,
         pushedCommitSha = result.PushedCommitSha,
         repos = result.RepositoryResults.Count,
-        empty = result.ChangedFiles.Count == 0 && string.IsNullOrEmpty(result.Patch) && result.PatchArtifactId is null && result.RepositoryResults.Count == 0,
+        typedArtifacts = result.CapturedArtifactCount,
+        empty = result.ChangedFiles.Count == 0 && string.IsNullOrEmpty(result.Patch) && result.PatchArtifactId is null && result.RepositoryResults.Count == 0 && result.CapturedArtifactCount == 0,
     }, AgentJson.Options);
 
     /// <summary>Pure mapping from a run's produced-artifact facts to the manifest upsert shape — the PublishState/AcceptanceState derivation this pins: <see cref="PublishState.Pushed"/> is a CONFIRMED claim (review hole 2) — it requires BOTH the produced branch AND the readback-confirmed remote tip (P3b-2's <paramref name="pushedCommitSha"/>); a branch whose readback failed or mismatched maps PatchOnly with a named PublishError, because a push command that RAN proves intent, not arrival — and Pushed flows straight into Delivered/Delivery-Passed. Everything else unchanged: no branch means PatchOnly (PublishError distinguishes an intentional FAILED attempt from a BY-CHOICE guard skip, whose reason lands on Summary); acceptance mirrors the grader's tri-state verbatim. Internal so it's unit-pinned without a database.</summary>

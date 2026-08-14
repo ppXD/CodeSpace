@@ -238,7 +238,7 @@ public sealed class PublishGuardChainFlowTests
             scope.Resolve<CodeSpace.Core.Services.Review.IStructuredCritic>(),
             scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(),
             scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactStore>(),
-            scope.Resolve<IPublishManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Agents.Capture.ICaptureIntentService>(),
+            scope.Resolve<IPublishManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IArtifactManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Agents.Capture.ICaptureIntentService>(),
             scope.Resolve<IEnumerable<IPublishGuard>>(),
             NullLogger<AgentRunExecutor>.Instance);
 

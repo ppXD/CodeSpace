@@ -70,6 +70,7 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork, IDataProtectionKeyCont
     public DbSet<ToolCallLedger> ToolCallLedger => Set<ToolCallLedger>();
 
     public DbSet<CaptureIntent> CaptureIntent => Set<CaptureIntent>();
+    public DbSet<ArtifactManifest> ArtifactManifest => Set<ArtifactManifest>();
     public DbSet<SupervisorDecisionRecord> SupervisorDecisionRecord => Set<SupervisorDecisionRecord>();
     public DbSet<SupervisorTapeSummaryRecord> SupervisorTapeSummaryRecord => Set<SupervisorTapeSummaryRecord>();
     public DbSet<WorkSession> WorkSession => Set<WorkSession>();

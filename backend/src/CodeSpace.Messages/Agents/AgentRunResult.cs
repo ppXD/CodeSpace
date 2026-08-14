@@ -1,5 +1,7 @@
 using CodeSpace.Messages.Enums;
 
+using System.Text.Json.Serialization;
+
 namespace CodeSpace.Messages.Agents;
 
 /// <summary>
@@ -36,6 +38,10 @@ public sealed record AgentRunResult
 
     /// <summary>When the diff was offloaded (D2: larger than the artifact inline threshold), the artifact-store id holding the full unified diff; <see cref="Patch"/> is then empty. Null when the diff is inline (small) or absent.</summary>
     public Guid? PatchArtifactId { get; init; }
+
+    /// <summary>DC-4: how many DECLARED deliverable files this attempt's capture minted typed artifact-manifest rows for (a non-TestsPass acceptance's path list). 0-omitted — a git-only run serializes byte-identical; the capture promise's facts read this so a typed capture is never recorded as "empty".</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public int CapturedArtifactCount { get; init; }
 
     /// <summary>D3: the FAITHFUL raw harness stream (every redacted line, including ones ParseEvent dropped) — the durable "replay the exact session" record. Inline when small; a larger transcript is offloaded and this is cleared, with <see cref="TranscriptArtifactId"/> holding the ref. Empty when there was no stream.</summary>
     public string Transcript { get; init; } = "";
