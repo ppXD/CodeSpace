@@ -152,6 +152,29 @@ public sealed class CompletionTerminalAuthorityFlowTests
     }
 
     [Fact]
+    public async Task A_run_level_integration_manifest_satisfies_the_integrate_cell()
+    {
+        // The Integrate cell's SECOND ledger (P4, the plan-map lane's shape): the tape never merged — but a
+        // git.integrate_run step recorded the run-level Integration candidate row, so the same claim that parks
+        // in the merge-less test above now terminalizes CleanSuccess. Two ledgers, one cell, no double standard.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunningRunAsync(teamId, userId, mode: "Enforced");
+        var attemptId = await SeedGradedTapeAsync(runId, teamId, acceptancePassed: true, merged: false);
+        var repositoryId = await SeedRepositoryAsync(teamId);
+        await SeedManifestAsync(teamId, attemptId, repositoryId);
+        await SeedIntegrationManifestAsync(teamId, runId, repositoryId);
+        await StakeAsync(runId, teamId, "acceptance:s1", ContractKinds.Acceptance);
+        await StakeAsync(runId, teamId, "delivery:s1", ContractKinds.Delivery);
+        await StakeAsync(runId, teamId, "output:s1", ContractKinds.Output);
+
+        using var scope = _fixture.BeginScope();
+        var arbitration = await scope.Resolve<ICompletionTerminalAuthority>().ArbitrateAsync(runId, teamId, "Enforced", WorkflowRunStatus.Success, CancellationToken.None);
+
+        arbitration.Decision.ShouldBe(TerminalDecision.CleanSuccess, "the pushed run-level candidate row evidences Integrate exactly as a tape merge does");
+        arbitration.Status.ShouldBe(WorkflowRunStatus.Success);
+    }
+
+    [Fact]
     public async Task The_shadow_would_be_decision_mirrors_the_stage_gate()
     {
         // Same seeding as the stage park above, driven through the shadow sweep on a Shadow-mode run — parity
@@ -403,6 +426,20 @@ public sealed class CompletionTerminalAuthorityFlowTests
         {
             Id = Guid.NewGuid(), TeamId = teamId, Kind = PublishManifestKind.Agent, AgentRunId = agentRunId, RepositoryId = repositoryId,
             RepositoryAlias = "primary", Branch = "codespace/agent/s1", BaseSha = "b1", CommitSha = "c1",
+            PublishStateValue = PublishState.Pushed,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>The run-level Integration candidate row a <c>git.integrate_run</c> step records — the Integrate cell's second evidence ledger.</summary>
+    private async Task SeedIntegrationManifestAsync(Guid teamId, Guid runId, Guid repositoryId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.PublishManifest.Add(new PublishManifest
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, Kind = PublishManifestKind.Integration, WorkflowRunId = runId, RepositoryId = repositoryId,
+            RepositoryAlias = "primary", Branch = $"codespace/integration/{runId:N}", BaseSha = "b1",
             PublishStateValue = PublishState.Pushed,
         });
         await db.SaveChangesAsync();
