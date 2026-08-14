@@ -33,7 +33,7 @@ public sealed class QualificationReceiptStore : IQualificationReceiptStore, ISco
     public async Task<IReadOnlyList<QualificationReceipt>> ListCurrentAsync(string mode, string capabilityKey, DateTimeOffset asOf, CancellationToken cancellationToken) =>
         await _db.QualificationReceipt.AsNoTracking()
             .Where(r => r.Mode == mode && r.CapabilityKey == capabilityKey
-                && r.EffectiveFrom <= asOf && r.ExpiresAt > asOf && r.RevokedAt == null)
+                && r.EffectiveFrom <= asOf && r.ExpiresAt > asOf)
             .OrderByDescending(r => r.EffectiveFrom)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
