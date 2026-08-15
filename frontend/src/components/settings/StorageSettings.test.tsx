@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { StorageProfileDetail, StorageProfileSummary, StorageProviderModuleSummary } from "@/api/storage";
+import type { StorageCredentialMetadata, StorageProfileDetail, StorageProfileSummary, StorageProviderModuleSummary } from "@/api/storage";
 
 import { StorageSettings } from "./StorageSettings";
 
@@ -48,6 +48,20 @@ const profile: StorageProfileSummary = {
   lastModifiedDate: "2026-08-15T10:00:00Z",
 };
 
+const credential: StorageCredentialMetadata = {
+  id: "credential-1",
+  stableName: "aliyun-primary",
+  state: "Active",
+  currentRevision: 3,
+  xmin: 21,
+  providerTypeKey: secretProvider.typeKey,
+  safeHint: "AKID…7Q",
+  credentialRef: "db:00000000-0000-0000-0000-000000000123:3",
+  createdDate: "2026-08-14T09:00:00Z",
+  currentRevisionCreatedDate: "2026-08-15T09:00:00Z",
+  revokedDate: null,
+};
+
 const detail: StorageProfileDetail = {
   id: profile.id,
   stableName: profile.stableName,
@@ -88,12 +102,13 @@ function renderSettings(handler: FetchHandler) {
   return render(<QueryClientProvider client={client}><StorageSettings /></QueryClientProvider>);
 }
 
-function defaultHandler(options: { providers?: StorageProviderModuleSummary[]; profiles?: StorageProfileSummary[]; detail?: StorageProfileDetail } = {}): FetchHandler {
+function defaultHandler(options: { providers?: StorageProviderModuleSummary[]; profiles?: StorageProfileSummary[]; detail?: StorageProfileDetail; credentials?: StorageCredentialMetadata[] } = {}): FetchHandler {
   const providers = options.providers ?? [localProvider, secretProvider];
   const profiles = options.profiles ?? [profile];
   const profileDetail = options.detail ?? detail;
   return (path) => {
     if (path === "/api/storage/provider-modules") return json(providers);
+    if (path === "/api/storage/credentials") return json(options.credentials ?? []);
     if (path === "/api/storage/profiles") return json(profiles);
     if (path === `/api/storage/profiles/${profile.id}`) return json(profileDetail);
     return json({ code: "not_found", message: `No stub for ${path}` }, 404);
@@ -109,6 +124,96 @@ function setSchemaText(groupName: string, value: string) {
 afterEach(() => { localStorage.clear(); vi.unstubAllGlobals(); });
 
 describe("storage profiles settings", () => {
+  it("lists only safe credential metadata and never renders the opaque reference", async () => {
+    renderSettings(defaultHandler({ credentials: [credential] }));
+
+    const list = await screen.findByRole("list", { name: "Storage credentials" });
+    expect(within(list).getByText("aliyun-primary")).toBeInTheDocument();
+    expect(within(list).getByText("Revision 3")).toBeInTheDocument();
+    expect(within(list).getByText("AKID…7Q")).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent(credential.credentialRef);
+  });
+
+  it("creates a write-only credential from SecretSchema using password inputs", async () => {
+    let submitted: Record<string, unknown> | undefined;
+    renderSettings(async (path, init) => {
+      const method = init.method ?? "GET";
+      if (path === "/api/storage/provider-modules") return json([secretProvider]);
+      if (path === "/api/storage/profiles") return json([]);
+      if (path === "/api/storage/credentials" && method === "GET") return json([]);
+      if (path === "/api/storage/credentials" && method === "POST") {
+        submitted = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return json(credential);
+      }
+      return json({ message: "Unexpected request" }, 500);
+    });
+
+    await screen.findByText("No storage credentials configured");
+    fireEvent.click(screen.getByRole("button", { name: "Create storage credential" }));
+    const dialog = await screen.findByRole("dialog", { name: "Create storage credential" });
+    fireEvent.change(within(dialog).getByLabelText("Stable name"), { target: { value: "aliyun-primary" } });
+    const secretInput = within(dialog).getByLabelText("Access key secret");
+    expect(secretInput).toHaveAttribute("type", "password");
+    expect(secretInput).toHaveAttribute("autocomplete", "new-password");
+    fireEvent.change(secretInput, { target: { value: "super-secret-value" } });
+    fireEvent.change(within(dialog).getByLabelText("Safe hint"), { target: { value: "AKID…7Q" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Create credential" }));
+
+    await waitFor(() => expect(submitted).toEqual({
+      stableName: "aliyun-primary",
+      providerTypeKey: secretProvider.typeKey,
+      secret: { accessKeySecret: "super-secret-value" },
+      safeHint: "AKID…7Q",
+    }));
+    expect(document.body).not.toHaveTextContent("super-secret-value");
+    expect(document.body).not.toHaveTextContent(credential.credentialRef);
+  });
+
+  it("rotates with exact concurrency tokens and explicitly confirms terminal revocation", async () => {
+    const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
+    let current = credential;
+    renderSettings(async (path, init) => {
+      const method = init.method ?? "GET";
+      if (path === "/api/storage/provider-modules") return json([secretProvider]);
+      if (path === "/api/storage/profiles") return json([]);
+      if (path === "/api/storage/credentials" && method === "GET") return json([current]);
+      if (path === `/api/storage/credentials/${credential.id}/revisions` && method === "POST") {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        requests.push({ path, body });
+        current = { ...current, currentRevision: 4, xmin: 22, safeHint: "AKID…8R" };
+        return json(current);
+      }
+      if (path === `/api/storage/credentials/${credential.id}/revoke` && method === "POST") {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        requests.push({ path, body });
+        current = { ...current, state: "Revoked", xmin: 23, revokedDate: "2026-08-15T11:00:00Z" };
+        return json(current);
+      }
+      return json({ message: "Unexpected request" }, 500);
+    });
+
+    await screen.findByText("aliyun-primary");
+    fireEvent.click(screen.getByRole("button", { name: "Manage credential aliyun-primary" }));
+    const dialog = await screen.findByRole("dialog", { name: "Manage storage credential aliyun-primary" });
+    fireEvent.change(within(dialog).getByLabelText("Access key secret"), { target: { value: "rotated-secret" } });
+    fireEvent.change(within(dialog).getByLabelText("Safe hint"), { target: { value: "AKID…8R" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Rotate credential" }));
+    await waitFor(() => expect(requests[0]).toEqual({
+      path: `/api/storage/credentials/${credential.id}/revisions`,
+      body: { expectedXmin: 21, expectedCurrentRevision: 3, providerTypeKey: secretProvider.typeKey, secret: { accessKeySecret: "rotated-secret" }, safeHint: "AKID…8R" },
+    }));
+
+    const refreshedDialog = await screen.findByRole("dialog", { name: "Manage storage credential aliyun-primary" });
+    fireEvent.click(within(refreshedDialog).getByRole("button", { name: "Revoke credential" }));
+    const confirmation = await screen.findByRole("alertdialog", { name: "Revoke aliyun-primary?" });
+    expect(confirmation).toHaveTextContent(/terminal/i);
+    fireEvent.click(within(confirmation).getByRole("button", { name: "Revoke permanently" }));
+    await waitFor(() => expect(requests[1]).toEqual({
+      path: `/api/storage/credentials/${credential.id}/revoke`,
+      body: { expectedXmin: 22, expectedCurrentRevision: 4 },
+    }));
+  });
+
   it("lists profile state, current revision, and installed provider while preserving the provider catalog", async () => {
     renderSettings(defaultHandler({ profiles: [{ ...profile, state: "Active" }] }));
 
@@ -131,6 +236,7 @@ describe("storage profiles settings", () => {
     renderSettings(async (path, init) => {
       const method = init.method ?? "GET";
       if (path === "/api/storage/provider-modules") return json([secretProvider]);
+      if (path === "/api/storage/credentials") return json([]);
       if (path === "/api/storage/profiles" && method === "GET") return json([]);
       if (path === "/api/storage/profiles" && method === "POST") {
         const body = JSON.parse(String(init.body)) as Record<string, unknown>;
@@ -166,6 +272,7 @@ describe("storage profiles settings", () => {
     renderSettings(async (path, init) => {
       const method = init.method ?? "GET";
       if (path === "/api/storage/provider-modules") return json([localProvider]);
+      if (path === "/api/storage/credentials") return json([]);
       if (path === "/api/storage/profiles" && method === "GET") return json([profile]);
       if (path === `/api/storage/profiles/${profile.id}` && method === "GET") return json(detail);
       if (path === `/api/storage/profiles/${profile.id}/revisions` && method === "POST") {
@@ -201,6 +308,7 @@ describe("storage profiles settings", () => {
     renderSettings(async (path, init) => {
       const method = init.method ?? "GET";
       if (path === "/api/storage/provider-modules") return json([localProvider]);
+      if (path === "/api/storage/credentials") return json([]);
       if (path === "/api/storage/profiles" && method === "GET") return json([profile]);
       if (path === `/api/storage/profiles/${profile.id}` && method === "GET") return json(detailReads++ === 0 ? detail : latest);
       if (path === `/api/storage/profiles/${profile.id}/state` && method === "PUT") {
@@ -226,6 +334,7 @@ describe("storage profiles settings", () => {
     renderSettings(async (path, init) => {
       const method = init.method ?? "GET";
       if (path === "/api/storage/provider-modules") return json([localProvider]);
+      if (path === "/api/storage/credentials") return json([]);
       if (path === "/api/storage/profiles" && method === "GET") return json([{ ...profile, state: current.state, xmin: current.xmin }]);
       if (path === `/api/storage/profiles/${profile.id}` && method === "GET") return json(current);
       if (path === `/api/storage/profiles/${profile.id}/state` && method === "PUT") {
@@ -275,7 +384,7 @@ describe("storage profiles settings", () => {
     fireEvent.click(screen.getByRole("button", { name: "Manage primary" }));
     const dialog = await screen.findByRole("dialog", { name: "Manage storage profile primary" });
 
-    expect(dialog).toHaveTextContent(/Storage Credential must be created in the next control-plane slice/i);
+    expect(dialog).toHaveTextContent(/requires a Storage Credential before this profile can be activated/i);
     expect(within(dialog).getByRole("button", { name: "Set Active" })).toBeDisabled();
     expect(dialog).not.toHaveTextContent("accessKeySecret");
     expect(dialog).not.toHaveTextContent("Access key secret");
@@ -283,9 +392,46 @@ describe("storage profiles settings", () => {
     expect(dialog).not.toHaveTextContent("credentialRef");
   });
 
+  it("links a provider-matched credential by stable UI identity while keeping its opaque ref out of the DOM", async () => {
+    let revisionPayload: Record<string, unknown> | undefined;
+    const secretDetail: StorageProfileDetail = {
+      ...detail,
+      revisions: [{ ...detail.revisions[0], providerTypeKey: secretProvider.typeKey, nonSecretConfig: { bucket: "archive" }, credentialRef: null }],
+    };
+    renderSettings(async (path, init) => {
+      const method = init.method ?? "GET";
+      if (path === "/api/storage/provider-modules") return json([secretProvider]);
+      if (path === "/api/storage/credentials") return json([credential]);
+      if (path === "/api/storage/profiles" && method === "GET") return json([{ ...profile, providerTypeKey: secretProvider.typeKey }]);
+      if (path === `/api/storage/profiles/${profile.id}` && method === "GET") return json(secretDetail);
+      if (path === `/api/storage/profiles/${profile.id}/revisions` && method === "POST") {
+        revisionPayload = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return json({ ...secretDetail, currentRevision: 3, xmin: 18, revisions: [{ ...secretDetail.revisions[0], revision: 3, credentialRef: credential.credentialRef }] });
+      }
+      return json({ message: "Unexpected request" }, 500);
+    });
+
+    await screen.findByText("primary");
+    fireEvent.click(screen.getByRole("button", { name: "Manage primary" }));
+    const dialog = await screen.findByRole("dialog", { name: "Manage storage profile primary" });
+    fireEvent.change(within(dialog).getByLabelText("Storage credential"), { target: { value: credential.id } });
+    expect(document.body).not.toHaveTextContent(credential.credentialRef);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Append revision" }));
+
+    await waitFor(() => expect(revisionPayload).toEqual({
+      expectedXmin: 17,
+      expectedCurrentRevision: 2,
+      providerTypeKey: secretProvider.typeKey,
+      nonSecretConfig: { bucket: "archive" },
+      credentialRef: credential.credentialRef,
+    }));
+    expect(document.body).not.toHaveTextContent(credential.credentialRef);
+  });
+
   it("distinguishes empty profiles from profile API failures", async () => {
     const { rerender } = renderSettings((path) => {
       if (path === "/api/storage/provider-modules") return json([localProvider]);
+      if (path === "/api/storage/credentials") return json([]);
       if (path === "/api/storage/profiles") return json([]);
       return json({}, 404);
     });
@@ -295,6 +441,7 @@ describe("storage profiles settings", () => {
     vi.unstubAllGlobals();
     renderSettings((path) => {
       if (path === "/api/storage/provider-modules") return json([localProvider]);
+      if (path === "/api/storage/credentials") return json([]);
       if (path === "/api/storage/profiles") return json({ code: "storage_unavailable", message: "Profile ledger unavailable" }, 503);
       return json({}, 404);
     });

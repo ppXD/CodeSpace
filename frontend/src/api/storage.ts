@@ -10,6 +10,43 @@ export interface StorageProviderModuleSummary {
 }
 
 export type StorageProfileState = "Draft" | "Active" | "Disabled" | "Retired";
+export type StorageCredentialState = "Active" | "Revoked";
+
+/** Safe metadata only. Secret JSON, ciphertext, and envelope fingerprints never cross this boundary. */
+export interface StorageCredentialMetadata {
+  id: string;
+  stableName: string;
+  state: StorageCredentialState;
+  currentRevision: number;
+  xmin: number;
+  providerTypeKey: string;
+  safeHint?: string | null;
+  /** Opaque linkage used by profile commands; Settings must never render it. */
+  credentialRef: string;
+  createdDate: string;
+  currentRevisionCreatedDate: string;
+  revokedDate?: string | null;
+}
+
+export interface CreateStorageCredentialInput {
+  stableName: string;
+  providerTypeKey: string;
+  secret: Record<string, unknown>;
+  safeHint?: string;
+}
+
+export interface AppendStorageCredentialRevisionInput {
+  expectedXmin: number;
+  expectedCurrentRevision: number;
+  providerTypeKey: string;
+  secret: Record<string, unknown>;
+  safeHint?: string;
+}
+
+export interface RevokeStorageCredentialInput {
+  expectedXmin: number;
+  expectedCurrentRevision: number;
+}
 
 export interface StorageProfileSummary {
   id: string;
@@ -47,11 +84,11 @@ export interface StorageProfileDetail {
   revisions: StorageProfileRevisionDetail[];
 }
 
-/** This slice intentionally has no credentialRef input; newly-created profiles are always credentialless Drafts. */
 export interface CreateStorageProfileInput {
   stableName: string;
   providerTypeKey: string;
   nonSecretConfig: Record<string, unknown>;
+  credentialRef?: string;
 }
 
 export interface AppendStorageProfileRevisionInput {
@@ -71,6 +108,19 @@ export interface SetStorageProfileStateInput {
 
 export const storageApi = {
   listProviderModules: () => fetchJson<StorageProviderModuleSummary[]>("/api/storage/provider-modules"),
+  listCredentials: () => fetchJson<StorageCredentialMetadata[]>("/api/storage/credentials"),
+  createCredential: (input: CreateStorageCredentialInput) => fetchJson<StorageCredentialMetadata>("/api/storage/credentials", {
+    method: "POST",
+    body: JSON.stringify(input),
+  }),
+  appendCredentialRevision: (credentialId: string, input: AppendStorageCredentialRevisionInput) => fetchJson<StorageCredentialMetadata>(`/api/storage/credentials/${encodeURIComponent(credentialId)}/revisions`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  }),
+  revokeCredential: (credentialId: string, input: RevokeStorageCredentialInput) => fetchJson<StorageCredentialMetadata>(`/api/storage/credentials/${encodeURIComponent(credentialId)}/revoke`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  }),
   listProfiles: () => fetchJson<StorageProfileSummary[]>("/api/storage/profiles"),
   getProfile: (profileId: string) => fetchJson<StorageProfileDetail>(`/api/storage/profiles/${encodeURIComponent(profileId)}`),
   createProfile: (input: CreateStorageProfileInput) => fetchJson<StorageProfileDetail>("/api/storage/profiles", {

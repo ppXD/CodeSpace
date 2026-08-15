@@ -2,18 +2,21 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 import { ApiError } from "@/api/request";
-import type { StorageProfileDetail, StorageProfileState, StorageProfileSummary, StorageProviderModuleSummary } from "@/api/storage";
-import { useAppendStorageProfileRevision, useCreateStorageProfile, useSetStorageProfileState, useStorageProfile, useStorageProfiles, useStorageProviderModules } from "@/hooks/use-storage";
+import type { StorageCredentialMetadata, StorageProfileDetail, StorageProfileState, StorageProfileSummary, StorageProviderModuleSummary } from "@/api/storage";
+import { useAppendStorageProfileRevision, useCreateStorageProfile, useSetStorageProfileState, useStorageCredentials, useStorageProfile, useStorageProfiles, useStorageProviderModules } from "@/hooks/use-storage";
 import { SchemaForm } from "@/components/workflows/SchemaForm";
+import { StorageCredentialSettings } from "./StorageCredentialSettings";
 
 /** Settings → Storage profile control plane. Runtime ArtifactStore selection remains deployment-managed. */
 export function StorageSettings() {
   const providers = useStorageProviderModules();
+  const credentials = useStorageCredentials();
   const profiles = useStorageProfiles();
   const [createOpen, setCreateOpen] = useState(false);
   const [managedProfileId, setManagedProfileId] = useState<string | null>(null);
   const providerRows = providers.data ?? [];
   const profileRows = profiles.data ?? [];
+  const credentialRows = credentials.data ?? [];
   const providerError = errorMessage(providers.error);
   const profileError = errorMessage(profiles.error);
 
@@ -26,6 +29,8 @@ export function StorageSettings() {
           deployment-managed until qualification and cutover are complete.
         </div>
       </div>
+
+      <StorageCredentialSettings providers={providerRows} />
 
       <section aria-labelledby="storage-profiles-title" style={{ margin: 16 }}>
         <div className="cn-listhead">
@@ -84,8 +89,8 @@ export function StorageSettings() {
         )}
       </section>
 
-      {createOpen && <CreateStorageProfileDialog providers={providerRows} onClose={() => setCreateOpen(false)} />}
-      {managedProfileId && <ManageStorageProfileDialog profileId={managedProfileId} providers={providerRows} onClose={() => setManagedProfileId(null)} />}
+      {createOpen && <CreateStorageProfileDialog providers={providerRows} credentials={credentialRows} onClose={() => setCreateOpen(false)} />}
+      {managedProfileId && <ManageStorageProfileDialog profileId={managedProfileId} providers={providerRows} credentials={credentialRows} onClose={() => setManagedProfileId(null)} />}
     </div>
   );
 }
@@ -137,12 +142,13 @@ function StorageProviderRow({ provider }: { provider: StorageProviderModuleSumma
   );
 }
 
-function CreateStorageProfileDialog({ providers, onClose }: { providers: StorageProviderModuleSummary[]; onClose: () => void }) {
+function CreateStorageProfileDialog({ providers, credentials, onClose }: { providers: StorageProviderModuleSummary[]; credentials: StorageCredentialMetadata[]; onClose: () => void }) {
   const [providerTypeKey, setProviderTypeKey] = useState(providers[0]?.typeKey ?? "");
   const [stableName, setStableName] = useState("");
   const selectedProvider = providers.find((provider) => provider.typeKey === providerTypeKey);
   const [config, setConfig] = useState<Record<string, unknown>>(() => defaultsFromSchema(selectedProvider?.configSchema));
   const [formError, setFormError] = useState<string | null>(null);
+  const [credentialRef, setCredentialRef] = useState("");
   const create = useCreateStorageProfile();
   const normalizedName = stableName.trim().toLowerCase();
   const stableNameValid = /^[a-z0-9][a-z0-9-]{0,127}$/.test(normalizedName);
@@ -153,13 +159,14 @@ function CreateStorageProfileDialog({ providers, onClose }: { providers: Storage
     const provider = providers.find((candidate) => candidate.typeKey === typeKey);
     setProviderTypeKey(typeKey);
     setConfig(defaultsFromSchema(provider?.configSchema));
+    setCredentialRef("");
     setFormError(null);
   };
 
   const submit = () => {
     if (!selectedProvider || !stableNameValid || !configValid || create.isPending) return;
     setFormError(null);
-    create.mutate({ stableName: normalizedName, providerTypeKey, nonSecretConfig: cleanConfig(config) }, {
+    create.mutate({ stableName: normalizedName, providerTypeKey, nonSecretConfig: cleanConfig(config), ...(credentialRef ? { credentialRef } : {}) }, {
       onSuccess: onClose,
       onError: (error) => setFormError(errorMessage(error) ?? "Couldn't create the storage profile."),
     });
@@ -190,9 +197,11 @@ function CreateStorageProfileDialog({ providers, onClose }: { providers: Storage
 
           {requiresCredential && (
             <CredentialNotice>
-              This provider requires a Storage Credential. A Storage Credential must be created in the next control-plane slice before this Draft can be activated.
+              This provider requires a Storage Credential before activation. You may link an active credential now or keep the new profile in Draft.
             </CredentialNotice>
           )}
+
+          {selectedProvider && providerHasSecretInputs(selectedProvider) && <CredentialSelector providerTypeKey={providerTypeKey} credentials={credentials} value={credentialRef} onChange={setCredentialRef} />}
 
           {formError && <div className="cn-banner cn-banner-err" role="alert"><div className="cn-banner-p">{formError}</div></div>}
         </div>
@@ -205,7 +214,7 @@ function CreateStorageProfileDialog({ providers, onClose }: { providers: Storage
   );
 }
 
-function ManageStorageProfileDialog({ profileId, providers, onClose }: { profileId: string; providers: StorageProviderModuleSummary[]; onClose: () => void }) {
+function ManageStorageProfileDialog({ profileId, providers, credentials, onClose }: { profileId: string; providers: StorageProviderModuleSummary[]; credentials: StorageCredentialMetadata[]; onClose: () => void }) {
   const profile = useStorageProfile(profileId);
   const [actionError, setActionError] = useState<string | null>(null);
   const label = profile.data?.stableName ?? "storage profile";
@@ -222,7 +231,7 @@ function ManageStorageProfileDialog({ profileId, providers, onClose }: { profile
         )}
         {actionError && <div className="cn-banner cn-banner-err" role="alert"><div className="cn-banner-p">{actionError}</div></div>}
         {profile.data && (
-          <StorageProfileEditor key={`${profile.data.xmin}:${profile.data.currentRevision}:${profile.data.state}`} detail={profile.data} providers={providers} onActionError={setActionError} />
+          <StorageProfileEditor key={`${profile.data.xmin}:${profile.data.currentRevision}:${profile.data.state}`} detail={profile.data} providers={providers} credentials={credentials} onActionError={setActionError} />
         )}
       </div>
       <div className="mdl-foot">
@@ -233,21 +242,22 @@ function ManageStorageProfileDialog({ profileId, providers, onClose }: { profile
   );
 }
 
-function StorageProfileEditor({ detail, providers, onActionError }: { detail: StorageProfileDetail; providers: StorageProviderModuleSummary[]; onActionError: (message: string | null) => void }) {
+function StorageProfileEditor({ detail, providers, credentials, onActionError }: { detail: StorageProfileDetail; providers: StorageProviderModuleSummary[]; credentials: StorageCredentialMetadata[]; onActionError: (message: string | null) => void }) {
   const appendRevision = useAppendStorageProfileRevision();
   const setState = useSetStorageProfileState();
   const currentRevision = detail.revisions.find((revision) => revision.revision === detail.currentRevision);
   const [providerTypeKey, setProviderTypeKey] = useState(currentRevision?.providerTypeKey ?? "");
   const [config, setConfig] = useState<Record<string, unknown>>(() => currentRevision?.nonSecretConfig ?? {});
+  const [credentialRef, setCredentialRef] = useState(() => typeof currentRevision?.credentialRef === "string" ? currentRevision.credentialRef : "");
   const [confirmRetire, setConfirmRetire] = useState(false);
   const selectedProvider = providers.find((provider) => provider.typeKey === providerTypeKey);
   const currentProvider = providers.find((provider) => provider.typeKey === currentRevision?.providerTypeKey);
   const currentCredentialRef = typeof currentRevision?.credentialRef === "string" && currentRevision.credentialRef !== "" ? currentRevision.credentialRef : undefined;
-  const preservedCredentialRef = providerTypeKey === currentRevision?.providerTypeKey ? currentCredentialRef : undefined;
+  const selectedCredentialRef = credentialRef || undefined;
   const currentNeedsCredential = currentProvider == null || providerRequiresCredential(currentProvider);
   const selectedNeedsCredential = selectedProvider != null && providerRequiresCredential(selectedProvider);
   const activationBlocked = currentProvider == null || (currentNeedsCredential && currentCredentialRef == null);
-  const activeRevisionWouldLoseCredential = detail.state === "Active" && selectedNeedsCredential && preservedCredentialRef == null;
+  const activeRevisionWouldLoseCredential = detail.state === "Active" && selectedNeedsCredential && selectedCredentialRef == null;
   const configValid = selectedProvider != null && requiredValuesPresent(selectedProvider.configSchema, config);
   const pending = appendRevision.isPending || setState.isPending;
   const retired = detail.state === "Retired";
@@ -260,6 +270,7 @@ function StorageProfileEditor({ detail, providers, onActionError }: { detail: St
     const provider = providers.find((candidate) => candidate.typeKey === typeKey);
     setProviderTypeKey(typeKey);
     setConfig(typeKey === currentRevision.providerTypeKey ? currentRevision.nonSecretConfig : defaultsFromSchema(provider?.configSchema));
+    setCredentialRef(typeKey === currentRevision.providerTypeKey ? currentCredentialRef ?? "" : "");
     onActionError(null);
   };
 
@@ -273,7 +284,7 @@ function StorageProfileEditor({ detail, providers, onActionError }: { detail: St
         expectedCurrentRevision: detail.currentRevision,
         providerTypeKey,
         nonSecretConfig: cleanConfig(config),
-        ...(preservedCredentialRef ? { credentialRef: preservedCredentialRef } : {}),
+        ...(selectedCredentialRef ? { credentialRef: selectedCredentialRef } : {}),
       },
     }, {
       onError: (error) => onActionError(mutationErrorMessage(error, "Couldn't append the storage profile revision.")),
@@ -305,7 +316,7 @@ function StorageProfileEditor({ detail, providers, onActionError }: { detail: St
 
       {currentProvider && providerRequiresCredential(currentProvider) && currentCredentialRef == null && (
         <CredentialNotice>
-          This provider requires a Storage Credential. A Storage Credential must be created in the next control-plane slice before this profile can be activated.
+          This provider requires a Storage Credential before this profile can be activated.
         </CredentialNotice>
       )}
 
@@ -330,8 +341,10 @@ function StorageProfileEditor({ detail, providers, onActionError }: { detail: St
           </div>
         )}
 
-        {selectedNeedsCredential && preservedCredentialRef == null && (
-          <CredentialNotice>This revision will not contain credentials. Credential selection is intentionally deferred to the next control-plane slice.</CredentialNotice>
+        {selectedProvider && providerHasSecretInputs(selectedProvider) && <CredentialSelector providerTypeKey={providerTypeKey} credentials={credentials} value={credentialRef} onChange={setCredentialRef} />}
+
+        {selectedNeedsCredential && selectedCredentialRef == null && (
+          <CredentialNotice>This revision will not contain credentials and cannot be activated.</CredentialNotice>
         )}
 
         {activeRevisionWouldLoseCredential && <div className="wf-form-help wf-form-help-err">Disable the profile before appending a credentialless revision.</div>}
@@ -396,6 +409,32 @@ function ModalFrame({ label, title, subtitle, onClose, children }: { label: stri
 
 function CredentialNotice({ children }: { children: ReactNode }) {
   return <div className="cn-banner" style={{ marginTop: 12 }}><div className="cn-banner-h">Credential boundary</div><div className="cn-banner-p">{children}</div></div>;
+}
+
+function CredentialSelector({ providerTypeKey, credentials, value, onChange }: { providerTypeKey: string; credentials: StorageCredentialMetadata[]; value: string; onChange: (credentialRef: string) => void }) {
+  const eligible = credentials.filter((credential) => credential.state === "Active" && credential.providerTypeKey === providerTypeKey);
+  const current = eligible.find((credential) => credential.credentialRef === value);
+  const selected = current?.id ?? (value ? "__pinned__" : "");
+  return (
+    <div className="wf-form-row">
+      <label className="wf-form-label" htmlFor="storage-profile-credential">Storage credential</label>
+      <select
+        id="storage-profile-credential"
+        className="wf-form-input"
+        value={selected}
+        onChange={(event) => {
+          if (event.target.value === "") { onChange(""); return; }
+          if (event.target.value === "__pinned__") return;
+          onChange(eligible.find((credential) => credential.id === event.target.value)?.credentialRef ?? "");
+        }}
+      >
+        <option value="">— none —</option>
+        {value && !current && <option value="__pinned__">Current linked credential (pinned revision)</option>}
+        {eligible.map((credential) => <option key={credential.id} value={credential.id}>{credential.stableName} · revision {credential.currentRevision}{credential.safeHint ? ` · ${credential.safeHint}` : ""}</option>)}
+      </select>
+      {eligible.length === 0 && <span className="wf-form-help">No active credential matches this provider.</span>}
+    </div>
+  );
 }
 
 function ErrorBanner({ title, message }: { title: string; message: string }) {

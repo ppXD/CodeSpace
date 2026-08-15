@@ -2,9 +2,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { ApiError } from "@/api/request";
 import { storageApi } from "@/api/storage";
-import type { AppendStorageProfileRevisionInput, CreateStorageProfileInput, SetStorageProfileStateInput } from "@/api/storage";
+import type { AppendStorageCredentialRevisionInput, AppendStorageProfileRevisionInput, CreateStorageCredentialInput, CreateStorageProfileInput, RevokeStorageCredentialInput, SetStorageProfileStateInput, StorageCredentialMetadata } from "@/api/storage";
 
 export const STORAGE_PROVIDER_MODULES_KEY = ["storage", "provider-modules"] as const;
+export const STORAGE_CREDENTIALS_KEY = ["storage", "credentials"] as const;
 export const STORAGE_PROFILES_KEY = ["storage", "profiles"] as const;
 export const storageProfileKey = (profileId: string) => ["storage", "profiles", profileId] as const;
 
@@ -19,6 +20,38 @@ export function useStorageProviderModules() {
 
 export function useStorageProfiles() {
   return useQuery({ queryKey: STORAGE_PROFILES_KEY, queryFn: () => storageApi.listProfiles() });
+}
+
+export function useStorageCredentials() {
+  return useQuery({ queryKey: STORAGE_CREDENTIALS_KEY, queryFn: () => storageApi.listCredentials() });
+}
+
+export function useCreateStorageCredential() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: CreateStorageCredentialInput) => storageApi.createCredential(input),
+    gcTime: 0,
+    onSuccess: (created) => upsertCredential(queryClient, created),
+  });
+}
+
+export function useAppendStorageCredentialRevision() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ credentialId, input }: { credentialId: string; input: AppendStorageCredentialRevisionInput }) => storageApi.appendCredentialRevision(credentialId, input),
+    gcTime: 0,
+    onSuccess: (updated) => upsertCredential(queryClient, updated),
+    onError: (error) => refreshCredentialsAfterConflict(queryClient, error),
+  });
+}
+
+export function useRevokeStorageCredential() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ credentialId, input }: { credentialId: string; input: RevokeStorageCredentialInput }) => storageApi.revokeCredential(credentialId, input),
+    onSuccess: (updated) => upsertCredential(queryClient, updated),
+    onError: (error) => refreshCredentialsAfterConflict(queryClient, error),
+  });
 }
 
 export function useStorageProfile(profileId: string | null) {
@@ -70,4 +103,13 @@ function refreshAfterConflict(queryClient: ReturnType<typeof useQueryClient>, er
     queryClient.invalidateQueries({ queryKey: STORAGE_PROFILES_KEY, exact: true }),
     queryClient.invalidateQueries({ queryKey: storageProfileKey(profileId), exact: true }),
   ]);
+}
+
+function upsertCredential(queryClient: ReturnType<typeof useQueryClient>, updated: StorageCredentialMetadata) {
+  queryClient.setQueryData<StorageCredentialMetadata[]>(STORAGE_CREDENTIALS_KEY, (current = []) => [...current.filter((value) => value.id !== updated.id), updated].sort((a, b) => a.stableName.localeCompare(b.stableName)));
+}
+
+function refreshCredentialsAfterConflict(queryClient: ReturnType<typeof useQueryClient>, error: unknown) {
+  if (!(error instanceof ApiError) || error.status !== 409) return;
+  return queryClient.invalidateQueries({ queryKey: STORAGE_CREDENTIALS_KEY, exact: true });
 }
