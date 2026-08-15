@@ -3,7 +3,7 @@ import { Outlet, useLocation, useNavigate, useParams } from "@tanstack/react-rou
 /**
  * Team Settings shell — owns the "Settings" header + the section tab strip; each section renders its body via
  * <Outlet/> (the app's `ct` + `.ct-tabs` rhythm, like the repo-detail / agent-detail shells). Team-scoped
- * configuration lives here (model credentials today; git providers next) so the primary sidebar stays focused
+ * configuration lives here (model credentials, Git providers, and storage) so the primary sidebar stays focused
  * on the work objects. Kept in its own file (not the route) so the route module exports only its `Route`.
  */
 export function SettingsLayout() {
@@ -14,6 +14,7 @@ export function SettingsLayout() {
   const tabs = [
     { key: "model-credentials", label: "Model credentials", to: "/teams/$teamSlug/settings/model-credentials" },
     { key: "providers", label: "Providers", to: "/teams/$teamSlug/settings/providers" },
+    { key: "storage", label: "Storage", to: "/teams/$teamSlug/settings/storage" },
   ] as const;
 
   const active = tabs.find(t => pathname.includes(`/settings/${t.key}`))?.key ?? tabs[0].key;
