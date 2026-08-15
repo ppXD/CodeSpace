@@ -74,6 +74,10 @@ services:
       # Stated explicitly rather than inheriting appsettings.json's committed dev key — a Production-labelled pod
       # silently signing tokens with a source-controlled key is exactly the footgun this line makes visible.
       Authentication__Jwt__SymmetricKey: "${CODESPACE_JWT_SYMMETRIC_KEY:-local-dev-only-jwt-key-minimum-32-chars-long}"
+    volumes:
+      # Artifact metadata lives in Postgres, but offloaded bytes must be visible to both roles. An image-layer path
+      # has the same spelling in each container while still being a different filesystem, and disappears on recreate.
+      - codespace-artifacts:/var/lib/codespace/artifacts
 
   # WORKER = THE LOCAL SANDBOX RUNNER — the Hangfire PROCESSING pod (HangfireHosting=Worker, which is also the
   # default when the key is absent). Agent runs + the per-run MCP endpoint execute HERE; the harness CLI is spawned as a confined child
@@ -120,6 +124,9 @@ services:
       CODESPACE_MCP_PROXY_PATH: "${CODESPACE_MCP_PROXY_PATH:-}"
       # Prod (userns-capable pod) arms the fail-closed isolation guard; left off for local dev (see comment above).
       # Sandbox__RequireConfinement: "true"
+    volumes:
+      - codespace-artifacts:/var/lib/codespace/artifacts
 
 volumes:
   codespace-pgdata:
+  codespace-artifacts:

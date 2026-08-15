@@ -43,6 +43,18 @@ echo "==> health probe: worker"
 wait_ready "$WORKER" "worker"
 [ "$(curl -fsS -o /dev/null -w '%{http_code}' "$API/health/live" 2>/dev/null)" = "200" ] || fail "/health/live not 200 (anonymous liveness)"
 
+# A matching path string is not shared storage. Prove the actual production topology invariant through the running
+# roles: bytes created by the worker must be immediately readable by the API, and the named volume survives each
+# container's independent filesystem lifecycle. This catches the split-brain that leaves durable DB metadata pointing
+# at a blob that only ever existed inside one worker image layer.
+echo "==> artifact root is physically shared between worker and API"
+ARTIFACT_PROBE="cross-role-$(date +%s)-$$"
+$COMPOSE exec -T worker sh -c "printf '%s' '$ARTIFACT_PROBE' > /var/lib/codespace/artifacts/.cross-role-probe" || fail "worker could not write artifact probe"
+READBACK="$($COMPOSE exec -T api sh -c 'cat /var/lib/codespace/artifacts/.cross-role-probe')" || fail "API could not read worker artifact probe"
+[ "$READBACK" = "$ARTIFACT_PROBE" ] || fail "artifact probe readback mismatch"
+$COMPOSE exec -T api rm -f /var/lib/codespace/artifacts/.cross-role-probe || fail "API could not clean artifact probe"
+echo "    worker write → API read succeeded on the shared artifact volume"
+
 # The API image carries no agent-EXECUTION machinery. git is the ONE sanctioned exception, documented in
 # Dockerfile.api's header (S1): TaskLaunchService resolves a launch's immutable base vector synchronously via
 # `git ls-remote` (RemoteTipResolver) — read-only, no clone, no working tree. This check forbade it anyway and had
