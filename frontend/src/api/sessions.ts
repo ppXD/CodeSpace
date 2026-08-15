@@ -329,6 +329,7 @@ export interface RoomFilePreview {
   truncated: boolean;
   sourceUrl?: string | null;
   note?: string | null;
+  unavailableReason?: "NotInChangeSet" | "MetadataMissing" | "PhysicalObjectMissing" | "IntegrityFailure" | "BackendUnavailable" | "AccessDenied" | "ReconstructionUnavailable" | null;
 }
 
 /// One session as a backend-authored transcript. Mirrors backend `RoomView`.

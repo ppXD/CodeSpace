@@ -1,10 +1,10 @@
-using System.IO;
 using System.Text;
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Workflows.Artifacts;
+using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Sessions.Room;
 using CodeSpace.Messages.Enums;
@@ -44,13 +44,15 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
         var sourceUrl = await DeliveryUrlAsync(runId, cancellationToken).ConfigureAwait(false);
 
         var patchRef = await LocateFilePatchAsync(runId, teamId, target, agentRunId, cancellationToken).ConfigureAwait(false);
-        if (patchRef is null) return Unavailable(target, sourceUrl, "This file isn't part of the turn's change set.");
+        if (patchRef is null) return Unavailable(target, sourceUrl, RoomFileUnavailableReason.NotInChangeSet, "This file isn't part of the turn's change set.");
 
         var patch = await ResolvePatchAsync(teamId, patchRef.Value, cancellationToken).ConfigureAwait(false);
-        if (patch is null) return Unavailable(target, sourceUrl, "This file's saved content has expired from the store — open it in the pull request.");
+        if (patch is PatchResolution.Unavailable unavailable)
+            return Unavailable(target, sourceUrl, Reason(unavailable.Kind), StorageNote(unavailable.Kind, sourceUrl != null));
 
-        var view = UnifiedPatchReader.Read(patch, target);
-        if (view is null) return Unavailable(target, sourceUrl, "This file's change is too large to reconstruct for an inline preview — open it in the pull request.");
+        var view = UnifiedPatchReader.Read(((PatchResolution.Found)patch).Text, target);
+        if (view is null)
+            return Unavailable(target, sourceUrl, RoomFileUnavailableReason.ReconstructionUnavailable, WithSourceFallback("This file's saved change cannot be reconstructed for a safe inline preview.", sourceUrl != null));
 
         return Project(view, sourceUrl);
     }
@@ -94,17 +96,23 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
     }
 
     /// <summary>
-    /// Resolve the captured patch text (inline, or the offloaded blob). A purged / unresolvable offloaded artifact — its
-    /// blob was reaped from the store while the durable metadata row lives on (the classic dev case: the store is a temp
-    /// dir the OS cleaned) — yields null so the caller returns a graceful "expired" preview instead of a 500. Narrow by
-    /// design: <see cref="IOException"/> covers the missing blob file / purged shard dir, <see cref="InvalidOperationException"/>
-    /// the artifact layer's url-validation / neither-inline-nor-url guards; a real programming bug (or a cancellation)
-    /// still surfaces.
+    /// Resolve the captured patch text (inline, or the offloaded blob) into a typed availability fact. Storage metadata,
+    /// missing bytes, corruption, authorization and transient backend failures remain distinct; none is normal "expiry".
+    /// Cancellation and programming faults still surface.
     /// </summary>
-    private async Task<string?> ResolvePatchAsync(Guid teamId, PatchRef patchRef, CancellationToken cancellationToken)
+    private async Task<PatchResolution> ResolvePatchAsync(Guid teamId, PatchRef patchRef, CancellationToken cancellationToken)
     {
-        try { return await _offloader.ResolveAsync(teamId, patchRef.Inline, patchRef.ArtifactId, cancellationToken).ConfigureAwait(false); }
-        catch (Exception ex) when (ex is IOException or InvalidOperationException) { return null; }
+        if (string.IsNullOrEmpty(patchRef.Inline) && patchRef.ArtifactId is null)
+            return new PatchResolution.Unavailable(ArtifactContentUnavailableKind.MetadataMissing);
+
+        try
+        {
+            return new PatchResolution.Found(await _offloader.ResolveRequiredAsync(teamId, patchRef.Inline, patchRef.ArtifactId, cancellationToken).ConfigureAwait(false));
+        }
+        catch (ArtifactContentUnavailableException exception)
+        {
+            return new PatchResolution.Unavailable(exception.Kind);
+        }
     }
 
     /// <summary>The patch reference (inline text or offloaded id) of the result's repo that changed <paramref name="path"/> — per-repo first, then the single-repo top level.</summary>
@@ -122,7 +130,7 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
     private RoomFilePreview Project(PatchFileView view, string? sourceUrl)
     {
         if (view.IsBinary)
-            return new RoomFilePreview { Path = view.Path, Kind = "binary", ChangeKind = view.Change.ToString(), SourceUrl = sourceUrl, Note = "Binary file — inline preview isn't available. Open it in the pull request." };
+            return new RoomFilePreview { Path = view.Path, Kind = "binary", ChangeKind = view.Change.ToString(), SourceUrl = sourceUrl, Note = WithSourceFallback("Binary file — inline preview isn't available.", sourceUrl != null) };
 
         var isContent = view.Change == PatchFileChange.Added && view.PostImage != null;
         var (text, size, truncated) = Cap(isContent ? view.PostImage! : view.DiffText);
@@ -136,7 +144,7 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
             SizeBytes = size,
             Truncated = truncated,
             SourceUrl = sourceUrl,
-            Note = truncated ? "Preview truncated — download or open in the pull request for the full file." : null,
+            Note = truncated ? WithSourceFallback("Preview truncated.", sourceUrl != null) : null,
         };
     }
 
@@ -151,8 +159,28 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
         return (capped, bytes, capped.Length < body.Length);
     }
 
-    private static RoomFilePreview Unavailable(string path, string? sourceUrl, string note) =>
-        new() { Path = path, Kind = "unavailable", SourceUrl = sourceUrl, Note = note };
+    private static RoomFilePreview Unavailable(string path, string? sourceUrl, RoomFileUnavailableReason reason, string note) =>
+        new() { Path = path, Kind = "unavailable", SourceUrl = sourceUrl, Note = note, UnavailableReason = reason };
+
+    private static RoomFileUnavailableReason Reason(ArtifactContentUnavailableKind kind) => kind switch
+    {
+        ArtifactContentUnavailableKind.MetadataMissing => RoomFileUnavailableReason.MetadataMissing,
+        ArtifactContentUnavailableKind.PhysicalObjectMissing => RoomFileUnavailableReason.PhysicalObjectMissing,
+        ArtifactContentUnavailableKind.IntegrityFailure => RoomFileUnavailableReason.IntegrityFailure,
+        ArtifactContentUnavailableKind.AccessDenied => RoomFileUnavailableReason.AccessDenied,
+        _ => RoomFileUnavailableReason.BackendUnavailable,
+    };
+
+    private static string StorageNote(ArtifactContentUnavailableKind kind, bool hasSource) => WithSourceFallback(kind switch
+    {
+        ArtifactContentUnavailableKind.MetadataMissing => "The saved patch metadata is unavailable.",
+        ArtifactContentUnavailableKind.PhysicalObjectMissing => "The saved patch's stored bytes are missing from the configured artifact backend.",
+        ArtifactContentUnavailableKind.IntegrityFailure => "The saved patch failed integrity verification and cannot be opened safely.",
+        ArtifactContentUnavailableKind.AccessDenied => "The configured artifact backend denied access to the saved patch.",
+        _ => "The configured artifact backend is temporarily unavailable.",
+    }, hasSource);
+
+    private static string WithSourceFallback(string note, bool hasSource) => hasSource ? note + " Open the delivered pull request to view the file." : note;
 
     /// <summary>The turn's delivered PR url (the fallback link for a binary / unavailable file), or null when it opened none.</summary>
     private async Task<string?> DeliveryUrlAsync(Guid runId, CancellationToken cancellationToken)
@@ -166,4 +194,11 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
     }
 
     private readonly record struct PatchRef(string? Inline, Guid? ArtifactId);
+
+    private abstract record PatchResolution
+    {
+        private PatchResolution() { }
+        public sealed record Found(string Text) : PatchResolution;
+        public sealed record Unavailable(ArtifactContentUnavailableKind Kind) : PatchResolution;
+    }
 }
