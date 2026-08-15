@@ -25,4 +25,12 @@ public interface IArtifactBlobBackend
 
     /// <summary>Resolve a <paramref name="storageUrl"/> this backend produced back to its bytes.</summary>
     Task<byte[]> ReadAsync(string storageUrl, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Read at most <paramref name="length"/> bytes without materializing the whole blob. This compatibility seam is
+    /// used only by bounded UI/read projections while the versioned provider driver plane is rolled out.
+    /// </summary>
+    Task<ArtifactBlobRange> ReadRangeAsync(string storageUrl, long offset, int length, CancellationToken cancellationToken);
 }
+
+public sealed record ArtifactBlobRange(byte[] Bytes, long TotalLength);

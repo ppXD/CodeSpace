@@ -86,6 +86,22 @@ public class WorkflowRunsController : ControllerBase
         return result == null ? NotFound() : Ok(result);
     }
 
+    /// <summary>Metadata-only view of one model call owned by this Workflow Run. Prompt/output bytes are fetched through the bounded part route below.</summary>
+    [HttpGet("{runId:guid}/model-calls/{sequence:long}")]
+    public async Task<IActionResult> GetModelCall([FromRoute] Guid runId, [FromRoute] long sequence, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetWorkflowRunModelCallQuery { RunId = runId, Sequence = sequence }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
+    /// <summary>One bounded UTF-8 page of a Workflow Run model-call part. Unavailable parts return a typed state without poisoning the other parts.</summary>
+    [HttpGet("{runId:guid}/model-calls/{sequence:long}/parts/{part}")]
+    public async Task<IActionResult> GetModelCallPart([FromRoute] Guid runId, [FromRoute] long sequence, [FromRoute] CodeSpace.Messages.Dtos.Workflows.ModelCalls.WorkflowRunModelCallPart part, [FromQuery] GetWorkflowRunModelCallPartQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query with { RunId = runId, Sequence = sequence, Part = part }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
     /// <summary>The work-session thread this run belongs to, as a conversation anchored at the run's turn — for the run-detail → session view. Any run in the thread (a turn or a rerun attempt) resolves to the same thread. Team-scoped; session-less / foreign / absent → 404.</summary>
     [HttpGet("{runId:guid}/session")]
     public async Task<IActionResult> GetSession([FromRoute] Guid runId, CancellationToken cancellationToken)

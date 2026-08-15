@@ -16,7 +16,7 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts;
 /// <c>storage_url</c> reference. Either way the metadata row (sha, size, content type, tenant) is the durable
 /// source of truth.
 /// </summary>
-public sealed class ArtifactStore : IArtifactStore, IScopedDependency
+public sealed class ArtifactStore : IArtifactStore, IArtifactRangeReader, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
     private readonly IArtifactBlobBackend _blobs;
@@ -146,6 +146,89 @@ public sealed class ArtifactStore : IArtifactStore, IScopedDependency
 
         return row;
     }
+
+    public async Task<ArtifactRangeReadResult> ReadRangeAsync(Guid teamId, Guid artifactId, long offset, int length, CancellationToken cancellationToken)
+    {
+        if (offset < 0 || length <= 0)
+            return ArtifactRangeReadResult.Failed(ArtifactRangeReadState.InvalidOffset);
+
+        var row = await _db.WorkflowArtifact.AsNoTracking()
+            .Where(a => a.Id == artifactId && a.TeamId == teamId)
+            .Select(a => new { a.Sha256, a.ContentType, a.SizeBytes, a.InlineBytes, a.StorageUrl })
+            .SingleOrDefaultAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        if (row is null) return ArtifactRangeReadResult.Failed(ArtifactRangeReadState.MetadataMissing);
+        if (offset > row.SizeBytes)
+            return ArtifactRangeReadResult.Failed(ArtifactRangeReadState.InvalidOffset, row.SizeBytes, row.Sha256, row.ContentType);
+
+        try
+        {
+            byte[] bytes;
+            long observedLength;
+            if (row.InlineBytes is { } inline)
+            {
+                observedLength = inline.LongLength;
+                if (observedLength != row.SizeBytes)
+                    return ArtifactRangeReadResult.Failed(ArtifactRangeReadState.IntegrityFailure, observedLength, row.Sha256, row.ContentType);
+                if (offset > observedLength)
+                    return ArtifactRangeReadResult.Failed(ArtifactRangeReadState.InvalidOffset, observedLength, row.Sha256, row.ContentType);
+
+                var count = (int)Math.Min(length, observedLength - offset);
+                bytes = inline.AsSpan((int)offset, count).ToArray();
+            }
+            else
+            {
+                var range = await _blobs.ReadRangeAsync(row.StorageUrl ?? throw new InvalidOperationException("Artifact storage locator is missing."), offset, length, cancellationToken).ConfigureAwait(false);
+                bytes = range.Bytes;
+                observedLength = range.TotalLength;
+            }
+
+            if (observedLength != row.SizeBytes)
+                return ArtifactRangeReadResult.Failed(ArtifactRangeReadState.IntegrityFailure, observedLength, row.Sha256, row.ContentType);
+
+            var fullObject = offset == 0 && bytes.LongLength == observedLength;
+            if (fullObject && !string.Equals(ComputeSha256Hex(bytes), row.Sha256, StringComparison.Ordinal))
+                return ArtifactRangeReadResult.Failed(ArtifactRangeReadState.IntegrityFailure, observedLength, row.Sha256, row.ContentType);
+
+            return ArtifactRangeReadResult.Available(bytes, observedLength, row.Sha256, row.ContentType, fullObject);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (FileNotFoundException)
+        {
+            return Unavailable(ArtifactRangeReadState.PhysicalObjectMissing, row.SizeBytes, row.Sha256, row.ContentType);
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return Unavailable(ArtifactRangeReadState.PhysicalObjectMissing, row.SizeBytes, row.Sha256, row.ContentType);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return Unavailable(ArtifactRangeReadState.AccessDenied, row.SizeBytes, row.Sha256, row.ContentType);
+        }
+        catch (InvalidOperationException)
+        {
+            return Unavailable(ArtifactRangeReadState.IntegrityFailure, row.SizeBytes, row.Sha256, row.ContentType);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return Unavailable(ArtifactRangeReadState.IntegrityFailure, row.SizeBytes, row.Sha256, row.ContentType);
+        }
+        catch (EndOfStreamException)
+        {
+            return Unavailable(ArtifactRangeReadState.IntegrityFailure, row.SizeBytes, row.Sha256, row.ContentType);
+        }
+        catch (IOException)
+        {
+            return Unavailable(ArtifactRangeReadState.BackendUnavailable, row.SizeBytes, row.Sha256, row.ContentType);
+        }
+    }
+
+    private static ArtifactRangeReadResult Unavailable(ArtifactRangeReadState state, long totalLength, string sha256, string contentType) =>
+        ArtifactRangeReadResult.Failed(state, totalLength, sha256, contentType);
 
     /// <summary>
     /// SHA-256 of <paramref name="bytes"/> as hex-lowercase. Deterministic, no salt — the
