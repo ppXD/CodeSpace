@@ -1,4 +1,5 @@
 using CodeSpace.Core.Services.Agents.Workspace;
+using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Messages.Agents;
 using Microsoft.Extensions.Logging;
 
@@ -176,7 +177,7 @@ public sealed partial class RealSupervisorActionExecutor
                 Label = producer.AgentRunId?.ToString() ?? producer.Id.ToString(),
                 SourceRepositoryId = repositoryId,
                 BaseSha = producer.BaseSha,
-                Patch = await _offloader.ResolveAsync(context.TeamId, "", producer.PatchArtifactId, cancellationToken).ConfigureAwait(false),
+                Patch = await _offloader.ResolveRequiredAsync(context.TeamId, "", producer.PatchArtifactId, cancellationToken).ConfigureAwait(false),
                 ProducedBranch = producer.Branch,
             });
 

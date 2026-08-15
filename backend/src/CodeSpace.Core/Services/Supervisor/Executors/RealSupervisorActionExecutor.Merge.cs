@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Messages.Agents;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -148,7 +149,7 @@ public sealed partial class RealSupervisorActionExecutor
 
         foreach (var repo in result.RepositoryResults)
         {
-            var patch = await _offloader.ResolveAsync(teamId, repo.Patch, repo.PatchArtifactId, cancellationToken).ConfigureAwait(false);
+            var patch = await _offloader.ResolveRequiredAsync(teamId, repo.Patch, repo.PatchArtifactId, cancellationToken).ConfigureAwait(false);
 
             resolved.Add(repo with { Patch = patch, PatchArtifactId = null });
         }
@@ -160,7 +161,7 @@ public sealed partial class RealSupervisorActionExecutor
     private Task<string> ResolvePatchAsync(AgentRunResult? result, Guid teamId, CancellationToken cancellationToken) =>
         result == null
             ? Task.FromResult("")
-            : _offloader.ResolveAsync(teamId, result.Patch, result.PatchArtifactId, cancellationToken);
+            : _offloader.ResolveRequiredAsync(teamId, result.Patch, result.PatchArtifactId, cancellationToken);
 
     /// <summary>One merged agent's full work products — the typed holder the merged-array projection AND the SOTA #3 integrate step both read (so the gate-OFF array stays byte-identical while the integrate step gets baseSha + the resolved patch). Internal scratch, not a persisted noun.</summary>
     private sealed class MergedAgent

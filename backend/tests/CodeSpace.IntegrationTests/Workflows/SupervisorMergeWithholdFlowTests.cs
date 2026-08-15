@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Decisions;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Arbiter;
+using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
@@ -86,6 +87,29 @@ public sealed class SupervisorMergeWithholdFlowTests
             .ShouldBe(2, "no per-unit verdicts → every unit folds, exactly as before the slice");
     }
 
+    [Fact]
+    public async Task A_missing_required_patch_fails_closed_and_terminalizes_the_merge_decision()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var agentRunId = Guid.NewGuid();
+        var missingArtifactId = Guid.NewGuid();
+
+        await SeedSpawnAsync(runId, teamId, sequence: 1, Unit(agentRunId, "codespace/agent/missing", null));
+        await SeedAgentRunAsync(agentRunId, teamId, runId, "codespace/agent/missing", missingArtifactId);
+
+        var ex = await Should.ThrowAsync<ArtifactContentUnavailableException>(() => RunMergeTurnAsync(runId, teamId));
+        ex.Kind.ShouldBe(ArtifactContentUnavailableKind.MetadataMissing);
+        ex.ArtifactId.ShouldBe(missingArtifactId);
+
+        using var verify = _fixture.BeginScope();
+        var decision = await verify.Resolve<CodeSpaceDbContext>().SupervisorDecisionRecord.AsNoTracking()
+            .SingleAsync(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.Merge);
+        decision.Status.ShouldBe(SupervisorDecisionStatus.Failed, "the merge cannot remain Running and crash again forever");
+        decision.Error.ShouldContain(missingArtifactId.ToString());
+        decision.Error.ShouldNotContain("/var/", customMessage: "host filesystem paths are never the operator-facing failure contract");
+    }
+
     // ─── Helpers ───
 
     private static SupervisorAgentResult Unit(Guid agentRunId, string producedBranch, bool? acceptancePassed) =>
@@ -137,14 +161,14 @@ public sealed class SupervisorMergeWithholdFlowTests
         await db.SaveChangesAsync();
     }
 
-    private async Task SeedAgentRunAsync(Guid agentRunId, Guid teamId, Guid runId, string producedBranch)
+    private async Task SeedAgentRunAsync(Guid agentRunId, Guid teamId, Guid runId, string producedBranch, Guid? patchArtifactId = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         var resultJson = JsonSerializer.Serialize(new AgentRunResult
         {
             Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = "did it",
-            ChangedFiles = new[] { "a.cs" }, ProducedBranch = producedBranch,
+            ChangedFiles = new[] { "a.cs" }, ProducedBranch = producedBranch, PatchArtifactId = patchArtifactId,
         }, AgentJson.Options);
 
         db.AgentRun.Add(new AgentRun
