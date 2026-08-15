@@ -5,6 +5,7 @@ using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Lifecycle;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Constants;
+using Microsoft.Extensions.Time.Testing;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Workflows.Llm;
@@ -215,31 +216,30 @@ public class RecordingLLMClientDecoratorTests
         // The events flow through verbatim — the decorator is a live tee, not a buffer.
         events.OfType<LlmStreamEvent.TextDelta>().Select(d => d.Text).ShouldBe(new[] { "hello ", "there" });
 
-        // AND the same interaction triple the buffered path records lands, with the FOLDED text + usage on completed.
-        logger.Calls.Select(c => c.RecordType).ShouldBe(new[] { WorkflowRunRecordTypes.InteractionStarted, WorkflowRunRecordTypes.InteractionCompleted });
-        logger.Calls[0].CorrelationId.ShouldBe(logger.Calls[1].CorrelationId);
+        // AND the same authoritative pair the buffered path records brackets one bounded progressive projection.
+        logger.Calls.Select(c => c.RecordType).ShouldBe(new[] { WorkflowRunRecordTypes.InteractionStarted, WorkflowRunRecordTypes.InteractionDelta, WorkflowRunRecordTypes.InteractionCompleted });
+        logger.Calls.ShouldAllBe(c => c.CorrelationId == logger.Calls[0].CorrelationId);
         logger.Calls[0].Payload.GetProperty("prompt").GetProperty("user").GetString().ShouldBe("USR");
 
-        var completed = logger.Calls[1].Payload;
+        var completed = logger.Calls[^1].Payload;
         completed.GetProperty("output").GetString().ShouldBe("hello there", "the streamed deltas fold into the recorded completion text");
         completed.GetProperty("usage").GetProperty("inputTokens").GetInt32().ShouldBe(5);
         completed.GetProperty("usage").GetProperty("outputTokens").GetInt32().ShouldBe(3);
         completed.GetProperty("usage").GetProperty("finishReason").GetString().ShouldBe("stop");
 
-        logger.Calls.ShouldNotContain(c => c.RecordType == WorkflowRunRecordTypes.InteractionDelta,
-            "a small streamed output (under the coalescing threshold) rides entirely in completed — no delta noise");
+        logger.Calls[1].Payload.GetProperty("text").GetString().ShouldBe("hello there", "even a fast stream has one exact progressive projection; completed remains authoritative");
     }
 
     [Fact]
-    public async Task A_large_streamed_output_records_COALESCED_interaction_delta_rows_between_started_and_completed()
+    public async Task A_200_KiB_stream_has_a_bounded_delta_write_count_exact_order_and_a_complete_authoritative_output()
     {
-        // Many small text fragments coalesce into a FEW interaction.delta rows (bounded by DeltaFlushChars) — NOT one
-        // row per token — so a huge stream can't flood the ledger. The deltas are ordered (monotonic ordinal from 0),
-        // correlated to started/completed by one id, and their concatenation is a prefix of the authoritative completed text.
-        const int flush = RecordingStreamingStructuredLLMClientDecorator.DeltaFlushChars;
-        var parts = Enumerable.Repeat("x", flush * 2 + 50).ToList();   // 2*flush+50 single-char fragments → exactly 2 full flushes + a sub-threshold tail
+        // 200 KiB used to produce 800 synchronous delta-ledger transactions at the 256-char threshold. The byte-sized
+        // bound makes that ceil(200/32)=7, including the final tail, while completed remains the whole-output authority.
+        const int totalBytes = 200 * 1024;
+        var text = new string('x', totalBytes);
+        var parts = Enumerable.Repeat(new string('x', 256), totalBytes / 256).ToList();
         var logger = new CapturingLogger();
-        var decorator = new RecordingStreamingStructuredLLMClientDecorator(new StreamingFakeClient { TextParts = parts });
+        var decorator = new RecordingStreamingStructuredLLMClientDecorator(new StreamingFakeClient { TextParts = parts }, new FakeTimeProvider());
 
         using (PushScope(logger))
         {
@@ -250,14 +250,53 @@ public class RecordingLLMClientDecoratorTests
         logger.Calls[^1].RecordType.ShouldBe(WorkflowRunRecordTypes.InteractionCompleted);
 
         var deltas = logger.Calls.Where(c => c.RecordType == WorkflowRunRecordTypes.InteractionDelta).ToList();
-        deltas.Count.ShouldBe(2, "2*flush+50 chars coalesce into exactly 2 full-threshold deltas (the sub-threshold tail rides in completed) — far fewer than the ~500 fragments");
-        deltas.Select(d => d.Payload.GetProperty("ordinal").GetInt32()).ShouldBe(new[] { 0, 1 }, "delta ordinals are monotonic from 0");
+        deltas.Count.ShouldBeLessThanOrEqualTo(7, "200 KiB is at most seven 32-KiB progressive writes, not ~800 256-char transactions");
+        deltas.Select(d => d.Payload.GetProperty("ordinal").GetInt32()).ShouldBe(Enumerable.Range(0, deltas.Count), "delta ordinals are monotonic from 0");
         deltas.ShouldAllBe(d => d.CorrelationId == logger.Calls[0].CorrelationId, "every delta shares the started/completed correlation id");
 
         var streamedText = string.Concat(deltas.Select(d => d.Payload.GetProperty("text").GetString()));
-        streamedText.Length.ShouldBe(flush * 2, "the deltas carry the coalesced text up to the last full flush");
-        // the completed output is the full authoritative text; the deltas are a prefix VIEW of it
-        logger.Calls[^1].Payload.GetProperty("output").GetString()!.ShouldStartWith(streamedText);
+        streamedText.ShouldBe(text, "coalescing neither duplicates nor loses provider text");
+        logger.Calls[^1].Payload.GetProperty("output").GetString().ShouldBe(text, "completed is still the canonical full output; deltas are only its progressive projection");
+    }
+
+    [Fact]
+    public async Task A_slow_sub_threshold_stream_flushes_its_live_projection_within_one_fake_second()
+    {
+        var time = new FakeTimeProvider();
+        var inner = new SlowStreamingClient();
+        var logger = new CapturingLogger();
+        var decorator = new RecordingStreamingStructuredLLMClientDecorator(inner, time);
+
+        Task consume;
+        using (PushScope(logger))
+        {
+            consume = ConsumeAsync(decorator, CancellationToken.None);
+            await inner.WaitingAfterFirstDelta.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+            logger.Calls.ShouldNotContain(c => c.RecordType == WorkflowRunRecordTypes.InteractionDelta, "the 4-byte fragment is below the size bound before the live timer fires");
+            time.Advance(RecordingStreamingStructuredLLMClientDecorator.DeltaFlushInterval);
+            await logger.DeltaRecorded.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+            logger.Calls.Single(c => c.RecordType == WorkflowRunRecordTypes.InteractionDelta).Payload.GetProperty("text").GetString().ShouldBe("slow");
+            inner.Release.TrySetResult();
+            await consume;
+        }
+    }
+
+    [Fact]
+    public async Task A_stream_capture_failure_never_changes_or_faults_the_provider_stream()
+    {
+        var logger = new CapturingLogger { ThrowOnRecord = true };
+        var decorator = new RecordingStreamingStructuredLLMClientDecorator(new StreamingFakeClient());
+        var events = new List<LlmStreamEvent>();
+
+        using (PushScope(logger))
+        {
+            await foreach (var e in decorator.StreamAsync(new LLMCompletionRequest { Model = "m", SystemPrompt = "s", UserPrompt = "u" }, CancellationToken.None))
+                events.Add(e);
+        }
+
+        events.OfType<LlmStreamEvent.TextDelta>().Select(d => d.Text).ShouldBe(new[] { "hello ", "there" }, "ledger/offload capture is a fail-open side channel, never the provider stream");
     }
 
     [Fact]
@@ -278,16 +317,69 @@ public class RecordingLLMClientDecoratorTests
         var logger = new CapturingLogger();
         var decorator = new RecordingStreamingStructuredLLMClientDecorator(inner);
 
+        InvalidOperationException thrown;
         using (PushScope(logger))
         {
-            await Should.ThrowAsync<InvalidOperationException>(async () =>
+            thrown = await Should.ThrowAsync<InvalidOperationException>(async () =>
             {
                 await foreach (var _ in decorator.StreamAsync(new LLMCompletionRequest { Model = "m", SystemPrompt = "s", UserPrompt = "u" }, CancellationToken.None)) { }
             });
         }
 
+        thrown.ShouldBeSameAs(inner.ThrowWith, "recording must not wrap or swallow the provider's typed exception");
         logger.Calls.Select(c => c.RecordType).ShouldBe(new[] { WorkflowRunRecordTypes.InteractionStarted, WorkflowRunRecordTypes.InteractionFailed });
         logger.Calls[1].Payload.GetProperty("error").GetString().ShouldBe("stream boom");
+        logger.Calls[1].Payload.GetProperty("failureKind").GetString().ShouldBe("exception");
+    }
+
+    [Fact]
+    public async Task A_mid_stream_provider_fault_keeps_its_typed_category_and_rethrows_verbatim()
+    {
+        var fault = new LlmApiException("streaming", 429, LlmErrorCategory.RateLimited, "slow down");
+        var inner = new StreamingFakeClient { ThrowAfter = 1, ThrowWith = fault };
+        var logger = new CapturingLogger();
+        var decorator = new RecordingStreamingStructuredLLMClientDecorator(inner);
+
+        LlmApiException thrown;
+        using (PushScope(logger))
+        {
+            thrown = await Should.ThrowAsync<LlmApiException>(async () =>
+            {
+                await foreach (var _ in decorator.StreamAsync(new LLMCompletionRequest { Model = "m", SystemPrompt = "s", UserPrompt = "u" }, CancellationToken.None)) { }
+            });
+        }
+
+        thrown.ShouldBeSameAs(fault);
+        logger.Calls[^1].RecordType.ShouldBe(WorkflowRunRecordTypes.InteractionFailed);
+        logger.Calls[^1].Payload.GetProperty("failureKind").GetString().ShouldBe("provider");
+        logger.Calls[^1].Payload.GetProperty("category").GetString().ShouldBe(nameof(LlmErrorCategory.RateLimited));
+    }
+
+    [Fact]
+    public async Task A_cancelled_stream_records_a_typed_failed_terminal_and_rethrows_cancellation()
+    {
+        var inner = new SlowStreamingClient();
+        var logger = new CapturingLogger();
+        var decorator = new RecordingStreamingStructuredLLMClientDecorator(inner, new FakeTimeProvider());
+        using var cancellation = new CancellationTokenSource();
+
+        Task consume;
+        using (PushScope(logger))
+        {
+            consume = ConsumeAsync(decorator, cancellation.Token);
+            await inner.WaitingAfterFirstDelta.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            cancellation.Cancel();
+            await Should.ThrowAsync<OperationCanceledException>(() => consume);
+        }
+
+        logger.Calls[^1].RecordType.ShouldBe(WorkflowRunRecordTypes.InteractionFailed);
+        logger.Calls[^1].Payload.GetProperty("failureKind").GetString().ShouldBe("cancelled");
+        logger.Calls.ShouldNotContain(c => c.RecordType == WorkflowRunRecordTypes.InteractionCompleted);
+    }
+
+    private static async Task ConsumeAsync(IStreamingLLMClient client, CancellationToken cancellationToken)
+    {
+        await foreach (var _ in client.StreamAsync(new LLMCompletionRequest { Model = "m", SystemPrompt = "s", UserPrompt = "u" }, cancellationToken)) { }
     }
 
     // ── Fakes ──────────────────────────────────────────────────────────────
@@ -346,6 +438,23 @@ public class RecordingLLMClientDecoratorTests
         }
     }
 
+    private sealed class SlowStreamingClient : ILLMClient, IStructuredLLMClient, IStreamingLLMClient
+    {
+        public TaskCompletionSource WaitingAfterFirstDelta { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public string Provider => "streaming";
+        public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken ct) => Task.FromResult(new LLMCompletion { Text = "slow", Model = "m" });
+        public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken ct) => Task.FromResult(new StructuredLLMCompletion { Json = JsonDocument.Parse("{}").RootElement, Model = "m" });
+
+        public async IAsyncEnumerable<LlmStreamEvent> StreamAsync(LLMCompletionRequest request, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        {
+            yield return new LlmStreamEvent.TextDelta("slow");
+            WaitingAfterFirstDelta.TrySetResult();
+            await Release.Task.WaitAsync(ct);
+            yield return new LlmStreamEvent.Meta(Model: "m", OutputTokens: 1, FinishReason: "stop");
+        }
+    }
+
     private sealed class NoopOffloader : IArtifactOffloader
     {
         public Task<OffloadedText> OffloadIfLargeAsync(Guid teamId, string? text, string contentType, CancellationToken ct) => Task.FromResult(new OffloadedText(text ?? "", null));
@@ -365,12 +474,14 @@ public class RecordingLLMClientDecoratorTests
     private sealed class CapturingLogger : IRunRecordLogger
     {
         public List<Captured> Calls { get; } = new();
+        public TaskCompletionSource DeltaRecorded { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public bool ThrowOnRecord { get; set; }
 
         public Task<Guid> RecordInteractionAsync(Guid runId, string recordType, string? nodeId, string iterationKey, Guid correlationId, Guid? parentRecordId, JsonElement payload, CancellationToken cancellationToken)
         {
             if (ThrowOnRecord) throw new InvalidOperationException("ledger down");
             Calls.Add(new Captured(runId, recordType, nodeId, iterationKey, correlationId, payload.Clone()));
+            if (recordType == WorkflowRunRecordTypes.InteractionDelta) DeltaRecorded.TrySetResult();
             return Task.FromResult(Guid.NewGuid());
         }
 

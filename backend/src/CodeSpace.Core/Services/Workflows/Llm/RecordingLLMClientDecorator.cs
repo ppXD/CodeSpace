@@ -103,7 +103,14 @@ public class RecordingLLMClientDecorator : ILLMClient
     protected static JsonElement FailedPayload(LlmCallScope scope, string provider, Exception ex)
     {
         var category = ex is LlmApiException llm ? llm.Category.ToString() : null;
-        return JsonSerializer.SerializeToElement(new { kind = scope.Kind, provider, error = ex.Message, category });
+        var failureKind = ex switch
+        {
+            OperationCanceledException => "cancelled",
+            LlmApiException => "provider",
+            _ => "exception",
+        };
+
+        return JsonSerializer.SerializeToElement(new { kind = scope.Kind, provider, error = ex.Message, category, failureKind });
     }
 
     /// <summary>A plain-text field (a prompt / a text completion): the inline string when small, else a content-addressed <c>$artifact_id</c> ref. Null/empty rides as-is.</summary>
