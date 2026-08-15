@@ -43,6 +43,23 @@ public sealed class RealModelRunClassifierTests
         RealModelRunClassifier.IsGatewayInfra(run).ShouldBeTrue("a time-budget termination is infra, not a code fault");
     }
 
+    [Theory]
+    [InlineData(AgentRunStatus.Succeeded, "", true)]
+    [InlineData(AgentRunStatus.NeedsReview, "needs-review", true)]
+    [InlineData(AgentRunStatus.NeedsReview, "output-flagged", false)]
+    [InlineData(AgentRunStatus.NeedsReview, "stalled", false)]
+    [InlineData(AgentRunStatus.NeedsReview, "needs-decision", false)]
+    [InlineData(AgentRunStatus.Failed, "non-zero-exit", false)]
+    [InlineData(AgentRunStatus.Cancelled, "cancelled", false)]
+    [InlineData(AgentRunStatus.TimedOut, "timed-out", false)]
+    [InlineData(AgentRunStatus.Running, "", false)]
+    public void Only_output_bearing_terminal_runs_are_inspectable_by_behavioral_gates(AgentRunStatus status, string exitReason, bool expected)
+    {
+        var run = new AgentRun { Status = status, ResultJson = $"{{\"exitReason\":\"{exitReason}\"}}" };
+
+        RealModelRunClassifier.HasInspectableModelReply(run).ShouldBe(expected);
+    }
+
     [Fact]
     public void ExitReasonOf_reads_the_reason_from_result_json_and_is_empty_when_absent()
     {
