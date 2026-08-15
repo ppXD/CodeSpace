@@ -172,6 +172,7 @@ public sealed class WorkflowRunModelCallProjectorTests
 
     private async Task<RunWorld> SeedRunAsync()
     {
+        await DrainExistingBacklogAsync();
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         Guid workflowId;
         using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
@@ -186,6 +187,19 @@ public sealed class WorkflowRunModelCallProjectorTests
         }
 
         return new RunWorld(await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId), teamId);
+    }
+
+    private async Task DrainExistingBacklogAsync()
+    {
+        // The real projector is intentionally global. Other integration classes exercise the explicit legacy-fallback
+        // reader by leaving valid terminal records unprojected, so this class must establish its own empty-backlog
+        // precondition before asserting exact global sweep counts. Never delete append-only facts or depend on test order.
+        for (var iteration = 0; iteration < 100; iteration++)
+        {
+            if ((await SweepAsync(1000)).TotalChanges == 0) return;
+        }
+
+        throw new InvalidOperationException("The model-call projection backlog did not drain within 100 bounded sweeps.");
     }
 
     private static WorkflowRunRecord Record(Guid runId, string recordType, Guid correlationId, string payloadJson, DateTimeOffset? occurredAt = null) => new()
