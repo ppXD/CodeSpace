@@ -54,11 +54,18 @@ export function StorageSettings() {
         )}
 
         {!profiles.isLoading && !profileError && profileRows.length > 0 && (
-          <div className="cn-list" role="list" aria-label="Storage profiles">
-            {profileRows.map((profile) => (
-              <StorageProfileRow key={profile.id} profile={profile} provider={providerRows.find((provider) => provider.typeKey === profile.providerTypeKey)} onManage={() => setManagedProfileId(profile.id)} />
-            ))}
-          </div>
+          <>
+            <div className="cn-list" role="list" aria-label="Storage profiles">
+              {profileRows.map((profile) => (
+                <StorageProfileRow key={profile.id} profile={profile} provider={providerRows.find((provider) => provider.typeKey === profile.providerTypeKey)} onManage={() => setManagedProfileId(profile.id)} />
+              ))}
+            </div>
+            {profiles.hasNextPage && (
+              <button type="button" className="btn" disabled={profiles.isFetchingNextPage} onClick={() => profiles.fetchNextPage()}>
+                {profiles.isFetchingNextPage ? "Loading more profiles…" : "Load more profiles"}
+              </button>
+            )}
+          </>
         )}
       </section>
 

@@ -12,6 +12,11 @@ export interface StorageProviderModuleSummary {
 export type StorageProfileState = "Draft" | "Active" | "Disabled" | "Retired";
 export type StorageCredentialState = "Active" | "Revoked";
 
+export interface StoragePage<T> {
+  items: T[];
+  nextCursor: string | null;
+}
+
 /** Safe metadata only. Secret JSON, ciphertext, and envelope fingerprints never cross this boundary. */
 export interface StorageCredentialMetadata {
   id: string;
@@ -109,6 +114,11 @@ export interface SetStorageProfileStateInput {
 export const storageApi = {
   listProviderModules: () => fetchJson<StorageProviderModuleSummary[]>("/api/storage/provider-modules"),
   listCredentials: () => fetchJson<StorageCredentialMetadata[]>("/api/storage/credentials"),
+  listCredentialPage: (cursor: string | null, limit = 50, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (cursor) query.set("cursor", cursor);
+    return fetchJson<StoragePage<StorageCredentialMetadata>>(`/api/storage/credentials/page?${query}`, { signal });
+  },
   createCredential: (input: CreateStorageCredentialInput) => fetchJson<StorageCredentialMetadata>("/api/storage/credentials", {
     method: "POST",
     body: JSON.stringify(input),
@@ -122,6 +132,11 @@ export const storageApi = {
     body: JSON.stringify(input),
   }),
   listProfiles: () => fetchJson<StorageProfileSummary[]>("/api/storage/profiles"),
+  listProfilePage: (cursor: string | null, limit = 50, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (cursor) query.set("cursor", cursor);
+    return fetchJson<StoragePage<StorageProfileSummary>>(`/api/storage/profiles/page?${query}`, { signal });
+  },
   getProfile: (profileId: string) => fetchJson<StorageProfileDetail>(`/api/storage/profiles/${encodeURIComponent(profileId)}`),
   createProfile: (input: CreateStorageProfileInput) => fetchJson<StorageProfileDetail>("/api/storage/profiles", {
     method: "POST",
