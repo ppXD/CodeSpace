@@ -1,0 +1,58 @@
+using CodeSpace.Core.Services.Identity;
+using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
+using CodeSpace.Messages.Commands.Storage;
+using CodeSpace.Messages.Dtos.Storage;
+using MediatR;
+
+namespace CodeSpace.Core.Handlers.CommandHandlers.Storage;
+
+public sealed class CreateStorageProfileCommandHandler : IRequestHandler<CreateStorageProfileCommand, StorageProfileDetail>
+{
+    private readonly IStorageProfileService _service;
+    private readonly ICurrentTeam _currentTeam;
+    private readonly ICurrentUser _currentUser;
+
+    public CreateStorageProfileCommandHandler(IStorageProfileService service, ICurrentTeam currentTeam, ICurrentUser currentUser)
+    {
+        _service = service;
+        _currentTeam = currentTeam;
+        _currentUser = currentUser;
+    }
+
+    public async Task<StorageProfileDetail> Handle(CreateStorageProfileCommand request, CancellationToken cancellationToken) =>
+        await _service.CreateAsync(_currentTeam.Id!.Value, _currentUser.Id!.Value, request, cancellationToken).ConfigureAwait(false);
+}
+
+public sealed class AppendStorageProfileRevisionCommandHandler : IRequestHandler<AppendStorageProfileRevisionCommand, StorageProfileDetail?>
+{
+    private readonly IStorageProfileService _service;
+    private readonly ICurrentTeam _currentTeam;
+    private readonly ICurrentUser _currentUser;
+
+    public AppendStorageProfileRevisionCommandHandler(IStorageProfileService service, ICurrentTeam currentTeam, ICurrentUser currentUser)
+    {
+        _service = service;
+        _currentTeam = currentTeam;
+        _currentUser = currentUser;
+    }
+
+    public async Task<StorageProfileDetail?> Handle(AppendStorageProfileRevisionCommand request, CancellationToken cancellationToken) =>
+        await _service.AppendRevisionAsync(_currentTeam.Id!.Value, _currentUser.Id!.Value, request, cancellationToken).ConfigureAwait(false);
+}
+
+public sealed class SetStorageProfileStateCommandHandler : IRequestHandler<SetStorageProfileStateCommand, StorageProfileDetail?>
+{
+    private readonly IStorageProfileService _service;
+    private readonly ICurrentTeam _currentTeam;
+    private readonly ICurrentUser _currentUser;
+
+    public SetStorageProfileStateCommandHandler(IStorageProfileService service, ICurrentTeam currentTeam, ICurrentUser currentUser)
+    {
+        _service = service;
+        _currentTeam = currentTeam;
+        _currentUser = currentUser;
+    }
+
+    public async Task<StorageProfileDetail?> Handle(SetStorageProfileStateCommand request, CancellationToken cancellationToken) =>
+        await _service.SetStateAsync(_currentTeam.Id!.Value, _currentUser.Id!.Value, request, cancellationToken).ConfigureAwait(false);
+}

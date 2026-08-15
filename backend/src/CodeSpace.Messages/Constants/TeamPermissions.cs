@@ -34,6 +34,7 @@ public static class TeamPermissions
 
     public const string ReposManage = "repos.manage";
     public const string CredentialsManage = "credentials.manage";
+    public const string StorageManage = "storage.manage";
     public const string ModelsManage = "models.manage";
     public const string MembersManage = "members.manage";
     public const string TeamManage = "team.manage";

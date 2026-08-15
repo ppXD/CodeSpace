@@ -34,6 +34,7 @@ public static class TeamPermissionMatrix
         [TeamPermissions.CredentialsUse] = TeamRole.Member,
         [TeamPermissions.ReposManage] = TeamRole.Admin,
         [TeamPermissions.CredentialsManage] = TeamRole.Admin,
+        [TeamPermissions.StorageManage] = TeamRole.Admin,
         [TeamPermissions.ModelsManage] = TeamRole.Admin,
         [TeamPermissions.MembersManage] = TeamRole.Admin,
         [TeamPermissions.TeamManage] = TeamRole.Owner
