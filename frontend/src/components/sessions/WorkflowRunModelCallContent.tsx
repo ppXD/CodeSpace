@@ -20,6 +20,7 @@ import { formatTokens } from "@/components/workflows/runActivity";
 export type WorkflowRunModelCallTab = "result" | "prompt" | "usage" | "trace";
 
 const MODEL_CALL_PAGE_BYTES = 64 * 1024;
+const MAX_VISIBLE_MODEL_CALL_PAGES = 8;
 const MODEL_CALL_METADATA_STALE_MS = 30_000;
 const MODEL_CALL_METADATA_GC_MS = 60_000;
 
@@ -35,8 +36,11 @@ interface LocalPageState {
   loading: boolean;
   loadingMore: boolean;
   missing: boolean;
+  droppedEarlier: boolean;
   error: Error | null;
 }
+
+const emptyPageState = (key: string, loading: boolean): LocalPageState => ({ key, pages: [], loading, loadingMore: false, missing: false, droppedEarlier: false, error: null });
 
 function retryModelCallRead(failureCount: number, error: Error): boolean {
   return error instanceof ApiError && [429, 502, 503, 504].includes(error.status) && failureCount < 2;
@@ -64,27 +68,31 @@ async function readPage(read: BoundedRead, offsetBytes: number, signal: AbortSig
   }
 }
 
-/** Body bytes live only for this mounted drawer section; React Query never receives or duplicates them. */
+/** Body bytes live only for this mounted drawer section; React Query never receives them and the visible window stays at or below 512 KiB. */
 function useLocalBoundedPages(read: BoundedRead | null) {
   const key = boundedReadKey(read);
   const generation = useRef(0);
   const controller = useRef<AbortController | null>(null);
-  const [state, setState] = useState<LocalPageState>({ key: "", pages: [], loading: true, loadingMore: false, missing: false, error: null });
+  const [state, setState] = useState<LocalPageState>(() => emptyPageState("", true));
 
   useEffect(() => {
     const currentGeneration = ++generation.current;
     controller.current?.abort();
-    if (read == null) return;
+    if (read == null) {
+      setState(emptyPageState(key, false));
+      return;
+    }
 
     const nextController = new AbortController();
     let active = true;
     controller.current = nextController;
+    setState(emptyPageState(key, true));
     void readPage(read, 0, nextController.signal).then((page) => {
       if (!active || generation.current !== currentGeneration) return;
-      setState({ key, pages: page == null ? [] : [page], loading: false, loadingMore: false, missing: page == null, error: null });
+      setState({ ...emptyPageState(key, false), pages: page == null ? [] : [page], missing: page == null });
     }).catch((error: unknown) => {
       if (nextController.signal.aborted || generation.current !== currentGeneration) return;
-      setState({ key, pages: [], loading: false, loadingMore: false, missing: false, error: error instanceof Error ? error : new Error("Model-call body read failed.") });
+      setState({ ...emptyPageState(key, false), error: error instanceof Error ? error : new Error("Model-call body read failed.") });
     });
 
     return () => {
@@ -93,7 +101,7 @@ function useLocalBoundedPages(read: BoundedRead | null) {
     };
   }, [key, read]);
 
-  const visible = state.key === key ? state : { key, pages: [], loading: read != null, loadingMore: false, missing: false, error: null };
+  const visible = state.key === key ? state : emptyPageState(key, read != null);
   const nextOffset = visible.pages.at(-1)?.availability === "Available" ? visible.pages.at(-1)?.nextOffsetBytes ?? null : null;
 
   const loadMore = useCallback(async () => {
@@ -106,9 +114,12 @@ function useLocalBoundedPages(read: BoundedRead | null) {
     try {
       const page = await readPage(read, nextOffset, nextController.signal);
       if (nextController.signal.aborted || generation.current !== currentGeneration) return;
-      setState((current) => current.key === key
-        ? { ...current, pages: page == null ? current.pages : [...current.pages, page], loadingMore: false, missing: page == null, error: null }
-        : current);
+      setState((current) => {
+        if (current.key !== key) return current;
+        const appended = page == null ? current.pages : [...current.pages, page];
+        const overflow = appended.length > MAX_VISIBLE_MODEL_CALL_PAGES;
+        return { ...current, pages: overflow ? appended.slice(-MAX_VISIBLE_MODEL_CALL_PAGES) : appended, loadingMore: false, missing: page == null, droppedEarlier: current.droppedEarlier || overflow, error: null };
+      });
     } catch (error) {
       if (nextController.signal.aborted || generation.current !== currentGeneration) return;
       setState((current) => current.key === key
@@ -117,7 +128,24 @@ function useLocalBoundedPages(read: BoundedRead | null) {
     }
   }, [key, nextOffset, read, visible.loadingMore]);
 
-  return { ...visible, hasNextPage: nextOffset != null, loadMore };
+  const startOver = useCallback(async () => {
+    if (read == null || visible.loading) return;
+    const currentGeneration = ++generation.current;
+    controller.current?.abort();
+    const nextController = new AbortController();
+    controller.current = nextController;
+    setState(emptyPageState(key, true));
+    try {
+      const page = await readPage(read, 0, nextController.signal);
+      if (nextController.signal.aborted || generation.current !== currentGeneration) return;
+      setState({ ...emptyPageState(key, false), pages: page == null ? [] : [page], missing: page == null });
+    } catch (error) {
+      if (nextController.signal.aborted || generation.current !== currentGeneration) return;
+      setState({ ...emptyPageState(key, false), error: error instanceof Error ? error : new Error("Model-call body read failed.") });
+    }
+  }, [key, read, visible.loading]);
+
+  return { ...visible, hasNextPage: nextOffset != null, loadMore, startOver };
 }
 
 function availabilityLabel(availability: WorkflowRunModelCallPartAvailability): string {
@@ -167,12 +195,22 @@ function BoundedBodyView({ pages, heading, emptyLabel }: { pages: ReturnType<typ
 
   const first = pages.pages[0];
   if (first.availability !== "Available") return <>{heading && <div className="room-mcpart-title">{heading}</div>}<ReadState availability={first.availability} message={first.message} completeness={"captureCompleteness" in first ? first.captureCompleteness : undefined} /></>;
-  const text = pages.pages.filter((page) => page.availability === "Available").map((page) => page.text ?? "").join("");
   const unavailable = pages.pages.find((page) => page.availability !== "Available");
+  const available = pages.pages.filter((page) => page.availability === "Available");
+  const hasText = available.some((page) => (page.text?.length ?? 0) > 0);
+  const startOffset = available[0]?.offsetBytes ?? 0;
+  const finalPage = available.at(-1);
+  const endOffset = finalPage == null ? 0 : finalPage.offsetBytes + finalPage.returnedBytes;
+  const totalBytes = available.find((page) => page.totalBytes != null)?.totalBytes ?? null;
   return (
     <>
       {heading && <div className="room-mcpart-title">{heading}</div>}
-      {text ? <pre className="room-mcpre">{text}</pre> : <p className="room-para room-muted">No {emptyLabel} recorded for this call.</p>}
+      <div className="room-mcwindow">
+        <span>Showing bytes {startOffset.toLocaleString()}–{endOffset.toLocaleString()}{totalBytes == null ? "" : ` of ${totalBytes.toLocaleString()}`}</span>
+        {pages.droppedEarlier && <button type="button" disabled={pages.loading || pages.loadingMore} onClick={() => void pages.startOver()}>Start over</button>}
+      </div>
+      {pages.droppedEarlier && <p className="room-mcwindow-note">Earlier bytes were removed from this view to keep the DOM and memory bounded.</p>}
+      {hasText ? <pre className="room-mcpre">{available.map((page) => <span className="room-mcchunk" key={page.offsetBytes}>{page.text ?? ""}</span>)}</pre> : <p className="room-para room-muted">No {emptyLabel} recorded for this call.</p>}
       {unavailable && <ReadState availability={unavailable.availability} message={unavailable.message} completeness={"captureCompleteness" in unavailable ? unavailable.captureCompleteness : undefined} />}
       {pages.missing && <ReadState availability="MetadataMissing" message="The next body page is unavailable." />}
       {pages.error && <p className="room-para room-muted">Couldn't load the next body page. {pages.error instanceof ApiError ? `(${pages.error.code})` : ""}</p>}
