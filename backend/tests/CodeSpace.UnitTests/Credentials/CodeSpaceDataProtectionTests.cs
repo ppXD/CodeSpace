@@ -25,6 +25,12 @@ public class CodeSpaceDataProtectionTests
     }
 
     [Fact]
+    public void Credential_protector_purpose_is_pinned_renaming_it_orphans_every_encrypted_payload()
+    {
+        DataProtectionPayloadEncryptor.ProtectorPurpose.ShouldBe("CodeSpace.Credentials.v1");
+    }
+
+    [Fact]
     public void AddCodeSpaceDataProtection_stamps_the_stable_application_discriminator()
     {
         var services = new ServiceCollection();

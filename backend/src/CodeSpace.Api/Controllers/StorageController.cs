@@ -5,7 +5,7 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace CodeSpace.Api.Controllers;
 
-/// <summary>Authenticated, team-scoped discovery surfaces for storage configuration.</summary>
+/// <summary>Authenticated, team-scoped storage discovery and admin control-plane surfaces.</summary>
 [ApiController]
 [Route("api/storage")]
 public class StorageController : ControllerBase
@@ -57,6 +57,43 @@ public class StorageController : ControllerBase
     public async Task<IActionResult> SetProfileState([FromRoute] Guid profileId, [FromBody] SetStorageProfileStateCommand command, CancellationToken cancellationToken)
     {
         var result = await _mediator.Send(command with { ProfileId = profileId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
+    [HttpGet("credentials")]
+    public async Task<IActionResult> ListCredentials(CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new ListStorageCredentialsQuery(), cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    [HttpGet("credentials/{credentialId:guid}")]
+    public async Task<IActionResult> GetCredential([FromRoute] Guid credentialId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetStorageCredentialQuery { CredentialId = credentialId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
+    [HttpPost("credentials")]
+    public async Task<IActionResult> CreateCredential([FromBody] CreateStorageCredentialCommand command, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    [HttpPost("credentials/{credentialId:guid}/revisions")]
+    public async Task<IActionResult> AppendCredentialRevision([FromRoute] Guid credentialId, [FromBody] AppendStorageCredentialRevisionCommand command, CancellationToken cancellationToken)
+    {
+        command.CredentialId = credentialId;
+        var result = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
+    [HttpPost("credentials/{credentialId:guid}/revoke")]
+    public async Task<IActionResult> RevokeCredential([FromRoute] Guid credentialId, [FromBody] RevokeStorageCredentialCommand command, CancellationToken cancellationToken)
+    {
+        command.CredentialId = credentialId;
+        var result = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
         return result == null ? NotFound() : Ok(result);
     }
 }

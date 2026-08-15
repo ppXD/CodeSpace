@@ -70,6 +70,8 @@ public class FailureTaxonomyTests
         FailureCodes.RerunBlockedUnsupportedNode.ShouldBe("rerun_blocked_unsupported_node");
         FailureCodes.RerunUpstreamNotReusable.ShouldBe("rerun_upstream_not_reusable");
         FailureCodes.PackImportFailed.ShouldBe("pack_import_failed");
+        FailureCodes.StorageCredentialInvalid.ShouldBe("storage_credential_invalid");
+        FailureCodes.StorageCredentialConflict.ShouldBe("storage_credential_conflict");
         FailureCodes.StorageProfileInvalid.ShouldBe("storage_profile_invalid");
         FailureCodes.StorageProfileConflict.ShouldBe("storage_profile_conflict");
         FailureCodes.InvitationNotUsable.ShouldBe("invitation_not_usable");
