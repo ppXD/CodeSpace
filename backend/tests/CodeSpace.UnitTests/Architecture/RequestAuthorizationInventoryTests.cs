@@ -56,6 +56,7 @@ public class RequestAuthorizationInventoryTests
         ["FireDueScheduleTriggersCommand"] = "sweep",
         ["ProbeStaleModelAvailabilityCommand"] = "sweep",
         ["ProbeUnknownModelCapabilitiesCommand"] = "sweep",
+        ["ProjectWorkflowRunModelCallsCommand"] = "projects terminal workflow-run interaction evidence; it is dispatched only by the bounded system recurring job.",
         ["ReapAgentRunSpoolsCommand"] = "sweep",
         ["ReconcileStuckAgentRunsCommand"] = "sweep",
         ["ReconcileStuckRunsCommand"] = "sweep",

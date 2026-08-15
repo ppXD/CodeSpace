@@ -32,6 +32,7 @@ public static class FailureCodes
     public const string StorageProfileConflict = "storage_profile_conflict";
     public const string StorageRouteInvalid = "storage_route_invalid";
     public const string StorageRouteConflict = "storage_route_conflict";
+    public const string ArtifactContentUnavailable = "artifact_content_unavailable";
 
     // ── Provider / OAuth ───────────────────────────────────────────────────────────
     public const string OAuthCallbackInvalid = "oauth_callback_invalid";
