@@ -3,8 +3,8 @@ using System.Text.Json;
 namespace CodeSpace.Core.Services.Workflows.Artifacts.Providers.Local;
 
 /// <summary>
-/// Descriptor for the current shared-filesystem-compatible backend. Merely publishing this descriptor does not
-/// activate it through the new catalog: <see cref="ArtifactStore"/> continues to receive the convention-registered
+/// Descriptor for the current shared-filesystem-compatible backend. Registering its inert factory does not create a
+/// driver or activate it through <see cref="ArtifactStore"/>: that store continues to receive the convention-registered
 /// <see cref="IArtifactBlobBackend"/> exactly as before until the profile/runtime cutover lands.
 /// </summary>
 public sealed class LocalRwxStorageProviderModule : IStorageProviderModule
@@ -35,7 +35,7 @@ public sealed class LocalRwxStorageProviderModule : IStorageProviderModule
         }
         """);
 
-    public string TypeKey => "local-rwx/v1";
+    public string TypeKey => LocalRwxArtifactStorageDriverFactory.TypeKey;
     public string DisplayName => "Local / shared filesystem";
     public JsonElement ConfigSchema => Config;
     public JsonElement SecretSchema => Secrets;
