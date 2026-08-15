@@ -93,6 +93,8 @@ interface Schema {
   /** Root-level only: the section order for the grouped layout (group names). Groups not listed are appended
    *  in first-seen order. Ignored when no field declares x-group. */
   "x-sections"?: string[];
+  /** Frontend-only projection used for write-only credential forms. Never accepted from persisted workflow schemas. */
+  "x-sensitive"?: boolean;
   /**
    * Explicit control discriminator: pick WHICH widget renders this field, independent of its JSON type.
    * The SAME stored value can render as a different control — e.g. a closed enum as "segmented" (a lifted
@@ -120,9 +122,11 @@ interface SchemaFormProps {
    * without typing the path by hand.
    */
   variableSuggestions?: ScopeSuggestion[];
+  /** Masks write-only values and disables copy/template affordances. Callers must also clear their state after submit. */
+  sensitive?: boolean;
 }
 
-export function SchemaForm({ schema, value, onChange, templateHint = false, variableSuggestions }: SchemaFormProps) {
+export function SchemaForm({ schema, value, onChange, templateHint = false, variableSuggestions, sensitive = false }: SchemaFormProps) {
   const parsed = useMemo(() => normalizeSchema(schema), [schema]);
   const obj = (typeof value === "object" && value !== null ? value : {}) as Record<string, unknown>;
   const required = new Set(parsed.required ?? []);
@@ -144,6 +148,7 @@ export function SchemaForm({ schema, value, onChange, templateHint = false, vari
       templateHint={templateHint}
       variableSuggestions={variableSuggestions}
       siblings={obj}
+      sensitive={sensitive}
     />
   );
 
@@ -207,7 +212,7 @@ export function SchemaForm({ schema, value, onChange, templateHint = false, vari
   );
 }
 
-function Field({ name, required, schema, value, onChange, templateHint, variableSuggestions, siblings }: {
+function Field({ name, required, schema, value, onChange, templateHint, variableSuggestions, siblings, sensitive }: {
   name: string;
   required: boolean;
   schema: Schema;
@@ -218,6 +223,7 @@ function Field({ name, required, schema, value, onChange, templateHint, variable
   /** The other field values at this object level — lets a control read a sibling (e.g. the repositoryId a
    *  user picker filters by). Generic + optional; a control that doesn't need siblings ignores it. */
   siblings?: Record<string, unknown>;
+  sensitive: boolean;
 }) {
   const label = schema.title ?? humanize(name);
   const description = schema.description;
@@ -259,7 +265,7 @@ function Field({ name, required, schema, value, onChange, templateHint, variable
         {label}
         {required && <span className="wf-form-required">*</span>}
       </span>
-      {renderControl(schema, value, onChange, templateHint, variableSuggestions, siblings)}
+      {renderControl(sensitive ? { ...schema, title: label, "x-sensitive": true } : schema, value, onChange, templateHint, variableSuggestions, siblings)}
       {description && <span className="wf-form-help">{description}</span>}
     </div>
   );
@@ -530,6 +536,7 @@ function renderControl(schema: Schema, value: unknown, onChange: (next: unknown)
   }
 
   const type = schema.type;
+  const sensitive = schema["x-sensitive"] === true;
 
   if (type === "boolean") {
     return (
@@ -543,6 +550,19 @@ function renderControl(schema: Schema, value: unknown, onChange: (next: unknown)
   }
 
   if (type === "integer" || type === "number") {
+    if (sensitive) {
+      return (
+        <input
+          type="password"
+          className="wf-form-input"
+          aria-label={schema.title}
+          autoComplete="new-password"
+          inputMode="decimal"
+          value={value == null ? "" : String(value)}
+          onChange={(e) => { const next = Number(e.target.value); onChange(e.target.value === "" || Number.isNaN(next) ? undefined : next); }}
+        />
+      );
+    }
     // In the editor (suggestions present) a number field is picker-capable, so it can reference
     // an input / upstream value via @ or {{ }} — `coerceNumberInput` keeps literals as JSON
     // numbers and {{ref}} templates as strings (a lone ref is type-preserved at run time). With
@@ -582,6 +602,10 @@ function renderControl(schema: Schema, value: unknown, onChange: (next: unknown)
     const isLong = schema["x-long"] === true || (schema.minLength != null && schema.minLength > 100);
     const stringValue = typeof value === "string" ? value : "";
 
+    if (sensitive) {
+      return <input type="password" className="wf-form-input" aria-label={schema.title} autoComplete="new-password" spellCheck={false} value={stringValue} onChange={(e) => onChange(e.target.value === "" ? undefined : e.target.value)} />;
+    }
+
     // Every string field gets the Dify-style framed input: copy + expand toolbar always,
     // @-picker added when in-scope suggestions exist. Passing an empty list still yields
     // the toolbar so the UX stays uniform across every inspector row.
@@ -600,6 +624,7 @@ function renderControl(schema: Schema, value: unknown, onChange: (next: unknown)
   }
 
   if (type === "array" && schema.items?.type === "string") {
+    if (sensitive) return <SensitiveJsonInput schema={schema} value={value} onChange={onChange} />;
     return <ChipsControl schema={schema} value={value} onChange={onChange} />;
   }
 
@@ -611,6 +636,7 @@ function renderControl(schema: Schema, value: unknown, onChange: (next: unknown)
         onChange={onChange}
         templateHint={templateHint}
         variableSuggestions={variableSuggestions}
+        sensitive={sensitive}
       />
     );
   }
@@ -628,6 +654,7 @@ function renderControl(schema: Schema, value: unknown, onChange: (next: unknown)
           onChange={(next) => onChange(next)}
           templateHint={templateHint}
           variableSuggestions={variableSuggestions}
+          sensitive={sensitive}
         />
       </div>
     );
@@ -635,6 +662,8 @@ function renderControl(schema: Schema, value: unknown, onChange: (next: unknown)
 
   // Fallback — raw JSON. Lets operators wire complex shapes (objects, $ref blocks) even when
   // the editor doesn't have a typed control for them. Round-trips safely.
+  if (sensitive) return <SensitiveJsonInput schema={schema} value={value} onChange={onChange} />;
+
   return (
     <>
       <textarea
@@ -801,12 +830,13 @@ function DualModeSelector({ pick, value, onChange, variableSuggestions }: {
  * (e.g. a row of action buttons) gets a usable editor instead of the raw-JSON fallback. Removing the
  * last row emits undefined (the field clears) so an empty list never lingers as a degenerate value.
  */
-function ObjectArrayEditor({ itemSchema, value, onChange, templateHint, variableSuggestions }: {
+function ObjectArrayEditor({ itemSchema, value, onChange, templateHint, variableSuggestions, sensitive = false }: {
   itemSchema: Schema;
   value: unknown;
   onChange: (next: unknown) => void;
   templateHint: boolean;
   variableSuggestions?: ScopeSuggestion[];
+  sensitive?: boolean;
 }) {
   const rows = Array.isArray(value) ? (value as Record<string, unknown>[]) : [];
   const replace = (next: Record<string, unknown>[]) => onChange(next.length === 0 ? undefined : next);
@@ -824,6 +854,7 @@ function ObjectArrayEditor({ itemSchema, value, onChange, templateHint, variable
               onChange={(next) => replace(rows.map((r, idx) => (idx === i ? next : r)))}
               templateHint={templateHint}
               variableSuggestions={variableSuggestions}
+              sensitive={sensitive}
             />
           </div>
           <button type="button" className="btn btn-ghost btn-icon wf-objarr-remove" onClick={() => replace(rows.filter((_, idx) => idx !== i))} aria-label="Remove item">
@@ -835,6 +866,24 @@ function ObjectArrayEditor({ itemSchema, value, onChange, templateHint, variable
         <Ic.Plus size={14} /> Add item
       </button>
     </div>
+  );
+}
+
+function SensitiveJsonInput({ schema, value, onChange }: { schema: Schema; value: unknown; onChange: (next: unknown) => void }) {
+  const encoded = value == null ? "" : JSON.stringify(value);
+  return (
+    <input
+      type="password"
+      className="wf-form-input"
+      aria-label={schema.title ?? "Secret JSON"}
+      autoComplete="new-password"
+      spellCheck={false}
+      value={encoded}
+      onChange={(event) => {
+        try { onChange(event.target.value === "" ? undefined : JSON.parse(event.target.value)); }
+        catch { /* Keep the last valid structured value; plaintext is never copied into a second visible control. */ }
+      }}
+    />
   );
 }
 

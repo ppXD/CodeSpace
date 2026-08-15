@@ -53,6 +53,20 @@ function renderForm(value: unknown, onChange = vi.fn()) {
   return onChange;
 }
 
+describe("SchemaForm sensitive projection", () => {
+  it("renders write-only strings as password controls without copy or expression affordances", () => {
+    const onChange = vi.fn();
+    render(<SchemaForm sensitive schema={{ type: "object", properties: { accessKeySecret: { type: "string", title: "Access key secret" } }, required: ["accessKeySecret"] }} value={{ accessKeySecret: "hidden" }} onChange={onChange} />);
+
+    const input = screen.getByLabelText("Access key secret");
+    expect(input).toHaveAttribute("type", "password");
+    expect(input).toHaveAttribute("autocomplete", "new-password");
+    expect(screen.queryByRole("button", { name: /copy/i })).not.toBeInTheDocument();
+    fireEvent.change(input, { target: { value: "rotated" } });
+    expect(onChange).toHaveBeenLastCalledWith({ accessKeySecret: "rotated" });
+  });
+});
+
 describe("SchemaForm object-array editor", () => {
   it("renders one sub-form row per item", () => {
     renderForm({ buttons: [{ kind: "approve" }, { kind: "reject" }] });
