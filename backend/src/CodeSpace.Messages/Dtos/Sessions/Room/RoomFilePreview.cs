@@ -32,4 +32,19 @@ public sealed record RoomFilePreview
 
     /// <summary>A one-line human explanation when the preview is degraded (binary / unavailable / truncated). Null on a clean text/diff preview.</summary>
     public string? Note { get; init; }
+
+    /// <summary>Typed reason when <see cref="Kind"/> is <c>unavailable</c>; null for renderable or binary previews.</summary>
+    public RoomFileUnavailableReason? UnavailableReason { get; init; }
+}
+
+/// <summary>Closed, transport-stable reasons a changed file cannot currently produce a safe inline preview.</summary>
+public enum RoomFileUnavailableReason
+{
+    NotInChangeSet,
+    MetadataMissing,
+    PhysicalObjectMissing,
+    IntegrityFailure,
+    BackendUnavailable,
+    AccessDenied,
+    ReconstructionUnavailable,
 }

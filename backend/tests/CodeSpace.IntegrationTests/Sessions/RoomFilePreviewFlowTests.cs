@@ -138,7 +138,7 @@ public class RoomFilePreviewFlowTests
     }
 
     [Fact]
-    public async Task A_purged_offloaded_patch_degrades_to_an_expired_notice_instead_of_a_500()
+    public async Task A_missing_offloaded_patch_reports_the_typed_storage_fact_instead_of_fake_expiry_or_a_500()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var runId = await SeedRunAsync(teamId);
@@ -153,8 +153,11 @@ public class RoomFilePreviewFlowTests
         preview.ShouldNotBeNull("a purged artifact must degrade gracefully, never propagate as a 500");
         preview!.Kind.ShouldBe("unavailable");
         preview.Text.ShouldBeNull();
+        preview.UnavailableReason.ShouldBe(RoomFileUnavailableReason.PhysicalObjectMissing);
         preview.Note.ShouldNotBeNull();
-        preview.Note!.ShouldContain("expired", customMessage: "the notice tells the operator the saved content is gone — not a bare 'couldn't load'");
+        preview.Note!.ShouldContain("stored bytes are missing");
+        preview.Note.ShouldNotContain("expired", customMessage: "there is no expiry policy and a topology/integrity fault must not be relabelled as normal expiry");
+        preview.Note.ShouldNotContain("pull request", customMessage: "this run has no delivered source URL, so the UI must not recommend an action that does not exist");
     }
 
     private async Task<RoomFilePreview?> PreviewAsync(Guid runId, string path, Guid teamId, Guid? agentRunId = null)
@@ -170,7 +173,7 @@ public class RoomFilePreviewFlowTests
         var db = scope.Resolve<CodeSpaceDbContext>();
 
         var sha = Convert.ToHexString(Guid.NewGuid().ToByteArray().Concat(Guid.NewGuid().ToByteArray()).ToArray()).ToLowerInvariant();   // 64 hex, unique → never on disk
-        var root = Path.GetFullPath(RuntimeSettings.Current.ArtifactStoreDirectory ?? Path.Combine(Path.GetTempPath(), "codespace-artifact-store"));
+        var root = DurableRoots.ArtifactStore(RuntimeSettings.Current.ArtifactStoreDirectory);
         var missing = Path.Combine(root, sha[..2], sha.Substring(2, 2), sha);
 
         var id = Guid.NewGuid();
