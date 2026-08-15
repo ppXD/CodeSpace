@@ -1,4 +1,6 @@
 using System.Buffers;
+using System.Data;
+using System.Data.Common;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using CodeSpace.Core.Persistence.Db;
@@ -6,6 +8,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace CodeSpace.Core.Services.Agents.AgentRunLogging;
 
@@ -160,6 +163,13 @@ public sealed partial class AgentRunLogService : IAgentRunLogService
         if (stream.CaptureFinalizedAt == null) return RejectComplete(AgentRunLogProblemCode.SourceNotFinalized);
         if (stream.Revision != request.ExpectedRevision || stream.TotalBytes != hashed.TotalBytes)
             return RejectComplete(AgentRunLogProblemCode.ConcurrentMutation, true);
+        if (request.RecoveryClaim != null)
+        {
+            if (!await CompleteUnderRecoveryClaimAsync(db, request, stream, hashed, cancellationToken).ConfigureAwait(false))
+                return RejectComplete(AgentRunLogProblemCode.StaleRecoveryClaim);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return new AgentRunLogCompleteResult.Completed(await RequireMetadataAsync(request.TeamId, request.StreamId, cancellationToken).ConfigureAwait(false));
+        }
 
         stream.State = AgentRunLogStreamState.Completed;
         stream.ContentDigestAlgorithm = ArtifactDigestAlgorithm.Sha256;
@@ -232,6 +242,13 @@ public sealed partial class AgentRunLogService : IAgentRunLogService
         if (stream.WorkerFenceEpoch != request.WorkerFenceEpoch || stream.CaptureSessionId != request.CaptureSessionId)
             return RejectFailCapture(AgentRunLogProblemCode.CaptureClaimConflict);
         if (stream.Revision != request.ExpectedRevision) return RejectFailCapture(AgentRunLogProblemCode.ConcurrentMutation, true);
+        if (request.RecoveryClaim != null)
+        {
+            if (!await FailUnderRecoveryClaimAsync(db, request, stream, cancellationToken).ConfigureAwait(false))
+                return RejectFailCapture(AgentRunLogProblemCode.StaleRecoveryClaim);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return new AgentRunLogFailCaptureResult.Failed(await RequireMetadataAsync(request.TeamId, request.StreamId, cancellationToken).ConfigureAwait(false), false);
+        }
 
         stream.State = AgentRunLogStreamState.CaptureFailed;
         stream.ErrorCode = request.ErrorCode;
@@ -467,6 +484,114 @@ public sealed partial class AgentRunLogService : IAgentRunLogService
         (await GetMetadataAsync(teamId, streamId, cancellationToken).ConfigureAwait(false) as AgentRunLogMetadataResult.Found)?.Metadata
         ?? throw new InvalidOperationException("The committed Agent Run log stream metadata disappeared.");
 
+    private static Task<bool> CompleteUnderRecoveryClaimAsync(CodeSpaceDbContext db, AgentRunLogCompleteRequest request, AgentRunLogStream stream, HashResult hash, CancellationToken cancellationToken)
+    {
+        var claim = request.RecoveryClaim!;
+        return ExecuteRecoveryCommitAsync(db, """
+            WITH authority AS MATERIALIZED (
+                SELECT intent.id FROM agent_run_log_capture_intent intent
+                WHERE intent.id = @intent_id AND intent.team_id = @team_id AND intent.agent_run_id = @agent_run_id
+                  AND intent.worker_fence_epoch = @worker_fence_epoch AND intent.capture_session_id = @capture_session_id
+                  AND intent.stream_kind = @stream_kind AND intent.content_type = @content_type
+                  AND intent.content_encoding IS NOT DISTINCT FROM @content_encoding AND intent.capture_source = @capture_source
+                  AND (intent.stream_id IS NULL OR intent.stream_id = @stream_id)
+                  AND intent.state IN ('Expected', 'Opened', 'SourceFinalized')
+                  AND intent.recovery_owner_id = @recovery_owner_id AND intent.recovery_fence_epoch = @recovery_fence_epoch
+                  AND intent.recovery_lease_expires_at > clock_timestamp()
+                FOR UPDATE
+            ), committed_at AS MATERIALIZED (
+                SELECT clock_timestamp() AS value
+            ), updated AS (
+                UPDATE agent_run_log_stream target SET
+                    state = 'Completed', content_digest_algorithm = 'Sha256', content_digest = @content_digest,
+                    revision = target.revision + 1, completed_at = committed_at.value, last_modified_at = committed_at.value
+                FROM authority, committed_at
+                WHERE target.team_id = @team_id AND target.agent_run_id = @agent_run_id AND target.id = @stream_id
+                  AND target.worker_fence_epoch = @worker_fence_epoch AND target.capture_session_id = @capture_session_id
+                  AND target.state = 'Open' AND target.capture_finalized_at IS NOT NULL
+                  AND target.revision = @expected_revision AND target.total_bytes = @total_bytes
+                RETURNING target.id
+            )
+            SELECT EXISTS (SELECT 1 FROM updated)
+            """, RecoveryCommitParameters(request, stream,
+            new RecoveryCommitPayload(claim, hash.Digest!, hash.TotalBytes, null, null)), cancellationToken);
+    }
+
+    private static Task<bool> FailUnderRecoveryClaimAsync(CodeSpaceDbContext db, AgentRunLogFailCaptureRequest request, AgentRunLogStream stream, CancellationToken cancellationToken)
+    {
+        var claim = request.RecoveryClaim!;
+        return ExecuteRecoveryCommitAsync(db, """
+            WITH authority AS MATERIALIZED (
+                SELECT intent.id FROM agent_run_log_capture_intent intent
+                WHERE intent.id = @intent_id AND intent.team_id = @team_id AND intent.agent_run_id = @agent_run_id
+                  AND intent.worker_fence_epoch = @worker_fence_epoch AND intent.capture_session_id = @capture_session_id
+                  AND intent.stream_kind = @stream_kind AND intent.content_type = @content_type
+                  AND intent.content_encoding IS NOT DISTINCT FROM @content_encoding AND intent.capture_source = @capture_source
+                  AND (intent.stream_id IS NULL OR intent.stream_id = @stream_id)
+                  AND intent.state IN ('Expected', 'Opened', 'SourceFinalized')
+                  AND intent.recovery_owner_id = @recovery_owner_id AND intent.recovery_fence_epoch = @recovery_fence_epoch
+                  AND intent.recovery_lease_expires_at > clock_timestamp()
+                FOR UPDATE
+            ), committed_at AS MATERIALIZED (
+                SELECT clock_timestamp() AS value
+            ), updated AS (
+                UPDATE agent_run_log_stream target SET
+                    state = 'CaptureFailed', error_code = @error_code, error_message = @error_message,
+                    revision = target.revision + 1, completed_at = committed_at.value, last_modified_at = committed_at.value
+                FROM authority, committed_at
+                WHERE target.team_id = @team_id AND target.agent_run_id = @agent_run_id AND target.id = @stream_id
+                  AND target.worker_fence_epoch = @worker_fence_epoch AND target.capture_session_id = @capture_session_id
+                  AND target.state = 'Open' AND target.revision = @expected_revision
+                RETURNING target.id
+            )
+            SELECT EXISTS (SELECT 1 FROM updated)
+            """, RecoveryCommitParameters(request, stream,
+            new RecoveryCommitPayload(claim, null, null, request.ErrorCode, request.ErrorMessage)), cancellationToken);
+    }
+
+    private static async Task<bool> ExecuteRecoveryCommitAsync(CodeSpaceDbContext db, string sql, IReadOnlyList<RecoveryCommitParameter> parameters, CancellationToken cancellationToken)
+    {
+        await using var command = db.Database.GetDbConnection().CreateCommand();
+        command.Transaction = db.Database.CurrentTransaction?.GetDbTransaction()
+            ?? throw new InvalidOperationException("A recovery-fenced stream commit requires an active database transaction.");
+        command.CommandText = sql;
+        foreach (var value in parameters) command.Parameters.Add(Parameter(command, value));
+        return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is true;
+    }
+
+    private static DbParameter Parameter(DbCommand command, RecoveryCommitParameter value)
+    {
+        var parameter = command.CreateParameter();
+        parameter.ParameterName = value.Name;
+        parameter.DbType = value.Type;
+        parameter.Value = value.Value ?? DBNull.Value;
+        return parameter;
+    }
+
+    private static RecoveryCommitParameter[] RecoveryCommitParameters(AgentRunLogCompleteRequest request, AgentRunLogStream stream, RecoveryCommitPayload payload) =>
+        CommonRecoveryCommitParameters(new RecoveryCommitIdentity(request.TeamId, request.AgentRunId, request.StreamId, request.WorkerFenceEpoch, request.CaptureSessionId, request.ExpectedRevision), stream, payload)
+            .Concat([
+                new("content_digest", DbType.Binary, payload.ContentDigest),
+                new("total_bytes", DbType.Int64, payload.TotalBytes),
+            ]).ToArray();
+
+    private static RecoveryCommitParameter[] RecoveryCommitParameters(AgentRunLogFailCaptureRequest request, AgentRunLogStream stream, RecoveryCommitPayload payload) =>
+        CommonRecoveryCommitParameters(new RecoveryCommitIdentity(request.TeamId, request.AgentRunId, request.StreamId, request.WorkerFenceEpoch, request.CaptureSessionId, request.ExpectedRevision), stream, payload)
+            .Concat([
+                new("error_code", DbType.String, payload.ErrorCode),
+                new("error_message", DbType.String, payload.ErrorMessage),
+            ]).ToArray();
+
+    private static RecoveryCommitParameter[] CommonRecoveryCommitParameters(RecoveryCommitIdentity identity, AgentRunLogStream stream, RecoveryCommitPayload payload) =>
+    [
+        new("intent_id", DbType.Guid, payload.Claim.IntentId), new("team_id", DbType.Guid, identity.TeamId), new("agent_run_id", DbType.Guid, identity.AgentRunId),
+        new("worker_fence_epoch", DbType.Int64, identity.WorkerFenceEpoch), new("capture_session_id", DbType.Guid, identity.CaptureSessionId),
+        new("stream_kind", DbType.String, stream.StreamKind), new("content_type", DbType.String, stream.ContentType),
+        new("content_encoding", DbType.String, stream.ContentEncoding), new("capture_source", DbType.String, stream.CaptureSource),
+        new("stream_id", DbType.Guid, identity.StreamId), new("recovery_owner_id", DbType.Guid, payload.Claim.OwnerId),
+        new("recovery_fence_epoch", DbType.Int64, payload.Claim.FenceEpoch), new("expected_revision", DbType.Int64, identity.ExpectedRevision),
+    ];
+
     private CodeSpaceDbContext CreateDb() => new(_dbOptions);
     private static AgentRunLogOpenResult.Opened Opened(AgentRunLogStream value, bool alreadyOpen, bool reclaimed) => new(Project(value), alreadyOpen, reclaimed) { CaptureSourceBaseOffsetBytes = value.CaptureSourceBaseOffsetBytes, CaptureFinalizedAt = value.CaptureFinalizedAt };
     private static AgentRunLogCaptureHead CaptureHead(AgentRunLogStream value) => new(Project(value), value.WorkerFenceEpoch!.Value, value.CaptureSessionId!.Value, value.CaptureSourceBaseOffsetBytes, value.CaptureFinalizedAt);
@@ -476,8 +601,9 @@ public sealed partial class AgentRunLogService : IAgentRunLogService
     private static bool Valid(AgentRunLogOpenRequest value, DateTimeOffset now) => value.TeamId != Guid.Empty && value.AgentRunId != Guid.Empty && value.WorkerFenceEpoch > 0 && value.CaptureSessionId != Guid.Empty && KeyPattern().IsMatch(value.StreamKind ?? "") && KeyPattern().IsMatch(value.CaptureSource ?? "") && value.ContentType is { Length: <= 255 } && ContentTypePattern().IsMatch(value.ContentType) && (value.ContentEncoding == null || EncodingPattern().IsMatch(value.ContentEncoding)) && Enum.IsDefined(value.Retention) && (value.ExpiresAt == null || value.ExpiresAt > now) && (value.Retention != ArtifactRetention.Ephemeral || value.ExpiresAt != null) && (value.Retention != ArtifactRetention.Permanent || value.ExpiresAt == null);
     private static bool Valid(AgentRunLogAppendRequest value) => value.TeamId != Guid.Empty && value.AgentRunId != Guid.Empty && value.StreamId != Guid.Empty && value.WorkerFenceEpoch > 0 && value.CaptureSessionId != Guid.Empty && value.ExpectedSegmentOrdinal > 0 && value.ExpectedOffsetBytes >= 0 && value.ExpectedSourceOffsetBytes >= 0 && value.SourceLengthBytes > 0 && value.StorageProfileId != Guid.Empty && value.StorageProfileRevision > 0 && value.ActorId != Guid.Empty && value.Bytes.Length is > 0 and <= MaximumAppendBytes && ValidTimeout(value.OperationTimeout);
     private static bool Valid(AgentRunLogFinalizeSourceRequest value) => value.TeamId != Guid.Empty && value.AgentRunId != Guid.Empty && value.StreamId != Guid.Empty && value.WorkerFenceEpoch > 0 && value.CaptureSessionId != Guid.Empty && value.ExpectedRevision > 0 && value.ExpectedSourceOffsetBytes >= 0;
-    private static bool Valid(AgentRunLogCompleteRequest value) => value.TeamId != Guid.Empty && value.AgentRunId != Guid.Empty && value.StreamId != Guid.Empty && value.WorkerFenceEpoch > 0 && value.CaptureSessionId != Guid.Empty && value.ExpectedRevision > 0 && ValidTimeout(value.OperationTimeout);
-    private static bool Valid(AgentRunLogFailCaptureRequest value) => value.TeamId != Guid.Empty && value.AgentRunId != Guid.Empty && value.StreamId != Guid.Empty && value.WorkerFenceEpoch > 0 && value.CaptureSessionId != Guid.Empty && value.ExpectedRevision > 0 && ErrorCodePattern().IsMatch(value.ErrorCode ?? "") && (value.ErrorMessage == null || value.ErrorMessage.Length <= 2048);
+    private static bool Valid(AgentRunLogCompleteRequest value) => value.TeamId != Guid.Empty && value.AgentRunId != Guid.Empty && value.StreamId != Guid.Empty && value.WorkerFenceEpoch > 0 && value.CaptureSessionId != Guid.Empty && value.ExpectedRevision > 0 && Valid(value.RecoveryClaim) && ValidTimeout(value.OperationTimeout);
+    private static bool Valid(AgentRunLogFailCaptureRequest value) => value.TeamId != Guid.Empty && value.AgentRunId != Guid.Empty && value.StreamId != Guid.Empty && value.WorkerFenceEpoch > 0 && value.CaptureSessionId != Guid.Empty && value.ExpectedRevision > 0 && Valid(value.RecoveryClaim) && ErrorCodePattern().IsMatch(value.ErrorCode ?? "") && (value.ErrorMessage == null || value.ErrorMessage.Length <= 2048);
+    private static bool Valid(AgentRunLogRecoveryClaimRef? value) => value == null || (value.IntentId != Guid.Empty && value.OwnerId != Guid.Empty && value.FenceEpoch > 0);
     private static bool ValidTimeout(TimeSpan? value) => value == null || (value > TimeSpan.Zero && value <= TimeSpan.FromMinutes(10));
     private static AgentRunLogOpenResult.Rejected RejectOpen(AgentRunLogProblemCode code, bool retryable = false) => new(Problem(code, retryable));
     private static AgentRunLogAppendResult.Rejected RejectAppend(AgentRunLogProblemCode code, bool retryable = false) => new(Problem(code, retryable));
@@ -518,6 +644,9 @@ public sealed partial class AgentRunLogService : IAgentRunLogService
     private sealed record SegmentLocation(Guid StorageProfileId, int StorageProfileRevision);
     private sealed record SegmentSource(long Ordinal, long StartOffset, long Length, Guid ArtifactObjectId, byte[] Digest, SegmentLocation[] Locations);
     private sealed record RangeCopy(long RequestedStart, long RequestedEnd, Stream Output);
+    private sealed record RecoveryCommitIdentity(Guid TeamId, Guid AgentRunId, Guid StreamId, long WorkerFenceEpoch, Guid CaptureSessionId, long ExpectedRevision);
+    private sealed record RecoveryCommitPayload(AgentRunLogRecoveryClaimRef Claim, byte[]? ContentDigest, long? TotalBytes, string? ErrorCode, string? ErrorMessage);
+    private sealed record RecoveryCommitParameter(string Name, DbType Type, object? Value);
     private sealed record LogSnapshot(AgentRunLogMetadata Metadata, long? WorkerFenceEpoch, Guid? CaptureSessionId, DateTimeOffset? CaptureFinalizedAt, SegmentSource[] Segments)
     {
         public Guid TeamId { get; init; }

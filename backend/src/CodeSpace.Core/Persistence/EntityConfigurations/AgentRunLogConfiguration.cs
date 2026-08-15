@@ -103,3 +103,40 @@ public sealed class AgentRunLogSegmentConfiguration : IEntityTypeConfiguration<A
         builder.HasIndex(segment => new { segment.TeamId, segment.ArtifactObjectId, segment.Id }).HasDatabaseName("ix_agent_run_log_segment_object");
     }
 }
+
+public sealed class AgentRunLogCaptureIntentConfiguration : IEntityTypeConfiguration<AgentRunLogCaptureIntent>
+{
+    public void Configure(EntityTypeBuilder<AgentRunLogCaptureIntent> builder)
+    {
+        builder.ToTable("agent_run_log_capture_intent", table =>
+        {
+            table.HasCheckConstraint("ck_agent_run_log_capture_intent_claim", "recovery_fence_epoch >= 0 AND recovery_attempt_count >= 0 AND ((recovery_attempt_count = 0 AND recovery_started_at IS NULL) OR (recovery_attempt_count > 0 AND recovery_started_at IS NOT NULL)) AND ((recovery_owner_id IS NULL AND recovery_lease_expires_at IS NULL) OR (recovery_owner_id IS NOT NULL AND recovery_fence_epoch > 0 AND recovery_lease_expires_at IS NOT NULL))");
+            table.HasCheckConstraint("ck_agent_run_log_capture_intent_error", "(last_error_code IS NULL AND last_error_message IS NULL) OR (last_error_code IS NOT NULL AND btrim(last_error_code) <> '')");
+            table.HasCheckConstraint("ck_agent_run_log_capture_intent_identity", "worker_fence_epoch > 0 AND capture_session_id <> '00000000-0000-0000-0000-000000000000'::uuid AND stream_kind ~ '^[a-z0-9][a-z0-9._/-]{0,126}/v[1-9][0-9]*$' AND capture_source ~ '^[a-z0-9][a-z0-9._/-]{0,126}/v[1-9][0-9]*$' AND content_type ~ '^[^[:space:]/]+/[^[:space:]]+$' AND (content_encoding IS NULL OR content_encoding ~ '^[a-z0-9][a-z0-9._+-]{0,63}$')");
+            table.HasCheckConstraint("ck_agent_run_log_capture_intent_state", "state IN ('Expected', 'Opened', 'SourceFinalized', 'Completed', 'CaptureFailed', 'Superseded', 'ExternalStateIndeterminate') AND ((state IN ('Completed', 'CaptureFailed', 'Superseded', 'ExternalStateIndeterminate') AND terminal_at IS NOT NULL AND recovery_owner_id IS NULL) OR (state IN ('Expected', 'Opened', 'SourceFinalized') AND terminal_at IS NULL)) AND (state IN ('Expected', 'CaptureFailed', 'Superseded', 'ExternalStateIndeterminate') OR stream_id IS NOT NULL)");
+            table.HasCheckConstraint("ck_agent_run_log_capture_intent_time", "revision > 0 AND next_recovery_at >= created_at AND last_modified_at >= created_at AND (recovery_started_at IS NULL OR last_modified_at >= recovery_started_at) AND (terminal_observed_at IS NULL OR last_modified_at >= terminal_observed_at) AND (terminal_at IS NULL OR last_modified_at >= terminal_at)");
+        });
+        builder.HasKey(intent => intent.Id);
+        builder.Property(intent => intent.StreamKind).HasMaxLength(128);
+        builder.Property(intent => intent.ContentType).HasMaxLength(255);
+        builder.Property(intent => intent.ContentEncoding).HasMaxLength(64);
+        builder.Property(intent => intent.CaptureSource).HasMaxLength(128);
+        builder.Property(intent => intent.State).HasConversion<string>().HasMaxLength(32);
+        builder.Property(intent => intent.LastErrorCode).HasMaxLength(128);
+        builder.Property(intent => intent.LastErrorMessage).HasMaxLength(2048);
+        builder.Property(intent => intent.Xmin).HasColumnName("xmin").HasColumnType("xid").ValueGeneratedOnAddOrUpdate().IsConcurrencyToken();
+
+        builder.HasOne(intent => intent.AgentRun).WithMany()
+            .HasForeignKey(intent => new { intent.TeamId, intent.AgentRunId })
+            .HasPrincipalKey(run => new { run.TeamId, run.Id })
+            .OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne(intent => intent.Stream).WithMany(stream => stream.CaptureIntents)
+            .HasForeignKey(intent => new { intent.TeamId, intent.StreamId, intent.AgentRunId })
+            .HasPrincipalKey(stream => new { stream.TeamId, stream.Id, stream.AgentRunId })
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasIndex(intent => new { intent.TeamId, intent.AgentRunId, intent.WorkerFenceEpoch, intent.CaptureSessionId, intent.StreamKind }).IsUnique().HasDatabaseName("ux_agent_run_log_capture_intent_identity");
+        builder.HasIndex(intent => new { intent.NextRecoveryAt, intent.TeamId, intent.Id }).HasDatabaseName("ix_agent_run_log_capture_intent_recovery")
+            .HasFilter("state IN ('Expected', 'Opened', 'SourceFinalized')").IncludeProperties(intent => new { intent.RecoveryLeaseExpiresAt, intent.WorkerFenceEpoch });
+    }
+}

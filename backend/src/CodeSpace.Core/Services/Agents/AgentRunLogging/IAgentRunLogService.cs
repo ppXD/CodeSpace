@@ -77,6 +77,7 @@ public sealed record AgentRunLogFailCaptureRequest
     public required long ExpectedRevision { get; init; }
     public required string ErrorCode { get; init; }
     public string? ErrorMessage { get; init; }
+    public AgentRunLogRecoveryClaimRef? RecoveryClaim { get; init; }
 }
 
 public sealed record AgentRunLogFinalizeSourceRequest
@@ -99,7 +100,11 @@ public sealed record AgentRunLogCompleteRequest
     public required Guid CaptureSessionId { get; init; }
     public required long ExpectedRevision { get; init; }
     public TimeSpan? OperationTimeout { get; init; }
+    public AgentRunLogRecoveryClaimRef? RecoveryClaim { get; init; }
 }
+
+/// <summary>Exact short-lived reconciler authority, validated inside the stream's final database transaction.</summary>
+public sealed record AgentRunLogRecoveryClaimRef(Guid IntentId, Guid OwnerId, long FenceEpoch);
 
 public sealed record AgentRunLogRangeRequest(Guid TeamId, Guid StreamId, long OffsetBytes, int Length)
 {
@@ -190,6 +195,7 @@ public enum AgentRunLogProblemCode
     Missing,
     RunNotRunning,
     StaleWorker,
+    StaleRecoveryClaim,
     CaptureClaimConflict,
     SourceNotFinalized,
     StreamTerminal,

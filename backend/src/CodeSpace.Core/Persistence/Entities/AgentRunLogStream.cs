@@ -43,6 +43,7 @@ public sealed class AgentRunLogStream : IEntity<Guid>
     public AgentRun AgentRun { get; set; } = default!;
     public ICollection<AgentRunLogSegment> Segments { get; set; } = new List<AgentRunLogSegment>();
     public ICollection<AgentRunLogCaptureSession> CaptureSessions { get; set; } = new List<AgentRunLogCaptureSession>();
+    public ICollection<AgentRunLogCaptureIntent> CaptureIntents { get; set; } = new List<AgentRunLogCaptureIntent>();
 }
 
 /// <summary>Capture state, not the Agent Run's task outcome. Every non-Open state is terminal.</summary>

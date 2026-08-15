@@ -106,7 +106,7 @@ public sealed class AgentRunLogCaptureBridgeTests
     }
 
     [Fact]
-    public async Task Stale_fence_and_backend_failure_never_change_harness_result_and_failure_is_durable()
+    public async Task Stale_fence_and_deterministic_corruption_never_change_harness_result_and_failure_is_durable()
     {
         var staleLogs = new FakeLogService { CurrentFence = 2 };
         var source = new FakeLogSource();
@@ -149,7 +149,7 @@ public sealed class AgentRunLogCaptureBridgeTests
         var source = new FakeLogSource();
         source.Set("stdout", "must-not-be-read"u8.ToArray());
         source.Set("stderr", []);
-        var bridge = new AgentRunLogCaptureBridge(logs, new ThrowingStorageResolver(), NullLogger<AgentRunLogCaptureBridge>.Instance);
+        var bridge = new AgentRunLogCaptureBridge(logs, new ThrowingStorageResolver(), new FakeRecoveryService(), NullLogger<AgentRunLogCaptureBridge>.Instance);
         var expected = Result();
 
         var capture = await bridge.OpenAsync(Request(source, 1, Guid.NewGuid()), CancellationToken.None);
@@ -167,7 +167,7 @@ public sealed class AgentRunLogCaptureBridgeTests
         var source = new FakeLogSource();
         source.Set("stdout", "must-not-be-read"u8.ToArray());
         source.Set("stderr", []);
-        var bridge = new AgentRunLogCaptureBridge(logs, new UnavailableStorageResolver(AgentRunLogStorageProblemCode.Missing), NullLogger<AgentRunLogCaptureBridge>.Instance);
+        var bridge = new AgentRunLogCaptureBridge(logs, new UnavailableStorageResolver(AgentRunLogStorageProblemCode.Missing), new FakeRecoveryService(), NullLogger<AgentRunLogCaptureBridge>.Instance);
         var expected = Result();
 
         var capture = await bridge.OpenAsync(Request(source, 1, Guid.NewGuid()), CancellationToken.None);
@@ -206,7 +206,7 @@ public sealed class AgentRunLogCaptureBridgeTests
         var source = new FakeLogSource();
         source.Set("stdout", []);
         source.Set("stderr", []);
-        var bridge = new AgentRunLogCaptureBridge(logs, new ThrowingStorageResolver(), NullLogger<AgentRunLogCaptureBridge>.Instance);
+        var bridge = new AgentRunLogCaptureBridge(logs, new ThrowingStorageResolver(), new FakeRecoveryService(), NullLogger<AgentRunLogCaptureBridge>.Instance);
 
         await bridge.OpenAsync(Request(source, 1, Guid.NewGuid()), CancellationToken.None);
 
@@ -221,7 +221,7 @@ public sealed class AgentRunLogCaptureBridgeTests
         var source = new FakeLogSource();
         source.Set("stdout", Enumerable.Repeat((byte)'x', 300 * 1024).ToArray());
         source.Set("stderr", []);
-        var bridge = new AgentRunLogCaptureBridge(logs, new ReadyStorageResolver(), NullLogger<AgentRunLogCaptureBridge>.Instance, TimeSpan.FromMilliseconds(40), TimeSpan.FromMilliseconds(150));
+        var bridge = new AgentRunLogCaptureBridge(logs, new ReadyStorageResolver(), new FakeRecoveryService(), NullLogger<AgentRunLogCaptureBridge>.Instance, new AgentRunLogCaptureBridgeOptions(TimeSpan.FromMilliseconds(40), TimeSpan.FromMilliseconds(150)));
         var expected = Result();
         var watch = Stopwatch.StartNew();
 
@@ -235,13 +235,56 @@ public sealed class AgentRunLogCaptureBridgeTests
     }
 
     [Fact]
+    public async Task Final_drain_retries_one_transient_append_and_preserves_the_complete_source()
+    {
+        var logs = new FakeLogService { CurrentFence = 1, RetryableAppendFailures = 1 };
+        var source = new FakeLogSource();
+        source.Set("stdout", "eventually-durable"u8.ToArray());
+        source.Set("stderr", []);
+        var bridge = new AgentRunLogCaptureBridge(logs, new ReadyStorageResolver(), new FakeRecoveryService(), NullLogger<AgentRunLogCaptureBridge>.Instance,
+            new AgentRunLogCaptureBridgeOptions(TimeSpan.FromMilliseconds(40), TimeSpan.FromMilliseconds(300)));
+        var expected = Result();
+
+        var observed = await (await bridge.OpenAsync(Request(source, 1, Guid.NewGuid()), CancellationToken.None))
+            .ObserveAsync((_, _) => Task.FromResult(expected), CancellationToken.None);
+
+        observed.ShouldBeSameAs(expected);
+        logs.AppendAttempts.ShouldBeGreaterThanOrEqualTo(2);
+        logs.Bytes(AgentRunLogKinds.StandardOutput).ShouldBe("eventually-durable"u8.ToArray());
+        logs.Heads.Single(value => value.Metadata.StreamKind == AgentRunLogKinds.StandardOutput).CaptureFinalizedAt.ShouldNotBeNull();
+    }
+
+    [Fact]
+    public async Task Final_drain_budget_exhaustion_on_transient_append_leaves_an_open_recoverable_stream()
+    {
+        var logs = new FakeLogService { CurrentFence = 1, RetryableAppendFailures = int.MaxValue };
+        var recovery = new FakeRecoveryService();
+        var source = new FakeLogSource();
+        source.Set("stdout", "still-in-native-spool"u8.ToArray());
+        source.Set("stderr", []);
+        var bridge = new AgentRunLogCaptureBridge(logs, new ReadyStorageResolver(), recovery, NullLogger<AgentRunLogCaptureBridge>.Instance,
+            new AgentRunLogCaptureBridgeOptions(TimeSpan.FromMilliseconds(20), TimeSpan.FromMilliseconds(120)));
+        var expected = Result();
+
+        var observed = await (await bridge.OpenAsync(Request(source, 1, Guid.NewGuid()), CancellationToken.None))
+            .ObserveAsync((_, _) => Task.FromResult(expected), CancellationToken.None);
+
+        observed.ShouldBeSameAs(expected);
+        var stdout = logs.Heads.Single(value => value.Metadata.StreamKind == AgentRunLogKinds.StandardOutput);
+        stdout.Metadata.State.ShouldBe(AgentRunLogStreamState.Open);
+        stdout.CaptureFinalizedAt.ShouldBeNull();
+        stdout.Metadata.ErrorCode.ShouldBeNull();
+        recovery.Declarations.ShouldHaveSingleItem("the durable intent remains available to terminal recovery");
+    }
+
+    [Fact]
     public async Task Transient_no_data_never_authorizes_finalization_and_returns_on_the_shadow_budget()
     {
         var logs = new FakeLogService { CurrentFence = 1 };
         var source = new FakeLogSource { EmitEndOfSource = false };
         source.Set("stdout", []);
         source.Set("stderr", []);
-        var bridge = new AgentRunLogCaptureBridge(logs, new ReadyStorageResolver(), NullLogger<AgentRunLogCaptureBridge>.Instance, TimeSpan.FromMilliseconds(40), TimeSpan.FromMilliseconds(100));
+        var bridge = new AgentRunLogCaptureBridge(logs, new ReadyStorageResolver(), new FakeRecoveryService(), NullLogger<AgentRunLogCaptureBridge>.Instance, new AgentRunLogCaptureBridgeOptions(TimeSpan.FromMilliseconds(40), TimeSpan.FromMilliseconds(100)));
         var expected = Result();
 
         var observed = await (await bridge.OpenAsync(Request(source, 1, Guid.NewGuid()), CancellationToken.None))
@@ -251,7 +294,64 @@ public sealed class AgentRunLogCaptureBridgeTests
         logs.Heads.ShouldAllBe(head => head.Metadata.State == AgentRunLogStreamState.Open && head.CaptureFinalizedAt == null);
     }
 
-    private static AgentRunLogCaptureBridge Bridge(FakeLogService logs) => new(logs, new ReadyStorageResolver(), NullLogger<AgentRunLogCaptureBridge>.Instance);
+    [Fact]
+    public async Task Expected_streams_are_declared_even_when_every_stream_open_fails()
+    {
+        var logs = new FakeLogService { CurrentFence = 1, RejectAllOpens = true };
+        var recovery = new FakeRecoveryService();
+        var source = new FakeLogSource();
+        source.Set("stdout", []);
+        source.Set("stderr", []);
+        var bridge = new AgentRunLogCaptureBridge(logs, new ReadyStorageResolver(), recovery, NullLogger<AgentRunLogCaptureBridge>.Instance);
+
+        var session = await bridge.OpenAsync(Request(source, 1, Guid.NewGuid()), CancellationToken.None);
+        var expected = Result();
+        (await session.ObserveAsync((_, _) => Task.FromResult(expected), CancellationToken.None)).ShouldBeSameAs(expected);
+
+        logs.Heads.ShouldBeEmpty("a fully failed Open cannot pretend a zero-byte stream existed");
+        var declaration = recovery.Declarations.ShouldHaveSingleItem();
+        declaration.Streams.Select(value => value.StreamKind).ShouldBe(new[] { AgentRunLogKinds.StandardOutput, AgentRunLogKinds.StandardError });
+    }
+
+    [Fact]
+    public async Task Total_intent_database_outage_is_an_honest_non_durable_boundary_and_never_changes_the_harness_result()
+    {
+        var logs = new FakeLogService { CurrentFence = 1 };
+        var recovery = new FakeRecoveryService { ThrowOnDeclare = true };
+        var source = new FakeLogSource();
+        source.Set("stdout", []);
+        source.Set("stderr", []);
+        var bridge = new AgentRunLogCaptureBridge(logs, new ReadyStorageResolver(), recovery, NullLogger<AgentRunLogCaptureBridge>.Instance);
+        var expected = Result();
+
+        var observed = await (await bridge.OpenAsync(Request(source, 1, Guid.NewGuid()), CancellationToken.None))
+            .ObserveAsync((_, _) => Task.FromResult(expected), CancellationToken.None);
+
+        observed.ShouldBeSameAs(expected);
+        recovery.DeclarationAttempts.ShouldBe(1);
+        recovery.Declarations.ShouldBeEmpty("a database outage cannot truthfully fabricate a durable capture intent");
+    }
+
+    [Fact]
+    public async Task Typed_intent_rejection_never_opens_a_stream_outside_its_durable_expected_identity()
+    {
+        var logs = new FakeLogService { CurrentFence = 1 };
+        var recovery = new FakeRecoveryService { RejectedDeclaration = AgentRunLogCaptureDeclarationProblem.IdentityConflict };
+        var source = new FakeLogSource();
+        source.Set("stdout", "must-not-open"u8.ToArray());
+        source.Set("stderr", []);
+        var bridge = new AgentRunLogCaptureBridge(logs, new ReadyStorageResolver(), recovery, NullLogger<AgentRunLogCaptureBridge>.Instance);
+        var expected = Result();
+
+        var observed = await (await bridge.OpenAsync(Request(source, 1, Guid.NewGuid()), CancellationToken.None))
+            .ObserveAsync((_, _) => Task.FromResult(expected), CancellationToken.None);
+
+        observed.ShouldBeSameAs(expected);
+        recovery.DeclarationAttempts.ShouldBe(1);
+        logs.Heads.ShouldBeEmpty("a typed declaration rejection must fail closed before any stream is opened");
+    }
+
+    private static AgentRunLogCaptureBridge Bridge(FakeLogService logs) => new(logs, new ReadyStorageResolver(), new FakeRecoveryService(), NullLogger<AgentRunLogCaptureBridge>.Instance);
 
     private static AgentRunLogCaptureOpenRequest Request(FakeLogSource source, long fence, Guid sessionId, SecretRedactor? redactor = null) => new()
     {
@@ -277,6 +377,26 @@ public sealed class AgentRunLogCaptureBridgeTests
     {
         public Task<AgentRunLogStorageResolution> ResolveAsync(Guid teamId, CancellationToken cancellationToken) =>
             Task.FromResult<AgentRunLogStorageResolution>(new AgentRunLogStorageResolution.Unavailable(code));
+    }
+
+    private sealed class FakeRecoveryService : IAgentRunLogCaptureRecoveryService
+    {
+        public bool ThrowOnDeclare { get; init; }
+        public AgentRunLogCaptureDeclarationProblem? RejectedDeclaration { get; init; }
+        public int DeclarationAttempts { get; private set; }
+        public List<AgentRunLogCaptureDeclarationRequest> Declarations { get; } = [];
+
+        public Task<AgentRunLogCaptureDeclarationResult> DeclareAsync(AgentRunLogCaptureDeclarationRequest request, CancellationToken cancellationToken)
+        {
+            DeclarationAttempts++;
+            if (ThrowOnDeclare) throw new IOException("capture-intent database unavailable");
+            if (RejectedDeclaration is { } problem)
+                return Task.FromResult<AgentRunLogCaptureDeclarationResult>(new AgentRunLogCaptureDeclarationResult.Rejected(problem));
+            Declarations.Add(request);
+            return Task.FromResult<AgentRunLogCaptureDeclarationResult>(new AgentRunLogCaptureDeclarationResult.Declared(request.Streams.Count, 0));
+        }
+
+        public Task<AgentRunLogCaptureRecoverySummary> ReconcileAsync(CancellationToken cancellationToken) => Task.FromResult(new AgentRunLogCaptureRecoverySummary(0, 0, 0, 0, 0, 0));
     }
 
     private sealed class FakeLogSource : ISandboxDurableLogSource
@@ -314,11 +434,14 @@ public sealed class AgentRunLogCaptureBridgeTests
         private readonly object _gate = new();
         private readonly Dictionary<string, StreamHead> _streams = new(StringComparer.Ordinal);
         public long CurrentFence { get; set; }
+        public bool RejectAllOpens { get; set; }
         public bool FailAppend { get; set; }
         public bool BlockAppend { get; set; }
+        public int RetryableAppendFailures { get; set; }
         public bool ConcurrentFailCaptureOnce { get; set; }
         public TimeSpan? ObservedOperationTimeout { get; private set; }
         public int FailCaptureCalls { get; private set; }
+        public int AppendAttempts { get; private set; }
         public List<int> AppendSizes { get; } = [];
         public List<Guid> OpenedSessions { get; } = [];
         public Dictionary<(string Kind, Guid Session), long> SourceBasesBySession { get; } = [];
@@ -329,6 +452,7 @@ public sealed class AgentRunLogCaptureBridgeTests
         {
             lock (_gate)
             {
+                if (RejectAllOpens) return Task.FromResult<AgentRunLogOpenResult>(RejectOpen(AgentRunLogProblemCode.BackendUnavailable));
                 if (request.WorkerFenceEpoch != CurrentFence) return Task.FromResult<AgentRunLogOpenResult>(RejectOpen(AgentRunLogProblemCode.StaleWorker));
                 if (!_streams.TryGetValue(request.StreamKind, out var stream))
                 {
@@ -367,7 +491,13 @@ public sealed class AgentRunLogCaptureBridgeTests
             lock (_gate)
             {
                 var stream = Find(request.StreamId);
-                if (FailAppend) return Task.FromResult<AgentRunLogAppendResult>(new AgentRunLogAppendResult.Rejected(new AgentRunLogProblem(AgentRunLogProblemCode.BackendUnavailable)));
+                AppendAttempts++;
+                if (RetryableAppendFailures > 0)
+                {
+                    RetryableAppendFailures--;
+                    return Task.FromResult<AgentRunLogAppendResult>(new AgentRunLogAppendResult.Rejected(new AgentRunLogProblem(AgentRunLogProblemCode.BackendUnavailable, true)));
+                }
+                if (FailAppend) return Task.FromResult<AgentRunLogAppendResult>(new AgentRunLogAppendResult.Rejected(new AgentRunLogProblem(AgentRunLogProblemCode.ArtifactCorrupt)));
                 if (!Owns(stream, request.WorkerFenceEpoch, request.CaptureSessionId)) return Task.FromResult<AgentRunLogAppendResult>(new AgentRunLogAppendResult.Rejected(new AgentRunLogProblem(AgentRunLogProblemCode.StaleWorker)));
                 if (stream.Head.Metadata.TotalBytes != request.ExpectedOffsetBytes || stream.Head.Metadata.SourceOffsetBytes != request.ExpectedSourceOffsetBytes)
                     return Task.FromResult<AgentRunLogAppendResult>(new AgentRunLogAppendResult.Rejected(new AgentRunLogProblem(AgentRunLogProblemCode.NonContiguous)));

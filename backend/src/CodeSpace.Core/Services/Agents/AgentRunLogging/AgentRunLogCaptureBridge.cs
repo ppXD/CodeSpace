@@ -15,21 +15,22 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
     private static readonly TimeSpan DefaultFinalizationBudget = TimeSpan.FromSeconds(30);
     private readonly IAgentRunLogService _logs;
     private readonly IAgentRunLogStorageResolver _storage;
+    private readonly IAgentRunLogCaptureRecoveryService _recovery;
     private readonly ILogger<AgentRunLogCaptureBridge> _logger;
     private readonly TimeSpan _operationTimeout;
     private readonly TimeSpan _finalizationBudget;
 
-    public AgentRunLogCaptureBridge(IAgentRunLogService logs, IAgentRunLogStorageResolver storage, ILogger<AgentRunLogCaptureBridge> logger) : this(logs, storage, logger, DefaultOperationTimeout, DefaultFinalizationBudget) { }
+    public AgentRunLogCaptureBridge(IAgentRunLogService logs, IAgentRunLogStorageResolver storage, IAgentRunLogCaptureRecoveryService recovery, ILogger<AgentRunLogCaptureBridge> logger) : this(logs, storage, recovery, logger, new AgentRunLogCaptureBridgeOptions(DefaultOperationTimeout, DefaultFinalizationBudget)) { }
 
-    internal AgentRunLogCaptureBridge(IAgentRunLogService logs, IAgentRunLogStorageResolver storage, ILogger<AgentRunLogCaptureBridge> logger, TimeSpan operationTimeout, TimeSpan finalizationBudget)
+    internal AgentRunLogCaptureBridge(IAgentRunLogService logs, IAgentRunLogStorageResolver storage, IAgentRunLogCaptureRecoveryService recovery, ILogger<AgentRunLogCaptureBridge> logger, AgentRunLogCaptureBridgeOptions options)
     {
-        if (operationTimeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(operationTimeout));
-        if (finalizationBudget <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(finalizationBudget));
+        if (options.OperationTimeout <= TimeSpan.Zero || options.FinalizationBudget <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(options));
         _logs = logs;
         _storage = storage;
+        _recovery = recovery;
         _logger = logger;
-        _operationTimeout = operationTimeout;
-        _finalizationBudget = finalizationBudget;
+        _operationTimeout = options.OperationTimeout;
+        _finalizationBudget = options.FinalizationBudget;
     }
 
     public async Task<IAgentRunLogCaptureSession> OpenAsync(AgentRunLogCaptureOpenRequest request, CancellationToken cancellationToken)
@@ -42,6 +43,8 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
             var descriptors = request.Source.DescribeLogs(request.Handle);
             if (!Valid(request, descriptors)) return new NoopCaptureSession(request.Handle);
             var captureSessionId = request.Handle.AgentRunLogCaptureSessionId!.Value;
+            if (!await DeclareExpectedStreamsAsync(Declaration(request.TeamId, request.AgentRunId, request.WorkerFenceEpoch, captureSessionId, descriptors), captureToken).ConfigureAwait(false))
+                return new NoopCaptureSession(request.Handle);
             var failure = new CaptureFailureContext(request.TeamId, request.AgentRunId, request.WorkerFenceEpoch, captureSessionId);
             AgentRunLogStorageResolution storage;
             try { storage = await _storage.ResolveAsync(request.TeamId, captureToken).ConfigureAwait(false); }
@@ -104,6 +107,7 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
             var descriptors = request.Source.DescribeLogs(request.Handle);
             if (!Valid(request, descriptors)) return;
             var sessionId = request.Handle.AgentRunLogCaptureSessionId!.Value;
+            if (!await DeclareExpectedStreamsAsync(Declaration(request.TeamId, request.AgentRunId, request.WorkerFenceEpoch, sessionId, descriptors), captureToken).ConfigureAwait(false)) return;
             var failure = new CaptureFailureContext(request.TeamId, request.AgentRunId, request.WorkerFenceEpoch, sessionId);
             foreach (var descriptor in descriptors)
             {
@@ -166,7 +170,12 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
                     ExpectedRevision = stream.Metadata.Revision, OperationTimeout = _operationTimeout,
                 }, captureToken).ConfigureAwait(false);
                 if (result is AgentRunLogCompleteResult.Rejected rejected)
-                    await FailQuietlyAsync(failure, stream.Metadata, $"complete-{Code(rejected.Problem.Code)}", "The finalized Agent Run log could not be verified before terminalization.", captureToken).ConfigureAwait(false);
+                {
+                    if (Transient(rejected.Problem))
+                        _logger.LogWarning("Agent run {RunId} log stream {StreamId} terminalization is transiently unavailable and remains Open for recovery: {Problem}", agentRunId, stream.Metadata.StreamId, rejected.Problem.Code);
+                    else
+                        await FailQuietlyAsync(failure, stream.Metadata, $"complete-{Code(rejected.Problem.Code)}", "The finalized Agent Run log could not be verified before terminalization.", captureToken).ConfigureAwait(false);
+                }
             }
             catch (OperationCanceledException) when (captureToken.IsCancellationRequested)
             {
@@ -175,8 +184,7 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
             }
             catch (Exception exception)
             {
-                _logger.LogWarning(exception, "Agent run {RunId} log stream {StreamId} terminalization failed", agentRunId, stream.Metadata.StreamId);
-                await FailQuietlyAsync(failure, stream.Metadata, "complete-exception", "The Agent Run log terminalization raised an unexpected storage error.", captureToken).ConfigureAwait(false);
+                _logger.LogWarning(exception, "Agent run {RunId} log stream {StreamId} terminalization raised an untyped storage error and remains Open for recovery", agentRunId, stream.Metadata.StreamId);
             }
         }
     }
@@ -258,36 +266,46 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
     private async Task<bool> FlushPendingAsync(AgentRunLogCaptureOpenRequest request, Guid captureSessionId, CaptureStream stream, bool final, CancellationToken cancellationToken)
     {
         if (stream.Pending is not { } pending) return true;
-        AgentRunLogAppendResult result;
-        try
+        var attempt = 0;
+        while (true)
         {
-            result = await _logs.AppendAsync(new AgentRunLogAppendRequest
+            AgentRunLogAppendResult result;
+            try
             {
-                TeamId = request.TeamId, AgentRunId = request.AgentRunId, StreamId = stream.Metadata.StreamId,
-                WorkerFenceEpoch = request.WorkerFenceEpoch, CaptureSessionId = captureSessionId,
-                ExpectedSegmentOrdinal = stream.Metadata.SegmentCount + 1, ExpectedOffsetBytes = stream.Metadata.TotalBytes,
-                ExpectedSourceOffsetBytes = stream.Metadata.SourceOffsetBytes, SourceLengthBytes = pending.SourceBytesConsumed,
-                StorageProfileId = stream.Storage.StorageProfileId, StorageProfileRevision = stream.Storage.StorageProfileRevision,
-                ActorId = request.ActorId, Bytes = pending.Bytes, OperationTimeout = _operationTimeout,
-            }, cancellationToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-        catch
-        {
-            if (!final) return false;
-            await FailStreamAsync(request, captureSessionId, stream, new CaptureFailure("capture-backend-exception", "The Agent Run log storage backend raised an unexpected error."), cancellationToken).ConfigureAwait(false);
+                result = await _logs.AppendAsync(new AgentRunLogAppendRequest
+                {
+                    TeamId = request.TeamId, AgentRunId = request.AgentRunId, StreamId = stream.Metadata.StreamId,
+                    WorkerFenceEpoch = request.WorkerFenceEpoch, CaptureSessionId = captureSessionId,
+                    ExpectedSegmentOrdinal = stream.Metadata.SegmentCount + 1, ExpectedOffsetBytes = stream.Metadata.TotalBytes,
+                    ExpectedSourceOffsetBytes = stream.Metadata.SourceOffsetBytes, SourceLengthBytes = pending.SourceBytesConsumed,
+                    StorageProfileId = stream.Storage.StorageProfileId, StorageProfileRevision = stream.Storage.StorageProfileRevision,
+                    ActorId = request.ActorId, Bytes = pending.Bytes, OperationTimeout = _operationTimeout,
+                }, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception exception)
+            {
+                if (!final) return false;
+                if (attempt == 0) _logger.LogWarning(exception, "Agent run {RunId} log stream {StreamId} final append raised an untyped transient error; retrying inside the final-drain budget", request.AgentRunId, stream.Metadata.StreamId);
+                await Task.Delay(AppendRetryDelay(++attempt), cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+            if (result is AgentRunLogAppendResult.Appended appended)
+            {
+                stream.Metadata = appended.Metadata;
+                stream.Pending = null;
+                return true;
+            }
+            var problem = ((AgentRunLogAppendResult.Rejected)result).Problem;
+            if (Transient(problem))
+            {
+                if (!final) return false;
+                await Task.Delay(AppendRetryDelay(++attempt), cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+            await FailStreamAsync(request, captureSessionId, stream, new CaptureFailure($"capture-{Code(problem.Code)}", "The Agent Run log segment could not be committed to durable storage."), cancellationToken).ConfigureAwait(false);
             return false;
         }
-        if (result is AgentRunLogAppendResult.Appended appended)
-        {
-            stream.Metadata = appended.Metadata;
-            stream.Pending = null;
-            return true;
-        }
-        var problem = ((AgentRunLogAppendResult.Rejected)result).Problem;
-        if (!final && problem.IsRetryable) return false;
-        await FailStreamAsync(request, captureSessionId, stream, new CaptureFailure($"capture-{Code(problem.Code)}", "The Agent Run log segment could not be committed to durable storage."), cancellationToken).ConfigureAwait(false);
-        return false;
     }
 
     private async Task FinalizeSourceAsync(AgentRunLogCaptureOpenRequest request, Guid captureSessionId, CaptureStream stream, CancellationToken cancellationToken)
@@ -304,7 +322,9 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
             stream.Terminal = true;
             return;
         }
-        await FailStreamAsync(request, captureSessionId, stream, new CaptureFailure($"finalize-{Code(((AgentRunLogFinalizeSourceResult.Rejected)result).Problem.Code)}", "The Agent Run log source final-drain receipt could not be committed."), cancellationToken).ConfigureAwait(false);
+        var problem = ((AgentRunLogFinalizeSourceResult.Rejected)result).Problem;
+        if (Transient(problem)) return;
+        await FailStreamAsync(request, captureSessionId, stream, new CaptureFailure($"finalize-{Code(problem.Code)}", "The Agent Run log source final-drain receipt could not be committed."), cancellationToken).ConfigureAwait(false);
     }
 
     private async Task FailStreamAsync(AgentRunLogCaptureOpenRequest request, Guid captureSessionId, CaptureStream stream, CaptureFailure failure, CancellationToken cancellationToken)
@@ -358,9 +378,39 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
         _logger.LogWarning("Agent run {RunId} log stream {StreamId} capture health remained concurrently mutable after bounded retries", context.AgentRunId, current.StreamId);
     }
 
+    private async Task<bool> DeclareExpectedStreamsAsync(AgentRunLogCaptureDeclarationRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await _recovery.DeclareAsync(request, cancellationToken).ConfigureAwait(false);
+            if (result is AgentRunLogCaptureDeclarationResult.Rejected rejected)
+            {
+                _logger.LogWarning("Agent run {RunId} expected log streams could not be declared: {Problem}", request.AgentRunId, rejected.Code);
+                return false;
+            }
+            return true;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception exception)
+        {
+            // A total metadata outage cannot durably prove its own missing intent. Keep task execution byte-identical,
+            // surface the honest boundary, and let any streams that can still open remain independently inspectable.
+            _logger.LogWarning(exception, "Agent run {RunId} expected log stream declaration failed; no durable intent can be claimed for this outage", request.AgentRunId);
+            return true;
+        }
+    }
+
+    private static AgentRunLogCaptureDeclarationRequest Declaration(Guid teamId, Guid agentRunId, long workerFenceEpoch, Guid captureSessionId, IReadOnlyList<SandboxDurableLogDescriptor> descriptors) => new()
+    {
+        TeamId = teamId, AgentRunId = agentRunId, WorkerFenceEpoch = workerFenceEpoch, CaptureSessionId = captureSessionId,
+        Streams = descriptors.Select(value => new AgentRunLogExpectedStream(value.StreamKind, value.ContentType, value.ContentEncoding, value.CaptureSource)).ToArray(),
+    };
+
     private static bool Valid(AgentRunLogCaptureOpenRequest request, IReadOnlyList<SandboxDurableLogDescriptor> descriptors) => request.TeamId != Guid.Empty && request.AgentRunId != Guid.Empty && request.ActorId != Guid.Empty && request.WorkerFenceEpoch > 0 && request.Handle.AgentRunLogCaptureSessionId is { } sessionId && sessionId != Guid.Empty && descriptors.Count > 0 && descriptors.Select(value => value.SourceKey).Distinct(StringComparer.Ordinal).Count() == descriptors.Count && descriptors.Select(value => value.StreamKind).Distinct(StringComparer.Ordinal).Count() == descriptors.Count;
     private static bool Valid(AgentRunLogCaptureGapRequest request, IReadOnlyList<SandboxDurableLogDescriptor> descriptors) => request.TeamId != Guid.Empty && request.AgentRunId != Guid.Empty && request.WorkerFenceEpoch > 0 && request.Handle.AgentRunLogCaptureSessionId is { } sessionId && sessionId != Guid.Empty && request.ErrorCode is { Length: > 0 and <= 128 } && request.ErrorMessage is { Length: > 0 and <= 2048 } && descriptors.Count > 0 && descriptors.Select(value => value.SourceKey).Distinct(StringComparer.Ordinal).Count() == descriptors.Count && descriptors.Select(value => value.StreamKind).Distinct(StringComparer.Ordinal).Count() == descriptors.Count;
     private static bool IsProcessStream(string streamKind) => streamKind is AgentRunLogKinds.StandardOutput or AgentRunLogKinds.StandardError;
+    private static bool Transient(AgentRunLogProblem problem) => problem.IsRetryable || problem.Code is AgentRunLogProblemCode.BackendUnavailable or AgentRunLogProblemCode.ProviderTimeout or AgentRunLogProblemCode.ConcurrentMutation;
+    private static TimeSpan AppendRetryDelay(int attempt) => TimeSpan.FromMilliseconds(Math.Min(1000, 50 * Math.Pow(2, Math.Min(Math.Max(attempt - 1, 0), 5))));
     private static string Code<T>(T value) where T : struct, Enum => string.Concat(value.ToString().Select((character, index) => char.IsUpper(character) && index > 0 ? $"-{char.ToLowerInvariant(character)}" : char.ToLowerInvariant(character).ToString()));
 
     private sealed class CaptureSession : IAgentRunLogCaptureSession
@@ -447,3 +497,5 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
     private sealed record CaptureFailure(string Code, string Message);
     private sealed record CaptureFailureContext(Guid TeamId, Guid AgentRunId, long WorkerFenceEpoch, Guid CaptureSessionId);
 }
+
+internal sealed record AgentRunLogCaptureBridgeOptions(TimeSpan OperationTimeout, TimeSpan FinalizationBudget);
