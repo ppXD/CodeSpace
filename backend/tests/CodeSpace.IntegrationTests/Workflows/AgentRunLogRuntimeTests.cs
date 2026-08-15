@@ -42,15 +42,87 @@ public sealed class AgentRunLogRuntimeTests
         var range = (await service.ReadRangeAsync(new AgentRunLogRangeRequest(world.TeamId, opened.Metadata.StreamId, 0, firstBytes.Length + secondBytes.Length), CancellationToken.None)).ShouldBeOfType<AgentRunLogRangeResult.Available>();
         range.Bytes.ShouldBe(firstBytes.Concat(secondBytes).ToArray());
 
-        var completed = (await service.CompleteAsync(new AgentRunLogCompleteRequest
+        var finalized = (await service.FinalizeSourceAsync(new AgentRunLogFinalizeSourceRequest
         {
             TeamId = world.TeamId, AgentRunId = world.AgentRunId, StreamId = opened.Metadata.StreamId,
             WorkerFenceEpoch = 7, CaptureSessionId = session, ExpectedRevision = second.Metadata.Revision,
+            ExpectedSourceOffsetBytes = second.Metadata.SourceOffsetBytes,
+        }, CancellationToken.None)).ShouldBeOfType<AgentRunLogFinalizeSourceResult.Finalized>();
+        var completed = (await service.CompleteAsync(new AgentRunLogCompleteRequest
+        {
+            TeamId = world.TeamId, AgentRunId = world.AgentRunId, StreamId = opened.Metadata.StreamId,
+            WorkerFenceEpoch = 7, CaptureSessionId = session, ExpectedRevision = finalized.Metadata.Revision,
         }, CancellationToken.None)).ShouldBeOfType<AgentRunLogCompleteResult.Completed>();
         completed.Metadata.State.ShouldBe(AgentRunLogStreamState.Completed);
         completed.Metadata.Sha256.ShouldBe(Convert.ToHexStringLower(SHA256.HashData(firstBytes.Concat(secondBytes).ToArray())));
         (await service.AppendAsync(Append(world, opened.Metadata.StreamId, session, 3, completed.Metadata.TotalBytes, [1]), CancellationToken.None))
             .ShouldBeOfType<AgentRunLogAppendResult.Rejected>().Problem.Code.ShouldBe(AgentRunLogProblemCode.StreamTerminal);
+    }
+
+    [Fact]
+    public async Task Same_fence_revise_spools_are_distinct_append_preserved_sessions_including_an_empty_final_spool()
+    {
+        var world = await SeedWorldAsync();
+        var service = Service(new TestCas(_fixture));
+        var firstSession = Guid.NewGuid();
+        var first = (await service.OpenAsync(Open(world, firstSession, AgentRunLogKinds.StandardOutput), CancellationToken.None)).ShouldBeOfType<AgentRunLogOpenResult.Opened>();
+        var firstAppend = (await service.AppendAsync(Append(world, first.Metadata.StreamId, firstSession, 1, 0, "one"u8.ToArray()), CancellationToken.None)).ShouldBeOfType<AgentRunLogAppendResult.Appended>();
+        await service.FinalizeSourceAsync(new AgentRunLogFinalizeSourceRequest
+        {
+            TeamId = world.TeamId, AgentRunId = world.AgentRunId, StreamId = first.Metadata.StreamId,
+            WorkerFenceEpoch = 7, CaptureSessionId = firstSession, ExpectedRevision = firstAppend.Metadata.Revision,
+            ExpectedSourceOffsetBytes = firstAppend.Metadata.SourceOffsetBytes,
+        }, CancellationToken.None);
+
+        var secondSession = Guid.NewGuid();
+        var second = (await service.OpenAsync(Open(world, secondSession, AgentRunLogKinds.StandardOutput), CancellationToken.None)).ShouldBeOfType<AgentRunLogOpenResult.Opened>();
+        second.CaptureSourceBaseOffsetBytes.ShouldBe(3);
+        var secondAppend = (await service.AppendAsync(Append(world, first.Metadata.StreamId, secondSession, 2, 3, "two"u8.ToArray()), CancellationToken.None)).ShouldBeOfType<AgentRunLogAppendResult.Appended>();
+        await service.FinalizeSourceAsync(new AgentRunLogFinalizeSourceRequest
+        {
+            TeamId = world.TeamId, AgentRunId = world.AgentRunId, StreamId = first.Metadata.StreamId,
+            WorkerFenceEpoch = 7, CaptureSessionId = secondSession, ExpectedRevision = secondAppend.Metadata.Revision,
+            ExpectedSourceOffsetBytes = secondAppend.Metadata.SourceOffsetBytes,
+        }, CancellationToken.None);
+
+        var emptySession = Guid.NewGuid();
+        var empty = (await service.OpenAsync(Open(world, emptySession, AgentRunLogKinds.StandardOutput), CancellationToken.None)).ShouldBeOfType<AgentRunLogOpenResult.Opened>();
+        empty.CaptureSourceBaseOffsetBytes.ShouldBe(6);
+        await service.FinalizeSourceAsync(new AgentRunLogFinalizeSourceRequest
+        {
+            TeamId = world.TeamId, AgentRunId = world.AgentRunId, StreamId = first.Metadata.StreamId,
+            WorkerFenceEpoch = 7, CaptureSessionId = emptySession, ExpectedRevision = empty.Metadata.Revision,
+            ExpectedSourceOffsetBytes = empty.Metadata.SourceOffsetBytes,
+        }, CancellationToken.None);
+
+        var bytes = (await service.ReadRangeAsync(new AgentRunLogRangeRequest(world.TeamId, first.Metadata.StreamId, 0, 6), CancellationToken.None)).ShouldBeOfType<AgentRunLogRangeResult.Available>();
+        bytes.Bytes.ShouldBe("onetwo"u8.ToArray());
+        using var scope = _fixture.BeginScope();
+        var sessions = await scope.Resolve<CodeSpaceDbContext>().AgentRunLogCaptureSession.AsNoTracking()
+            .Where(value => value.StreamId == first.Metadata.StreamId).OrderBy(value => value.SourceBaseOffsetBytes).ThenBy(value => value.CreatedAt).ToListAsync();
+        sessions.Select(value => value.CaptureSessionId).ShouldBe(new[] { firstSession, secondSession, emptySession });
+        sessions.ShouldAllBe(value => value.State == AgentRunLogCaptureSessionState.Finalized);
+        sessions.Select(value => (value.SourceBaseOffsetBytes, value.SourceOffsetBytes)).ShouldBe(new[] { (0L, 3L), (3L, 6L), (6L, 6L) });
+    }
+
+    [Fact]
+    public async Task Reserved_log_profile_wins_even_when_more_than_three_active_profiles_sort_before_it()
+    {
+        var world = await SeedWorldAsync();
+        var reservedId = Guid.NewGuid();
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        AddProfile(db, world, Guid.NewGuid(), "aaa", now);
+        AddProfile(db, world, Guid.NewGuid(), "aab", now);
+        AddProfile(db, world, Guid.NewGuid(), "aac", now);
+        AddProfile(db, world, Guid.NewGuid(), "aad", now);
+        AddProfile(db, world, reservedId, AgentRunLogStorageResolver.ReservedStableName, now);
+        await db.SaveChangesAsync();
+
+        var result = await new AgentRunLogStorageResolver(db).ResolveAsync(world.TeamId, CancellationToken.None);
+
+        result.ShouldBe(new AgentRunLogStorageResolution.Ready(reservedId, 1));
     }
 
     [Fact]
@@ -60,17 +132,42 @@ public sealed class AgentRunLogRuntimeTests
         var service = Service(new TestCas(_fixture));
         var session = Guid.NewGuid();
         var stream = (await service.OpenAsync(Open(world, session, AgentRunLogKinds.StandardOutput), CancellationToken.None)).ShouldBeOfType<AgentRunLogOpenResult.Opened>().Metadata;
-        var request = Append(world, stream.StreamId, session, 1, 0, [1, 2, 3, 4]);
+        var request = Append(world, stream.StreamId, session, 1, 0, [1, 2, 3, 4]) with { SourceLengthBytes = 7 };
         var first = (await service.AppendAsync(request, CancellationToken.None)).ShouldBeOfType<AgentRunLogAppendResult.Appended>();
+        first.Metadata.SourceOffsetBytes.ShouldBe(7, "source progress is independent from the redacted stored length");
         var retry = (await service.AppendAsync(request, CancellationToken.None)).ShouldBeOfType<AgentRunLogAppendResult.Appended>();
         retry.WasExactRetry.ShouldBeTrue();
         retry.Segment.SegmentId.ShouldBe(first.Segment.SegmentId);
         (await service.AppendAsync(request with { Bytes = new byte[] { 9, 9, 9, 9 } }, CancellationToken.None))
             .ShouldBeOfType<AgentRunLogAppendResult.Rejected>().Problem.Code.ShouldBe(AgentRunLogProblemCode.IdempotencyConflict);
+        (await service.AppendAsync(request with { SourceLengthBytes = 6 }, CancellationToken.None))
+            .ShouldBeOfType<AgentRunLogAppendResult.Rejected>().Problem.Code.ShouldBe(AgentRunLogProblemCode.IdempotencyConflict);
         (await service.AppendAsync(request with { ExpectedSegmentOrdinal = 2, ExpectedOffsetBytes = 3 }, CancellationToken.None))
             .ShouldBeOfType<AgentRunLogAppendResult.Rejected>().Problem.Code.ShouldBe(AgentRunLogProblemCode.NonContiguous);
         (await service.AppendAsync(request with { ExpectedSegmentOrdinal = 3, ExpectedOffsetBytes = 4 }, CancellationToken.None))
             .ShouldBeOfType<AgentRunLogAppendResult.Rejected>().Problem.Code.ShouldBe(AgentRunLogProblemCode.NonContiguous);
+    }
+
+    [Fact]
+    public async Task Capture_failure_is_a_fenced_typed_terminal_stream_health_state_and_streams_are_listable_by_run()
+    {
+        var world = await SeedWorldAsync();
+        var service = Service(new TestCas(_fixture));
+        var session = Guid.NewGuid();
+        var stdout = (await service.OpenAsync(Open(world, session, AgentRunLogKinds.StandardOutput), CancellationToken.None)).ShouldBeOfType<AgentRunLogOpenResult.Opened>().Metadata;
+        var stderr = (await service.OpenAsync(Open(world, session, AgentRunLogKinds.StandardError), CancellationToken.None)).ShouldBeOfType<AgentRunLogOpenResult.Opened>().Metadata;
+
+        var failed = await service.FailCaptureAsync(new AgentRunLogFailCaptureRequest
+        {
+            TeamId = world.TeamId, AgentRunId = world.AgentRunId, StreamId = stderr.StreamId,
+            WorkerFenceEpoch = 7, CaptureSessionId = session, ExpectedRevision = stderr.Revision,
+            ErrorCode = "capture-backend-unavailable", ErrorMessage = "The selected capture backend was unavailable.",
+        }, CancellationToken.None);
+
+        failed.ShouldBeOfType<AgentRunLogFailCaptureResult.Failed>().Metadata.State.ShouldBe(AgentRunLogStreamState.CaptureFailed);
+        var listed = await service.ListMetadataAsync(world.TeamId, world.AgentRunId, CancellationToken.None);
+        listed.Select(value => value.StreamId).ShouldBe(new[] { stdout.StreamId, stderr.StreamId }, ignoreOrder: true);
+        listed.Single(value => value.StreamId == stderr.StreamId).ErrorCode.ShouldBe("capture-backend-unavailable");
     }
 
     [Fact]
@@ -168,6 +265,7 @@ public sealed class AgentRunLogRuntimeTests
     {
         TeamId = world.TeamId, AgentRunId = world.AgentRunId, StreamId = streamId, WorkerFenceEpoch = 7,
         CaptureSessionId = session, ExpectedSegmentOrdinal = ordinal, ExpectedOffsetBytes = offset,
+        ExpectedSourceOffsetBytes = offset, SourceLengthBytes = bytes.Length,
         StorageProfileId = world.StorageProfileId, StorageProfileRevision = 1, ActorId = world.ActorId, Bytes = bytes,
     };
 
@@ -203,6 +301,22 @@ public sealed class AgentRunLogRuntimeTests
         });
         await db.SaveChangesAsync();
         return new World(teamId, actorId, profileId, runId);
+    }
+
+    private static void AddProfile(CodeSpaceDbContext db, World world, Guid profileId, string stableName, DateTimeOffset now)
+    {
+        var profile = new StorageProfile
+        {
+            Id = profileId, TeamId = world.TeamId, StableName = stableName, State = StorageProfileState.Active,
+            CurrentRevision = 1, CreatedDate = now, CreatedBy = world.ActorId, LastModifiedDate = now, LastModifiedBy = world.ActorId,
+        };
+        profile.Revisions.Add(new StorageProfileRevision
+        {
+            Id = Guid.NewGuid(), TeamId = world.TeamId, StorageProfileId = profileId, Revision = 1,
+            ProviderTypeKey = "local-rwx/v1", NonSecretConfigJson = "{\"rootPath\":\"/srv/codespace/artifacts\"}",
+            NamespaceFingerprint = $"sha256:{new string('b', 64)}", CreatedDate = now, CreatedBy = world.ActorId,
+        });
+        db.StorageProfile.Add(profile);
     }
 
     private sealed record World(Guid TeamId, Guid ActorId, Guid StorageProfileId, Guid AgentRunId);

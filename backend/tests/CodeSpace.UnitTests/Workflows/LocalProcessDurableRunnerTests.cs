@@ -2,6 +2,7 @@ using CodeSpace.Core.Settings;
 using System.Diagnostics;
 using System.Linq;
 using System.Net.Sockets;
+using CodeSpace.Core.Services.Agents.AgentRunLogging;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
@@ -126,6 +127,122 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
 
         result.Stderr.ShouldContain("err-on-spool");
         lines.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Durable_log_source_reads_bounded_raw_stdout_and_stderr_ranges_without_utf8_boundary_assumptions()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var handle = await LaunchAsync(new SandboxSpec { Command = "/bin/sh", Args = new[] { "-c", "printf '\\377A'; printf '\\376B' >&2" }, TimeoutSeconds = 30 });
+        await AttachCollectAsync(handle);
+        var source = (ISandboxDurableLogSource)_runner;
+        var descriptors = source.DescribeLogs(handle);
+        var stdout = descriptors.Single(value => value.StreamKind == AgentRunLogKinds.StandardOutput);
+        var stderr = descriptors.Single(value => value.StreamKind == AgentRunLogKinds.StandardError);
+
+        var stdoutRead = await source.ReadAsync(new SandboxDurableLogReadRequest { Handle = handle, SourceKey = stdout.SourceKey, OffsetBytes = 0, MinimumBytes = 1, MaximumBytes = 1, FinalDrain = true }, CancellationToken.None);
+        var stderrRead = await source.ReadAsync(new SandboxDurableLogReadRequest { Handle = handle, SourceKey = stderr.SourceKey, OffsetBytes = 0, MinimumBytes = 1, MaximumBytes = 2, FinalDrain = true }, CancellationToken.None);
+        var unknown = await source.ReadAsync(new SandboxDurableLogReadRequest { Handle = handle, SourceKey = "../out.log", OffsetBytes = 0, MinimumBytes = 1, MaximumBytes = 2, FinalDrain = true }, CancellationToken.None);
+        var relative = await source.ReadAsync(new SandboxDurableLogReadRequest { Handle = handle with { SpoolDirectory = "relative-spool" }, SourceKey = stdout.SourceKey, OffsetBytes = 0, MinimumBytes = 1, MaximumBytes = 2, FinalDrain = true }, CancellationToken.None);
+        var stdoutEnd = await source.ReadAsync(new SandboxDurableLogReadRequest { Handle = handle, SourceKey = stdout.SourceKey, OffsetBytes = 2, MinimumBytes = 1, MaximumBytes = 2, FinalDrain = true }, CancellationToken.None);
+
+        stdoutRead.ShouldBeOfType<SandboxDurableLogReadResult.Available>().Bytes.Length.ShouldBe(1, "the source obeys the caller's byte cap rather than decoding a character");
+        stderrRead.ShouldBeOfType<SandboxDurableLogReadResult.Available>().Bytes.ToArray().ShouldBe(new byte[] { 0xfe, (byte)'B' });
+        unknown.ShouldBeOfType<SandboxDurableLogReadResult.Unavailable>().Problem.Code.ShouldBe(SandboxDurableLogProblemCode.UnknownSource, "source keys are an allowlist, never path fragments");
+        relative.ShouldBeOfType<SandboxDurableLogReadResult.Unavailable>().Problem.Code.ShouldBe(SandboxDurableLogProblemCode.InvalidRequest, "only the persisted absolute spool root is readable");
+        stdoutEnd.ShouldBeOfType<SandboxDurableLogReadResult.EndOfSource>("only a dead and quiescent producer yields the explicit final receipt");
+    }
+
+    [Fact]
+    public async Task Final_drain_never_treats_an_unsealed_quiescent_spool_as_eof_before_a_late_byte()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var spool = LocalProcessRunner.SpoolDirectoryFor(Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(spool);
+        _spoolDirs.Add(spool);
+        var stdoutPath = Path.Combine(spool, "out.log");
+        await File.WriteAllBytesAsync(stdoutPath, []);
+        await File.WriteAllBytesAsync(Path.Combine(spool, "err.log"), []);
+
+        using var producer = Process.Start(new ProcessStartInfo { FileName = "/bin/sh", ArgumentList = { "-c", "exit 0" }, UseShellExecute = false })!;
+        var producerStart = producer.StartTime.ToUniversalTime();
+        await producer.WaitForExitAsync();
+        var handle = new SandboxHandle { Kind = LocalProcessRunner.LocalKind, ProcessId = producer.Id, ProcessStartTimeUtc = producerStart, SpoolDirectory = spool, Deadline = DateTimeOffset.MaxValue };
+        var source = (ISandboxDurableLogSource)_runner;
+        var sourceKey = source.DescribeLogs(handle).Single(value => value.StreamKind == AgentRunLogKinds.StandardOutput).SourceKey;
+        var request = new SandboxDurableLogReadRequest { Handle = handle, SourceKey = sourceKey, OffsetBytes = 0, MinimumBytes = 1, MaximumBytes = 32, FinalDrain = true };
+
+        var lateWrite = Task.Run(async () =>
+        {
+            await Task.Delay(750);
+            await File.AppendAllTextAsync(stdoutPath, "late");
+        });
+        var premature = await source.ReadAsync(request, CancellationToken.None);
+        await lateWrite;
+        var bytes = await source.ReadAsync(request, CancellationToken.None);
+        var end = await source.ReadAsync(request with { OffsetBytes = 4 }, CancellationToken.None);
+
+        premature.ShouldBeOfType<SandboxDurableLogReadResult.NoData>("an empty observation whose size changes during the seal window is transient, never EOF");
+        bytes.ShouldBeOfType<SandboxDurableLogReadResult.Available>().Bytes.ToArray().ShouldBe("late"u8.ToArray());
+        end.ShouldBeOfType<SandboxDurableLogReadResult.NoData>("time-based quiescence cannot mint EOF without the runner's durable seal authority");
+    }
+
+    [Fact]
+    public async Task Supervisor_seals_logs_only_after_a_background_descendant_closes_its_output_writer()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var handle = await LaunchAsync(new SandboxSpec { Command = "/bin/sh", Args = new[] { "-c", "(sleep 0.8; printf late)& exit 0" }, TimeoutSeconds = 30 });
+        await Task.Delay(300);
+
+        File.Exists(Path.Combine(handle.SpoolDirectory, "logs.sealed")).ShouldBeFalse("a descendant still holds the FIFO writer, so an apparent command exit cannot mint a false EOF receipt");
+
+        var (result, lines) = await AttachCollectAsync(handle);
+        var source = (ISandboxDurableLogSource)_runner;
+        var sourceKey = source.DescribeLogs(handle).Single(value => value.StreamKind == AgentRunLogKinds.StandardOutput).SourceKey;
+        var end = await source.ReadAsync(new SandboxDurableLogReadRequest { Handle = handle, SourceKey = sourceKey, OffsetBytes = 4, MinimumBytes = 1, MaximumBytes = 32, FinalDrain = true }, CancellationToken.None);
+
+        result.Status.ShouldBe(SandboxStatus.Success);
+        lines.ShouldBe(new[] { "late" });
+        File.Exists(Path.Combine(handle.SpoolDirectory, "logs.sealed")).ShouldBeTrue("the seal is written only after both FIFO writers reached EOF");
+        end.ShouldBeOfType<SandboxDurableLogReadResult.EndOfSource>();
+    }
+
+    [Fact]
+    public async Task Durable_log_source_rejects_root_escape_dot_segments_and_symlinked_spools_or_files()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var source = (ISandboxDurableLogSource)_runner;
+        var outside = TempDir();
+        var outsideLog = Path.Combine(outside, "outside.log");
+        await File.WriteAllTextAsync(outsideLog, "must-not-read");
+        var template = await LaunchAsync(ContractSpecs.Print("safe"));
+        await AttachCollectAsync(template);
+        var sourceKey = source.DescribeLogs(template).Single(value => value.StreamKind == AgentRunLogKinds.StandardOutput).SourceKey;
+        var request = new SandboxDurableLogReadRequest { Handle = template, SourceKey = sourceKey, OffsetBytes = 0, MinimumBytes = 1, MaximumBytes = 32, FinalDrain = true };
+
+        var outsideRead = await source.ReadAsync(request with { Handle = template with { SpoolDirectory = outside } }, CancellationToken.None);
+        var dotSegment = await source.ReadAsync(request with { Handle = template with { SpoolDirectory = Path.Combine(template.SpoolDirectory, "..", Path.GetFileName(template.SpoolDirectory)) } }, CancellationToken.None);
+
+        var linkedSpool = LocalProcessRunner.SpoolDirectoryFor("linked-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.GetDirectoryName(linkedSpool)!);
+        Directory.CreateSymbolicLink(linkedSpool, outside);
+        SandboxDurableLogReadResult linkedSpoolRead;
+        try { linkedSpoolRead = await source.ReadAsync(request with { Handle = template with { SpoolDirectory = linkedSpool } }, CancellationToken.None); }
+        finally { Directory.Delete(linkedSpool); }
+
+        var spoolLog = Path.Combine(template.SpoolDirectory, "out.log");
+        File.Delete(spoolLog);
+        File.CreateSymbolicLink(spoolLog, outsideLog);
+        var linkedFileRead = await source.ReadAsync(request, CancellationToken.None);
+
+        outsideRead.ShouldBeOfType<SandboxDurableLogReadResult.Unavailable>().Problem.Code.ShouldBe(SandboxDurableLogProblemCode.InvalidRequest, "an absolute path outside the configured spool root is never authorized by a persisted handle");
+        dotSegment.ShouldBeOfType<SandboxDurableLogReadResult.Unavailable>().Problem.Code.ShouldBe(SandboxDurableLogProblemCode.InvalidRequest, "a non-canonical persisted path cannot smuggle dot segments through the root clamp");
+        linkedSpoolRead.ShouldBeOfType<SandboxDurableLogReadResult.Unavailable>().Problem.Code.ShouldBe(SandboxDurableLogProblemCode.InvalidRequest, "a direct-child symlink can still escape the root and is rejected");
+        linkedFileRead.ShouldBeOfType<SandboxDurableLogReadResult.Unavailable>().Problem.Code.ShouldBe(SandboxDurableLogProblemCode.InvalidRequest, "the fixed filename must itself be a real spool file, not a symlink");
     }
 
     [Fact]
@@ -343,7 +460,12 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
 
         var c = info.ArgumentList.IndexOf("-c");
         c.ShouldBeGreaterThanOrEqualTo(0, "the supervisor is invoked via sh -c");
+        var script = info.ArgumentList[c + 1];
         info.ArgumentList[c + 2].ShouldBe("sh");                       // $0 — the script reads the real command from "$@"
+        script.Contains("unset CSP_PID CSP_OUT CSP_ERR CSP_EXIT CSP_LOG_COPY_STATUS", StringComparison.Ordinal).ShouldBeTrue("the child never inherits host spool paths or status-marker authority");
+        script.Contains("out_status=$?", StringComparison.Ordinal).ShouldBeTrue("stdout copier success is captured before any host seal can be authorized");
+        script.Contains("err_status=$?", StringComparison.Ordinal).ShouldBeTrue("stderr copier success is captured before any host seal can be authorized");
+        script.Contains("logs.sealed", StringComparison.Ordinal).ShouldBeFalse("only the host runner, never the child-side script, can mint the final source seal");
 
         // "$@" is the command, possibly wrapped by prlimit (resource caps, outermost) and/or bwrap (confinement),
         // each terminated by `--`. The REAL command is invariably the trailing tokens, however many wrappers precede.
@@ -359,6 +481,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         info.Environment["CSP_OUT"].ShouldBe(Path.Combine("/tmp/spool-x", "out.log"));
         info.Environment["CSP_ERR"].ShouldBe(Path.Combine("/tmp/spool-x", "err.log"));
         info.Environment["CSP_EXIT"].ShouldBe(Path.Combine("/tmp/spool-x", "exit"));
+        info.Environment["CSP_LOG_COPY_STATUS"].ShouldBe(Path.Combine("/tmp/spool-x", "logs.copy-status"));
         info.Environment["CSP_PID"].ShouldBe(Path.Combine("/tmp/spool-x", "pid"));
     }
 
@@ -423,6 +546,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         info.Environment.ShouldContainKey("CSP_OUT");
         info.Environment.ShouldContainKey("CSP_ERR");
         info.Environment.ShouldContainKey("CSP_EXIT");
+        info.Environment.ShouldContainKey("CSP_LOG_COPY_STATUS");
         info.Environment.ShouldContainKey("CSP_PID");
     }
 

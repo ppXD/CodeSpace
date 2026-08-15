@@ -25,10 +25,10 @@ public sealed class AgentRunLogSchemaTests
         entity.GetTableName().ShouldBe("agent_run_log_stream");
         entity.GetProperties().Select(property => property.Name).Order().ShouldBe(new[]
         {
-            "AgentRunId", "CaptureSessionId", "CaptureSource", "CompletedAt", "ContentDigest", "ContentDigestAlgorithm",
+            "AgentRunId", "CaptureFinalizedAt", "CaptureSessionId", "CaptureSource", "CaptureSourceBaseOffsetBytes", "CompletedAt", "ContentDigest", "ContentDigestAlgorithm",
             "ContentEncoding", "ContentType", "CreatedAt", "ErrorCode", "ErrorMessage", "ExpiresAt", "Id", "LastModifiedAt",
             "NextOffsetBytes", "NextSegmentOrdinal", "Retention", "Revision", "SchemaVersion", "SegmentCount", "State",
-            "StreamKind", "TeamId", "TotalBytes", "WorkerFenceEpoch", "Xmin",
+            "SourceOffsetBytes", "StreamKind", "TeamId", "TotalBytes", "WorkerFenceEpoch", "Xmin",
         }.Order());
         entity.FindProperty(nameof(AgentRunLogStream.State))!.GetMaxLength().ShouldBe(24);
         entity.FindProperty(nameof(AgentRunLogStream.Xmin))!.IsConcurrencyToken.ShouldBeTrue();
@@ -47,6 +47,31 @@ public sealed class AgentRunLogSchemaTests
     }
 
     [Fact]
+    public void Capture_session_is_append_preserved_per_spool_progress_and_health()
+    {
+        using var db = BuildContext();
+        var entity = Entity<AgentRunLogCaptureSession>(db);
+
+        entity.GetTableName().ShouldBe("agent_run_log_capture_session");
+        entity.GetProperties().Select(property => property.Name).Order().ShouldBe(new[]
+        {
+            "AgentRunId", "CaptureSessionId", "CreatedAt", "CurrentWorkerFenceEpoch", "ErrorCode", "ErrorMessage",
+            "FinalizedAt", "Id", "InitialWorkerFenceEpoch", "LastObservedAt", "Revision", "SourceBaseOffsetBytes",
+            "SourceOffsetBytes", "State", "StreamId", "TeamId", "Xmin",
+        }.Order());
+        entity.FindProperty(nameof(AgentRunLogCaptureSession.Xmin))!.IsConcurrencyToken.ShouldBeTrue();
+        AlternateKey(entity, "ak_agent_run_log_capture_session_identity").Properties.Select(property => property.Name)
+            .ShouldBe(new[] { "TeamId", "StreamId", "CaptureSessionId" });
+        ForeignKey(entity, typeof(AgentRunLogStream)).Properties.Select(property => property.Name)
+            .ShouldBe(new[] { "TeamId", "StreamId", "AgentRunId" });
+        entity.GetCheckConstraints().Select(constraint => constraint.Name).ShouldBe(new[]
+        {
+            "ck_agent_run_log_capture_session_bounds", "ck_agent_run_log_capture_session_identity",
+            "ck_agent_run_log_capture_session_state", "ck_agent_run_log_capture_session_time",
+        }, ignoreOrder: true);
+    }
+
+    [Fact]
     public void Segment_is_append_only_byte_addressed_fenced_and_contains_only_a_cas_reference()
     {
         using var db = BuildContext();
@@ -57,9 +82,10 @@ public sealed class AgentRunLogSchemaTests
         {
             "AgentRunId", "ArtifactObjectId", "CaptureSessionId", "CreatedAt", "FirstObservedAt", "Id",
             "LastObservedAt", "LengthBytes", "SchemaVersion", "SegmentOrdinal", "StartOffsetBytes", "StreamId",
-            "TeamId", "WorkerFenceEpoch",
+            "SourceLengthBytes", "SourceStartOffsetBytes", "TeamId", "WorkerFenceEpoch",
         }.Order());
         ForeignKey(entity, typeof(AgentRunLogStream)).Properties.Select(property => property.Name).ShouldBe(new[] { "TeamId", "StreamId", "AgentRunId" });
+        ForeignKey(entity, typeof(AgentRunLogCaptureSession)).Properties.Select(property => property.Name).ShouldBe(new[] { "TeamId", "StreamId", "CaptureSessionId" });
         ForeignKey(entity, typeof(ArtifactObject)).Properties.Select(property => property.Name).ShouldBe(new[] { "TeamId", "ArtifactObjectId" });
 
         var ordinal = Index(entity, "ux_agent_run_log_segment_ordinal");

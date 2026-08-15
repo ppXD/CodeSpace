@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -57,4 +58,65 @@ public sealed class SecretRedactor
 
         return text;
     }
+
+    /// <summary>
+    /// Creates a stateful byte-stream redactor for durable stdout/stderr capture. It matches the UTF-8 bytes of the
+    /// same known secrets while preserving every unrelated byte verbatim, including malformed UTF-8. A bounded suffix
+    /// is held between calls so a secret split at any read boundary is still masked; callers persist only
+    /// <see cref="SecretUtf8Redaction.SourceBytesConsumed"/> source bytes with each transformed result.
+    /// </summary>
+    public SecretUtf8RedactionStream CreateUtf8Stream() => new(_secrets);
 }
+
+public sealed class SecretUtf8RedactionStream
+{
+    private static readonly byte[] PlaceholderBytes = Encoding.UTF8.GetBytes(SecretRedactor.Placeholder);
+    private readonly IReadOnlyList<byte[]> _patterns;
+    private readonly int _maximumPatternLength;
+    private byte[] _carry = [];
+
+    internal SecretUtf8RedactionStream(IEnumerable<string> secrets)
+    {
+        _patterns = secrets.Select(Encoding.UTF8.GetBytes).Where(value => value.Length > 0).OrderByDescending(value => value.Length).ToArray();
+        _maximumPatternLength = _patterns.Count == 0 ? 0 : _patterns.Max(value => value.Length);
+    }
+
+    public SecretUtf8Redaction Transform(ReadOnlySpan<byte> source, bool final)
+    {
+        var combined = new byte[_carry.Length + source.Length];
+        _carry.CopyTo(combined, 0);
+        source.CopyTo(combined.AsSpan(_carry.Length));
+        var safeStartLimit = final || _maximumPatternLength == 0 ? combined.Length : Math.Max(0, combined.Length - _maximumPatternLength + 1);
+        var output = new ArrayBufferWriter<byte>(Math.Max(combined.Length, 1));
+        var offset = 0;
+
+        while (offset < safeStartLimit)
+        {
+            var matched = Match(combined, offset);
+            if (matched > 0)
+            {
+                output.Write(PlaceholderBytes);
+                offset += matched;
+                continue;
+            }
+
+            output.Write(combined.AsSpan(offset, 1));
+            offset++;
+        }
+
+        _carry = combined.AsSpan(offset).ToArray();
+        return new SecretUtf8Redaction(output.WrittenMemory.ToArray(), offset);
+    }
+
+    private int Match(byte[] source, int offset)
+    {
+        foreach (var pattern in _patterns)
+        {
+            if (offset + pattern.Length <= source.Length && source.AsSpan(offset, pattern.Length).SequenceEqual(pattern)) return pattern.Length;
+        }
+
+        return 0;
+    }
+}
+
+public sealed record SecretUtf8Redaction(ReadOnlyMemory<byte> Bytes, int SourceBytesConsumed);

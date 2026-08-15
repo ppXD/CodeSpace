@@ -24,6 +24,12 @@ public sealed class AgentRunLogStream : IEntity<Guid>
     public long TotalBytes { get; set; }
     public long NextSegmentOrdinal { get; set; } = 1;
     public long NextOffsetBytes { get; set; }
+    /// <summary>Monotonic raw-source progress, kept separate because redaction can change stored byte length.</summary>
+    public long SourceOffsetBytes { get; set; }
+    /// <summary>Raw-source head at which the currently claimed spool started; local reads resume at source minus base.</summary>
+    public long CaptureSourceBaseOffsetBytes { get; set; }
+    /// <summary>Durable proof that the currently claimed spool source reached a final drain at its committed source head.</summary>
+    public DateTimeOffset? CaptureFinalizedAt { get; set; }
     public ArtifactDigestAlgorithm? ContentDigestAlgorithm { get; set; }
     public byte[]? ContentDigest { get; set; }
     public int SchemaVersion { get; set; } = 2;
@@ -36,6 +42,7 @@ public sealed class AgentRunLogStream : IEntity<Guid>
 
     public AgentRun AgentRun { get; set; } = default!;
     public ICollection<AgentRunLogSegment> Segments { get; set; } = new List<AgentRunLogSegment>();
+    public ICollection<AgentRunLogCaptureSession> CaptureSessions { get; set; } = new List<AgentRunLogCaptureSession>();
 }
 
 /// <summary>Capture state, not the Agent Run's task outcome. Every non-Open state is terminal.</summary>

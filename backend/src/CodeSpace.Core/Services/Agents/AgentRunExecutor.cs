@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents.AgentRunLogging;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Review;
@@ -93,6 +94,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// is exactly what this codebase does not keep. Changing it is a one-line edit in a reviewed PR.
     /// </summary>
     internal const bool FullToolCatalogByDefault = true;
+    private static readonly TimeSpan ShadowLogTerminalizationBudget = TimeSpan.FromSeconds(30);
 
     private static readonly IReadOnlyDictionary<string, string> EmptySecretEnv = new Dictionary<string, string>();
 
@@ -122,12 +124,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private readonly IPublishManifestStore _manifests;
     private readonly IArtifactManifestStore _artifactManifests;
     private readonly Capture.ICaptureIntentService _captureIntents;
+    private readonly IAgentRunLogCaptureBridge? _logCapture;
     // The publish guard chain (Order ascending) — see EvaluatePublishGuardsAsync. Sorted once at construction so
     // production reads a stable sequence regardless of DI registration order.
     private readonly IReadOnlyList<IPublishGuard> _publishGuards;
     private readonly ILogger<AgentRunExecutor> _logger;
 
-    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, Workflows.Artifacts.IArtifactStore artifacts, IPublishManifestStore manifests, IArtifactManifestStore artifactManifests, Capture.ICaptureIntentService captureIntents, IEnumerable<IPublishGuard> publishGuards, ILogger<AgentRunExecutor> logger)
+    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, Workflows.Artifacts.IArtifactStore artifacts, IPublishManifestStore manifests, IArtifactManifestStore artifactManifests, Capture.ICaptureIntentService captureIntents, IEnumerable<IPublishGuard> publishGuards, ILogger<AgentRunExecutor> logger, IAgentRunLogCaptureBridge? logCapture = null)
     {
         _runs = runs;
         _harnesses = harnesses;
@@ -145,6 +148,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         _manifests = manifests;
         _artifactManifests = artifactManifests;
         _captureIntents = captureIntents;
+        _logCapture = logCapture;
         // Tolerate a null enumerable (a hand-built test double that never exercises the push path) — zero guards
         // registered is a legitimate state (every push clears), not a constructor-time crash.
         _publishGuards = (publishGuards ?? Enumerable.Empty<IPublishGuard>()).OrderBy(g => g.Order).ToList();
@@ -193,7 +197,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // EXACTLY as before — only a terminal parent aborts the launch (the run, now Running, is cancelled instead). INSIDE
             // the try so a fault READING the parent status lands a clean terminal Failed with the real (redacted) error, instead
             // of escaping uncaught to leave the run Running for the reconciler to later abandon with a generic reason.
-            if (await AbortIfParentTerminalAsync(agentRunId, run.WorkflowRunId, claimedEpoch, cancellationToken).ConfigureAwait(false)) return;
+            if (await AbortIfParentTerminalAsync(agentRunId, run.TeamId, run.WorkflowRunId, claimedEpoch, cancellationToken).ConfigureAwait(false)) return;
 
             var task = JsonSerializer.Deserialize<AgentTask>(run.TaskJson, AgentJson.Options)
                        ?? throw new InvalidOperationException($"AgentRun {agentRunId} has an empty task envelope.");
@@ -295,7 +299,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // points at it. Null when no endpoint → nothing to re-open.
             var mcpToken = mcp is null ? null : token;
 
-            var result = await RunHarnessAsync(agentRunId, harness, runner, spec, mcpToken, redactor, ReviseSpoolKey(agentRunId, round: 0), workspaceDirectory, workspaceBaseSha, cancellationToken).ConfigureAwait(false);
+            var runContext = new HarnessRunContext
+            {
+                RunId = agentRunId, TeamId = run.TeamId, ActorId = run.CreatedBy, WorkerFenceEpoch = claimedEpoch,
+                Harness = harness, Runner = runner, Spec = spec, McpToken = mcpToken, Redactor = redactor,
+                SpoolKey = ReviseSpoolKey(agentRunId, round: 0), WorkspaceDirectory = workspaceDirectory, WorkspaceBaseSha = workspaceBaseSha,
+            };
+            var result = await RunHarnessAsync(runContext, cancellationToken).ConfigureAwait(false);
 
             // P2 (capture-intent saga): the harness exited — the capture window opens HERE, before any of its
             // individually best-effort side effects (diff, offload, push, manifest). A crash inside the window
@@ -337,7 +347,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
                 var priorTranscript = result.Transcript;
                 var priorUsage = result.TokenUsage;
-                result = await RunHarnessAsync(agentRunId, harness, runner, reviseSpec, mcpToken, redactor, ReviseSpoolKey(agentRunId, round), workspaceDirectory, workspaceBaseSha, cancellationToken).ConfigureAwait(false);
+                result = await RunHarnessAsync(runContext with { Spec = reviseSpec, SpoolKey = ReviseSpoolKey(agentRunId, round) }, cancellationToken).ConfigureAwait(false);
                 result = result with { Transcript = JoinTranscripts(priorTranscript, result.Transcript), TokenUsage = SumTokenUsage(priorUsage, result.TokenUsage), ReviseRounds = round };
 
                 // Verify under the ORIGINAL goal: the composed REVISE goal is for the harness invocation only — the
@@ -359,7 +369,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // re-commit, never as a terminal run with an unresolved promise.
             await _captureIntents.CommitAsync(agentRunId, claimedEpoch, CaptureFactsOf(result), cancellationToken).ConfigureAwait(false);
 
-            await CompleteAndNotifyAsync(agentRunId, result, claimedEpoch, cancellationToken).ConfigureAwait(false);
+            await CompleteAndNotifyAsync(agentRunId, run.TeamId, result, claimedEpoch, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -371,7 +381,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         catch (Exception ex)
         {
             _logger.LogError(ex, "Agent run {RunId} failed during execution", agentRunId);
-            await CompleteAndNotifyAsync(agentRunId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "executor-error", Error = redactor.Redact(ex.Message) }, claimedEpoch, cancellationToken).ConfigureAwait(false);
+            await CompleteAndNotifyAsync(agentRunId, run.TeamId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "executor-error", Error = redactor.Redact(ex.Message) }, claimedEpoch, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -437,7 +447,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // clone directory itself DOES survive (deliberately left in place for this exact case) with its base SHA
             // persisted on the handle at launch, so EnrichWithReattachWorkspaceChangesAsync below still CAPTURES the
             // diff (I1) via IWorkspacePathCapture — read-only, credential-free — even though nothing gets pushed here.
-            var result = await ReattachAndFoldAsync(agentRunId, durable, handle, task, run.TeamId, harness, cancellationToken).ConfigureAwait(false);
+            var reattach = new ReattachFoldContext
+            {
+                RunId = agentRunId, TeamId = run.TeamId, ActorId = run.CreatedBy, WorkerFenceEpoch = expectedEpoch,
+                Durable = durable, Handle = handle, Task = task, Harness = harness,
+            };
+            var result = await ReattachAndFoldAsync(reattach, cancellationToken).ConfigureAwait(false);
 
             if (result is null) return;   // couldn't safely observe (no redactor, still running) — leave Running for a later sweep
 
@@ -461,7 +476,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             await _captureIntents.CommitAsync(agentRunId, expectedEpoch, CaptureFactsOf(result), cancellationToken).ConfigureAwait(false);
 
-            await CompleteAndNotifyAsync(agentRunId, result, expectedEpoch, cancellationToken).ConfigureAwait(false);
+            await CompleteAndNotifyAsync(agentRunId, run.TeamId, result, expectedEpoch, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -470,7 +485,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         catch (Exception ex)
         {
             _logger.LogError(ex, "Agent run {RunId} failed during re-attach", agentRunId);
-            await CompleteAndNotifyAsync(agentRunId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "reattach-error", Error = "The agent run could not be re-attached after a restart and was failed." }, expectedEpoch, cancellationToken).ConfigureAwait(false);
+            await CompleteAndNotifyAsync(agentRunId, run.TeamId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "reattach-error", Error = "The agent run could not be re-attached after a restart and was failed." }, expectedEpoch, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -489,38 +504,38 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// credential threw, re-resolved to nothing, or rotated (fingerprint mismatch), we complete from the exit
     /// marker only (NEVER re-tail with an un/mis-keyed redactor) so an echoed secret is never frozen into the log.
     /// </summary>
-    private async Task<AgentRunResult?> ReattachAndFoldAsync(Guid runId, ISandboxDurableRunner durable, SandboxHandle handle, AgentTask task, Guid teamId, IAgentHarness harness, CancellationToken cancellationToken)
+    private async Task<AgentRunResult?> ReattachAndFoldAsync(ReattachFoldContext context, CancellationToken cancellationToken)
     {
         SecretRedactor redactor;
         try
         {
-            redactor = (await ResolveModelCredentialEnvAsync(task, teamId, harness, cancellationToken).ConfigureAwait(false)).Redactor;
+            redactor = (await ResolveModelCredentialEnvAsync(context.Task, context.TeamId, context.Harness, cancellationToken).ConfigureAwait(false)).Redactor;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogWarning(ex, "Agent run {RunId}: could not re-resolve the credential to redact the re-attached tail; completing from the exit marker only to avoid leaking an echoed secret", runId);
-            return await CompleteFromMarkerOnlyAsync(durable, handle, cancellationToken).ConfigureAwait(false);
+            _logger.LogWarning(ex, "Agent run {RunId}: could not re-resolve the credential to redact the re-attached tail; completing from the exit marker only to avoid leaking an echoed secret", context.RunId);
+            return await CompleteFromMarkerWithCaptureGapAsync(context, "redactor-resolution-failed", "The durable native log could not be captured because its original redaction credential was unavailable after worker recovery.", cancellationToken).ConfigureAwait(false);
         }
 
         // Re-tail ONLY when the rebuilt redactor provably matches the one that masked the original output — its
         // fingerprint must equal the one stamped at launch. A mismatch (credential deleted/rotated, team-default
         // changed; both-null = a run with no injected secret → safe) means we can no longer mask a key the spool
         // may echo, so complete from the marker only rather than freeze an unmaskable secret into the log.
-        if (redactor.Fingerprint != handle.InjectedKeyFingerprint)
+        if (redactor.Fingerprint != context.Handle.InjectedKeyFingerprint)
         {
-            _logger.LogWarning("Agent run {RunId}: the re-resolved credential no longer matches the one injected at launch (deleted/rotated); completing from the exit marker only to avoid leaking an echoed secret", runId);
-            return await CompleteFromMarkerOnlyAsync(durable, handle, cancellationToken).ConfigureAwait(false);
+            _logger.LogWarning("Agent run {RunId}: the re-resolved credential no longer matches the one injected at launch (deleted/rotated); completing from the exit marker only to avoid leaking an echoed secret", context.RunId);
+            return await CompleteFromMarkerWithCaptureGapAsync(context, "redactor-fingerprint-mismatch", "The durable native log could not be captured because its redaction credential changed after worker recovery.", cancellationToken).ConfigureAwait(false);
         }
 
         var events = new List<AgentEvent>();
         var transcript = new System.Text.StringBuilder();   // D3: the faithful raw stream of the RESUMED tail (the pre-crash prefix lived in the dead observer's run)
-        var writer = new BufferedEventWriter(_runs, runId);   // same batched-append + flush-at-checkpoint path as the live tail
+        var writer = new BufferedEventWriter(_runs, context.RunId);   // same batched-append + flush-at-checkpoint path as the live tail
 
         async Task PersistLineAsync(string line)
         {
             transcript.AppendLine(redactor.Redact(line));
 
-            foreach (var normalized in harness.ParseEvents(line))
+            foreach (var normalized in context.Harness.ParseEvents(line))
             {
                 var redacted = Redact(normalized, redactor);
 
@@ -529,16 +544,22 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             }
         }
 
-        var sandbox = await durable.AttachAsync(handle, (line, _) => PersistLineAsync(line), cancellationToken, CheckpointHandleOffset(runId, handle, writer)).ConfigureAwait(false);
+        var handle = EnsureLogCaptureHandle(context.Handle, context.Durable);
+        if (handle != context.Handle)
+            await _runs.SetRunnerHandleAsync(context.RunId, JsonSerializer.Serialize(handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
+        var capture = await OpenLogCaptureAsync(new LogCaptureContext(context.TeamId, context.RunId, context.ActorId, context.WorkerFenceEpoch, redactor), context.Durable, handle, cancellationToken).ConfigureAwait(false);
+        if (!ReferenceEquals(capture.Handle, handle) && capture.Handle != handle)
+            await _runs.SetRunnerHandleAsync(context.RunId, JsonSerializer.Serialize(capture.Handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
+        var sandbox = await capture.ObserveAsync((capturedHandle, token) => context.Durable.AttachAsync(capturedHandle, (line, _) => PersistLineAsync(line), token, CheckpointHandleOffset(context.RunId, capturedHandle, writer)), cancellationToken).ConfigureAwait(false);
 
         // Final flush for the terminal-drain lines (no trailing checkpoint), as in the live path.
         await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
 
-        var result = MapSandboxResult(sandbox, harness, events) with { Transcript = transcript.ToString() };
+        var result = MapSandboxResult(sandbox, context.Harness, events) with { Transcript = transcript.ToString() };
 
         // Capture the resumable session transcript here too — a run that completes via durable re-attach (worker restart
         // mid-run) is exactly the durability case continuity serves; the config home still lives under the handle's spool.
-        return await CaptureSessionTranscriptAsync(runId, task, result, harness, handle, cancellationToken).ConfigureAwait(false);
+        return await CaptureSessionTranscriptAsync(context.RunId, context.Task, result, context.Harness, capture.Handle, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -576,6 +597,28 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         };
     }
 
+    private async Task<AgentRunResult?> CompleteFromMarkerWithCaptureGapAsync(ReattachFoldContext context, string errorCode, string errorMessage, CancellationToken cancellationToken)
+    {
+        var result = await CompleteFromMarkerOnlyAsync(context.Durable, context.Handle, cancellationToken).ConfigureAwait(false);
+        if (result == null || _logCapture == null || context.Durable is not ISandboxDurableLogSource source) return result;
+        var handle = EnsureLogCaptureHandle(context.Handle, context.Durable);
+        if (handle != context.Handle)
+            await _runs.SetRunnerHandleAsync(context.RunId, JsonSerializer.Serialize(handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await _logCapture.RecordGapAsync(new AgentRunLogCaptureGapRequest
+            {
+                TeamId = context.TeamId, AgentRunId = context.RunId, WorkerFenceEpoch = context.WorkerFenceEpoch,
+                Handle = handle, Source = source, ErrorCode = errorCode, ErrorMessage = errorMessage,
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(exception, "Agent run {RunId} native-log capture gap could not be persisted; marker-only result remains unchanged", context.RunId);
+        }
+        return result;
+    }
+
     private static SandboxHandle? DeserializeHandle(string? handleJson)
     {
         if (string.IsNullOrWhiteSpace(handleJson)) return null;
@@ -585,7 +628,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     }
 
     /// <summary>Land the terminal result (fenced on the claim epoch, so a reclaimed-then-revived worker loses), then fire the completion notifier (which resumes the agent.run node parked on this run). The notifier is best-effort + swallows its own failures, so completion is never masked by a resume error.</summary>
-    private async Task CompleteAndNotifyAsync(Guid runId, AgentRunResult result, long expectedEpoch, CancellationToken cancellationToken)
+    private async Task CompleteAndNotifyAsync(Guid runId, Guid teamId, AgentRunResult result, long expectedEpoch, CancellationToken cancellationToken)
     {
         try
         {
@@ -600,6 +643,21 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
 
         await _notifier.NotifyCompletedAsync(runId, cancellationToken).ConfigureAwait(false);
+
+        if (_logCapture != null)
+        {
+            using var shadow = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            shadow.CancelAfter(ShadowLogTerminalizationBudget);
+            try { await _logCapture.CompleteRunAsync(teamId, runId, expectedEpoch, shadow.Token).ConfigureAwait(false); }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogWarning("Agent run {RunId} shadow log terminalization exceeded its post-terminal budget; durable Open state remains for reconciliation", runId);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogWarning(exception, "Agent run {RunId} shadow log terminalization failed after task completion; durable log state remains independently recoverable", runId);
+            }
+        }
     }
 
     /// <summary>
@@ -1959,7 +2017,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// uses for any outcome, which also notifies the parent — and returns true (abort the launch). This closes the TOCTOU
     /// the reconciler's still-Queued guard can't: the parent may flip terminal between that guard's read and this claim.
     /// </summary>
-    private async Task<bool> AbortIfParentTerminalAsync(Guid runId, Guid? workflowRunId, long claimedEpoch, CancellationToken cancellationToken)
+    private async Task<bool> AbortIfParentTerminalAsync(Guid runId, Guid teamId, Guid? workflowRunId, long claimedEpoch, CancellationToken cancellationToken)
     {
         if (workflowRunId is not { } parentId) return false;   // standalone run — no parent to gate on, proceed unchanged
 
@@ -1972,7 +2030,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         _logger.LogInformation("Agent run {RunId}: parent workflow run {ParentId} is terminal ({Status}) at the claim point; cancelling instead of launching a sandbox", runId, parentId, parentStatus);
 
-        await CompleteAndNotifyAsync(runId, new AgentRunResult { Status = AgentRunStatus.Cancelled, ExitReason = "parent-terminal", Error = ParentTerminalAtClaimError }, claimedEpoch, cancellationToken).ConfigureAwait(false);
+        await CompleteAndNotifyAsync(runId, teamId, new AgentRunResult { Status = AgentRunStatus.Cancelled, ExitReason = "parent-terminal", Error = ParentTerminalAtClaimError }, claimedEpoch, cancellationToken).ConfigureAwait(false);
 
         return true;
     }
@@ -1991,24 +2049,24 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
     }
 
-    private async Task<AgentRunResult> RunHarnessAsync(Guid runId, IAgentHarness harness, ISandboxRunner runner, SandboxSpec spec, string? mcpToken, SecretRedactor redactor, string spoolKey, string? workspaceDirectory, string? workspaceBaseSha, CancellationToken cancellationToken)
+    private async Task<AgentRunResult> RunHarnessAsync(HarnessRunContext context, CancellationToken cancellationToken)
     {
         var events = new List<AgentEvent>();
         var transcript = new System.Text.StringBuilder();   // D3: the FAITHFUL raw stream — every redacted line, incl. ones ParseEvent drops
-        var writer = new BufferedEventWriter(_runs, runId);   // batches the DB inserts; flushed at each spool checkpoint + once at the end
+        var writer = new BufferedEventWriter(_runs, context.RunId);   // batches the DB inserts; flushed at each spool checkpoint + once at the end
 
         async Task PersistLineAsync(string line)
         {
             // Capture the faithful transcript FIRST — redact the raw line, then keep it whether or not ParseEvents
             // surfaces any event. ParseEvents drops blank/unrecognized lines; the transcript keeps them so a replay
             // is exact. Redacted before it's held, so no secret reaches the offloaded artifact.
-            transcript.AppendLine(redactor.Redact(line));
+            transcript.AppendLine(context.Redactor.Redact(line));
 
             // ONE native line can carry several content blocks (reasoning + tool_use + text) → several events, in
             // stream order. Each is redacted BEFORE the append-only log freezes it (the log can't be edited later).
-            foreach (var normalized in harness.ParseEvents(line))
+            foreach (var normalized in context.Harness.ParseEvents(line))
             {
-                var redacted = Redact(normalized, redactor);
+                var redacted = Redact(normalized, context.Redactor);
 
                 await writer.BufferAsync(redacted, cancellationToken).ConfigureAwait(false);   // buffered — one batched INSERT per spool checkpoint, not one per line
                 events.Add(redacted);   // in-memory, for the harness's result fold
@@ -2020,7 +2078,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // redactor's fingerprint is stamped onto the durable handle so a re-attach can prove it rebuilt the SAME
         // key before re-tailing the spool (a rotated/deleted key → marker-only, never an unmaskable leak). The MCP
         // token rides the handle too so a re-attach re-binds the SAME socket+token the agent's declaration carries.
-        var sandbox = await RunSandboxAsync(runId, runner, spec, PersistLineAsync, writer, redactor.Fingerprint, mcpToken, spoolKey, workspaceDirectory, workspaceBaseSha, cancellationToken).ConfigureAwait(false);
+        var sandbox = await RunSandboxAsync(context, PersistLineAsync, writer, cancellationToken).ConfigureAwait(false);
 
         // Final flush: the durable runner's terminal-drain paths (CompleteFromSpool/Timeout/Vanished) deliver the last
         // lines WITHOUT a trailing checkpoint, so anything buffered after the last checkpoint must be flushed here
@@ -2028,7 +2086,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
 
         // Events are already redacted, so a result the harness folds from them (summary / error) is redacted too.
-        var result = MapSandboxResult(sandbox, harness, events);
+        var result = MapSandboxResult(sandbox, context.Harness, events);
 
         // D3: attach the faithful raw transcript (offloaded to an artifact at completion if large — the common case).
         return result with { Transcript = transcript.ToString() };
@@ -2062,13 +2120,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// otherwise the live-stream / batch path. Feature-detected via <c>runner is ISandboxDurableRunner</c>, so
     /// a runner that can't be durable transparently falls back to streaming.
     /// </summary>
-    private async Task<SandboxResult> RunSandboxAsync(Guid runId, ISandboxRunner runner, SandboxSpec spec, Func<string, Task> persistLine, BufferedEventWriter writer, string? keyFingerprint, string? mcpToken, string spoolKey, string? workspaceDirectory, string? workspaceBaseSha, CancellationToken cancellationToken)
+    private async Task<SandboxResult> RunSandboxAsync(HarnessRunContext context, Func<string, Task> persistLine, BufferedEventWriter writer, CancellationToken cancellationToken)
     {
-        if (runner is ISandboxDurableRunner durable)
-            return await RunDurableAsync(runId, durable, spec, persistLine, writer, keyFingerprint, mcpToken, spoolKey, workspaceDirectory, workspaceBaseSha, cancellationToken).ConfigureAwait(false);
+        if (context.Runner is ISandboxDurableRunner durable)
+            return await RunDurableAsync(context, durable, persistLine, writer, cancellationToken).ConfigureAwait(false);
 
         // Non-durable fallback (no spool/checkpoint): the writer's size cap + the caller's final flush drain it.
-        return await RunAndStreamAsync(runner, spec, persistLine, cancellationToken).ConfigureAwait(false);
+        return await RunAndStreamAsync(context.Runner, context.Spec, persistLine, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -2077,7 +2135,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// observer dies mid-tail. On a host-shutdown cancel the attach stops observing WITHOUT killing the
     /// process (leaving the run Running for re-attach/recovery); only the spec timeout terminates it.
     /// </summary>
-    private async Task<SandboxResult> RunDurableAsync(Guid runId, ISandboxDurableRunner durable, SandboxSpec spec, Func<string, Task> persistLine, BufferedEventWriter writer, string? keyFingerprint, string? mcpToken, string spoolKey, string? workspaceDirectory, string? workspaceBaseSha, CancellationToken cancellationToken)
+    private async Task<SandboxResult> RunDurableAsync(HarnessRunContext context, ISandboxDurableRunner durable, Func<string, Task> persistLine, BufferedEventWriter writer, CancellationToken cancellationToken)
     {
         // Stamp the injected-key fingerprint + the MCP run token onto the handle at launch. The fingerprint lets a
         // re-attach verify it rebuilt the same redactor before re-tailing (rotated/deleted credential → marker-only);
@@ -2085,13 +2143,45 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // The spool key is round-scoped (ReviseSpoolKey) — a revise round must never inherit a finished spool's exit marker.
         // The workspace directory + base SHA (primary repo only) let a re-attach capture the agent's diff via
         // IWorkspacePathCapture even though the live IWorkspaceHandle that prepared the clone died with this worker.
-        var handle = (await durable.LaunchAsync(spec, spoolKey, cancellationToken).ConfigureAwait(false)) with { InjectedKeyFingerprint = keyFingerprint, McpRunToken = mcpToken, WorkspaceDirectory = workspaceDirectory, WorkspaceBaseSha = workspaceBaseSha };
+        var handle = (await durable.LaunchAsync(context.Spec, context.SpoolKey, cancellationToken).ConfigureAwait(false)) with
+        {
+            InjectedKeyFingerprint = context.Redactor.Fingerprint, McpRunToken = context.McpToken,
+            WorkspaceDirectory = context.WorkspaceDirectory, WorkspaceBaseSha = context.WorkspaceBaseSha,
+        };
+        handle = EnsureLogCaptureHandle(handle, durable);
 
-        await _runs.SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
+        await _runs.SetRunnerHandleAsync(context.RunId, JsonSerializer.Serialize(handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
+        var capture = await OpenLogCaptureAsync(new LogCaptureContext(context.TeamId, context.RunId, context.ActorId, context.WorkerFenceEpoch, context.Redactor), durable, handle, cancellationToken).ConfigureAwait(false);
+        if (capture.Handle != handle)
+            await _runs.SetRunnerHandleAsync(context.RunId, JsonSerializer.Serialize(capture.Handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
 
         // Checkpoint the advancing spool offset onto the handle as we tail, so a backend restart mid-run can
         // re-attach (ReattachAsync) and resume from here instead of re-emitting the whole spool.
-        return await durable.AttachAsync(handle, (line, _) => persistLine(line), cancellationToken, CheckpointHandleOffset(runId, handle, writer)).ConfigureAwait(false);
+        return await capture.ObserveAsync((capturedHandle, token) => durable.AttachAsync(capturedHandle, (line, _) => persistLine(line), token, CheckpointHandleOffset(context.RunId, capturedHandle, writer)), cancellationToken).ConfigureAwait(false);
+    }
+
+    private SandboxHandle EnsureLogCaptureHandle(SandboxHandle handle, ISandboxDurableRunner durable)
+    {
+        if (_logCapture == null || durable is not ISandboxDurableLogSource || handle.AgentRunLogCaptureSessionId is { } sessionId && sessionId != Guid.Empty) return handle;
+        return handle with { AgentRunLogCaptureSessionId = Guid.NewGuid() };
+    }
+
+    private async Task<IAgentRunLogCaptureSession> OpenLogCaptureAsync(LogCaptureContext context, ISandboxDurableRunner durable, SandboxHandle handle, CancellationToken cancellationToken)
+    {
+        if (_logCapture == null || durable is not ISandboxDurableLogSource source) return new PassthroughLogCaptureSession(handle);
+        try
+        {
+            return await _logCapture.OpenAsync(new AgentRunLogCaptureOpenRequest
+            {
+                TeamId = context.TeamId, AgentRunId = context.RunId, ActorId = context.ActorId,
+                WorkerFenceEpoch = context.WorkerFenceEpoch, Handle = handle, Source = source, Redactor = context.Redactor,
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(exception, "Agent run {RunId} shadow log capture could not open; sandbox observation remains unchanged", context.RunId);
+            return new PassthroughLogCaptureSession(handle);
+        }
     }
 
     /// <summary>
@@ -2106,6 +2196,42 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             await writer.FlushAsync(ct).ConfigureAwait(false);
             await _runs.SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle with { StdoutOffset = offset }, AgentJson.Options), ct).ConfigureAwait(false);
         };
+
+    private sealed record HarnessRunContext
+    {
+        public required Guid RunId { get; init; }
+        public required Guid TeamId { get; init; }
+        public required Guid ActorId { get; init; }
+        public required long WorkerFenceEpoch { get; init; }
+        public required IAgentHarness Harness { get; init; }
+        public required ISandboxRunner Runner { get; init; }
+        public required SandboxSpec Spec { get; init; }
+        public string? McpToken { get; init; }
+        public required SecretRedactor Redactor { get; init; }
+        public required string SpoolKey { get; init; }
+        public string? WorkspaceDirectory { get; init; }
+        public string? WorkspaceBaseSha { get; init; }
+    }
+
+    private sealed record ReattachFoldContext
+    {
+        public required Guid RunId { get; init; }
+        public required Guid TeamId { get; init; }
+        public required Guid ActorId { get; init; }
+        public required long WorkerFenceEpoch { get; init; }
+        public required ISandboxDurableRunner Durable { get; init; }
+        public required SandboxHandle Handle { get; init; }
+        public required AgentTask Task { get; init; }
+        public required IAgentHarness Harness { get; init; }
+    }
+
+    private sealed record LogCaptureContext(Guid TeamId, Guid RunId, Guid ActorId, long WorkerFenceEpoch, SecretRedactor Redactor);
+
+    private sealed class PassthroughLogCaptureSession(SandboxHandle handle) : IAgentRunLogCaptureSession
+    {
+        public SandboxHandle Handle { get; } = handle;
+        public Task<SandboxResult> ObserveAsync(Func<SandboxHandle, CancellationToken, Task<SandboxResult>> observer, CancellationToken cancellationToken) => observer(Handle, cancellationToken);
+    }
 
     /// <summary>
     /// Buffers redacted agent events and flushes them as ONE batched insert (instead of one INSERT per stdout line —

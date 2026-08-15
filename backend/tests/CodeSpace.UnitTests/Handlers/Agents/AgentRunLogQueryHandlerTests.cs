@@ -107,7 +107,7 @@ public sealed class AgentRunLogQueryHandlerTests
         wire.ShouldNotContain("WorkerFence");
     }
 
-    private static AgentRunLogMetadata Metadata(Guid runId) => new(Guid.NewGuid(), runId, AgentRunLogKinds.StandardOutput, "text/plain", "utf-8", "durable-spool/v1", ArtifactRetention.Run, AgentRunLogStreamState.Open, 1, 0, 0, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null, null);
+    private static AgentRunLogMetadata Metadata(Guid runId) => new(Guid.NewGuid(), runId, AgentRunLogKinds.StandardOutput, "text/plain", "utf-8", "durable-spool/v1", ArtifactRetention.Run, AgentRunLogStreamState.Open, 1, 0, 0, 0, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null, null);
 
     private sealed class StubLogService : IAgentRunLogService
     {
@@ -130,7 +130,11 @@ public sealed class AgentRunLogQueryHandlerTests
 
         public Task<AgentRunLogOpenResult> OpenAsync(AgentRunLogOpenRequest request, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<AgentRunLogAppendResult> AppendAsync(AgentRunLogAppendRequest request, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<AgentRunLogFinalizeSourceResult> FinalizeSourceAsync(AgentRunLogFinalizeSourceRequest request, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<AgentRunLogCompleteResult> CompleteAsync(AgentRunLogCompleteRequest request, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<AgentRunLogFailCaptureResult> FailCaptureAsync(AgentRunLogFailCaptureRequest request, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<IReadOnlyList<AgentRunLogMetadata>> ListMetadataAsync(Guid teamId, Guid agentRunId, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<IReadOnlyList<AgentRunLogCaptureHead>> ListCaptureHeadsAsync(Guid teamId, Guid agentRunId, CancellationToken cancellationToken) => throw new NotImplementedException();
     }
 
     private sealed class StubCurrentTeam(Guid id) : ICurrentTeam

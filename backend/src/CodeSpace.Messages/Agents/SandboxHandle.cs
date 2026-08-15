@@ -55,6 +55,13 @@ public sealed record SandboxHandle
     public long StdoutOffset { get; init; }
 
     /// <summary>
+    /// Opaque identity of this exact launched spool's native-log capture session. A revise round gets a new handle and
+    /// therefore a new session; a worker re-attach retains the same value. Null on handles written before log capture
+    /// existed; the executor stamps and persists one before opening the first capture stream.
+    /// </summary>
+    public Guid? AgentRunLogCaptureSessionId { get; init; }
+
+    /// <summary>
     /// A NON-REVERSIBLE fingerprint of the secret(s) the launching run injected into the sandbox env (null when
     /// the run injected none). A re-attaching observer rebuilds its redactor from the run's CURRENT credential
     /// and compares: only when the fingerprint MATCHES has it provably reconstructed the same key that masked the

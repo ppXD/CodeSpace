@@ -13,12 +13,13 @@ namespace CodeSpace.Core.Services.Agents.Sandbox.Runners;
 /// Implements the batch <see cref="ISandboxRunner"/> (full stdout/stderr capture), the streaming
 /// <see cref="ISandboxStreamRunner"/> (stdout delivered line-by-line for live logs), and the DURABLE
 /// <see cref="ISandboxDurableRunner"/> (launch + spool + re-attachable observation — see
-/// <c>LocalProcessRunner.Durable.cs</c>). Enforces <see cref="SandboxSpec.TimeoutSeconds"/> by killing the
+/// <c>LocalProcessRunner.Durable.cs</c>). Its sibling <see cref="ISandboxDurableLogSource"/> exposes only bounded,
+/// byte-addressed reads of that exact spool for generic Shadow capture. Enforces <see cref="SandboxSpec.TimeoutSeconds"/> by killing the
 /// process tree, and surfaces a non-zero exit as <see cref="SandboxStatus.Failed"/> rather than throwing.
 /// Caller cancellation is honoured distinctly from the spec timeout: it terminates the process and rethrows
 /// (the durable path differs — see its remarks: cancellation stops observing without killing).
 /// </summary>
-public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamRunner, ISandboxDurableRunner, ISingletonDependency
+public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamRunner, ISandboxDurableRunner, ISandboxDurableLogSource, ISingletonDependency
 {
     public const string LocalKind = "local";
 
