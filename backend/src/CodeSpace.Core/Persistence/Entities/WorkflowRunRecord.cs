@@ -21,16 +21,14 @@ public class WorkflowRunRecord : IEntity<Guid>
     public Guid RunId { get; set; }
 
     /// <summary>
-    /// Insert-ordering token, backed by a single PostgreSQL BIGSERIAL sequence shared across
-    /// every <c>workflow_run_record</c> row in the database. The sequence is therefore
-    /// <b>globally</b> monotonic — strict across runs, not just within one. Consumers MUST
-    /// scope queries by <c>run_id</c> when they want per-run ordering (the index
-    /// <c>idx_wrr_run_sequence</c> covers this).
+    /// Allocation-order token, backed by a single PostgreSQL BIGSERIAL sequence shared across
+    /// every <c>workflow_run_record</c> row in the database. It is monotonic at allocation and
+    /// remains useful for deterministic ordering inside a run (the index <c>idx_wrr_run_sequence</c>
+    /// covers this), but it is gapful and is not transaction commit order.
     ///
-    /// <para>Global monotonicity is a feature, not an accident: future ledger-streaming
-    /// consumers can use Sequence as a single global cursor (<c>WHERE sequence > $last_seen
-    /// ORDER BY sequence</c>) and still see writes in the same order the engine emitted
-    /// them, across all runs. Within a single run, monotonicity holds trivially.</para>
+    /// <para>A durable global consumer MUST NOT advance a high-water mark over this value: a transaction can allocate
+    /// a lower sequence and commit after another transaction whose higher value is already visible. Use an outbox,
+    /// source-id anti-join, or another commit-aware admission protocol instead.</para>
     /// </summary>
     public long Sequence { get; set; }
 

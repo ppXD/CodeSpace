@@ -32,7 +32,8 @@ public sealed class WorkflowRunModelCallSchemaTests
             "CallOrdinal", "CaptureCompleteness", "CaptureSource", "CreatedBy", "CreatedDate", "ExecutionAttemptId",
             "ExecutionAttemptOrdinal", "ExecutionGeneration", "Id", "IterationKey", "LastModifiedBy", "LastModifiedDate",
             "NodeId", "PlanVersion", "Purpose", "RequestArtifactId", "RequestedModel", "RequestedModelRowId", "RequestedProvider",
-            "SchemaVersion", "SelectionPolicy", "TeamId", "WorkflowRunId", "WorkPlanId", "WorkUnitContractHash", "WorkUnitId",
+            "SchemaVersion", "SelectionPolicy", "SourceCorrelationId", "SourceKind", "TeamId", "WorkflowRunId", "WorkPlanId",
+            "WorkUnitContractHash", "WorkUnitId",
         }.Order());
 
         entity.FindProperty(nameof(WorkflowRunModelCall.NodeId))!.IsNullable.ShouldBeTrue();
@@ -43,6 +44,7 @@ public sealed class WorkflowRunModelCallSchemaTests
         entity.FindProperty(nameof(WorkflowRunModelCall.CaptureCompleteness))!.ClrType.ShouldBe(typeof(WorkflowRunCaptureCompleteness));
         entity.FindProperty(nameof(WorkflowRunModelCall.Purpose))!.GetMaxLength().ShouldBe(128);
         entity.FindProperty(nameof(WorkflowRunModelCall.SelectionPolicy))!.GetMaxLength().ShouldBe(256);
+        entity.FindProperty(nameof(WorkflowRunModelCall.SourceKind))!.GetMaxLength().ShouldBe(64);
         new WorkflowRunModelCall().SchemaVersion.ShouldBe(WorkflowRunDataContract.CurrentVersion);
 
         Index(entity, "ix_workflow_run_model_call_run_created").Properties.Select(p => p.Name)
@@ -53,6 +55,13 @@ public sealed class WorkflowRunModelCallSchemaTests
             .ShouldBe(new[] { "WorkPlanId", "PlanVersion", "WorkUnitId" });
         Index(entity, "ix_workflow_run_model_call_requested_model_row").Properties.Select(p => p.Name)
             .ShouldBe(new[] { "RequestedModelRowId", "CreatedDate" });
+        var source = Index(entity, "ux_workflow_run_model_call_source_identity");
+        source.IsUnique.ShouldBeTrue();
+        source.Properties.Select(p => p.Name).ShouldBe(new[] { "TeamId", "WorkflowRunId", "SourceKind", "SourceCorrelationId" });
+
+        var run = entity.GetForeignKeys().Single(f => f.PrincipalEntityType.ClrType == typeof(WorkflowRun));
+        run.Properties.Select(p => p.Name).ShouldBe(new[] { "TeamId", "WorkflowRunId" });
+        run.DeleteBehavior.ShouldBe(DeleteBehavior.Restrict);
 
         entity.GetCheckConstraints().Select(c => c.Name).ShouldBe(new[]
         {
@@ -60,6 +69,7 @@ public sealed class WorkflowRunModelCallSchemaTests
             "ck_workflow_run_model_call_execution_identity",
             "ck_workflow_run_model_call_positive_values",
             "ck_workflow_run_model_call_provenance",
+            "ck_workflow_run_model_call_source_identity",
             "ck_workflow_run_model_call_work_unit_identity",
         }, ignoreOrder: true);
     }
@@ -78,8 +88,8 @@ public sealed class WorkflowRunModelCallSchemaTests
             "CostAmount", "CostCurrency", "CreatedBy", "CreatedDate", "EffectiveModel", "EffectiveModelRowId", "EffectiveProvider",
             "EndpointFingerprint", "ErrorArtifactId", "ErrorCode", "FinishReason", "FirstTokenAt", "HttpStatusCode", "Id",
             "InputTokens", "LastModifiedBy", "LastModifiedDate", "ModelCallId", "OutputTokens", "PricingVersion", "ProviderRequestId",
-            "ReasoningTokens", "RequestArtifactId", "ResponseArtifactId", "SchemaVersion", "StartedAt", "Status", "TeamId",
-            "TransportKind", "WorkflowRunId",
+            "ReasoningTokens", "RequestArtifactId", "ResponseArtifactId", "SchemaVersion", "SourceEvidenceRevision", "SourceStartedRecordId",
+            "SourceTerminalRecordId", "StartedAt", "Status", "TeamId", "TransportKind", "WorkflowRunId",
         }.Order());
 
         entity.FindProperty(nameof(WorkflowRunModelCallAttempt.CostAmount))!.GetPrecision().ShouldBe(18);
@@ -91,6 +101,7 @@ public sealed class WorkflowRunModelCallSchemaTests
         entity.FindProperty(nameof(WorkflowRunModelCallAttempt.FinishReason))!.GetMaxLength().ShouldBe(100);
         entity.FindProperty(nameof(WorkflowRunModelCallAttempt.CaptureCompleteness))!.ClrType.ShouldBe(typeof(WorkflowRunCaptureCompleteness));
         new WorkflowRunModelCallAttempt().SchemaVersion.ShouldBe(WorkflowRunDataContract.CurrentVersion);
+        entity.FindProperty(nameof(WorkflowRunModelCallAttempt.SourceEvidenceRevision))!.IsConcurrencyToken.ShouldBeTrue();
 
         var parent = entity.GetForeignKeys().Single(f => f.PrincipalEntityType.ClrType == typeof(WorkflowRunModelCall));
         parent.Properties.Select(p => p.Name).ShouldBe(new[] { "ModelCallId", "TeamId", "WorkflowRunId" });
@@ -103,6 +114,19 @@ public sealed class WorkflowRunModelCallSchemaTests
             .ShouldBe(new[] { "WorkflowRunId", "StartedAt", "Id" });
         Index(entity, "ix_workflow_run_model_call_attempt_effective_model_row").Properties.Select(p => p.Name)
             .ShouldBe(new[] { "EffectiveModelRowId", "StartedAt" });
+        Index(entity, "ux_workflow_run_model_call_attempt_source_started").IsUnique.ShouldBeTrue();
+        Index(entity, "ux_workflow_run_model_call_attempt_source_terminal").IsUnique.ShouldBeTrue();
+        Index(entity, "ix_workflow_run_model_call_attempt_late_start").Properties.Select(p => p.Name)
+            .ShouldBe(new[] { "WorkflowRunId", "ModelCallId" });
+
+        var sourceRecords = entity.GetForeignKeys().Where(f => f.PrincipalEntityType.ClrType == typeof(WorkflowRunRecord)).ToList();
+        sourceRecords.Count.ShouldBe(2);
+        sourceRecords.ShouldAllBe(f => f.DeleteBehavior == DeleteBehavior.Restrict);
+        sourceRecords.Select(f => f.Properties.Select(p => p.Name).ToArray()).ShouldBe(new[]
+        {
+            new[] { "SourceStartedRecordId" },
+            new[] { "SourceTerminalRecordId" },
+        }, ignoreOrder: true);
 
         entity.GetCheckConstraints().Select(c => c.Name).ShouldBe(new[]
         {
@@ -110,6 +134,7 @@ public sealed class WorkflowRunModelCallSchemaTests
             "ck_workflow_run_model_call_attempt_cost",
             "ck_workflow_run_model_call_attempt_http_status",
             "ck_workflow_run_model_call_attempt_positive_values",
+            "ck_workflow_run_model_call_attempt_source_identity",
             "ck_workflow_run_model_call_attempt_status",
             "ck_workflow_run_model_call_attempt_timing",
         }, ignoreOrder: true);

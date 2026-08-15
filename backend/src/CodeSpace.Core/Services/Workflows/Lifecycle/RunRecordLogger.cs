@@ -10,7 +10,7 @@ namespace CodeSpace.Core.Services.Workflows.Lifecycle;
 /// Append-only writer for <see cref="WorkflowRunRecord"/>. Each public method builds the
 /// canonical payload shape for its <c>record_type</c> (documented on
 /// <c>WorkflowRunRecordTypes</c>) and inserts one row + SaveChanges. The DB's BIGSERIAL on
-/// <c>sequence</c> assigns the per-run ordering.
+/// <c>sequence</c> assigns a deterministic allocation order inside the run. It is never a gapless/global commit cursor.
 ///
 /// Scoped per DbContext (matches the engine's lifetime) so writes within a single run share
 /// the same change-tracker. Thread-safety mirrors the DbContext's: one logger instance per

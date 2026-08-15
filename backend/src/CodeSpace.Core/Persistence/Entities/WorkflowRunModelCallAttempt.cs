@@ -22,6 +22,24 @@ public class WorkflowRunModelCallAttempt : IEntity<Guid>, IAuditable
     /// <summary>One-based physical attempt order within the logical call.</summary>
     public int AttemptOrdinal { get; set; }
 
+    /// <summary>
+    /// Exact immutable <c>interaction.started</c> source row when observed. Null is honest missing/late evidence;
+    /// it may be filled once, never replaced or removed.
+    /// </summary>
+    public Guid? SourceStartedRecordId { get; set; }
+
+    /// <summary>
+    /// Exact immutable <c>interaction.completed</c> or <c>interaction.failed</c> source row. This is the idempotent
+    /// physical-attempt admission key for the Workflow Run record projector.
+    /// </summary>
+    public Guid? SourceTerminalRecordId { get; set; }
+
+    /// <summary>
+    /// Monotonic evidence revision for a projected attempt: zero for a native/direct row, one at first source
+    /// admission, then exactly +1 for each late-evidence update. It is also EF's optimistic concurrency token.
+    /// </summary>
+    public int SourceEvidenceRevision { get; set; }
+
     public string? EffectiveProvider { get; set; }
 
     public string? EffectiveModel { get; set; }
