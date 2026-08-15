@@ -10,7 +10,7 @@ namespace CodeSpace.IntegrationTests.Persistence;
 
 /// <summary>
 /// Real-Postgres proof that Agent Run log metadata cannot outrun its bytes, worker fence or contiguous stream head.
-/// The feature remains schema-only: no existing runner, completion authority or harness consumes these rows.
+/// These are the database teeth beneath the Shadow process-spool producer; task completion remains independent.
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -44,7 +44,19 @@ public sealed class AgentRunLogPersistenceTests
             stored.TotalBytes.ShouldBe(17);
             stored.NextSegmentOrdinal.ShouldBe(2);
             stored.NextOffsetBytes.ShouldBe(17);
+            stored.SourceOffsetBytes.ShouldBe(17);
 
+            var finalizedAt = DateTimeOffset.UtcNow;
+            stored.CaptureFinalizedAt = finalizedAt;
+            stored.Revision++;
+            stored.LastModifiedAt = finalizedAt;
+            await db.SaveChangesAsync();
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var stored = await db.AgentRunLogStream.SingleAsync(candidate => candidate.Id == stream.Id);
             var completedAt = DateTimeOffset.UtcNow;
             stored.State = AgentRunLogStreamState.Completed;
             stored.Revision++;
@@ -60,7 +72,7 @@ public sealed class AgentRunLogPersistenceTests
             var db = scope.Resolve<CodeSpaceDbContext>();
             var stored = await db.AgentRunLogStream.SingleAsync(candidate => candidate.Id == stream.Id);
             stored.State.ShouldBe(AgentRunLogStreamState.Completed);
-            stored.Revision.ShouldBe(3);
+            stored.Revision.ShouldBe(4);
             stored.SegmentCount.ShouldBe(1);
             stored.TotalBytes.ShouldBe(17);
             (await db.AgentRunLogSegment.SingleAsync(candidate => candidate.Id == segment.Id)).ArtifactObjectId.ShouldBe(artifact.Id);
@@ -138,7 +150,6 @@ public sealed class AgentRunLogPersistenceTests
                 .ExecuteUpdateAsync(update => update.SetProperty(value => value.FenceEpoch, 8));
             var stored = await db.AgentRunLogStream.SingleAsync(value => value.Id == stream.Id);
             stored.WorkerFenceEpoch = 8;
-            stored.CaptureSessionId = Guid.NewGuid();
             stored.Revision++;
             stored.LastModifiedAt = DateTimeOffset.UtcNow;
             await db.SaveChangesAsync();
@@ -229,6 +240,78 @@ public sealed class AgentRunLogPersistenceTests
         stored.LastModifiedAt = stored.CompletedAt.Value;
         var missingDigest = await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
         missingDigest.InnerException?.Message.ShouldContain("requires its verified SHA-256 content digest");
+    }
+
+    [Fact]
+    public async Task Capture_session_open_and_finalized_rows_cannot_forge_error_text_or_a_final_receipt()
+    {
+        var world = await SeedWorldAsync();
+        var stream = await SeedStreamAsync(world);
+        Guid sessionId;
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            sessionId = (await db.AgentRunLogCaptureSession.SingleAsync(value => value.StreamId == stream.Id)).Id;
+            const string forgedMessage = "forged";
+            var forgedError = await Should.ThrowAsync<Exception>(() => db.Database.ExecuteSqlInterpolatedAsync(
+                $"UPDATE agent_run_log_capture_session SET error_message = {forgedMessage} WHERE id = {sessionId}"));
+            forgedError.Message.ShouldContain("must project the exact current stream claim/source state");
+        }
+
+        DateTimeOffset finalizedAt;
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var stored = await db.AgentRunLogStream.SingleAsync(value => value.Id == stream.Id);
+            finalizedAt = DateTimeOffset.UtcNow;
+            stored.CaptureFinalizedAt = finalizedAt;
+            stored.Revision++;
+            stored.LastModifiedAt = finalizedAt;
+            await db.SaveChangesAsync();
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var forgedAt = finalizedAt.AddMinutes(1);
+            var forgedReceipt = await Should.ThrowAsync<Exception>(() => db.Database.ExecuteSqlInterpolatedAsync(
+                $"UPDATE agent_run_log_capture_session SET finalized_at = {forgedAt}, last_observed_at = {forgedAt}, revision = revision + 1 WHERE id = {sessionId}"));
+            forgedReceipt.Message.ShouldContain("must project the exact current stream claim/source state");
+        }
+    }
+
+    [Fact]
+    public async Task Capture_failed_session_must_project_the_streams_exact_error_fields()
+    {
+        var world = await SeedWorldAsync();
+        var stream = await SeedStreamAsync(world);
+        Guid sessionId;
+        var failedAt = DateTimeOffset.UtcNow;
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var stored = await db.AgentRunLogStream.SingleAsync(value => value.Id == stream.Id);
+            stored.State = AgentRunLogStreamState.CaptureFailed;
+            stored.CompletedAt = failedAt;
+            stored.LastModifiedAt = failedAt;
+            stored.ErrorCode = "source-unavailable";
+            stored.ErrorMessage = "the durable source disappeared";
+            stored.Revision++;
+            await db.SaveChangesAsync();
+            sessionId = (await db.AgentRunLogCaptureSession.SingleAsync(value => value.StreamId == stream.Id)).Id;
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var observedAt = failedAt.AddSeconds(1);
+            const string differentError = "different-error";
+            var forgedError = await Should.ThrowAsync<Exception>(() => db.Database.ExecuteSqlInterpolatedAsync(
+                $"UPDATE agent_run_log_capture_session SET error_code = {differentError}, last_observed_at = {observedAt}, revision = revision + 1 WHERE id = {sessionId}"));
+            forgedError.Message.ShouldContain("must project the exact current stream claim/source state");
+        }
     }
 
     private async Task<World> SeedWorldAsync()
@@ -339,6 +422,7 @@ public sealed class AgentRunLogPersistenceTests
         {
             Id = Guid.NewGuid(), TeamId = world.TeamId, AgentRunId = world.AgentRunId, StreamId = stream.Id,
             SegmentOrdinal = ordinal, StartOffsetBytes = offset, LengthBytes = artifact.SizeBytes,
+            SourceStartOffsetBytes = offset, SourceLengthBytes = artifact.SizeBytes,
             ArtifactObjectId = artifact.Id, WorkerFenceEpoch = fenceEpoch, CaptureSessionId = stream.CaptureSessionId!.Value,
             FirstObservedAt = now, LastObservedAt = now, CreatedAt = now, SchemaVersion = 2,
         };

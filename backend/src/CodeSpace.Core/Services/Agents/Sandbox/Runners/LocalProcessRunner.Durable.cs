@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using CodeSpace.Core.Services.Agents.AgentRunLogging;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Messages.Agents;
@@ -23,7 +24,14 @@ public sealed partial class LocalProcessRunner
     private const string StdoutFile = "out.log";
     private const string StderrFile = "err.log";
     private const string ExitMarkerFile = "exit";
+    private const string LogSealMarkerFile = "logs.sealed";
+    private const string LogCopyStatusFile = "logs.copy-status";
     private const string PidFile = "pid";
+    private const string StdoutSourceKey = "stdout";
+    private const string StderrSourceKey = "stderr";
+    private const int MaximumDurableLogReadBytes = 4 * 1024 * 1024;
+    private static readonly TimeSpan ProducerExitWait = TimeSpan.FromSeconds(2);
+    private const int SourceQuiescenceChecks = 2;
 
     /// <summary>The per-run MCP listener socket file. Single source of truth so the executor's listener and the harness/proxy's connect path agree by construction on the same path.</summary>
     internal const string McpSocketFile = "mcp.sock";
@@ -67,12 +75,13 @@ public sealed partial class LocalProcessRunner
     private const int StartTimeToleranceSeconds = 2;
 
     /// <summary>
-    /// The supervisor script: FIRST record the supervisor's own pid (<c>$$</c>) to the pid file — read back in
-    /// LaunchAsync because under <c>setsid</c> the launched process's own id isn't a reliable handle (setsid
-    /// either execs the shell in place or forks it). Then run the command (the positional <c>"$@"</c>) with
-    /// stdout→out.log, stderr→err.log, stdin←/dev/null, and finally write the exit code to the marker. The marker is
-    /// written AFTER the command and BEFORE the shell exits, so "marker present" reliably means "the command finished
-    /// with this code" and "shell gone with no marker" means it was killed before recording one.
+    /// The supervisor script first records its own pid (<c>$$</c>). It then routes stdout/stderr through two FIFO
+    /// copier children rather than letting the command open the spool files directly. The supervisor waits for both
+    /// FIFO readers to reach real writer EOF before writing the exit marker and both copier statuses. A background
+    /// descendant can therefore keep the supervisor alive, but can never write a late byte after copier EOF. The child
+    /// never receives the host spool paths: the script snapshots and unsets them before invocation. Only the host writes
+    /// the log-seal marker after producer exit, successful copiers and spool quiescence; forced stops use the same host
+    /// authority after a bounded whole-tree kill.
     ///
     /// <para>stdin is redirected from <c>/dev/null</c> so the agent process gets an immediate EOF instead of INHERITING
     /// the worker's stdin. A harness that reads stdin (<c>codex exec</c> reads "additional input from stdin" even with the
@@ -80,7 +89,7 @@ public sealed partial class LocalProcessRunner
     /// an open, never-closing stdin (e.g. a supervising process's pipe) — a hung run with zero output. Neither harness needs
     /// stdin, so closing it is always safe. Pinned by a test.</para>
     /// </summary>
-    internal const string SupervisorScript = "printf '%s' \"$$\" >\"$CSP_PID\"; \"$@\" >\"$CSP_OUT\" 2>\"$CSP_ERR\" </dev/null; printf '%s' \"$?\" >\"$CSP_EXIT\"";
+    internal const string SupervisorScript = "pid_path=\"$CSP_PID\"; out_path=\"$CSP_OUT\"; err_path=\"$CSP_ERR\"; exit_path=\"$CSP_EXIT\"; copy_status_path=\"$CSP_LOG_COPY_STATUS\"; unset CSP_PID CSP_OUT CSP_ERR CSP_EXIT CSP_LOG_COPY_STATUS; printf '%s' \"$$\" >\"$pid_path\"; out_pipe=\"${out_path}.pipe\"; err_pipe=\"${err_path}.pipe\"; rm -f \"$out_pipe\" \"$err_pipe\"; mkfifo \"$out_pipe\" \"$err_pipe\" || exit 125; cat <\"$out_pipe\" >\"$out_path\" & out_cat=$!; cat <\"$err_pipe\" >\"$err_path\" & err_cat=$!; \"$@\" >\"$out_pipe\" 2>\"$err_pipe\" </dev/null; code=$?; wait \"$out_cat\"; out_status=$?; wait \"$err_cat\"; err_status=$?; rm -f \"$out_pipe\" \"$err_pipe\"; printf '%s' \"$code\" >\"$exit_path\"; printf '%s:%s' \"$out_status\" \"$err_status\" >\"$copy_status_path\"";
 
     /// <summary>How long the filtered-egress netns setup may take before the launch fails closed — the ip/nft/sysctl commands are sub-second, so a slow setup is a host problem, not a long-running run.</summary>
     private const int EgressSetupTimeoutSeconds = 20;
@@ -144,6 +153,133 @@ public sealed partial class LocalProcessRunner
                 await CgroupResourceLimit.TeardownAsync(root, orphanCgroup, CancellationToken.None).ConfigureAwait(false);
 
             throw;
+        }
+    }
+
+    public IReadOnlyList<SandboxDurableLogDescriptor> DescribeLogs(SandboxHandle handle) =>
+    [
+        new(StdoutSourceKey, AgentRunLogKinds.StandardOutput, "application/octet-stream", null, "local-process-spool/v1"),
+        new(StderrSourceKey, AgentRunLogKinds.StandardError, "application/octet-stream", null, "local-process-spool/v1"),
+    ];
+
+    public async Task<SandboxDurableLogReadResult> ReadAsync(SandboxDurableLogReadRequest request, CancellationToken cancellationToken)
+    {
+        if (!ValidLogRead(request)) return new SandboxDurableLogReadResult.Unavailable(new SandboxDurableLogProblem(SandboxDurableLogProblemCode.InvalidRequest));
+        var fileName = request.SourceKey switch
+        {
+            StdoutSourceKey => StdoutFile,
+            StderrSourceKey => StderrFile,
+            _ => null,
+        };
+        if (fileName is null) return new SandboxDurableLogReadResult.Unavailable(new SandboxDurableLogProblem(SandboxDurableLogProblemCode.UnknownSource));
+        if (!TryResolveDurableLogPath(request.Handle, fileName, out var path))
+            return new SandboxDurableLogReadResult.Unavailable(new SandboxDurableLogProblem(SandboxDurableLogProblemCode.InvalidRequest));
+
+        try
+        {
+            if (!File.Exists(path)) return request.FinalDrain
+                ? new SandboxDurableLogReadResult.Unavailable(new SandboxDurableLogProblem(SandboxDurableLogProblemCode.SourceMissing))
+                : new SandboxDurableLogReadResult.NoData();
+            await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            if (stream.Length < request.OffsetBytes) return new SandboxDurableLogReadResult.Unavailable(new SandboxDurableLogProblem(SandboxDurableLogProblemCode.SourceReset));
+            var available = stream.Length - request.OffsetBytes;
+            if (available == 0)
+            {
+                if (request.FinalDrain && await IsDurableSourceSealedAsync(request.Handle, path, cancellationToken).ConfigureAwait(false))
+                    return new SandboxDurableLogReadResult.EndOfSource();
+                return new SandboxDurableLogReadResult.NoData();
+            }
+            if (!request.FinalDrain && available < request.MinimumBytes) return new SandboxDurableLogReadResult.NoData();
+            var length = (int)Math.Min(available, request.MaximumBytes);
+            var bytes = new byte[length];
+            stream.Seek(request.OffsetBytes, SeekOrigin.Begin);
+            var read = 0;
+            while (read < bytes.Length)
+            {
+                var count = await stream.ReadAsync(bytes.AsMemory(read), cancellationToken).ConfigureAwait(false);
+                if (count == 0) break;
+                read += count;
+            }
+            if (read == 0) return new SandboxDurableLogReadResult.NoData();
+            return new SandboxDurableLogReadResult.Available(read == bytes.Length ? bytes : bytes.AsMemory(0, read).ToArray());
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return new SandboxDurableLogReadResult.Unavailable(new SandboxDurableLogProblem(SandboxDurableLogProblemCode.AccessDenied));
+        }
+        catch (IOException)
+        {
+            return new SandboxDurableLogReadResult.Unavailable(new SandboxDurableLogProblem(SandboxDurableLogProblemCode.IoUnavailable, true));
+        }
+    }
+
+    private static bool ValidLogRead(SandboxDurableLogReadRequest request) => request.Handle.Kind == LocalKind && Path.IsPathFullyQualified(request.Handle.SpoolDirectory) && request.OffsetBytes >= 0 && request.MinimumBytes > 0 && request.MaximumBytes >= request.MinimumBytes && request.MaximumBytes <= MaximumDurableLogReadBytes;
+
+    private static bool TryResolveDurableLogPath(SandboxHandle handle, string fileName, out string path)
+    {
+        path = "";
+        try
+        {
+            var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(SpoolRoot()));
+            var suppliedSpool = Path.TrimEndingDirectorySeparator(handle.SpoolDirectory);
+            var spool = Path.TrimEndingDirectorySeparator(Path.GetFullPath(suppliedSpool));
+            if (!string.Equals(suppliedSpool, spool, comparison)) return false;
+            if (!string.Equals(Directory.GetParent(spool)?.FullName, root, comparison)) return false;
+
+            var spoolInfo = new DirectoryInfo(spool);
+            if (IsLinkOrReparsePoint(spoolInfo)) return false;
+            var candidate = Path.Combine(spool, fileName);
+            if (IsLinkOrReparsePoint(new FileInfo(candidate))) return false;
+            path = candidate;
+            return true;
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsLinkOrReparsePoint(FileSystemInfo entry)
+    {
+        try
+        {
+            if (entry.LinkTarget != null) return true;
+            return entry.Exists && (entry.Attributes & FileAttributes.ReparsePoint) != 0;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            return true;
+        }
+    }
+
+    private static async Task<bool> IsDurableSourceSealedAsync(SandboxHandle handle, string path, CancellationToken cancellationToken)
+    {
+        var seal = new FileInfo(Path.Combine(handle.SpoolDirectory, LogSealMarkerFile));
+        if (!seal.Exists || IsLinkOrReparsePoint(seal) || IsProcessAlive(handle.ProcessId, handle.ProcessStartTimeUtc) || !TryFileLength(path, out var stableLength)) return false;
+
+        for (var observation = 0; observation < SourceQuiescenceChecks; observation++)
+        {
+            await Task.Delay(PollInterval, cancellationToken).ConfigureAwait(false);
+            if (IsProcessAlive(handle.ProcessId, handle.ProcessStartTimeUtc) || !TryFileLength(path, out var observedLength) || observedLength != stableLength)
+                return false;
+            stableLength = observedLength;
+        }
+
+        return true;
+    }
+
+    private static bool TryFileLength(string path, out long length)
+    {
+        try
+        {
+            length = new FileInfo(path).Length;
+            return true;
+        }
+        catch
+        {
+            length = 0;
+            return false;
         }
     }
 
@@ -310,7 +446,7 @@ public sealed partial class LocalProcessRunner
     {
         // The explicit kill (NOT the cancel-stops-observing path): reuse the same start-time-guarded tree-kill the
         // timeout path uses, so a recycled pid is never killed and an already-exited run is a quiet no-op.
-        KillByIdQuietly(handle.ProcessId, handle.ProcessStartTimeUtc);
+        await KillByIdAndWaitAsync(handle, cancellationToken).ConfigureAwait(false);
 
         await TearDownIsolationAsync(handle).ConfigureAwait(false);
     }
@@ -365,6 +501,9 @@ public sealed partial class LocalProcessRunner
     /// <summary>Final drain (incl. a trailing partial line) + buffered stderr, mapped to Success/Failed by the exit code.</summary>
     private async Task<SandboxResult> CompleteFromSpoolAsync(SandboxHandle handle, long offset, int exitCode, Func<string, CancellationToken, Task> onLine, CancellationToken ct)
     {
+        var producerExited = await WaitForProducerExitAsync(handle, ct).ConfigureAwait(false);
+        if (producerExited && SuccessfulLogCopiers(handle) && await WaitForSpoolsQuiescentAsync(handle, ct).ConfigureAwait(false))
+            await TryWriteLogSealAsync(handle, ct).ConfigureAwait(false);
         await TearDownIsolationAsync(handle).ConfigureAwait(false);
 
         await EmitNewLinesAsync(Path.Combine(handle.SpoolDirectory, StdoutFile), offset, onLine, drainPartial: true, ct).ConfigureAwait(false);
@@ -377,7 +516,7 @@ public sealed partial class LocalProcessRunner
     /// <summary>Deadline elapsed: terminate the process tree, drain what landed, return TimedOut.</summary>
     private async Task<SandboxResult> TimeoutAsync(SandboxHandle handle, long offset, Func<string, CancellationToken, Task> onLine, CancellationToken ct)
     {
-        KillByIdQuietly(handle.ProcessId, handle.ProcessStartTimeUtc);
+        await KillByIdAndWaitAsync(handle, ct).ConfigureAwait(false);
 
         await TearDownIsolationAsync(handle).ConfigureAwait(false);
 
@@ -391,7 +530,7 @@ public sealed partial class LocalProcessRunner
     /// <summary>C3 stall watchdog tripped (no output for the idle window): terminate the process tree, drain what landed, return Stalled.</summary>
     private async Task<SandboxResult> StalledAsync(SandboxHandle handle, long offset, Func<string, CancellationToken, Task> onLine, CancellationToken ct)
     {
-        KillByIdQuietly(handle.ProcessId, handle.ProcessStartTimeUtc);
+        await KillByIdAndWaitAsync(handle, ct).ConfigureAwait(false);
 
         await TearDownIsolationAsync(handle).ConfigureAwait(false);
 
@@ -489,6 +628,7 @@ public sealed partial class LocalProcessRunner
         info.Environment["CSP_OUT"] = Path.Combine(spoolDir, StdoutFile);
         info.Environment["CSP_ERR"] = Path.Combine(spoolDir, StderrFile);
         info.Environment["CSP_EXIT"] = Path.Combine(spoolDir, ExitMarkerFile);
+        info.Environment["CSP_LOG_COPY_STATUS"] = Path.Combine(spoolDir, LogCopyStatusFile);
         info.Environment["CSP_PID"] = Path.Combine(spoolDir, PidFile);
 
         // Point the config-isolating tool at the per-run home so a shelled-out CLI reads ONLY the credentials we
@@ -764,15 +904,92 @@ public sealed partial class LocalProcessRunner
         catch { return null; }
     }
 
-    /// <summary>Terminate the supervisor's process tree (the timeout path and the explicit <see cref="TerminateAsync"/>) — but only when the pid is still OUR supervisor (the start-time guard), so a recycled pid handed to an unrelated process is never killed by us.</summary>
-    private static void KillByIdQuietly(int pid, DateTimeOffset? expectedStartUtc)
+    /// <summary>Terminate the supervisor's process tree, then boundedly wait for the producer to close its spool handles. A recycled pid is never touched.</summary>
+    private static async Task<bool> KillByIdAndWaitAsync(SandboxHandle handle, CancellationToken cancellationToken)
     {
         try
         {
-            using var p = Process.GetProcessById(pid);
-            if (!p.HasExited && !StartTimeMismatch(p, expectedStartUtc)) p.Kill(entireProcessTree: true);
+            using var process = Process.GetProcessById(handle.ProcessId);
+            if (process.HasExited || StartTimeMismatch(process, handle.ProcessStartTimeUtc)) return File.Exists(Path.Combine(handle.SpoolDirectory, LogSealMarkerFile));
+            process.Kill(entireProcessTree: true);
+            if (!await WaitForExitBoundedAsync(process, cancellationToken).ConfigureAwait(false)) return false;
+            if (!await WaitForSpoolsQuiescentAsync(handle, cancellationToken).ConfigureAwait(false)) return false;
+            return await TryWriteLogSealAsync(handle, cancellationToken).ConfigureAwait(false);
         }
-        catch { /* best-effort: already exited / reaped between the check and the kill */ }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch { return false; /* best-effort: already exited / reaped between the check and the kill */ }
+    }
+
+    private static async Task<bool> WaitForProducerExitAsync(SandboxHandle handle, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(handle.ProcessId);
+            if (process.HasExited || StartTimeMismatch(process, handle.ProcessStartTimeUtc)) return true;
+            return await WaitForExitBoundedAsync(process, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch { return true; }
+    }
+
+    private static async Task<bool> WaitForExitBoundedAsync(Process process, CancellationToken cancellationToken)
+    {
+        using var wait = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        wait.CancelAfter(ProducerExitWait);
+        try
+        {
+            await process.WaitForExitAsync(wait.Token).ConfigureAwait(false);
+            return true;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return process.HasExited;
+        }
+    }
+
+    private static async Task<bool> WaitForSpoolsQuiescentAsync(SandboxHandle handle, CancellationToken cancellationToken)
+    {
+        var stdout = Path.Combine(handle.SpoolDirectory, StdoutFile);
+        var stderr = Path.Combine(handle.SpoolDirectory, StderrFile);
+        if (!TryFileLength(stdout, out var stdoutLength) || !TryFileLength(stderr, out var stderrLength)) return false;
+
+        for (var observation = 0; observation < SourceQuiescenceChecks; observation++)
+        {
+            await Task.Delay(PollInterval, cancellationToken).ConfigureAwait(false);
+            if (!TryFileLength(stdout, out var observedStdout) || !TryFileLength(stderr, out var observedStderr)) return false;
+            if (observedStdout != stdoutLength || observedStderr != stderrLength) return false;
+            stdoutLength = observedStdout;
+            stderrLength = observedStderr;
+        }
+        return true;
+    }
+
+    private static async Task<bool> TryWriteLogSealAsync(SandboxHandle handle, CancellationToken cancellationToken)
+    {
+        var seal = Path.Combine(handle.SpoolDirectory, LogSealMarkerFile);
+        var temporary = seal + ".tmp-" + Guid.NewGuid().ToString("N");
+        try
+        {
+            await File.WriteAllTextAsync(temporary, "v1", cancellationToken).ConfigureAwait(false);
+            File.Move(temporary, seal, overwrite: true);
+            return true;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            try { File.Delete(temporary); }
+            catch { /* Best effort: an orphaned temporary file has no seal authority. */ }
+            return false;
+        }
+    }
+
+    private static bool SuccessfulLogCopiers(SandboxHandle handle)
+    {
+        try { return string.Equals(File.ReadAllText(Path.Combine(handle.SpoolDirectory, LogCopyStatusFile)).Trim(), "0:0", StringComparison.Ordinal); }
+        catch { return false; }
     }
 
     private static async Task<string> ReadAllSafeAsync(string path)

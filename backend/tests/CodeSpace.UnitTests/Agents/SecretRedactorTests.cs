@@ -1,4 +1,5 @@
 using CodeSpace.Core.Services.Agents;
+using System.Text;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents;
@@ -71,4 +72,29 @@ public class SecretRedactorTests
     [InlineData(null)]
     public void Null_or_empty_text_is_returned_as_is(string? text) =>
         new SecretRedactor(new[] { "sk-secret" }).Redact(text!).ShouldBe(text);
+
+    [Fact]
+    public void Utf8_stream_masks_a_secret_split_across_arbitrary_byte_chunks()
+    {
+        var stream = new SecretRedactor(new[] { "sk-secret" }).CreateUtf8Stream();
+        var first = stream.Transform(Encoding.UTF8.GetBytes("prefix sk-se"), final: false);
+        var second = stream.Transform(Encoding.UTF8.GetBytes("cret suffix"), final: true);
+
+        first.SourceBytesConsumed.ShouldBeGreaterThanOrEqualTo(0);
+        first.SourceBytesConsumed.ShouldBeLessThan("prefix sk-se"u8.Length, "the possible secret prefix stays uncommitted until the next chunk");
+        (first.SourceBytesConsumed + second.SourceBytesConsumed).ShouldBe("prefix sk-secret suffix"u8.Length);
+        (Encoding.UTF8.GetString(first.Bytes.Span) + Encoding.UTF8.GetString(second.Bytes.Span)).ShouldBe("prefix *** suffix");
+    }
+
+    [Fact]
+    public void Utf8_stream_preserves_non_utf8_bytes_and_never_uses_character_boundaries_as_source_offsets()
+    {
+        var stream = new SecretRedactor(new[] { "token" }).CreateUtf8Stream();
+        var source = new byte[] { 0xff, 0xfe, (byte)'t', (byte)'o', (byte)'k', (byte)'e', (byte)'n', 0x80 };
+
+        var transformed = stream.Transform(source, final: true);
+
+        transformed.SourceBytesConsumed.ShouldBe(source.Length);
+        transformed.Bytes.ToArray().ShouldBe(new byte[] { 0xff, 0xfe, (byte)'*', (byte)'*', (byte)'*', 0x80 });
+    }
 }

@@ -3,6 +3,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.AgentRunLogging;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
@@ -113,6 +114,54 @@ public class AgentRunExecutorTests
         handle.Kind.ShouldBe("local");
         handle.ProcessId.ShouldBeGreaterThan(0);
         handle.SpoolDirectory.ShouldNotBeNullOrEmpty();
+    }
+
+    [Fact]
+    public async Task Durable_runner_wires_the_shadow_log_bridge_with_the_persisted_per_spool_session_without_changing_results()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+        var bridge = new RecordingLogCaptureBridge();
+
+        await ExecuteAsync(runId, new ScriptedHarness("printf 'same-result\\n'"), bridge);
+
+        using var scope = _fixture.BeginScope();
+        var service = scope.Resolve<IAgentRunService>();
+        var run = await service.GetAsync(runId, CancellationToken.None);
+        run.Status.ShouldBe(AgentRunStatus.Succeeded);
+        (await service.GetEventsAsync(runId, teamId, 0, CancellationToken.None)).Single().Text.ShouldBe("same-result");
+        var handle = JsonSerializer.Deserialize<SandboxHandle>(run.RunnerHandleJson!, AgentJson.Options)!;
+        handle.AgentRunLogCaptureSessionId.ShouldNotBeNull();
+        bridge.OpenRequests.Count.ShouldBe(1);
+        bridge.OpenRequests[0].TeamId.ShouldBe(teamId);
+        bridge.OpenRequests[0].AgentRunId.ShouldBe(runId);
+        bridge.OpenRequests[0].Handle.AgentRunLogCaptureSessionId.ShouldBe(handle.AgentRunLogCaptureSessionId);
+        bridge.OpenRequests[0].Source.ShouldBeAssignableTo<ISandboxDurableLogSource>();
+        bridge.Completions.ShouldBe(new[] { (teamId, runId, 1L) });
+    }
+
+    [Fact]
+    public async Task Shadow_log_terminalization_starts_only_after_the_run_and_completion_notification_are_durable()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+        var bridge = new RecordingLogCaptureBridge { BlockCompletion = true };
+        var notifier = new RecordingCompletionNotifier();
+
+        var execution = ExecuteAsync(runId, new ScriptedHarness("printf 'terminal-first\\n'"), bridge, notifier);
+        await bridge.CompletionEntered.Task.WaitAsync(TimeSpan.FromSeconds(15));
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded, "the AgentRun terminal CAS lands before shadow log verification begins");
+        notifier.RunIds.SequenceEqual(new[] { runId }).ShouldBeTrue("the workflow notifier fires before shadow log verification begins");
+        execution.IsCompleted.ShouldBeFalse("the test bridge is still deliberately blocked after observing the post-terminal ordering");
+
+        bridge.ReleaseCompletion.TrySetResult();
+        await execution;
     }
 
     [Fact]
@@ -1243,7 +1292,7 @@ public class AgentRunExecutorTests
         }
     }
 
-    private async Task ExecuteAsync(Guid runId, IAgentHarness harness)
+    private async Task ExecuteAsync(Guid runId, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, IAgentRunCompletionNotifier? notifier = null)
     {
         using var scope = _fixture.BeginScope();
         var executor = new AgentRunExecutor(
@@ -1254,7 +1303,7 @@ public class AgentRunExecutorTests
             scope.Resolve<IAgentWorkspaceResolver>(),
             scope.Resolve<IModelCredentialResolver>(),
             scope.Resolve<IWorkspaceProviderRegistry>(),
-            scope.Resolve<IAgentRunCompletionNotifier>(),
+            notifier ?? scope.Resolve<IAgentRunCompletionNotifier>(),
             scope.Resolve<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(),
             scope.Resolve<CodeSpaceDbContext>(),
             scope.Resolve<CodeSpace.Core.Services.Review.IStructuredCritic>(),
@@ -1262,9 +1311,46 @@ public class AgentRunExecutorTests
             scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactStore>(),
             scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IArtifactManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Agents.Capture.ICaptureIntentService>(),
             scope.Resolve<IEnumerable<CodeSpace.Core.Services.Agents.Publish.IPublishGuard>>(),
-            NullLogger<AgentRunExecutor>.Instance);
+            NullLogger<AgentRunExecutor>.Instance,
+            logCapture);
 
         await executor.ExecuteAsync(runId, CancellationToken.None);
+    }
+
+    private sealed class RecordingLogCaptureBridge : IAgentRunLogCaptureBridge
+    {
+        public List<AgentRunLogCaptureOpenRequest> OpenRequests { get; } = [];
+        public List<(Guid TeamId, Guid AgentRunId, long WorkerFenceEpoch)> Completions { get; } = [];
+        public bool BlockCompletion { get; init; }
+        public TaskCompletionSource CompletionEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseCompletion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task<IAgentRunLogCaptureSession> OpenAsync(AgentRunLogCaptureOpenRequest request, CancellationToken cancellationToken)
+        {
+            OpenRequests.Add(request);
+            return Task.FromResult<IAgentRunLogCaptureSession>(new Session(request.Handle));
+        }
+
+        public Task RecordGapAsync(AgentRunLogCaptureGapRequest request, CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public async Task CompleteRunAsync(Guid teamId, Guid agentRunId, long workerFenceEpoch, CancellationToken cancellationToken)
+        {
+            Completions.Add((teamId, agentRunId, workerFenceEpoch));
+            CompletionEntered.TrySetResult();
+            if (BlockCompletion) await ReleaseCompletion.Task.WaitAsync(cancellationToken);
+        }
+
+        private sealed class Session(SandboxHandle handle) : IAgentRunLogCaptureSession
+        {
+            public SandboxHandle Handle { get; } = handle;
+            public Task<SandboxResult> ObserveAsync(Func<SandboxHandle, CancellationToken, Task<SandboxResult>> observer, CancellationToken cancellationToken) => observer(Handle, cancellationToken);
+        }
+    }
+
+    private sealed class RecordingCompletionNotifier : IAgentRunCompletionNotifier
+    {
+        public List<Guid> RunIds { get; } = [];
+        public Task NotifyCompletedAsync(Guid agentRunId, CancellationToken cancellationToken) { RunIds.Add(agentRunId); return Task.CompletedTask; }
     }
 
     /// <summary>

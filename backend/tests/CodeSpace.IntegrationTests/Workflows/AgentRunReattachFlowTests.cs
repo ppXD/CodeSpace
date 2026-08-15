@@ -4,6 +4,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.AgentRunLogging;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
@@ -100,16 +101,25 @@ public sealed class AgentRunReattachFlowTests : IDisposable
         using (var scope = _fixture.BeginScope())
             (await scope.Resolve<IAgentRunService>().ReclaimForReattachAsync(runId, CancellationToken.None)).ShouldBeTrue();
 
-        await ReattachAsync(runId, new ScriptedHarness());
+        var capture = new RecordingLogCaptureBridge();
+        await ReattachAsync(runId, new ScriptedHarness(), capture);
 
         using (var scope = _fixture.BeginScope())
         {
             var svc = scope.Resolve<IAgentRunService>();
-            (await svc.GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded, "the re-attached observer tailed the live process to completion");
+            var run = await svc.GetAsync(runId, CancellationToken.None);
+            run.Status.ShouldBe(AgentRunStatus.Succeeded, "the re-attached observer tailed the live process to completion");
+            var persistedHandle = JsonSerializer.Deserialize<SandboxHandle>(run.RunnerHandleJson!, AgentJson.Options)!;
+            persistedHandle.AgentRunLogCaptureSessionId.ShouldBe(capture.OpenRequests.Single().Handle.AgentRunLogCaptureSessionId,
+                "the legacy reattach handle is durable before the log observer starts");
 
             (await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None)).Select(e => e.Text)
                 .ShouldBe(new[] { "step1", "step2", "step3", "step4", "step5", "step6" }, "the timeline is continuous + each line appears EXACTLY ONCE (resume skipped the already-emitted prefix)");
         }
+        capture.OpenRequests.Count.ShouldBe(1);
+        capture.OpenRequests[0].Handle.AgentRunLogCaptureSessionId.ShouldNotBeNull("a legacy handle is stamped and persisted before reattach observation");
+        capture.OpenRequests[0].Source.ShouldBeAssignableTo<ISandboxDurableLogSource>();
+        capture.Completions.ShouldBe(new[] { (teamId, runId, 2L) });
     }
 
     [Fact]
@@ -553,7 +563,7 @@ public sealed class AgentRunReattachFlowTests : IDisposable
             .ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = {DateTimeOffset.UtcNow.AddMinutes(-1)} WHERE id = {runId}");
     }
 
-    private async Task ReattachAsync(Guid runId, IAgentHarness harness)
+    private async Task ReattachAsync(Guid runId, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null)
     {
         using var scope = _fixture.BeginScope();
         var executor = new AgentRunExecutor(
@@ -572,9 +582,36 @@ public sealed class AgentRunReattachFlowTests : IDisposable
             scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactStore>(),
             scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IArtifactManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Agents.Capture.ICaptureIntentService>(),
             scope.Resolve<IEnumerable<CodeSpace.Core.Services.Agents.Publish.IPublishGuard>>(),
-            NullLogger<AgentRunExecutor>.Instance);
+            NullLogger<AgentRunExecutor>.Instance,
+            logCapture);
 
         await executor.ReattachAsync(runId, CancellationToken.None);
+    }
+
+    private sealed class RecordingLogCaptureBridge : IAgentRunLogCaptureBridge
+    {
+        public List<AgentRunLogCaptureOpenRequest> OpenRequests { get; } = [];
+        public List<(Guid TeamId, Guid AgentRunId, long WorkerFenceEpoch)> Completions { get; } = [];
+
+        public Task<IAgentRunLogCaptureSession> OpenAsync(AgentRunLogCaptureOpenRequest request, CancellationToken cancellationToken)
+        {
+            OpenRequests.Add(request);
+            return Task.FromResult<IAgentRunLogCaptureSession>(new Session(request.Handle));
+        }
+
+        public Task RecordGapAsync(AgentRunLogCaptureGapRequest request, CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public Task CompleteRunAsync(Guid teamId, Guid agentRunId, long workerFenceEpoch, CancellationToken cancellationToken)
+        {
+            Completions.Add((teamId, agentRunId, workerFenceEpoch));
+            return Task.CompletedTask;
+        }
+
+        private sealed class Session(SandboxHandle handle) : IAgentRunLogCaptureSession
+        {
+            public SandboxHandle Handle { get; } = handle;
+            public Task<SandboxResult> ObserveAsync(Func<SandboxHandle, CancellationToken, Task<SandboxResult>> observer, CancellationToken cancellationToken) => observer(Handle, cancellationToken);
+        }
     }
 
     private string NewSpoolDir()

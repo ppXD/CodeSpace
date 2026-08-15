@@ -13,12 +13,12 @@ public sealed class AgentRunLogStreamConfiguration : IEntityTypeConfiguration<Ag
             table.HasCheckConstraint("ck_agent_run_log_stream_claim", "(worker_fence_epoch IS NULL AND capture_session_id IS NULL) OR (worker_fence_epoch IS NOT NULL AND worker_fence_epoch > 0 AND capture_session_id IS NOT NULL AND capture_session_id <> '00000000-0000-0000-0000-000000000000'::uuid)");
             table.HasCheckConstraint("ck_agent_run_log_stream_digest", "(content_digest_algorithm IS NULL AND content_digest IS NULL) OR (content_digest_algorithm IS NOT NULL AND content_digest_algorithm = 'Sha256' AND content_digest IS NOT NULL AND octet_length(content_digest) = 32)");
             table.HasCheckConstraint("ck_agent_run_log_stream_error", "(error_code IS NULL AND error_message IS NULL) OR (error_code IS NOT NULL AND btrim(error_code) <> '')");
-            table.HasCheckConstraint("ck_agent_run_log_stream_head", "revision > 0 AND segment_count >= 0 AND total_bytes >= 0 AND next_segment_ordinal = segment_count + 1 AND next_offset_bytes = total_bytes AND schema_version > 0");
-            table.HasCheckConstraint("ck_agent_run_log_stream_time", "last_modified_at >= created_at AND (completed_at IS NULL OR last_modified_at >= completed_at)");
+            table.HasCheckConstraint("ck_agent_run_log_stream_head", "revision > 0 AND segment_count >= 0 AND total_bytes >= 0 AND source_offset_bytes >= 0 AND capture_source_base_offset_bytes >= 0 AND capture_source_base_offset_bytes <= source_offset_bytes AND next_segment_ordinal = segment_count + 1 AND next_offset_bytes = total_bytes AND schema_version > 0");
+            table.HasCheckConstraint("ck_agent_run_log_stream_time", "last_modified_at >= created_at AND (capture_finalized_at IS NULL OR last_modified_at >= capture_finalized_at) AND (completed_at IS NULL OR last_modified_at >= completed_at)");
             table.HasCheckConstraint("ck_agent_run_log_stream_identity", "stream_kind ~ '^[a-z0-9][a-z0-9._/-]{0,126}/v[1-9][0-9]*$' AND capture_source ~ '^[a-z0-9][a-z0-9._/-]{0,126}/v[1-9][0-9]*$' AND content_type ~ '^[^[:space:]/]+/[^[:space:]]+$' AND (content_encoding IS NULL OR content_encoding ~ '^[a-z0-9][a-z0-9._+-]{0,63}$')");
             table.HasCheckConstraint("ck_agent_run_log_stream_retention", "retention IN ('Ephemeral', 'Run', 'Team', 'Compliance', 'Permanent') AND (expires_at IS NULL OR expires_at > created_at) AND (retention <> 'Ephemeral' OR expires_at IS NOT NULL) AND (retention <> 'Permanent' OR expires_at IS NULL)");
             table.HasCheckConstraint("ck_agent_run_log_stream_state", "state IN ('Open', 'Completed', 'Truncated', 'Unavailable', 'Corrupt', 'CaptureFailed')");
-            table.HasCheckConstraint("ck_agent_run_log_stream_terminal", "((state = 'Open' AND completed_at IS NULL AND error_code IS NULL) OR (state = 'Completed' AND completed_at IS NOT NULL AND error_code IS NULL) OR (state IN ('Truncated', 'Unavailable', 'Corrupt', 'CaptureFailed') AND completed_at IS NOT NULL AND error_code IS NOT NULL)) AND (state <> 'Completed' OR schema_version = 1 OR (content_digest_algorithm = 'Sha256' AND content_digest IS NOT NULL AND octet_length(content_digest) = 32))");
+            table.HasCheckConstraint("ck_agent_run_log_stream_terminal", "((state = 'Open' AND completed_at IS NULL AND error_code IS NULL) OR (state = 'Completed' AND completed_at IS NOT NULL AND error_code IS NULL) OR (state IN ('Truncated', 'Unavailable', 'Corrupt', 'CaptureFailed') AND completed_at IS NOT NULL AND error_code IS NOT NULL)) AND (state <> 'Completed' OR (capture_finalized_at IS NOT NULL AND (schema_version = 1 OR (content_digest_algorithm = 'Sha256' AND content_digest IS NOT NULL AND octet_length(content_digest) = 32))))");
         });
         builder.HasKey(stream => stream.Id);
         builder.HasAlternateKey(stream => new { stream.TeamId, stream.Id, stream.AgentRunId }).HasName("ak_agent_run_log_stream_scope");
@@ -45,13 +45,41 @@ public sealed class AgentRunLogStreamConfiguration : IEntityTypeConfiguration<Ag
     }
 }
 
+public sealed class AgentRunLogCaptureSessionConfiguration : IEntityTypeConfiguration<AgentRunLogCaptureSession>
+{
+    public void Configure(EntityTypeBuilder<AgentRunLogCaptureSession> builder)
+    {
+        builder.ToTable("agent_run_log_capture_session", table =>
+        {
+            table.HasCheckConstraint("ck_agent_run_log_capture_session_bounds", "initial_worker_fence_epoch > 0 AND current_worker_fence_epoch >= initial_worker_fence_epoch AND source_base_offset_bytes >= 0 AND source_offset_bytes >= source_base_offset_bytes AND revision > 0");
+            table.HasCheckConstraint("ck_agent_run_log_capture_session_identity", "capture_session_id <> '00000000-0000-0000-0000-000000000000'::uuid");
+            table.HasCheckConstraint("ck_agent_run_log_capture_session_state", "(state = 'Open' AND finalized_at IS NULL AND error_code IS NULL) OR (state = 'Finalized' AND finalized_at IS NOT NULL AND error_code IS NULL) OR (state = 'CaptureFailed' AND finalized_at IS NOT NULL AND error_code IS NOT NULL)");
+            table.HasCheckConstraint("ck_agent_run_log_capture_session_time", "last_observed_at >= created_at AND (finalized_at IS NULL OR last_observed_at >= finalized_at)");
+        });
+        builder.HasKey(session => session.Id);
+        builder.HasAlternateKey(session => new { session.TeamId, session.StreamId, session.CaptureSessionId }).HasName("ak_agent_run_log_capture_session_identity");
+        builder.Property(session => session.State).HasConversion<string>().HasMaxLength(24);
+        builder.Property(session => session.ErrorCode).HasMaxLength(128);
+        builder.Property(session => session.ErrorMessage).HasMaxLength(2048);
+        builder.Property(session => session.Xmin).HasColumnName("xmin").HasColumnType("xid").ValueGeneratedOnAddOrUpdate().IsConcurrencyToken();
+
+        builder.HasOne(session => session.Stream).WithMany(stream => stream.CaptureSessions)
+            .HasForeignKey(session => new { session.TeamId, session.StreamId, session.AgentRunId })
+            .HasPrincipalKey(stream => new { stream.TeamId, stream.Id, stream.AgentRunId })
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasIndex(session => new { session.TeamId, session.AgentRunId, session.CreatedAt, session.Id }).HasDatabaseName("ix_agent_run_log_capture_session_run_created");
+        builder.HasIndex(session => new { session.TeamId, session.State, session.LastObservedAt, session.Id }).HasDatabaseName("ix_agent_run_log_capture_session_state_observed");
+    }
+}
+
 public sealed class AgentRunLogSegmentConfiguration : IEntityTypeConfiguration<AgentRunLogSegment>
 {
     public void Configure(EntityTypeBuilder<AgentRunLogSegment> builder)
     {
         builder.ToTable("agent_run_log_segment", table =>
         {
-            table.HasCheckConstraint("ck_agent_run_log_segment_bounds", "segment_ordinal > 0 AND start_offset_bytes >= 0 AND length_bytes > 0 AND worker_fence_epoch > 0 AND schema_version > 0");
+            table.HasCheckConstraint("ck_agent_run_log_segment_bounds", "segment_ordinal > 0 AND start_offset_bytes >= 0 AND length_bytes > 0 AND source_start_offset_bytes >= 0 AND source_length_bytes > 0 AND worker_fence_epoch > 0 AND schema_version > 0");
             table.HasCheckConstraint("ck_agent_run_log_segment_identity", "capture_session_id <> '00000000-0000-0000-0000-000000000000'::uuid");
             table.HasCheckConstraint("ck_agent_run_log_segment_observation", "first_observed_at <= last_observed_at AND created_at >= last_observed_at");
         });
@@ -60,6 +88,10 @@ public sealed class AgentRunLogSegmentConfiguration : IEntityTypeConfiguration<A
         builder.HasOne(segment => segment.Stream).WithMany(stream => stream.Segments)
             .HasForeignKey(segment => new { segment.TeamId, segment.StreamId, segment.AgentRunId })
             .HasPrincipalKey(stream => new { stream.TeamId, stream.Id, stream.AgentRunId })
+            .OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne(segment => segment.CaptureSession).WithMany(session => session.Segments)
+            .HasForeignKey(segment => new { segment.TeamId, segment.StreamId, segment.CaptureSessionId })
+            .HasPrincipalKey(session => new { session.TeamId, session.StreamId, session.CaptureSessionId })
             .OnDelete(DeleteBehavior.Restrict);
         builder.HasOne(segment => segment.ArtifactObject).WithMany()
             .HasForeignKey(segment => new { segment.TeamId, segment.ArtifactObjectId })
