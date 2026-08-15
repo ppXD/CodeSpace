@@ -48,6 +48,8 @@ public sealed class AgentRunLogPersistenceTests
             var completedAt = DateTimeOffset.UtcNow;
             stored.State = AgentRunLogStreamState.Completed;
             stored.Revision++;
+            stored.ContentDigestAlgorithm = ArtifactDigestAlgorithm.Sha256;
+            stored.ContentDigest = Enumerable.Repeat((byte)17, 32).ToArray();
             stored.CompletedAt = completedAt;
             stored.LastModifiedAt = completedAt;
             await db.SaveChangesAsync();
@@ -113,6 +115,62 @@ public sealed class AgentRunLogPersistenceTests
     }
 
     [Fact]
+    public async Task Higher_current_worker_fence_can_reclaim_an_open_stream_but_stale_or_same_fence_session_replacement_is_rejected()
+    {
+        var world = await SeedWorldAsync();
+        var stream = await SeedStreamAsync(world);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var stored = await db.AgentRunLogStream.SingleAsync(value => value.Id == stream.Id);
+            stored.CaptureSessionId = Guid.NewGuid();
+            stored.Revision++;
+            stored.LastModifiedAt = DateTimeOffset.UtcNow;
+            var sameFence = await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
+            sameFence.InnerException?.Message.ShouldContain("stale or malformed capture claim rejected");
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            await db.AgentRun.Where(value => value.TeamId == world.TeamId && value.Id == world.AgentRunId)
+                .ExecuteUpdateAsync(update => update.SetProperty(value => value.FenceEpoch, 8));
+            var stored = await db.AgentRunLogStream.SingleAsync(value => value.Id == stream.Id);
+            stored.WorkerFenceEpoch = 8;
+            stored.CaptureSessionId = Guid.NewGuid();
+            stored.Revision++;
+            stored.LastModifiedAt = DateTimeOffset.UtcNow;
+            await db.SaveChangesAsync();
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var stored = await scope.Resolve<CodeSpaceDbContext>().AgentRunLogStream.SingleAsync(value => value.Id == stream.Id);
+            stored.WorkerFenceEpoch.ShouldBe(8);
+            stored.Revision.ShouldBe(2);
+            stored.SegmentCount.ShouldBe(0);
+            stored.TotalBytes.ShouldBe(0);
+        }
+    }
+
+    [Fact]
+    public async Task Segment_capture_session_must_match_the_current_stream_claim()
+    {
+        var world = await SeedWorldAsync();
+        var artifact = await SeedArtifactAsync(world, 9, available: true);
+        var stream = await SeedStreamAsync(world);
+        var segment = Segment(world, stream, artifact, fenceEpoch: 7, ordinal: 1, offset: 0);
+        segment.CaptureSessionId = Guid.NewGuid();
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.AgentRunLogSegment.Add(segment);
+        var mismatch = await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
+        mismatch.InnerException?.Message.ShouldContain("capture claim mismatch rejected");
+    }
+
+    [Fact]
     public async Task Terminal_stream_and_existing_segments_are_immutable()
     {
         var world = await SeedWorldAsync();
@@ -154,6 +212,23 @@ public sealed class AgentRunLogPersistenceTests
             var reopen = await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
             reopen.InnerException?.Message.ShouldContain("terminal state is immutable");
         }
+    }
+
+    [Fact]
+    public async Task Runtime_completed_stream_requires_a_non_null_sha256_digest()
+    {
+        var world = await SeedWorldAsync();
+        var stream = await SeedStreamAsync(world);
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var stored = await db.AgentRunLogStream.SingleAsync(candidate => candidate.Id == stream.Id);
+        stored.State = AgentRunLogStreamState.Completed;
+        stored.Revision++;
+        stored.CompletedAt = DateTimeOffset.UtcNow;
+        stored.LastModifiedAt = stored.CompletedAt.Value;
+        var missingDigest = await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
+        missingDigest.InnerException?.Message.ShouldContain("requires its verified SHA-256 content digest");
     }
 
     private async Task<World> SeedWorldAsync()
@@ -242,10 +317,11 @@ public sealed class AgentRunLogPersistenceTests
         var stream = new AgentRunLogStream
         {
             Id = Guid.NewGuid(), TeamId = world.TeamId, AgentRunId = world.AgentRunId,
+            WorkerFenceEpoch = 7, CaptureSessionId = Guid.NewGuid(),
             StreamKind = "stdout/v1", ContentType = "text/plain", ContentEncoding = "utf-8",
             CaptureSource = "sandbox-spool/v1", Retention = ArtifactRetention.Run,
             State = AgentRunLogStreamState.Open, Revision = 1, SegmentCount = 0, TotalBytes = 0,
-            NextSegmentOrdinal = 1, NextOffsetBytes = 0, SchemaVersion = 1,
+            NextSegmentOrdinal = 1, NextOffsetBytes = 0, SchemaVersion = 2,
             CreatedAt = now, LastModifiedAt = now,
         };
 
@@ -263,8 +339,8 @@ public sealed class AgentRunLogPersistenceTests
         {
             Id = Guid.NewGuid(), TeamId = world.TeamId, AgentRunId = world.AgentRunId, StreamId = stream.Id,
             SegmentOrdinal = ordinal, StartOffsetBytes = offset, LengthBytes = artifact.SizeBytes,
-            ArtifactObjectId = artifact.Id, WorkerFenceEpoch = fenceEpoch, CaptureSessionId = Guid.NewGuid(),
-            FirstObservedAt = now, LastObservedAt = now, CreatedAt = now, SchemaVersion = 1,
+            ArtifactObjectId = artifact.Id, WorkerFenceEpoch = fenceEpoch, CaptureSessionId = stream.CaptureSessionId!.Value,
+            FirstObservedAt = now, LastObservedAt = now, CreatedAt = now, SchemaVersion = 2,
         };
     }
 

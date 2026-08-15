@@ -10,13 +10,15 @@ public sealed class AgentRunLogStreamConfiguration : IEntityTypeConfiguration<Ag
     {
         builder.ToTable("agent_run_log_stream", table =>
         {
+            table.HasCheckConstraint("ck_agent_run_log_stream_claim", "(worker_fence_epoch IS NULL AND capture_session_id IS NULL) OR (worker_fence_epoch IS NOT NULL AND worker_fence_epoch > 0 AND capture_session_id IS NOT NULL AND capture_session_id <> '00000000-0000-0000-0000-000000000000'::uuid)");
+            table.HasCheckConstraint("ck_agent_run_log_stream_digest", "(content_digest_algorithm IS NULL AND content_digest IS NULL) OR (content_digest_algorithm IS NOT NULL AND content_digest_algorithm = 'Sha256' AND content_digest IS NOT NULL AND octet_length(content_digest) = 32)");
             table.HasCheckConstraint("ck_agent_run_log_stream_error", "(error_code IS NULL AND error_message IS NULL) OR (error_code IS NOT NULL AND btrim(error_code) <> '')");
             table.HasCheckConstraint("ck_agent_run_log_stream_head", "revision > 0 AND segment_count >= 0 AND total_bytes >= 0 AND next_segment_ordinal = segment_count + 1 AND next_offset_bytes = total_bytes AND schema_version > 0");
             table.HasCheckConstraint("ck_agent_run_log_stream_time", "last_modified_at >= created_at AND (completed_at IS NULL OR last_modified_at >= completed_at)");
             table.HasCheckConstraint("ck_agent_run_log_stream_identity", "stream_kind ~ '^[a-z0-9][a-z0-9._/-]{0,126}/v[1-9][0-9]*$' AND capture_source ~ '^[a-z0-9][a-z0-9._/-]{0,126}/v[1-9][0-9]*$' AND content_type ~ '^[^[:space:]/]+/[^[:space:]]+$' AND (content_encoding IS NULL OR content_encoding ~ '^[a-z0-9][a-z0-9._+-]{0,63}$')");
             table.HasCheckConstraint("ck_agent_run_log_stream_retention", "retention IN ('Ephemeral', 'Run', 'Team', 'Compliance', 'Permanent') AND (expires_at IS NULL OR expires_at > created_at) AND (retention <> 'Ephemeral' OR expires_at IS NOT NULL) AND (retention <> 'Permanent' OR expires_at IS NULL)");
             table.HasCheckConstraint("ck_agent_run_log_stream_state", "state IN ('Open', 'Completed', 'Truncated', 'Unavailable', 'Corrupt', 'CaptureFailed')");
-            table.HasCheckConstraint("ck_agent_run_log_stream_terminal", "(state = 'Open' AND completed_at IS NULL AND error_code IS NULL) OR (state = 'Completed' AND completed_at IS NOT NULL AND error_code IS NULL) OR (state IN ('Truncated', 'Unavailable', 'Corrupt', 'CaptureFailed') AND completed_at IS NOT NULL AND error_code IS NOT NULL)");
+            table.HasCheckConstraint("ck_agent_run_log_stream_terminal", "((state = 'Open' AND completed_at IS NULL AND error_code IS NULL) OR (state = 'Completed' AND completed_at IS NOT NULL AND error_code IS NULL) OR (state IN ('Truncated', 'Unavailable', 'Corrupt', 'CaptureFailed') AND completed_at IS NOT NULL AND error_code IS NOT NULL)) AND (state <> 'Completed' OR schema_version = 1 OR (content_digest_algorithm = 'Sha256' AND content_digest IS NOT NULL AND octet_length(content_digest) = 32))");
         });
         builder.HasKey(stream => stream.Id);
         builder.HasAlternateKey(stream => new { stream.TeamId, stream.Id, stream.AgentRunId }).HasName("ak_agent_run_log_stream_scope");
@@ -26,6 +28,8 @@ public sealed class AgentRunLogStreamConfiguration : IEntityTypeConfiguration<Ag
         builder.Property(stream => stream.CaptureSource).HasMaxLength(128);
         builder.Property(stream => stream.Retention).HasConversion<string>().HasMaxLength(24);
         builder.Property(stream => stream.State).HasConversion<string>().HasMaxLength(24);
+        builder.Property(stream => stream.ContentDigestAlgorithm).HasConversion<string>().HasMaxLength(16);
+        builder.Property(stream => stream.ContentDigest).HasColumnType("bytea");
         builder.Property(stream => stream.ErrorCode).HasMaxLength(128);
         builder.Property(stream => stream.ErrorMessage).HasMaxLength(2048);
         builder.Property(stream => stream.Xmin).HasColumnName("xmin").HasColumnType("xid").ValueGeneratedOnAddOrUpdate().IsConcurrencyToken();
