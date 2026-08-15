@@ -109,7 +109,8 @@ public sealed class ArtifactTransferIntentConfiguration : IEntityTypeConfigurati
     {
         builder.ToTable("artifact_transfer_intent", table =>
         {
-            table.HasCheckConstraint("ck_artifact_transfer_intent_attempt", "(execution_attempt_id IS NULL AND execution_attempt_ordinal IS NULL AND execution_generation IS NULL AND worker_fence_epoch IS NULL) OR (execution_attempt_id IS NOT NULL AND execution_attempt_ordinal IS NOT NULL AND execution_attempt_ordinal > 0 AND execution_generation IS NOT NULL AND execution_generation > 0 AND worker_fence_epoch IS NOT NULL AND worker_fence_epoch > 0)");
+            table.HasCheckConstraint("ck_artifact_transfer_intent_attempt", "((execution_attempt_id IS NULL AND execution_attempt_ordinal IS NULL AND execution_generation IS NULL) OR (execution_attempt_id IS NOT NULL AND execution_attempt_ordinal IS NOT NULL AND execution_attempt_ordinal > 0 AND execution_generation IS NOT NULL AND execution_generation > 0)) AND (worker_fence_epoch IS NULL OR worker_fence_epoch > 0)");
+            table.HasCheckConstraint("ck_artifact_transfer_intent_worker_lease", "worker_lease_expires_at IS NULL OR worker_fence_epoch IS NOT NULL");
             table.HasCheckConstraint("ck_artifact_transfer_intent_digest", "expected_digest_algorithm IN ('Sha256') AND octet_length(expected_digest) = 32 AND expected_size_bytes >= 0");
             table.HasCheckConstraint("ck_artifact_transfer_intent_error", "(last_error_code IS NULL AND last_error_message IS NULL) OR (last_error_code IS NOT NULL AND btrim(last_error_code) <> '')");
             table.HasCheckConstraint("ck_artifact_transfer_intent_identity", "btrim(idempotency_key) <> '' AND btrim(target_locator) <> '' AND btrim(target_object_key) <> '' AND (temporary_object_key IS NULL OR btrim(temporary_object_key) <> '') AND (provider_upload_id IS NULL OR btrim(provider_upload_id) <> '')");
@@ -145,7 +146,9 @@ public sealed class ArtifactTransferIntentConfiguration : IEntityTypeConfigurati
             .OnDelete(DeleteBehavior.Restrict);
 
         builder.HasIndex(i => new { i.TeamId, i.StorageProfileRevisionId, i.IdempotencyKey }).IsUnique().HasDatabaseName("ux_artifact_transfer_intent_idempotency");
-        builder.HasIndex(i => new { i.TeamId, i.State, i.NextAttemptAt, i.Id }).HasDatabaseName("ix_artifact_transfer_intent_state_next");
+        const string liveTransferFilter = "state IN ('Intended', 'Uploading', 'Uploaded', 'Verifying', 'RetryScheduled')";
+        builder.HasIndex(i => new { i.TeamId, i.State, i.NextAttemptAt, i.Id }).HasDatabaseName("ix_artifact_transfer_intent_state_next").HasFilter(liveTransferFilter);
+        builder.HasIndex(i => new { i.TeamId, i.State, i.WorkerLeaseExpiresAt, i.NextAttemptAt, i.Id }).HasDatabaseName("ix_artifact_transfer_intent_recovery").HasFilter(liveTransferFilter);
         builder.HasIndex(i => new { i.TeamId, i.ExpectedDigestAlgorithm, i.ExpectedDigest }).HasDatabaseName("ix_artifact_transfer_intent_expected_digest");
     }
 }

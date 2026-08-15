@@ -25,8 +25,14 @@ public class ArtifactTransferIntent : IEntity<Guid>, IAuditable
     public int? ExecutionAttemptOrdinal { get; set; }
     public int? ExecutionGeneration { get; set; }
 
-    /// <summary>Monotonic worker-claim fence, advanced by a state-neutral claim and pinned across each transition.</summary>
+    /// <summary>Independent monotonic worker-claim fence, advanced by a state-neutral claim and pinned across each transition.</summary>
     public long? WorkerFenceEpoch { get; set; }
+
+    /// <summary>
+    /// Expiring ownership lease for the current fence. Active work may renew it without changing state or fence;
+    /// retry/terminal transitions release it so another process can claim only when the durable schedule permits.
+    /// </summary>
+    public DateTimeOffset? WorkerLeaseExpiresAt { get; set; }
 
     public int RetryCount { get; set; }
     public DateTimeOffset? NextAttemptAt { get; set; }

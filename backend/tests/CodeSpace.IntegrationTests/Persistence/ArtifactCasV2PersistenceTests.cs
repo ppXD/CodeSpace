@@ -48,10 +48,11 @@ public sealed class ArtifactCasV2PersistenceTests
             await db.SaveChangesAsync();
         }
 
-        await AdvanceTransferAsync(transfer.Id, ArtifactTransferState.Uploading, 2);
-        await AdvanceTransferAsync(transfer.Id, ArtifactTransferState.Uploaded, 3);
-        await AdvanceTransferAsync(transfer.Id, ArtifactTransferState.Verifying, 4);
-        await AdvanceTransferAsync(transfer.Id, ArtifactTransferState.Committed, 5, artifact.Id, location.Id);
+        await ClaimTransferAsync(transfer.Id);
+        await AdvanceTransferAsync(transfer.Id, ArtifactTransferState.Uploading, 3);
+        await AdvanceTransferAsync(transfer.Id, ArtifactTransferState.Uploaded, 4);
+        await AdvanceTransferAsync(transfer.Id, ArtifactTransferState.Verifying, 5);
+        await AdvanceTransferAsync(transfer.Id, ArtifactTransferState.Committed, 6, artifact.Id, location.Id);
 
         using (var scope = _fixture.BeginScope())
         {
@@ -63,7 +64,7 @@ public sealed class ArtifactCasV2PersistenceTests
 
             var storedTransfer = await db.ArtifactTransferIntent.SingleAsync(i => i.Id == transfer.Id);
             storedTransfer.State.ShouldBe(ArtifactTransferState.Committed);
-            storedTransfer.Revision.ShouldBe(5);
+            storedTransfer.Revision.ShouldBe(6);
             storedTransfer.ArtifactObjectId.ShouldBe(artifact.Id);
             storedTransfer.ArtifactLocationId.ShouldBe(location.Id);
 
@@ -284,12 +285,14 @@ public sealed class ArtifactCasV2PersistenceTests
             await db.SaveChangesAsync();
         }
 
+        await ClaimTransferAsync(transfer.Id);
+
         using (var scope = _fixture.BeginScope())
         {
             var db = scope.Resolve<CodeSpaceDbContext>();
             var stored = await db.ArtifactTransferIntent.SingleAsync(i => i.Id == transfer.Id);
             stored.State = ArtifactTransferState.Committed;
-            stored.Revision = 2;
+            stored.Revision = 3;
             stored.ArtifactObjectId = artifact.Id;
             stored.ArtifactLocationId = location.Id;
             stored.CompletedAt = DateTimeOffset.UtcNow;
@@ -445,42 +448,156 @@ public sealed class ArtifactCasV2PersistenceTests
         {
             var db = scope.Resolve<CodeSpaceDbContext>();
             var stored = await db.ArtifactTransferIntent.SingleAsync(i => i.Id == transfer.Id);
-            stored.WorkerFenceEpoch = 2;
+            stored.WorkerFenceEpoch = 1;
+            stored.WorkerLeaseExpiresAt = DateTimeOffset.UtcNow.AddMilliseconds(500);
             stored.Revision = 2;
+            await db.SaveChangesAsync();
+        }
+
+        await Task.Delay(650);
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var stored = await db.ArtifactTransferIntent.SingleAsync(i => i.Id == transfer.Id);
+            stored.State = ArtifactTransferState.Uploading;
+            stored.WorkerFenceEpoch = 2;
+            stored.WorkerLeaseExpiresAt = DateTimeOffset.UtcNow.AddMinutes(5);
+            stored.Revision = 3;
+            var combined = await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
+            combined.ToString().ShouldContain("claim-only");
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var stored = await db.ArtifactTransferIntent.SingleAsync(i => i.Id == transfer.Id);
+            stored.WorkerFenceEpoch = 2;
+            stored.WorkerLeaseExpiresAt = DateTimeOffset.UtcNow.AddMinutes(5);
+            stored.Revision = 3;
+            await db.SaveChangesAsync();
+        }
+
+        await using var connection = new NpgsqlConnection(_fixture.ConnectionString);
+        await connection.OpenAsync();
+        await using var staleCas = new NpgsqlCommand("UPDATE artifact_transfer_intent SET state = 'Uploading', revision = 4, last_modified_date = now() WHERE id = @id AND revision = 3 AND worker_fence_epoch = 1", connection);
+        staleCas.Parameters.AddWithValue("id", transfer.Id);
+        (await staleCas.ExecuteNonQueryAsync()).ShouldBe(0);
+
+        await using var currentCas = new NpgsqlCommand("UPDATE artifact_transfer_intent SET state = 'Uploading', revision = 4, last_modified_date = now() WHERE id = @id AND revision = 3 AND worker_fence_epoch = 2", connection);
+        currentCas.Parameters.AddWithValue("id", transfer.Id);
+        (await currentCas.ExecuteNonQueryAsync()).ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task System_and_attempt_owned_transfers_claim_null_to_one_then_advance_without_mutating_identity_or_state()
+    {
+        var world = await SeedWorldAsync();
+        var artifact = Object(world.TeamId, 13, 0x54);
+        var location = PendingLocation(world, artifact, "objects/54/claim.bin");
+        var systemOwned = Transfer(world, artifact, location, "system-claim");
+        systemOwned.ExecutionAttemptId = null;
+        systemOwned.ExecutionAttemptOrdinal = null;
+        systemOwned.ExecutionGeneration = null;
+        systemOwned.WorkerFenceEpoch = null;
+        var attemptOwned = Transfer(world, artifact, location, "attempt-claim");
+        attemptOwned.WorkerFenceEpoch = null;
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.ArtifactTransferIntent.AddRange(systemOwned, attemptOwned);
+            await db.SaveChangesAsync();
+        }
+
+        foreach (var intentId in new[] { systemOwned.Id, attemptOwned.Id })
+        {
+            var firstLease = DateTimeOffset.UtcNow.AddMilliseconds(500);
+            using (var scope = _fixture.BeginScope())
+            {
+                var db = scope.Resolve<CodeSpaceDbContext>();
+                var stored = await db.ArtifactTransferIntent.SingleAsync(value => value.Id == intentId);
+                stored.WorkerFenceEpoch = 1;
+                stored.WorkerLeaseExpiresAt = firstLease;
+                stored.Revision = 2;
+                await db.SaveChangesAsync();
+            }
+
+            using (var scope = _fixture.BeginScope())
+            {
+                var db = scope.Resolve<CodeSpaceDbContext>();
+                var stored = await db.ArtifactTransferIntent.SingleAsync(value => value.Id == intentId);
+                stored.WorkerFenceEpoch = 2;
+                stored.WorkerLeaseExpiresAt = DateTimeOffset.UtcNow.AddMinutes(5);
+                stored.Revision = 3;
+                var doubleClaim = await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
+                doubleClaim.ToString().ShouldContain("live worker lease");
+            }
+
+            await Task.Delay(650);
+            using (var scope = _fixture.BeginScope())
+            {
+                var db = scope.Resolve<CodeSpaceDbContext>();
+                var stored = await db.ArtifactTransferIntent.SingleAsync(value => value.Id == intentId);
+                stored.WorkerFenceEpoch = 2;
+                stored.WorkerLeaseExpiresAt = DateTimeOffset.UtcNow.AddMilliseconds(500);
+                stored.Revision = 3;
+                await db.SaveChangesAsync();
+            }
+        }
+
+        await Task.Delay(650);
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var stored = await db.ArtifactTransferIntent.SingleAsync(value => value.Id == systemOwned.Id);
+            stored.WorkerFenceEpoch = 4;
+            stored.WorkerLeaseExpiresAt = DateTimeOffset.UtcNow.AddMinutes(10);
+            stored.Revision = 4;
+            var skipped = await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
+            skipped.ToString().ShouldContain("advance exactly once");
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var stored = await db.ArtifactTransferIntent.SingleAsync(value => value.Id == attemptOwned.Id);
+            stored.WorkerFenceEpoch = 3;
+            stored.WorkerLeaseExpiresAt = DateTimeOffset.UtcNow.AddMinutes(10);
+            stored.State = ArtifactTransferState.Uploading;
+            stored.Revision = 4;
+            var combined = await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
+            combined.ToString().ShouldContain("claim-only");
+        }
+    }
+
+    [Fact]
+    public async Task Transfer_transition_without_claim_is_rejected_for_system_owned_intent()
+    {
+        var world = await SeedWorldAsync();
+        var artifact = Object(world.TeamId, 14, 0x55);
+        var location = PendingLocation(world, artifact, "objects/55/unclaimed.bin");
+        var transfer = Transfer(world, artifact, location, "unclaimed-system");
+        transfer.ExecutionAttemptId = null;
+        transfer.ExecutionAttemptOrdinal = null;
+        transfer.ExecutionGeneration = null;
+        transfer.WorkerFenceEpoch = null;
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.ArtifactTransferIntent.Add(transfer);
             await db.SaveChangesAsync();
         }
 
         using (var scope = _fixture.BeginScope())
         {
             var db = scope.Resolve<CodeSpaceDbContext>();
-            var stored = await db.ArtifactTransferIntent.SingleAsync(i => i.Id == transfer.Id);
+            var stored = await db.ArtifactTransferIntent.SingleAsync(value => value.Id == transfer.Id);
             stored.State = ArtifactTransferState.Uploading;
-            stored.WorkerFenceEpoch = 1;
-            stored.Revision = 3;
-            var stale = await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
-            stale.ToString().ShouldContain("worker fence");
+            stored.Revision = 2;
+            var unclaimed = await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
+            unclaimed.ToString().ShouldContain("requires a current worker fence claim");
         }
-
-        using (var scope = _fixture.BeginScope())
-        {
-            var db = scope.Resolve<CodeSpaceDbContext>();
-            var stored = await db.ArtifactTransferIntent.SingleAsync(i => i.Id == transfer.Id);
-            stored.State = ArtifactTransferState.Uploading;
-            stored.WorkerFenceEpoch = 3;
-            stored.Revision = 3;
-            var combined = await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
-            combined.ToString().ShouldContain("claim-only");
-        }
-
-        await using var connection = new NpgsqlConnection(_fixture.ConnectionString);
-        await connection.OpenAsync();
-        await using var staleCas = new NpgsqlCommand("UPDATE artifact_transfer_intent SET state = 'Uploading', revision = 3, worker_fence_epoch = 1 WHERE id = @id AND revision = 2 AND worker_fence_epoch = 1", connection);
-        staleCas.Parameters.AddWithValue("id", transfer.Id);
-        (await staleCas.ExecuteNonQueryAsync()).ShouldBe(0);
-
-        await using var currentCas = new NpgsqlCommand("UPDATE artifact_transfer_intent SET state = 'Uploading', revision = 3, worker_fence_epoch = 2 WHERE id = @id AND revision = 2 AND worker_fence_epoch = 2", connection);
-        currentCas.Parameters.AddWithValue("id", transfer.Id);
-        (await currentCas.ExecuteNonQueryAsync()).ShouldBe(1);
     }
 
     [Fact]
@@ -622,7 +739,20 @@ public sealed class ArtifactCasV2PersistenceTests
             transfer.ArtifactObjectId = objectId;
             transfer.ArtifactLocationId = locationId;
             transfer.CompletedAt = DateTimeOffset.UtcNow;
+            transfer.WorkerLeaseExpiresAt = null;
         }
+        await db.SaveChangesAsync();
+    }
+
+    private async Task ClaimTransferAsync(Guid id)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var transfer = await db.ArtifactTransferIntent.SingleAsync(value => value.Id == id);
+        transfer.WorkerFenceEpoch = (transfer.WorkerFenceEpoch ?? 0) + 1;
+        transfer.WorkerLeaseExpiresAt = DateTimeOffset.UtcNow.AddMinutes(10);
+        transfer.Revision++;
+        transfer.LastModifiedDate = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync();
     }
 
@@ -722,7 +852,7 @@ public sealed class ArtifactCasV2PersistenceTests
         IdempotencyKey = idempotencyKey, ExpectedDigestAlgorithm = artifact.DigestAlgorithm,
         ExpectedDigest = artifact.Digest, ExpectedSizeBytes = artifact.SizeBytes, TargetLocator = location.Locator,
         TargetObjectKey = location.ObjectKey, State = ArtifactTransferState.Intended, Revision = 1,
-        ExecutionAttemptId = Guid.NewGuid(), ExecutionAttemptOrdinal = 1, ExecutionGeneration = 1, WorkerFenceEpoch = 1,
+        ExecutionAttemptId = Guid.NewGuid(), ExecutionAttemptOrdinal = 1, ExecutionGeneration = 1,
         CreatedDate = DateTimeOffset.UtcNow, CreatedBy = world.ActorId,
         LastModifiedDate = DateTimeOffset.UtcNow, LastModifiedBy = world.ActorId,
     };
