@@ -44,10 +44,11 @@ namespace CodeSpace.E2ETests.Workflows;
 /// with <c>gating: false</c>), while skill LOADING (the SKILL.md lands where the CLI scans) is GATED deterministically by
 /// <c>RealHarnessSkillProjectionTests</c>. This mirrors the gate's own code-fault-GATES / capability-miss-REPORTS split.
 /// Only a GATEWAY/transport/auth failure is a non-gating LOUD skip (classified by <c>RealModelRunClassifier</c>); an
-/// injection/CODE fault — a non-Succeeded run that is NOT a recognised gateway signature (a malformed
+/// injection/CODE fault — an outputless terminal run that is NOT a recognised gateway signature (a malformed
 /// <c>--append-system-prompt</c>, a throwing operating contract, arg-ordering swallowing the Goal) — is a REAL miss the
 /// gate REDS on, so the persona gate can red on the exact regression class it exists to catch, never collapsing it to a
-/// green skip. A no-creds / no-CLI run self-skips LOUDLY (skip ≠ pass). POSIX-only. <c>[Category=RealModel]</c> so it
+/// green skip. A completion-review NeedsReview reply remains inspectable and is scored for the marker without weakening
+/// that honest terminal status. A no-creds / no-CLI run self-skips LOUDLY (skip ≠ pass). POSIX-only. <c>[Category=RealModel]</c> so it
 /// runs ONLY on the real-model lane.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
@@ -139,7 +140,7 @@ public sealed class RealModelAgentInjectionE2ETests
 
     // ─── shared drive ──────────────────────────────────────────────────────────
 
-    /// <summary>Seed a fresh credential + run ONE real claude agent for <paramref name="taskFactory"/>, and return whether <paramref name="marker"/> reached the model's OWN reply, ALONG WITH that reply text (for a diagnostic snippet on a miss). A run that did not COMPLETE is gateway/exec infra (an <see cref="AgentExecutionInfraException"/> → the gate's non-gating skip), NEVER a false behavior miss.</summary>
+    /// <summary>Seed a fresh credential + run ONE real claude agent for <paramref name="taskFactory"/>, and return whether <paramref name="marker"/> reached the model's OWN reply, ALONG WITH that reply text (for a diagnostic snippet on a miss). Succeeded and completion-review NeedsReview runs both carry inspectable model output: the latter is the honest completion contract parking a reply that ends in a question, which is orthogonal to whether the persona was applied. A run without inspectable output is gateway/exec infra (an <see cref="AgentExecutionInfraException"/> → the gate's non-gating skip) or a real behavior miss.</summary>
     private async Task<(bool Found, string ModelReply)> RunAndCheckMarkerAsync(LiveContext live, Func<Guid, AgentTask> taskFactory, string marker)
     {
         var credId = await SeedAgentCredentialAsync(live.TeamId, live.BaseUrl, live.ApiKey);
@@ -156,18 +157,18 @@ public sealed class RealModelAgentInjectionE2ETests
         var svc = read.Resolve<IAgentRunService>();
         var run = await svc.GetAsync(runId, CancellationToken.None);
 
-        if (run.Status != AgentRunStatus.Succeeded)
+        if (!RealModelRunClassifier.HasInspectableModelReply(run))
         {
             var reason = $"status={run.Status}; exitReason={RealModelRunClassifier.ExitReasonOf(run)}; error={run.Error ?? "(none)"}";
 
             // A GATEWAY/transport/auth failure is non-gating infra (skip). An injection/CODE fault — a malformed
             // --append-system-prompt, a throwing operating contract, arg-ordering that swallows the Goal — is a REAL
             // miss the gate MUST red on, NEVER a silent skip. Classify so the persona GATE actually reds on the exact
-            // regression class it exists to catch (else every non-Succeeded status collapses to a green skip).
+            // regression class it exists to catch (else every outputless terminal status collapses to a green skip).
             if (RealModelRunClassifier.IsGatewayInfra(run))
                 throw new AgentExecutionInfraException($"the claude run did not complete — gateway/exec infra (non-gating skip): {reason}");
 
-            return (false, $"[run did NOT complete — likely an injection/CODE fault, not gateway infra: {reason}]");
+            return (false, $"[run produced no inspectable reply — likely an injection/CODE fault, not gateway infra: {reason}]");
         }
 
         var events = await svc.GetEventsAsync(runId, live.TeamId, 0, CancellationToken.None);

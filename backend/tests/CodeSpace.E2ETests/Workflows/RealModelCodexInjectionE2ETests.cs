@@ -129,7 +129,7 @@ public sealed class RealModelCodexInjectionE2ETests : IDisposable
 
     // ─── shared drive ──────────────────────────────────────────────────────────
 
-    /// <summary>Seed a fresh credential + run ONE real codex agent for <paramref name="taskFactory"/>, and report whether <paramref name="marker"/> reached the MODEL'S reply. A run that did not COMPLETE is gateway/exec/wire infra (an <see cref="AgentExecutionInfraException"/> → the gate's non-gating skip) — the likely path when the gateway does not serve Codex's <c>responses</c> wire — NEVER a false behavior miss.</summary>
+    /// <summary>Seed a fresh credential + run ONE real codex agent for <paramref name="taskFactory"/>, and report whether <paramref name="marker"/> reached the MODEL'S reply. Succeeded and completion-review NeedsReview runs both carry inspectable output; a reply parked because it ends in a question still proves or disproves the behavioral injection independently. A run without inspectable output is gateway/exec/wire infra (an <see cref="AgentExecutionInfraException"/> → the gate's non-gating skip) — the likely path when the gateway does not serve Codex's <c>responses</c> wire — or a real behavior miss.</summary>
     private async Task<bool> RunAndCheckMarkerAsync(LiveContext live, Func<Guid, AgentTask> taskFactory, string marker)
     {
         var credId = await SeedAgentCredentialAsync(live.TeamId, live.BaseUrl, live.ApiKey);
@@ -146,7 +146,7 @@ public sealed class RealModelCodexInjectionE2ETests : IDisposable
         var svc = read.Resolve<IAgentRunService>();
         var run = await svc.GetAsync(runId, CancellationToken.None);
 
-        if (run.Status != AgentRunStatus.Succeeded)
+        if (!RealModelRunClassifier.HasInspectableModelReply(run))
         {
             var reason = $"status={run.Status}; exitReason={RealModelRunClassifier.ExitReasonOf(run)}; error={run.Error ?? "(none)"}";
 

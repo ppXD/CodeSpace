@@ -52,6 +52,16 @@ public static class RealModelRunClassifier
         // unknown failure) → default to a CODE FAULT (the caller reds), so an injection-channel regression is never a skip.
     }
 
+    /// <summary>
+    /// True when a behavioral gate can inspect the model's persisted reply. The completion-review form of
+    /// <see cref="AgentRunStatus.NeedsReview"/> deliberately remains inspectable: the completion contract can honestly
+    /// park an otherwise successful reply when it ends with an unresolved question, but that does not erase the reply
+    /// or prove that a persona/skill injection failed. Other NeedsReview reasons remain non-inspectable here so a stalled,
+    /// critic-flagged, or decision-blocked run cannot borrow this narrow exception.
+    /// </summary>
+    public static bool HasInspectableModelReply(AgentRun run) => run.Status == AgentRunStatus.Succeeded
+        || run.Status == AgentRunStatus.NeedsReview && ExitReasonOf(run) == "needs-review";
+
     /// <summary>The run's ExitReason, read from the serialized <c>AgentRunResult</c> in <see cref="AgentRun.ResultJson"/> (there is no ExitReason column on the entity). Empty when absent/unparseable.</summary>
     public static string ExitReasonOf(AgentRun run)
     {
