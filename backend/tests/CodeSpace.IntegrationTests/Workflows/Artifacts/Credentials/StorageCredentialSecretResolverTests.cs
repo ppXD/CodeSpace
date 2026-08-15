@@ -42,10 +42,10 @@ public sealed class StorageCredentialSecretResolverTests
         using var scope = ResolverScope(Module);
         var result = await scope.Resolve<IStorageCredentialSecretResolver>().ResolveAsync(Request(teamId, credential.Id, 1), CancellationToken.None);
 
-        var ready = result.ShouldBeOfType<StorageCredentialSecretResolution.Ready>();
-        ready.Secret.ValueKind.ShouldBe(JsonValueKind.Object);
-        ready.Secret.GetProperty("accessKey").GetString().ShouldBe("secret-v1");
-        ready.Secret.GetProperty("region").GetString().ShouldBe("cn-hangzhou");
+        using var ready = result.ShouldBeOfType<StorageCredentialSecretResolution.Ready>();
+        ready.UseSecret(secret => secret.ValueKind).ShouldBe(JsonValueKind.Object);
+        ready.UseSecret(secret => secret.GetProperty("accessKey").GetString()).ShouldBe("secret-v1");
+        ready.UseSecret(secret => secret.GetProperty("region").GetString()).ShouldBe("cn-hangzhou");
         ready.ToString().ShouldNotContain("secret-v1", Case.Sensitive);
         ready.ToString().ShouldContain("REDACTED", Case.Sensitive);
         scope.Resolve<CodeSpaceDbContext>().ChangeTracker.Entries().ShouldBeEmpty();
@@ -57,11 +57,11 @@ public sealed class StorageCredentialSecretResolverTests
         var (teamId, actorId) = await SeedTeamAsync();
         var credential = await SeedCredentialAsync(teamId, actorId, ProviderTypeKey, ["""{"accessKey":"old-key"}""", """{"accessKey":"new-key"}"""]);
 
-        var old = (await ResolveAsync(Request(teamId, credential.Id, 1))).ShouldBeOfType<StorageCredentialSecretResolution.Ready>();
-        var current = (await ResolveAsync(Request(teamId, credential.Id, 2))).ShouldBeOfType<StorageCredentialSecretResolution.Ready>();
+        using var old = (await ResolveAsync(Request(teamId, credential.Id, 1))).ShouldBeOfType<StorageCredentialSecretResolution.Ready>();
+        using var current = (await ResolveAsync(Request(teamId, credential.Id, 2))).ShouldBeOfType<StorageCredentialSecretResolution.Ready>();
 
-        old.Secret.GetProperty("accessKey").GetString().ShouldBe("old-key");
-        current.Secret.GetProperty("accessKey").GetString().ShouldBe("new-key");
+        old.UseSecret(secret => secret.GetProperty("accessKey").GetString()).ShouldBe("old-key");
+        current.UseSecret(secret => secret.GetProperty("accessKey").GetString()).ShouldBe("new-key");
     }
 
     [Fact]

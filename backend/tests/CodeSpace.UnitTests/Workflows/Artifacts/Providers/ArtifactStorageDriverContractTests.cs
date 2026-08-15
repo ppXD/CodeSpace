@@ -13,20 +13,17 @@ public sealed class LocalRwxArtifactStorageDriverContractTests : ArtifactStorage
     private readonly string _root = Path.Combine(Path.GetTempPath(), "codespace-storage-driver-tests", Guid.NewGuid().ToString("N"));
 
     [Fact]
-    public void Profile_snapshot_is_versioned_and_serializes_only_a_secret_reference()
+    public void Profile_snapshot_is_versioned_and_driver_request_never_serializes_a_runtime_credential_handle()
     {
         var secretReference = new StorageSecretReference("vault/v1", "storage/team-7/profile-3", "42");
         var profile = Profile(secretReference);
-        var request = new ArtifactStorageDriverCreateRequest(profile)
-        {
-            CredentialHandle = new StorageCredentialHandle("credential-handle-9", secretReference, DateTimeOffset.UtcNow.AddMinutes(5))
-        };
+        var request = new ArtifactStorageDriverCreateRequest(profile);
         var json = JsonSerializer.Serialize(profile);
         var requestJson = JsonSerializer.Serialize(request);
 
         profile.SchemaVersion.ShouldBe(StorageProfileSnapshot.CurrentSchemaVersion);
         json.ShouldContain("storage/team-7/profile-3");
-        requestJson.ShouldContain("credential-handle-9");
+        requestJson.ShouldNotContain(nameof(ArtifactStorageDriverCreateRequest.CredentialHandle));
         json.ShouldNotContain("accessKeySecret", Case.Insensitive);
         json.ShouldNotContain("plaintext", Case.Insensitive);
     }

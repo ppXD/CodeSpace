@@ -43,4 +43,12 @@ public sealed class StorageCredentialSecretResolverContractTests
         typeof(StorageCredentialMetadata).GetProperties().Select(property => property.Name)
             .ShouldNotContain(name => name.Contains("Secret", StringComparison.Ordinal) || name.Contains("Payload", StringComparison.Ordinal) || name.Contains("Cipher", StringComparison.Ordinal) || name.Contains("Fingerprint", StringComparison.Ordinal));
     }
+
+    [Fact]
+    public void Ready_secret_has_no_public_property_surface_for_dto_or_structured_log_reflection()
+    {
+        typeof(StorageCredentialSecretResolution.Ready).GetProperties().ShouldBeEmpty();
+        typeof(StorageCredentialSecretResolution.Ready).GetMethods().Where(method => method.DeclaringType == typeof(StorageCredentialSecretResolution.Ready)).Select(method => method.Name)
+            .ShouldContain(nameof(StorageCredentialSecretResolution.Ready.UseSecret));
+    }
 }

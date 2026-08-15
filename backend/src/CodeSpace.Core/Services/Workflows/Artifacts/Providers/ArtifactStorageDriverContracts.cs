@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace CodeSpace.Core.Services.Workflows.Artifacts.Providers;
 
@@ -24,13 +25,49 @@ public sealed record StorageProfileSnapshot
 public sealed record StorageSecretReference(string SecretStoreType, string SecretId, string? SecretVersion = null);
 
 /// <summary>
-/// Ephemeral authorization handle passed to a factory after a trusted secret broker authorizes the reference. The
-/// handle is an identifier, not credential material; provider SDK secrets remain owned by the broker/factory scope.
+/// Ephemeral, in-process credential activation handle. A factory may synchronously materialize its provider SDK
+/// credential through <see cref="UseSecret{T}"/> while <c>CreateAsync</c> is running, but must never retain this handle or
+/// the supplied JSON element. The runtime broker owns and disposes it as soon as driver creation completes.
 /// </summary>
-public sealed record StorageCredentialHandle(string HandleId, StorageSecretReference SecretReference, DateTimeOffset? ExpiresAt = null);
+public sealed class StorageCredentialHandle : IDisposable, IJsonOnSerializing
+{
+    private readonly object _gate = new();
+    private JsonElement _secret;
+    private bool _disposed;
+
+    internal StorageCredentialHandle(JsonElement secret)
+    {
+        if (secret.ValueKind != JsonValueKind.Object) throw new ArgumentException("A storage credential secret must be a JSON object.", nameof(secret));
+        _secret = secret.Clone();
+    }
+
+    public T UseSecret<T>(Func<JsonElement, T> materialize)
+    {
+        ArgumentNullException.ThrowIfNull(materialize);
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            return materialize(_secret);
+        }
+    }
+
+    public void Dispose()
+    {
+        lock (_gate)
+        {
+            if (_disposed) return;
+            _secret = default;
+            _disposed = true;
+        }
+    }
+
+    public void OnSerializing() => throw new NotSupportedException("Runtime storage credential handles cannot be serialized.");
+    public override string ToString() => "StorageCredentialHandle { Secret = [REDACTED] }";
+}
 
 public sealed record ArtifactStorageDriverCreateRequest(StorageProfileSnapshot Profile)
 {
+    [JsonIgnore]
     public StorageCredentialHandle? CredentialHandle { get; init; }
 }
 

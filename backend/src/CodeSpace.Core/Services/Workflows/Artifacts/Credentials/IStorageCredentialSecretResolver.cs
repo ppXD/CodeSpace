@@ -21,11 +21,37 @@ public abstract record StorageCredentialSecretResolution
 {
     private StorageCredentialSecretResolution() { }
 
-    /// <summary>The decrypted, schema-validated object. The element owns an independent immutable JSON clone.</summary>
-    public sealed record Ready : StorageCredentialSecretResolution
+    /// <summary>
+    /// The decrypted, schema-validated object. The result owns an independent immutable JSON clone and the trusted
+    /// caller must dispose it as soon as runtime credential materialization completes.
+    /// </summary>
+    public sealed record Ready : StorageCredentialSecretResolution, IDisposable
     {
-        public Ready(JsonElement secret) => Secret = secret;
-        public JsonElement Secret { get; }
+        private readonly object _gate = new();
+        private JsonElement _secret;
+        private bool _disposed;
+
+        public Ready(JsonElement secret) => _secret = secret.Clone();
+
+        public T UseSecret<T>(Func<JsonElement, T> materialize)
+        {
+            ArgumentNullException.ThrowIfNull(materialize);
+            lock (_gate)
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                return materialize(_secret);
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (_gate)
+            {
+                if (_disposed) return;
+                _secret = default;
+                _disposed = true;
+            }
+        }
 
         /// <summary>Prevent accidental plaintext disclosure when a caller logs the resolution value.</summary>
         public override string ToString() => "Ready { Secret = [REDACTED] }";
