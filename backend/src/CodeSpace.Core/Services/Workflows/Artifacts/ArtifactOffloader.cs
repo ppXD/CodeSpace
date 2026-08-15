@@ -1,5 +1,6 @@
 using System.Text;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
 
 namespace CodeSpace.Core.Services.Workflows.Artifacts;
 
@@ -36,5 +37,52 @@ public sealed class ArtifactOffloader : IArtifactOffloader, IScopedDependency
         var bytes = await _store.GetBytesAsync(teamId, id, cancellationToken).ConfigureAwait(false);
 
         return bytes == null ? "" : Encoding.UTF8.GetString(bytes.Bytes);
+    }
+}
+
+/// <summary>Fail-closed read used by patch, oracle, and integration consumers whose referenced bytes are required.</summary>
+public static class ArtifactOffloaderExtensions
+{
+    public static async Task<string> ResolveRequiredAsync(this IArtifactOffloader offloader, Guid teamId, string? inline, Guid? artifactId, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(offloader);
+        if (!string.IsNullOrEmpty(inline)) return inline;
+        if (artifactId is not { } id) return "";
+
+        try
+        {
+            var resolved = await offloader.ResolveAsync(teamId, inline, id, cancellationToken).ConfigureAwait(false);
+            return !string.IsNullOrEmpty(resolved)
+                ? resolved
+                : throw new ArtifactContentUnavailableException(id, ArtifactContentUnavailableKind.MetadataMissing);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (ArtifactContentUnavailableException)
+        {
+            throw;
+        }
+        catch (FileNotFoundException ex)
+        {
+            throw new ArtifactContentUnavailableException(id, ArtifactContentUnavailableKind.PhysicalObjectMissing, ex);
+        }
+        catch (DirectoryNotFoundException ex)
+        {
+            throw new ArtifactContentUnavailableException(id, ArtifactContentUnavailableKind.PhysicalObjectMissing, ex);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            throw new ArtifactContentUnavailableException(id, ArtifactContentUnavailableKind.AccessDenied, ex);
+        }
+        catch (InvalidOperationException ex)
+        {
+            throw new ArtifactContentUnavailableException(id, ArtifactContentUnavailableKind.IntegrityFailure, ex);
+        }
+        catch (IOException ex)
+        {
+            throw new ArtifactContentUnavailableException(id, ArtifactContentUnavailableKind.BackendUnavailable, ex);
+        }
     }
 }

@@ -67,7 +67,7 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
 
         foreach (var c in request.Contributions)
         {
-            var patch = await _offloader.ResolveAsync(request.TeamId, c.Patch, c.PatchArtifactId, cancellationToken).ConfigureAwait(false);
+            var patch = await _offloader.ResolveRequiredAsync(request.TeamId, c.Patch, c.PatchArtifactId, cancellationToken).ConfigureAwait(false);
             resolved.Add(new ResolvedContribution(c, patch));
         }
 

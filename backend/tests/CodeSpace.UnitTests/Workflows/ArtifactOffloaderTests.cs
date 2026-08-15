@@ -1,5 +1,6 @@
 using System.Text;
 using CodeSpace.Core.Services.Workflows.Artifacts;
+using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Workflows;
@@ -92,12 +93,40 @@ public sealed class ArtifactOffloaderTests
         (await offloader.ResolveAsync(Guid.NewGuid(), "", Guid.NewGuid(), CancellationToken.None)).ShouldBe("", "a missing / cross-team artifact resolves to empty, not a crash");
     }
 
+    [Fact]
+    public async Task ResolveRequired_rejects_a_missing_reference_instead_of_turning_required_work_into_empty_text()
+    {
+        var artifactId = Guid.NewGuid();
+        var ex = await Should.ThrowAsync<ArtifactContentUnavailableException>(() =>
+            new ArtifactOffloader(new FakeStore()).ResolveRequiredAsync(Guid.NewGuid(), "", artifactId, CancellationToken.None));
+
+        ex.ArtifactId.ShouldBe(artifactId);
+        ex.Kind.ShouldBe(ArtifactContentUnavailableKind.MetadataMissing);
+        ex.Message.ShouldNotContain("/var/", customMessage: "operator-facing failures expose typed identity, never host paths");
+    }
+
+    [Theory]
+    [InlineData(typeof(DirectoryNotFoundException), ArtifactContentUnavailableKind.PhysicalObjectMissing)]
+    [InlineData(typeof(InvalidOperationException), ArtifactContentUnavailableKind.IntegrityFailure)]
+    [InlineData(typeof(UnauthorizedAccessException), ArtifactContentUnavailableKind.AccessDenied)]
+    [InlineData(typeof(IOException), ArtifactContentUnavailableKind.BackendUnavailable)]
+    public async Task ResolveRequired_classifies_storage_faults(Type exceptionType, ArtifactContentUnavailableKind expected)
+    {
+        var store = new FakeStore { GetException = (Exception)Activator.CreateInstance(exceptionType)! };
+
+        var ex = await Should.ThrowAsync<ArtifactContentUnavailableException>(() =>
+            new ArtifactOffloader(store).ResolveRequiredAsync(Guid.NewGuid(), "", Guid.NewGuid(), CancellationToken.None));
+
+        ex.Kind.ShouldBe(expected);
+    }
+
     /// <summary>An in-memory <see cref="IArtifactStore"/> — records Puts (returns a stable id per sha) + serves Gets; unknown id → null (the cross-team/missing case).</summary>
     private sealed class FakeStore : IArtifactStore
     {
         public List<(Guid TeamId, byte[] Bytes, string ContentType)> Puts { get; } = new();
         public List<Guid> Gets { get; } = new();
         private readonly Dictionary<Guid, (string Sha, string ContentType, byte[] Bytes)> _byId = new();
+        public Exception? GetException { get; init; }
 
         public Task<Guid> PutAsync(Guid teamId, ReadOnlyMemory<byte> bytes, string contentType, CancellationToken cancellationToken)
         {
@@ -111,6 +140,7 @@ public sealed class ArtifactOffloaderTests
 
         public Task<ArtifactBytes?> GetBytesAsync(Guid teamId, Guid artifactId, CancellationToken cancellationToken)
         {
+            if (GetException is not null) throw GetException;
             Gets.Add(artifactId);
             if (!_byId.TryGetValue(artifactId, out var v)) return Task.FromResult<ArtifactBytes?>(null);
             return Task.FromResult<ArtifactBytes?>(new ArtifactBytes { Id = artifactId, Sha256 = v.Sha, ContentType = v.ContentType, Bytes = v.Bytes });

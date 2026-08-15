@@ -116,7 +116,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
 
             await CloneAtBaseAsync(clone, baseSha, directory, cancellationToken).ConfigureAwait(false);
 
-            var patch = await _offloader.ResolveAsync(teamId, inlinePatch, patchArtifactId, cancellationToken).ConfigureAwait(false);
+            var patch = await _offloader.ResolveRequiredAsync(teamId, inlinePatch, patchArtifactId, cancellationToken).ConfigureAwait(false);
 
             if (string.IsNullOrEmpty(patch))
             {
