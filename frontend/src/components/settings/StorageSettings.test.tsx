@@ -111,7 +111,9 @@ function renderSettings(handler: FetchHandler) {
   localStorage.setItem("codespace.activeTeamId", "team-1");
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
     const raw = typeof input === "string" ? input : input.toString();
-    return handler(new URL(raw, "http://test.local").pathname, init);
+    const path = new URL(raw, "http://test.local").pathname;
+    if (path === "/api/storage/routes/page") return json(page([]));
+    return handler(path, init);
   }));
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } } });
 

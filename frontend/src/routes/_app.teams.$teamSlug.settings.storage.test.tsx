@@ -20,7 +20,7 @@ describe("storage settings route", () => {
   afterEach(() => { localStorage.clear(); vi.unstubAllGlobals(); });
 
   it("is a first-class Settings tab and does not redirect to another section", async () => {
-    stubFetch({ "/api/users/me": me });
+    stubFetch({ "/api/users/me": me, "/api/storage/routes/page": { items: [], nextCursor: null } });
     localStorage.setItem("codespace.activeTeamId", team.id);
 
     const { currentPath } = await renderRoute("/teams/platform-team/settings/storage");
@@ -28,5 +28,6 @@ describe("storage settings route", () => {
     expect(currentPath()).toBe("/teams/platform-team/settings/storage");
     expect(screen.getByRole("tab", { name: "Storage" }).getAttribute("aria-selected")).toBe("true");
     expect(screen.getByRole("heading", { name: "Artifact storage" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Data routing" })).toBeTruthy();
   });
 });
