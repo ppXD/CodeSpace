@@ -1,3 +1,4 @@
+using CodeSpace.Api.Http;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Commands.Agents;
 using CodeSpace.Messages.Dtos.Agents;
@@ -79,13 +80,13 @@ public class AgentsController : ControllerBase
             return StatusCode(LogProblemStatus(result.Availability), problem);
         }
 
-        Response.Headers.Append("X-CodeSpace-Log-Offset", result.OffsetBytes.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        Response.Headers.Append("X-CodeSpace-Log-Next-Offset", result.NextOffsetBytes.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        Response.Headers.Append("X-CodeSpace-Log-Total-Bytes", result.Stream.TotalBytes.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        Response.Headers.Append("X-CodeSpace-Log-Has-More", result.HasMore ? "true" : "false");
-        Response.Headers.Append("X-CodeSpace-Log-Revision", result.Stream.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        Response.Headers.Append("X-CodeSpace-Log-Content-Type", result.Stream.ContentType);
-        if (result.Stream.ContentEncoding != null) Response.Headers.Append("X-CodeSpace-Log-Content-Encoding", result.Stream.ContentEncoding);
+        Response.Headers.Append(AgentRunLogHttpHeaders.Offset, result.OffsetBytes.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Response.Headers.Append(AgentRunLogHttpHeaders.NextOffset, result.NextOffsetBytes.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Response.Headers.Append(AgentRunLogHttpHeaders.TotalBytes, result.Stream.TotalBytes.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Response.Headers.Append(AgentRunLogHttpHeaders.HasMore, result.HasMore ? "true" : "false");
+        Response.Headers.Append(AgentRunLogHttpHeaders.Revision, result.Stream.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Response.Headers.Append(AgentRunLogHttpHeaders.ContentType, result.Stream.ContentType);
+        if (result.Stream.ContentEncoding != null) Response.Headers.Append(AgentRunLogHttpHeaders.ContentEncoding, result.Stream.ContentEncoding);
         Response.Headers.Append("Cache-Control", "private, no-store");
         Response.Headers.Append("X-Content-Type-Options", "nosniff");
         return File(result.Content, "application/octet-stream");
