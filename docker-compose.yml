@@ -126,7 +126,11 @@ services:
       # Sandbox__RequireConfinement: "true"
     volumes:
       - codespace-artifacts:/var/lib/codespace/artifacts
+      # The spool is the recoverable source until stdout/stderr segments reach artifact CAS. Keep it across worker
+      # replacement and share it between same-host worker replicas; production multi-host deployments require RWX.
+      - codespace-spool:/var/lib/codespace/spool
 
 volumes:
   codespace-pgdata:
   codespace-artifacts:
+  codespace-spool:
