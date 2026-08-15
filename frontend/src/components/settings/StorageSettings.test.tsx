@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { StorageCredentialMetadata, StorageProfileDetail, StorageProfileSummary, StorageProviderModuleSummary } from "@/api/storage";
+import type { StorageCredentialMetadata, StorageProfileDetail, StorageProfileProbeResult, StorageProfileSummary, StorageProviderModuleSummary } from "@/api/storage";
 
 import { StorageSettings } from "./StorageSettings";
 
@@ -92,6 +92,18 @@ function json(body: unknown, status = 200) {
 
 function page<T>(items: T[], nextCursor: string | null = null) {
   return { items, nextCursor };
+}
+
+function probeResult(overrides: Partial<StorageProfileProbeResult> = {}): StorageProfileProbeResult {
+  return {
+    profileId: profile.id,
+    profileRevision: profile.currentRevision,
+    writeAccessRequested: true,
+    status: "Available",
+    latencyMilliseconds: 14,
+    failure: null,
+    ...overrides,
+  };
 }
 
 function renderSettings(handler: FetchHandler) {
@@ -456,6 +468,118 @@ describe("storage profiles settings", () => {
       credentialRef: credential.credentialRef,
     }));
     expect(document.body).not.toHaveTextContent(credential.credentialRef);
+  });
+
+  it("probes the current revision with write access by default and renders only the closed result vocabulary", async () => {
+    let probeBody: Record<string, unknown> | undefined;
+    renderSettings(async (path, init) => {
+      const method = init.method ?? "GET";
+      if (path === "/api/storage/provider-modules") return json([localProvider]);
+      if (path === "/api/storage/credentials/page") return json(page([]));
+      if (path === "/api/storage/profiles/page") return json(page([profile]));
+      if (path === `/api/storage/profiles/${profile.id}` && method === "GET") return json(detail);
+      if (path === `/api/storage/profiles/${profile.id}/probe` && method === "POST") {
+        probeBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return json({ ...probeResult(), providerTypeKey: "provider-internal/raw", providerMessage: "secret-provider-text" });
+      }
+      return json({ message: "Unexpected request" }, 500);
+    });
+
+    await screen.findByText("primary");
+    fireEvent.click(screen.getByRole("button", { name: "Manage primary" }));
+    const dialog = await screen.findByRole("dialog", { name: "Manage storage profile primary" });
+    expect(within(dialog).getByLabelText("Probe revision")).toHaveValue("current");
+    expect(within(dialog).getByLabelText("Probe access")).toHaveValue("write");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Run write probe" }));
+
+    await waitFor(() => expect(probeBody).toEqual({ profileRevision: null, verifyWriteAccess: true }));
+    const result = await within(dialog).findByRole("status", { name: "Storage probe result" });
+    expect(result).toHaveTextContent("Available");
+    expect(result).toHaveTextContent("14 ms");
+    expect(result).toHaveTextContent("Revision 2");
+    expect(result).not.toHaveTextContent("provider-internal/raw");
+    expect(result).not.toHaveTextContent("secret-provider-text");
+    fireEvent.change(within(dialog).getByLabelText("Probe revision"), { target: { value: "2" } });
+    expect(within(dialog).queryByRole("status", { name: "Storage probe result" })).not.toBeInTheDocument();
+  });
+
+  it("probes an exact revision read-only and clears the bound result before a profile mutation", async () => {
+    const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
+    let current = detail;
+    renderSettings(async (path, init) => {
+      const method = init.method ?? "GET";
+      if (path === "/api/storage/provider-modules") return json([localProvider]);
+      if (path === "/api/storage/credentials/page") return json(page([]));
+      if (path === "/api/storage/profiles/page") return json(page([{ ...profile, state: current.state, xmin: current.xmin }]));
+      if (path === `/api/storage/profiles/${profile.id}` && method === "GET") return json(current);
+      if (path === `/api/storage/profiles/${profile.id}/probe` && method === "POST") {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        requests.push({ path, body });
+        return json(probeResult({
+          writeAccessRequested: false,
+          status: "Degraded",
+          latencyMilliseconds: 91,
+          failure: { stage: "Probe", code: "ProbeThrottled", retryable: true },
+        }));
+      }
+      if (path === `/api/storage/profiles/${profile.id}/state` && method === "PUT") {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        requests.push({ path, body });
+        current = { ...current, state: "Active", xmin: 18 };
+        return json(current);
+      }
+      return json({ message: "Unexpected request" }, 500);
+    });
+
+    await screen.findByText("primary");
+    fireEvent.click(screen.getByRole("button", { name: "Manage primary" }));
+    const dialog = await screen.findByRole("dialog", { name: "Manage storage profile primary" });
+    fireEvent.change(within(dialog).getByLabelText("Probe revision"), { target: { value: "2" } });
+    fireEvent.change(within(dialog).getByLabelText("Probe access"), { target: { value: "read" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Run read probe" }));
+
+    const result = await within(dialog).findByRole("status", { name: "Storage probe result" });
+    expect(requests[0]).toEqual({ path: `/api/storage/profiles/${profile.id}/probe`, body: { profileRevision: 2, verifyWriteAccess: false } });
+    expect(result).toHaveTextContent("Degraded");
+    expect(result).toHaveTextContent("Probe");
+    expect(result).toHaveTextContent("ProbeThrottled");
+    expect(result).toHaveTextContent("Retryable");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Set Active" }));
+    expect(within(dialog).queryByRole("status", { name: "Storage probe result" })).not.toBeInTheDocument();
+    await waitFor(() => expect(requests).toHaveLength(2));
+  });
+
+  it("prevents duplicate probes and aborts the in-flight request when the profile editor unmounts", async () => {
+    let probeCalls = 0;
+    const captured: { signal: AbortSignal | null } = { signal: null };
+    const never = new Promise<Response>(() => {});
+    const rendered = renderSettings((path, init) => {
+      if (path === "/api/storage/provider-modules") return json([localProvider]);
+      if (path === "/api/storage/credentials/page") return json(page([]));
+      if (path === "/api/storage/profiles/page") return json(page([profile]));
+      if (path === `/api/storage/profiles/${profile.id}` && (init.method ?? "GET") === "GET") return json(detail);
+      if (path === `/api/storage/profiles/${profile.id}/probe`) {
+        probeCalls += 1;
+        captured.signal = init.signal ?? null;
+        return never;
+      }
+      return json({ message: "Unexpected request" }, 500);
+    });
+
+    await screen.findByText("primary");
+    fireEvent.click(screen.getByRole("button", { name: "Manage primary" }));
+    const dialog = await screen.findByRole("dialog", { name: "Manage storage profile primary" });
+    const run = within(dialog).getByRole("button", { name: "Run write probe" });
+    fireEvent.click(run);
+    fireEvent.click(run);
+
+    expect(await within(dialog).findByRole("button", { name: "Probing…" })).toBeDisabled();
+    expect(probeCalls).toBe(1);
+    expect(captured.signal).toBeInstanceOf(AbortSignal);
+    expect(captured.signal?.aborted).toBe(false);
+    rendered.unmount();
+    expect(captured.signal?.aborted).toBe(true);
   });
 
   it("distinguishes empty profiles from profile API failures", async () => {

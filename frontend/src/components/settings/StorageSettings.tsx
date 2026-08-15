@@ -2,8 +2,8 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 import { ApiError } from "@/api/request";
-import type { StorageCredentialMetadata, StorageProfileDetail, StorageProfileState, StorageProfileSummary, StorageProviderModuleSummary } from "@/api/storage";
-import { useAppendStorageProfileRevision, useCreateStorageProfile, useSetStorageProfileState, useStorageCredentials, useStorageProfile, useStorageProfiles, useStorageProviderModules } from "@/hooks/use-storage";
+import type { StorageCredentialMetadata, StorageProfileDetail, StorageProfileProbeResult, StorageProfileState, StorageProfileSummary, StorageProviderModuleSummary } from "@/api/storage";
+import { useAppendStorageProfileRevision, useCreateStorageProfile, useProbeStorageProfile, useSetStorageProfileState, useStorageCredentials, useStorageProfile, useStorageProfiles, useStorageProviderModules } from "@/hooks/use-storage";
 import { SchemaForm } from "@/components/workflows/SchemaForm";
 import { StorageCredentialSettings } from "./StorageCredentialSettings";
 
@@ -252,11 +252,17 @@ function ManageStorageProfileDialog({ profileId, providers, credentials, onClose
 function StorageProfileEditor({ detail, providers, credentials, onActionError }: { detail: StorageProfileDetail; providers: StorageProviderModuleSummary[]; credentials: StorageCredentialMetadata[]; onActionError: (message: string | null) => void }) {
   const appendRevision = useAppendStorageProfileRevision();
   const setState = useSetStorageProfileState();
+  const probe = useProbeStorageProfile();
   const currentRevision = detail.revisions.find((revision) => revision.revision === detail.currentRevision);
   const [providerTypeKey, setProviderTypeKey] = useState(currentRevision?.providerTypeKey ?? "");
   const [config, setConfig] = useState<Record<string, unknown>>(() => currentRevision?.nonSecretConfig ?? {});
   const [credentialRef, setCredentialRef] = useState(() => typeof currentRevision?.credentialRef === "string" ? currentRevision.credentialRef : "");
   const [confirmRetire, setConfirmRetire] = useState(false);
+  const [probeRevision, setProbeRevision] = useState("current");
+  const [probeAccess, setProbeAccess] = useState<"read" | "write">("write");
+  const [probeResult, setProbeResult] = useState<BoundStorageProfileProbeResult | null>(null);
+  const [probeError, setProbeError] = useState<string | null>(null);
+  const probeController = useRef<AbortController | null>(null);
   const selectedProvider = providers.find((provider) => provider.typeKey === providerTypeKey);
   const currentProvider = providers.find((provider) => provider.typeKey === currentRevision?.providerTypeKey);
   const currentCredentialRef = typeof currentRevision?.credentialRef === "string" && currentRevision.credentialRef !== "" ? currentRevision.credentialRef : undefined;
@@ -266,8 +272,11 @@ function StorageProfileEditor({ detail, providers, credentials, onActionError }:
   const activationBlocked = currentProvider == null || (currentNeedsCredential && currentCredentialRef == null);
   const activeRevisionWouldLoseCredential = detail.state === "Active" && selectedNeedsCredential && selectedCredentialRef == null;
   const configValid = selectedProvider != null && requiredValuesPresent(selectedProvider.configSchema, config);
-  const pending = appendRevision.isPending || setState.isPending;
+  const profileMutationPending = appendRevision.isPending || setState.isPending;
+  const pending = profileMutationPending || probe.isPending;
   const retired = detail.state === "Retired";
+
+  useEffect(() => () => probeController.current?.abort(), []);
 
   if (!currentRevision) {
     return <ErrorBanner title="Current revision unavailable" message="Refresh the profile before making changes." />;
@@ -281,8 +290,55 @@ function StorageProfileEditor({ detail, providers, credentials, onActionError }:
     onActionError(null);
   };
 
+  const clearProbe = () => {
+    probeController.current?.abort();
+    probeController.current = null;
+    probe.reset();
+    setProbeResult(null);
+    setProbeError(null);
+  };
+
+  const selectProbeRevision = (value: string) => {
+    clearProbe();
+    setProbeRevision(value);
+  };
+
+  const selectProbeAccess = (value: "read" | "write") => {
+    clearProbe();
+    setProbeAccess(value);
+  };
+
+  const runProbe = () => {
+    if (pending || probeController.current != null) return;
+    const requestedRevision = probeRevision === "current" ? null : Number(probeRevision);
+    const boundRevision = requestedRevision ?? detail.currentRevision;
+    const writeAccess = probeAccess === "write";
+    const controller = new AbortController();
+    probeController.current = controller;
+    setProbeResult(null);
+    setProbeError(null);
+    probe.mutate({ profileId: detail.id, input: { profileRevision: requestedRevision, verifyWriteAccess: writeAccess }, signal: controller.signal }, {
+      onSuccess: (result) => {
+        if (controller.signal.aborted || probeController.current !== controller) return;
+        const revisionMatches = result.profileRevision == null || result.profileRevision === boundRevision;
+        if (result.profileId !== detail.id || !revisionMatches || result.writeAccessRequested !== writeAccess) {
+          setProbeError("The probe response did not match the requested profile revision. Refresh the profile and try again.");
+          return;
+        }
+        setProbeResult({ profileId: detail.id, profileRevision: boundRevision, result });
+      },
+      onError: () => {
+        if (!controller.signal.aborted && probeController.current === controller) setProbeError("The runtime probe request couldn't be completed. Try again.");
+      },
+      onSettled: () => {
+        if (probeController.current === controller) probeController.current = null;
+      },
+    });
+  };
+
   const append = () => {
     if (!selectedProvider || !configValid || retired || activeRevisionWouldLoseCredential || pending) return;
+    clearProbe();
     onActionError(null);
     appendRevision.mutate({
       profileId: detail.id,
@@ -301,6 +357,7 @@ function StorageProfileEditor({ detail, providers, credentials, onActionError }:
 
   const transition = (state: Exclude<StorageProfileState, "Draft">) => {
     if (pending || retired || (state === "Active" && activationBlocked)) return;
+    clearProbe();
     onActionError(null);
     setState.mutate({
       profileId: detail.id,
@@ -319,6 +376,29 @@ function StorageProfileEditor({ detail, providers, credentials, onActionError }:
           <span style={{ marginLeft: 8 }}>Current revision {detail.currentRevision}</span>
         </div>
         <div className="cn-banner-p">State changes and revisions use optimistic concurrency. Retired is terminal.</div>
+      </div>
+
+      <div style={{ borderBottom: "1px solid var(--line)", marginBottom: 18, paddingBottom: 16 }}>
+        <div className="wf-form-label" style={{ marginBottom: 8 }}>Runtime probe</div>
+        <div className="wf-form" style={{ display: "grid", gap: 10 }}>
+          <div className="wf-form-row">
+            <label className="wf-form-label" htmlFor="storage-profile-probe-revision">Probe revision</label>
+            <select id="storage-profile-probe-revision" className="wf-form-input" value={probeRevision} disabled={pending} onChange={(event) => selectProbeRevision(event.target.value)}>
+              <option value="current">Current revision ({detail.currentRevision})</option>
+              {[...detail.revisions].sort((left, right) => right.revision - left.revision).map((revision) => <option key={revision.id} value={revision.revision}>Exact revision {revision.revision}</option>)}
+            </select>
+          </div>
+          <div className="wf-form-row">
+            <label className="wf-form-label" htmlFor="storage-profile-probe-access">Probe access</label>
+            <select id="storage-profile-probe-access" className="wf-form-input" value={probeAccess} disabled={pending} onChange={(event) => selectProbeAccess(event.target.value === "read" ? "read" : "write")}>
+              <option value="write">Read and write</option>
+              <option value="read">Read only</option>
+            </select>
+          </div>
+          <button type="button" className="btn" disabled={pending} onClick={runProbe}>{probe.isPending ? "Probing…" : `Run ${probeAccess} probe`}</button>
+        </div>
+        {probeError && <div className="cn-banner cn-banner-err" role="alert" style={{ marginTop: 10 }}><div className="cn-banner-p">{probeError}</div></div>}
+        {probeResult && probeResult.profileId === detail.id && probeResult.profileRevision === (probeRevision === "current" ? detail.currentRevision : Number(probeRevision)) && <StorageProfileProbeResultView binding={probeResult} />}
       </div>
 
       {currentProvider && providerRequiresCredential(currentProvider) && currentCredentialRef == null && (
@@ -372,6 +452,24 @@ function StorageProfileEditor({ detail, providers, credentials, onActionError }:
 
       {confirmRetire && <RetireConfirmation stableName={detail.stableName} onCancel={() => setConfirmRetire(false)} onConfirm={() => { setConfirmRetire(false); transition("Retired"); }} />}
     </>
+  );
+}
+
+interface BoundStorageProfileProbeResult {
+  profileId: string;
+  profileRevision: number;
+  result: StorageProfileProbeResult;
+}
+
+function StorageProfileProbeResultView({ binding }: { binding: BoundStorageProfileProbeResult }) {
+  const { result } = binding;
+  const statusClass = result.status === "Available" ? "cn-status cn-status-active" : result.status === "Unavailable" || result.status === "Cancelled" ? "cn-status cn-status-revoked" : "cn-status cn-status-warn";
+  return (
+    <div className="cn-banner" role="status" aria-label="Storage probe result" style={{ marginTop: 10 }}>
+      <div className="cn-banner-h"><span className={statusClass}>{result.status}</span></div>
+      <div className="cn-banner-p">Revision {binding.profileRevision} · {result.writeAccessRequested ? "Read and write" : "Read only"} · {result.latencyMilliseconds} ms</div>
+      {result.failure && <div className="cn-banner-p">Stage {result.failure.stage} · Code {result.failure.code} · {result.failure.retryable ? "Retryable" : "Not retryable"}</div>}
+    </div>
   );
 }
 
