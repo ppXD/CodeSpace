@@ -2,7 +2,7 @@ namespace CodeSpace.Core.Persistence.Entities;
 
 /// <summary>
 /// Provider-neutral upload/copy saga. Expected content identity, destination and idempotency key are immutable;
-/// mutable execution ownership and provider handles advance through a database-guarded revision/state machine.
+/// immutable execution lineage and mutable provider handles advance through a database-guarded revision/state machine.
 /// </summary>
 public class ArtifactTransferIntent : IEntity<Guid>, IAuditable
 {
@@ -20,12 +20,12 @@ public class ArtifactTransferIntent : IEntity<Guid>, IAuditable
     public ArtifactTransferState State { get; set; } = ArtifactTransferState.Intended;
     public long Revision { get; set; } = 1;
 
-    /// <summary>Generic durable attempt identity; null as a complete bundle for system-owned transfers.</summary>
+    /// <summary>Immutable generic attempt identity; null as a complete bundle for system-owned transfers.</summary>
     public Guid? ExecutionAttemptId { get; set; }
     public int? ExecutionAttemptOrdinal { get; set; }
     public int? ExecutionGeneration { get; set; }
 
-    /// <summary>Worker-claim fence, deliberately distinct from execution generation.</summary>
+    /// <summary>Monotonic worker-claim fence, advanced by a state-neutral claim and pinned across each transition.</summary>
     public long? WorkerFenceEpoch { get; set; }
 
     public int RetryCount { get; set; }

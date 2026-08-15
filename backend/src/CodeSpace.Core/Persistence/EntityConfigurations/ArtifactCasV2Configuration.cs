@@ -29,7 +29,7 @@ public sealed class ArtifactLocationConfiguration : IEntityTypeConfiguration<Art
     {
         builder.ToTable("artifact_location", table =>
         {
-            table.HasCheckConstraint("ck_artifact_location_checksum", "(provider_checksum_algorithm IS NULL AND provider_checksum IS NULL) OR (provider_checksum_algorithm ~ '^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$' AND provider_checksum IS NOT NULL AND octet_length(provider_checksum) > 0)");
+            table.HasCheckConstraint("ck_artifact_location_checksum", "(provider_checksum_algorithm IS NULL) = (provider_checksum IS NULL) AND (provider_checksum_algorithm IS NULL OR (provider_checksum_algorithm ~ '^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$' AND octet_length(provider_checksum) > 0))");
             table.HasCheckConstraint("ck_artifact_location_encoding", "content_encoding IS NULL OR content_encoding ~ '^[a-z0-9][a-z0-9._+-]{0,63}$'");
             table.HasCheckConstraint("ck_artifact_location_error", "(last_error_code IS NULL AND last_error_message IS NULL) OR (last_error_code IS NOT NULL AND btrim(last_error_code) <> '')");
             table.HasCheckConstraint("ck_artifact_location_identity", "btrim(locator) <> '' AND btrim(object_key) <> ''");
@@ -73,7 +73,7 @@ public sealed class ArtifactLocationEventConfiguration : IEntityTypeConfiguratio
     {
         builder.ToTable("artifact_location_event", table =>
         {
-            table.HasCheckConstraint("ck_artifact_location_event_checksum", "(provider_checksum_algorithm IS NULL AND provider_checksum IS NULL) OR (provider_checksum_algorithm ~ '^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$' AND provider_checksum IS NOT NULL AND octet_length(provider_checksum) > 0)");
+            table.HasCheckConstraint("ck_artifact_location_event_checksum", "(provider_checksum_algorithm IS NULL) = (provider_checksum IS NULL) AND (provider_checksum_algorithm IS NULL OR (provider_checksum_algorithm ~ '^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$' AND octet_length(provider_checksum) > 0))");
             table.HasCheckConstraint("ck_artifact_location_event_details", "jsonb_typeof(details_jsonb) = 'object'");
             table.HasCheckConstraint("ck_artifact_location_event_error", "(error_code IS NULL AND error_message IS NULL) OR (error_code IS NOT NULL AND btrim(error_code) <> '')");
             table.HasCheckConstraint("ck_artifact_location_event_revision", "revision > 0 AND (observed_size_bytes IS NULL OR observed_size_bytes >= 0)");
@@ -87,6 +87,8 @@ public sealed class ArtifactLocationEventConfiguration : IEntityTypeConfiguratio
         builder.Property(e => e.ProviderETag).HasColumnName("provider_etag").HasMaxLength(512);
         builder.Property(e => e.ProviderChecksumAlgorithm).HasMaxLength(64);
         builder.Property(e => e.ProviderChecksum).HasColumnType("bytea");
+        builder.Property(e => e.ContentEncoding).HasMaxLength(64);
+        builder.Property(e => e.EncryptionKeyVersion).HasMaxLength(512);
         builder.Property(e => e.ErrorCode).HasMaxLength(128);
         builder.Property(e => e.ErrorMessage).HasMaxLength(2048);
         builder.Property(e => e.DetailsJson).HasColumnName("details_jsonb").HasColumnType("jsonb");
@@ -196,6 +198,6 @@ public sealed class WorkflowRunArtifactReferenceConfiguration : IEntityTypeConfi
         builder.HasIndex(r => new { r.WorkPlanId, r.PlanVersion, r.WorkUnitId, r.Id }).HasDatabaseName("ix_run_artifact_reference_work_unit").HasFilter("work_plan_id IS NOT NULL");
         builder.HasIndex(r => new { r.ExecutionAttemptId, r.ExecutionGeneration, r.Id }).HasDatabaseName("ix_run_artifact_reference_attempt").HasFilter("execution_attempt_id IS NOT NULL");
         builder.HasIndex(r => new { r.ExpiresAt, r.Id }).HasDatabaseName("ix_run_artifact_reference_expiry").HasFilter("expires_at IS NOT NULL AND superseded_by_reference_id IS NULL");
-        builder.HasIndex(r => new { r.TeamId, r.WorkflowRunId, r.ExecutionAttemptId, r.Role, r.LogicalPath }).IsUnique().HasDatabaseName("ux_run_artifact_reference_attempt_path").HasFilter("execution_attempt_id IS NOT NULL");
+        builder.HasIndex(r => new { r.TeamId, r.WorkflowRunId, r.ExecutionAttemptId, r.ExecutionGeneration, r.Role, r.LogicalPath }).IsUnique().HasDatabaseName("ux_run_artifact_reference_attempt_path").HasFilter("execution_attempt_id IS NOT NULL AND superseded_by_reference_id IS NULL");
     }
 }

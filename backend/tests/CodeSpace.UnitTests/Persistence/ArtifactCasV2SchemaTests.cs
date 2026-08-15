@@ -58,6 +58,7 @@ public sealed class ArtifactCasV2SchemaTests
         entity.FindProperty(nameof(ArtifactLocation.ProviderChecksum))!.GetColumnType().ShouldBe("bytea");
         entity.FindProperty(nameof(ArtifactLocation.State))!.GetMaxLength().ShouldBe(24);
         entity.FindProperty(nameof(ArtifactLocation.Xmin))!.IsConcurrencyToken.ShouldBeTrue();
+        CheckConstraint(entity, "ck_artifact_location_checksum").Sql.ShouldContain("(provider_checksum_algorithm IS NULL) = (provider_checksum IS NULL)");
         CheckConstraint(entity, "ck_artifact_location_observation").Sql.ShouldContain("provider_checksum_algorithm = 'Sha256'");
         AlternateKey(entity, "ak_artifact_location_team_id").Properties.Select(p => p.Name).ShouldBe(new[] { "TeamId", "Id" });
 
@@ -83,12 +84,14 @@ public sealed class ArtifactCasV2SchemaTests
         entity.GetTableName().ShouldBe("artifact_location_event");
         entity.GetProperties().Select(p => p.Name).Order().ShouldBe(new[]
         {
-            "ArtifactLocationId", "CreatedBy", "DetailsJson", "ErrorCode", "ErrorMessage", "EventType", "Id",
-            "ObservedAt", "ObservedSizeBytes", "ProviderChecksum", "ProviderChecksumAlgorithm", "ProviderETag",
-            "ProviderObjectVersion", "Revision", "State", "TeamId", "VerifiedAt",
+            "ArtifactLocationId", "ContentEncoding", "CreatedBy", "DetailsJson", "EncryptionKeyVersion", "ErrorCode",
+            "ErrorMessage", "EventType", "Id", "ObservedAt", "ObservedSizeBytes", "ProviderChecksum",
+            "ProviderChecksumAlgorithm", "ProviderETag", "ProviderObjectVersion", "Revision", "State", "TeamId",
+            "VerifiedAt",
         }.Order());
         entity.FindProperty(nameof(ArtifactLocationEvent.DetailsJson))!.GetColumnType().ShouldBe("jsonb");
         ForeignKey(entity, typeof(ArtifactLocation)).Properties.Select(p => p.Name).ShouldBe(new[] { "TeamId", "ArtifactLocationId" });
+        CheckConstraint(entity, "ck_artifact_location_event_checksum").Sql.ShouldContain("(provider_checksum_algorithm IS NULL) = (provider_checksum IS NULL)");
 
         var revision = Index(entity, "ux_artifact_location_event_revision");
         revision.IsUnique.ShouldBeTrue();
@@ -161,6 +164,13 @@ public sealed class ArtifactCasV2SchemaTests
         ForeignKey(entity, typeof(WorkflowRunArtifactReference)).Properties.Select(p => p.Name).ShouldBe(new[] { "TeamId", "SupersededByReferenceId" });
 
         Index(entity, "ix_run_artifact_reference_active").GetFilter().ShouldBe("superseded_by_reference_id IS NULL");
+        var attemptPath = Index(entity, "ux_run_artifact_reference_attempt_path");
+        attemptPath.IsUnique.ShouldBeTrue();
+        attemptPath.Properties.Select(p => p.Name).ShouldBe(new[]
+        {
+            "TeamId", "WorkflowRunId", "ExecutionAttemptId", "ExecutionGeneration", "Role", "LogicalPath",
+        });
+        attemptPath.GetFilter().ShouldBe("execution_attempt_id IS NOT NULL AND superseded_by_reference_id IS NULL");
         entity.GetCheckConstraints().Select(c => c.Name).ShouldBe(new[]
         {
             "ck_run_artifact_reference_attempt", "ck_run_artifact_reference_content_type",
