@@ -28,6 +28,13 @@ public static class AgentRunLogKinds
     public const string Debug = "debug/v1";
 }
 
+/// <summary>Canonical representation for harness process text after the capture bridge's UTF-8 byte redaction.</summary>
+public static class AgentRunLogRepresentations
+{
+    public const string PlainTextContentType = "text/plain";
+    public const string Utf8ContentEncoding = "utf-8";
+}
+
 public sealed record AgentRunLogOpenRequest
 {
     public required Guid TeamId { get; init; }

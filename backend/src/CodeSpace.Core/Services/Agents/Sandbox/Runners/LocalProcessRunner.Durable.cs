@@ -158,8 +158,8 @@ public sealed partial class LocalProcessRunner
 
     public IReadOnlyList<SandboxDurableLogDescriptor> DescribeLogs(SandboxHandle handle) =>
     [
-        new(StdoutSourceKey, AgentRunLogKinds.StandardOutput, "application/octet-stream", null, "local-process-spool/v1"),
-        new(StderrSourceKey, AgentRunLogKinds.StandardError, "application/octet-stream", null, "local-process-spool/v1"),
+        new(StdoutSourceKey, AgentRunLogKinds.StandardOutput, AgentRunLogRepresentations.PlainTextContentType, AgentRunLogRepresentations.Utf8ContentEncoding, "local-process-spool/v1"),
+        new(StderrSourceKey, AgentRunLogKinds.StandardError, AgentRunLogRepresentations.PlainTextContentType, AgentRunLogRepresentations.Utf8ContentEncoding, "local-process-spool/v1"),
     ];
 
     public async Task<SandboxDurableLogReadResult> ReadAsync(SandboxDurableLogReadRequest request, CancellationToken cancellationToken)
