@@ -33,6 +33,7 @@ import { Route as AppTeamsTeamSlugRepositoriesIndexRouteImport } from './routes/
 import { Route as AppTeamsTeamSlugProjectsIndexRouteImport } from './routes/_app.teams.$teamSlug.projects.index'
 import { Route as AppTeamsTeamSlugAgentsIndexRouteImport } from './routes/_app.teams.$teamSlug.agents.index'
 import { Route as AppTeamsTeamSlugWorkflowsWorkflowSlugRouteImport } from './routes/_app.teams.$teamSlug.workflows.$workflowSlug'
+import { Route as AppTeamsTeamSlugSettingsStorageRouteImport } from './routes/_app.teams.$teamSlug.settings.storage'
 import { Route as AppTeamsTeamSlugSettingsProvidersRouteImport } from './routes/_app.teams.$teamSlug.settings.providers'
 import { Route as AppTeamsTeamSlugSettingsModelCredentialsRouteImport } from './routes/_app.teams.$teamSlug.settings.model-credentials'
 import { Route as AppTeamsTeamSlugRunsRunNumberRouteImport } from './routes/_app.teams.$teamSlug.runs.$runNumber'
@@ -183,6 +184,12 @@ const AppTeamsTeamSlugWorkflowsWorkflowSlugRoute =
     path: '/$workflowSlug',
     getParentRoute: () => AppTeamsTeamSlugWorkflowsRoute,
   } as any)
+const AppTeamsTeamSlugSettingsStorageRoute =
+  AppTeamsTeamSlugSettingsStorageRouteImport.update({
+    id: '/storage',
+    path: '/storage',
+    getParentRoute: () => AppTeamsTeamSlugSettingsRoute,
+  } as any)
 const AppTeamsTeamSlugSettingsProvidersRoute =
   AppTeamsTeamSlugSettingsProvidersRouteImport.update({
     id: '/providers',
@@ -326,6 +333,7 @@ export interface FileRoutesByFullPath {
   '/teams/$teamSlug/runs/$runNumber': typeof AppTeamsTeamSlugRunsRunNumberRoute
   '/teams/$teamSlug/settings/model-credentials': typeof AppTeamsTeamSlugSettingsModelCredentialsRoute
   '/teams/$teamSlug/settings/providers': typeof AppTeamsTeamSlugSettingsProvidersRoute
+  '/teams/$teamSlug/settings/storage': typeof AppTeamsTeamSlugSettingsStorageRoute
   '/teams/$teamSlug/workflows/$workflowSlug': typeof AppTeamsTeamSlugWorkflowsWorkflowSlugRouteWithChildren
   '/teams/$teamSlug/agents/': typeof AppTeamsTeamSlugAgentsIndexRoute
   '/teams/$teamSlug/projects/': typeof AppTeamsTeamSlugProjectsIndexRoute
@@ -365,6 +373,7 @@ export interface FileRoutesByTo {
   '/teams/$teamSlug/runs/$runNumber': typeof AppTeamsTeamSlugRunsRunNumberRoute
   '/teams/$teamSlug/settings/model-credentials': typeof AppTeamsTeamSlugSettingsModelCredentialsRoute
   '/teams/$teamSlug/settings/providers': typeof AppTeamsTeamSlugSettingsProvidersRoute
+  '/teams/$teamSlug/settings/storage': typeof AppTeamsTeamSlugSettingsStorageRoute
   '/teams/$teamSlug/agents': typeof AppTeamsTeamSlugAgentsIndexRoute
   '/teams/$teamSlug/projects': typeof AppTeamsTeamSlugProjectsIndexRoute
   '/teams/$teamSlug/repositories': typeof AppTeamsTeamSlugRepositoriesIndexRoute
@@ -408,6 +417,7 @@ export interface FileRoutesById {
   '/_app/teams/$teamSlug/runs/$runNumber': typeof AppTeamsTeamSlugRunsRunNumberRoute
   '/_app/teams/$teamSlug/settings/model-credentials': typeof AppTeamsTeamSlugSettingsModelCredentialsRoute
   '/_app/teams/$teamSlug/settings/providers': typeof AppTeamsTeamSlugSettingsProvidersRoute
+  '/_app/teams/$teamSlug/settings/storage': typeof AppTeamsTeamSlugSettingsStorageRoute
   '/_app/teams/$teamSlug/workflows/$workflowSlug': typeof AppTeamsTeamSlugWorkflowsWorkflowSlugRouteWithChildren
   '/_app/teams/$teamSlug/agents/': typeof AppTeamsTeamSlugAgentsIndexRoute
   '/_app/teams/$teamSlug/projects/': typeof AppTeamsTeamSlugProjectsIndexRoute
@@ -455,6 +465,7 @@ export interface FileRouteTypes {
     | '/teams/$teamSlug/runs/$runNumber'
     | '/teams/$teamSlug/settings/model-credentials'
     | '/teams/$teamSlug/settings/providers'
+    | '/teams/$teamSlug/settings/storage'
     | '/teams/$teamSlug/workflows/$workflowSlug'
     | '/teams/$teamSlug/agents/'
     | '/teams/$teamSlug/projects/'
@@ -494,6 +505,7 @@ export interface FileRouteTypes {
     | '/teams/$teamSlug/runs/$runNumber'
     | '/teams/$teamSlug/settings/model-credentials'
     | '/teams/$teamSlug/settings/providers'
+    | '/teams/$teamSlug/settings/storage'
     | '/teams/$teamSlug/agents'
     | '/teams/$teamSlug/projects'
     | '/teams/$teamSlug/repositories'
@@ -536,6 +548,7 @@ export interface FileRouteTypes {
     | '/_app/teams/$teamSlug/runs/$runNumber'
     | '/_app/teams/$teamSlug/settings/model-credentials'
     | '/_app/teams/$teamSlug/settings/providers'
+    | '/_app/teams/$teamSlug/settings/storage'
     | '/_app/teams/$teamSlug/workflows/$workflowSlug'
     | '/_app/teams/$teamSlug/agents/'
     | '/_app/teams/$teamSlug/projects/'
@@ -738,6 +751,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/teams/$teamSlug/workflows/$workflowSlug'
       preLoaderRoute: typeof AppTeamsTeamSlugWorkflowsWorkflowSlugRouteImport
       parentRoute: typeof AppTeamsTeamSlugWorkflowsRoute
+    }
+    '/_app/teams/$teamSlug/settings/storage': {
+      id: '/_app/teams/$teamSlug/settings/storage'
+      path: '/storage'
+      fullPath: '/teams/$teamSlug/settings/storage'
+      preLoaderRoute: typeof AppTeamsTeamSlugSettingsStorageRouteImport
+      parentRoute: typeof AppTeamsTeamSlugSettingsRoute
     }
     '/_app/teams/$teamSlug/settings/providers': {
       id: '/_app/teams/$teamSlug/settings/providers'
@@ -1004,6 +1024,7 @@ const AppTeamsTeamSlugRepositoriesRouteWithChildren =
 interface AppTeamsTeamSlugSettingsRouteChildren {
   AppTeamsTeamSlugSettingsModelCredentialsRoute: typeof AppTeamsTeamSlugSettingsModelCredentialsRoute
   AppTeamsTeamSlugSettingsProvidersRoute: typeof AppTeamsTeamSlugSettingsProvidersRoute
+  AppTeamsTeamSlugSettingsStorageRoute: typeof AppTeamsTeamSlugSettingsStorageRoute
   AppTeamsTeamSlugSettingsIndexRoute: typeof AppTeamsTeamSlugSettingsIndexRoute
 }
 
@@ -1013,6 +1034,7 @@ const AppTeamsTeamSlugSettingsRouteChildren: AppTeamsTeamSlugSettingsRouteChildr
       AppTeamsTeamSlugSettingsModelCredentialsRoute,
     AppTeamsTeamSlugSettingsProvidersRoute:
       AppTeamsTeamSlugSettingsProvidersRoute,
+    AppTeamsTeamSlugSettingsStorageRoute: AppTeamsTeamSlugSettingsStorageRoute,
     AppTeamsTeamSlugSettingsIndexRoute: AppTeamsTeamSlugSettingsIndexRoute,
   }
 
