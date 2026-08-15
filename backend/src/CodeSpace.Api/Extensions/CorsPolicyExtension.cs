@@ -1,3 +1,4 @@
+using CodeSpace.Api.Http;
 using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Settings.CorsPolicy;
 
@@ -26,9 +27,9 @@ public static class CorsPolicyExtension
             .AllowAnyHeader()      // the SPA sends Authorization + X-Team-Id + Content-Type
             .AllowAnyMethod()      // GET/POST/PATCH/DELETE + the OPTIONS preflight
             // AllowAnyHeader governs REQUEST headers only; a custom RESPONSE header stays unreadable cross-origin
-            // unless it is exposed. The SPA reads the current-team header off a response, so expose it by the
-            // constant the server writes it with — the exposed name can then never drift from the emitted one.
-            .WithExposedHeaders(HeaderCurrentTeam.HeaderName)
+            // unless it is exposed. The SPA reads the current-team and bounded log-range contracts, so expose them
+            // from the same constants the server emits — the readable names can never drift from the written names.
+            .WithExposedHeaders([HeaderCurrentTeam.HeaderName, .. AgentRunLogHttpHeaders.RangeResponseHeaders])
             .AllowCredentials()));  // no cookies today, but keeps a refresh-cookie flow open
 
         return services;
