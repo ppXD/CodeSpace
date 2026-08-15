@@ -171,14 +171,16 @@ public class AgentMcpEndpointTests
         await using var endpoint = new AgentMcpEndpoint(runId, new EmptyRegistry(), AgentAutonomyLevel.Standard, Guid.NewGuid(), SecretRedactor.None, socketPath, "the-real-token", connects, scope, CancellationToken.None, NullLogger.Instance);
 
         using var client = await ConnectAsync(socketPath);
+        // Capture the read side while the socket is known-connected. The endpoint is allowed to close as soon as it
+        // reads the bad token; constructing NetworkStream after the sends races that correct close and can fail before
+        // the assertion observes the only property under test: no JSON-RPC response was served.
+        await using var net = new NetworkStream(client, ownsSocket: false);
         await SendLineAsync(client, "the-WRONG-token");
 
         // Send a real JSON-RPC request AFTER the bad token, so a still-serving endpoint would have something to
         // reply TO. The send itself is best-effort: if the close already landed, writing to the dead peer throws
         // Broken pipe — which is that same close observed from the write side, not a failure of the property.
         await TrySendLineAsync(client, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}");
-
-        await using var net = new NetworkStream(client, ownsSocket: false);
 
         var response = await ReadReplyOrNullIfClosedAsync(net, TimeSpan.FromSeconds(5));
         response.ShouldBeNull(customMessage: "a wrong token must close the connection before any JSON-RPC reply");
@@ -277,10 +279,10 @@ public class AgentMcpEndpointTests
         {
             await SendLineAsync(socket, line);
         }
-        catch (SocketException ex) when (ex.SocketErrorCode is SocketError.Shutdown or SocketError.ConnectionReset or SocketError.ConnectionAborted)
+        catch (SocketException ex) when (ex.SocketErrorCode is SocketError.Shutdown or SocketError.NotConnected or SocketError.ConnectionReset or SocketError.ConnectionAborted)
         {
         }
-        catch (IOException ex) when (ex.InnerException is SocketException { SocketErrorCode: SocketError.Shutdown or SocketError.ConnectionReset or SocketError.ConnectionAborted })
+        catch (IOException ex) when (ex.InnerException is SocketException { SocketErrorCode: SocketError.Shutdown or SocketError.NotConnected or SocketError.ConnectionReset or SocketError.ConnectionAborted })
         {
         }
     }
