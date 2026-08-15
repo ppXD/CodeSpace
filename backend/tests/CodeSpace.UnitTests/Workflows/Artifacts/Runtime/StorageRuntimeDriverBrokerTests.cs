@@ -264,6 +264,20 @@ public sealed class StorageRuntimeDriverBrokerTests
             .OpenAsync(Request(), duringCredential.Token);
         credentialResult.ShouldBe(new StorageRuntimeDriverResolution.Cancelled(StorageRuntimeCancellationStage.CredentialResolution));
 
+        using var readyCredentialCancellation = new CancellationTokenSource();
+        var readySecret = new StorageCredentialSecretResolution.Ready(JsonSerializer.SerializeToElement(new { accessKey = "dispose-on-cancel" }));
+        var readyCredential = new StubCredentialResolver((_, _) =>
+        {
+            readyCredentialCancellation.Cancel();
+            return Task.FromResult<StorageCredentialSecretResolution>(readySecret);
+        });
+        var untouchedFactory = new StubFactory();
+        var readyCredentialResult = await Broker(ProfileResolver(Profile(secretReference: new StorageSecretReference("database/v1", Guid.NewGuid().ToString("D"), "1"))), readyCredential, untouchedFactory)
+            .OpenAsync(Request(), readyCredentialCancellation.Token);
+        readyCredentialResult.ShouldBe(new StorageRuntimeDriverResolution.Cancelled(StorageRuntimeCancellationStage.CredentialResolution));
+        Should.Throw<ObjectDisposedException>(() => readySecret.UseSecret(secret => secret.ValueKind));
+        untouchedFactory.CreateCalls.ShouldBe(0);
+
         using var duringFactory = new CancellationTokenSource();
         var driver = new StubDriver();
         var factory = new StubFactory((_, _) =>
@@ -274,6 +288,43 @@ public sealed class StorageRuntimeDriverBrokerTests
         var factoryResult = await Broker(ProfileResolver(Profile()), new StubCredentialResolver(), factory).OpenAsync(Request(), duringFactory.Token);
         factoryResult.ShouldBe(new StorageRuntimeDriverResolution.Cancelled(StorageRuntimeCancellationStage.DriverInitialization));
         driver.DisposeCalls.ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task Recoverable_faults_cannot_mask_supplied_cancellation_at_any_broker_stage()
+    {
+        using var profileCancellation = new CancellationTokenSource();
+        var profile = new StubProfileResolver((_, _) =>
+        {
+            profileCancellation.Cancel();
+            return Task.FromException<StorageProfileSnapshotResolution>(new IOException("translated profile cancellation"));
+        });
+        var profileResult = await Broker(profile, new StubCredentialResolver(), new StubFactory()).OpenAsync(Request(), profileCancellation.Token);
+        profileResult.ShouldBe(new StorageRuntimeDriverResolution.Cancelled(StorageRuntimeCancellationStage.ProfileResolution));
+
+        using var catalogCancellation = new CancellationTokenSource();
+        var catalogResult = await Broker(ProfileResolver(Profile()), new StubCredentialResolver(), new CancellingCatalog(catalogCancellation))
+            .OpenAsync(Request(), catalogCancellation.Token);
+        catalogResult.ShouldBe(new StorageRuntimeDriverResolution.Cancelled(StorageRuntimeCancellationStage.DriverInitialization));
+
+        using var credentialCancellation = new CancellationTokenSource();
+        var credential = new StubCredentialResolver((_, _) =>
+        {
+            credentialCancellation.Cancel();
+            return Task.FromException<StorageCredentialSecretResolution>(new InvalidOperationException("translated credential cancellation"));
+        });
+        var credentialResult = await Broker(ProfileResolver(Profile(secretReference: new StorageSecretReference("database/v1", Guid.NewGuid().ToString("D"), "1"))), credential, new StubFactory())
+            .OpenAsync(Request(), credentialCancellation.Token);
+        credentialResult.ShouldBe(new StorageRuntimeDriverResolution.Cancelled(StorageRuntimeCancellationStage.CredentialResolution));
+
+        using var factoryCancellation = new CancellationTokenSource();
+        var factory = new StubFactory((_, _) =>
+        {
+            factoryCancellation.Cancel();
+            return ValueTask.FromException<IArtifactStorageDriver>(new ArgumentException("translated factory cancellation"));
+        });
+        var factoryResult = await Broker(ProfileResolver(Profile()), new StubCredentialResolver(), factory).OpenAsync(Request(), factoryCancellation.Token);
+        factoryResult.ShouldBe(new StorageRuntimeDriverResolution.Cancelled(StorageRuntimeCancellationStage.DriverInitialization));
     }
 
     [Fact]
@@ -384,6 +435,17 @@ public sealed class StorageRuntimeDriverBrokerTests
         }
 
         public IArtifactStorageDriverFactory Require(string providerTypeKey) => Get(providerTypeKey) ?? throw new NotSupportedException();
+    }
+
+    private sealed class CancellingCatalog(CancellationTokenSource cancellation) : IArtifactStorageDriverFactoryCatalog
+    {
+        public IArtifactStorageDriverFactory? Get(string providerTypeKey)
+        {
+            cancellation.Cancel();
+            throw new InvalidOperationException("translated catalog cancellation");
+        }
+
+        public IArtifactStorageDriverFactory Require(string providerTypeKey) => throw new InvalidOperationException();
     }
 
     private sealed class StubFactory : IArtifactStorageDriverFactory

@@ -1,9 +1,11 @@
 using System.Buffers;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
+using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers.Local;
 using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
@@ -367,7 +369,7 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
     }
 
     [Fact]
-    public async Task Secret_reference_without_broker_is_rejected_before_intent_or_factory_activation()
+    public async Task Encrypted_credential_backed_profile_activates_the_factory_without_exposing_secret_material()
     {
         var world = await SeedWorldAsync(withCredential: true);
         var storage = new FakeStorageState();
@@ -375,10 +377,161 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
 
         var result = await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "credential"));
 
-        result.ShouldBeOfType<ArtifactCasTransferResult.Rejected>().Problem.Code.ShouldBe(ArtifactCasProblemCode.CredentialBrokerUnavailable);
-        storage.FactoryCreateCalls.ShouldBe(0);
+        result.ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        storage.FactoryCredentialHandleObserved.ShouldBeTrue();
+        storage.FactoryCreateCalls.ShouldBe(1);
         using var scope = _fixture.BeginScope();
-        (await scope.Resolve<CodeSpaceDbContext>().ArtifactTransferIntent.CountAsync(value => value.TeamId == world.TeamId)).ShouldBe(0);
+        (await scope.Resolve<CodeSpaceDbContext>().ArtifactTransferIntent.CountAsync(value => value.TeamId == world.TeamId && value.State == ArtifactTransferState.Committed)).ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task Revoked_credential_and_wrong_provider_fail_closed_before_factory_I_O()
+    {
+        var revoked = await SeedWorldAsync(withCredential: true);
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var credential = await db.StorageCredential.SingleAsync(value => value.TeamId == revoked.TeamId);
+            credential.State = StorageCredentialState.Revoked;
+            credential.RevokedDate = DateTimeOffset.UtcNow;
+            credential.RevokedBy = revoked.ActorId;
+            await db.SaveChangesAsync();
+        }
+        var revokedStorage = new FakeStorageState();
+        var revokedBytes = RandomNumberGenerator.GetBytes(128);
+
+        var revokedResult = await PutAsync(revoked, revokedStorage, Request(revoked, new MemoryStream(revokedBytes), revokedBytes, "revoked-credential"));
+
+        revokedResult.ShouldBeOfType<ArtifactCasTransferResult.Rejected>().Problem.Code.ShouldBe(ArtifactCasProblemCode.CredentialUnavailable);
+        revokedStorage.FactoryCreateCalls.ShouldBe(0);
+
+        var mismatched = await SeedWorldAsync(withCredential: true, credentialProviderMismatch: true);
+        var mismatchedStorage = new FakeStorageState();
+        var mismatchedBytes = RandomNumberGenerator.GetBytes(128);
+
+        var mismatchedResult = await PutAsync(mismatched, mismatchedStorage, Request(mismatched, new MemoryStream(mismatchedBytes), mismatchedBytes, "provider-mismatch"));
+
+        mismatchedResult.ShouldBeOfType<ArtifactCasTransferResult.Rejected>().Problem.Code.ShouldBe(ArtifactCasProblemCode.CredentialInvalid);
+        mismatchedStorage.FactoryCreateCalls.ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task Broker_activation_uses_the_requested_revision_even_when_a_newer_revision_is_current()
+    {
+        var world = await SeedWorldAsync();
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.StorageProfileRevision.Add(new StorageProfileRevision
+            {
+                Id = Guid.NewGuid(), TeamId = world.TeamId, StorageProfileId = world.ProfileId, Revision = 2,
+                ProviderTypeKey = LocalRwxArtifactStorageDriverFactory.TypeKey, NonSecretConfigJson = "{\"rootPath\":\"/unused/newer\"}",
+                NamespaceFingerprint = $"sha256:{new string('c', 64)}", CreatedDate = DateTimeOffset.UtcNow, CreatedBy = world.ActorId,
+            });
+            await db.SaveChangesAsync();
+            await db.StorageProfile.Where(value => value.TeamId == world.TeamId && value.Id == world.ProfileId).ExecuteUpdateAsync(setters => setters.SetProperty(value => value.CurrentRevision, 2));
+        }
+        var storage = new FakeStorageState();
+        var bytes = RandomNumberGenerator.GetBytes(128);
+
+        var result = await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "exact-revision"));
+
+        result.ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        storage.FactoryProfileRevision.ShouldBe(1);
+        using var queryScope = _fixture.BeginScope();
+        var committed = await queryScope.Resolve<CodeSpaceDbContext>().ArtifactTransferIntent.SingleAsync(value => value.TeamId == world.TeamId && value.IdempotencyKey == "exact-revision");
+        committed.StorageProfileRevisionId.ShouldBe(world.ProfileRevisionId);
+    }
+
+    [Fact]
+    public async Task Capability_mismatch_fails_closed_and_cleans_up_the_broker_lease_without_provider_I_O()
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState { Capabilities = StorageProviderCapabilities.StreamingRead };
+        var bytes = RandomNumberGenerator.GetBytes(128);
+
+        var result = await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "capability-mismatch"));
+
+        result.ShouldBeOfType<ArtifactCasTransferResult.Rejected>().Problem.Code.ShouldBe(ArtifactCasProblemCode.Unsupported);
+        storage.PutCalls.ShouldBe(0);
+        storage.DisposeCalls.ShouldBe(1);
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        (await db.ArtifactObject.CountAsync(value => value.TeamId == world.TeamId)).ShouldBe(0);
+        (await db.ArtifactLocation.CountAsync(value => value.TeamId == world.TeamId)).ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task Cancellation_during_broker_activation_preserves_the_claim_for_a_later_retry()
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState { BlockFactoryCreate = true };
+        var bytes = RandomNumberGenerator.GetBytes(128);
+        using var scope = Scope(storage);
+        using var cancellation = new CancellationTokenSource();
+        var request = Request(world, new MemoryStream(bytes), bytes, "broker-cancel");
+        var running = scope.Resolve<IArtifactCasRuntimeCoordinator>().PutAsync(request, cancellation.Token);
+        await storage.FactoryCreateEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        cancellation.Cancel();
+        await running.ShouldThrowAsync<OperationCanceledException>();
+
+        using var queryScope = _fixture.BeginScope();
+        var intent = await queryScope.Resolve<CodeSpaceDbContext>().ArtifactTransferIntent.SingleAsync(value => value.TeamId == world.TeamId && value.IdempotencyKey == "broker-cancel");
+        intent.State.ShouldBe(ArtifactTransferState.Intended);
+        intent.WorkerFenceEpoch.ShouldBe(1);
+        (await queryScope.Resolve<CodeSpaceDbContext>().ArtifactObject.CountAsync(value => value.TeamId == world.TeamId)).ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task Timed_out_broker_activation_disposes_a_late_driver_once_without_blocking_the_CAS_outcome()
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState { BlockFactoryIgnoringCancellation = true };
+        var bytes = RandomNumberGenerator.GetBytes(128);
+        var request = Request(world, new MemoryStream(bytes), bytes, "broker-timeout") with { OperationTimeout = TimeSpan.FromMilliseconds(25) };
+
+        var running = PutAsync(world, storage, request);
+        await storage.FactoryCreateEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var deferred = await running.WaitAsync(TimeSpan.FromSeconds(5));
+
+        deferred.ShouldBeOfType<ArtifactCasTransferResult.Deferred>().Problem.Code.ShouldBe(ArtifactCasProblemCode.ProviderTimeout);
+        storage.DisposeCalls.ShouldBe(0);
+        storage.ReleaseFactoryCreate.TrySetResult();
+        await storage.DriverDisposed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        storage.DisposeCalls.ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_wins_when_a_nonconforming_broker_translates_cancellation_into_an_exception()
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState();
+        var broker = new CancellationTranslatingBroker();
+        var bytes = RandomNumberGenerator.GetBytes(128);
+        using var scope = Scope(storage, broker: broker);
+        using var cancellation = new CancellationTokenSource();
+        var running = scope.Resolve<IArtifactCasRuntimeCoordinator>().PutAsync(Request(world, new MemoryStream(bytes), bytes, "translated-caller-cancel"), cancellation.Token);
+        await broker.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        cancellation.Cancel();
+
+        await running.ShouldThrowAsync<OperationCanceledException>();
+    }
+
+    [Fact]
+    public async Task Operation_timeout_wins_when_a_nonconforming_broker_translates_its_linked_cancellation_into_an_exception()
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState();
+        var broker = new CancellationTranslatingBroker();
+        var bytes = RandomNumberGenerator.GetBytes(128);
+        var request = Request(world, new MemoryStream(bytes), bytes, "translated-timeout") with { OperationTimeout = TimeSpan.FromMilliseconds(25) };
+        using var scope = Scope(storage, broker: broker);
+
+        var result = await scope.Resolve<IArtifactCasRuntimeCoordinator>().PutAsync(request, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+
+        result.ShouldBeOfType<ArtifactCasTransferResult.Deferred>().Problem.Code.ShouldBe(ArtifactCasProblemCode.ProviderTimeout);
     }
 
     private async Task<ArtifactCasTransferResult> PutAsync(World world, FakeStorageState storage, ArtifactCasTransferRequest request, TimeProvider? clock = null)
@@ -387,10 +540,11 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         return await scope.Resolve<IArtifactCasRuntimeCoordinator>().PutAsync(request, CancellationToken.None);
     }
 
-    private ILifetimeScope Scope(FakeStorageState storage, TimeProvider? clock = null, SaveChangesInterceptor? interceptor = null) => _fixture.BeginScope(builder =>
+    private ILifetimeScope Scope(FakeStorageState storage, TimeProvider? clock = null, SaveChangesInterceptor? interceptor = null, IStorageRuntimeDriverBroker? broker = null) => _fixture.BeginScope(builder =>
     {
         builder.RegisterInstance(new FakeFactoryCatalog(new FakeStorageFactory(storage))).As<IArtifactStorageDriverFactoryCatalog>().SingleInstance();
         if (clock != null) builder.RegisterInstance(clock).As<TimeProvider>().SingleInstance();
+        if (broker != null) builder.RegisterInstance(broker).As<IStorageRuntimeDriverBroker>().SingleInstance();
         if (interceptor != null)
         {
             var options = new DbContextOptionsBuilder<CodeSpaceDbContext>().UseNpgsql(_fixture.ConnectionString).UseSnakeCaseNamingConvention().AddInterceptors(interceptor).Options;
@@ -398,7 +552,7 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         }
     });
 
-    private async Task<World> SeedWorldAsync(bool withCredential = false)
+    private async Task<World> SeedWorldAsync(bool withCredential = false, bool credentialProviderMismatch = false)
     {
         var actorId = Guid.NewGuid();
         var teamId = Guid.NewGuid();
@@ -409,6 +563,7 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
 
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
+        var encryptor = scope.Resolve<IPayloadEncryptor>();
         db.User.Add(new User { Id = actorId, Email = $"cas-runtime-{actorId:N}@test.local", Name = $"cas-runtime-{actorId:N}" });
         db.Team.Add(new Team { Id = teamId, Slug = $"cas-runtime-{teamId:N}", Name = "CAS Runtime Team", Kind = TeamKind.Workspace });
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = actorId, Role = TeamRole.Owner });
@@ -422,7 +577,8 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
             credential.Revisions.Add(new StorageCredentialRevision
             {
                 Id = Guid.NewGuid(), TeamId = teamId, StorageCredentialId = credential.Id, Revision = 1,
-                ProviderTypeKey = LocalRwxArtifactStorageDriverFactory.TypeKey, EncryptedPayload = "opaque-ciphertext-never-read",
+                ProviderTypeKey = credentialProviderMismatch ? "wrong-provider/v1" : LocalRwxArtifactStorageDriverFactory.TypeKey,
+                EncryptedPayload = encryptor.Encrypt("{}"),
                 SafeHint = "safe", EnvelopeFingerprint = $"sha256:{new string('b', 64)}", CreatedDate = now, CreatedBy = actorId,
             });
             db.StorageCredential.Add(credential);
@@ -465,10 +621,35 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
     {
         public string ProviderTypeKey => LocalRwxArtifactStorageDriverFactory.TypeKey;
 
-        public ValueTask<IArtifactStorageDriver> CreateAsync(ArtifactStorageDriverCreateRequest request, CancellationToken cancellationToken)
+        public async ValueTask<IArtifactStorageDriver> CreateAsync(ArtifactStorageDriverCreateRequest request, CancellationToken cancellationToken)
         {
             Interlocked.Increment(ref state.FactoryCreateCalls);
-            return ValueTask.FromResult<IArtifactStorageDriver>(new FakeStorageDriver(state));
+            state.FactoryCredentialHandleObserved = request.CredentialHandle?.UseSecret(secret => secret.ValueKind == JsonValueKind.Object) == true;
+            state.FactoryProfileRevision = request.Profile.ProfileRevision;
+            if (state.BlockFactoryCreate)
+            {
+                state.FactoryCreateEntered.TrySetResult();
+                await state.ReleaseFactoryCreate.Task.WaitAsync(cancellationToken);
+            }
+            if (state.BlockFactoryIgnoringCancellation)
+            {
+                state.FactoryCreateEntered.TrySetResult();
+                await state.ReleaseFactoryCreate.Task;
+            }
+            return new FakeStorageDriver(state);
+        }
+    }
+
+    private sealed class CancellationTranslatingBroker : IStorageRuntimeDriverBroker
+    {
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async ValueTask<StorageRuntimeDriverResolution> OpenAsync(StorageRuntimeDriverRequest request, CancellationToken cancellationToken)
+        {
+            Entered.TrySetResult();
+            try { await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken); }
+            catch (OperationCanceledException) { throw new IOException("provider detail must not escape"); }
+            throw new InvalidOperationException("Unreachable.");
         }
     }
 
@@ -483,21 +664,28 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         public TaskCompletionSource IgnoringCancellationPutEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ReleaseIgnoringCancellationPut { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource DriverDisposed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource FactoryCreateEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseFactoryCreate { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public bool BlockNextPut;
         public bool BlockAfterNextPut;
         public bool BlockIgnoringCancellationNextPut;
+        public bool BlockFactoryCreate;
+        public bool BlockFactoryIgnoringCancellation;
         public bool CorruptReads;
+        public StorageProviderCapabilities Capabilities = StorageProviderCapabilities.StreamingWrite | StorageProviderCapabilities.StreamingRead | StorageProviderCapabilities.ConditionalCreate;
         public int MetadataRevision = 1;
         public int PutCalls;
         public int FactoryCreateCalls;
         public int DisposeCalls;
+        public bool FactoryCredentialHandleObserved;
+        public int FactoryProfileRevision;
     }
 
     private sealed class FakeStorageDriver(FakeStorageState state) : IArtifactStorageDriver
     {
         public const int BufferSize = 32 * 1024;
 
-        public StorageProviderCapabilities Capabilities => StorageProviderCapabilities.StreamingWrite | StorageProviderCapabilities.StreamingRead | StorageProviderCapabilities.ConditionalCreate;
+        public StorageProviderCapabilities Capabilities => state.Capabilities;
 
         public async ValueTask<ArtifactStoragePutResult> PutAsync(ArtifactStoragePutRequest request, CancellationToken cancellationToken)
         {
