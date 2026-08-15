@@ -52,6 +52,11 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork, IDataProtectionKeyCont
     public DbSet<StorageProfileRevision> StorageProfileRevision => Set<StorageProfileRevision>();
     public DbSet<StorageCredential> StorageCredential => Set<StorageCredential>();
     public DbSet<StorageCredentialRevision> StorageCredentialRevision => Set<StorageCredentialRevision>();
+    public DbSet<ArtifactObject> ArtifactObject => Set<ArtifactObject>();
+    public DbSet<ArtifactLocation> ArtifactLocation => Set<ArtifactLocation>();
+    public DbSet<ArtifactLocationEvent> ArtifactLocationEvent => Set<ArtifactLocationEvent>();
+    public DbSet<ArtifactTransferIntent> ArtifactTransferIntent => Set<ArtifactTransferIntent>();
+    public DbSet<WorkflowRunArtifactReference> WorkflowRunArtifactReference => Set<WorkflowRunArtifactReference>();
     public DbSet<WorkflowArtifact> WorkflowArtifact => Set<WorkflowArtifact>();
     public DbSet<WorkflowRunNode> WorkflowRunNode => Set<WorkflowRunNode>();
     public DbSet<WorkflowRunVariable> WorkflowRunVariable => Set<WorkflowRunVariable>();

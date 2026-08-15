@@ -9,6 +9,7 @@ public class WorkPlanConfiguration : IEntityTypeConfiguration<WorkPlan>
     public void Configure(EntityTypeBuilder<WorkPlan> builder)
     {
         builder.HasKey(p => p.Id);
+        builder.HasAlternateKey(p => new { p.TeamId, p.Id, p.WorkflowRunId, p.Version }).HasName("ak_work_plan_artifact_scope");
 
         builder.Property(p => p.ItemsJson).HasColumnType("jsonb");
         builder.Property(p => p.SuccessCriteriaJson).HasColumnType("jsonb");
