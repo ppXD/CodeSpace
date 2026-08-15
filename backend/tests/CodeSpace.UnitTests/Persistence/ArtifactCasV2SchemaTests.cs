@@ -118,12 +118,13 @@ public sealed class ArtifactCasV2SchemaTests
             "ExpectedSizeBytes", "Id", "IdempotencyKey", "LastErrorCode", "LastErrorMessage", "LastModifiedBy",
             "LastModifiedDate", "NextAttemptAt", "ProviderUploadId", "RetryCount", "Revision", "State",
             "StorageProfileRevisionId", "TargetLocator", "TargetObjectKey", "TeamId", "TemporaryObjectKey",
-            "WorkerFenceEpoch", "Xmin",
+            "WorkerFenceEpoch", "WorkerLeaseExpiresAt", "Xmin",
         }.Order());
         entity.FindProperty(nameof(ArtifactTransferIntent.ExpectedDigest))!.GetColumnType().ShouldBe("bytea");
         entity.FindProperty(nameof(ArtifactTransferIntent.Xmin))!.IsConcurrencyToken.ShouldBeTrue();
         CheckConstraint(entity, "ck_artifact_transfer_intent_attempt").Sql.ShouldContain("execution_attempt_ordinal IS NOT NULL");
-        CheckConstraint(entity, "ck_artifact_transfer_intent_attempt").Sql.ShouldContain("worker_fence_epoch IS NOT NULL");
+        CheckConstraint(entity, "ck_artifact_transfer_intent_attempt").Sql.ShouldContain("worker_fence_epoch IS NULL OR worker_fence_epoch > 0");
+        CheckConstraint(entity, "ck_artifact_transfer_intent_worker_lease").Sql.ShouldContain("worker_lease_expires_at IS NULL OR worker_fence_epoch IS NOT NULL");
         ForeignKey(entity, typeof(StorageProfileRevision)).Properties.Select(p => p.Name).ShouldBe(new[] { "TeamId", "StorageProfileRevisionId" });
         ForeignKey(entity, typeof(ArtifactObject)).Properties.Select(p => p.Name).ShouldBe(new[] { "TeamId", "ArtifactObjectId" });
         ForeignKey(entity, typeof(ArtifactLocation)).Properties.Select(p => p.Name).ShouldBe(new[] { "TeamId", "ArtifactLocationId" });
@@ -137,6 +138,7 @@ public sealed class ArtifactCasV2SchemaTests
             "ck_artifact_transfer_intent_error", "ck_artifact_transfer_intent_identity",
             "ck_artifact_transfer_intent_outcome", "ck_artifact_transfer_intent_retry",
             "ck_artifact_transfer_intent_revision", "ck_artifact_transfer_intent_state",
+            "ck_artifact_transfer_intent_worker_lease",
         }, ignoreOrder: true);
     }
 
