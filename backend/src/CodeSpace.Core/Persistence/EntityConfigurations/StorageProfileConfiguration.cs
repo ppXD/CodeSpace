@@ -44,6 +44,7 @@ public sealed class StorageProfileRevisionConfiguration : IEntityTypeConfigurati
         });
 
         builder.HasKey(r => r.Id);
+        builder.HasAlternateKey(r => new { r.TeamId, r.Id }).HasName("ak_storage_profile_revision_team_id");
         builder.Property(r => r.ProviderTypeKey).HasMaxLength(128);
         builder.Property(r => r.NonSecretConfigJson).HasColumnName("config_jsonb").HasColumnType("jsonb");
         builder.Property(r => r.CredentialRef).HasMaxLength(512);

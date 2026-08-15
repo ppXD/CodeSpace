@@ -9,6 +9,7 @@ public class WorkflowRunConfiguration : IEntityTypeConfiguration<WorkflowRun>
     public void Configure(EntityTypeBuilder<WorkflowRun> builder)
     {
         builder.HasKey(r => r.Id);
+        builder.HasAlternateKey(r => new { r.TeamId, r.Id }).HasName("ak_workflow_run_team_id");
 
         builder.Property(r => r.Status).HasConversion<string>().HasMaxLength(16);
         builder.Property(r => r.CompletionEnforcementMode).HasMaxLength(16);
