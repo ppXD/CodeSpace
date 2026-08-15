@@ -25,9 +25,10 @@ public sealed class AgentRunLogSchemaTests
         entity.GetTableName().ShouldBe("agent_run_log_stream");
         entity.GetProperties().Select(property => property.Name).Order().ShouldBe(new[]
         {
-            "AgentRunId", "CaptureSource", "CompletedAt", "ContentEncoding", "ContentType", "CreatedAt",
-            "ErrorCode", "ErrorMessage", "ExpiresAt", "Id", "LastModifiedAt", "NextOffsetBytes", "NextSegmentOrdinal",
-            "Retention", "Revision", "SchemaVersion", "SegmentCount", "State", "StreamKind", "TeamId", "TotalBytes", "Xmin",
+            "AgentRunId", "CaptureSessionId", "CaptureSource", "CompletedAt", "ContentDigest", "ContentDigestAlgorithm",
+            "ContentEncoding", "ContentType", "CreatedAt", "ErrorCode", "ErrorMessage", "ExpiresAt", "Id", "LastModifiedAt",
+            "NextOffsetBytes", "NextSegmentOrdinal", "Retention", "Revision", "SchemaVersion", "SegmentCount", "State",
+            "StreamKind", "TeamId", "TotalBytes", "WorkerFenceEpoch", "Xmin",
         }.Order());
         entity.FindProperty(nameof(AgentRunLogStream.State))!.GetMaxLength().ShouldBe(24);
         entity.FindProperty(nameof(AgentRunLogStream.Xmin))!.IsConcurrencyToken.ShouldBeTrue();
@@ -39,7 +40,7 @@ public sealed class AgentRunLogSchemaTests
         identity.Properties.Select(property => property.Name).ShouldBe(new[] { "TeamId", "AgentRunId", "StreamKind" });
         entity.GetCheckConstraints().Select(constraint => constraint.Name).ShouldBe(new[]
         {
-            "ck_agent_run_log_stream_error", "ck_agent_run_log_stream_head", "ck_agent_run_log_stream_identity",
+            "ck_agent_run_log_stream_claim", "ck_agent_run_log_stream_digest", "ck_agent_run_log_stream_error", "ck_agent_run_log_stream_head", "ck_agent_run_log_stream_identity",
             "ck_agent_run_log_stream_retention", "ck_agent_run_log_stream_state", "ck_agent_run_log_stream_terminal",
             "ck_agent_run_log_stream_time",
         }, ignoreOrder: true);
