@@ -1,4 +1,4 @@
-import { fetchJson } from "./request";
+import { ApiError, fetchJson } from "./request";
 import type { RoomPullRequestResult } from "./sessions";
 
 // ─── Types (mirror backend DTOs) ───────────────────────────────────────────────
@@ -633,6 +633,42 @@ export interface AnswerDecisionResult {
   message?: string | null;
 }
 
+export type WorkflowRunModelCallStatus = "Completed" | "Failed";
+export type WorkflowRunModelCallPart = "Result" | "SystemPrompt" | "UserPrompt" | "Usage" | "Trace";
+export type WorkflowRunModelCallPartSource = "NotRecorded" | "Inline" | "Artifact" | "Synthesized";
+export type WorkflowRunModelCallPartAvailability = "Available" | "NotRecorded" | "MetadataMissing" | "PhysicalObjectMissing" | "IntegrityFailure" | "BackendUnavailable" | "AccessDenied" | "InvalidOffset";
+
+export interface WorkflowRunModelCallPartDescriptor {
+  part: WorkflowRunModelCallPart;
+  source: WorkflowRunModelCallPartSource;
+  sizeBytes?: number | null;
+  contentType?: string | null;
+  artifactId?: string | null;
+}
+
+/** Metadata-only Workflow Run model-call projection; content is fetched one selected, bounded part at a time. */
+export interface WorkflowRunModelCallMetadata {
+  runId: string;
+  sequence: number;
+  correlationId?: string | null;
+  status: WorkflowRunModelCallStatus;
+  parts: WorkflowRunModelCallPartDescriptor[];
+}
+
+export interface WorkflowRunModelCallPartPage {
+  part: WorkflowRunModelCallPart;
+  availability: WorkflowRunModelCallPartAvailability;
+  text?: string | null;
+  offsetBytes: number;
+  returnedBytes: number;
+  totalBytes?: number | null;
+  nextOffsetBytes?: number | null;
+  contentType?: string | null;
+  artifactId?: string | null;
+  integrityVerified: boolean;
+  message?: string | null;
+}
+
 // ─── API client ────────────────────────────────────────────────────────────────
 
 export const workflowsApi = {
@@ -695,6 +731,26 @@ export const workflowsApi = {
 
   /** The run's RAW event ledger — every record unfiltered, in Sequence order (the Trace audit). */
   getRunRecords: (runId: string) => fetchJson<RunRecordsResponse>(`/api/workflows/runs/${runId}/records`),
+
+  /** Metadata only; opening the drawer never eagerly downloads prompt/result blobs. */
+  getRunModelCall: async (runId: string, sequence: number, signal?: AbortSignal): Promise<WorkflowRunModelCallMetadata | null> => {
+    try {
+      return await fetchJson<WorkflowRunModelCallMetadata>(`/api/workflows/runs/${runId}/model-calls/${sequence}`, { signal });
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null;
+      throw error;
+    }
+  },
+
+  /** One bounded UTF-8 page of a selected Workflow Run model-call part. */
+  getRunModelCallPart: async (runId: string, sequence: number, part: WorkflowRunModelCallPart, offsetBytes: number, limitBytes: number, signal?: AbortSignal): Promise<WorkflowRunModelCallPartPage | null> => {
+    try {
+      return await fetchJson<WorkflowRunModelCallPartPage>(`/api/workflows/runs/${runId}/model-calls/${sequence}/parts/${part}?offsetBytes=${offsetBytes}&limitBytes=${limitBytes}`, { signal });
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null;
+      throw error;
+    }
+  },
 
   /** The team's cross-grain pending decisions, soonest-deadline first. The Run Room filters by `rootTraceId`. */
   listPendingDecisions: () => fetchJson<PendingDecision[]>("/api/workflows/decisions"),

@@ -93,4 +93,28 @@ public sealed class LocalFileArtifactBlobBackendTests : IDisposable
 
         await Should.ThrowAsync<InvalidOperationException>(() => backend.ReadAsync(outside, CancellationToken.None));
     }
+
+    [Fact]
+    public async Task Range_read_opens_only_the_requested_window_and_reports_total_length()
+    {
+        var backend = new LocalFileArtifactBlobBackend(_root);
+        var bytes = Encoding.UTF8.GetBytes("0123456789abcdefghijklmnopqrstuvwxyz");
+        var url = await backend.WriteAsync(ArtifactStore.ComputeSha256Hex(bytes), bytes, CancellationToken.None);
+
+        var range = await backend.ReadRangeAsync(url, offset: 10, length: 8, CancellationToken.None);
+
+        Encoding.UTF8.GetString(range.Bytes).ShouldBe("abcdefgh");
+        range.TotalLength.ShouldBe(bytes.LongLength);
+    }
+
+    [Fact]
+    public async Task Range_read_at_the_end_is_empty_and_past_the_end_is_rejected()
+    {
+        var backend = new LocalFileArtifactBlobBackend(_root);
+        var bytes = Encoding.UTF8.GetBytes("short");
+        var url = await backend.WriteAsync(ArtifactStore.ComputeSha256Hex(bytes), bytes, CancellationToken.None);
+
+        (await backend.ReadRangeAsync(url, bytes.Length, 64, CancellationToken.None)).Bytes.ShouldBeEmpty();
+        await Should.ThrowAsync<ArgumentOutOfRangeException>(() => backend.ReadRangeAsync(url, bytes.Length + 1, 64, CancellationToken.None));
+    }
 }

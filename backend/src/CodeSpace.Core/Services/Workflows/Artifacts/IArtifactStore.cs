@@ -35,6 +35,60 @@ public interface IArtifactStore
     Task<ArtifactMetadata?> GetMetadataAsync(Guid teamId, Guid artifactId, CancellationToken cancellationToken);
 }
 
+/// <summary>
+/// Bounded, non-authoritative artifact read for UI/inspection projections. Agent, oracle, and completion consumers must
+/// continue to use the strict full-byte path until the versioned storage driver router provides verified range reads.
+/// </summary>
+public interface IArtifactRangeReader
+{
+    Task<ArtifactRangeReadResult> ReadRangeAsync(Guid teamId, Guid artifactId, long offset, int length, CancellationToken cancellationToken);
+}
+
+public enum ArtifactRangeReadState
+{
+    Available = 0,
+    MetadataMissing = 1,
+    PhysicalObjectMissing = 2,
+    IntegrityFailure = 3,
+    BackendUnavailable = 4,
+    AccessDenied = 5,
+    InvalidOffset = 6,
+}
+
+public sealed class ArtifactRangeReadResult
+{
+    public ArtifactRangeReadState State { get; }
+    public byte[]? Bytes { get; }
+    public long? TotalLength { get; }
+    public string? Sha256 { get; }
+    public string? ContentType { get; }
+    public bool IntegrityVerified { get; }
+
+    private ArtifactRangeReadResult(ArtifactRangeReadState state, byte[]? bytes, long? totalLength, string? sha256, string? contentType, bool integrityVerified)
+    {
+        State = state;
+        Bytes = bytes;
+        TotalLength = totalLength;
+        Sha256 = sha256;
+        ContentType = contentType;
+        IntegrityVerified = integrityVerified;
+    }
+
+    public static ArtifactRangeReadResult Available(byte[] bytes, long totalLength, string sha256, string contentType, bool integrityVerified)
+    {
+        ArgumentNullException.ThrowIfNull(bytes);
+        if (totalLength < 0 || bytes.LongLength > totalLength) throw new ArgumentOutOfRangeException(nameof(totalLength));
+        if (string.IsNullOrWhiteSpace(sha256) || string.IsNullOrWhiteSpace(contentType)) throw new ArgumentException("Available artifact range reads require identity metadata.");
+        return new ArtifactRangeReadResult(ArtifactRangeReadState.Available, bytes, totalLength, sha256, contentType, integrityVerified);
+    }
+
+    public static ArtifactRangeReadResult Failed(ArtifactRangeReadState state, long? totalLength = null, string? sha256 = null, string? contentType = null)
+    {
+        if (state == ArtifactRangeReadState.Available) throw new ArgumentException("A failed artifact range read cannot use the Available state.", nameof(state));
+        return new ArtifactRangeReadResult(state, null, totalLength, sha256, contentType, false);
+    }
+}
+
 /// <summary>Bytes + metadata bundle returned by <see cref="IArtifactStore.GetBytesAsync"/>.</summary>
 public sealed record ArtifactBytes
 {

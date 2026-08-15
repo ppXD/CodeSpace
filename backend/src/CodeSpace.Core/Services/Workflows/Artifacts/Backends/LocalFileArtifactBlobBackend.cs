@@ -72,6 +72,28 @@ public sealed class LocalFileArtifactBlobBackend : IArtifactBlobBackend, ISingle
         return await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<ArtifactBlobRange> ReadRangeAsync(string storageUrl, long offset, int length, CancellationToken cancellationToken)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(length);
+
+        var path = ResolveUnderRoot(storageUrl);
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 1, FileOptions.Asynchronous | FileOptions.RandomAccess);
+        if (offset > stream.Length) throw new ArgumentOutOfRangeException(nameof(offset), "Artifact byte offset exceeds the object length.");
+
+        var count = (int)Math.Min(length, stream.Length - offset);
+        var bytes = new byte[count];
+        var read = 0;
+        while (read < count)
+        {
+            var current = await RandomAccess.ReadAsync(stream.SafeFileHandle, bytes.AsMemory(read, count - read), offset + read, cancellationToken).ConfigureAwait(false);
+            if (current == 0) throw new EndOfStreamException("Artifact object ended before its reported length.");
+            read += current;
+        }
+
+        return new ArtifactBlobRange(bytes, stream.Length);
+    }
+
     // <root>/<sha[0:2]>/<sha[2:4]>/<sha> — two levels of fan-out keep any single directory small.
     private string PathFor(string sha256) => Path.Combine(_root, sha256[..2], sha256.Substring(2, 2), sha256);
 
