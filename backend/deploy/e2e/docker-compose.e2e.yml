@@ -65,8 +65,10 @@ services:
     volumes:
       - ./fake-codex:/opt/fake-codex:ro
       - artifacts:/var/lib/codespace/artifacts
+      - spool:/var/lib/codespace/spool
     ports:
       - "18081:8080"
 
 volumes:
   artifacts:
+  spool:
