@@ -100,6 +100,7 @@ function renderContent(handler: FetchHandler, tab: WorkflowRunModelCallTab = "re
   const view = render(<QueryClientProvider client={client}><WorkflowRunModelCallContent runId="run-1" sequence={42} tab={tab} /></QueryClientProvider>);
   return {
     client,
+    unmount: view.unmount,
     rerenderTab(next: WorkflowRunModelCallTab) {
       view.rerender(<QueryClientProvider client={client}><WorkflowRunModelCallContent runId="run-1" sequence={42} tab={next} /></QueryClientProvider>);
     },
@@ -146,8 +147,135 @@ describe("WorkflowRunModelCallContent", () => {
     expect(vi.mocked(globalThis.fetch).mock.calls.filter(([input]) => String(input).includes("/bodies/")).length).toBe(1);
 
     fireEvent.click(screen.getByRole("button", { name: "Load more" }));
-    expect(await screen.findByText(/first stable chunksecond stable chunk/)).toBeInTheDocument();
+    expect(await screen.findByText("second stable chunk")).toBeInTheDocument();
+    expect(document.querySelector(".room-mcpre")).toHaveTextContent("first stable chunksecond stable chunk");
     expect(vi.mocked(globalThis.fetch).mock.calls.some(([input]) => String(input).includes("offsetBytes=18"))).toBe(true);
+  });
+
+  it("pages past 50k-token scale, bounds a 128k-token-equivalent DOM window, and can restart at byte zero", async () => {
+    const pageBytes = 64 * 1024;
+    const totalBytes = 9 * pageBytes;
+    const pageText = (page: number) => `page-${page}:`.padEnd(pageBytes, "x");
+    const visiblePagePrefixes = () => [...document.querySelectorAll(".room-mcchunk")].map((element) => element.textContent?.slice(0, 7));
+    const { client } = renderContent((url) => {
+      if (url.pathname === "/api/workflows/runs/run-1/model-calls/42") return json(projectedMetadata());
+      if (url.pathname === `/api/workflows/runs/run-1/model-calls/${callId}`) return json(stableDetail());
+      if (url.pathname.endsWith("/bodies/AttemptResponse")) {
+        const offset = Number(url.searchParams.get("offsetBytes"));
+        const nextOffset = offset + pageBytes;
+        return json({
+          body: "AttemptResponse",
+          attemptId: activeAttemptId,
+          captureCompleteness: "Exact",
+          availability: "Available",
+          text: pageText(offset / pageBytes),
+          offsetBytes: offset,
+          returnedBytes: pageBytes,
+          totalBytes,
+          nextOffsetBytes: nextOffset < totalBytes ? nextOffset : null,
+          contentType: "text/plain",
+          artifactId: "55555555-5555-5555-5555-555555555555",
+          integrityVerified: true,
+          message: null,
+        });
+      }
+      return json({ message: `Unexpected ${url.pathname}` }, 500);
+    });
+
+    await waitFor(() => expect(visiblePagePrefixes()).toEqual(["page-0:"]));
+    for (let page = 1; page <= 7; page++) {
+      fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+      await waitFor(() => expect(visiblePagePrefixes()).toContain(`page-${page}:`));
+      if (page === 3) expect(screen.getByText(/Showing bytes 0–262,144 of 589,824/)).toBeInTheDocument();
+    }
+
+    expect(screen.getByText(/Showing bytes 0–524,288 of 589,824/)).toBeInTheDocument();
+    expect(document.querySelectorAll(".room-mcchunk")).toHaveLength(8);
+    expect(JSON.stringify(client.getQueryCache().getAll().map((query) => query.state.data))).not.toContain("page-0:");
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    await waitFor(() => expect(visiblePagePrefixes()).toContain("page-8:"));
+    expect(visiblePagePrefixes()).not.toContain("page-0:");
+    expect(document.querySelectorAll(".room-mcchunk")).toHaveLength(8);
+    expect(screen.getByText(/Showing bytes 65,536–589,824 of 589,824/)).toBeInTheDocument();
+    expect(screen.getByText(/Earlier bytes were removed from this view/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Start over" }));
+    await waitFor(() => expect(visiblePagePrefixes()).toEqual(["page-0:"]));
+    expect(screen.getByText(/Showing bytes 0–65,536 of 589,824/)).toBeInTheDocument();
+    expect(screen.queryByText(/Earlier bytes were removed from this view/i)).toBeNull();
+  });
+
+  it("aborts and rejects a stale physical-attempt body response after selection changes", async () => {
+    let staleSignal: AbortSignal | undefined;
+    let resolveStale!: (response: Response) => void;
+    const staleResponse = new Promise<Response>((resolve) => { resolveStale = resolve; });
+    renderContent((url, init) => {
+      if (url.pathname === "/api/workflows/runs/run-1/model-calls/42") return json(projectedMetadata());
+      if (url.pathname === `/api/workflows/runs/run-1/model-calls/${callId}`) return json(stableDetail());
+      if (url.pathname.endsWith("/bodies/AttemptResponse")) {
+        const attemptId = url.searchParams.get("attemptId");
+        if (attemptId === activeAttemptId) {
+          staleSignal = init.signal as AbortSignal;
+          return staleResponse;
+        }
+        return json({
+          body: "AttemptResponse",
+          attemptId: firstAttemptId,
+          captureCompleteness: "Exact",
+          availability: "Available",
+          text: "selected attempt one",
+          offsetBytes: 0,
+          returnedBytes: 20,
+          totalBytes: 20,
+          nextOffsetBytes: null,
+          contentType: "text/plain",
+          artifactId: "55555555-5555-5555-5555-555555555555",
+          integrityVerified: true,
+          message: null,
+        });
+      }
+      return json({ message: `Unexpected ${url.pathname}` }, 500);
+    });
+
+    await waitFor(() => expect(staleSignal).toBeInstanceOf(AbortSignal));
+    fireEvent.click(screen.getByRole("button", { name: /attempt 1.*model-a.*failed/i }));
+    expect(await screen.findByText("selected attempt one")).toBeInTheDocument();
+    expect(staleSignal?.aborted).toBe(true);
+
+    resolveStale(json({
+      body: "AttemptResponse",
+      attemptId: activeAttemptId,
+      captureCompleteness: "Exact",
+      availability: "Available",
+      text: "stale attempt two",
+      offsetBytes: 0,
+      returnedBytes: 17,
+      totalBytes: 17,
+      nextOffsetBytes: null,
+      contentType: "text/plain",
+      artifactId: "55555555-5555-5555-5555-555555555555",
+      integrityVerified: true,
+      message: null,
+    }));
+    await waitFor(() => expect(screen.queryByText("stale attempt two")).toBeNull());
+    expect(screen.getByText("selected attempt one")).toBeInTheDocument();
+  });
+
+  it("aborts a large-body page read when the drawer closes", async () => {
+    let bodySignal: AbortSignal | undefined;
+    const { unmount } = renderContent((url, init) => {
+      if (url.pathname === "/api/workflows/runs/run-1/model-calls/42") return json(projectedMetadata());
+      if (url.pathname === `/api/workflows/runs/run-1/model-calls/${callId}`) return json(stableDetail());
+      if (url.pathname.endsWith("/bodies/AttemptResponse")) {
+        bodySignal = init.signal as AbortSignal;
+        return new Promise<Response>(() => undefined);
+      }
+      return json({ message: `Unexpected ${url.pathname}` }, 500);
+    });
+
+    await waitFor(() => expect(bodySignal).toBeInstanceOf(AbortSignal));
+    unmount();
+    expect(bodySignal?.aborted).toBe(true);
   });
 
   it("keeps LegacyFallback on the sequence part reader and surfaces typed backend state", async () => {
