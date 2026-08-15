@@ -26,9 +26,9 @@ CREATE TABLE workflow_run_record (
     -- run a privileged operation that bypasses the immutability trigger via a session var.
     run_id          UUID NOT NULL REFERENCES workflow_run(id),
 
-    -- Sequence is the ledger's natural per-run ordering. BIGSERIAL guarantees monotonic
-    -- INSERT order globally, which is enough for replay reconstruction (one engine writes
-    -- to one run at a time). Globally unique not strictly necessary but harmless.
+    -- Sequence is the ledger's natural per-run allocation ordering. BIGSERIAL is gapful and
+    -- allocated before transaction commit: it MUST NOT be used as a global committed-event
+    -- high-water cursor because a lower value may become visible after a higher one.
     sequence        BIGSERIAL NOT NULL,
 
     -- Event discriminator. Open string — no CHECK constraint — so new event kinds drop in

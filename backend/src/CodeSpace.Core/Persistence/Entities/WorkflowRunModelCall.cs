@@ -49,6 +49,18 @@ public class WorkflowRunModelCall : IEntity<Guid>, IAuditable
     /// <summary>One-based order of this logical model call within its execution scope.</summary>
     public long CallOrdinal { get; set; } = 1;
 
+    /// <summary>
+    /// Open, versioned source adapter identity when this row is a physical projection, e.g.
+    /// <c>workflow-run-record/v1</c>. Null together with <see cref="SourceCorrelationId"/> for native/direct producers.
+    /// </summary>
+    public string? SourceKind { get; set; }
+
+    /// <summary>
+    /// Stable logical identity in <see cref="SourceKind"/>. For the interaction tape this is its correlation id;
+    /// it is never inferred from a global sequence or an occurrence timestamp.
+    /// </summary>
+    public Guid? SourceCorrelationId { get; set; }
+
     /// <summary>Versioned semantic purpose, e.g. supervisor.decision/v1, planner.plan/v1 or grader.oracle/v1.</summary>
     public string Purpose { get; set; } = "unknown/v1";
 

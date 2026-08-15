@@ -3,6 +3,8 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
+using CodeSpace.Messages.Commands.Workflows;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Contracts;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
@@ -30,7 +32,8 @@ public sealed class WorkflowRunModelCallSchemaFlowTests
             "call_ordinal", "capture_completeness", "capture_source", "created_by", "created_date", "execution_attempt_id",
             "execution_attempt_ordinal", "execution_generation", "id", "iteration_key", "last_modified_by", "last_modified_date",
             "node_id", "plan_version", "purpose", "request_artifact_id", "requested_model", "requested_model_row_id", "requested_provider",
-            "schema_version", "selection_policy", "team_id", "workflow_run_id", "work_plan_id", "work_unit_contract_hash", "work_unit_id",
+            "schema_version", "selection_policy", "source_correlation_id", "source_kind", "team_id", "workflow_run_id", "work_plan_id",
+            "work_unit_contract_hash", "work_unit_id",
         }.Order());
         (await ColumnsAsync("workflow_run_model_call_attempt")).ShouldBe(new[]
         {
@@ -39,7 +42,7 @@ public sealed class WorkflowRunModelCallSchemaFlowTests
             "endpoint_fingerprint", "error_artifact_id", "error_code", "finish_reason", "first_token_at", "http_status_code", "id",
             "input_tokens", "last_modified_by", "last_modified_date", "model_call_id", "output_tokens", "pricing_version",
             "provider_request_id", "reasoning_tokens", "request_artifact_id", "response_artifact_id", "schema_version", "started_at",
-            "status", "team_id", "transport_kind", "workflow_run_id",
+            "status", "source_evidence_revision", "source_started_record_id", "source_terminal_record_id", "team_id", "transport_kind", "workflow_run_id",
         }.Order());
 
         var indexes = await IndexesAsync();
@@ -50,13 +53,15 @@ public sealed class WorkflowRunModelCallSchemaFlowTests
         indexes.ShouldContain("ux_workflow_run_model_call_attempt_ordinal");
         indexes.ShouldContain("ix_workflow_run_model_call_attempt_run_started");
         indexes.ShouldContain("ix_workflow_run_model_call_attempt_effective_model_row");
+        indexes.ShouldContain("ux_workflow_run_model_call_source_identity");
+        indexes.ShouldContain("ux_workflow_run_model_call_attempt_source_terminal");
+        indexes.ShouldContain("ix_workflow_run_model_call_attempt_late_start");
     }
 
     [Fact]
     public async Task Logical_call_and_physical_attempt_round_trip_without_collapsing_requested_and_effective_models()
     {
-        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var runId = Guid.NewGuid();
+        var (runId, teamId) = await SeedRunAsync();
         var callId = Guid.NewGuid();
         var requestArtifactId = Guid.NewGuid();
         var providerRequestArtifactId = Guid.NewGuid();
@@ -161,8 +166,8 @@ public sealed class WorkflowRunModelCallSchemaFlowTests
     [Fact]
     public async Task Database_rejects_partial_identity_negative_usage_and_inverted_timing()
     {
-        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var invalidCall = Call(teamId);
+        var (runId, teamId) = await SeedRunAsync();
+        var invalidCall = Call(teamId, runId);
         invalidCall.WorkPlanId = Guid.NewGuid();
 
         using (var scope = _fixture.BeginScope())
@@ -172,7 +177,7 @@ public sealed class WorkflowRunModelCallSchemaFlowTests
             (await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>()).InnerException.ShouldNotBeNull();
         }
 
-        var invalidGenerationCall = Call(teamId);
+        var invalidGenerationCall = Call(teamId, runId);
         invalidGenerationCall.ExecutionAttemptId = Guid.NewGuid();
         invalidGenerationCall.ExecutionAttemptOrdinal = 1;
         invalidGenerationCall.ExecutionGeneration = 0;
@@ -183,7 +188,7 @@ public sealed class WorkflowRunModelCallSchemaFlowTests
             await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
         }
 
-        var validCall = Call(teamId);
+        var validCall = Call(teamId, runId);
         using (var scope = _fixture.BeginScope())
         {
             var db = scope.Resolve<CodeSpaceDbContext>();
@@ -231,11 +236,29 @@ public sealed class WorkflowRunModelCallSchemaFlowTests
         }
     }
 
-    private static WorkflowRunModelCall Call(Guid teamId) => new()
+    private static WorkflowRunModelCall Call(Guid teamId, Guid runId) => new()
     {
-        Id = Guid.NewGuid(), TeamId = teamId, WorkflowRunId = Guid.NewGuid(), IterationKey = "", CallOrdinal = 1, Purpose = "test/v1",
+        Id = Guid.NewGuid(), TeamId = teamId, WorkflowRunId = runId, IterationKey = "", CallOrdinal = 1, Purpose = "test/v1",
         CaptureSource = "harness-native", CaptureCompleteness = WorkflowRunCaptureCompleteness.Partial, SchemaVersion = WorkflowRunDataContract.CurrentVersion,
     };
+
+    private async Task<(Guid RunId, Guid TeamId)> SeedRunAsync()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        Guid workflowId;
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+        {
+            workflowId = await scope.Resolve<MediatR.IMediator>().Send(new CreateWorkflowCommand
+            {
+                Name = "model-call-schema-" + Guid.NewGuid().ToString("N")[..8],
+                Definition = WorkflowsTestSeed.MinimalDefinition(),
+                Activations = new List<WorkflowActivationInput>(),
+                Enabled = true,
+            });
+        }
+
+        return (await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId), teamId);
+    }
 
     private async Task<IReadOnlyList<string>> ColumnsAsync(string table)
     {
