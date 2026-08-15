@@ -1,5 +1,6 @@
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Commands.Agents;
+using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Queries.Agents;
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
@@ -49,6 +50,55 @@ public class AgentsController : ControllerBase
         var result = await _mediator.Send(new ListAgentRunEventsQuery { AgentRunId = agentRunId, AfterSequence = after }, cancellationToken).ConfigureAwait(false);
         return Ok(result);
     }
+
+    /// <summary>Metadata-only, keyset-paged durable stdout/stderr/transcript/debug streams for one Agent Run.</summary>
+    [HttpGet("runs/{agentRunId:guid}/logs")]
+    public async Task<IActionResult> ListRunLogs([FromRoute] Guid agentRunId, [FromQuery] ListAgentRunLogsQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query with { AgentRunId = agentRunId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
+    /// <summary>Metadata for one exact Agent Run log stream. Stream ids from another run or team are indistinguishable from missing.</summary>
+    [HttpGet("runs/{agentRunId:guid}/logs/{streamId:guid}")]
+    public async Task<IActionResult> GetRunLog([FromRoute] Guid agentRunId, [FromRoute] Guid streamId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetAgentRunLogQuery { AgentRunId = agentRunId, StreamId = streamId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
+    /// <summary>One bounded raw byte range from a durable Agent Run log. Availability failures are typed JSON and never become empty content.</summary>
+    [HttpGet("runs/{agentRunId:guid}/logs/{streamId:guid}/content")]
+    public async Task<IActionResult> ReadRunLog([FromRoute] Guid agentRunId, [FromRoute] Guid streamId, [FromQuery] ReadAgentRunLogRangeQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query with { AgentRunId = agentRunId, StreamId = streamId }, cancellationToken).ConfigureAwait(false);
+        if (result == null) return NotFound();
+        if (result.Availability != AgentRunLogReadAvailability.Available)
+        {
+            var problem = new AgentRunLogReadProblem { Availability = result.Availability, Code = result.ProblemCode ?? result.Availability.ToString(), IsRetryable = result.IsRetryable, StreamId = result.Stream.StreamId };
+            return StatusCode(LogProblemStatus(result.Availability), problem);
+        }
+
+        Response.Headers.Append("X-CodeSpace-Log-Offset", result.OffsetBytes.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Response.Headers.Append("X-CodeSpace-Log-Next-Offset", result.NextOffsetBytes.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Response.Headers.Append("X-CodeSpace-Log-Total-Bytes", result.Stream.TotalBytes.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Response.Headers.Append("X-CodeSpace-Log-Has-More", result.HasMore ? "true" : "false");
+        Response.Headers.Append("X-CodeSpace-Log-Revision", result.Stream.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Response.Headers.Append("X-CodeSpace-Log-Content-Type", result.Stream.ContentType);
+        if (result.Stream.ContentEncoding != null) Response.Headers.Append("X-CodeSpace-Log-Content-Encoding", result.Stream.ContentEncoding);
+        Response.Headers.Append("Cache-Control", "private, no-store");
+        Response.Headers.Append("X-Content-Type-Options", "nosniff");
+        return File(result.Content, "application/octet-stream");
+    }
+
+    private static int LogProblemStatus(AgentRunLogReadAvailability availability) => availability switch
+    {
+        AgentRunLogReadAvailability.InvalidRange => StatusCodes.Status400BadRequest,
+        AgentRunLogReadAvailability.AccessDenied => StatusCodes.Status424FailedDependency,
+        AgentRunLogReadAvailability.BackendUnavailable or AgentRunLogReadAvailability.ProviderTimeout => StatusCodes.Status503ServiceUnavailable,
+        AgentRunLogReadAvailability.PhysicalObjectMissing or AgentRunLogReadAvailability.IntegrityFailure => StatusCodes.Status410Gone,
+        _ => StatusCodes.Status422UnprocessableEntity,
+    };
 
     /// <summary>The run's governed (side-effecting) tool-call audit — what tool, when, the outcome, and the approval trail (team-scoped). Read-only tools are absent (they skip the ledger).</summary>
     [HttpGet("runs/{agentRunId:guid}/tool-calls")]

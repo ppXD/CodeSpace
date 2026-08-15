@@ -1,12 +1,15 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using Autofac;
+using CodeSpace.Core.Handlers.QueryHandlers.Agents;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.AgentRunLogging;
+using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Queries.Agents;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
@@ -120,6 +123,35 @@ public sealed class AgentRunLogRuntimeTests
             .ShouldBeOfType<AgentRunLogAppendResult.Rejected>().Problem.Code.ShouldBe(AgentRunLogProblemCode.StaleWorker);
     }
 
+    [Fact]
+    public async Task Metadata_index_is_team_scoped_and_keyset_paged_without_loading_segments()
+    {
+        var world = await SeedWorldAsync();
+        var service = Service(new TestCas(_fixture));
+        var session = Guid.NewGuid();
+        await service.OpenAsync(Open(world, session, AgentRunLogKinds.StandardOutput), CancellationToken.None);
+        await Task.Delay(2);
+        await service.OpenAsync(Open(world, session, AgentRunLogKinds.StandardError), CancellationToken.None);
+
+        using var scope = _fixture.BeginScope();
+        var first = await new ListAgentRunLogsQueryHandler(scope.Resolve<CodeSpaceDbContext>(), new StubCurrentTeam(world.TeamId))
+            .Handle(new ListAgentRunLogsQuery { AgentRunId = world.AgentRunId, Limit = 1 }, CancellationToken.None);
+        first.ShouldNotBeNull();
+        first.Items.Count.ShouldBe(1);
+        first.NextCursor.ShouldNotBeNull();
+
+        var second = await new ListAgentRunLogsQueryHandler(scope.Resolve<CodeSpaceDbContext>(), new StubCurrentTeam(world.TeamId))
+            .Handle(new ListAgentRunLogsQuery { AgentRunId = world.AgentRunId, Limit = 1, Cursor = first.NextCursor }, CancellationToken.None);
+        second.ShouldNotBeNull();
+        second.Items.Count.ShouldBe(1);
+        second.Items[0].StreamId.ShouldNotBe(first.Items[0].StreamId);
+        second.NextCursor.ShouldBeNull();
+
+        var foreign = await new ListAgentRunLogsQueryHandler(scope.Resolve<CodeSpaceDbContext>(), new StubCurrentTeam(Guid.NewGuid()))
+            .Handle(new ListAgentRunLogsQuery { AgentRunId = world.AgentRunId }, CancellationToken.None);
+        foreign.ShouldBeNull();
+    }
+
     private AgentRunLogService Service(IArtifactCasRuntimeCoordinator artifacts)
     {
         using var scope = _fixture.BeginScope();
@@ -174,6 +206,12 @@ public sealed class AgentRunLogRuntimeTests
     }
 
     private sealed record World(Guid TeamId, Guid ActorId, Guid StorageProfileId, Guid AgentRunId);
+
+    private sealed class StubCurrentTeam(Guid id) : ICurrentTeam
+    {
+        public Guid? Id { get; } = id;
+        public bool IsSet => true;
+    }
 
     private sealed class TestCas(PostgresFixture fixture) : IArtifactCasRuntimeCoordinator
     {
