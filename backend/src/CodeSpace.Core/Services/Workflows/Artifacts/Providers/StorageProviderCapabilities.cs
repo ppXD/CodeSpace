@@ -19,4 +19,6 @@ public enum StorageProviderCapabilities : long
     SignedDownload = 1L << 7,
     ServerSideEncryption = 1L << 8,
     ObjectLock = 1L << 9,
+    Delete = 1L << 10,
+    HealthProbe = 1L << 11,
 }

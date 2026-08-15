@@ -45,7 +45,9 @@ public sealed class StorageProviderModulesEndpointE2ETests : IClassFixture<TaskL
         local.GetProperty("displayName").GetString().ShouldBe("Local / shared filesystem");
         local.GetProperty("configSchema").GetProperty("properties").TryGetProperty("rootPath", out _).ShouldBeTrue();
         local.GetProperty("secretSchema").GetProperty("properties").EnumerateObject().ShouldBeEmpty("the local provider declares no secret inputs");
-        local.GetProperty("capabilities").EnumerateArray().Select(value => value.GetString()).ShouldBe(["ConditionalCreate"]);
+        local.GetProperty("capabilities").EnumerateArray().Select(value => value.GetString()).ShouldBe([
+            "StreamingWrite", "StreamingRead", "RangeRead", "ConditionalCreate", "Delete", "HealthProbe"
+        ]);
 
         var wire = body.GetRawText();
         wire.ShouldNotContain("factoryType", Case.Insensitive);

@@ -57,7 +57,7 @@ public sealed class StorageProviderModuleCatalog : IStorageProviderModuleCatalog
             throw new InvalidOperationException($"Storage provider module '{module.TypeKey}' {nameof(IStorageProviderModule.ConfigSchema)} must be a JSON object schema.");
         if (module.SecretSchema.ValueKind != JsonValueKind.Object)
             throw new InvalidOperationException($"Storage provider module '{module.TypeKey}' {nameof(IStorageProviderModule.SecretSchema)} must be a JSON object schema.");
-        if (module.FactoryType == null || !module.FactoryType.IsClass || module.FactoryType.IsAbstract)
-            throw new InvalidOperationException($"Storage provider module '{module.TypeKey}' FactoryType must be a concrete class.");
+        if (module.FactoryType == null || !module.FactoryType.IsClass || module.FactoryType.IsAbstract || !typeof(IArtifactStorageDriverFactory).IsAssignableFrom(module.FactoryType))
+            throw new InvalidOperationException($"Storage provider module '{module.TypeKey}' FactoryType must be a concrete {nameof(IArtifactStorageDriverFactory)} implementation.");
     }
 }
