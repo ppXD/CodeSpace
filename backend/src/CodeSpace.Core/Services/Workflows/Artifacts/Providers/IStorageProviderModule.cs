@@ -32,8 +32,8 @@ public interface IStorageProviderModule
     StorageProviderCapabilities Capabilities { get; }
 
     /// <summary>
-    /// Concrete activation entry point for this module. The catalog records but never resolves or instantiates it;
-    /// the dynamic profile/runtime slice will own that lifecycle.
+    /// Concrete activation entry point for this module. Startup validates an exact registered factory instance against
+    /// this type, but the dynamic profile/runtime slice will own calling it and the resulting driver lifecycle.
     /// </summary>
     Type FactoryType { get; }
 }

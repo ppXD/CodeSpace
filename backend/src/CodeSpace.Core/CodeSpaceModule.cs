@@ -6,6 +6,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Services.Providers.Modules;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers;
+using CodeSpace.Core.Services.Workflows.Artifacts.Providers.Local;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Plugins;
@@ -173,8 +174,9 @@ public class CodeSpaceModule : Autofac.Module
     }
 
     /// <summary>
-    /// Discovers immutable storage provider DESCRIPTORS only. Factories are intentionally not registered or resolved
-    /// here: the existing singleton <c>IArtifactBlobBackend</c> path remains authoritative until dynamic profiles land.
+    /// Discovers immutable storage provider descriptors and their inert factory entry points. Catalog construction only
+    /// validates descriptor/factory parity: it never creates a driver, resolves a profile/credential, or changes the
+    /// existing singleton <c>IArtifactBlobBackend</c> path.
     /// </summary>
     private static void RegisterStorageProviderModules(ContainerBuilder builder)
     {
@@ -183,10 +185,12 @@ public class CodeSpaceModule : Autofac.Module
             .ToArray();
 
         foreach (var type in moduleTypes) builder.RegisterType(type).As<IStorageProviderModule>().SingleInstance();
+        builder.RegisterType<LocalRwxArtifactStorageDriverFactory>().As<IArtifactStorageDriverFactory>().SingleInstance();
 
-        // Resolve the union at container build time, not a captured Core-assembly list: an external Azure/OSS package
-        // can contribute IStorageProviderModule from its own Autofac module without editing this central switch.
+        // Resolve both unions at container build time, not captured Core-assembly lists: an external Azure/OSS package
+        // can contribute its module and factory from its own Autofac module without editing this central switch.
         builder.Register(c => new StorageProviderModuleCatalog(c.Resolve<IEnumerable<IStorageProviderModule>>())).As<IStorageProviderModuleCatalog>().SingleInstance().AutoActivate();
+        builder.Register(c => new ArtifactStorageDriverFactoryCatalog(c.Resolve<IEnumerable<IArtifactStorageDriverFactory>>(), c.Resolve<IStorageProviderModuleCatalog>())).As<IArtifactStorageDriverFactoryCatalog>().SingleInstance().AutoActivate();
     }
 
     private void RegisterPluginModules(ContainerBuilder builder)
