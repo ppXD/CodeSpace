@@ -18,19 +18,45 @@ public sealed class AgentRunLogStorageResolverTests
             NamespaceFingerprint = $"sha256:{new string('a', 64)}",
         };
         var route = new StubRouteResolver(new StorageRouteSnapshotResolution.Ready(snapshot));
+        var readiness = new StubReadiness();
 
-        var result = await new AgentRunLogStorageResolver(route).ResolveAsync(teamId, CancellationToken.None);
+        var result = await new AgentRunLogStorageResolver(route, readiness).ResolveAsync(teamId, CancellationToken.None);
 
         result.ShouldBe(new AgentRunLogStorageResolution.Ready(profileId, 11));
         route.Requests.ShouldBe([new StorageRouteSnapshotRequest(teamId, "agent-run-log/v1")]);
+        readiness.TeamIds.ShouldBeEmpty();
     }
 
     [Fact]
-    public async Task Route_policy_failures_are_typed_and_never_fall_back_to_an_unrelated_profile()
+    public async Task Missing_route_is_bootstrapped_once_then_resolved_through_the_same_exact_route()
+    {
+        var teamId = Guid.NewGuid();
+        var profileId = Guid.NewGuid();
+        var route = new StubRouteResolver(
+            new StorageRouteSnapshotResolution.Missing(),
+            new StorageRouteSnapshotResolution.Ready(new StorageRouteSnapshot
+            {
+                RouteId = Guid.NewGuid(), RouteRevision = 1, DataClassTypeKey = AgentRunLogStorageResolver.DataClassTypeKey,
+                StorageProfileId = profileId, StorageProfileRevision = 1, ProviderTypeKey = "local-rwx/v1",
+                NamespaceFingerprint = $"sha256:{new string('b', 64)}",
+            }));
+        var readiness = new StubReadiness();
+
+        var result = await new AgentRunLogStorageResolver(route, readiness).ResolveAsync(teamId, CancellationToken.None);
+
+        result.ShouldBe(new AgentRunLogStorageResolution.Ready(profileId, 1));
+        readiness.TeamIds.ShouldBe([teamId]);
+        route.Requests.ShouldBe([
+            new StorageRouteSnapshotRequest(teamId, AgentRunLogStorageResolver.DataClassTypeKey),
+            new StorageRouteSnapshotRequest(teamId, AgentRunLogStorageResolver.DataClassTypeKey),
+        ]);
+    }
+
+    [Fact]
+    public async Task Non_missing_route_policy_failures_are_typed_and_never_bootstrap_or_fall_back()
     {
         var cases = new (StorageRouteSnapshotResolution Resolution, AgentRunLogStorageProblemCode Expected)[]
         {
-            (new StorageRouteSnapshotResolution.Missing(), AgentRunLogStorageProblemCode.Missing),
             (new StorageRouteSnapshotResolution.RouteNotActive(), AgentRunLogStorageProblemCode.Inactive),
             (new StorageRouteSnapshotResolution.ProfileNotActive(), AgentRunLogStorageProblemCode.Inactive),
             (new StorageRouteSnapshotResolution.RouteRevisionMissing(), AgentRunLogStorageProblemCode.Invalid),
@@ -43,10 +69,25 @@ public sealed class AgentRunLogStorageResolverTests
         foreach (var (resolution, expected) in cases)
         {
             var route = new StubRouteResolver(resolution);
-            var result = await new AgentRunLogStorageResolver(route).ResolveAsync(Guid.NewGuid(), CancellationToken.None);
+            var readiness = new StubReadiness();
+            var result = await new AgentRunLogStorageResolver(route, readiness).ResolveAsync(Guid.NewGuid(), CancellationToken.None);
             result.ShouldBe(new AgentRunLogStorageResolution.Unavailable(expected));
             route.Requests.Count.ShouldBe(1);
+            readiness.TeamIds.ShouldBeEmpty();
         }
+    }
+
+    [Fact]
+    public async Task Missing_route_that_cannot_be_bootstrapped_remains_typed_missing_without_another_profile_fallback()
+    {
+        var route = new StubRouteResolver(new StorageRouteSnapshotResolution.Missing(), new StorageRouteSnapshotResolution.Missing());
+        var readiness = new StubReadiness();
+
+        var result = await new AgentRunLogStorageResolver(route, readiness).ResolveAsync(Guid.NewGuid(), CancellationToken.None);
+
+        result.ShouldBe(new AgentRunLogStorageResolution.Unavailable(AgentRunLogStorageProblemCode.Missing));
+        readiness.TeamIds.Count.ShouldBe(1);
+        route.Requests.Count.ShouldBe(2);
     }
 
     [Fact]
@@ -56,17 +97,28 @@ public sealed class AgentRunLogStorageResolverTests
         cancellation.Cancel();
         var route = new StubRouteResolver(new StorageRouteSnapshotResolution.Cancelled());
 
-        await Should.ThrowAsync<OperationCanceledException>(() => new AgentRunLogStorageResolver(route).ResolveAsync(Guid.NewGuid(), cancellation.Token));
+        await Should.ThrowAsync<OperationCanceledException>(() => new AgentRunLogStorageResolver(route, new StubReadiness()).ResolveAsync(Guid.NewGuid(), cancellation.Token));
     }
 
-    private sealed class StubRouteResolver(StorageRouteSnapshotResolution result) : IStorageRouteSnapshotResolver
+    private sealed class StubRouteResolver(params StorageRouteSnapshotResolution[] results) : IStorageRouteSnapshotResolver
     {
         public List<StorageRouteSnapshotRequest> Requests { get; } = [];
 
         public Task<StorageRouteSnapshotResolution> ResolveAsync(StorageRouteSnapshotRequest request, CancellationToken cancellationToken)
         {
             Requests.Add(request);
-            return Task.FromResult(result);
+            return Task.FromResult(results[Math.Min(Requests.Count - 1, results.Length - 1)]);
+        }
+    }
+
+    private sealed class StubReadiness : IAgentRunLogStorageReadiness
+    {
+        public List<Guid> TeamIds { get; } = [];
+
+        public Task EnsureDefaultRouteAsync(Guid teamId, CancellationToken cancellationToken)
+        {
+            TeamIds.Add(teamId);
+            return Task.CompletedTask;
         }
     }
 }

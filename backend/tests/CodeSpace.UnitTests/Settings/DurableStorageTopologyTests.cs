@@ -25,6 +25,28 @@ public class DurableStorageTopologyTests
         volumes.Children.Keys.Select(ScalarValue).ShouldContain(volumeName);
     }
 
+    [Theory]
+    [InlineData("docker-compose.yml", "codespace-artifacts")]
+    [InlineData("backend/deploy/e2e/docker-compose.e2e.yml", "artifacts")]
+    public void Local_rwx_is_qualified_only_in_stacks_where_api_and_worker_share_one_declared_artifact_volume(string relativePath, string volumeName)
+    {
+        var root = Mapping(Load(relativePath));
+        var services = Mapping(root.Children[Scalar("services")]);
+        var volumes = Mapping(root.Children[Scalar("volumes")]);
+
+        foreach (var serviceName in new[] { "api", "worker" })
+        {
+            var service = Mapping(services.Children[Scalar(serviceName)]);
+            var environment = Mapping(service.Children[Scalar("environment")]);
+            var mounts = Sequence(service.Children[Scalar("volumes")]).Children.Select(ScalarValue).ToArray();
+
+            ScalarValue(environment.Children[Scalar("Artifacts__LocalRwxShared")]).ShouldBe("true");
+            mounts.ShouldContain($"{volumeName}:{CodeSpace.Core.Settings.DurableRoots.ContainerArtifactStore}");
+        }
+
+        volumes.Children.Keys.Select(ScalarValue).ShouldContain(volumeName);
+    }
+
     private static YamlNode Load(string relativePath)
     {
         using var reader = File.OpenText(Path.Combine(FindRepoRoot(), relativePath));

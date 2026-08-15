@@ -40,6 +40,13 @@ public sealed record RuntimeSettings
     public string? ArtifactStoreDirectory { get; init; }
 
     /// <summary>
+    /// Explicit deployment qualification that the local-rwx artifact root is one shared namespace visible to every API
+    /// and worker instance that may use it. False by default: a durable-looking or existing path does not prove two
+    /// hosts see the same bytes, so it cannot authorize an automatically active team route.
+    /// </summary>
+    public bool ArtifactLocalRwxShared { get; init; }
+
+    /// <summary>
     /// Graceful-shutdown drain budget in seconds — how long the host waits on SIGTERM for in-flight background work
     /// before exiting. The orchestrator's own grace period MUST be at least this (k8s
     /// <c>terminationGracePeriodSeconds</c>), or the process is SIGKILLed before it can drain. The default matches
@@ -78,6 +85,7 @@ public sealed record RuntimeSettings
         AgentCgroupRoot = Trimmed(configuration["Sandbox:CgroupRoot"]),
         AgentRunSpoolDirectory = Trimmed(configuration["Agents:RunSpoolDirectory"]),
         ArtifactStoreDirectory = Trimmed(configuration["Artifacts:StoreDirectory"]),
+        ArtifactLocalRwxShared = configuration.GetValue("Artifacts:LocalRwxShared", false),
         ShutdownDrainSeconds = Positive(configuration["Shutdown:DrainSeconds"], DefaultShutdownDrainSeconds),
         PackAllowedHosts = Trimmed(configuration["Agents:PackAllowedHosts"]),
         // Secrets. The LEGACY flat keys are still honoured, and that is load-bearing rather than tidy: every
