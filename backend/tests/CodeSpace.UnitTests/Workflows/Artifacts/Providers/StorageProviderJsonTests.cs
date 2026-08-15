@@ -69,6 +69,31 @@ public sealed class StorageProviderJsonTests
         error.Message.ShouldNotContain("second");
     }
 
+    [Fact]
+    public void Payload_byte_limit_is_utf8_exact_and_applies_before_canonicalization()
+    {
+        const int envelopeBytes = 12; // {"value":""}
+        var exact = Json($$"""{"value":"{{new string('a', StorageProviderJson.MaxValueBytes - envelopeBytes)}}"}""");
+        var oversizedAscii = Json($$"""{"value":"{{new string('a', StorageProviderJson.MaxValueBytes - envelopeBytes + 1)}}"}""");
+        var oversizedUtf8 = Json($$"""{"value":"{{new string('界', StorageProviderJson.MaxValueBytes / 3)}}"}""");
+
+        StorageProviderJson.Canonicalize(exact, "Secret").Length.ShouldBe(StorageProviderJson.MaxValueBytes);
+        Should.Throw<ArgumentException>(() => StorageProviderJson.Canonicalize(oversizedAscii, "Secret")).Message.ShouldContain("bytes");
+        Should.Throw<ArgumentException>(() => StorageProviderJson.Canonicalize(oversizedUtf8, "Secret")).Message.ShouldContain("UTF-8");
+    }
+
+    [Fact]
+    public void Payload_depth_and_node_limits_fail_closed_without_recursing_unboundedly()
+    {
+        var allowedDepth = Json(new string('[', StorageProviderJson.MaxValueDepth - 1) + "0" + new string(']', StorageProviderJson.MaxValueDepth - 1));
+        var excessiveDepth = Json(new string('[', StorageProviderJson.MaxValueDepth) + "0" + new string(']', StorageProviderJson.MaxValueDepth));
+        var excessiveNodes = Json("[" + string.Join(',', Enumerable.Repeat("0", StorageProviderJson.MaxValueNodes)) + "]");
+
+        StorageProviderJson.Canonicalize(allowedDepth, "NonSecretConfig").ShouldNotBeNullOrEmpty();
+        Should.Throw<ArgumentException>(() => StorageProviderJson.Canonicalize(excessiveDepth, "NonSecretConfig")).Message.ShouldContain("depth");
+        Should.Throw<ArgumentException>(() => StorageProviderJson.Canonicalize(excessiveNodes, "NonSecretConfig")).Message.ShouldContain("nodes");
+    }
+
     private static void ShouldReject(JsonElement schema, string json, string message)
     {
         var error = Should.Throw<ArgumentException>(() => StorageProviderJson.Validate(Json(json), schema, "Secret"));

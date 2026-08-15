@@ -10,6 +10,7 @@ namespace CodeSpace.Api.Controllers;
 [Route("api/storage")]
 public class StorageController : ControllerBase
 {
+    internal const long MaxMutationBodyBytes = 128 * 1024;
     private readonly IMediator _mediator;
 
     public StorageController(IMediator mediator) { _mediator = mediator; }
@@ -40,6 +41,7 @@ public class StorageController : ControllerBase
     }
 
     [HttpPost("profiles")]
+    [RequestSizeLimit(MaxMutationBodyBytes)]
     public async Task<IActionResult> CreateProfile([FromBody] CreateStorageProfileCommand command, CancellationToken cancellationToken)
     {
         var result = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
@@ -47,6 +49,7 @@ public class StorageController : ControllerBase
     }
 
     [HttpPost("profiles/{profileId:guid}/revisions")]
+    [RequestSizeLimit(MaxMutationBodyBytes)]
     public async Task<IActionResult> AppendProfileRevision([FromRoute] Guid profileId, [FromBody] AppendStorageProfileRevisionCommand command, CancellationToken cancellationToken)
     {
         var result = await _mediator.Send(command with { ProfileId = profileId }, cancellationToken).ConfigureAwait(false);
@@ -54,6 +57,7 @@ public class StorageController : ControllerBase
     }
 
     [HttpPut("profiles/{profileId:guid}/state")]
+    [RequestSizeLimit(MaxMutationBodyBytes)]
     public async Task<IActionResult> SetProfileState([FromRoute] Guid profileId, [FromBody] SetStorageProfileStateCommand command, CancellationToken cancellationToken)
     {
         var result = await _mediator.Send(command with { ProfileId = profileId }, cancellationToken).ConfigureAwait(false);
@@ -75,6 +79,7 @@ public class StorageController : ControllerBase
     }
 
     [HttpPost("credentials")]
+    [RequestSizeLimit(MaxMutationBodyBytes)]
     public async Task<IActionResult> CreateCredential([FromBody] CreateStorageCredentialCommand command, CancellationToken cancellationToken)
     {
         var result = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
@@ -82,6 +87,7 @@ public class StorageController : ControllerBase
     }
 
     [HttpPost("credentials/{credentialId:guid}/revisions")]
+    [RequestSizeLimit(MaxMutationBodyBytes)]
     public async Task<IActionResult> AppendCredentialRevision([FromRoute] Guid credentialId, [FromBody] AppendStorageCredentialRevisionCommand command, CancellationToken cancellationToken)
     {
         command.CredentialId = credentialId;
@@ -90,6 +96,7 @@ public class StorageController : ControllerBase
     }
 
     [HttpPost("credentials/{credentialId:guid}/revoke")]
+    [RequestSizeLimit(MaxMutationBodyBytes)]
     public async Task<IActionResult> RevokeCredential([FromRoute] Guid credentialId, [FromBody] RevokeStorageCredentialCommand command, CancellationToken cancellationToken)
     {
         command.CredentialId = credentialId;

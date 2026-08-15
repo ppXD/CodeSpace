@@ -11,6 +11,10 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts.Providers;
 /// </summary>
 internal static class StorageProviderJson
 {
+    internal const int MaxValueBytes = 64 * 1024;
+    internal const int MaxValueDepth = 16;
+    internal const int MaxValueNodes = 4096;
+
     private static readonly HashSet<string> SupportedSchemaKeywords = new(StringComparer.Ordinal)
     {
         "$schema", "$id", "$comment", "title", "description", "default", "examples", "deprecated", "readOnly", "writeOnly",
@@ -20,11 +24,18 @@ internal static class StorageProviderJson
 
     public static void Validate(JsonElement value, JsonElement schema, string valueName, string schemaName = "SecretSchema")
     {
+        EnsureWithinLimits(value, valueName);
         ValidateSchema(schema, schemaName);
         ValidateNode(value, schema, "$", valueName);
     }
 
     public static void ValidateSchema(JsonElement schema, string path)
+    {
+        EnsureWithinLimits(schema, path);
+        ValidateSchemaNode(schema, path);
+    }
+
+    private static void ValidateSchemaNode(JsonElement schema, string path)
     {
         if (schema.ValueKind is JsonValueKind.True or JsonValueKind.False) return;
         if (schema.ValueKind != JsonValueKind.Object) throw new ArgumentException($"Storage provider schema at {path} must be an object or boolean.");
@@ -45,6 +56,7 @@ internal static class StorageProviderJson
 
     public static string Canonicalize(JsonElement value, string valueName)
     {
+        EnsureWithinLimits(value, valueName);
         var output = new ArrayBufferWriter<byte>();
         using (var writer = new Utf8JsonWriter(output, new JsonWriterOptions { Indented = false, SkipValidation = false }))
             WriteCanonical(writer, value, valueName);
@@ -146,13 +158,13 @@ internal static class StorageProviderJson
         {
             if (properties.ValueKind != JsonValueKind.Object) throw new ArgumentException($"Storage provider schema properties at {path} must be an object.");
             EnsureUniqueProperties(properties, $"{path}.properties", "Storage provider schema");
-            foreach (var property in properties.EnumerateObject()) ValidateSchema(property.Value, Path(path, property.Name));
+            foreach (var property in properties.EnumerateObject()) ValidateSchemaNode(property.Value, Path(path, property.Name));
         }
 
         if (!schema.TryGetProperty("additionalProperties", out var additional)) return;
         if (additional.ValueKind is not (JsonValueKind.Object or JsonValueKind.True or JsonValueKind.False))
             throw new ArgumentException($"Storage provider schema additionalProperties at {path} must be an object or boolean.");
-        if (additional.ValueKind == JsonValueKind.Object) ValidateSchema(additional, $"{path}.additionalProperties");
+        if (additional.ValueKind == JsonValueKind.Object) ValidateSchemaNode(additional, $"{path}.additionalProperties");
     }
 
     private static void ValidateItemsSchema(JsonElement schema, string path)
@@ -160,7 +172,7 @@ internal static class StorageProviderJson
         if (!schema.TryGetProperty("items", out var items)) return;
         if (items.ValueKind is not (JsonValueKind.Object or JsonValueKind.True or JsonValueKind.False))
             throw new ArgumentException($"Storage provider schema items at {path} must be an object or boolean.");
-        if (items.ValueKind == JsonValueKind.Object) ValidateSchema(items, $"{path}.items");
+        if (items.ValueKind == JsonValueKind.Object) ValidateSchemaNode(items, $"{path}.items");
     }
 
     private static void ValidateAssertionSchema(JsonElement schema, string path)
@@ -256,6 +268,31 @@ internal static class StorageProviderJson
         foreach (var property in value.EnumerateObject())
         {
             if (!names.Add(property.Name)) throw new ArgumentException($"{valueName} contains duplicate property '{Path(path, property.Name)}'.");
+        }
+    }
+
+    private static void EnsureWithinLimits(JsonElement value, string valueName)
+    {
+        var raw = value.GetRawText();
+        if (raw.Length > MaxValueBytes || Encoding.UTF8.GetByteCount(raw) > MaxValueBytes)
+            throw new ArgumentException($"{valueName} must not exceed {MaxValueBytes} UTF-8 bytes.");
+
+        var nodes = 0;
+        var pending = new Stack<(JsonElement Value, int Depth)>();
+        pending.Push((value, 1));
+        while (pending.TryPop(out var current))
+        {
+            if (current.Depth > MaxValueDepth) throw new ArgumentException($"{valueName} must not exceed a JSON depth of {MaxValueDepth}.");
+            if (++nodes > MaxValueNodes) throw new ArgumentException($"{valueName} must not exceed {MaxValueNodes} JSON nodes.");
+
+            if (current.Value.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var property in current.Value.EnumerateObject()) pending.Push((property.Value, current.Depth + 1));
+            }
+            else if (current.Value.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in current.Value.EnumerateArray()) pending.Push((item, current.Depth + 1));
+            }
         }
     }
 
