@@ -6,6 +6,7 @@ import type { StorageCredentialMetadata, StorageProfileDetail, StorageProfilePro
 import { useAppendStorageProfileRevision, useCreateStorageProfile, useProbeStorageProfile, useSetStorageProfileState, useStorageCredentials, useStorageProfile, useStorageProfiles, useStorageProviderModules } from "@/hooks/use-storage";
 import { SchemaForm } from "@/components/workflows/SchemaForm";
 import { StorageCredentialSettings } from "./StorageCredentialSettings";
+import { StorageRouteSettings } from "./StorageRouteSettings";
 
 /** Settings → Storage profile control plane. Runtime ArtifactStore selection remains deployment-managed. */
 export function StorageSettings() {
@@ -68,6 +69,8 @@ export function StorageSettings() {
           </>
         )}
       </section>
+
+      <StorageRouteSettings profiles={profileRows} />
 
       <section aria-labelledby="storage-providers-title" style={{ margin: 16 }}>
         <div className="cn-listhead">

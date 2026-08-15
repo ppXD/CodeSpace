@@ -3,6 +3,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 import { ApiError } from "@/api/request";
 import { storageApi } from "@/api/storage";
 import type { AppendStorageCredentialRevisionInput, AppendStorageProfileRevisionInput, CreateStorageCredentialInput, CreateStorageProfileInput, ProbeStorageProfileInput, RevokeStorageCredentialInput, SetStorageProfileStateInput } from "@/api/storage";
+import { refreshStorageRouteQueries } from "@/hooks/use-storage-routes";
 
 export const STORAGE_PROVIDER_MODULES_KEY = ["storage", "provider-modules"] as const;
 export const STORAGE_CREDENTIALS_KEY = ["storage", "credentials"] as const;
@@ -78,9 +79,12 @@ export function useCreateStorageProfile() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (input: CreateStorageProfileInput) => storageApi.createProfile(input),
-    onSuccess: (created) => {
+    onSuccess: async (created) => {
       queryClient.setQueryData(storageProfileKey(created.id), created);
-      return queryClient.invalidateQueries({ queryKey: STORAGE_PROFILES_KEY, exact: true });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: STORAGE_PROFILES_KEY, exact: true }),
+        refreshStorageRouteQueries(queryClient),
+      ]);
     },
   });
 }
@@ -89,9 +93,12 @@ export function useAppendStorageProfileRevision() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ profileId, input }: { profileId: string; input: AppendStorageProfileRevisionInput }) => storageApi.appendProfileRevision(profileId, input),
-    onSuccess: (updated) => {
+    onSuccess: async (updated) => {
       queryClient.setQueryData(storageProfileKey(updated.id), updated);
-      return queryClient.invalidateQueries({ queryKey: STORAGE_PROFILES_KEY, exact: true });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: STORAGE_PROFILES_KEY, exact: true }),
+        refreshStorageRouteQueries(queryClient),
+      ]);
     },
     onError: (error, variables) => refreshAfterConflict(queryClient, error, variables.profileId),
   });
@@ -101,9 +108,12 @@ export function useSetStorageProfileState() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ profileId, input }: { profileId: string; input: SetStorageProfileStateInput }) => storageApi.setProfileState(profileId, input),
-    onSuccess: (updated) => {
+    onSuccess: async (updated) => {
       queryClient.setQueryData(storageProfileKey(updated.id), updated);
-      return queryClient.invalidateQueries({ queryKey: STORAGE_PROFILES_KEY, exact: true });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: STORAGE_PROFILES_KEY, exact: true }),
+        refreshStorageRouteQueries(queryClient),
+      ]);
     },
     onError: (error, variables) => refreshAfterConflict(queryClient, error, variables.profileId),
   });
@@ -121,6 +131,7 @@ function refreshAfterConflict(queryClient: ReturnType<typeof useQueryClient>, er
   return Promise.all([
     queryClient.invalidateQueries({ queryKey: STORAGE_PROFILES_KEY, exact: true }),
     queryClient.invalidateQueries({ queryKey: storageProfileKey(profileId), exact: true }),
+    refreshStorageRouteQueries(queryClient),
   ]);
 }
 
