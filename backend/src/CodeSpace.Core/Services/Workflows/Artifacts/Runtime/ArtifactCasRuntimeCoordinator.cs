@@ -1,7 +1,6 @@
 using System.Security.Cryptography;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
-using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
@@ -20,15 +19,13 @@ public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinat
     private const int HashBufferSize = 128 * 1024;
 
     private readonly DbContextOptions<CodeSpaceDbContext> _dbOptions;
-    private readonly IStorageProfileSnapshotResolver _profileResolver;
-    private readonly IArtifactStorageDriverFactoryCatalog _factoryCatalog;
+    private readonly IStorageRuntimeDriverBroker _driverBroker;
     private readonly TimeProvider _clock;
 
-    public ArtifactCasRuntimeCoordinator(DbContextOptions<CodeSpaceDbContext> dbOptions, IStorageProfileSnapshotResolver profileResolver, IArtifactStorageDriverFactoryCatalog factoryCatalog, TimeProvider clock)
+    public ArtifactCasRuntimeCoordinator(DbContextOptions<CodeSpaceDbContext> dbOptions, IStorageRuntimeDriverBroker driverBroker, TimeProvider clock)
     {
         _dbOptions = dbOptions;
-        _profileResolver = profileResolver;
-        _factoryCatalog = factoryCatalog;
+        _driverBroker = driverBroker;
         _clock = clock;
     }
 
@@ -39,7 +36,7 @@ public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinat
         // accepting it would let a replaced/zombie attempt mint a fresh effect intent.
         if (request.ExecutionIdentity != null)
             return new ArtifactCasTransferResult.Rejected(null, Problem(ArtifactCasProblemCode.ExecutionAdmissionUnavailable));
-        var resolved = await ResolveProfileAsync(request.TeamId, request.StorageProfileId, request.StorageProfileRevision, cancellationToken).ConfigureAwait(false);
+        var resolved = await ResolveProfileRevisionAsync(request.TeamId, request.StorageProfileId, request.StorageProfileRevision, cancellationToken).ConfigureAwait(false);
         if (resolved.Problem != null) return new ArtifactCasTransferResult.Rejected(null, resolved.Problem);
 
         var intent = await EnsureIntentAsync(request, resolved.ProfileRevisionId!.Value, input.Digest, cancellationToken).ConfigureAwait(false);
@@ -62,7 +59,7 @@ public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinat
         if (!claimed.Acquired)
             return new ArtifactCasTransferResult.Deferred(claim.Id, claim.LeaseExpiresAt ?? _clock.GetUtcNow(), Problem(ArtifactCasProblemCode.TransferInProgress, true));
 
-        ArtifactStorageDriverLease? driverLease = null;
+        StorageRuntimeDriverLease? driverLease = null;
         try
         {
             if (claim.State == ArtifactTransferState.RetryScheduled)
@@ -70,21 +67,21 @@ public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinat
                 claim = await TransitionAsync(claim, ArtifactTransferState.Uploading, request.ActorId, cancellationToken).ConfigureAwait(false);
                 if (claim.IsStale) return Stale(intent.Id);
             }
-            var create = await CreateDriverAsync(resolved.Snapshot!, input.Timeout, StorageProviderCapabilities.StreamingWrite | StorageProviderCapabilities.StreamingRead | StorageProviderCapabilities.ConditionalCreate, cancellationToken).ConfigureAwait(false);
+            var create = await OpenDriverAsync(new DriverActivationRequest(request.TeamId, request.StorageProfileId, request.StorageProfileRevision, input.Timeout, StorageProviderCapabilities.StreamingWrite | StorageProviderCapabilities.StreamingRead | StorageProviderCapabilities.ConditionalCreate), cancellationToken).ConfigureAwait(false);
             if (create.Problem != null) return await HandleProblemAsync(claim, request.ActorId, create.Problem, cancellationToken).ConfigureAwait(false);
-            driverLease = new ArtifactStorageDriverLease(create.Driver!);
+            driverLease = create.Lease!;
             return await DriveTransferAsync(request, input, claim, driverLease, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
-            if (driverLease != null) await driverLease.DisposeAsync().ConfigureAwait(false);
+            if (driverLease != null) await DisposeLeaseQuietlyAsync(driverLease).ConfigureAwait(false);
         }
     }
 
     public async Task<ArtifactCasReadResult> OpenReadAsync(ArtifactCasReadRequest request, CancellationToken cancellationToken)
     {
         var timeout = Validate(request);
-        var resolved = await ResolveProfileAsync(request.TeamId, request.StorageProfileId, request.StorageProfileRevision, cancellationToken).ConfigureAwait(false);
+        var resolved = await ResolveProfileRevisionAsync(request.TeamId, request.StorageProfileId, request.StorageProfileRevision, cancellationToken).ConfigureAwait(false);
         if (resolved.Problem != null) return new ArtifactCasReadResult.Unavailable(resolved.Problem);
 
         ReadLocation? stored;
@@ -101,10 +98,10 @@ public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinat
         }
 
         if (stored == null) return new ArtifactCasReadResult.Unavailable(Problem(ArtifactCasProblemCode.ArtifactMissing));
-        var create = await CreateDriverAsync(resolved.Snapshot!, timeout, StorageProviderCapabilities.StreamingRead, cancellationToken).ConfigureAwait(false);
+        var create = await OpenDriverAsync(new DriverActivationRequest(request.TeamId, request.StorageProfileId, request.StorageProfileRevision, timeout, StorageProviderCapabilities.StreamingRead), cancellationToken).ConfigureAwait(false);
         if (create.Problem != null) return new ArtifactCasReadResult.Unavailable(create.Problem);
 
-        ArtifactStorageDriverLease? driverLease = new(create.Driver!);
+        StorageRuntimeDriverLease? driverLease = create.Lease!;
         try
         {
             var driver = driverLease.Driver;
@@ -136,11 +133,11 @@ public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinat
         }
         finally
         {
-            if (driverLease != null) await driverLease.DisposeAsync().ConfigureAwait(false);
+            if (driverLease != null) await DisposeLeaseQuietlyAsync(driverLease).ConfigureAwait(false);
         }
     }
 
-    private async Task<ArtifactCasTransferResult> DriveTransferAsync(ArtifactCasTransferRequest request, ValidTransfer input, IntentSnapshot claim, ArtifactStorageDriverLease driverLease, CancellationToken cancellationToken)
+    private async Task<ArtifactCasTransferResult> DriveTransferAsync(ArtifactCasTransferRequest request, ValidTransfer input, IntentSnapshot claim, StorageRuntimeDriverLease driverLease, CancellationToken cancellationToken)
     {
         var driver = driverLease.Driver;
         var current = claim;
@@ -199,7 +196,7 @@ public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinat
         return await CommitAsync(current, request.ActorId, verification.Metadata!, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<Verification> VerifyAsync(ArtifactStorageDriverLease driverLease, string objectKey, ValidTransfer input, LeaseRenewal renewal, CancellationToken cancellationToken)
+    private async Task<Verification> VerifyAsync(StorageRuntimeDriverLease driverLease, string objectKey, ValidTransfer input, LeaseRenewal renewal, CancellationToken cancellationToken)
     {
         var driver = driverLease.Driver;
         if (!await RenewLeaseAsync(renewal.Claim, renewal.ActorId, input.Timeout, cancellationToken).ConfigureAwait(false))
@@ -496,79 +493,87 @@ public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinat
         }
     }
 
-    private async Task<ResolvedProfile> ResolveProfileAsync(Guid teamId, Guid profileId, int profileRevision, CancellationToken cancellationToken)
+    private async Task<ResolvedProfileRevision> ResolveProfileRevisionAsync(Guid teamId, Guid profileId, int profileRevision, CancellationToken cancellationToken)
     {
-        var resolution = await _profileResolver.ResolveAsync(new StorageProfileSnapshotRequest(teamId, profileId, profileRevision), cancellationToken).ConfigureAwait(false);
-        if (resolution is not StorageProfileSnapshotResolution.Ready ready)
-            return new ResolvedProfile(null, null, Map(resolution));
-        if (ready.Snapshot.ProfileId != profileId || ready.Snapshot.ProfileRevision != profileRevision)
-            return new ResolvedProfile(null, null, Problem(ArtifactCasProblemCode.ProfileInvalid));
-        if (ready.Snapshot.SecretReference != null)
-            return new ResolvedProfile(null, null, Problem(ArtifactCasProblemCode.CredentialBrokerUnavailable));
-
         await using var db = CreateDb();
-        var revisionId = await db.StorageProfileRevision.AsNoTracking()
-            .Where(value => value.TeamId == teamId && value.StorageProfileId == profileId && value.Revision == profileRevision)
-            .Select(value => (Guid?)value.Id)
+        var row = await (from profile in db.StorageProfile.AsNoTracking()
+                         join revision in db.StorageProfileRevision.AsNoTracking().Where(value => value.Revision == profileRevision)
+                             on new { profile.TeamId, StorageProfileId = profile.Id } equals new { revision.TeamId, revision.StorageProfileId } into revisions
+                         from revision in revisions.DefaultIfEmpty()
+                         where profile.TeamId == teamId && profile.Id == profileId
+                         select new ProfileRevisionRow(profile.State, revision == null ? null : revision.Id))
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-        return revisionId == null
-            ? new ResolvedProfile(null, null, Problem(ArtifactCasProblemCode.ProfileRevisionMissing))
-            : new ResolvedProfile(ready.Snapshot, revisionId, null);
+        if (row == null) return new ResolvedProfileRevision(null, Problem(ArtifactCasProblemCode.ProfileMissing));
+        if (row.State != StorageProfileState.Active) return new ResolvedProfileRevision(null, Problem(ArtifactCasProblemCode.ProfileNotActive));
+        return row.RevisionId == null
+            ? new ResolvedProfileRevision(null, Problem(ArtifactCasProblemCode.ProfileRevisionMissing))
+            : new ResolvedProfileRevision(row.RevisionId, null);
     }
 
-    private async Task<DriverCreation> CreateDriverAsync(StorageProfileSnapshot snapshot, TimeSpan timeout, StorageProviderCapabilities requiredCapabilities, CancellationToken cancellationToken)
+    private async Task<DriverCreation> OpenDriverAsync(DriverActivationRequest request, CancellationToken cancellationToken)
     {
-        var factory = _factoryCatalog.Get(snapshot.ProviderTypeKey);
-        if (factory == null) return new DriverCreation(null, Problem(ArtifactCasProblemCode.ProviderUnavailable));
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeoutSource.CancelAfter(timeout);
-        Task<IArtifactStorageDriver>? pending = null;
-        IArtifactStorageDriver? driver = null;
-        var ownershipReturned = false;
+        timeoutSource.CancelAfter(request.Timeout);
+        Task<StorageRuntimeDriverResolution>? pending = null;
         try
         {
-            pending = factory.CreateAsync(new ArtifactStorageDriverCreateRequest(snapshot), timeoutSource.Token).AsTask();
-            driver = await pending.WaitAsync(timeoutSource.Token).ConfigureAwait(false);
-            if (driver == null) return new DriverCreation(null, Problem(ArtifactCasProblemCode.ProviderFailure, true));
-            if ((driver.Capabilities & requiredCapabilities) != requiredCapabilities)
-                return new DriverCreation(null, Problem(ArtifactCasProblemCode.Unsupported));
-            ownershipReturned = true;
-            return new DriverCreation(driver, null);
+            pending = _driverBroker.OpenAsync(new StorageRuntimeDriverRequest(request.TeamId, request.ProfileId, request.ProfileRevision), timeoutSource.Token).AsTask();
+            var resolution = await pending.WaitAsync(timeoutSource.Token).ConfigureAwait(false);
+            if (resolution is not StorageRuntimeDriverResolution.Ready ready)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (timeoutSource.IsCancellationRequested)
+                    return new DriverCreation(null, Problem(ArtifactCasProblemCode.ProviderTimeout, true));
+                return new DriverCreation(null, MapBrokerFailure(resolution));
+            }
+            if (cancellationToken.IsCancellationRequested)
+            {
+                await DisposeLeaseQuietlyAsync(ready.Lease).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+            if (timeoutSource.IsCancellationRequested)
+            {
+                await DisposeLeaseQuietlyAsync(ready.Lease).ConfigureAwait(false);
+                return new DriverCreation(null, Problem(ArtifactCasProblemCode.ProviderTimeout, true));
+            }
+            var capabilityProblem = await RequireCapabilitiesAsync(ready.Lease, request.RequiredCapabilities).ConfigureAwait(false);
+            return capabilityProblem == null ? new DriverCreation(ready.Lease, null) : new DriverCreation(null, capabilityProblem);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            ObserveLateDriver(pending);
+            ObserveLateBrokerResolution(pending);
             return new DriverCreation(null, Problem(ArtifactCasProblemCode.ProviderTimeout, true));
         }
         catch (OperationCanceledException)
         {
-            ObserveLateDriver(pending);
+            ObserveLateBrokerResolution(pending);
             throw;
         }
-        catch (Exception exception) when (exception is ArgumentException or NotSupportedException)
+        catch (Exception exception) when (IsRecoverable(exception))
         {
-            return new DriverCreation(null, Problem(ArtifactCasProblemCode.Unsupported));
-        }
-        catch (Exception exception) when (exception is IOException or InvalidOperationException)
-        {
+            ObserveLateBrokerResolution(pending);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (timeoutSource.IsCancellationRequested)
+                return new DriverCreation(null, Problem(ArtifactCasProblemCode.ProviderTimeout, true));
             return new DriverCreation(null, Problem(ArtifactCasProblemCode.ProviderFailure, true));
-        }
-        catch (UnauthorizedAccessException)
-        {
-            return new DriverCreation(null, Problem(ArtifactCasProblemCode.Unauthorized));
-        }
-        catch (Exception)
-        {
-            return new DriverCreation(null, Problem(ArtifactCasProblemCode.ProviderFailure, true));
-        }
-        finally
-        {
-            if (driver != null && !ownershipReturned)
-                await ArtifactStorageDriverLease.DisposeDriverAsync(driver).ConfigureAwait(false);
         }
     }
 
-    private async Task<HashObservation> HashAsync(Stream stream, ArtifactStorageDriverLease driverLease, TimeSpan timeout, CancellationToken cancellationToken)
+    internal static async Task<ArtifactCasProblem?> RequireCapabilitiesAsync(StorageRuntimeDriverLease lease, StorageProviderCapabilities requiredCapabilities)
+    {
+        StorageProviderCapabilities capabilities;
+        try { capabilities = lease.Driver.Capabilities; }
+        catch (Exception exception) when (IsRecoverable(exception))
+        {
+            await DisposeLeaseQuietlyAsync(lease).ConfigureAwait(false);
+            return Problem(ArtifactCasProblemCode.ProviderFailure, true);
+        }
+        if ((capabilities & requiredCapabilities) == requiredCapabilities) return null;
+        await DisposeLeaseQuietlyAsync(lease).ConfigureAwait(false);
+        return Problem(ArtifactCasProblemCode.Unsupported);
+    }
+
+    private async Task<HashObservation> HashAsync(Stream stream, StorageRuntimeDriverLease driverLease, TimeSpan timeout, CancellationToken cancellationToken)
     {
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutSource.CancelAfter(timeout);
@@ -581,6 +586,7 @@ public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinat
         {
             int read;
             Task<int>? pending = null;
+            var abandoned = false;
             try
             {
                 pending = driverLease.Track(stream.ReadAsync(buffer.AsMemory(), timeoutSource.Token).AsTask());
@@ -588,12 +594,12 @@ public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinat
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
-                if (pending != null) driverLease.Abandon(pending);
+                if (pending != null) { abandoned = true; driverLease.Abandon(pending); }
                 return new HashObservation(null, 0, true, null);
             }
             catch (OperationCanceledException)
             {
-                if (pending != null) driverLease.Abandon(pending);
+                if (pending != null) { abandoned = true; driverLease.Abandon(pending); }
                 throw;
             }
             catch (UnauthorizedAccessException)
@@ -608,17 +614,22 @@ public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinat
             {
                 return new HashObservation(null, 0, false, Problem(ArtifactCasProblemCode.ProviderFailure, true));
             }
+            finally
+            {
+                if (pending != null && !abandoned) driverLease.Release(pending);
+            }
             if (read == 0) return new HashObservation(hash.GetHashAndReset(), size, false, null);
             hash.AppendData(buffer, 0, read);
             size += read;
         }
     }
 
-    private static async Task<Invocation<T>> InvokeAsync<T>(Func<CancellationToken, ValueTask<T>> action, TimeSpan timeout, CancellationToken cancellationToken, ArtifactStorageDriverLease driverLease)
+    private static async Task<Invocation<T>> InvokeAsync<T>(Func<CancellationToken, ValueTask<T>> action, TimeSpan timeout, CancellationToken cancellationToken, StorageRuntimeDriverLease driverLease)
     {
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutSource.CancelAfter(timeout);
         Task<T>? pending = null;
+        var abandoned = false;
         try
         {
             pending = driverLease.Track(action(timeoutSource.Token).AsTask());
@@ -626,12 +637,12 @@ public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinat
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            if (pending != null) driverLease.Abandon(pending);
+            if (pending != null) { abandoned = true; driverLease.Abandon(pending); }
             return new Invocation<T>(default, true, null);
         }
         catch (OperationCanceledException)
         {
-            if (pending != null) driverLease.Abandon(pending);
+            if (pending != null) { abandoned = true; driverLease.Abandon(pending); }
             throw;
         }
         catch (UnauthorizedAccessException)
@@ -653,6 +664,10 @@ public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinat
         catch (Exception)
         {
             return new Invocation<T>(default, false, Problem(ArtifactCasProblemCode.ProviderFailure, true));
+        }
+        finally
+        {
+            if (pending != null && !abandoned) driverLease.Release(pending);
         }
     }
 
@@ -661,11 +676,12 @@ public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinat
     /// task to settle before returning, so a non-conforming plugin cannot continue touching a stream the caller may
     /// now dispose. Qualified drivers settle promptly when their cancellation token is signalled.
     /// </summary>
-    private static async Task<Invocation<T>> InvokeOwnedInputAsync<T>(Func<CancellationToken, ValueTask<T>> action, TimeSpan timeout, CancellationToken cancellationToken, ArtifactStorageDriverLease driverLease)
+    private static async Task<Invocation<T>> InvokeOwnedInputAsync<T>(Func<CancellationToken, ValueTask<T>> action, TimeSpan timeout, CancellationToken cancellationToken, StorageRuntimeDriverLease driverLease)
     {
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutSource.CancelAfter(timeout);
         Task<T>? pending = null;
+        var abandoned = false;
         try
         {
             pending = driverLease.Track(action(timeoutSource.Token).AsTask());
@@ -673,11 +689,13 @@ public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinat
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
+            if (pending != null) { abandoned = true; driverLease.Abandon(pending); }
             await ObserveOwnedInputSettlementAsync(pending).ConfigureAwait(false);
             return new Invocation<T>(default, true, null);
         }
         catch (OperationCanceledException)
         {
+            if (pending != null) { abandoned = true; driverLease.Abandon(pending); }
             await ObserveOwnedInputSettlementAsync(pending).ConfigureAwait(false);
             throw;
         }
@@ -700,6 +718,10 @@ public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinat
         catch (Exception)
         {
             return new Invocation<T>(default, false, Problem(ArtifactCasProblemCode.ProviderFailure, true));
+        }
+        finally
+        {
+            if (pending != null && !abandoned) driverLease.Release(pending);
         }
     }
 
@@ -805,15 +827,74 @@ public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinat
         DetailsJson = "{}", CreatedBy = actorId,
     };
 
-    private static ArtifactCasProblem Map(StorageProfileSnapshotResolution resolution) => resolution switch
+    internal static ArtifactCasProblem MapBrokerFailure(StorageRuntimeDriverResolution resolution) => resolution switch
     {
-        StorageProfileSnapshotResolution.Missing => Problem(ArtifactCasProblemCode.ProfileMissing),
-        StorageProfileSnapshotResolution.NotActive => Problem(ArtifactCasProblemCode.ProfileNotActive),
-        StorageProfileSnapshotResolution.RevisionMissing => Problem(ArtifactCasProblemCode.ProfileRevisionMissing),
-        StorageProfileSnapshotResolution.Invalid => Problem(ArtifactCasProblemCode.ProfileInvalid),
-        StorageProfileSnapshotResolution.ProviderUnavailable => Problem(ArtifactCasProblemCode.ProviderUnavailable),
-        StorageProfileSnapshotResolution.CredentialUnavailable => Problem(ArtifactCasProblemCode.CredentialUnavailable),
-        StorageProfileSnapshotResolution.CredentialInvalid => Problem(ArtifactCasProblemCode.CredentialInvalid),
+        StorageRuntimeDriverResolution.ProfileUnavailable value => MapProfileFailure(value.Reason),
+        StorageRuntimeDriverResolution.CredentialUnavailable value => MapCredentialFailure(value.Reason),
+        StorageRuntimeDriverResolution.ProviderUnavailable value => MapProviderFailure(value.Reason),
+        StorageRuntimeDriverResolution.ConfigurationInvalid value => MapConfigurationFailure(value.Reason),
+        StorageRuntimeDriverResolution.Cancelled value => MapCancellation(value.Stage),
+        StorageRuntimeDriverResolution.DriverInitializationFailed value => MapDriverFailure(value.Reason),
+        StorageRuntimeDriverResolution.Ready => Problem(ArtifactCasProblemCode.ProviderFailure),
+        _ => Problem(ArtifactCasProblemCode.ProviderFailure),
+    };
+
+    private static ArtifactCasProblem MapProfileFailure(StorageRuntimeProfileFailureReason reason) => reason switch
+    {
+        StorageRuntimeProfileFailureReason.Missing => Problem(ArtifactCasProblemCode.ProfileMissing),
+        StorageRuntimeProfileFailureReason.NotActive => Problem(ArtifactCasProblemCode.ProfileNotActive),
+        StorageRuntimeProfileFailureReason.RevisionMissing => Problem(ArtifactCasProblemCode.ProfileRevisionMissing),
+        StorageRuntimeProfileFailureReason.ResolutionFailed => Problem(ArtifactCasProblemCode.ProviderUnavailableTransient, true),
+        _ => Problem(ArtifactCasProblemCode.ProviderFailure),
+    };
+
+    private static ArtifactCasProblem MapCredentialFailure(StorageRuntimeCredentialFailureReason reason) => reason switch
+    {
+        StorageRuntimeCredentialFailureReason.Missing => Problem(ArtifactCasProblemCode.CredentialUnavailable),
+        StorageRuntimeCredentialFailureReason.NotActive => Problem(ArtifactCasProblemCode.CredentialUnavailable),
+        StorageRuntimeCredentialFailureReason.RevisionMissing => Problem(ArtifactCasProblemCode.CredentialUnavailable),
+        StorageRuntimeCredentialFailureReason.ProviderMismatch => Problem(ArtifactCasProblemCode.CredentialInvalid),
+        StorageRuntimeCredentialFailureReason.ProviderUnavailable => Problem(ArtifactCasProblemCode.CredentialBrokerUnavailable, true),
+        StorageRuntimeCredentialFailureReason.InvalidEnvelope => Problem(ArtifactCasProblemCode.CredentialInvalid),
+        StorageRuntimeCredentialFailureReason.InvalidReference => Problem(ArtifactCasProblemCode.CredentialInvalid),
+        StorageRuntimeCredentialFailureReason.InvalidSecret => Problem(ArtifactCasProblemCode.CredentialInvalid),
+        StorageRuntimeCredentialFailureReason.ResolutionFailed => Problem(ArtifactCasProblemCode.CredentialBrokerUnavailable, true),
+        _ => Problem(ArtifactCasProblemCode.ProviderFailure),
+    };
+
+    private static ArtifactCasProblem MapProviderFailure(StorageRuntimeProviderFailureReason reason) => reason switch
+    {
+        StorageRuntimeProviderFailureReason.ModuleMissing => Problem(ArtifactCasProblemCode.ProviderUnavailable),
+        StorageRuntimeProviderFailureReason.FactoryMissing => Problem(ArtifactCasProblemCode.ProviderUnavailable),
+        StorageRuntimeProviderFailureReason.FactoryMismatch => Problem(ArtifactCasProblemCode.ProviderUnavailable),
+        StorageRuntimeProviderFailureReason.CatalogFailure => Problem(ArtifactCasProblemCode.ProviderFailure, true),
+        _ => Problem(ArtifactCasProblemCode.ProviderFailure),
+    };
+
+    private static ArtifactCasProblem MapConfigurationFailure(StorageRuntimeConfigurationFailureReason reason) => reason switch
+    {
+        StorageRuntimeConfigurationFailureReason.InvalidConfiguration => Problem(ArtifactCasProblemCode.ProfileInvalid),
+        StorageRuntimeConfigurationFailureReason.UnsupportedSchemaVersion => Problem(ArtifactCasProblemCode.ProfileInvalid),
+        StorageRuntimeConfigurationFailureReason.SnapshotIdentityMismatch => Problem(ArtifactCasProblemCode.ProfileInvalid),
+        StorageRuntimeConfigurationFailureReason.InvalidProviderTypeKey => Problem(ArtifactCasProblemCode.ProfileInvalid),
+        StorageRuntimeConfigurationFailureReason.FactoryRejectedConfiguration => Problem(ArtifactCasProblemCode.Unsupported),
+        _ => Problem(ArtifactCasProblemCode.ProviderFailure),
+    };
+
+    private static ArtifactCasProblem MapCancellation(StorageRuntimeCancellationStage stage) => stage switch
+    {
+        StorageRuntimeCancellationStage.ProfileResolution => Problem(ArtifactCasProblemCode.ProviderTimeout, true),
+        StorageRuntimeCancellationStage.CredentialResolution => Problem(ArtifactCasProblemCode.ProviderTimeout, true),
+        StorageRuntimeCancellationStage.DriverInitialization => Problem(ArtifactCasProblemCode.ProviderTimeout, true),
+        _ => Problem(ArtifactCasProblemCode.ProviderFailure),
+    };
+
+    private static ArtifactCasProblem MapDriverFailure(StorageRuntimeDriverInitializationFailureReason reason) => reason switch
+    {
+        StorageRuntimeDriverInitializationFailureReason.NullDriver => Problem(ArtifactCasProblemCode.ProviderFailure, true),
+        StorageRuntimeDriverInitializationFailureReason.ProviderCanceled => Problem(ArtifactCasProblemCode.ProviderTimeout, true),
+        StorageRuntimeDriverInitializationFailureReason.ProviderFailure => Problem(ArtifactCasProblemCode.ProviderFailure, true),
+        StorageRuntimeDriverInitializationFailureReason.CleanupFailure => Problem(ArtifactCasProblemCode.ProviderFailure, true),
         _ => Problem(ArtifactCasProblemCode.ProviderFailure),
     };
 
@@ -844,16 +925,28 @@ public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinat
     private ArtifactCasTransferResult.Deferred Stale(Guid intentId) => new(intentId, _clock.GetUtcNow(), Problem(ArtifactCasProblemCode.StaleWorker, true));
     private static bool IsUniqueViolation(Exception exception) => exception is DbUpdateException { InnerException: PostgresException { SqlState: PostgresErrorCodes.UniqueViolation } } || exception is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation };
 
-    private static void ObserveLateDriver(Task<IArtifactStorageDriver>? pending)
+    private static void ObserveLateBrokerResolution(Task<StorageRuntimeDriverResolution>? pending)
     {
-        if (pending != null) _ = DisposeLateDriverAsync(pending);
+        if (pending != null) _ = DisposeLateBrokerLeaseAsync(pending);
     }
 
-    private static async Task DisposeLateDriverAsync(Task<IArtifactStorageDriver> pending)
+    private static async Task DisposeLateBrokerLeaseAsync(Task<StorageRuntimeDriverResolution> pending)
     {
-        try { await ArtifactStorageDriverLease.DisposeDriverAsync(await pending.ConfigureAwait(false)).ConfigureAwait(false); }
-        catch { /* Observe late factory faults without logging provider/secret material. */ }
+        try
+        {
+            if (await pending.ConfigureAwait(false) is StorageRuntimeDriverResolution.Ready ready)
+                await DisposeLeaseQuietlyAsync(ready.Lease).ConfigureAwait(false);
+        }
+        catch { /* Observe late broker faults without logging provider, configuration or secret material. */ }
     }
+
+    private static async Task DisposeLeaseQuietlyAsync(StorageRuntimeDriverLease lease)
+    {
+        try { await lease.DisposeAsync().ConfigureAwait(false); }
+        catch { /* Cleanup cannot change the already-typed CAS outcome or expose provider detail. */ }
+    }
+
+    private static bool IsRecoverable(Exception exception) => exception is not OutOfMemoryException and not AccessViolationException;
 
     private CodeSpaceDbContext CreateDb() => new(_dbOptions);
 
@@ -879,8 +972,10 @@ public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinat
         Problem = problem,
     };
 
-    private sealed record ResolvedProfile(StorageProfileSnapshot? Snapshot, Guid? ProfileRevisionId, ArtifactCasProblem? Problem);
-    private sealed record DriverCreation(IArtifactStorageDriver? Driver, ArtifactCasProblem? Problem);
+    private sealed record ResolvedProfileRevision(Guid? ProfileRevisionId, ArtifactCasProblem? Problem);
+    private sealed record DriverActivationRequest(Guid TeamId, Guid ProfileId, int ProfileRevision, TimeSpan Timeout, StorageProviderCapabilities RequiredCapabilities);
+    private sealed record DriverCreation(StorageRuntimeDriverLease? Lease, ArtifactCasProblem? Problem);
+    private sealed record ProfileRevisionRow(StorageProfileState State, Guid? RevisionId);
     private sealed record ClaimResult(IntentSnapshot Intent, bool Acquired);
     private sealed record ValidTransfer(byte[] Digest, long Size, TimeSpan Timeout);
     private sealed record LeaseRenewal(IntentSnapshot Claim, Guid ActorId);

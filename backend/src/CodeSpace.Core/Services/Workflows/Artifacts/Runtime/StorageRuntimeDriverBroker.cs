@@ -39,6 +39,7 @@ public sealed class StorageRuntimeDriverBroker : IStorageRuntimeDriverBroker
         }
         catch (Exception exception) when (IsRecoverable(exception))
         {
+            if (cancellationToken.IsCancellationRequested) return new StorageRuntimeDriverResolution.Cancelled(StorageRuntimeCancellationStage.ProfileResolution);
             return new StorageRuntimeDriverResolution.ProfileUnavailable(StorageRuntimeProfileFailureReason.ResolutionFailed);
         }
 
@@ -53,12 +54,14 @@ public sealed class StorageRuntimeDriverBroker : IStorageRuntimeDriverBroker
         try
         {
             factory = _factoryCatalog.Get(snapshot.ProviderTypeKey);
+            if (cancellationToken.IsCancellationRequested) return new StorageRuntimeDriverResolution.Cancelled(StorageRuntimeCancellationStage.DriverInitialization);
             if (factory == null) return new StorageRuntimeDriverResolution.ProviderUnavailable(StorageRuntimeProviderFailureReason.FactoryMissing);
             if (!string.Equals(factory.ProviderTypeKey, snapshot.ProviderTypeKey, StringComparison.Ordinal))
                 return new StorageRuntimeDriverResolution.ProviderUnavailable(StorageRuntimeProviderFailureReason.FactoryMismatch);
         }
         catch (Exception exception) when (IsRecoverable(exception))
         {
+            if (cancellationToken.IsCancellationRequested) return new StorageRuntimeDriverResolution.Cancelled(StorageRuntimeCancellationStage.DriverInitialization);
             return new StorageRuntimeDriverResolution.ProviderUnavailable(StorageRuntimeProviderFailureReason.CatalogFailure);
         }
 
@@ -79,13 +82,18 @@ public sealed class StorageRuntimeDriverBroker : IStorageRuntimeDriverBroker
             }
             catch (Exception exception) when (IsRecoverable(exception))
             {
+                if (cancellationToken.IsCancellationRequested) return new StorageRuntimeDriverResolution.Cancelled(StorageRuntimeCancellationStage.CredentialResolution);
                 return new StorageRuntimeDriverResolution.CredentialUnavailable(StorageRuntimeCredentialFailureReason.ResolutionFailed);
             }
 
-            if (cancellationToken.IsCancellationRequested) return new StorageRuntimeDriverResolution.Cancelled(StorageRuntimeCancellationStage.CredentialResolution);
-            if (credentialResolution is not StorageCredentialSecretResolution.Ready credentialReady) return MapCredentialFailure(credentialResolution);
+            if (credentialResolution is not StorageCredentialSecretResolution.Ready credentialReady)
+            {
+                if (cancellationToken.IsCancellationRequested) return new StorageRuntimeDriverResolution.Cancelled(StorageRuntimeCancellationStage.CredentialResolution);
+                return MapCredentialFailure(credentialResolution);
+            }
             using (credentialReady)
             {
+                if (cancellationToken.IsCancellationRequested) return new StorageRuntimeDriverResolution.Cancelled(StorageRuntimeCancellationStage.CredentialResolution);
                 if (credentialReady.UseSecret(secret => secret.ValueKind) != JsonValueKind.Object)
                     return new StorageRuntimeDriverResolution.CredentialUnavailable(StorageRuntimeCredentialFailureReason.InvalidSecret);
                 credentialHandle = credentialReady.UseSecret(secret => new StorageCredentialHandle(secret));
@@ -113,10 +121,12 @@ public sealed class StorageRuntimeDriverBroker : IStorageRuntimeDriverBroker
         }
         catch (Exception exception) when (exception is ArgumentException or NotSupportedException)
         {
+            if (cancellationToken.IsCancellationRequested) return new StorageRuntimeDriverResolution.Cancelled(StorageRuntimeCancellationStage.DriverInitialization);
             return new StorageRuntimeDriverResolution.ConfigurationInvalid(StorageRuntimeConfigurationFailureReason.FactoryRejectedConfiguration);
         }
         catch (Exception exception) when (IsRecoverable(exception))
         {
+            if (cancellationToken.IsCancellationRequested) return new StorageRuntimeDriverResolution.Cancelled(StorageRuntimeCancellationStage.DriverInitialization);
             return new StorageRuntimeDriverResolution.DriverInitializationFailed(StorageRuntimeDriverInitializationFailureReason.ProviderFailure);
         }
         finally
@@ -124,8 +134,11 @@ public sealed class StorageRuntimeDriverBroker : IStorageRuntimeDriverBroker
             credentialHandle?.Dispose();
         }
 
+        if (cancellationToken.IsCancellationRequested)
+            return driver == null
+                ? new StorageRuntimeDriverResolution.Cancelled(StorageRuntimeCancellationStage.DriverInitialization)
+                : await DisposeCancelledDriverAsync(driver).ConfigureAwait(false);
         if (driver == null) return new StorageRuntimeDriverResolution.DriverInitializationFailed(StorageRuntimeDriverInitializationFailureReason.NullDriver);
-        if (cancellationToken.IsCancellationRequested) return await DisposeCancelledDriverAsync(driver).ConfigureAwait(false);
         return new StorageRuntimeDriverResolution.Ready(new StorageRuntimeDriverLease(driver));
     }
 
@@ -184,7 +197,7 @@ public sealed class StorageRuntimeDriverBroker : IStorageRuntimeDriverBroker
     {
         try
         {
-            await driver.DisposeAsync().ConfigureAwait(false);
+            await StorageRuntimeDriverLease.DisposeDriverAsync(driver).ConfigureAwait(false);
             return new StorageRuntimeDriverResolution.Cancelled(StorageRuntimeCancellationStage.DriverInitialization);
         }
         catch (Exception exception) when (IsRecoverable(exception))
