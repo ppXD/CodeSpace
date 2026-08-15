@@ -1,10 +1,12 @@
+using CodeSpace.Messages.Failures;
+
 namespace CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
 
 /// <summary>
 /// A required artifact reference could not produce verified bytes. This is a storage-plane fact, not an empty
 /// document and not a model/task failure; authoritative consumers must fail closed with this typed reason.
 /// </summary>
-public sealed class ArtifactContentUnavailableException : Exception
+public sealed class ArtifactContentUnavailableException : Exception, IFailure
 {
     public ArtifactContentUnavailableException(Guid artifactId, ArtifactContentUnavailableKind kind, Exception? innerException = null)
         : base(MessageFor(artifactId, kind), innerException)
@@ -15,6 +17,10 @@ public sealed class ArtifactContentUnavailableException : Exception
 
     public Guid ArtifactId { get; }
     public ArtifactContentUnavailableKind Kind { get; }
+
+    FailureKind IFailure.Kind => FailureKind.Unavailable;
+    string IFailure.Code => FailureCodes.ArtifactContentUnavailable;
+    string? IFailure.ClientMessage => "Required saved content is unavailable or could not be verified.";
 
     private static string MessageFor(Guid artifactId, ArtifactContentUnavailableKind kind) => kind switch
     {

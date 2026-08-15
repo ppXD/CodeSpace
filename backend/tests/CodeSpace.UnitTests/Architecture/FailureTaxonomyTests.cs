@@ -76,6 +76,7 @@ public class FailureTaxonomyTests
         FailureCodes.StorageProfileConflict.ShouldBe("storage_profile_conflict");
         FailureCodes.StorageRouteInvalid.ShouldBe("storage_route_invalid");
         FailureCodes.StorageRouteConflict.ShouldBe("storage_route_conflict");
+        FailureCodes.ArtifactContentUnavailable.ShouldBe("artifact_content_unavailable");
         FailureCodes.InvitationNotUsable.ShouldBe("invitation_not_usable");
         FailureCodes.InvitationEmailMismatch.ShouldBe("invitation_email_mismatch");
         FailureCodes.InvitationRequiresSignIn.ShouldBe("invitation_requires_sign_in");

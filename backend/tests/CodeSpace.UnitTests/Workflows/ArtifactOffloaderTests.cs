@@ -1,6 +1,8 @@
 using System.Text;
+using CodeSpace.Core.Failures;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
+using CodeSpace.Messages.Failures;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Workflows;
@@ -118,6 +120,18 @@ public sealed class ArtifactOffloaderTests
             new ArtifactOffloader(store).ResolveRequiredAsync(Guid.NewGuid(), "", Guid.NewGuid(), CancellationToken.None));
 
         ex.Kind.ShouldBe(expected);
+    }
+
+    [Fact]
+    public void Artifact_unavailability_has_a_stable_safe_failure_contract()
+    {
+        var artifactId = Guid.NewGuid();
+        var classification = FailureClassifier.Classify(new ArtifactContentUnavailableException(artifactId, ArtifactContentUnavailableKind.IntegrityFailure));
+
+        classification.Kind.ShouldBe(FailureKind.Unavailable);
+        classification.Code.ShouldBe(FailureCodes.ArtifactContentUnavailable);
+        classification.ClientMessage.ShouldBe("Required saved content is unavailable or could not be verified.");
+        classification.ClientMessage.ShouldNotContain(artifactId.ToString(), customMessage: "artifact identity is diagnostic context, not public failure detail");
     }
 
     /// <summary>An in-memory <see cref="IArtifactStore"/> — records Puts (returns a stable id per sha) + serves Gets; unknown id → null (the cross-team/missing case).</summary>
