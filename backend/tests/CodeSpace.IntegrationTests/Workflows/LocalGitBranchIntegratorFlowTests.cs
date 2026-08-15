@@ -4,6 +4,7 @@ using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Core.Services.Agents.Workspace.Integrators;
 using CodeSpace.Core.Services.Agents.Workspace.Providers;
 using CodeSpace.Core.Services.Workflows.Artifacts;
+using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
 using CodeSpace.Messages.Agents;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
@@ -209,6 +210,23 @@ public sealed class LocalGitBranchIntegratorFlowTests
         ctx.Outcome(result, "agent-cross").Reason.ShouldContain("could not be resolved");
     }
 
+    [Fact]
+    public async Task A_storage_backend_outage_remains_a_typed_infrastructure_failure()
+    {
+        using var ctx = new IntegratorTestContext();
+        var artifactId = Guid.NewGuid();
+        var offloader = new FakeOffloader
+        {
+            ResolveException = new ArtifactContentUnavailableException(artifactId, ArtifactContentUnavailableKind.BackendUnavailable),
+        };
+        var contribution = new BranchContribution { Label = "agent-a", BaseSha = "base", PatchArtifactId = artifactId };
+
+        var exception = await Should.ThrowAsync<ArtifactContentUnavailableException>(() =>
+            ctx.NewIntegrator(offloader).IntegrateAsync(ctx.Request("base", contribution), CancellationToken.None));
+
+        exception.Kind.ShouldBe(ArtifactContentUnavailableKind.BackendUnavailable);
+    }
+
     // ── Multi-repo set is refused ────────────────────────────────────────────────────
 
     [Fact]
@@ -391,12 +409,14 @@ public sealed class LocalGitBranchIntegratorFlowTests
     {
         private readonly Dictionary<Guid, (Guid Team, string Text)> _store = new();
         public List<Guid> ResolvedTeams { get; } = new();
+        public Exception? ResolveException { get; init; }
 
         public void Store(Guid artifactId, Guid team, string text) => _store[artifactId] = (team, text);
 
         public Task<string> ResolveAsync(Guid teamId, string? inline, Guid? artifactId, CancellationToken cancellationToken)
         {
             ResolvedTeams.Add(teamId);
+            if (ResolveException is not null) throw ResolveException;
 
             if (artifactId is null) return Task.FromResult(inline ?? "");
 

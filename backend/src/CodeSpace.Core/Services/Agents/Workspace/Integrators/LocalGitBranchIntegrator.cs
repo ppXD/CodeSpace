@@ -3,6 +3,7 @@ using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Workspace.Providers;
 using CodeSpace.Core.Services.Workflows.Artifacts;
+using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
 using CodeSpace.Messages.Agents;
 using Microsoft.Extensions.Logging;
 
@@ -67,8 +68,18 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
 
         foreach (var c in request.Contributions)
         {
-            var patch = await _offloader.ResolveRequiredAsync(request.TeamId, c.Patch, c.PatchArtifactId, cancellationToken).ConfigureAwait(false);
-            resolved.Add(new ResolvedContribution(c, patch));
+            try
+            {
+                var patch = await _offloader.ResolveRequiredAsync(request.TeamId, c.Patch, c.PatchArtifactId, cancellationToken).ConfigureAwait(false);
+                resolved.Add(new ResolvedContribution(c, patch));
+            }
+            catch (ArtifactContentUnavailableException exception) when (IsUnintegrableArtifact(exception.Kind))
+            {
+                var unavailable = new ResolvedContribution(c, "");
+                unavailable.Block(ArtifactResolutionReason(exception.Kind));
+                resolved.Add(unavailable);
+                _logger.LogWarning(exception, "Contribution {Label} cannot be integrated because its patch is unavailable. Kind={Kind}", c.Label, exception.Kind);
+            }
         }
 
         return resolved;
@@ -87,6 +98,12 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
 
         foreach (var r in resolved)
         {
+            if (r.IsBlocked)
+            {
+                anyBlocked = true;
+                continue;
+            }
+
             var reason = BlockReason(request, r);
 
             if (reason is null) continue;
@@ -100,6 +117,16 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
 
     private static bool SpansMultipleRepositories(IReadOnlyList<ResolvedContribution> resolved) =>
         resolved.Select(r => r.Contribution.SourceRepositoryId).Where(id => id != Guid.Empty).Distinct().Count() > 1;
+
+    private static bool IsUnintegrableArtifact(ArtifactContentUnavailableKind kind) =>
+        kind is ArtifactContentUnavailableKind.MetadataMissing or ArtifactContentUnavailableKind.PhysicalObjectMissing or ArtifactContentUnavailableKind.IntegrityFailure;
+
+    private static string ArtifactResolutionReason(ArtifactContentUnavailableKind kind) => kind switch
+    {
+        ArtifactContentUnavailableKind.PhysicalObjectMissing => "offloaded patch bytes are missing from durable storage",
+        ArtifactContentUnavailableKind.IntegrityFailure => "offloaded patch failed integrity verification",
+        _ => "offloaded patch could not be resolved (missing or cross-team artifact)",
+    };
 
     /// <summary>The per-contribution refusal cause (null = would apply). The base-SHA equality check is the integrity guard against grafting stale-base work onto a moved tree.</summary>
     private static string? BlockReason(IntegrationRequest request, ResolvedContribution r)
@@ -402,6 +429,7 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
 
         public BranchContribution Contribution { get; }
         public string Patch { get; }
+        public bool IsBlocked => _reason is not null;
 
         private ContributionDisposition _disposition = ContributionDisposition.Applied;
         private string? _reason;
