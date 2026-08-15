@@ -48,6 +48,8 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork, IDataProtectionKeyCont
     public DbSet<WorkflowRunRecord> WorkflowRunRecord => Set<WorkflowRunRecord>();
     public DbSet<WorkflowRunModelCall> WorkflowRunModelCall => Set<WorkflowRunModelCall>();
     public DbSet<WorkflowRunModelCallAttempt> WorkflowRunModelCallAttempt => Set<WorkflowRunModelCallAttempt>();
+    public DbSet<StorageProfile> StorageProfile => Set<StorageProfile>();
+    public DbSet<StorageProfileRevision> StorageProfileRevision => Set<StorageProfileRevision>();
     public DbSet<WorkflowArtifact> WorkflowArtifact => Set<WorkflowArtifact>();
     public DbSet<WorkflowRunNode> WorkflowRunNode => Set<WorkflowRunNode>();
     public DbSet<WorkflowRunVariable> WorkflowRunVariable => Set<WorkflowRunVariable>();
