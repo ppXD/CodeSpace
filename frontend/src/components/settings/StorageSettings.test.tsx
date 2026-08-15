@@ -90,6 +90,10 @@ function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, statusText: status === 409 ? "Conflict" : "", headers: { "Content-Type": "application/json" } });
 }
 
+function page<T>(items: T[], nextCursor: string | null = null) {
+  return { items, nextCursor };
+}
+
 function renderSettings(handler: FetchHandler) {
   localStorage.setItem("codespace.jwt", "test-jwt");
   localStorage.setItem("codespace.activeTeamId", "team-1");
@@ -108,8 +112,8 @@ function defaultHandler(options: { providers?: StorageProviderModuleSummary[]; p
   const profileDetail = options.detail ?? detail;
   return (path) => {
     if (path === "/api/storage/provider-modules") return json(providers);
-    if (path === "/api/storage/credentials") return json(options.credentials ?? []);
-    if (path === "/api/storage/profiles") return json(profiles);
+    if (path === "/api/storage/credentials/page") return json(page(options.credentials ?? []));
+    if (path === "/api/storage/profiles/page") return json(page(profiles));
     if (path === `/api/storage/profiles/${profile.id}`) return json(profileDetail);
     return json({ code: "not_found", message: `No stub for ${path}` }, 404);
   };
@@ -134,13 +138,39 @@ describe("storage profiles settings", () => {
     expect(document.body).not.toHaveTextContent(credential.credentialRef);
   });
 
+  it("loads profile and credential pages without replacing already loaded rows", async () => {
+    const secondProfile = { ...profile, id: "profile-2", stableName: "archive", providerTypeKey: secretProvider.typeKey };
+    const secondCredential = { ...credential, id: "credential-2", stableName: "aliyun-archive", credentialRef: "db:00000000-0000-0000-0000-000000000456:3" };
+    let profileReads = 0;
+    let credentialReads = 0;
+    renderSettings((path) => {
+      if (path === "/api/storage/provider-modules") return json([localProvider, secretProvider]);
+      if (path === "/api/storage/profiles/page") return json(profileReads++ === 0 ? page([profile], "profile-cursor") : page([secondProfile]));
+      if (path === "/api/storage/credentials/page") return json(credentialReads++ === 0 ? page([credential], "credential-cursor") : page([secondCredential]));
+      return json({ message: "Unexpected request" }, 500);
+    });
+
+    await screen.findByText("primary");
+    await screen.findByText("aliyun-primary");
+    fireEvent.click(screen.getByRole("button", { name: "Load more profiles" }));
+    fireEvent.click(screen.getByRole("button", { name: "Load more credentials" }));
+
+    expect(await screen.findByText("archive")).toBeInTheDocument();
+    expect(await screen.findByText("aliyun-archive")).toBeInTheDocument();
+    expect(screen.getByText("primary")).toBeInTheDocument();
+    expect(screen.getByText("aliyun-primary")).toBeInTheDocument();
+    const requestUrls = vi.mocked(globalThis.fetch).mock.calls.map(([input]) => String(input));
+    expect(requestUrls.some((url) => url.includes("/api/storage/profiles/page?limit=50&cursor=profile-cursor"))).toBe(true);
+    expect(requestUrls.some((url) => url.includes("/api/storage/credentials/page?limit=50&cursor=credential-cursor"))).toBe(true);
+  });
+
   it("creates a write-only credential from SecretSchema using password inputs", async () => {
     let submitted: Record<string, unknown> | undefined;
     renderSettings(async (path, init) => {
       const method = init.method ?? "GET";
       if (path === "/api/storage/provider-modules") return json([secretProvider]);
-      if (path === "/api/storage/profiles") return json([]);
-      if (path === "/api/storage/credentials" && method === "GET") return json([]);
+      if (path === "/api/storage/profiles/page") return json(page([]));
+      if (path === "/api/storage/credentials/page" && method === "GET") return json(page([]));
       if (path === "/api/storage/credentials" && method === "POST") {
         submitted = JSON.parse(String(init.body)) as Record<string, unknown>;
         return json(credential);
@@ -175,8 +205,8 @@ describe("storage profiles settings", () => {
     renderSettings(async (path, init) => {
       const method = init.method ?? "GET";
       if (path === "/api/storage/provider-modules") return json([secretProvider]);
-      if (path === "/api/storage/profiles") return json([]);
-      if (path === "/api/storage/credentials" && method === "GET") return json([current]);
+      if (path === "/api/storage/profiles/page") return json(page([]));
+      if (path === "/api/storage/credentials/page" && method === "GET") return json(page([current]));
       if (path === `/api/storage/credentials/${credential.id}/revisions` && method === "POST") {
         const body = JSON.parse(String(init.body)) as Record<string, unknown>;
         requests.push({ path, body });
@@ -236,8 +266,8 @@ describe("storage profiles settings", () => {
     renderSettings(async (path, init) => {
       const method = init.method ?? "GET";
       if (path === "/api/storage/provider-modules") return json([secretProvider]);
-      if (path === "/api/storage/credentials") return json([]);
-      if (path === "/api/storage/profiles" && method === "GET") return json([]);
+      if (path === "/api/storage/credentials/page") return json(page([]));
+      if (path === "/api/storage/profiles/page" && method === "GET") return json(page([]));
       if (path === "/api/storage/profiles" && method === "POST") {
         const body = JSON.parse(String(init.body)) as Record<string, unknown>;
         requests.push({ path, method, body });
@@ -272,8 +302,8 @@ describe("storage profiles settings", () => {
     renderSettings(async (path, init) => {
       const method = init.method ?? "GET";
       if (path === "/api/storage/provider-modules") return json([localProvider]);
-      if (path === "/api/storage/credentials") return json([]);
-      if (path === "/api/storage/profiles" && method === "GET") return json([profile]);
+      if (path === "/api/storage/credentials/page") return json(page([]));
+      if (path === "/api/storage/profiles/page" && method === "GET") return json(page([profile]));
       if (path === `/api/storage/profiles/${profile.id}` && method === "GET") return json(detail);
       if (path === `/api/storage/profiles/${profile.id}/revisions` && method === "POST") {
         revisionPayload = JSON.parse(String(init.body)) as Record<string, unknown>;
@@ -308,8 +338,8 @@ describe("storage profiles settings", () => {
     renderSettings(async (path, init) => {
       const method = init.method ?? "GET";
       if (path === "/api/storage/provider-modules") return json([localProvider]);
-      if (path === "/api/storage/credentials") return json([]);
-      if (path === "/api/storage/profiles" && method === "GET") return json([profile]);
+      if (path === "/api/storage/credentials/page") return json(page([]));
+      if (path === "/api/storage/profiles/page" && method === "GET") return json(page([profile]));
       if (path === `/api/storage/profiles/${profile.id}` && method === "GET") return json(detailReads++ === 0 ? detail : latest);
       if (path === `/api/storage/profiles/${profile.id}/state` && method === "PUT") {
         return json({ code: "storage_profile_conflict", message: "Storage profile version mismatch." }, 409);
@@ -334,8 +364,8 @@ describe("storage profiles settings", () => {
     renderSettings(async (path, init) => {
       const method = init.method ?? "GET";
       if (path === "/api/storage/provider-modules") return json([localProvider]);
-      if (path === "/api/storage/credentials") return json([]);
-      if (path === "/api/storage/profiles" && method === "GET") return json([{ ...profile, state: current.state, xmin: current.xmin }]);
+      if (path === "/api/storage/credentials/page") return json(page([]));
+      if (path === "/api/storage/profiles/page" && method === "GET") return json(page([{ ...profile, state: current.state, xmin: current.xmin }]));
       if (path === `/api/storage/profiles/${profile.id}` && method === "GET") return json(current);
       if (path === `/api/storage/profiles/${profile.id}/state` && method === "PUT") {
         const body = JSON.parse(String(init.body)) as Record<string, unknown>;
@@ -401,8 +431,8 @@ describe("storage profiles settings", () => {
     renderSettings(async (path, init) => {
       const method = init.method ?? "GET";
       if (path === "/api/storage/provider-modules") return json([secretProvider]);
-      if (path === "/api/storage/credentials") return json([credential]);
-      if (path === "/api/storage/profiles" && method === "GET") return json([{ ...profile, providerTypeKey: secretProvider.typeKey }]);
+      if (path === "/api/storage/credentials/page") return json(page([credential]));
+      if (path === "/api/storage/profiles/page" && method === "GET") return json(page([{ ...profile, providerTypeKey: secretProvider.typeKey }]));
       if (path === `/api/storage/profiles/${profile.id}` && method === "GET") return json(secretDetail);
       if (path === `/api/storage/profiles/${profile.id}/revisions` && method === "POST") {
         revisionPayload = JSON.parse(String(init.body)) as Record<string, unknown>;
@@ -431,8 +461,8 @@ describe("storage profiles settings", () => {
   it("distinguishes empty profiles from profile API failures", async () => {
     const { rerender } = renderSettings((path) => {
       if (path === "/api/storage/provider-modules") return json([localProvider]);
-      if (path === "/api/storage/credentials") return json([]);
-      if (path === "/api/storage/profiles") return json([]);
+      if (path === "/api/storage/credentials/page") return json(page([]));
+      if (path === "/api/storage/profiles/page") return json(page([]));
       return json({}, 404);
     });
     expect(await screen.findByText("No storage profiles configured")).toBeInTheDocument();
@@ -441,8 +471,8 @@ describe("storage profiles settings", () => {
     vi.unstubAllGlobals();
     renderSettings((path) => {
       if (path === "/api/storage/provider-modules") return json([localProvider]);
-      if (path === "/api/storage/credentials") return json([]);
-      if (path === "/api/storage/profiles") return json({ code: "storage_unavailable", message: "Profile ledger unavailable" }, 503);
+      if (path === "/api/storage/credentials/page") return json(page([]));
+      if (path === "/api/storage/profiles/page") return json({ code: "storage_unavailable", message: "Profile ledger unavailable" }, 503);
       return json({}, 404);
     });
     expect(await screen.findByText("Couldn't load storage profiles")).toBeInTheDocument();

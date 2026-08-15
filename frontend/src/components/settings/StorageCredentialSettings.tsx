@@ -31,9 +31,16 @@ export function StorageCredentialSettings({ providers }: { providers: StoragePro
         </div>
       )}
       {!credentials.isLoading && !error && rows.length > 0 && (
-        <div className="cn-list" role="list" aria-label="Storage credentials">
-          {rows.map((credential) => <StorageCredentialRow key={credential.id} credential={credential} provider={providers.find((provider) => provider.typeKey === credential.providerTypeKey)} onManage={() => setManagedId(credential.id)} />)}
-        </div>
+        <>
+          <div className="cn-list" role="list" aria-label="Storage credentials">
+            {rows.map((credential) => <StorageCredentialRow key={credential.id} credential={credential} provider={providers.find((provider) => provider.typeKey === credential.providerTypeKey)} onManage={() => setManagedId(credential.id)} />)}
+          </div>
+          {credentials.hasNextPage && (
+            <button type="button" className="btn" disabled={credentials.isFetchingNextPage} onClick={() => credentials.fetchNextPage()}>
+              {credentials.isFetchingNextPage ? "Loading more credentials…" : "Load more credentials"}
+            </button>
+          )}
+        </>
       )}
 
       {createOpen && <CreateStorageCredentialDialog providers={secretProviders} onClose={() => setCreateOpen(false)} />}
