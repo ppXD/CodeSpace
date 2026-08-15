@@ -21,6 +21,13 @@ public interface IStorageProviderModule
     /// <summary>JSON Schema for write-only secret inputs. Secret values never belong in <see cref="ConfigSchema"/>.</summary>
     JsonElement SecretSchema { get; }
 
+    /// <summary>
+    /// Project the non-secret configuration fields that identify the provider namespace. The control plane canonicalizes
+    /// and hashes this server-owned projection; clients can never submit a fingerprint. Providers with operational
+    /// tuning fields should override the conservative default so those fields do not create a new namespace identity.
+    /// </summary>
+    JsonElement GetNamespaceConfiguration(JsonElement nonSecretConfiguration) => nonSecretConfiguration.Clone();
+
     /// <summary>Provider-native behaviours available to a future policy admission layer.</summary>
     StorageProviderCapabilities Capabilities { get; }
 

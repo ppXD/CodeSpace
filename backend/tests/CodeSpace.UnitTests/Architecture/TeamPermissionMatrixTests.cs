@@ -59,6 +59,7 @@ public class TeamPermissionMatrixTests
         TeamPermissions.CredentialsUse.ShouldBe("credentials.use");
         TeamPermissions.ReposManage.ShouldBe("repos.manage");
         TeamPermissions.CredentialsManage.ShouldBe("credentials.manage");
+        TeamPermissions.StorageManage.ShouldBe("storage.manage");
         TeamPermissions.ModelsManage.ShouldBe("models.manage");
         TeamPermissions.MembersManage.ShouldBe("members.manage");
         TeamPermissions.TeamManage.ShouldBe("team.manage");
@@ -76,6 +77,7 @@ public class TeamPermissionMatrixTests
     [InlineData(TeamPermissions.CredentialsUse, TeamRole.Member)]
     [InlineData(TeamPermissions.ReposManage, TeamRole.Admin)]
     [InlineData(TeamPermissions.CredentialsManage, TeamRole.Admin)]
+    [InlineData(TeamPermissions.StorageManage, TeamRole.Admin)]
     [InlineData(TeamPermissions.ModelsManage, TeamRole.Admin)]
     [InlineData(TeamPermissions.MembersManage, TeamRole.Admin)]
     [InlineData(TeamPermissions.TeamManage, TeamRole.Owner)]
