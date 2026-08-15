@@ -552,8 +552,14 @@ public sealed class AgentRunLogCaptureRecoveryFlowTests
         intent.State.ShouldBe(AgentRunLogCaptureIntentState.ExternalStateIndeterminate);
         intent.LastErrorCode.ShouldBe("recovery-exhausted");
         intent.RecoveryAttemptCount.ShouldBe(2);
+        var terminalRevision = intent.Revision;
         await Task.Delay(30);
-        (await recovery.ReconcileAsync(CancellationToken.None)).Claimed.ShouldBe(0, "exhaustion is terminal and leaves the hot recovery index");
+        await recovery.ReconcileAsync(CancellationToken.None);
+        using var finalScope = _fixture.BeginScope();
+        var unchanged = await finalScope.Resolve<CodeSpaceDbContext>().AgentRunLogCaptureIntent.AsNoTracking().SingleAsync(value => value.AgentRunId == world.AgentRunId);
+        unchanged.State.ShouldBe(AgentRunLogCaptureIntentState.ExternalStateIndeterminate);
+        unchanged.Revision.ShouldBe(terminalRevision, "the exhausted target must remain outside the hot recovery index even when a concurrent test leaves another due intent");
+        unchanged.RecoveryAttemptCount.ShouldBe(2);
     }
 
     [Fact]
