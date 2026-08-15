@@ -1,4 +1,4 @@
-import { fetchJson } from "./request";
+import { ApiError, fetchJson, fetchResponse } from "./request";
 
 // ─── Types (mirror backend AgentDefinition DTOs) ────────────────────────────────
 
@@ -89,6 +89,55 @@ export interface AgentRunEventDto {
   data: string | null;
   occurredAt: string;
 }
+
+export type AgentRunLogStatus = "Open" | "Completed" | "Truncated" | "Unavailable" | "Corrupt" | "CaptureFailed";
+
+/** Metadata-only durable stream identity. Body bytes are always fetched separately in bounded ranges. */
+export interface AgentRunLogStreamSummary {
+  streamId: string;
+  agentRunId: string;
+  streamKind: string;
+  contentType: string;
+  contentEncoding: string | null;
+  captureSource: string;
+  retention: string;
+  status: AgentRunLogStatus;
+  revision: number;
+  segmentCount: number;
+  totalBytes: number;
+  sha256: string | null;
+  createdAt: string;
+  lastModifiedAt: string;
+  completedAt: string | null;
+  errorCode: string | null;
+}
+
+export interface AgentRunLogPage {
+  items: AgentRunLogStreamSummary[];
+  nextCursor: string | null;
+}
+
+export type AgentRunLogReadAvailability = "InvalidRange" | "PhysicalObjectMissing" | "IntegrityFailure" | "BackendUnavailable" | "AccessDenied" | "ProviderTimeout" | "Unsupported";
+
+export interface AgentRunLogRangeAvailable {
+  availability: "Available";
+  bytes: Uint8Array;
+  offsetBytes: number;
+  nextOffsetBytes: number;
+  totalBytes: number;
+  hasMore: boolean;
+  revision: number;
+  contentType: string;
+  contentEncoding: string | null;
+}
+
+export interface AgentRunLogRangeProblem {
+  availability: AgentRunLogReadAvailability | "Missing" | "InvalidResponse";
+  code: string;
+  isRetryable: boolean;
+}
+
+export type AgentRunLogRangeResult = AgentRunLogRangeAvailable | AgentRunLogRangeProblem;
 
 /** Mirrors backend `ToolCallLedgerStatus` — the lifecycle outcome of one governed tool call. */
 export type ToolCallLedgerStatus =
@@ -250,6 +299,43 @@ export const agentsApi = {
   getRun: (agentRunId: string) => fetchJson<AgentRunSummary>(`/api/agents/runs/${agentRunId}`),
   listRunEvents: (agentRunId: string, after = 0) =>
     fetchJson<AgentRunEventDto[]>(`/api/agents/runs/${agentRunId}/events?after=${after}`),
+  listRunLogs: async (agentRunId: string, cursor: string | null, limit = 25, signal?: AbortSignal): Promise<AgentRunLogPage | null> => {
+    const normalizedLimit = Math.min(Math.max(Number.isSafeInteger(limit) ? limit : 25, 1), 100);
+    const params = new URLSearchParams({ limit: String(normalizedLimit) });
+    if (cursor) params.set("cursor", cursor);
+    try {
+      const value = await fetchJson<unknown>(`/api/agents/runs/${encodeURIComponent(agentRunId)}/logs?${params}`, { signal });
+      return decodeAgentRunLogPage(value, agentRunId, cursor, normalizedLimit);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null;
+      throw error;
+    }
+  },
+  getRunLog: async (agentRunId: string, streamId: string, signal?: AbortSignal): Promise<AgentRunLogStreamSummary | null> => {
+    try {
+      const value = await fetchJson<unknown>(`/api/agents/runs/${encodeURIComponent(agentRunId)}/logs/${encodeURIComponent(streamId)}`, { signal });
+      return decodeAgentRunLogMetadata(value, agentRunId, streamId);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null;
+      throw error;
+    }
+  },
+  readRunLogRange: async (agentRunId: string, streamId: string, offsetBytes: number, limitBytes: number, signal?: AbortSignal): Promise<AgentRunLogRangeResult> => {
+    const path = `/api/agents/runs/${encodeURIComponent(agentRunId)}/logs/${encodeURIComponent(streamId)}/content?offsetBytes=${offsetBytes}&limitBytes=${limitBytes}`;
+    try {
+      const response = await fetchResponse(path, { signal, headers: { Accept: "application/octet-stream" } });
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      return validLogRange(response.headers, bytes, offsetBytes);
+    } catch (error) {
+      if (!(error instanceof ApiError)) throw error;
+      if (error.status === 404) return { availability: "Missing", code: error.code, isRetryable: false };
+      const problem = error.body as { availability?: unknown; code?: unknown; isRetryable?: unknown } | undefined;
+      if (!isLogReadAvailability(problem?.availability) || typeof problem?.code !== "string" || typeof problem?.isRetryable !== "boolean") {
+        return { availability: "InvalidResponse", code: `http_${error.status}_without_log_problem`, isRetryable: false };
+      }
+      return { availability: problem.availability, code: problem.code, isRetryable: problem.isRetryable };
+    }
+  },
   listToolCalls: (agentRunId: string) =>
     fetchJson<ToolCallView[]>(`/api/agents/runs/${agentRunId}/tool-calls`),
   getScorecard: (filters: ScorecardFilters = {}) => {
@@ -265,3 +351,113 @@ export const agentsApi = {
   getStats: (since?: string) =>
     fetchJson<AgentStatsRollup>(`/api/agents/stats${since ? `?since=${encodeURIComponent(since)}` : ""}`),
 };
+
+const LOG_READ_AVAILABILITIES = new Set<AgentRunLogReadAvailability>(["InvalidRange", "PhysicalObjectMissing", "IntegrityFailure", "BackendUnavailable", "AccessDenied", "ProviderTimeout", "Unsupported"]);
+const LOG_STATUSES = new Set<AgentRunLogStatus>(["Open", "Completed", "Truncated", "Unavailable", "Corrupt", "CaptureFailed"]);
+const LOG_RETENTIONS = new Set(["Ephemeral", "Run", "Team", "Compliance", "Permanent"]);
+
+function isLogReadAvailability(value: unknown): value is AgentRunLogReadAvailability {
+  return typeof value === "string" && LOG_READ_AVAILABILITIES.has(value as AgentRunLogReadAvailability);
+}
+
+function validLogRange(headers: Headers, bytes: Uint8Array, requestedOffset: number): AgentRunLogRangeResult {
+  const offsetBytes = exactIntegerHeader(headers, "X-CodeSpace-Log-Offset");
+  const nextOffsetBytes = exactIntegerHeader(headers, "X-CodeSpace-Log-Next-Offset");
+  const totalBytes = exactIntegerHeader(headers, "X-CodeSpace-Log-Total-Bytes");
+  const revision = exactIntegerHeader(headers, "X-CodeSpace-Log-Revision");
+  const hasMoreRaw = headers.get("X-CodeSpace-Log-Has-More");
+  const contentType = headers.get("X-CodeSpace-Log-Content-Type");
+  const valid = offsetBytes === requestedOffset && nextOffsetBytes != null && totalBytes != null && revision != null && contentType != null
+    && nextOffsetBytes - offsetBytes === bytes.byteLength && totalBytes >= nextOffsetBytes && (hasMoreRaw === "true" || hasMoreRaw === "false")
+    && (hasMoreRaw === "true") === (nextOffsetBytes < totalBytes) && !(hasMoreRaw === "true" && nextOffsetBytes === offsetBytes);
+  if (!valid) return { availability: "InvalidResponse", code: "invalid_log_range_headers", isRetryable: false };
+  return {
+    availability: "Available",
+    bytes,
+    offsetBytes,
+    nextOffsetBytes,
+    totalBytes,
+    hasMore: hasMoreRaw === "true",
+    revision,
+    contentType,
+    contentEncoding: headers.get("X-CodeSpace-Log-Content-Encoding"),
+  };
+}
+
+function exactIntegerHeader(headers: Headers, name: string): number | null {
+  const raw = headers.get(name);
+  if (raw == null || !/^\d+$/.test(raw)) return null;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function decodeAgentRunLogPage(value: unknown, expectedRunId: string, cursor: string | null, limit: number): AgentRunLogPage {
+  if (!isRecord(value) || !Array.isArray(value.items) || value.items.length > limit || !validCursor(value.nextCursor)) throw new Error("Agent Run log metadata pagination contract is invalid.");
+  if (value.nextCursor != null && (value.items.length === 0 || value.nextCursor === cursor)) throw new Error("Agent Run log metadata pagination contract cannot advance.");
+  const items = value.items.map((item) => decodeAgentRunLogMetadata(item, expectedRunId));
+  if (new Set(items.map((item) => item.streamId)).size !== items.length) throw new Error("Agent Run log metadata pagination contract contains duplicate stream identities.");
+  return { items, nextCursor: value.nextCursor };
+}
+
+function decodeAgentRunLogMetadata(value: unknown, expectedRunId: string, expectedStreamId?: string): AgentRunLogStreamSummary {
+  if (!isRecord(value)) throw new Error("Agent Run log metadata contract is not an object.");
+  const streamId = nonEmptyString(value.streamId);
+  const agentRunId = nonEmptyString(value.agentRunId);
+  const streamKind = nonEmptyString(value.streamKind);
+  const contentType = nonEmptyString(value.contentType);
+  const contentEncoding = nullableString(value.contentEncoding);
+  const captureSource = nonEmptyString(value.captureSource);
+  const retention = nonEmptyString(value.retention);
+  const status = nonEmptyString(value.status);
+  const revision = nonNegativeInteger(value.revision, false);
+  const segmentCount = nonNegativeInteger(value.segmentCount);
+  const totalBytes = nonNegativeInteger(value.totalBytes);
+  const sha256 = nullableString(value.sha256);
+  const createdAt = isoDate(value.createdAt);
+  const lastModifiedAt = isoDate(value.lastModifiedAt);
+  const completedAt = nullableIsoDate(value.completedAt);
+  const errorCode = nullableString(value.errorCode);
+  const identityValid = agentRunId === expectedRunId && (expectedStreamId == null || streamId === expectedStreamId);
+  const enumValid = LOG_STATUSES.has(status as AgentRunLogStatus) && LOG_RETENTIONS.has(retention);
+  const digestValid = sha256 == null || /^[0-9a-f]{64}$/i.test(sha256);
+  const descriptorValid = /^[a-z0-9][a-z0-9._/-]{0,126}\/v[1-9][0-9]*$/.test(streamKind) && /^[a-z0-9][a-z0-9._/-]{0,126}\/v[1-9][0-9]*$/.test(captureSource)
+    && /^[^\s/]+\/[^\s]+$/.test(contentType) && (contentEncoding == null || /^[a-z0-9][a-z0-9._+-]{0,63}$/i.test(contentEncoding));
+  const lifecycleValid = status === "Open" ? completedAt == null && errorCode == null
+    : status === "Completed" ? completedAt != null && errorCode == null : completedAt != null && errorCode != null;
+  const timeValid = Date.parse(lastModifiedAt) >= Date.parse(createdAt) && (completedAt == null || Date.parse(lastModifiedAt) >= Date.parse(completedAt));
+  if (!identityValid || !enumValid || !digestValid || !descriptorValid || !lifecycleValid || !timeValid) throw new Error("Agent Run log metadata contract has an invalid identity, enum, descriptor, lifecycle, or digest.");
+  return { streamId, agentRunId, streamKind, contentType, contentEncoding, captureSource, retention, status: status as AgentRunLogStatus, revision, segmentCount, totalBytes, sha256, createdAt, lastModifiedAt, completedAt, errorCode };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value != null && !Array.isArray(value);
+}
+
+function nonEmptyString(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0) throw new Error("Agent Run log metadata contract requires a non-empty string.");
+  return value;
+}
+
+function nullableString(value: unknown): string | null {
+  if (value === null) return null;
+  return nonEmptyString(value);
+}
+
+function nonNegativeInteger(value: unknown, allowZero = true): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < (allowZero ? 0 : 1)) throw new Error("Agent Run log metadata contract requires a bounded integer.");
+  return value;
+}
+
+function isoDate(value: unknown): string {
+  const parsed = nonEmptyString(value);
+  if (!/^\d{4}-\d{2}-\d{2}T/.test(parsed) || !Number.isFinite(Date.parse(parsed))) throw new Error("Agent Run log metadata contract requires an ISO timestamp.");
+  return parsed;
+}
+
+function nullableIsoDate(value: unknown): string | null {
+  return value === null ? null : isoDate(value);
+}
+
+function validCursor(value: unknown): value is string | null {
+  return value === null || (typeof value === "string" && value.length > 0 && value.length <= 8192);
+}

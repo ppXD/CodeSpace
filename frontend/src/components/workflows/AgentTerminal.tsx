@@ -7,6 +7,7 @@ import { useAgentRun, useAgentRunEvents } from "@/hooks/use-agents";
 import { useCellAttempts } from "@/hooks/use-workflows";
 
 import { AgentToolCalls } from "./AgentToolCalls";
+import { AgentRunLogs } from "./AgentRunLogs";
 import { RunActionsContext } from "./runActionsContext";
 import { isAgentBusy } from "./runPhases";
 import { formatDuration, formatTokens, formatUsd, tileState } from "./runActivity";
@@ -21,7 +22,7 @@ import { formatDuration, formatTokens, formatUsd, tileState } from "./runActivit
  * ledger lives in the Trace tab.
  */
 export function AgentTerminal({ agent, onClose, rerun, onOpenFile }: { agent: PhaseAgentRef; onClose?: () => void; rerun?: ReactNode; onOpenFile?: (path: string) => void }) {
-  const [tab, setTab] = useState<"output" | "tools" | "files">("output");
+  const [tab, setTab] = useState<"output" | "logs" | "tools" | "files">("output");
 
   // Per-cell rerun history: every attempt that ran THIS (node, branch) cell. Picking an earlier one shows that
   // attempt's own record (the agent that ran then), so you can look back at e.g. the run that failed before a rerun.
@@ -116,6 +117,7 @@ export function AgentTerminal({ agent, onClose, rerun, onOpenFile }: { agent: Ph
       <div className="agent-terminal-body">
         {tab === "output"
           ? <Scrollback events={evts} loading={events.isLoading && evts.length === 0} error={tileState(status) === "failed" ? run.data?.error ?? null : null} />
+          : tab === "logs" ? <AgentRunLogs key={activeAgentRunId} agentRunId={activeAgentRunId} />
           : tab === "tools" ? <AgentToolCalls agentRunId={activeAgentRunId} hideHeader />
           : <AgentFiles files={files} onOpenFile={onOpenFile} />}
       </div>
@@ -128,6 +130,7 @@ export function AgentTerminal({ agent, onClose, rerun, onOpenFile }: { agent: Ph
         {m.files > 0 && <span className="agent-terminal-fact">{m.files} {m.files === 1 ? "file" : "files"}</span>}
         <div className="agent-terminal-tabs">
           <button type="button" data-active={tab === "output" || undefined} onClick={() => setTab("output")}>Output</button>
+          <button type="button" data-active={tab === "logs" || undefined} onClick={() => setTab("logs")}>Logs</button>
           <button type="button" data-active={tab === "tools" || undefined} onClick={() => setTab("tools")}>Tool calls</button>
           {files.length > 0 && <button type="button" data-active={tab === "files" || undefined} onClick={() => setTab("files")}>Files</button>}
         </div>
