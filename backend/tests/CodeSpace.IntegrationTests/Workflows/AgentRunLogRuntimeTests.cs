@@ -106,23 +106,74 @@ public sealed class AgentRunLogRuntimeTests
     }
 
     [Fact]
-    public async Task Reserved_log_profile_wins_even_when_more_than_three_active_profiles_sort_before_it()
+    public async Task Pinned_log_route_stays_on_its_frozen_revision_and_never_uses_the_legacy_reserved_profile_name()
     {
         var world = await SeedWorldAsync();
-        var reservedId = Guid.NewGuid();
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         var now = DateTimeOffset.UtcNow;
-        AddProfile(db, world, Guid.NewGuid(), "aaa", now);
-        AddProfile(db, world, Guid.NewGuid(), "aab", now);
-        AddProfile(db, world, Guid.NewGuid(), "aac", now);
-        AddProfile(db, world, Guid.NewGuid(), "aad", now);
-        AddProfile(db, world, reservedId, AgentRunLogStorageResolver.ReservedStableName, now);
+        AddProfile(db, world, Guid.NewGuid(), "agent-run-logs", now);
+        AddProfile(db, world, Guid.NewGuid(), "another-active-profile", now);
         await db.SaveChangesAsync();
+        await AddRouteAsync(db, world, world.StorageProfileId, StorageProfileRevisionMode.Pinned, 1);
+        await AppendProfileRevisionAsync(world, world.StorageProfileId, 2, 'c');
 
-        var result = await new AgentRunLogStorageResolver(db).ResolveAsync(world.TeamId, CancellationToken.None);
+        var result = await scope.Resolve<IAgentRunLogStorageResolver>().ResolveAsync(world.TeamId, CancellationToken.None);
 
-        result.ShouldBe(new AgentRunLogStorageResolution.Ready(reservedId, 1));
+        result.ShouldBe(new AgentRunLogStorageResolution.Ready(world.StorageProfileId, 1));
+    }
+
+    [Fact]
+    public async Task Current_at_write_uses_the_exact_current_route_revision_and_that_target_profiles_current_revision()
+    {
+        var world = await SeedWorldAsync();
+        var secondProfileId = Guid.NewGuid();
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        AddProfile(db, world, secondProfileId, "second-log-profile", now);
+        await db.SaveChangesAsync();
+        var route = await AddRouteAsync(db, world, world.StorageProfileId, StorageProfileRevisionMode.CurrentAtWrite);
+
+        var resolver = scope.Resolve<IAgentRunLogStorageResolver>();
+        var first = await resolver.ResolveAsync(world.TeamId, CancellationToken.None);
+        first.ShouldBe(new AgentRunLogStorageResolution.Ready(world.StorageProfileId, 1));
+
+        await AppendProfileRevisionAsync(world, world.StorageProfileId, 2, 'c');
+        await AppendProfileRevisionAsync(world, secondProfileId, 2, 'd');
+        await AppendRouteRevisionAsync(world, route.Id, secondProfileId, StorageProfileRevisionMode.CurrentAtWrite);
+
+        var second = await resolver.ResolveAsync(world.TeamId, CancellationToken.None);
+        second.ShouldBe(new AgentRunLogStorageResolution.Ready(secondProfileId, 2));
+    }
+
+    [Fact]
+    public async Task Missing_inactive_invalid_and_foreign_routes_fail_closed_without_an_active_profile_fallback()
+    {
+        var world = await SeedWorldAsync();
+        var foreign = await SeedWorldAsync();
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var resolver = scope.Resolve<IAgentRunLogStorageResolver>();
+
+        (await resolver.ResolveAsync(world.TeamId, CancellationToken.None)).ShouldBe(new AgentRunLogStorageResolution.Unavailable(AgentRunLogStorageProblemCode.Missing));
+        var route = await AddRouteAsync(db, world, world.StorageProfileId, StorageProfileRevisionMode.CurrentAtWrite);
+        (await resolver.ResolveAsync(foreign.TeamId, CancellationToken.None)).ShouldBe(new AgentRunLogStorageResolution.Unavailable(AgentRunLogStorageProblemCode.Missing));
+
+        route.State = StorageRouteState.Disabled;
+        route.LastModifiedDate = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync();
+        (await resolver.ResolveAsync(world.TeamId, CancellationToken.None)).ShouldBe(new AgentRunLogStorageResolution.Unavailable(AgentRunLogStorageProblemCode.Inactive));
+
+        route.State = StorageRouteState.Active;
+        route.LastModifiedDate = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync();
+        await using var transaction = await db.Database.BeginTransactionAsync();
+        await db.Database.ExecuteSqlRawAsync("ALTER TABLE storage_route_revision DISABLE TRIGGER storage_route_revision_enforce_append_only");
+        await db.Database.ExecuteSqlRawAsync("ALTER TABLE storage_route_revision DROP CONSTRAINT ck_storage_route_revision_profile_selection");
+        await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE storage_route_revision SET profile_revision_mode = 'FuturePolicy' WHERE storage_route_id = {route.Id}");
+        (await resolver.ResolveAsync(world.TeamId, CancellationToken.None)).ShouldBe(new AgentRunLogStorageResolution.Unavailable(AgentRunLogStorageProblemCode.Invalid));
+        await transaction.RollbackAsync();
     }
 
     [Fact]
@@ -302,6 +353,61 @@ public sealed class AgentRunLogRuntimeTests
         await db.SaveChangesAsync();
         return new World(teamId, actorId, profileId, runId);
     }
+
+    private static async Task<StorageRoute> AddRouteAsync(CodeSpaceDbContext db, World world, Guid profileId, StorageProfileRevisionMode mode, int? pinnedRevision = null)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var route = new StorageRoute
+        {
+            Id = Guid.NewGuid(), TeamId = world.TeamId, DataClassTypeKey = AgentRunLogStorageResolver.DataClassTypeKey,
+            CurrentRevision = 1, State = StorageRouteState.Draft, CreatedDate = now, CreatedBy = world.ActorId,
+            LastModifiedDate = now, LastModifiedBy = world.ActorId,
+        };
+        route.Revisions.Add(RouteRevision(world, route, profileId, mode, pinnedRevision));
+        db.StorageRoute.Add(route);
+        await db.SaveChangesAsync();
+        route.State = StorageRouteState.Active;
+        route.LastModifiedDate = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync();
+        return route;
+    }
+
+    private async Task AppendProfileRevisionAsync(World world, Guid profileId, int revision, char fingerprint)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var profile = await db.StorageProfile.SingleAsync(value => value.TeamId == world.TeamId && value.Id == profileId);
+        profile.CurrentRevision = revision;
+        profile.LastModifiedDate = DateTimeOffset.UtcNow;
+        profile.LastModifiedBy = world.ActorId;
+        db.StorageProfileRevision.Add(new StorageProfileRevision
+        {
+            Id = Guid.NewGuid(), TeamId = world.TeamId, StorageProfileId = profileId, Revision = revision,
+            ProviderTypeKey = "local-rwx/v1", NonSecretConfigJson = $"{{\"rootPath\":\"/srv/codespace/logs-v{revision}\"}}",
+            NamespaceFingerprint = $"sha256:{new string(fingerprint, 64)}", CreatedDate = DateTimeOffset.UtcNow, CreatedBy = world.ActorId,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    private async Task AppendRouteRevisionAsync(World world, Guid routeId, Guid profileId, StorageProfileRevisionMode mode, int? pinnedRevision = null)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var route = await db.StorageRoute.SingleAsync(value => value.TeamId == world.TeamId && value.Id == routeId);
+        route.CurrentRevision++;
+        route.LastModifiedDate = DateTimeOffset.UtcNow;
+        route.LastModifiedBy = world.ActorId;
+        db.StorageRouteRevision.Add(RouteRevision(world, route, profileId, mode, pinnedRevision));
+        await db.SaveChangesAsync();
+    }
+
+    private static StorageRouteRevision RouteRevision(World world, StorageRoute route, Guid profileId, StorageProfileRevisionMode mode, int? pinnedRevision = null) => new()
+    {
+        Id = Guid.NewGuid(), TeamId = world.TeamId, StorageRouteId = route.Id, Revision = route.CurrentRevision,
+        StorageProfileId = profileId, ProfileRevisionMode = mode,
+        PinnedProfileRevision = mode == StorageProfileRevisionMode.Pinned ? pinnedRevision ?? 1 : null,
+        CreatedDate = DateTimeOffset.UtcNow, CreatedBy = world.ActorId,
+    };
 
     private static void AddProfile(CodeSpaceDbContext db, World world, Guid profileId, string stableName, DateTimeOffset now)
     {

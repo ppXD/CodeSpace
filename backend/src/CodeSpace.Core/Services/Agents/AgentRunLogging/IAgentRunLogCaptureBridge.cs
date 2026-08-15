@@ -60,4 +60,6 @@ public enum AgentRunLogStorageProblemCode
     Missing,
     Ambiguous,
     ResolutionFailed,
+    Inactive,
+    Invalid,
 }

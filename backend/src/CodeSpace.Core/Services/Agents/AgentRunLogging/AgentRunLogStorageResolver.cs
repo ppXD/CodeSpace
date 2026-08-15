@@ -1,36 +1,34 @@
-using CodeSpace.Core.Persistence.Db;
-using CodeSpace.Core.Persistence.Entities;
-using Microsoft.EntityFrameworkCore;
+using CodeSpace.Core.Services.Workflows.Artifacts.Routing;
 
 namespace CodeSpace.Core.Services.Agents.AgentRunLogging;
 
 /// <summary>
-/// Deterministic team policy for the first producer slice: an explicitly named <c>agent-run-logs</c> Active profile
-/// wins; otherwise exactly one Active profile is unambiguous. Zero or multiple candidates fail visibly instead of
-/// silently choosing a destination whose retention/security posture the operator did not authorize.
+/// Resolves the versioned Agent Run log data class through the team storage routing control plane. The returned
+/// profile coordinates are frozen for the write and no profile-name or single-candidate fallback is permitted.
 /// </summary>
 public sealed class AgentRunLogStorageResolver : IAgentRunLogStorageResolver
 {
-    public const string ReservedStableName = "agent-run-logs";
-    private readonly CodeSpaceDbContext _db;
+    public const string DataClassTypeKey = "agent-run-log/v1";
+    private readonly IStorageRouteSnapshotResolver _routes;
 
-    public AgentRunLogStorageResolver(CodeSpaceDbContext db) => _db = db;
+    public AgentRunLogStorageResolver(IStorageRouteSnapshotResolver routes) => _routes = routes;
 
     public async Task<AgentRunLogStorageResolution> ResolveAsync(Guid teamId, CancellationToken cancellationToken)
     {
-        if (teamId == Guid.Empty) return new AgentRunLogStorageResolution.Unavailable(AgentRunLogStorageProblemCode.Missing);
-        var reserved = await _db.StorageProfile.AsNoTracking()
-            .Where(value => value.TeamId == teamId && value.StableName == ReservedStableName && value.State == StorageProfileState.Active)
-            .Select(value => new { value.Id, value.CurrentRevision }).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-        if (reserved != null) return new AgentRunLogStorageResolution.Ready(reserved.Id, reserved.CurrentRevision);
+        var resolution = await _routes.ResolveAsync(new StorageRouteSnapshotRequest(teamId, DataClassTypeKey), cancellationToken).ConfigureAwait(false);
+        if (resolution is StorageRouteSnapshotResolution.Cancelled && cancellationToken.IsCancellationRequested)
+            throw new OperationCanceledException(cancellationToken);
 
-        var candidates = await _db.StorageProfile.AsNoTracking().Where(value => value.TeamId == teamId && value.State == StorageProfileState.Active)
-            .OrderBy(value => value.StableName).ThenBy(value => value.Id).Select(value => new { value.Id, value.CurrentRevision }).Take(2).ToListAsync(cancellationToken).ConfigureAwait(false);
-        return candidates.Count switch
+        return resolution switch
         {
-            1 => new AgentRunLogStorageResolution.Ready(candidates[0].Id, candidates[0].CurrentRevision),
-            0 => new AgentRunLogStorageResolution.Unavailable(AgentRunLogStorageProblemCode.Missing),
-            _ => new AgentRunLogStorageResolution.Unavailable(AgentRunLogStorageProblemCode.Ambiguous),
+            StorageRouteSnapshotResolution.Ready ready => new AgentRunLogStorageResolution.Ready(ready.Snapshot.StorageProfileId, ready.Snapshot.StorageProfileRevision),
+            StorageRouteSnapshotResolution.Missing => Unavailable(AgentRunLogStorageProblemCode.Missing),
+            StorageRouteSnapshotResolution.RouteNotActive or StorageRouteSnapshotResolution.ProfileNotActive => Unavailable(AgentRunLogStorageProblemCode.Inactive),
+            StorageRouteSnapshotResolution.RouteRevisionMissing or StorageRouteSnapshotResolution.ProfileMissing
+                or StorageRouteSnapshotResolution.ProfileRevisionMissing or StorageRouteSnapshotResolution.Invalid => Unavailable(AgentRunLogStorageProblemCode.Invalid),
+            _ => Unavailable(AgentRunLogStorageProblemCode.ResolutionFailed),
         };
     }
+
+    private static AgentRunLogStorageResolution Unavailable(AgentRunLogStorageProblemCode code) => new AgentRunLogStorageResolution.Unavailable(code);
 }

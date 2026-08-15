@@ -68,7 +68,7 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
                 }
                 if (storage is AgentRunLogStorageResolution.Unavailable unavailable)
                 {
-                    await FailQuietlyAsync(failure, ready.Metadata, $"storage-profile-{Code(unavailable.Code)}", "No unambiguous Active storage profile was authorized for Agent Run logs.", captureToken).ConfigureAwait(false);
+                    await FailQuietlyAsync(failure, ready.Metadata, $"storage-profile-{Code(unavailable.Code)}", "No Active valid storage route was authorized for the Agent Run log data class.", captureToken).ConfigureAwait(false);
                     continue;
                 }
                 if (ready.CaptureSourceBaseOffsetBytes < 0 || ready.Metadata.SourceOffsetBytes < ready.CaptureSourceBaseOffsetBytes)

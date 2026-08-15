@@ -160,6 +160,24 @@ public sealed class AgentRunLogCaptureBridgeTests
     }
 
     [Fact]
+    public async Task Missing_storage_route_is_durable_capture_health_and_does_not_change_the_harness_result()
+    {
+        var logs = new FakeLogService { CurrentFence = 1 };
+        var source = new FakeLogSource();
+        source.Set("stdout", "must-not-be-read"u8.ToArray());
+        source.Set("stderr", []);
+        var bridge = new AgentRunLogCaptureBridge(logs, new UnavailableStorageResolver(AgentRunLogStorageProblemCode.Missing), NullLogger<AgentRunLogCaptureBridge>.Instance);
+        var expected = Result();
+
+        var capture = await bridge.OpenAsync(Request(source, 1, Guid.NewGuid()), CancellationToken.None);
+        var observed = await capture.ObserveAsync((_, _) => Task.FromResult(expected), CancellationToken.None);
+
+        observed.ShouldBeSameAs(expected);
+        logs.AppendSizes.ShouldBeEmpty();
+        logs.Heads.ShouldAllBe(head => head.Metadata.State == AgentRunLogStreamState.CaptureFailed && head.Metadata.ErrorCode == "storage-profile-missing");
+    }
+
+    [Fact]
     public async Task Explicit_unreadable_source_gap_is_durable_without_reading_any_native_bytes()
     {
         var logs = new FakeLogService { CurrentFence = 3 };
@@ -252,6 +270,12 @@ public sealed class AgentRunLogCaptureBridgeTests
     private sealed class ThrowingStorageResolver : IAgentRunLogStorageResolver
     {
         public Task<AgentRunLogStorageResolution> ResolveAsync(Guid teamId, CancellationToken cancellationToken) => throw new IOException("resolver backend failed");
+    }
+
+    private sealed class UnavailableStorageResolver(AgentRunLogStorageProblemCode code) : IAgentRunLogStorageResolver
+    {
+        public Task<AgentRunLogStorageResolution> ResolveAsync(Guid teamId, CancellationToken cancellationToken) =>
+            Task.FromResult<AgentRunLogStorageResolution>(new AgentRunLogStorageResolution.Unavailable(code));
     }
 
     private sealed class FakeLogSource : ISandboxDurableLogSource
