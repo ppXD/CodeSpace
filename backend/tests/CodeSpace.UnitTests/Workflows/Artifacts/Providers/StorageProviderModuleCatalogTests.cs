@@ -1,5 +1,4 @@
 using System.Text.Json;
-using CodeSpace.Core.Services.Workflows.Artifacts.Backends;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers.Local;
 using Shouldly;
@@ -86,14 +85,27 @@ public class StorageProviderModuleCatalogTests
     }
 
     [Fact]
+    public void Constructor_rejects_a_concrete_factory_that_does_not_implement_the_driver_factory_contract()
+    {
+        var invalid = Module("invalid-factory/v1");
+        invalid.FactoryType = typeof(string);
+
+        var error = Should.Throw<InvalidOperationException>(() => new StorageProviderModuleCatalog([invalid]));
+
+        error.Message.ShouldContain(nameof(IArtifactStorageDriverFactory));
+    }
+
+    [Fact]
     public void Local_rwx_descriptor_is_discoverable_without_replacing_the_current_blob_backend()
     {
         var module = new LocalRwxStorageProviderModule();
         var catalog = new StorageProviderModuleCatalog([module]);
 
         module.TypeKey.ShouldBe("local-rwx/v1");
-        module.FactoryType.ShouldBe(typeof(LocalFileArtifactBlobBackend));
-        module.Capabilities.ShouldBe(StorageProviderCapabilities.ConditionalCreate);
+        module.FactoryType.ShouldBe(typeof(LocalRwxArtifactStorageDriverFactory));
+        (module.Capabilities & StorageProviderCapabilities.StreamingWrite).ShouldBe(StorageProviderCapabilities.StreamingWrite);
+        (module.Capabilities & StorageProviderCapabilities.StreamingRead).ShouldBe(StorageProviderCapabilities.StreamingRead);
+        (module.Capabilities & StorageProviderCapabilities.ConditionalCreate).ShouldBe(StorageProviderCapabilities.ConditionalCreate);
         module.ConfigSchema.GetProperty("properties").TryGetProperty("rootPath", out _).ShouldBeTrue();
         module.SecretSchema.GetProperty("properties").EnumerateObject().ShouldBeEmpty();
         catalog.Require(module.TypeKey).ShouldBeSameAs(module);
@@ -137,8 +149,12 @@ public class StorageProviderModuleCatalogTests
         public required JsonElement ConfigSchema { get; init; }
         public required JsonElement SecretSchema { get; init; }
         public required StorageProviderCapabilities Capabilities { get; init; }
-        public required Type FactoryType { get; init; }
+        public required Type FactoryType { get; set; }
     }
 
-    private sealed class TestFactory;
+    private sealed class TestFactory : IArtifactStorageDriverFactory
+    {
+        public string ProviderTypeKey => "test/v1";
+        public ValueTask<IArtifactStorageDriver> CreateAsync(ArtifactStorageDriverCreateRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
 }

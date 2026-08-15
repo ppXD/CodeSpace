@@ -1,5 +1,4 @@
 using System.Text.Json;
-using CodeSpace.Core.Services.Workflows.Artifacts.Backends;
 
 namespace CodeSpace.Core.Services.Workflows.Artifacts.Providers.Local;
 
@@ -40,8 +39,13 @@ public sealed class LocalRwxStorageProviderModule : IStorageProviderModule
     public string DisplayName => "Local / shared filesystem";
     public JsonElement ConfigSchema => Config;
     public JsonElement SecretSchema => Secrets;
-    public StorageProviderCapabilities Capabilities => StorageProviderCapabilities.ConditionalCreate;
-    public Type FactoryType => typeof(LocalFileArtifactBlobBackend);
+    public StorageProviderCapabilities Capabilities => StorageProviderCapabilities.StreamingWrite
+        | StorageProviderCapabilities.StreamingRead
+        | StorageProviderCapabilities.RangeRead
+        | StorageProviderCapabilities.ConditionalCreate
+        | StorageProviderCapabilities.Delete
+        | StorageProviderCapabilities.HealthProbe;
+    public Type FactoryType => typeof(LocalRwxArtifactStorageDriverFactory);
 
     private static JsonElement ParseSchema(string json)
     {
