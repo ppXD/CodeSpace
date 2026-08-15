@@ -34,3 +34,11 @@ public sealed record SetStorageProfileStateCommand : ICommand<StorageProfileDeta
     public required int ExpectedCurrentRevision { get; init; }
     public required StorageProfileStateValue State { get; init; }
 }
+
+public sealed record ProbeStorageProfileCommand : ICommand<StorageProfileProbeResult>, IRequireTeamPermission
+{
+    public string RequiredPermission => TeamPermissions.StorageManage;
+    public Guid ProfileId { get; init; }
+    public int? ProfileRevision { get; init; }
+    public bool VerifyWriteAccess { get; init; } = true;
+}

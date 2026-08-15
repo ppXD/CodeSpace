@@ -71,6 +71,14 @@ public class StorageController : ControllerBase
         return result == null ? NotFound() : Ok(result);
     }
 
+    [HttpPost("profiles/{profileId:guid}/probe")]
+    [RequestSizeLimit(MaxMutationBodyBytes)]
+    public async Task<IActionResult> ProbeProfile([FromRoute] Guid profileId, [FromBody] ProbeStorageProfileCommand command, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(command with { ProfileId = profileId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     [HttpGet("credentials")]
     public async Task<IActionResult> ListCredentials(CancellationToken cancellationToken)
     {
