@@ -40,6 +40,8 @@ public sealed class WorkflowRunModelCallProjector : IWorkflowRunModelCallProject
                                 where record.CorrelationId != null
                                       && (record.RecordType == WorkflowRunRecordTypes.InteractionCompleted || record.RecordType == WorkflowRunRecordTypes.InteractionFailed)
                                       && !_db.WorkflowRunModelCallAttempt.Any(attempt => attempt.SourceTerminalRecordId == record.Id)
+                                      && !_db.WorkflowRunModelCall.Any(call => call.TeamId == run.TeamId && call.WorkflowRunId == record.RunId
+                                          && call.SourceKind == SourceKind && call.SourceCorrelationId == record.CorrelationId)
                                 orderby record.OccurredAt, record.Id
                                 select new TerminalCandidate(record.Id, record.Sequence, record.RunId, run.TeamId, run.ActorId ?? run.CreatedBy,
                                     record.NodeId, record.IterationKey, record.CorrelationId!.Value, record.OccurredAt, record.RecordType, record.PayloadJson))
@@ -48,48 +50,42 @@ public sealed class WorkflowRunModelCallProjector : IWorkflowRunModelCallProject
         if (candidates.Count == 0) return 0;
 
         await TakeRunLocksAsync(candidates.Select(value => value.RunId), cancellationToken).ConfigureAwait(false);
-        var candidateIds = candidates.Select(value => value.RecordId).ToArray();
-        var admitted = (await _db.WorkflowRunModelCallAttempt.AsNoTracking().Where(value => value.SourceTerminalRecordId != null && candidateIds.Contains(value.SourceTerminalRecordId.Value))
-            .Select(value => value.SourceTerminalRecordId!.Value).ToListAsync(cancellationToken).ConfigureAwait(false)).ToHashSet();
-        candidates = candidates.Where(value => !admitted.Contains(value.RecordId)).ToList();
+        var runIds = candidates.Select(value => value.RunId).Distinct().ToArray();
+        var correlationIds = candidates.Select(value => value.CorrelationId).Distinct().ToArray();
+        var admitted = (await _db.WorkflowRunModelCall.AsNoTracking().Where(value => value.SourceKind == SourceKind && value.SourceCorrelationId != null
+                && runIds.Contains(value.WorkflowRunId) && correlationIds.Contains(value.SourceCorrelationId.Value))
+            .Select(value => new SourceIdentity(value.TeamId, value.WorkflowRunId, value.SourceCorrelationId!.Value))
+            .ToListAsync(cancellationToken).ConfigureAwait(false)).ToHashSet();
+        candidates = candidates.Where(value => !admitted.Contains(SourceIdentity.For(value)))
+            .GroupBy(SourceIdentity.For).Select(group => group.OrderBy(value => value.OccurredAt).ThenBy(value => value.RecordId).First())
+            .OrderBy(value => value.OccurredAt).ThenBy(value => value.RecordId).ToList();
         if (candidates.Count == 0) return 0;
 
         var scopes = candidates.Select(SourceScope.For).Distinct().ToArray();
         var starts = await ReadStartsAsync(scopes, cancellationToken).ConfigureAwait(false);
-        var runIds = candidates.Select(value => value.RunId).Distinct().ToArray();
-        var correlationIds = candidates.Select(value => value.CorrelationId).Distinct().ToArray();
-        var calls = await _db.WorkflowRunModelCall.Where(value => value.SourceKind == SourceKind && value.SourceCorrelationId != null
-                && runIds.Contains(value.WorkflowRunId) && correlationIds.Contains(value.SourceCorrelationId.Value))
-            .ToListAsync(cancellationToken).ConfigureAwait(false);
-        var callsBySource = calls.ToDictionary(value => new SourceScope(value.WorkflowRunId, value.NodeId, value.IterationKey, value.SourceCorrelationId!.Value));
-        var callIds = calls.Select(value => value.Id).ToArray();
-        var ordinals = callIds.Length == 0 ? new Dictionary<Guid, int>() : await _db.WorkflowRunModelCallAttempt.AsNoTracking()
-            .Where(value => callIds.Contains(value.ModelCallId)).GroupBy(value => value.ModelCallId)
-            .ToDictionaryAsync(group => group.Key, group => group.Max(value => value.AttemptOrdinal), cancellationToken).ConfigureAwait(false);
         var startIds = starts.Values.Select(value => value.Id).ToArray();
         var usedStarts = startIds.Length == 0 ? [] : (await _db.WorkflowRunModelCallAttempt.AsNoTracking()
             .Where(value => value.SourceStartedRecordId != null && startIds.Contains(value.SourceStartedRecordId.Value))
             .Select(value => value.SourceStartedRecordId!.Value).ToListAsync(cancellationToken).ConfigureAwait(false)).ToHashSet();
-
-        foreach (var candidate in candidates)
+        var inputs = candidates.Select(candidate =>
         {
-            var source = SourceScope.For(candidate);
-            starts.TryGetValue(source, out var started);
-            var terminalPayload = ParsedPayload.Parse(candidate.PayloadJson);
-            var startedPayload = started == null ? null : ParsedPayload.Parse(started.PayloadJson);
-            var input = new ProjectionInput(candidate, started, startedPayload, terminalPayload);
-            if (!callsBySource.TryGetValue(source, out var call))
-            {
-                call = BuildCall(input);
-                callsBySource.Add(source, call);
-                ordinals.Add(call.Id, 0);
-                _db.WorkflowRunModelCall.Add(call);
-            }
+            starts.TryGetValue(SourceScope.For(candidate), out var started);
+            return new ProjectionInput(candidate, started, started == null ? null : ParsedPayload.Parse(started.PayloadJson), ParsedPayload.Parse(candidate.PayloadJson));
+        }).ToArray();
+        var artifactIds = inputs.Select(value => value.TerminalPayload.OutputArtifactId).OfType<Guid>().Distinct().ToArray();
+        var teamIds = inputs.Select(value => value.Candidate.TeamId).Distinct().ToArray();
+        var artifacts = artifactIds.Length == 0 ? [] : (await _db.WorkflowArtifact.AsNoTracking()
+            .Where(value => teamIds.Contains(value.TeamId) && artifactIds.Contains(value.Id))
+            .Select(value => new ArtifactIdentity(value.TeamId, value.Id)).ToListAsync(cancellationToken).ConfigureAwait(false)).ToHashSet();
 
-            var ordinal = ordinals[call.Id] + 1;
-            ordinals[call.Id] = ordinal;
-            Guid? startedRecordId = started != null && usedStarts.Add(started.Id) ? started.Id : null;
-            _db.WorkflowRunModelCallAttempt.Add(BuildAttempt(input, call.Id, ordinal, startedRecordId));
+        foreach (var input in inputs)
+        {
+            var call = BuildCall(input);
+            Guid? startedRecordId = input.StartedRecord != null && usedStarts.Add(input.StartedRecord.Id) ? input.StartedRecord.Id : null;
+            Guid? responseArtifactId = input.TerminalPayload.OutputArtifactId is { } artifactId
+                && artifacts.Contains(new ArtifactIdentity(input.Candidate.TeamId, artifactId)) ? artifactId : null;
+            _db.WorkflowRunModelCall.Add(call);
+            _db.WorkflowRunModelCallAttempt.Add(BuildAttempt(input, call.Id, startedRecordId, responseArtifactId));
         }
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
@@ -168,12 +164,12 @@ public sealed class WorkflowRunModelCallProjector : IWorkflowRunModelCallProject
         LastModifiedDate = input.Candidate.OccurredAt, LastModifiedBy = input.Candidate.ActorId,
     };
 
-    private static WorkflowRunModelCallAttempt BuildAttempt(ProjectionInput input, Guid callId, int ordinal, Guid? startedRecordId) => new()
+    private static WorkflowRunModelCallAttempt BuildAttempt(ProjectionInput input, Guid callId, Guid? startedRecordId, Guid? responseArtifactId) => new()
     {
-        Id = Guid.NewGuid(), TeamId = input.Candidate.TeamId, WorkflowRunId = input.Candidate.RunId, ModelCallId = callId, AttemptOrdinal = ordinal,
+        Id = Guid.NewGuid(), TeamId = input.Candidate.TeamId, WorkflowRunId = input.Candidate.RunId, ModelCallId = callId, AttemptOrdinal = 1,
         SourceStartedRecordId = startedRecordId, SourceTerminalRecordId = input.Candidate.RecordId, SourceEvidenceRevision = 1,
         EffectiveProvider = Limit(input.TerminalPayload.Provider, 100), EffectiveModel = Limit(input.TerminalPayload.Model, 500),
-        ResponseArtifactId = input.TerminalPayload.OutputArtifactId, Status = Status(input.Candidate.RecordType, input.TerminalPayload.FailureKind),
+        ResponseArtifactId = responseArtifactId, Status = Status(input.Candidate.RecordType, input.TerminalPayload.FailureKind),
         ErrorCode = Limit(input.TerminalPayload.ErrorCode, 200), FinishReason = Limit(input.TerminalPayload.FinishReason, 100), CaptureSource = SourceKind,
         CaptureCompleteness = Completeness(input.StartedPayload, input.TerminalPayload), InputTokens = input.TerminalPayload.InputTokens,
         OutputTokens = input.TerminalPayload.OutputTokens, StartedAt = Earlier(input.StartedRecord?.OccurredAt, input.Candidate.OccurredAt),
@@ -220,6 +216,10 @@ public sealed class WorkflowRunModelCallProjector : IWorkflowRunModelCallProject
         string IterationKey, Guid CorrelationId, DateTimeOffset OccurredAt, string RecordType, string PayloadJson);
     private sealed record LateStartCandidate(Guid AttemptId, int SourceEvidenceRevision, Guid TerminalRecordId, Guid ModelCallId,
         Guid TeamId, Guid WorkflowRunId, string? NodeId, string IterationKey, Guid CorrelationId);
+    private readonly record struct SourceIdentity(Guid TeamId, Guid RunId, Guid CorrelationId)
+    {
+        public static SourceIdentity For(TerminalCandidate value) => new(value.TeamId, value.RunId, value.CorrelationId);
+    }
     private readonly record struct SourceScope(Guid RunId, string? NodeId, string IterationKey, Guid CorrelationId)
     {
         public static SourceScope For(TerminalCandidate value) => new(value.RunId, value.NodeId, value.IterationKey, value.CorrelationId);
@@ -227,6 +227,7 @@ public sealed class WorkflowRunModelCallProjector : IWorkflowRunModelCallProject
     }
     private sealed record SourceStarted(Guid Id, Guid RunId, string? NodeId, string IterationKey, Guid CorrelationId, long Sequence,
         DateTimeOffset OccurredAt, string PayloadJson);
+    private readonly record struct ArtifactIdentity(Guid TeamId, Guid ArtifactId);
     private sealed record ProjectionInput(TerminalCandidate Candidate, SourceStarted? StartedRecord, ParsedPayload? StartedPayload, ParsedPayload TerminalPayload);
     private sealed record LateStartEvidence(SourceStarted Started, ParsedPayload StartedPayload, WorkflowRunRecord Terminal, ParsedPayload TerminalPayload);
 
@@ -240,11 +241,19 @@ public sealed class WorkflowRunModelCallProjector : IWorkflowRunModelCallProject
                 using var document = JsonDocument.Parse(json);
                 if (document.RootElement.ValueKind != JsonValueKind.Object) return Corrupt();
                 var root = document.RootElement;
-                var usage = root.TryGetProperty("usage", out var usageElement) && usageElement.ValueKind == JsonValueKind.Object ? usageElement : default;
-                return new ParsedPayload(false, Text(root, "kind"), Text(root, "provider"), Text(root, "model"), Text(root, "failureKind"),
-                    Text(root, "category") ?? Text(root, "failureKind"), usage.ValueKind == JsonValueKind.Object ? Text(usage, "finishReason") : null,
-                    usage.ValueKind == JsonValueKind.Object ? NonNegativeLong(usage, "inputTokens") : null,
-                    usage.ValueKind == JsonValueKind.Object ? NonNegativeLong(usage, "outputTokens") : null, ArtifactId(root, "output"));
+                var malformed = false;
+                var kind = Text(root, "kind", ref malformed);
+                var provider = Text(root, "provider", ref malformed);
+                var model = Text(root, "model", ref malformed);
+                var failureKind = Text(root, "failureKind", ref malformed);
+                var category = Text(root, "category", ref malformed);
+                var usage = OptionalObject(root, "usage", ref malformed);
+                var finishReason = usage is { } usageValue ? Text(usageValue, "finishReason", ref malformed) : null;
+                var inputTokens = usage is { } inputUsage ? NonNegativeLong(inputUsage, "inputTokens", ref malformed) : null;
+                var outputTokens = usage is { } outputUsage ? NonNegativeLong(outputUsage, "outputTokens", ref malformed) : null;
+                var outputArtifactId = ArtifactId(root, "output", ref malformed);
+                return new ParsedPayload(malformed, kind, provider, model, failureKind, category ?? failureKind, finishReason,
+                    inputTokens, outputTokens, outputArtifactId);
             }
             catch (JsonException)
             {
@@ -253,9 +262,37 @@ public sealed class WorkflowRunModelCallProjector : IWorkflowRunModelCallProject
         }
 
         private static ParsedPayload Corrupt() => new(true, null, null, null, null, null, null, null, null, null);
-        private static string? Text(JsonElement root, string name) => root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
-        private static long? NonNegativeLong(JsonElement root, string name) => root.TryGetProperty(name, out var value) && value.TryGetInt64(out var parsed) && parsed >= 0 ? parsed : null;
-        private static Guid? ArtifactId(JsonElement root, string name) => root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Object
-            && value.TryGetProperty("$artifact_id", out var id) && id.ValueKind == JsonValueKind.String && Guid.TryParse(id.GetString(), out var parsed) ? parsed : null;
+        private static string? Text(JsonElement root, string name, ref bool malformed)
+        {
+            if (!root.TryGetProperty(name, out var value) || value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined) return null;
+            if (value.ValueKind == JsonValueKind.String) return value.GetString();
+            malformed = true;
+            return null;
+        }
+
+        private static JsonElement? OptionalObject(JsonElement root, string name, ref bool malformed)
+        {
+            if (!root.TryGetProperty(name, out var value) || value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined) return null;
+            if (value.ValueKind == JsonValueKind.Object) return value;
+            malformed = true;
+            return null;
+        }
+
+        private static long? NonNegativeLong(JsonElement root, string name, ref bool malformed)
+        {
+            if (!root.TryGetProperty(name, out var value) || value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined) return null;
+            if (value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var parsed) && parsed >= 0) return parsed;
+            malformed = true;
+            return null;
+        }
+
+        private static Guid? ArtifactId(JsonElement root, string name, ref bool malformed)
+        {
+            if (!root.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.Object
+                || !value.TryGetProperty("$artifact_id", out var id)) return null;
+            if (id.ValueKind == JsonValueKind.String && Guid.TryParse(id.GetString(), out var parsed) && parsed != Guid.Empty) return parsed;
+            malformed = true;
+            return null;
+        }
     }
 }

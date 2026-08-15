@@ -1,6 +1,7 @@
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.ModelCalls;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -26,7 +27,9 @@ public sealed class WorkflowRunModelCallProjectorTests
     {
         var world = await SeedRunAsync();
         var correlationId = Guid.NewGuid();
-        var artifactId = Guid.NewGuid();
+        Guid artifactId;
+        using (var artifactScope = _fixture.BeginScope())
+            artifactId = await artifactScope.Resolve<IArtifactStore>().PutAsync(world.TeamId, "captured response"u8.ToArray(), "text/plain", CancellationToken.None);
         var started = Record(world.RunId, WorkflowRunRecordTypes.InteractionStarted, correlationId, """
             {"kind":"supervisor.decision","provider":"custom","model":"reasoner-v1","prompt":{"system":"sys","user":"usr"}}
             """);
@@ -109,6 +112,112 @@ public sealed class WorkflowRunModelCallProjectorTests
         var valid = await db.WorkflowRunModelCall.AsNoTracking().SingleAsync(value => value.SourceCorrelationId == validCorrelation);
         broken.CaptureCompleteness.ShouldBe(WorkflowRunCaptureCompleteness.Corrupt);
         valid.CaptureCompleteness.ShouldBe(WorkflowRunCaptureCompleteness.Partial);
+    }
+
+    [Fact]
+    public async Task Malformed_typed_evidence_is_corrupt_and_missing_values_remain_nullable()
+    {
+        var world = await SeedRunAsync();
+        var correlationId = Guid.NewGuid();
+        await AddRecordsAsync(Record(world.RunId, WorkflowRunRecordTypes.InteractionCompleted, correlationId,
+            """{"kind":42,"provider":{"unexpected":true},"model":"observed-model","usage":{"inputTokens":-1,"outputTokens":"2"},"output":{"$artifact_id":"not-a-guid"}}"""));
+
+        (await SweepAsync(50)).TerminalAttemptsProjected.ShouldBe(1);
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var call = await db.WorkflowRunModelCall.AsNoTracking().SingleAsync(value => value.WorkflowRunId == world.RunId && value.SourceCorrelationId == correlationId);
+        var attempt = await db.WorkflowRunModelCallAttempt.AsNoTracking().SingleAsync(value => value.ModelCallId == call.Id);
+        call.Purpose.ShouldBe("unknown/v1");
+        call.CaptureCompleteness.ShouldBe(WorkflowRunCaptureCompleteness.Corrupt);
+        attempt.EffectiveProvider.ShouldBeNull();
+        attempt.EffectiveModel.ShouldBe("observed-model");
+        attempt.InputTokens.ShouldBeNull();
+        attempt.OutputTokens.ShouldBeNull();
+        attempt.ResponseArtifactId.ShouldBeNull();
+        attempt.CaptureCompleteness.ShouldBe(WorkflowRunCaptureCompleteness.Corrupt);
+    }
+
+    [Fact]
+    public async Task One_tape_correlation_projects_one_physical_observation_and_never_invents_a_retry()
+    {
+        var world = await SeedRunAsync();
+        var correlationId = Guid.NewGuid();
+        var completed = Record(world.RunId, WorkflowRunRecordTypes.InteractionCompleted, correlationId,
+            """{"kind":"single-observation","provider":"test","model":"m"}""");
+        var duplicate = Record(world.RunId, WorkflowRunRecordTypes.InteractionFailed, correlationId,
+            """{"kind":"single-observation","provider":"test","failureKind":"provider"}""", completed.OccurredAt.AddSeconds(1));
+        await AddRecordsAsync(completed, duplicate);
+
+        (await SweepAsync(50)).ShouldBe(new WorkflowRunModelCallProjectionResult(1, 0));
+        await AddRecordsAsync(Record(world.RunId, WorkflowRunRecordTypes.InteractionFailed, correlationId,
+            """{"kind":"single-observation","provider":"test","failureKind":"provider"}""", duplicate.OccurredAt.AddSeconds(1)));
+
+        (await SweepAsync(50)).ShouldBe(new WorkflowRunModelCallProjectionResult(0, 0));
+        (await SweepAsync(50)).ShouldBe(new WorkflowRunModelCallProjectionResult(0, 0));
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var call = await db.WorkflowRunModelCall.AsNoTracking().SingleAsync(value => value.WorkflowRunId == world.RunId && value.SourceCorrelationId == correlationId);
+        var attempt = await db.WorkflowRunModelCallAttempt.AsNoTracking().SingleAsync(value => value.ModelCallId == call.Id);
+        attempt.AttemptOrdinal.ShouldBe(1);
+        attempt.SourceTerminalRecordId.ShouldBe(completed.Id);
+        attempt.Status.ShouldBe("Succeeded");
+    }
+
+    [Fact]
+    public async Task Artifact_reference_is_admitted_only_when_existing_in_the_exact_team()
+    {
+        var owner = await SeedRunAsync();
+        var foreign = await SeedRunAsync();
+        Guid foreignArtifactId;
+        using (var scope = _fixture.BeginScope())
+            foreignArtifactId = await scope.Resolve<IArtifactStore>().PutAsync(foreign.TeamId, "foreign"u8.ToArray(), "text/plain", CancellationToken.None);
+        var missingArtifactId = Guid.NewGuid();
+        var missingCorrelation = Guid.NewGuid();
+        var foreignCorrelation = Guid.NewGuid();
+        await AddRecordsAsync(
+            Record(owner.RunId, WorkflowRunRecordTypes.InteractionCompleted, missingCorrelation,
+                $$$"""{"kind":"missing-artifact","provider":"test","model":"m","output":{"$artifact_id":"{{{missingArtifactId:D}}}"}}"""),
+            Record(owner.RunId, WorkflowRunRecordTypes.InteractionCompleted, foreignCorrelation,
+                $$$"""{"kind":"foreign-artifact","provider":"test","model":"m","output":{"$artifact_id":"{{{foreignArtifactId:D}}}"}}"""));
+
+        (await SweepAsync(50)).TerminalAttemptsProjected.ShouldBe(2);
+
+        using var readScope = _fixture.BeginScope();
+        var db = readScope.Resolve<CodeSpaceDbContext>();
+        var callIds = await db.WorkflowRunModelCall.AsNoTracking().Where(value => value.WorkflowRunId == owner.RunId
+                && (value.SourceCorrelationId == missingCorrelation || value.SourceCorrelationId == foreignCorrelation))
+            .Select(value => value.Id).ToArrayAsync();
+        var attempts = await db.WorkflowRunModelCallAttempt.AsNoTracking().Where(value => callIds.Contains(value.ModelCallId)).ToListAsync();
+        attempts.Count.ShouldBe(2);
+        attempts.ShouldAllBe(value => value.ResponseArtifactId == null);
+        attempts.ShouldAllBe(value => value.CaptureCompleteness == WorkflowRunCaptureCompleteness.Partial);
+    }
+
+    [Fact]
+    public async Task Shared_correlation_across_runs_keeps_exact_tenant_run_and_source_rows()
+    {
+        var first = await SeedRunAsync();
+        var second = await SeedRunAsync();
+        var correlationId = Guid.NewGuid();
+        var firstTerminal = Record(first.RunId, WorkflowRunRecordTypes.InteractionCompleted, correlationId,
+            """{"kind":"cross-run","provider":"first","model":"m1"}""");
+        var secondTerminal = Record(second.RunId, WorkflowRunRecordTypes.InteractionFailed, correlationId,
+            """{"kind":"cross-run","provider":"second","failureKind":"provider"}""");
+        await AddRecordsAsync(firstTerminal, secondTerminal);
+
+        (await SweepAsync(50)).TerminalAttemptsProjected.ShouldBe(2);
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var projected = await (from call in db.WorkflowRunModelCall.AsNoTracking()
+                               join attempt in db.WorkflowRunModelCallAttempt.AsNoTracking() on call.Id equals attempt.ModelCallId
+                               where call.SourceCorrelationId == correlationId
+                               select new { call.TeamId, call.WorkflowRunId, attempt.SourceTerminalRecordId }).ToListAsync();
+        projected.Count.ShouldBe(2);
+        projected.ShouldContain(value => value.TeamId == first.TeamId && value.WorkflowRunId == first.RunId && value.SourceTerminalRecordId == firstTerminal.Id);
+        projected.ShouldContain(value => value.TeamId == second.TeamId && value.WorkflowRunId == second.RunId && value.SourceTerminalRecordId == secondTerminal.Id);
     }
 
     [Fact]
