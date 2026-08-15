@@ -1,3 +1,5 @@
+using CodeSpace.Messages.Contracts;
+
 namespace CodeSpace.Messages.Dtos.Workflows.ModelCalls;
 
 /// <summary>
@@ -8,9 +10,19 @@ public sealed record WorkflowRunModelCallMetadata
 {
     public required Guid RunId { get; init; }
     public required long Sequence { get; init; }
+    /// <summary>The stable projected identity when admission has caught up; null only for an explicit legacy fallback.</summary>
+    public Guid? WorkflowRunModelCallId { get; init; }
+    public required WorkflowRunModelCallProjectionState ProjectionState { get; init; }
+    public required WorkflowRunCaptureCompleteness CaptureCompleteness { get; init; }
     public Guid? CorrelationId { get; init; }
     public required WorkflowRunModelCallStatus Status { get; init; }
     public required IReadOnlyList<WorkflowRunModelCallPartDescriptor> Parts { get; init; }
+}
+
+public enum WorkflowRunModelCallProjectionState
+{
+    Projected = 0,
+    LegacyFallback = 1,
 }
 
 public enum WorkflowRunModelCallStatus

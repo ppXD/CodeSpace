@@ -94,6 +94,24 @@ public class WorkflowRunsController : ControllerBase
         return result == null ? NotFound() : Ok(result);
     }
 
+    /// <summary>Metadata-only view of one stable logical model-call id and all physical provider attempts. No body bytes are read.</summary>
+    [HttpGet("{runId:guid}/model-calls/{modelCallId:guid}")]
+    public async Task<IActionResult> GetModelCallById([FromRoute] Guid runId, [FromRoute] Guid modelCallId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetWorkflowRunModelCallByIdQuery { RunId = runId, WorkflowRunModelCallId = modelCallId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
+    /// <summary>One bounded UTF-8 page from a stable logical-call or physical-attempt artifact reference.</summary>
+    [HttpGet("{runId:guid}/model-calls/{modelCallId:guid}/bodies/{body}")]
+    public async Task<IActionResult> GetModelCallBody([FromRoute] Guid runId, [FromRoute] Guid modelCallId,
+        [FromRoute] CodeSpace.Messages.Dtos.Workflows.ModelCalls.WorkflowRunModelCallBody body,
+        [FromQuery] GetWorkflowRunModelCallBodyQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query with { RunId = runId, WorkflowRunModelCallId = modelCallId, Body = body }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
     /// <summary>One bounded UTF-8 page of a Workflow Run model-call part. Unavailable parts return a typed state without poisoning the other parts.</summary>
     [HttpGet("{runId:guid}/model-calls/{sequence:long}/parts/{part}")]
     public async Task<IActionResult> GetModelCallPart([FromRoute] Guid runId, [FromRoute] long sequence, [FromRoute] CodeSpace.Messages.Dtos.Workflows.ModelCalls.WorkflowRunModelCallPart part, [FromQuery] GetWorkflowRunModelCallPartQuery query, CancellationToken cancellationToken)
