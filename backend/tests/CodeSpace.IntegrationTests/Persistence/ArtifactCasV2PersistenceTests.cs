@@ -336,6 +336,280 @@ public sealed class ArtifactCasV2PersistenceTests
         }
     }
 
+    [Fact]
+    public async Task Supersession_target_cannot_be_seeded_on_insert()
+    {
+        var world = await SeedWorldAsync();
+        var artifact = Object(world.TeamId, 9, 0x51);
+        var target = Reference(world, artifact, "output.primary", "reports/current.md");
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.AddRange(artifact, target);
+            await db.SaveChangesAsync();
+        }
+
+        var preSuperseded = Reference(world, artifact, "output.unrelated", "reports/unrelated.md");
+        preSuperseded.SupersededByReferenceId = target.Id;
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.WorkflowRunArtifactReference.Add(preSuperseded);
+            var failure = await Record.ExceptionAsync(() => db.SaveChangesAsync());
+            failure.ShouldNotBeNull();
+            failure.ToString().ShouldContain("must start active");
+        }
+    }
+
+    [Fact]
+    public async Task Attempt_path_uniqueness_is_active_and_generation_scoped()
+    {
+        var world = await SeedWorldAsync();
+        var artifact = Object(world.TeamId, 10, 0x52);
+        var attemptId = Guid.NewGuid();
+        var createdAt = DateTimeOffset.UtcNow;
+        var firstGeneration = Reference(world, artifact, "output.primary", "reports/versioned.md");
+        firstGeneration.ExecutionAttemptId = attemptId;
+        firstGeneration.ExecutionGeneration = 1;
+        firstGeneration.CreatedDate = createdAt;
+        var secondGeneration = Reference(world, artifact, firstGeneration.Role, firstGeneration.LogicalPath);
+        secondGeneration.ExecutionAttemptId = attemptId;
+        secondGeneration.ExecutionGeneration = 2;
+        secondGeneration.CreatedDate = createdAt.AddSeconds(1);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.AddRange(artifact, firstGeneration, secondGeneration);
+            await db.SaveChangesAsync();
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var stored = await db.WorkflowRunArtifactReference.SingleAsync(r => r.Id == firstGeneration.Id);
+            stored.SupersededByReferenceId = secondGeneration.Id;
+            await db.SaveChangesAsync();
+        }
+
+        var replacement = Reference(world, artifact, firstGeneration.Role, firstGeneration.LogicalPath);
+        replacement.ExecutionAttemptId = attemptId;
+        replacement.ExecutionGeneration = 1;
+        replacement.CreatedDate = createdAt.AddSeconds(2);
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.WorkflowRunArtifactReference.Add(replacement);
+            await db.SaveChangesAsync();
+        }
+
+        var duplicateActive = Reference(world, artifact, firstGeneration.Role, firstGeneration.LogicalPath);
+        duplicateActive.ExecutionAttemptId = attemptId;
+        duplicateActive.ExecutionGeneration = 1;
+        duplicateActive.CreatedDate = createdAt.AddSeconds(3);
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.WorkflowRunArtifactReference.Add(duplicateActive);
+            await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
+        }
+    }
+
+    [Fact]
+    public async Task Transfer_claim_is_fence_pinned_and_execution_identity_is_immutable()
+    {
+        var world = await SeedWorldAsync();
+        var artifact = Object(world.TeamId, 11, 0x53);
+        var location = PendingLocation(world, artifact, "objects/53/fenced.bin");
+        var transfer = Transfer(world, artifact, location, "fenced-transfer");
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.ArtifactTransferIntent.Add(transfer);
+            await db.SaveChangesAsync();
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var stored = await db.ArtifactTransferIntent.SingleAsync(i => i.Id == transfer.Id);
+            stored.ExecutionGeneration++;
+            stored.Revision = 2;
+            var mutation = await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
+            mutation.ToString().ShouldContain("execution identity is immutable");
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var stored = await db.ArtifactTransferIntent.SingleAsync(i => i.Id == transfer.Id);
+            stored.WorkerFenceEpoch = 2;
+            stored.Revision = 2;
+            await db.SaveChangesAsync();
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var stored = await db.ArtifactTransferIntent.SingleAsync(i => i.Id == transfer.Id);
+            stored.State = ArtifactTransferState.Uploading;
+            stored.WorkerFenceEpoch = 1;
+            stored.Revision = 3;
+            var stale = await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
+            stale.ToString().ShouldContain("worker fence");
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var stored = await db.ArtifactTransferIntent.SingleAsync(i => i.Id == transfer.Id);
+            stored.State = ArtifactTransferState.Uploading;
+            stored.WorkerFenceEpoch = 3;
+            stored.Revision = 3;
+            var combined = await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
+            combined.ToString().ShouldContain("claim-only");
+        }
+
+        await using var connection = new NpgsqlConnection(_fixture.ConnectionString);
+        await connection.OpenAsync();
+        await using var staleCas = new NpgsqlCommand("UPDATE artifact_transfer_intent SET state = 'Uploading', revision = 3, worker_fence_epoch = 1 WHERE id = @id AND revision = 2 AND worker_fence_epoch = 1", connection);
+        staleCas.Parameters.AddWithValue("id", transfer.Id);
+        (await staleCas.ExecuteNonQueryAsync()).ShouldBe(0);
+
+        await using var currentCas = new NpgsqlCommand("UPDATE artifact_transfer_intent SET state = 'Uploading', revision = 3, worker_fence_epoch = 2 WHERE id = @id AND revision = 2 AND worker_fence_epoch = 2", connection);
+        currentCas.Parameters.AddWithValue("id", transfer.Id);
+        (await currentCas.ExecuteNonQueryAsync()).ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task Future_location_event_cannot_commit_without_its_location_revision()
+    {
+        var world = await SeedWorldAsync();
+        var artifact = Object(world.TeamId, 12, 0x54);
+        var location = PendingLocation(world, artifact, "objects/54/future.bin");
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.AddRange(artifact, location, Event(location, 1, ArtifactLocationEventType.Created, ArtifactLocationState.Pending));
+            await db.SaveChangesAsync();
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.ArtifactLocationEvent.Add(Event(location, 2, ArtifactLocationEventType.Observed, ArtifactLocationState.Pending));
+            var failure = await Record.ExceptionAsync(() => db.SaveChangesAsync());
+            failure.ShouldNotBeNull();
+            failure.ToString().ShouldContain("must match the committed location revision");
+        }
+    }
+
+    [Fact]
+    public async Task Next_event_can_lock_first_and_preserves_encoding_and_key_version_snapshot()
+    {
+        var world = await SeedWorldAsync();
+        var artifact = Object(world.TeamId, 13, 0x55);
+        var location = PendingLocation(world, artifact, "objects/55/snapshot.bin");
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.AddRange(artifact, location, Event(location, 1, ArtifactLocationEventType.Created, ArtifactLocationState.Pending));
+            await db.SaveChangesAsync();
+        }
+
+        var eventId = Guid.NewGuid();
+        await using (var connection = new NpgsqlConnection(_fixture.ConnectionString))
+        {
+            await connection.OpenAsync();
+            await using var transaction = await connection.BeginTransactionAsync();
+            await using var insertEvent = new NpgsqlCommand("""
+                INSERT INTO artifact_location_event (
+                    id, team_id, artifact_location_id, revision, event_type, state, observed_at,
+                    content_encoding, encryption_key_version, details_jsonb, created_by)
+                VALUES (@id, @team_id, @location_id, 2, 'Observed', 'Pending', @observed_at,
+                    'gzip', 'kms-v2', '{}'::jsonb, @created_by)
+                """, connection, transaction);
+            insertEvent.Parameters.AddWithValue("id", eventId);
+            insertEvent.Parameters.AddWithValue("team_id", world.TeamId);
+            insertEvent.Parameters.AddWithValue("location_id", location.Id);
+            insertEvent.Parameters.AddWithValue("observed_at", DateTimeOffset.UtcNow);
+            insertEvent.Parameters.AddWithValue("created_by", world.ActorId);
+            await insertEvent.ExecuteNonQueryAsync();
+
+            await using var updateLocation = new NpgsqlCommand("""
+                UPDATE artifact_location
+                SET revision = 2, content_encoding = 'gzip', encryption_key_version = 'kms-v2',
+                    last_modified_date = @modified_at, last_modified_by = @modified_by
+                WHERE team_id = @team_id AND id = @location_id
+                """, connection, transaction);
+            updateLocation.Parameters.AddWithValue("modified_at", DateTimeOffset.UtcNow);
+            updateLocation.Parameters.AddWithValue("modified_by", world.ActorId);
+            updateLocation.Parameters.AddWithValue("team_id", world.TeamId);
+            updateLocation.Parameters.AddWithValue("location_id", location.Id);
+            (await updateLocation.ExecuteNonQueryAsync()).ShouldBe(1);
+            await transaction.CommitAsync();
+        }
+
+        await using (var connection = new NpgsqlConnection(_fixture.ConnectionString))
+        {
+            await connection.OpenAsync();
+            await using var command = new NpgsqlCommand("SELECT content_encoding, encryption_key_version FROM artifact_location_event WHERE id = @id", connection);
+            command.Parameters.AddWithValue("id", eventId);
+            await using var reader = await command.ExecuteReaderAsync();
+            (await reader.ReadAsync()).ShouldBeTrue();
+            reader.GetString(0).ShouldBe("gzip");
+            reader.GetString(1).ShouldBe("kms-v2");
+        }
+    }
+
+    [Fact]
+    public async Task Checksum_algorithm_and_bytes_are_a_strict_pair_on_location_and_event()
+    {
+        var world = await SeedWorldAsync();
+        var artifact = Object(world.TeamId, 14, 0x56);
+        var malformedLocation = PendingLocation(world, artifact, "objects/56/malformed-location.bin");
+        malformedLocation.ProviderChecksum = [0x01];
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.AddRange(artifact, malformedLocation, Event(malformedLocation, 1, ArtifactLocationEventType.Created, ArtifactLocationState.Pending));
+            var failure = await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
+            failure.ToString().ShouldContain("ck_artifact_location_checksum");
+        }
+
+        var validArtifact = Object(world.TeamId, 15, 0x57);
+        var validLocation = PendingLocation(world, validArtifact, "objects/57/malformed-event.bin");
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.AddRange(validArtifact, validLocation, Event(validLocation, 1, ArtifactLocationEventType.Created, ArtifactLocationState.Pending));
+            await db.SaveChangesAsync();
+        }
+
+        await using var connection = new NpgsqlConnection(_fixture.ConnectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand("""
+            INSERT INTO artifact_location_event (
+                id, team_id, artifact_location_id, revision, event_type, state, observed_at,
+                provider_checksum_algorithm, provider_checksum, details_jsonb, created_by)
+            VALUES (@id, @team_id, @location_id, 2, 'Observed', 'Pending', @observed_at,
+                NULL, @checksum, '{}'::jsonb, @created_by)
+            """, connection);
+        command.Parameters.AddWithValue("id", Guid.NewGuid());
+        command.Parameters.AddWithValue("team_id", world.TeamId);
+        command.Parameters.AddWithValue("location_id", validLocation.Id);
+        command.Parameters.AddWithValue("observed_at", DateTimeOffset.UtcNow);
+        command.Parameters.AddWithValue("checksum", new byte[] { 0x01 });
+        command.Parameters.AddWithValue("created_by", world.ActorId);
+        var eventFailure = await command.ExecuteNonQueryAsync().ShouldThrowAsync<PostgresException>();
+        eventFailure.ConstraintName.ShouldBe("ck_artifact_location_event_checksum");
+    }
+
     private async Task AdvanceTransferAsync(Guid id, ArtifactTransferState state, long revision, Guid? objectId = null, Guid? locationId = null)
     {
         using var scope = _fixture.BeginScope();
@@ -438,6 +712,7 @@ public sealed class ArtifactCasV2PersistenceTests
         ProviderObjectVersion = location.ProviderObjectVersion, ProviderETag = location.ProviderETag,
         ProviderChecksumAlgorithm = location.ProviderChecksumAlgorithm, ProviderChecksum = location.ProviderChecksum,
         ObservedSizeBytes = location.ObservedSizeBytes, VerifiedAt = location.VerifiedAt,
+        ContentEncoding = location.ContentEncoding, EncryptionKeyVersion = location.EncryptionKeyVersion,
         DetailsJson = "{}", CreatedBy = location.LastModifiedBy,
     };
 

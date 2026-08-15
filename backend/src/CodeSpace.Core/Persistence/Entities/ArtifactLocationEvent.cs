@@ -19,6 +19,8 @@ public class ArtifactLocationEvent : IEntity<Guid>
     public byte[]? ProviderChecksum { get; set; }
     public long? ObservedSizeBytes { get; set; }
     public DateTimeOffset? VerifiedAt { get; set; }
+    public string? ContentEncoding { get; set; }
+    public string? EncryptionKeyVersion { get; set; }
     public string? ErrorCode { get; set; }
     public string? ErrorMessage { get; set; }
     public string DetailsJson { get; set; } = "{}";
