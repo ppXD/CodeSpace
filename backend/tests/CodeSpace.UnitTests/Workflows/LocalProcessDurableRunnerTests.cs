@@ -141,6 +141,11 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         var stdout = descriptors.Single(value => value.StreamKind == AgentRunLogKinds.StandardOutput);
         var stderr = descriptors.Single(value => value.StreamKind == AgentRunLogKinds.StandardError);
 
+        stdout.ContentType.ShouldBe(AgentRunLogRepresentations.PlainTextContentType);
+        stdout.ContentEncoding.ShouldBe(AgentRunLogRepresentations.Utf8ContentEncoding);
+        stderr.ContentType.ShouldBe(AgentRunLogRepresentations.PlainTextContentType);
+        stderr.ContentEncoding.ShouldBe(AgentRunLogRepresentations.Utf8ContentEncoding);
+
         var stdoutRead = await source.ReadAsync(new SandboxDurableLogReadRequest { Handle = handle, SourceKey = stdout.SourceKey, OffsetBytes = 0, MinimumBytes = 1, MaximumBytes = 1, FinalDrain = true }, CancellationToken.None);
         var stderrRead = await source.ReadAsync(new SandboxDurableLogReadRequest { Handle = handle, SourceKey = stderr.SourceKey, OffsetBytes = 0, MinimumBytes = 1, MaximumBytes = 2, FinalDrain = true }, CancellationToken.None);
         var unknown = await source.ReadAsync(new SandboxDurableLogReadRequest { Handle = handle, SourceKey = "../out.log", OffsetBytes = 0, MinimumBytes = 1, MaximumBytes = 2, FinalDrain = true }, CancellationToken.None);

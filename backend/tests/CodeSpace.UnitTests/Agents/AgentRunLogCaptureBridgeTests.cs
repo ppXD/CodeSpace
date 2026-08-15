@@ -43,6 +43,7 @@ public sealed class AgentRunLogCaptureBridgeTests
         logs.AppendSizes.ShouldAllBe(size => size <= 1024 * 1024);
         logs.AppendSizes.Count.ShouldBeLessThan(8, "multi-megabyte output is batched, never written per token or line");
         logs.Heads.ShouldAllBe(head => head.Metadata.State == AgentRunLogStreamState.Completed && head.CaptureFinalizedAt != null);
+        logs.Heads.ShouldAllBe(head => head.Metadata.ContentType == AgentRunLogRepresentations.PlainTextContentType && head.Metadata.ContentEncoding == AgentRunLogRepresentations.Utf8ContentEncoding);
     }
 
     [Fact]
@@ -285,8 +286,8 @@ public sealed class AgentRunLogCaptureBridgeTests
 
         public IReadOnlyList<SandboxDurableLogDescriptor> DescribeLogs(SandboxHandle handle) =>
         [
-            new("stdout", AgentRunLogKinds.StandardOutput, "application/octet-stream", null, "fake-spool/v1"),
-            new("stderr", AgentRunLogKinds.StandardError, "application/octet-stream", null, "fake-spool/v1"),
+            new("stdout", AgentRunLogKinds.StandardOutput, AgentRunLogRepresentations.PlainTextContentType, AgentRunLogRepresentations.Utf8ContentEncoding, "fake-spool/v1"),
+            new("stderr", AgentRunLogKinds.StandardError, AgentRunLogRepresentations.PlainTextContentType, AgentRunLogRepresentations.Utf8ContentEncoding, "fake-spool/v1"),
         ];
 
         public Task<SandboxDurableLogReadResult> ReadAsync(SandboxDurableLogReadRequest request, CancellationToken cancellationToken)
@@ -331,7 +332,7 @@ public sealed class AgentRunLogCaptureBridgeTests
                 if (request.WorkerFenceEpoch != CurrentFence) return Task.FromResult<AgentRunLogOpenResult>(RejectOpen(AgentRunLogProblemCode.StaleWorker));
                 if (!_streams.TryGetValue(request.StreamKind, out var stream))
                 {
-                    var metadata = Metadata(Guid.NewGuid(), request.StreamKind);
+                    var metadata = Metadata(Guid.NewGuid(), request);
                     stream = new StreamHead(new AgentRunLogCaptureHead(metadata, request.WorkerFenceEpoch, request.CaptureSessionId, 0, null));
                     _streams.Add(request.StreamKind, stream);
                     RecordOpen(request.StreamKind, request.CaptureSessionId, 0);
@@ -455,10 +456,10 @@ public sealed class AgentRunLogCaptureBridgeTests
         private void RecordOpen(string kind, Guid session, long sourceBase) { OpenedSessions.Add(session); SourceBasesBySession[(kind, session)] = sourceBase; }
         private static AgentRunLogOpenResult.Rejected RejectOpen(AgentRunLogProblemCode code) => new(new AgentRunLogProblem(code));
         private static AgentRunLogOpenResult.Opened Opened(AgentRunLogCaptureHead head, bool already, bool reclaimed) => new(head.Metadata, already, reclaimed) { CaptureSourceBaseOffsetBytes = head.CaptureSourceBaseOffsetBytes, CaptureFinalizedAt = head.CaptureFinalizedAt };
-        private static AgentRunLogMetadata Metadata(Guid id, string kind)
+        private static AgentRunLogMetadata Metadata(Guid id, AgentRunLogOpenRequest request)
         {
             var now = DateTimeOffset.UtcNow;
-            return new AgentRunLogMetadata(id, RunId, kind, "application/octet-stream", null, "fake-spool/v1", ArtifactRetention.Run, AgentRunLogStreamState.Open, 1, 0, 0, 0, null, now, now, null, null);
+            return new AgentRunLogMetadata(id, RunId, request.StreamKind, request.ContentType, request.ContentEncoding, request.CaptureSource, request.Retention, AgentRunLogStreamState.Open, 1, 0, 0, 0, null, now, now, null, null);
         }
 
         private sealed class StreamHead(AgentRunLogCaptureHead head)

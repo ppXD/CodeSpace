@@ -37,7 +37,8 @@ describe("Agent Run durable log API", () => {
       "X-CodeSpace-Log-Total-Bytes": "3",
       "X-CodeSpace-Log-Has-More": "true",
       "X-CodeSpace-Log-Revision": "7",
-      "X-CodeSpace-Log-Content-Type": "application/octet-stream",
+      "X-CodeSpace-Log-Content-Type": "text/plain",
+      "X-CodeSpace-Log-Content-Encoding": "utf-8",
     })));
 
     const result = await agentsApi.readRunLogRange("run-1", "stream-1", 0, 65536);
@@ -45,7 +46,7 @@ describe("Agent Run durable log API", () => {
     expect(result.availability).toBe("Available");
     if (result.availability !== "Available") throw new Error("expected available");
     expect([...result.bytes]).toEqual([0xe2]);
-    expect(result).toMatchObject({ offsetBytes: 0, nextOffsetBytes: 1, totalBytes: 3, hasMore: true, revision: 7 });
+    expect(result).toMatchObject({ offsetBytes: 0, nextOffsetBytes: 1, totalBytes: 3, hasMore: true, revision: 7, contentType: "text/plain", contentEncoding: "utf-8" });
   });
 
   it("preserves typed storage failures and distinguishes HTTP 404 from an empty byte range", async () => {
