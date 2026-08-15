@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -49,7 +50,8 @@ public sealed class StorageProfilePersistenceTests
 
             var revision = stored.Revisions.ShouldHaveSingleItem();
             revision.ProviderTypeKey.ShouldBe("local-rwx/v1");
-            revision.NonSecretConfigJson.ShouldBe("{\"rootPath\":\"/srv/codespace/artifacts\"}");
+            using var config = JsonDocument.Parse(revision.NonSecretConfigJson);
+            config.RootElement.GetProperty("rootPath").GetString().ShouldBe("/srv/codespace/artifacts", "jsonb preserves data semantics, not source whitespace");
             revision.CredentialRef.ShouldBe("credential://storage/primary");
             revision.NamespaceFingerprint.ShouldBe(Fingerprint('a'));
         }

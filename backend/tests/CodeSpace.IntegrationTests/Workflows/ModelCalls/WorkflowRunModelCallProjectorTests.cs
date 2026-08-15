@@ -91,7 +91,8 @@ public sealed class WorkflowRunModelCallProjectorTests
         attempt.SourceEvidenceRevision.ShouldBe(2);
         attempt.Status.ShouldBe("Failed");
         attempt.ErrorCode.ShouldBe("Transport");
-        attempt.StartedAt.ShouldBe(terminal.OccurredAt, "a late observation cannot produce an impossible completed-before-started interval");
+        attempt.CompletedAt.HasValue.ShouldBeTrue();
+        attempt.StartedAt.ShouldBe(attempt.CompletedAt.Value, "a late observation is clamped to the persisted terminal timestamp and cannot produce an impossible completed-before-started interval");
     }
 
     [Fact]
