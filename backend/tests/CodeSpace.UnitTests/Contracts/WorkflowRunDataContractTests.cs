@@ -29,6 +29,7 @@ public sealed class WorkflowRunDataContractTests
 
     [Theory]
     [InlineData("storage_profile")]
+    [InlineData("storage_route")]
     [InlineData("artifact_object")]
     [InlineData("artifact_location")]
     public void Global_storage_aggregates_are_not_run_owned_names(string tableName)
