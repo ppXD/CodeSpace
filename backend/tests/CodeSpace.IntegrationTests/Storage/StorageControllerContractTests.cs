@@ -15,6 +15,7 @@ public sealed class StorageControllerContractTests
         var mutationMethods = new[]
         {
             nameof(StorageController.CreateProfile), nameof(StorageController.AppendProfileRevision), nameof(StorageController.SetProfileState),
+            nameof(StorageController.CreateRoute), nameof(StorageController.AppendRouteRevision), nameof(StorageController.SetRouteState),
             nameof(StorageController.CreateCredential), nameof(StorageController.AppendCredentialRevision), nameof(StorageController.RevokeCredential),
         };
 

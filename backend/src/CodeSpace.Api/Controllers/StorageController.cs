@@ -79,6 +79,44 @@ public class StorageController : ControllerBase
         return Ok(result);
     }
 
+    [HttpGet("routes/page")]
+    public async Task<IActionResult> ListRoutePage([FromQuery] ListStorageRoutePageQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    [HttpGet("routes/{routeId:guid}")]
+    public async Task<IActionResult> GetRoute([FromRoute] Guid routeId, [FromQuery] GetStorageRouteQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query with { RouteId = routeId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
+    [HttpPost("routes")]
+    [RequestSizeLimit(MaxMutationBodyBytes)]
+    public async Task<IActionResult> CreateRoute([FromBody] CreateStorageRouteCommand command, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    [HttpPost("routes/{routeId:guid}/revisions")]
+    [RequestSizeLimit(MaxMutationBodyBytes)]
+    public async Task<IActionResult> AppendRouteRevision([FromRoute] Guid routeId, [FromBody] AppendStorageRouteRevisionCommand command, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(command with { RouteId = routeId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
+    [HttpPut("routes/{routeId:guid}/state")]
+    [RequestSizeLimit(MaxMutationBodyBytes)]
+    public async Task<IActionResult> SetRouteState([FromRoute] Guid routeId, [FromBody] SetStorageRouteStateCommand command, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(command with { RouteId = routeId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
     [HttpGet("credentials")]
     public async Task<IActionResult> ListCredentials(CancellationToken cancellationToken)
     {
