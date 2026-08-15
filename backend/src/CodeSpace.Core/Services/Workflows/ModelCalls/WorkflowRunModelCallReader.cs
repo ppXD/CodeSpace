@@ -6,15 +6,16 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Dtos.Workflows.ModelCalls;
 using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.Workflows.ModelCalls;
 
 /// <summary>
-/// Metadata-first, bounded reader for Workflow Run model-call records. This is a read projection over the legacy
-/// interaction ledger while <c>workflow_run_model_call*</c> shadow producers are introduced; it never changes model,
-/// workflow, completion, or terminal behavior.
+/// Metadata-first, bounded reader for Workflow Run model calls. Stable-id reads use the first-class logical-call and
+/// physical-attempt projection without touching body artifacts; sequence reads remain an explicit compatibility view
+/// over the legacy interaction ledger. This service never changes model, workflow, completion, or terminal behavior.
 /// </summary>
 public sealed class WorkflowRunModelCallReader : IWorkflowRunModelCallReader, IScopedDependency
 {
@@ -34,20 +35,219 @@ public sealed class WorkflowRunModelCallReader : IWorkflowRunModelCallReader, IS
         _artifacts = artifacts;
     }
 
+    public async Task<WorkflowRunModelCallDetailMetadata?> ReadByIdAsync(Guid runId, Guid modelCallId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var call = await _db.WorkflowRunModelCall.AsNoTracking()
+            .SingleOrDefaultAsync(value => value.Id == modelCallId && value.WorkflowRunId == runId && value.TeamId == teamId, cancellationToken)
+            .ConfigureAwait(false);
+        if (call is null) return null;
+
+        var attempts = await _db.WorkflowRunModelCallAttempt.AsNoTracking()
+            .Where(value => value.ModelCallId == modelCallId && value.WorkflowRunId == runId && value.TeamId == teamId)
+            .OrderBy(value => value.AttemptOrdinal)
+            .ThenBy(value => value.Id)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        return Detail(call, attempts);
+    }
+
+    public async Task<WorkflowRunModelCallBodyPage?> ReadBodyAsync(WorkflowRunModelCallBodyReadRequest request, CancellationToken cancellationToken)
+    {
+        var call = await _db.WorkflowRunModelCall.AsNoTracking()
+            .Where(value => value.Id == request.ModelCallId && value.WorkflowRunId == request.RunId && value.TeamId == request.TeamId)
+            .Select(value => new BodyRow(value.RequestArtifactId, value.CaptureCompleteness))
+            .SingleOrDefaultAsync(cancellationToken)
+            .ConfigureAwait(false);
+        if (call is null) return null;
+        if (!Enum.IsDefined(request.Body))
+            return BodyUnavailable(request, WorkflowRunModelCallPartAvailability.InvalidBodyReference, "The model-call body kind is invalid.", call);
+
+        BodyRow source;
+        if (request.Body == WorkflowRunModelCallBody.LogicalRequest)
+        {
+            if (request.AttemptId is not null) return BodyUnavailable(request, WorkflowRunModelCallPartAvailability.InvalidBodyReference, "A logical request body cannot be scoped to a physical attempt.", call);
+            source = call;
+        }
+        else
+        {
+            if (request.AttemptId is not { } attemptId)
+                return BodyUnavailable(request, WorkflowRunModelCallPartAvailability.InvalidBodyReference, "A physical attempt body requires an attempt id.", call);
+
+            var attempt = await _db.WorkflowRunModelCallAttempt.AsNoTracking()
+                .Where(value => value.Id == attemptId && value.ModelCallId == request.ModelCallId
+                    && value.WorkflowRunId == request.RunId && value.TeamId == request.TeamId)
+                .Select(value => new AttemptBodyRow(value.RequestArtifactId, value.ResponseArtifactId, value.ErrorArtifactId, value.CaptureCompleteness))
+                .SingleOrDefaultAsync(cancellationToken)
+                .ConfigureAwait(false);
+            if (attempt is null) return null;
+            source = new BodyRow(attempt.Artifact(request.Body), attempt.CaptureCompleteness);
+        }
+
+        if (request.OffsetBytes < 0)
+            return BodyUnavailable(request, WorkflowRunModelCallPartAvailability.InvalidOffset, "The byte offset is invalid.", source);
+        if (source.ArtifactId is null)
+            return BodyUnavailable(request, MissingAvailability(source.CaptureCompleteness), MissingMessage(source.CaptureCompleteness), source);
+
+        var limit = Math.Clamp(request.LimitBytes, MinPageBytes, MaxPageBytes);
+        var read = await _artifacts.ReadRangeAsync(request.TeamId, source.ArtifactId.Value, request.OffsetBytes, limit + Utf8LookaheadBytes, cancellationToken).ConfigureAwait(false);
+        if (read.State != ArtifactRangeReadState.Available)
+            return BodyUnavailable(request, Map(read.State), Message(read.State), source, new BodyMetadata(read.TotalLength, read.ContentType));
+
+        return PageBodyUtf8(request, new BodyContent(source, read.Bytes!, read.TotalLength!.Value, read.ContentType!, read.IntegrityVerified), limit);
+    }
+
     public async Task<WorkflowRunModelCallMetadata?> ReadMetadataAsync(Guid runId, long sequence, Guid teamId, CancellationToken cancellationToken)
     {
         var call = await FindAsync(runId, sequence, teamId, cancellationToken).ConfigureAwait(false);
         if (call is null) return null;
 
+        var projection = await (from attempt in _db.WorkflowRunModelCallAttempt.AsNoTracking()
+                                join modelCall in _db.WorkflowRunModelCall.AsNoTracking() on attempt.ModelCallId equals modelCall.Id
+                                where attempt.SourceTerminalRecordId == call.Completed.Id
+                                      && attempt.WorkflowRunId == runId && attempt.TeamId == teamId
+                                      && modelCall.WorkflowRunId == runId && modelCall.TeamId == teamId
+                                select new { modelCall.Id, modelCall.CaptureCompleteness })
+            .SingleOrDefaultAsync(cancellationToken)
+            .ConfigureAwait(false);
+
         return new WorkflowRunModelCallMetadata
         {
             RunId = runId,
             Sequence = sequence,
+            WorkflowRunModelCallId = projection?.Id,
+            ProjectionState = projection is null ? WorkflowRunModelCallProjectionState.LegacyFallback : WorkflowRunModelCallProjectionState.Projected,
+            CaptureCompleteness = projection?.CaptureCompleteness ?? WorkflowRunCaptureCompleteness.LegacyUnknown,
             CorrelationId = call.Completed.CorrelationId,
             Status = call.Completed.RecordType == WorkflowRunRecordTypes.InteractionFailed ? WorkflowRunModelCallStatus.Failed : WorkflowRunModelCallStatus.Completed,
             Parts = Enum.GetValues<WorkflowRunModelCallPart>().Select(part => SourceFor(call, part).Descriptor(part)).ToList(),
         };
     }
+
+    private static WorkflowRunModelCallDetailMetadata Detail(WorkflowRunModelCall call, IReadOnlyList<WorkflowRunModelCallAttempt> attempts) => new()
+    {
+        WorkflowRunModelCallId = call.Id,
+        RunId = call.WorkflowRunId,
+        CallOrdinal = call.CallOrdinal,
+        NodeId = call.NodeId,
+        IterationKey = call.IterationKey,
+        WorkPlanId = call.WorkPlanId,
+        PlanVersion = call.PlanVersion,
+        WorkUnitId = call.WorkUnitId,
+        WorkUnitContractHash = call.WorkUnitContractHash,
+        ExecutionAttemptId = call.ExecutionAttemptId,
+        ExecutionAttemptOrdinal = call.ExecutionAttemptOrdinal,
+        ExecutionGeneration = call.ExecutionGeneration,
+        Purpose = call.Purpose,
+        RequestedProvider = call.RequestedProvider,
+        RequestedModel = call.RequestedModel,
+        RequestedModelRowId = call.RequestedModelRowId,
+        SelectionPolicy = call.SelectionPolicy,
+        SourceKind = call.SourceKind,
+        SourceCorrelationId = call.SourceCorrelationId,
+        CaptureSource = call.CaptureSource,
+        CaptureCompleteness = call.CaptureCompleteness,
+        SchemaVersion = call.SchemaVersion,
+        CreatedAt = call.CreatedDate,
+        Bodies = [Descriptor(WorkflowRunModelCallBody.LogicalRequest, null, call.RequestArtifactId, call.CaptureCompleteness)],
+        Attempts = attempts.Select(Attempt).ToList(),
+    };
+
+    private static WorkflowRunModelCallAttemptMetadata Attempt(WorkflowRunModelCallAttempt attempt) => new()
+    {
+        AttemptId = attempt.Id,
+        AttemptOrdinal = attempt.AttemptOrdinal,
+        EffectiveProvider = attempt.EffectiveProvider,
+        EffectiveModel = attempt.EffectiveModel,
+        EffectiveModelRowId = attempt.EffectiveModelRowId,
+        TransportKind = attempt.TransportKind,
+        EndpointFingerprint = attempt.EndpointFingerprint,
+        ProviderRequestId = attempt.ProviderRequestId,
+        Status = attempt.Status,
+        ErrorCode = attempt.ErrorCode,
+        FinishReason = attempt.FinishReason,
+        HttpStatusCode = attempt.HttpStatusCode,
+        CaptureSource = attempt.CaptureSource,
+        CaptureCompleteness = attempt.CaptureCompleteness,
+        SourceEvidence = Evidence(attempt),
+        SourceStartedRecordId = attempt.SourceStartedRecordId,
+        SourceTerminalRecordId = attempt.SourceTerminalRecordId,
+        SourceEvidenceRevision = attempt.SourceEvidenceRevision,
+        Usage = new WorkflowRunModelCallUsageMetadata
+        {
+            InputTokens = attempt.InputTokens,
+            OutputTokens = attempt.OutputTokens,
+            CacheReadTokens = attempt.CacheReadTokens,
+            CacheWriteTokens = attempt.CacheWriteTokens,
+            ReasoningTokens = attempt.ReasoningTokens,
+        },
+        CostAmount = attempt.CostAmount,
+        CostCurrency = attempt.CostCurrency,
+        PricingVersion = attempt.PricingVersion,
+        StartedAt = attempt.StartedAt,
+        FirstTokenAt = attempt.FirstTokenAt,
+        CompletedAt = attempt.CompletedAt,
+        SchemaVersion = attempt.SchemaVersion,
+        Bodies =
+        [
+            Descriptor(WorkflowRunModelCallBody.AttemptRequest, attempt.Id, attempt.RequestArtifactId, attempt.CaptureCompleteness),
+            Descriptor(WorkflowRunModelCallBody.AttemptResponse, attempt.Id, attempt.ResponseArtifactId, attempt.CaptureCompleteness),
+            Descriptor(WorkflowRunModelCallBody.AttemptError, attempt.Id, attempt.ErrorArtifactId, attempt.CaptureCompleteness),
+        ],
+    };
+
+    private static WorkflowRunModelCallBodyDescriptor Descriptor(WorkflowRunModelCallBody body, Guid? attemptId, Guid? artifactId,
+        WorkflowRunCaptureCompleteness completeness) => new()
+    {
+        Body = body,
+        AttemptId = attemptId,
+        ArtifactId = artifactId,
+        ReferenceState = ReferenceState(artifactId, completeness),
+        CaptureCompleteness = completeness,
+    };
+
+    private static WorkflowRunModelCallSourceEvidence Evidence(WorkflowRunModelCallAttempt attempt)
+    {
+        if (attempt.SourceTerminalRecordId is null) return WorkflowRunModelCallSourceEvidence.Native;
+        if (attempt.SourceStartedRecordId is null) return WorkflowRunModelCallSourceEvidence.TerminalOnly;
+        return attempt.SourceEvidenceRevision > 1
+            ? WorkflowRunModelCallSourceEvidence.LateStartAttached
+            : WorkflowRunModelCallSourceEvidence.StartedAndTerminal;
+    }
+
+    private static WorkflowRunModelCallBodyReferenceState ReferenceState(Guid? artifactId, WorkflowRunCaptureCompleteness completeness)
+    {
+        if (artifactId is not null) return WorkflowRunModelCallBodyReferenceState.Referenced;
+        return completeness switch
+        {
+            WorkflowRunCaptureCompleteness.Exact => WorkflowRunModelCallBodyReferenceState.NotRecorded,
+            WorkflowRunCaptureCompleteness.RedactedExact => WorkflowRunModelCallBodyReferenceState.Redacted,
+            WorkflowRunCaptureCompleteness.Partial => WorkflowRunModelCallBodyReferenceState.Partial,
+            WorkflowRunCaptureCompleteness.Unavailable => WorkflowRunModelCallBodyReferenceState.Unavailable,
+            WorkflowRunCaptureCompleteness.Corrupt => WorkflowRunModelCallBodyReferenceState.Corrupt,
+            _ => WorkflowRunModelCallBodyReferenceState.LegacyUnknown,
+        };
+    }
+
+    private static WorkflowRunModelCallPartAvailability MissingAvailability(WorkflowRunCaptureCompleteness completeness) => completeness switch
+    {
+        WorkflowRunCaptureCompleteness.Exact => WorkflowRunModelCallPartAvailability.NotRecorded,
+        WorkflowRunCaptureCompleteness.RedactedExact => WorkflowRunModelCallPartAvailability.Redacted,
+        WorkflowRunCaptureCompleteness.Partial => WorkflowRunModelCallPartAvailability.CapturePartial,
+        WorkflowRunCaptureCompleteness.Unavailable => WorkflowRunModelCallPartAvailability.CaptureUnavailable,
+        WorkflowRunCaptureCompleteness.Corrupt => WorkflowRunModelCallPartAvailability.CaptureCorrupt,
+        _ => WorkflowRunModelCallPartAvailability.LegacyUnknown,
+    };
+
+    private static string MissingMessage(WorkflowRunCaptureCompleteness completeness) => completeness switch
+    {
+        WorkflowRunCaptureCompleteness.Exact => "This body was not recorded.",
+        WorkflowRunCaptureCompleteness.RedactedExact => "This body was intentionally redacted.",
+        WorkflowRunCaptureCompleteness.Partial => "The capture is partial and contains no body reference.",
+        WorkflowRunCaptureCompleteness.Unavailable => "The body capture is unavailable.",
+        WorkflowRunCaptureCompleteness.Corrupt => "The captured body reference is corrupt or unstatable.",
+        _ => "Legacy capture did not establish a body reference.",
+    };
 
     public async Task<WorkflowRunModelCallPartPage?> ReadPartAsync(WorkflowRunModelCallPartReadRequest request, CancellationToken cancellationToken)
     {
@@ -178,6 +378,48 @@ public sealed class WorkflowRunModelCallReader : IWorkflowRunModelCallReader, IS
         };
     }
 
+    private static WorkflowRunModelCallBodyPage PageBodyUtf8(WorkflowRunModelCallBodyReadRequest request, BodyContent content, int limit)
+    {
+        if (request.OffsetBytes > content.TotalBytes)
+            return BodyUnavailable(request, WorkflowRunModelCallPartAvailability.InvalidOffset, "The byte offset exceeds this body's length.", content.Source, content.Metadata);
+        if (content.Bytes.Length > 0 && IsContinuation(content.Bytes[0]))
+            return BodyUnavailable(request, WorkflowRunModelCallPartAvailability.InvalidOffset, "The byte offset is not a UTF-8 character boundary.", content.Source, content.Metadata);
+
+        var consumed = 0;
+        var max = Math.Min(limit, content.Bytes.Length);
+        while (consumed < max)
+        {
+            var status = Rune.DecodeFromUtf8(content.Bytes.AsSpan(consumed), out _, out var runeBytes);
+            if (status == OperationStatus.Done && consumed + runeBytes <= max)
+            {
+                consumed += runeBytes;
+                continue;
+            }
+            if (status == OperationStatus.NeedMoreData || status == OperationStatus.Done) break;
+            return BodyUnavailable(request, WorkflowRunModelCallPartAvailability.IntegrityFailure, "The stored body is not valid UTF-8 text.", content.Source, content.Metadata);
+        }
+
+        if (consumed == 0 && request.OffsetBytes < content.TotalBytes)
+            return BodyUnavailable(request, WorkflowRunModelCallPartAvailability.IntegrityFailure, "The stored body could not produce a complete UTF-8 character.", content.Source, content.Metadata);
+
+        var next = request.OffsetBytes + consumed;
+        return new WorkflowRunModelCallBodyPage
+        {
+            Body = request.Body,
+            AttemptId = request.AttemptId,
+            CaptureCompleteness = content.Source.CaptureCompleteness,
+            Availability = WorkflowRunModelCallPartAvailability.Available,
+            Text = Encoding.UTF8.GetString(content.Bytes, 0, consumed),
+            OffsetBytes = request.OffsetBytes,
+            ReturnedBytes = consumed,
+            TotalBytes = content.TotalBytes,
+            NextOffsetBytes = next < content.TotalBytes ? next : null,
+            ContentType = content.ContentType,
+            ArtifactId = content.Source.ArtifactId,
+            IntegrityVerified = content.IntegrityVerified,
+        };
+    }
+
     private static WorkflowRunModelCallPartPage Unavailable(WorkflowRunModelCallPartReadRequest request, WorkflowRunModelCallPartAvailability availability, string message, PartSource source, long? totalBytes = null) => new()
     {
         Part = request.Part,
@@ -186,6 +428,21 @@ public sealed class WorkflowRunModelCallReader : IWorkflowRunModelCallReader, IS
         ReturnedBytes = 0,
         TotalBytes = totalBytes ?? source.SizeBytes,
         ContentType = source.ContentType,
+        ArtifactId = source.ArtifactId,
+        Message = message,
+    };
+
+    private static WorkflowRunModelCallBodyPage BodyUnavailable(WorkflowRunModelCallBodyReadRequest request,
+        WorkflowRunModelCallPartAvailability availability, string message, BodyRow source, BodyMetadata? metadata = null) => new()
+    {
+        Body = request.Body,
+        AttemptId = request.AttemptId,
+        CaptureCompleteness = source.CaptureCompleteness,
+        Availability = availability,
+        OffsetBytes = request.OffsetBytes,
+        ReturnedBytes = 0,
+        TotalBytes = metadata?.TotalBytes,
+        ContentType = metadata?.ContentType,
         ArtifactId = source.ArtifactId,
         Message = message,
     };
@@ -254,6 +511,27 @@ public sealed class WorkflowRunModelCallReader : IWorkflowRunModelCallReader, IS
     private static bool IsContinuation(byte value) => (value & 0b1100_0000) == 0b1000_0000;
 
     private sealed record CallRecords(WorkflowRunRecord? Started, WorkflowRunRecord Completed);
+
+    private sealed record BodyRow(Guid? ArtifactId, WorkflowRunCaptureCompleteness CaptureCompleteness);
+
+    private sealed record BodyMetadata(long? TotalBytes, string? ContentType);
+
+    private sealed record BodyContent(BodyRow Source, byte[] Bytes, long TotalBytes, string ContentType, bool IntegrityVerified)
+    {
+        public BodyMetadata Metadata { get; } = new(TotalBytes, ContentType);
+    }
+
+    private sealed record AttemptBodyRow(Guid? RequestArtifactId, Guid? ResponseArtifactId, Guid? ErrorArtifactId,
+        WorkflowRunCaptureCompleteness CaptureCompleteness)
+    {
+        public Guid? Artifact(WorkflowRunModelCallBody body) => body switch
+        {
+            WorkflowRunModelCallBody.AttemptRequest => RequestArtifactId,
+            WorkflowRunModelCallBody.AttemptResponse => ResponseArtifactId,
+            WorkflowRunModelCallBody.AttemptError => ErrorArtifactId,
+            _ => null,
+        };
+    }
 
     private sealed record PartSource(WorkflowRunModelCallPartSource Kind, string? InlineText, Guid? ArtifactId, long? SizeBytes, string? ContentType)
     {

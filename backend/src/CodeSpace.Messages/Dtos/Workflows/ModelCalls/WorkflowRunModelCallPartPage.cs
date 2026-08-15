@@ -26,4 +26,10 @@ public enum WorkflowRunModelCallPartAvailability
     BackendUnavailable = 5,
     AccessDenied = 6,
     InvalidOffset = 7,
+    Redacted = 8,
+    CapturePartial = 9,
+    CaptureUnavailable = 10,
+    CaptureCorrupt = 11,
+    LegacyUnknown = 12,
+    InvalidBodyReference = 13,
 }

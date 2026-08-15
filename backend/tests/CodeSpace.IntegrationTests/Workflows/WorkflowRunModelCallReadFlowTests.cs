@@ -9,6 +9,7 @@ using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Commands.Workflows;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Dtos.Workflows.ModelCalls;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
@@ -43,6 +44,9 @@ public sealed class WorkflowRunModelCallReadFlowTests
         metadata!.RunId.ShouldBe(seeded.RunId);
         metadata.Sequence.ShouldBe(seeded.Sequence);
         metadata.Status.ShouldBe(WorkflowRunModelCallStatus.Completed);
+        metadata.WorkflowRunModelCallId.ShouldBeNull();
+        metadata.ProjectionState.ShouldBe(WorkflowRunModelCallProjectionState.LegacyFallback);
+        metadata.CaptureCompleteness.ShouldBe(WorkflowRunCaptureCompleteness.LegacyUnknown);
         metadata.Parts.Single(p => p.Part == WorkflowRunModelCallPart.SystemPrompt).Source.ShouldBe(WorkflowRunModelCallPartSource.Artifact);
 
         var result = await reader.ReadPartAsync(new WorkflowRunModelCallPartReadRequest(seeded.RunId, seeded.Sequence, seeded.TeamId, WorkflowRunModelCallPart.Result), CancellationToken.None);
