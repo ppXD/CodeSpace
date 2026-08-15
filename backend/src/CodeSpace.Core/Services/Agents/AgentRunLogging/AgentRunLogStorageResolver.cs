@@ -10,14 +10,27 @@ public sealed class AgentRunLogStorageResolver : IAgentRunLogStorageResolver
 {
     public const string DataClassTypeKey = "agent-run-log/v1";
     private readonly IStorageRouteSnapshotResolver _routes;
+    private readonly IAgentRunLogStorageReadiness _readiness;
 
-    public AgentRunLogStorageResolver(IStorageRouteSnapshotResolver routes) => _routes = routes;
+    public AgentRunLogStorageResolver(IStorageRouteSnapshotResolver routes, IAgentRunLogStorageReadiness readiness)
+    {
+        _routes = routes;
+        _readiness = readiness;
+    }
 
     public async Task<AgentRunLogStorageResolution> ResolveAsync(Guid teamId, CancellationToken cancellationToken)
     {
-        var resolution = await _routes.ResolveAsync(new StorageRouteSnapshotRequest(teamId, DataClassTypeKey), cancellationToken).ConfigureAwait(false);
+        var request = new StorageRouteSnapshotRequest(teamId, DataClassTypeKey);
+        var resolution = await _routes.ResolveAsync(request, cancellationToken).ConfigureAwait(false);
         if (resolution is StorageRouteSnapshotResolution.Cancelled && cancellationToken.IsCancellationRequested)
             throw new OperationCanceledException(cancellationToken);
+        if (resolution is StorageRouteSnapshotResolution.Missing)
+        {
+            await _readiness.EnsureDefaultRouteAsync(teamId, cancellationToken).ConfigureAwait(false);
+            resolution = await _routes.ResolveAsync(request, cancellationToken).ConfigureAwait(false);
+            if (resolution is StorageRouteSnapshotResolution.Cancelled && cancellationToken.IsCancellationRequested)
+                throw new OperationCanceledException(cancellationToken);
+        }
 
         return resolution switch
         {

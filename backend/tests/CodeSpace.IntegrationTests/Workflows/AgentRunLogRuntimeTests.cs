@@ -1,13 +1,17 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
+using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Handlers.QueryHandlers.Agents;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.AgentRunLogging;
 using CodeSpace.Core.Services.Identity;
+using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
 using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
+using CodeSpace.Core.Settings;
 using CodeSpace.IntegrationTests.Infrastructure;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Queries.Agents;
 using Microsoft.EntityFrameworkCore;
@@ -148,17 +152,157 @@ public sealed class AgentRunLogRuntimeTests
     }
 
     [Fact]
-    public async Task Missing_inactive_invalid_and_foreign_routes_fail_closed_without_an_active_profile_fallback()
+    public async Task Missing_route_stays_typed_missing_when_the_deployment_did_not_qualify_local_rwx_as_shared()
+    {
+        var world = await SeedWorldAsync();
+        var nonTemporaryExistingRoot = Path.Combine(Directory.GetCurrentDirectory(), "agent-log-unqualified", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(nonTemporaryExistingRoot);
+        using var settings = RuntimeSettings.Override(current => current with
+        {
+            ArtifactStoreDirectory = nonTemporaryExistingRoot,
+            ArtifactLocalRwxShared = false,
+        });
+        try
+        {
+            using var scope = _fixture.BeginScope();
+            var result = await scope.Resolve<IAgentRunLogStorageResolver>().ResolveAsync(world.TeamId, CancellationToken.None);
+
+            result.ShouldBe(new AgentRunLogStorageResolution.Unavailable(AgentRunLogStorageProblemCode.Missing));
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            (await db.StorageProfile.CountAsync(value => value.TeamId == world.TeamId && value.StableName == AgentRunLogStorageReadiness.DefaultProfileStableName)).ShouldBe(0);
+            (await db.StorageRoute.CountAsync(value => value.TeamId == world.TeamId && value.DataClassTypeKey == AgentRunLogStorageResolver.DataClassTypeKey)).ShouldBe(0);
+        }
+        finally
+        {
+            Directory.Delete(nonTemporaryExistingRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task First_resolution_creates_one_idempotent_settings_visible_local_route_without_selecting_an_unrelated_profile()
+    {
+        var world = await SeedWorldAsync();
+        var rootPath = Path.Combine(Path.GetTempPath(), "codespace-agent-log-readiness", Guid.NewGuid().ToString("N"));
+        using var settings = RuntimeSettings.Override(current => current with { ArtifactStoreDirectory = rootPath, ArtifactLocalRwxShared = true });
+        using var scope = _fixture.BeginScope();
+        var resolver = scope.Resolve<IAgentRunLogStorageResolver>();
+
+        var first = (await resolver.ResolveAsync(world.TeamId, CancellationToken.None)).ShouldBeOfType<AgentRunLogStorageResolution.Ready>();
+        var second = (await resolver.ResolveAsync(world.TeamId, CancellationToken.None)).ShouldBeOfType<AgentRunLogStorageResolution.Ready>();
+
+        first.ShouldBe(second);
+        first.StorageProfileId.ShouldNotBe(world.StorageProfileId, "an arbitrary active profile is never a routing fallback");
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var route = await db.StorageRoute.AsNoTracking().Include(value => value.Revisions)
+            .SingleAsync(value => value.TeamId == world.TeamId && value.DataClassTypeKey == AgentRunLogStorageResolver.DataClassTypeKey);
+        route.State.ShouldBe(StorageRouteState.Active);
+        route.CurrentRevision.ShouldBe(1);
+        route.Revisions.ShouldHaveSingleItem().StorageProfileId.ShouldBe(first.StorageProfileId);
+        route.Revisions.Single().ProfileRevisionMode.ShouldBe(StorageProfileRevisionMode.CurrentAtWrite);
+        var profile = await db.StorageProfile.AsNoTracking().Include(value => value.Revisions).SingleAsync(value => value.TeamId == world.TeamId && value.Id == first.StorageProfileId);
+        profile.StableName.ShouldBe(AgentRunLogStorageReadiness.DefaultProfileStableName);
+        profile.State.ShouldBe(StorageProfileState.Active);
+        profile.CreatedBy.ShouldBe(SystemUsers.SeederId);
+        var revision = profile.Revisions.ShouldHaveSingleItem();
+        revision.ProviderTypeKey.ShouldBe("local-rwx/v1");
+        revision.CredentialRef.ShouldBeNull();
+        using var config = JsonDocument.Parse(revision.NonSecretConfigJson);
+        config.RootElement.GetProperty("rootPath").GetString().ShouldBe(Path.GetFullPath(rootPath));
+    }
+
+    [Fact]
+    public async Task Reserved_profile_collision_is_not_hijacked_and_missing_route_stays_explicit()
+    {
+        var world = await SeedWorldAsync();
+        var rootPath = Path.Combine(Path.GetTempPath(), "codespace-agent-log-collision", Guid.NewGuid().ToString("N"));
+        using var settings = RuntimeSettings.Override(current => current with { ArtifactStoreDirectory = rootPath, ArtifactLocalRwxShared = true });
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        AddReservedDefaultProfile(db, world, rootPath, DateTimeOffset.UtcNow);
+        await db.SaveChangesAsync();
+
+        var result = await scope.Resolve<IAgentRunLogStorageResolver>().ResolveAsync(world.TeamId, CancellationToken.None);
+
+        result.ShouldBe(new AgentRunLogStorageResolution.Unavailable(AgentRunLogStorageProblemCode.Missing));
+        (await db.StorageRoute.CountAsync(value => value.TeamId == world.TeamId && value.DataClassTypeKey == AgentRunLogStorageResolver.DataClassTypeKey)).ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task Concurrent_first_resolutions_converge_on_one_profile_route_and_revision_chain()
+    {
+        var world = await SeedWorldAsync();
+        using var settings = RuntimeSettings.Override(current => current with { ArtifactLocalRwxShared = true });
+        using var firstScope = _fixture.BeginScope();
+        using var secondScope = _fixture.BeginScope();
+
+        var resolutions = await Task.WhenAll(
+            firstScope.Resolve<IAgentRunLogStorageResolver>().ResolveAsync(world.TeamId, CancellationToken.None),
+            secondScope.Resolve<IAgentRunLogStorageResolver>().ResolveAsync(world.TeamId, CancellationToken.None));
+
+        resolutions.ShouldAllBe(value => value is AgentRunLogStorageResolution.Ready);
+        resolutions.Cast<AgentRunLogStorageResolution.Ready>().Select(value => value.StorageProfileId).Distinct().Count().ShouldBe(1);
+        using var readScope = _fixture.BeginScope();
+        var db = readScope.Resolve<CodeSpaceDbContext>();
+        (await db.StorageProfile.CountAsync(value => value.TeamId == world.TeamId && value.StableName == AgentRunLogStorageReadiness.DefaultProfileStableName)).ShouldBe(1);
+        (await db.StorageRoute.CountAsync(value => value.TeamId == world.TeamId && value.DataClassTypeKey == AgentRunLogStorageResolver.DataClassTypeKey)).ShouldBe(1);
+        (await db.StorageRouteRevision.CountAsync(value => value.TeamId == world.TeamId && value.Route.DataClassTypeKey == AgentRunLogStorageResolver.DataClassTypeKey)).ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task Default_route_persists_and_reads_log_bytes_through_the_profile_driven_local_runtime()
+    {
+        var world = await SeedWorldAsync();
+        var rootPath = Path.Combine(Path.GetTempPath(), "codespace-agent-log-default-runtime", Guid.NewGuid().ToString("N"));
+        using var settings = RuntimeSettings.Override(current => current with { ArtifactStoreDirectory = rootPath, ArtifactLocalRwxShared = true });
+        try
+        {
+            var captureSessionId = Guid.NewGuid();
+            var bytes = "durable-default-log"u8.ToArray();
+            Guid streamId;
+
+            using (var writeScope = _fixture.BeginScope())
+            {
+                var storage = (await writeScope.Resolve<IAgentRunLogStorageResolver>().ResolveAsync(world.TeamId, CancellationToken.None)).ShouldBeOfType<AgentRunLogStorageResolution.Ready>();
+                var logs = writeScope.Resolve<IAgentRunLogService>();
+                var opened = (await logs.OpenAsync(Open(world, captureSessionId, AgentRunLogKinds.StandardOutput), CancellationToken.None)).ShouldBeOfType<AgentRunLogOpenResult.Opened>();
+                streamId = opened.Metadata.StreamId;
+                var appended = await logs.AppendAsync(Append(world, streamId, captureSessionId, 1, 0, bytes) with
+                {
+                    StorageProfileId = storage.StorageProfileId,
+                    StorageProfileRevision = storage.StorageProfileRevision,
+                }, CancellationToken.None);
+
+                appended.ShouldBeOfType<AgentRunLogAppendResult.Appended>();
+            }
+
+            using (var readScope = _fixture.BeginScope())
+            {
+                var read = (await readScope.Resolve<IAgentRunLogService>().ReadRangeAsync(
+                    new AgentRunLogRangeRequest(world.TeamId, streamId, 0, bytes.Length), CancellationToken.None)).ShouldBeOfType<AgentRunLogRangeResult.Available>();
+                read.Bytes.ShouldBe(bytes);
+            }
+            Directory.EnumerateFiles(rootPath, "*", SearchOption.AllDirectories).ShouldNotBeEmpty();
+        }
+        finally
+        {
+            if (Directory.Exists(rootPath)) Directory.Delete(rootPath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Missing_routes_get_tenant_defaults_while_inactive_invalid_routes_remain_authoritative_without_fallback()
     {
         var world = await SeedWorldAsync();
         var foreign = await SeedWorldAsync();
+        using var settings = RuntimeSettings.Override(current => current with { ArtifactLocalRwxShared = true });
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         var resolver = scope.Resolve<IAgentRunLogStorageResolver>();
 
-        (await resolver.ResolveAsync(world.TeamId, CancellationToken.None)).ShouldBe(new AgentRunLogStorageResolution.Unavailable(AgentRunLogStorageProblemCode.Missing));
-        var route = await AddRouteAsync(db, world, world.StorageProfileId, StorageProfileRevisionMode.CurrentAtWrite);
-        (await resolver.ResolveAsync(foreign.TeamId, CancellationToken.None)).ShouldBe(new AgentRunLogStorageResolution.Unavailable(AgentRunLogStorageProblemCode.Missing));
+        var ready = (await resolver.ResolveAsync(world.TeamId, CancellationToken.None)).ShouldBeOfType<AgentRunLogStorageResolution.Ready>();
+        var foreignReady = (await resolver.ResolveAsync(foreign.TeamId, CancellationToken.None)).ShouldBeOfType<AgentRunLogStorageResolution.Ready>();
+        ready.StorageProfileId.ShouldNotBe(foreignReady.StorageProfileId);
+        var route = await db.StorageRoute.SingleAsync(value => value.TeamId == world.TeamId && value.DataClassTypeKey == AgentRunLogStorageResolver.DataClassTypeKey);
 
         route.State = StorageRouteState.Disabled;
         route.LastModifiedDate = DateTimeOffset.UtcNow;
@@ -421,6 +565,27 @@ public sealed class AgentRunLogRuntimeTests
             Id = Guid.NewGuid(), TeamId = world.TeamId, StorageProfileId = profileId, Revision = 1,
             ProviderTypeKey = "local-rwx/v1", NonSecretConfigJson = "{\"rootPath\":\"/srv/codespace/artifacts\"}",
             NamespaceFingerprint = $"sha256:{new string('b', 64)}", CreatedDate = now, CreatedBy = world.ActorId,
+        });
+        db.StorageProfile.Add(profile);
+    }
+
+    private static void AddReservedDefaultProfile(CodeSpaceDbContext db, World world, string rootPath, DateTimeOffset now)
+    {
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(new { rootPath = Path.GetFullPath(rootPath) }));
+        var canonicalConfig = StorageProfileRules.CanonicalJson(document.RootElement);
+        using var canonical = JsonDocument.Parse(canonicalConfig);
+        var profile = new StorageProfile
+        {
+            Id = Guid.NewGuid(), TeamId = world.TeamId, StableName = AgentRunLogStorageReadiness.DefaultProfileStableName,
+            State = StorageProfileState.Active, CurrentRevision = 1, CreatedDate = now, CreatedBy = SystemUsers.SeederId,
+            LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId,
+        };
+        profile.Revisions.Add(new StorageProfileRevision
+        {
+            Id = Guid.NewGuid(), TeamId = world.TeamId, StorageProfileId = profile.Id, Revision = 1,
+            ProviderTypeKey = "local-rwx/v1", NonSecretConfigJson = canonicalConfig, CredentialRef = null,
+            NamespaceFingerprint = StorageProfileRules.NamespaceFingerprint("local-rwx/v1", canonical.RootElement),
+            CreatedDate = now, CreatedBy = SystemUsers.SeederId,
         });
         db.StorageProfile.Add(profile);
     }

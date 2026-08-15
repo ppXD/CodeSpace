@@ -74,6 +74,8 @@ services:
       # Stated explicitly rather than inheriting appsettings.json's committed dev key — a Production-labelled pod
       # silently signing tokens with a source-controlled key is exactly the footgun this line makes visible.
       Authentication__Jwt__SymmetricKey: "${CODESPACE_JWT_SYMMETRIC_KEY:-local-dev-only-jwt-key-minimum-32-chars-long}"
+      # Both app roles mount the same named artifact volume below, so local-rwx is a genuinely shared namespace.
+      Artifacts__LocalRwxShared: "true"
     volumes:
       # Artifact metadata lives in Postgres, but offloaded bytes must be visible to both roles. An image-layer path
       # has the same spelling in each container while still being a different filesystem, and disappears on recreate.
@@ -116,6 +118,7 @@ services:
       # Both pods share ONE key-ring and ONE token signer, so these MUST match the api service's values above.
       CODESPACE_VARIABLE_MASTER_KEY: "${CODESPACE_VARIABLE_MASTER_KEY:-bG9jYWwtZGV2LW9ubHkta2V5LW5vdC1mb3ItcHJvZCE=}"
       Authentication__Jwt__SymmetricKey: "${CODESPACE_JWT_SYMMETRIC_KEY:-local-dev-only-jwt-key-minimum-32-chars-long}"
+      Artifacts__LocalRwxShared: "true"
       # The full tool fabric and its governance used to be turned on here. Both are committed constants now
       # (AgentRunExecutor.FullToolCatalogByDefault, McpRequestHandler.GovernanceEnabled) at exactly the values this
       # file set, so every deployment gets the posture this one had rather than whatever its env happened to say.

@@ -36,6 +36,7 @@ services:
       # P2 slice 3: Production refuses to start with unconfigured durable roots — the exact discipline this
       # smoke stack must model. The images prepare these dirs with app ownership; a real deployment mounts volumes at them.
       Artifacts__StoreDirectory: /var/lib/codespace/artifacts
+      Artifacts__LocalRwxShared: "true"
       Agents__RunSpoolDirectory: /var/lib/codespace/spool
     volumes:
       - artifacts:/var/lib/codespace/artifacts
@@ -59,6 +60,7 @@ services:
       Authentication__Jwt__SymmetricKey: "${E2E_JWT_KEY}"
       CODESPACE_VARIABLE_MASTER_KEY: "${E2E_VARIABLE_MASTER_KEY}"
       Artifacts__StoreDirectory: /var/lib/codespace/artifacts
+      Artifacts__LocalRwxShared: "true"
       Agents__RunSpoolDirectory: /var/lib/codespace/spool
       HangfireHosting: "Worker"
       CODESPACE_CODEX_CLI_PATH: "/opt/fake-codex"

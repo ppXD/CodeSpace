@@ -48,6 +48,16 @@ public interface IAgentRunLogStorageResolver : IScopedDependency
     Task<AgentRunLogStorageResolution> ResolveAsync(Guid teamId, CancellationToken cancellationToken);
 }
 
+/// <summary>
+/// Establishes the explicit Settings-visible default route for a team that has never configured Agent Run log storage,
+/// but only when the deployment explicitly qualified local-rwx as shared. Implementations may act only on a missing
+/// exact route; lifecycle states and reserved stable names chosen by an operator are final.
+/// </summary>
+public interface IAgentRunLogStorageReadiness : IScopedDependency
+{
+    Task EnsureDefaultRouteAsync(Guid teamId, CancellationToken cancellationToken);
+}
+
 public abstract record AgentRunLogStorageResolution
 {
     private AgentRunLogStorageResolution() { }
