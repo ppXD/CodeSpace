@@ -634,9 +634,11 @@ export interface AnswerDecisionResult {
 }
 
 export type WorkflowRunModelCallStatus = "Completed" | "Failed";
+export type WorkflowRunModelCallProjectionState = "Projected" | "LegacyFallback";
+export type WorkflowRunCaptureCompleteness = "Exact" | "RedactedExact" | "Partial" | "Unavailable" | "Corrupt" | "LegacyUnknown";
 export type WorkflowRunModelCallPart = "Result" | "SystemPrompt" | "UserPrompt" | "Usage" | "Trace";
 export type WorkflowRunModelCallPartSource = "NotRecorded" | "Inline" | "Artifact" | "Synthesized";
-export type WorkflowRunModelCallPartAvailability = "Available" | "NotRecorded" | "MetadataMissing" | "PhysicalObjectMissing" | "IntegrityFailure" | "BackendUnavailable" | "AccessDenied" | "InvalidOffset";
+export type WorkflowRunModelCallPartAvailability = "Available" | "NotRecorded" | "MetadataMissing" | "PhysicalObjectMissing" | "IntegrityFailure" | "BackendUnavailable" | "AccessDenied" | "InvalidOffset" | "Redacted" | "CapturePartial" | "CaptureUnavailable" | "CaptureCorrupt" | "LegacyUnknown" | "InvalidBodyReference";
 
 export interface WorkflowRunModelCallPartDescriptor {
   part: WorkflowRunModelCallPart;
@@ -650,6 +652,9 @@ export interface WorkflowRunModelCallPartDescriptor {
 export interface WorkflowRunModelCallMetadata {
   runId: string;
   sequence: number;
+  workflowRunModelCallId?: string | null;
+  projectionState: WorkflowRunModelCallProjectionState;
+  captureCompleteness: WorkflowRunCaptureCompleteness;
   correlationId?: string | null;
   status: WorkflowRunModelCallStatus;
   parts: WorkflowRunModelCallPartDescriptor[];
@@ -667,6 +672,108 @@ export interface WorkflowRunModelCallPartPage {
   artifactId?: string | null;
   integrityVerified: boolean;
   message?: string | null;
+}
+
+export type WorkflowRunModelCallBody = "LogicalRequest" | "AttemptRequest" | "AttemptResponse" | "AttemptError";
+export type WorkflowRunModelCallBodyReferenceState = "Referenced" | "NotRecorded" | "Redacted" | "Partial" | "Unavailable" | "Corrupt" | "LegacyUnknown";
+export type WorkflowRunModelCallSourceEvidence = "Native" | "TerminalOnly" | "StartedAndTerminal" | "LateStartAttached";
+
+export interface WorkflowRunModelCallBodyDescriptor {
+  body: WorkflowRunModelCallBody;
+  attemptId?: string | null;
+  artifactId?: string | null;
+  referenceState: WorkflowRunModelCallBodyReferenceState;
+  captureCompleteness: WorkflowRunCaptureCompleteness;
+}
+
+export interface WorkflowRunModelCallUsageMetadata {
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  cacheReadTokens?: number | null;
+  cacheWriteTokens?: number | null;
+  reasoningTokens?: number | null;
+}
+
+export interface WorkflowRunModelCallAttemptMetadata {
+  attemptId: string;
+  attemptOrdinal: number;
+  effectiveProvider?: string | null;
+  effectiveModel?: string | null;
+  effectiveModelRowId?: string | null;
+  transportKind?: string | null;
+  endpointFingerprint?: string | null;
+  providerRequestId?: string | null;
+  status: string;
+  errorCode?: string | null;
+  finishReason?: string | null;
+  httpStatusCode?: number | null;
+  captureSource: string;
+  captureCompleteness: WorkflowRunCaptureCompleteness;
+  sourceEvidence: WorkflowRunModelCallSourceEvidence;
+  sourceStartedRecordId?: string | null;
+  sourceTerminalRecordId?: string | null;
+  sourceEvidenceRevision: number;
+  usage: WorkflowRunModelCallUsageMetadata;
+  costAmount?: number | null;
+  costCurrency?: string | null;
+  pricingVersion?: string | null;
+  startedAt: string;
+  firstTokenAt?: string | null;
+  completedAt?: string | null;
+  schemaVersion: number;
+  bodies: WorkflowRunModelCallBodyDescriptor[];
+}
+
+/** Byte-free logical call plus its ordered physical provider attempts. */
+export interface WorkflowRunModelCallDetailMetadata {
+  workflowRunModelCallId: string;
+  runId: string;
+  callOrdinal: number;
+  nodeId?: string | null;
+  iterationKey: string;
+  workPlanId?: string | null;
+  planVersion?: number | null;
+  workUnitId?: string | null;
+  workUnitContractHash?: string | null;
+  executionAttemptId?: string | null;
+  executionAttemptOrdinal?: number | null;
+  executionGeneration?: number | null;
+  purpose: string;
+  requestedProvider?: string | null;
+  requestedModel?: string | null;
+  requestedModelRowId?: string | null;
+  selectionPolicy?: string | null;
+  sourceKind?: string | null;
+  sourceCorrelationId?: string | null;
+  captureSource: string;
+  captureCompleteness: WorkflowRunCaptureCompleteness;
+  schemaVersion: number;
+  createdAt: string;
+  bodies: WorkflowRunModelCallBodyDescriptor[];
+  attempts: WorkflowRunModelCallAttemptMetadata[];
+}
+
+export interface WorkflowRunModelCallBodyPage {
+  body: WorkflowRunModelCallBody;
+  attemptId?: string | null;
+  captureCompleteness: WorkflowRunCaptureCompleteness;
+  availability: WorkflowRunModelCallPartAvailability;
+  text?: string | null;
+  offsetBytes: number;
+  returnedBytes: number;
+  totalBytes?: number | null;
+  nextOffsetBytes?: number | null;
+  contentType?: string | null;
+  artifactId?: string | null;
+  integrityVerified: boolean;
+  message?: string | null;
+}
+
+export interface WorkflowRunModelCallBodyRead {
+  body: WorkflowRunModelCallBody;
+  attemptId?: string | null;
+  offsetBytes: number;
+  limitBytes: number;
 }
 
 // ─── API client ────────────────────────────────────────────────────────────────
@@ -736,6 +843,28 @@ export const workflowsApi = {
   getRunModelCall: async (runId: string, sequence: number, signal?: AbortSignal): Promise<WorkflowRunModelCallMetadata | null> => {
     try {
       return await fetchJson<WorkflowRunModelCallMetadata>(`/api/workflows/runs/${runId}/model-calls/${sequence}`, { signal });
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null;
+      throw error;
+    }
+  },
+
+  /** Byte-free stable logical call and physical-attempt metadata. */
+  getRunModelCallById: async (runId: string, modelCallId: string, signal?: AbortSignal): Promise<WorkflowRunModelCallDetailMetadata | null> => {
+    try {
+      return await fetchJson<WorkflowRunModelCallDetailMetadata>(`/api/workflows/runs/${runId}/model-calls/${modelCallId}`, { signal });
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null;
+      throw error;
+    }
+  },
+
+  /** One bounded UTF-8 page from a stable logical-call or physical-attempt body reference. */
+  getRunModelCallBody: async (runId: string, modelCallId: string, read: WorkflowRunModelCallBodyRead, signal?: AbortSignal): Promise<WorkflowRunModelCallBodyPage | null> => {
+    const params = new URLSearchParams({ offsetBytes: String(read.offsetBytes), limitBytes: String(read.limitBytes) });
+    if (read.attemptId) params.set("attemptId", read.attemptId);
+    try {
+      return await fetchJson<WorkflowRunModelCallBodyPage>(`/api/workflows/runs/${runId}/model-calls/${modelCallId}/bodies/${read.body}?${params}`, { signal });
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) return null;
       throw error;

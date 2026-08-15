@@ -32,9 +32,8 @@ import type {
   StatItem,
 } from "@/api/sessions";
 import { sessionsApi } from "@/api/sessions";
-import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
-import { workflowsApi, type PendingDecision, type PhaseAgentRef, type WorkflowRunModelCallPart, type WorkflowRunStatus } from "@/api/workflows";
-import { ApiError } from "@/api/request";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { type PendingDecision, type PhaseAgentRef, type WorkflowRunStatus } from "@/api/workflows";
 import { AgentTerminal } from "@/components/workflows/AgentTerminal";
 import { DecisionCard } from "@/components/workflows/DecisionCard";
 import { RunActionsContext } from "@/components/workflows/runActionsContext";
@@ -53,6 +52,7 @@ import { useNowTick } from "@/hooks/use-now-tick";
 import { liveRunSummary } from "./live-run-summary";
 import { partitionForFailureHoist } from "./room-blocks";
 import { RoomRunPane, type PaneView } from "./RoomRunPane";
+import { WorkflowRunModelCallContent, type WorkflowRunModelCallTab } from "./WorkflowRunModelCallContent";
 
 /** What the right-side preview drawer is showing — an agent (its terminal) or a file (its content + download). */
 type DrawerTarget =
@@ -440,50 +440,9 @@ function AgentDrawer({ agent, runId, onClose }: { agent: RoomAgentCard; runId: s
   );
 }
 
-const MODEL_CALL_PAGE_BYTES = 64 * 1024;
-
-function retryModelCallRead(failureCount: number, error: Error): boolean {
-  return error instanceof ApiError && [429, 502, 503, 504].includes(error.status) && failureCount < 2;
-}
-
-/** One selected part; pages are fetched manually and discarded shortly after the drawer closes. */
-function WorkflowRunModelCallPartBody({ runId, sequence, part, emptyLabel, heading }: { runId: string; sequence: number; part: WorkflowRunModelCallPart; emptyLabel: string; heading?: string }) {
-  const q = useInfiniteQuery({
-    queryKey: ["workflow-run-model-call-part", runId, sequence, part],
-    initialPageParam: 0,
-    queryFn: ({ pageParam, signal }) => workflowsApi.getRunModelCallPart(runId, sequence, part, pageParam, MODEL_CALL_PAGE_BYTES, signal),
-    getNextPageParam: (last) => last?.availability === "Available" ? last.nextOffsetBytes ?? undefined : undefined,
-    staleTime: Infinity,
-    gcTime: 60_000,
-    retry: retryModelCallRead,
-  });
-
-  if (q.isLoading) return <p className="room-para room-muted">Loading…</p>;
-  if (q.isError) return <p className="room-para room-muted">Couldn't load this part. {q.error instanceof ApiError ? `(${q.error.code})` : ""}</p>;
-  const first = q.data?.pages[0];
-  if (first == null) return <p className="room-para room-muted">This model call isn't available.</p>;
-  if (first.availability !== "Available") return <>{heading && <div className="room-mcpart-title">{heading}</div>}<p className="room-para room-muted">{first.message ?? `This ${emptyLabel} isn't available.`}{first.artifactId ? ` Artifact ${first.artifactId}.` : ""}</p></>;
-
-  const text = (q.data?.pages ?? []).map((page) => page?.text ?? "").join("");
-  return (
-    <>
-      {heading && <div className="room-mcpart-title">{heading}</div>}
-      {text ? <pre className="room-mcpre">{text}</pre> : <p className="room-para room-muted">No {emptyLabel} recorded for this call.</p>}
-      {q.hasNextPage && <button className="room-mcload" disabled={q.isFetchingNextPage} onClick={() => void q.fetchNextPage()}>{q.isFetchingNextPage ? "Loading…" : "Load more"}</button>}
-    </>
-  );
-}
-
 /** Metadata first; only the selected tab mounts its bounded content queries. */
 function ModelCallDrawer({ target, onClose }: { target: Extract<DrawerTarget, { kind: "modelcall" }>; onClose: () => void }) {
-  const [tab, setTab] = useState<"result" | "prompt" | "usage" | "trace">("result");
-  const q = useQuery({
-    queryKey: ["workflow-run-model-call", target.runId, target.sequence],
-    queryFn: ({ signal }) => workflowsApi.getRunModelCall(target.runId, target.sequence, signal),
-    staleTime: Infinity,
-    gcTime: 60_000,
-    retry: retryModelCallRead,
-  });
+  const [tab, setTab] = useState<WorkflowRunModelCallTab>("result");
   const mc = target.call;
 
   return (
@@ -506,13 +465,7 @@ function ModelCallDrawer({ target, onClose }: { target: Extract<DrawerTarget, { 
         ))}
       </div>
       <div className="room-drawer-body">
-        {q.isLoading ? <p className="room-para room-muted">Loading…</p>
-          : q.isError ? <p className="room-para room-muted">Couldn't load this model call. {q.error instanceof ApiError ? `(${q.error.code})` : ""}</p>
-          : q.data == null ? <p className="room-para room-muted">This model call's detail isn't available.</p>
-          : tab === "result" ? <WorkflowRunModelCallPartBody runId={target.runId} sequence={target.sequence} part="Result" emptyLabel="result" />
-          : tab === "usage" ? <WorkflowRunModelCallPartBody runId={target.runId} sequence={target.sequence} part="Usage" emptyLabel="usage" />
-          : tab === "trace" ? <WorkflowRunModelCallPartBody runId={target.runId} sequence={target.sequence} part="Trace" emptyLabel="trace" />
-          : <><WorkflowRunModelCallPartBody runId={target.runId} sequence={target.sequence} part="SystemPrompt" emptyLabel="system prompt" heading="SYSTEM" /><WorkflowRunModelCallPartBody runId={target.runId} sequence={target.sequence} part="UserPrompt" emptyLabel="user prompt" heading="USER" /></>}
+        <WorkflowRunModelCallContent runId={target.runId} sequence={target.sequence} tab={tab} />
       </div>
     </>
   );
