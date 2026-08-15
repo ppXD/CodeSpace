@@ -37,6 +37,8 @@ services:
       # smoke stack must model. The images prepare these dirs with app ownership; a real deployment mounts volumes at them.
       Artifacts__StoreDirectory: /var/lib/codespace/artifacts
       Agents__RunSpoolDirectory: /var/lib/codespace/spool
+    volumes:
+      - artifacts:/var/lib/codespace/artifacts
     ports:
       - "18080:8080"
 
@@ -62,5 +64,9 @@ services:
       CODESPACE_CODEX_CLI_PATH: "/opt/fake-codex"
     volumes:
       - ./fake-codex:/opt/fake-codex:ro
+      - artifacts:/var/lib/codespace/artifacts
     ports:
       - "18081:8080"
+
+volumes:
+  artifacts:
