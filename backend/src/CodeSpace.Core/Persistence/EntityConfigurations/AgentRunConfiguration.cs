@@ -9,6 +9,7 @@ public class AgentRunConfiguration : IEntityTypeConfiguration<AgentRun>
     public void Configure(EntityTypeBuilder<AgentRun> builder)
     {
         builder.HasKey(r => r.Id);
+        builder.HasAlternateKey(r => new { r.TeamId, r.Id }).HasName("ak_agent_run_team_id");
 
         // Stored as its string name (matches WorkflowRun); 16 chars covers the longest value ("Succeeded"/"Cancelled").
         builder.Property(r => r.Status).HasConversion<string>().HasMaxLength(16);
