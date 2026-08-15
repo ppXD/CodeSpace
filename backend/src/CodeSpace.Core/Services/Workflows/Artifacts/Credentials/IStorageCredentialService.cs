@@ -6,6 +6,7 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts.Credentials;
 public interface IStorageCredentialService
 {
     Task<IReadOnlyList<StorageCredentialMetadata>> ListAsync(Guid teamId, CancellationToken cancellationToken);
+    Task<StoragePage<StorageCredentialMetadata>> ListPageAsync(Guid teamId, string? cursor, int limit, CancellationToken cancellationToken);
     Task<StorageCredentialMetadata?> GetAsync(Guid teamId, Guid credentialId, CancellationToken cancellationToken);
     Task<StorageCredentialMetadata> CreateAsync(Guid teamId, Guid actorId, CreateStorageCredentialCommand command, CancellationToken cancellationToken);
     Task<StorageCredentialMetadata?> AppendRevisionAsync(Guid teamId, Guid actorId, AppendStorageCredentialRevisionCommand command, CancellationToken cancellationToken);

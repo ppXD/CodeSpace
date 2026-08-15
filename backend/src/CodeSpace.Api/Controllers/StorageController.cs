@@ -33,6 +33,13 @@ public class StorageController : ControllerBase
         return Ok(result);
     }
 
+    [HttpGet("profiles/page")]
+    public async Task<IActionResult> ListProfilePage([FromQuery] ListStorageProfilePageQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     [HttpGet("profiles/{profileId:guid}")]
     public async Task<IActionResult> GetProfile([FromRoute] Guid profileId, CancellationToken cancellationToken)
     {
@@ -68,6 +75,13 @@ public class StorageController : ControllerBase
     public async Task<IActionResult> ListCredentials(CancellationToken cancellationToken)
     {
         var result = await _mediator.Send(new ListStorageCredentialsQuery(), cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    [HttpGet("credentials/page")]
+    public async Task<IActionResult> ListCredentialPage([FromQuery] ListStorageCredentialPageQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query, cancellationToken).ConfigureAwait(false);
         return Ok(result);
     }
 

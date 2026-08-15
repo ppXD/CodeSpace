@@ -42,6 +42,32 @@ public sealed class StorageProfileService : IStorageProfileService, IScopedDepen
         return rows.Select(row => Summary(row.Profile, row.ProviderTypeKey)).ToList();
     }
 
+    public async Task<StoragePage<StorageProfileSummary>> ListPageAsync(Guid teamId, string? cursor, int limit, CancellationToken cancellationToken)
+    {
+        var keyset = StorageSettingsCursor.Decode(cursor);
+        var take = Math.Clamp(limit, 1, StoragePageLimits.MaxPageSize);
+        var query =
+            from profile in _db.StorageProfile.AsNoTracking()
+            join revision in _db.StorageProfileRevision.AsNoTracking()
+                on new { profile.TeamId, StorageProfileId = profile.Id, Revision = profile.CurrentRevision }
+                equals new { revision.TeamId, revision.StorageProfileId, revision.Revision }
+            where profile.TeamId == teamId
+            select new { Profile = profile, revision.ProviderTypeKey };
+        if (keyset is { } after)
+            query = query.Where(row => string.Compare(row.Profile.StableName, after.StableName) > 0
+                || (row.Profile.StableName == after.StableName && row.Profile.Id.CompareTo(after.Id) > 0));
+
+        var rows = await query.OrderBy(row => row.Profile.StableName).ThenBy(row => row.Profile.Id).Take(take + 1)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        var hasMore = rows.Count > take;
+        var page = hasMore ? rows.GetRange(0, take) : rows;
+        return new StoragePage<StorageProfileSummary>
+        {
+            Items = page.Select(row => Summary(row.Profile, row.ProviderTypeKey)).ToList(),
+            NextCursor = hasMore ? new StorageSettingsCursor(page[^1].Profile.StableName, page[^1].Profile.Id).Encode() : null,
+        };
+    }
+
     public async Task<StorageProfileDetail?> GetAsync(Guid teamId, Guid profileId, CancellationToken cancellationToken)
     {
         var profile = await _db.StorageProfile.AsNoTracking()

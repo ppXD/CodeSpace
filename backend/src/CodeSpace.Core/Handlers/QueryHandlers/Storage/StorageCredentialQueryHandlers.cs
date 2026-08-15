@@ -21,6 +21,21 @@ public sealed class ListStorageCredentialsQueryHandler : IRequestHandler<ListSto
         await _service.ListAsync(_currentTeam.Id!.Value, cancellationToken).ConfigureAwait(false);
 }
 
+public sealed class ListStorageCredentialPageQueryHandler : IRequestHandler<ListStorageCredentialPageQuery, StoragePage<StorageCredentialMetadata>>
+{
+    private readonly IStorageCredentialService _service;
+    private readonly ICurrentTeam _currentTeam;
+
+    public ListStorageCredentialPageQueryHandler(IStorageCredentialService service, ICurrentTeam currentTeam)
+    {
+        _service = service;
+        _currentTeam = currentTeam;
+    }
+
+    public async Task<StoragePage<StorageCredentialMetadata>> Handle(ListStorageCredentialPageQuery request, CancellationToken cancellationToken) =>
+        await _service.ListPageAsync(_currentTeam.Id!.Value, request.Cursor, request.Limit, cancellationToken).ConfigureAwait(false);
+}
+
 public sealed class GetStorageCredentialQueryHandler : IRequestHandler<GetStorageCredentialQuery, StorageCredentialMetadata?>
 {
     private readonly IStorageCredentialService _service;
