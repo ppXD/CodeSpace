@@ -5,6 +5,7 @@ using CodeSpace.Core.Mediation;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Services.Providers.Modules;
+using CodeSpace.Core.Services.Workflows.Artifacts.Providers;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Plugins;
@@ -46,6 +47,7 @@ public class CodeSpaceModule : Autofac.Module
         RegisterMediator(builder);
         RegisterPersistence(builder);
         RegisterProviderModules(builder);
+        RegisterStorageProviderModules(builder);
         RegisterPluginModules(builder);
         RegisterLLMProviderModules(builder);
         RegisterFirstPartyAgentTools(builder);
@@ -168,6 +170,23 @@ public class CodeSpaceModule : Autofac.Module
         foreach (var type in module.AuthStrategies) builder.RegisterType(type).AsSelf().AsImplementedInterfaces().InstancePerLifetimeScope();
         foreach (var type in module.EventSubscriptions) builder.RegisterType(type).AsSelf().AsImplementedInterfaces().InstancePerLifetimeScope();
         foreach (var type in module.AuxiliaryServices) builder.RegisterType(type).AsSelf().SingleInstance();
+    }
+
+    /// <summary>
+    /// Discovers immutable storage provider DESCRIPTORS only. Factories are intentionally not registered or resolved
+    /// here: the existing singleton <c>IArtifactBlobBackend</c> path remains authoritative until dynamic profiles land.
+    /// </summary>
+    private static void RegisterStorageProviderModules(ContainerBuilder builder)
+    {
+        var moduleTypes = typeof(CodeSpaceModule).Assembly.GetTypes()
+            .Where(t => t.IsClass && !t.IsAbstract && typeof(IStorageProviderModule).IsAssignableFrom(t))
+            .ToArray();
+
+        foreach (var type in moduleTypes) builder.RegisterType(type).As<IStorageProviderModule>().SingleInstance();
+
+        // Resolve the union at container build time, not a captured Core-assembly list: an external Azure/OSS package
+        // can contribute IStorageProviderModule from its own Autofac module without editing this central switch.
+        builder.Register(c => new StorageProviderModuleCatalog(c.Resolve<IEnumerable<IStorageProviderModule>>())).As<IStorageProviderModuleCatalog>().SingleInstance().AutoActivate();
     }
 
     private void RegisterPluginModules(ContainerBuilder builder)
