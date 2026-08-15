@@ -21,6 +21,21 @@ public sealed class ListStorageProfilesQueryHandler : IRequestHandler<ListStorag
         await _service.ListAsync(_currentTeam.Id!.Value, cancellationToken).ConfigureAwait(false);
 }
 
+public sealed class ListStorageProfilePageQueryHandler : IRequestHandler<ListStorageProfilePageQuery, StoragePage<StorageProfileSummary>>
+{
+    private readonly IStorageProfileService _service;
+    private readonly ICurrentTeam _currentTeam;
+
+    public ListStorageProfilePageQueryHandler(IStorageProfileService service, ICurrentTeam currentTeam)
+    {
+        _service = service;
+        _currentTeam = currentTeam;
+    }
+
+    public async Task<StoragePage<StorageProfileSummary>> Handle(ListStorageProfilePageQuery request, CancellationToken cancellationToken) =>
+        await _service.ListPageAsync(_currentTeam.Id!.Value, request.Cursor, request.Limit, cancellationToken).ConfigureAwait(false);
+}
+
 public sealed class GetStorageProfileQueryHandler : IRequestHandler<GetStorageProfileQuery, StorageProfileDetail?>
 {
     private readonly IStorageProfileService _service;

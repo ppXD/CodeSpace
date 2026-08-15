@@ -38,6 +38,26 @@ public sealed class StorageCredentialService : IStorageCredentialService, IScope
         return rows.Select(Metadata).ToList();
     }
 
+    public async Task<StoragePage<StorageCredentialMetadata>> ListPageAsync(Guid teamId, string? cursor, int limit, CancellationToken cancellationToken)
+    {
+        var keyset = StorageSettingsCursor.Decode(cursor);
+        var take = Math.Clamp(limit, 1, StoragePageLimits.MaxPageSize);
+        var query = CurrentRows().Where(value => value.TeamId == teamId);
+        if (keyset is { } after)
+            query = query.Where(value => string.Compare(value.StableName, after.StableName) > 0
+                || (value.StableName == after.StableName && value.Id.CompareTo(after.Id) > 0));
+
+        var rows = await query.OrderBy(value => value.StableName).ThenBy(value => value.Id).Take(take + 1)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        var hasMore = rows.Count > take;
+        var page = hasMore ? rows.GetRange(0, take) : rows;
+        return new StoragePage<StorageCredentialMetadata>
+        {
+            Items = page.Select(Metadata).ToList(),
+            NextCursor = hasMore ? new StorageSettingsCursor(page[^1].StableName, page[^1].Id).Encode() : null,
+        };
+    }
+
     public async Task<StorageCredentialMetadata?> GetAsync(Guid teamId, Guid credentialId, CancellationToken cancellationToken)
     {
         var row = await CurrentRows().SingleOrDefaultAsync(value => value.TeamId == teamId && value.Id == credentialId, cancellationToken).ConfigureAwait(false);

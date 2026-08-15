@@ -10,6 +10,13 @@ public sealed record ListStorageProfilesQuery : IQuery<IReadOnlyList<StorageProf
     public string RequiredPermission => TeamPermissions.StorageManage;
 }
 
+public sealed record ListStorageProfilePageQuery : IQuery<StoragePage<StorageProfileSummary>>, IRequireTeamPermission
+{
+    public string RequiredPermission => TeamPermissions.StorageManage;
+    public string? Cursor { get; init; }
+    public int Limit { get; init; } = StoragePageLimits.DefaultPageSize;
+}
+
 public sealed record GetStorageProfileQuery : IQuery<StorageProfileDetail?>, IRequireTeamPermission
 {
     public string RequiredPermission => TeamPermissions.StorageManage;
