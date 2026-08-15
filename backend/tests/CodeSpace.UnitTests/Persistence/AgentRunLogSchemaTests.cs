@@ -72,6 +72,34 @@ public sealed class AgentRunLogSchemaTests
     }
 
     [Fact]
+    public void Capture_intent_is_an_exact_fenced_expected_stream_ledger_with_a_bounded_recovery_claim()
+    {
+        using var db = BuildContext();
+        var entity = Entity<AgentRunLogCaptureIntent>(db);
+
+        entity.GetTableName().ShouldBe("agent_run_log_capture_intent");
+        entity.FindProperty(nameof(AgentRunLogCaptureIntent.Xmin))!.IsConcurrencyToken.ShouldBeTrue();
+        ForeignKey(entity, typeof(AgentRun)).Properties.Select(property => property.Name).ShouldBe(new[] { "TeamId", "AgentRunId" });
+        ForeignKey(entity, typeof(AgentRunLogStream)).Properties.Select(property => property.Name).ShouldBe(new[] { "TeamId", "StreamId", "AgentRunId" });
+
+        var identity = Index(entity, "ux_agent_run_log_capture_intent_identity");
+        identity.IsUnique.ShouldBeTrue();
+        identity.Properties.Select(property => property.Name).ShouldBe(new[] { "TeamId", "AgentRunId", "WorkerFenceEpoch", "CaptureSessionId", "StreamKind" });
+        var recovery = Index(entity, "ix_agent_run_log_capture_intent_recovery");
+        recovery.Properties.Select(property => property.Name).ShouldBe(new[] { "NextRecoveryAt", "TeamId", "Id" });
+        recovery.GetFilter().ShouldBe("state IN ('Expected', 'Opened', 'SourceFinalized')");
+        entity.GetCheckConstraints().Select(constraint => constraint.Name).ShouldBe(new[]
+        {
+            "ck_agent_run_log_capture_intent_claim", "ck_agent_run_log_capture_intent_error",
+            "ck_agent_run_log_capture_intent_identity", "ck_agent_run_log_capture_intent_state",
+            "ck_agent_run_log_capture_intent_time",
+        }, ignoreOrder: true);
+        entity.GetCheckConstraints().Single(constraint => constraint.Name == "ck_agent_run_log_capture_intent_claim").Sql.ShouldContain("recovery_started_at");
+        entity.GetCheckConstraints().Single(constraint => constraint.Name == "ck_agent_run_log_capture_intent_state").Sql.ShouldContain("ExternalStateIndeterminate");
+        entity.GetCheckConstraints().Single(constraint => constraint.Name == "ck_agent_run_log_capture_intent_time").Sql.ShouldContain("terminal_observed_at");
+    }
+
+    [Fact]
     public void Segment_is_append_only_byte_addressed_fenced_and_contains_only_a_cas_reference()
     {
         using var db = BuildContext();
