@@ -19,6 +19,9 @@ vi.mock("@/hooks/use-workflows", () => ({
 vi.mock("./AgentToolCalls", () => ({
   AgentToolCalls: ({ agentRunId }: { agentRunId: string }) => <div data-testid="tool-calls">tools:{agentRunId}</div>,
 }));
+vi.mock("./AgentRunLogs", () => ({
+  AgentRunLogs: ({ agentRunId }: { agentRunId: string }) => <div data-testid="run-logs">logs:{agentRunId}</div>,
+}));
 
 import { AgentTerminal } from "./AgentTerminal";
 
@@ -138,6 +141,24 @@ describe("AgentTerminal", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Output" }));
     expect(screen.queryByTestId("tool-calls")).toBeNull();
+  });
+
+  it("mounts durable logs only when selected and remounts them for the selected attempt", () => {
+    useCellAttemptsMock.mockReturnValue({ data: { attempts: [
+      { attemptNumber: 1, runId: "r1", agentRunId: "ag1", status: "Failure", createdDate: "2026-06-23T00:00:00Z", isLatest: false },
+      { attemptNumber: 2, runId: "r2", agentRunId: "ag2", status: "Success", createdDate: "2026-06-23T01:00:00Z", isLatest: true },
+    ] } });
+    render(<AgentTerminal agent={termAgent({ agentRunId: "ag2", nodeId: "map", iterationKey: "map#0" })} onClose={vi.fn()} />);
+
+    expect(screen.queryByTestId("run-logs")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Logs" }));
+    expect(screen.getByTestId("run-logs")).toHaveTextContent("logs:ag2");
+
+    fireEvent.click(screen.getByRole("tab", { name: /attempt 1/i }));
+    expect(screen.getByTestId("run-logs")).toHaveTextContent("logs:ag1");
+
+    fireEvent.click(screen.getByRole("button", { name: "Output" }));
+    expect(screen.queryByTestId("run-logs")).toBeNull();
   });
 
   it("shows the agent's goal/instruction (its prompt) in a collapsible disclosure when present", () => {

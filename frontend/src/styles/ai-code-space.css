@@ -2817,6 +2817,29 @@ textarea:-webkit-autofill {
 .acs-root .agent-terminal-attempt-glyph[data-tone="live"] { color: #2F6FE0; }
 .acs-root .agent-terminal-body { max-height: 360px; overflow-y: auto; }
 .acs-root .agent-terminal-empty { padding: 16px 14px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--muted); }
+.acs-root .agent-run-logs { min-height: 130px; }
+.acs-root .agent-run-log-streams { display: flex; align-items: stretch; gap: 5px; padding: 7px 10px; overflow-x: auto; border-bottom: 1px solid var(--line); background: var(--panel-2); }
+.acs-root .agent-run-log-streams > button { appearance: none; display: inline-grid; grid-template-columns: auto auto; align-items: center; gap: 2px 7px; flex: none; min-width: 112px; padding: 5px 8px; text-align: left; color: var(--muted); background: var(--panel); border: 1px solid var(--line); border-radius: 7px; cursor: pointer; }
+.acs-root .agent-run-log-streams > button[data-active] { color: var(--ink); border-color: var(--accent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent); }
+.acs-root .agent-run-log-streams > button strong { font: 550 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.acs-root .agent-run-log-streams > button span { font-size: 10px; text-transform: lowercase; }
+.acs-root .agent-run-log-streams > button span[data-state="Open"] { color: #2F6FE0; }
+.acs-root .agent-run-log-streams > button span[data-state="CaptureFailed"], .acs-root .agent-run-log-streams > button span[data-state="Corrupt"] { color: #9E3535; }
+.acs-root .agent-run-log-streams > button small { grid-column: 1 / -1; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted-2); }
+.acs-root .agent-run-log-streams > .agent-run-log-more-streams { display: block; min-width: 118px; text-align: center; }
+.acs-root .agent-run-log-content { min-width: 0; }
+.acs-root .agent-run-log-state { margin: 0; padding: 7px 12px; font-size: 11px; color: var(--muted); border-bottom: 1px solid var(--line); }
+.acs-root .agent-run-log-state[data-state="Corrupt"], .acs-root .agent-run-log-state[data-state="CaptureFailed"] { color: #9E3535; }
+.acs-root .agent-run-log-facts { display: flex; gap: 12px; padding: 5px 12px; overflow-x: auto; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted-2); border-bottom: 1px solid var(--line); white-space: nowrap; }
+.acs-root .agent-run-log-facts button { appearance: none; margin-left: auto; padding: 1px 6px; color: var(--ink-2); background: transparent; border: 1px solid var(--line); border-radius: 5px; font: inherit; cursor: pointer; }
+.acs-root .agent-run-log-window { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 5px 12px; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted-2); }
+.acs-root .agent-run-log-window button, .acs-root .agent-run-log-load { appearance: none; padding: 3px 8px; color: var(--ink-2); background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; font: inherit; cursor: pointer; }
+.acs-root .agent-run-log-window-note, .acs-root .agent-run-log-empty-bytes { margin: 0; padding: 6px 12px; font-size: 11px; color: #A8590E; background: color-mix(in srgb, #A8590E 7%, transparent); }
+.acs-root .agent-run-log-pre { margin: 0; padding: 10px 12px; min-height: 56px; overflow: auto; color: var(--ink-2); background: var(--bg); font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.acs-root .agent-run-log-chunk { display: inline; }
+.acs-root .agent-run-log-load { margin: 8px 12px; font-size: 11px; }
+.acs-root .agent-run-log-notice { display: flex; flex-direction: column; gap: 3px; padding: 11px 12px; color: var(--muted); font-size: 11px; }
+.acs-root .agent-run-log-notice strong { color: var(--ink-2); }
 .acs-root .agent-terminal-scroll { list-style: none; margin: 0; padding: 12px 14px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.65; }
 .acs-root .agent-terminal-row { color: var(--ink-2); white-space: pre-wrap; word-break: break-word; }
 .acs-root .agent-terminal-row[data-kind="command"] { color: var(--ink); }

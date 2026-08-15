@@ -26,7 +26,8 @@ export class ApiError extends Error {
   }
 }
 
-export async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+/** Authenticated response reader for bounded binary endpoints. Error bodies still become the same typed ApiError. */
+export async function fetchResponse(path: string, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers ?? {});
 
   if (!headers.has("Accept")) headers.set("Accept", "application/json");
@@ -43,30 +44,35 @@ export async function fetchJson<T>(path: string, init: RequestInit = {}): Promis
 
   const response = await fetch(baseUrl + path, { ...init, headers });
 
+  if (response.ok) return response;
+
+  const text = await response.text();
+  const parsed = text.length > 0 ? safeJsonParse(text) : undefined;
+  const code = (parsed as { code?: string })?.code ?? `http_${response.status}`;
+  const message = (parsed as { message?: string })?.message ?? response.statusText;
+
+  // 401 means our JWT is invalid / expired / missing. Wipe it so the auth guard
+  // sends the user to /signin — except on the endpoints a signed-out visitor is
+  // SUPPOSED to call, where a 401 is the answer to what they asked, not a broken
+  // session (bad password; dead invite token). Bouncing those replaces the page's
+  // own message with a redirect the visitor can do nothing with.
+  if (response.status === 401 && !isAnonymousSurface(path)) handleUnauthorized();
+
+  // 403 with password_rotation_required → user must rotate before continuing. Same
+  // exemption: /api/auth/change-password is the rotation itself, so don't bounce on
+  // its own response.
+  if (response.status === 403 && code === "password_rotation_required" && !isAnonymousSurface(path)) redirectToPasswordRotation();
+
+  throw new ApiError(response.status, code, message, parsed);
+}
+
+export async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const response = await fetchResponse(path, init);
+
   if (response.status === 204) return undefined as T;
 
   const text = await response.text();
   const parsed = text.length > 0 ? safeJsonParse(text) : undefined;
-
-  if (!response.ok) {
-    const code = (parsed as { code?: string })?.code ?? `http_${response.status}`;
-    const message = (parsed as { message?: string })?.message ?? response.statusText;
-
-    // 401 means our JWT is invalid / expired / missing. Wipe it so the auth guard
-    // sends the user to /signin — except on the endpoints a signed-out visitor is
-    // SUPPOSED to call, where a 401 is the answer to what they asked, not a broken
-    // session (bad password; dead invite token). Bouncing those replaces the page's
-    // own message with a redirect the visitor can do nothing with.
-    if (response.status === 401 && !isAnonymousSurface(path)) handleUnauthorized();
-
-    // 403 with password_rotation_required → user must rotate before continuing. Same
-    // exemption: /api/auth/change-password is the rotation itself, so don't bounce on
-    // its own response.
-    if (response.status === 403 && code === "password_rotation_required" && !isAnonymousSurface(path)) redirectToPasswordRotation();
-
-    throw new ApiError(response.status, code, message, parsed);
-  }
-
   return parsed as T;
 }
 
