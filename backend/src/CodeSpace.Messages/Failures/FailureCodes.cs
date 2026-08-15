@@ -26,6 +26,8 @@ public static class FailureCodes
     public const string InvalidRequest = "invalid_request";
     public const string NotFound = "not_found";
     public const string DuplicateResource = "duplicate_resource";
+    public const string StorageCredentialInvalid = "storage_credential_invalid";
+    public const string StorageCredentialConflict = "storage_credential_conflict";
     public const string StorageProfileInvalid = "storage_profile_invalid";
     public const string StorageProfileConflict = "storage_profile_conflict";
 
