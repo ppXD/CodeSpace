@@ -51,7 +51,7 @@ public class LlmCompleteNodeStreamingFlowTests
             .ShouldBe(Enumerable.Range(0, deltas.Count), "delta ordinals are monotonic from 0 in ledger Sequence order");
         deltas.ShouldAllBe(d => d.CorrelationId == rows[0].CorrelationId, "every delta shares the started/completed correlation id");
 
-        textOutput.ShouldBe(new string('x', 600), "the streamed deltas fold into the node's whole text output");
+        textOutput.ShouldBe(new string('x', 70 * 1024), "the streamed deltas fold into the node's whole text output");
     }
 
     [Fact]
@@ -207,7 +207,7 @@ public class LlmCompleteNodeStreamingFlowTests
         public async IAsyncEnumerable<LlmStreamEvent> StreamAsync(LLMCompletionRequest request, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
         {
             yield return new LlmStreamEvent.Meta(Model: "claude-sonnet-4-5", InputTokens: 7);
-            for (var i = 0; i < 600; i++) yield return new LlmStreamEvent.TextDelta("x");   // > 2× the 256-char coalesce threshold → ≥2 delta rows
+            for (var i = 0; i < 70; i++) yield return new LlmStreamEvent.TextDelta(new string('x', 1024));   // >2× the 32-KiB coalesce bound → ≥2 delta rows
             yield return new LlmStreamEvent.Meta(OutputTokens: 4, FinishReason: "end_turn");
             await Task.CompletedTask;
         }
@@ -222,7 +222,7 @@ public class LlmCompleteNodeStreamingFlowTests
         public async IAsyncEnumerable<LlmStreamEvent> StreamAsync(LLMCompletionRequest request, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
         {
             yield return new LlmStreamEvent.Meta(Model: "claude-sonnet-4-5", InputTokens: 7);
-            for (var i = 0; i < 300; i++) yield return new LlmStreamEvent.TextDelta("x");   // enough to flush ≥1 coalesced delta before the drop
+            for (var i = 0; i < 40; i++) yield return new LlmStreamEvent.TextDelta(new string('x', 1024));   // enough to flush ≥1 bounded delta before the drop
             await Task.CompletedTask;
             throw new InvalidOperationException("the gateway dropped mid-stream");
         }

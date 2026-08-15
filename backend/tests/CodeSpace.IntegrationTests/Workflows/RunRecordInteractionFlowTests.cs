@@ -26,13 +26,6 @@ namespace CodeSpace.IntegrationTests.Workflows;
 [Trait("Category", "Integration")]
 public class RunRecordInteractionFlowTests
 {
-    private static readonly string[] InteractionTypes =
-    {
-        WorkflowRunRecordTypes.InteractionStarted,
-        WorkflowRunRecordTypes.InteractionCompleted,
-        WorkflowRunRecordTypes.InteractionFailed,
-    };
-
     private readonly PostgresFixture _fixture;
 
     public RunRecordInteractionFlowTests(PostgresFixture fixture) { _fixture = fixture; }
@@ -61,7 +54,7 @@ public class RunRecordInteractionFlowTests
         var db = verify.Resolve<CodeSpaceDbContext>();
 
         var rows = await db.WorkflowRunRecord.AsNoTracking()
-            .Where(r => r.RunId == runId && InteractionTypes.Contains(r.RecordType))
+            .Where(r => r.RunId == runId && r.RecordType.StartsWith("interaction."))
             .OrderBy(r => r.Sequence)
             .ToListAsync();
 
@@ -107,15 +100,15 @@ public class RunRecordInteractionFlowTests
         var db = verify.Resolve<CodeSpaceDbContext>();
 
         var rows = await db.WorkflowRunRecord.AsNoTracking()
-            .Where(r => r.RunId == runId && InteractionTypes.Contains(r.RecordType))
+            .Where(r => r.RunId == runId && r.RecordType.StartsWith("interaction."))
             .OrderBy(r => r.Sequence)
             .ToListAsync();
 
-        rows.Select(r => r.RecordType).ShouldBe(new[] { WorkflowRunRecordTypes.InteractionStarted, WorkflowRunRecordTypes.InteractionCompleted },
-            "a streamed call lands the SAME started+completed pair a buffered one does, on the real ledger");
-        rows[0].CorrelationId.ShouldBe(rows[1].CorrelationId, "the streamed triple is paired by one correlation id");
+        rows.Select(r => r.RecordType).ShouldBe(new[] { WorkflowRunRecordTypes.InteractionStarted, WorkflowRunRecordTypes.InteractionDelta, WorkflowRunRecordTypes.InteractionCompleted },
+            "a streamed call lands one bounded progressive row inside the authoritative started+completed pair");
+        rows.ShouldAllBe(r => r.CorrelationId == rows[0].CorrelationId, "the streamed interaction is paired by one correlation id");
 
-        var completed = JsonDocument.Parse(rows[1].PayloadJson).RootElement;
+        var completed = JsonDocument.Parse(rows[^1].PayloadJson).RootElement;
         completed.GetProperty("output").GetString().ShouldBe("hello there", "the streamed deltas fold into the recorded completion text");
         completed.GetProperty("usage").GetProperty("inputTokens").GetInt32().ShouldBe(7);
         completed.GetProperty("usage").GetProperty("outputTokens").GetInt32().ShouldBe(4);
@@ -214,13 +207,13 @@ public class RunRecordInteractionFlowTests
     private sealed class LargeStreamingClient : ILLMClient, IStructuredLLMClient, IStreamingLLMClient
     {
         public string Provider => "anthropic";
-        public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken ct) => Task.FromResult(new LLMCompletion { Text = new string('x', 600), Model = "claude-x" });
+        public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken ct) => Task.FromResult(new LLMCompletion { Text = new string('x', 70 * 1024), Model = "claude-x" });
         public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken ct) => Task.FromResult(new StructuredLLMCompletion { Json = JsonSerializer.SerializeToElement(new { }), Model = "claude-x" });
 
         public async IAsyncEnumerable<LlmStreamEvent> StreamAsync(LLMCompletionRequest request, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
         {
             yield return new LlmStreamEvent.Meta(Model: "claude-x", InputTokens: 7);
-            for (var i = 0; i < 600; i++) yield return new LlmStreamEvent.TextDelta("x");   // 600 chars > 2× the 256-char coalesce threshold → 2 delta rows
+            for (var i = 0; i < 70; i++) yield return new LlmStreamEvent.TextDelta(new string('x', 1024));   // >2× the 32-KiB coalesce bound → ≥2 delta rows
             yield return new LlmStreamEvent.Meta(OutputTokens: 4, FinishReason: "end_turn");
             await Task.CompletedTask;
         }
