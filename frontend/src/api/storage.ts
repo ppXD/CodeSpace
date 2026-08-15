@@ -11,6 +11,52 @@ export interface StorageProviderModuleSummary {
 
 export type StorageProfileState = "Draft" | "Active" | "Disabled" | "Retired";
 export type StorageCredentialState = "Active" | "Revoked";
+export type StorageProfileProbeStatus = "Available" | "ReadOnly" | "Degraded" | "Unavailable" | "Cancelled";
+export type StorageProfileProbeFailureStage = "Profile" | "Credential" | "Provider" | "Configuration" | "DriverInitialization" | "Probe" | "Cancellation" | "DriverCleanup";
+export type StorageProfileProbeFailureCode =
+  | "ProfileMissing"
+  | "ProfileNotActive"
+  | "ProfileRevisionMissing"
+  | "ProfileRevisionInvalid"
+  | "ProfileResolutionFailed"
+  | "CredentialMissing"
+  | "CredentialNotActive"
+  | "CredentialRevisionMissing"
+  | "CredentialProviderMismatch"
+  | "CredentialProviderUnavailable"
+  | "CredentialEnvelopeInvalid"
+  | "CredentialReferenceInvalid"
+  | "CredentialSecretInvalid"
+  | "CredentialResolutionFailed"
+  | "ProviderModuleMissing"
+  | "ProviderFactoryMissing"
+  | "ProviderFactoryMismatch"
+  | "ProviderCatalogFailure"
+  | "ConfigurationInvalid"
+  | "ConfigurationSchemaUnsupported"
+  | "SnapshotIdentityMismatch"
+  | "ProviderTypeKeyInvalid"
+  | "FactoryRejectedConfiguration"
+  | "DriverNull"
+  | "DriverProviderCancelled"
+  | "DriverProviderFailure"
+  | "DriverCleanupFailure"
+  | "CancelledProfileResolution"
+  | "CancelledCredentialResolution"
+  | "CancelledDriverInitialization"
+  | "CancelledProbe"
+  | "ProbeInvalidRequest"
+  | "ProbeMissing"
+  | "ProbeAlreadyExists"
+  | "ProbeConditionNotMet"
+  | "ProbeIntegrityMismatch"
+  | "ProbeCorrupt"
+  | "ProbeUnauthorized"
+  | "ProbeForbidden"
+  | "ProbeThrottled"
+  | "ProbeUnavailable"
+  | "ProbeUnsupported"
+  | "ProbeProviderFailure";
 
 export interface StoragePage<T> {
   items: T[];
@@ -111,6 +157,24 @@ export interface SetStorageProfileStateInput {
   state: Exclude<StorageProfileState, "Draft">;
 }
 
+export interface ProbeStorageProfileInput {
+  profileRevision: number | null;
+  verifyWriteAccess: boolean;
+}
+
+export interface StorageProfileProbeResult {
+  profileId: string;
+  profileRevision: number | null;
+  writeAccessRequested: boolean;
+  status: StorageProfileProbeStatus;
+  latencyMilliseconds: number;
+  failure?: {
+    stage: StorageProfileProbeFailureStage;
+    code: StorageProfileProbeFailureCode;
+    retryable: boolean;
+  } | null;
+}
+
 export const storageApi = {
   listProviderModules: () => fetchJson<StorageProviderModuleSummary[]>("/api/storage/provider-modules"),
   listCredentials: () => fetchJson<StorageCredentialMetadata[]>("/api/storage/credentials"),
@@ -149,5 +213,10 @@ export const storageApi = {
   setProfileState: (profileId: string, input: SetStorageProfileStateInput) => fetchJson<StorageProfileDetail>(`/api/storage/profiles/${encodeURIComponent(profileId)}/state`, {
     method: "PUT",
     body: JSON.stringify(input),
+  }),
+  probeProfile: (profileId: string, input: ProbeStorageProfileInput, signal?: AbortSignal) => fetchJson<StorageProfileProbeResult>(`/api/storage/profiles/${encodeURIComponent(profileId)}/probe`, {
+    method: "POST",
+    body: JSON.stringify(input),
+    signal,
   }),
 };

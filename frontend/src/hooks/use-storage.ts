@@ -2,7 +2,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 
 import { ApiError } from "@/api/request";
 import { storageApi } from "@/api/storage";
-import type { AppendStorageCredentialRevisionInput, AppendStorageProfileRevisionInput, CreateStorageCredentialInput, CreateStorageProfileInput, RevokeStorageCredentialInput, SetStorageProfileStateInput } from "@/api/storage";
+import type { AppendStorageCredentialRevisionInput, AppendStorageProfileRevisionInput, CreateStorageCredentialInput, CreateStorageProfileInput, ProbeStorageProfileInput, RevokeStorageCredentialInput, SetStorageProfileStateInput } from "@/api/storage";
 
 export const STORAGE_PROVIDER_MODULES_KEY = ["storage", "provider-modules"] as const;
 export const STORAGE_CREDENTIALS_KEY = ["storage", "credentials"] as const;
@@ -106,6 +106,13 @@ export function useSetStorageProfileState() {
       return queryClient.invalidateQueries({ queryKey: STORAGE_PROFILES_KEY, exact: true });
     },
     onError: (error, variables) => refreshAfterConflict(queryClient, error, variables.profileId),
+  });
+}
+
+export function useProbeStorageProfile() {
+  return useMutation({
+    mutationFn: ({ profileId, input, signal }: { profileId: string; input: ProbeStorageProfileInput; signal: AbortSignal }) => storageApi.probeProfile(profileId, input, signal),
+    gcTime: 0,
   });
 }
 
