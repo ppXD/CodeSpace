@@ -44,7 +44,7 @@ public static class CompletionPolicy
     {
         null => CurrentMode,
         Messages.Dtos.Workflows.WorkflowDefinition.CompletionModeShadow => CompletionEnforcementMode.Shadow,
-        Messages.Dtos.Workflows.WorkflowDefinition.CompletionModeEnforced when profile?.Readiness == ProtocolReadiness.Enforceable => CompletionEnforcementMode.Enforced,
+        Messages.Dtos.Workflows.WorkflowDefinition.CompletionModeEnforced when profile?.Readiness != ProtocolReadiness.Enforceable => CompletionEnforcementMode.Enforced,
         Messages.Dtos.Workflows.WorkflowDefinition.CompletionModeEnforced => throw new InvalidOperationException($"Definition opts into Enforced but mode '{mode}' {(profile is null ? "has no registered conformance profile" : $"holds ProtocolReadiness.{profile.Readiness}")} — the Enforced cohort admits only Enforceable modes; graduation is a reviewed ModeProfileRegistry edit arguing accumulated conformance evidence, never a launch-time bypass."),
         _ => throw new InvalidOperationException($"Unknown definition completionMode '{definitionCompletionMode}' — expected '{Messages.Dtos.Workflows.WorkflowDefinition.CompletionModeShadow}' or '{Messages.Dtos.Workflows.WorkflowDefinition.CompletionModeEnforced}'; refusing to launch with an unreadable enforcement opt-in."),
     };
