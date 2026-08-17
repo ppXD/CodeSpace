@@ -22,8 +22,9 @@ public static class RunModeKeys
 
 /// <summary>
 /// P4 (Lock Clause 4): the CLOSED mode-profile vocabulary with committed stage declarations — no deployment
-/// toggles; a profile change is a reviewed edit to this table. Today's honest standings: the three agent lanes
-/// hold Shadow evidence (their stage chains are exercised by the live gate and the shadow sweep); a GENERIC
+/// toggles; a profile change is a reviewed edit to this table. Today's honest standings: the supervisor lane
+/// holds Enforceable standing (the first admitted Enforced cohort — Q3), plan-map and single-agent hold
+/// Open/Shadow evidence (their stage chains are exercised by the live gate and the shadow sweep); a GENERIC
 /// graph — arbitrary nodes with no agent lane — is deliberately UNREGISTERED: its runs have no conformance
 /// story, so an Enforced generic run parks Unsupported instead of terminalizing a Success nothing qualified.
 /// Every profile is validated TOTAL over the ten stages at construction, so adding an eleventh stage breaks the
@@ -35,8 +36,12 @@ public sealed class ModeProfileRegistry : IModeProfileRegistry, ISingletonDepend
     {
         // The supervisor lane exercises the FULL chain: contracts staked at spawn, plans on the tape, integration
         // via merge/resolve, per-unit + stop verification, capture + publish + handoff receipts, assessment + the
-        // arbitrated terminal.
-        Profile(RunModeKeys.Supervisor, ProtocolReadiness.Shadow, PerformanceQualification.Shadow, required: new[]
+        // arbitrated terminal — and holds ENFORCEABLE standing (Q3): the first admitted Enforced cohort. The
+        // accumulated evidence Enforceable names: the P2b park canaries, the P4 stage-gate parks, the durable
+        // park→Continue re-arbitration, and the whole-loop Enforced E2E proving both the unbacked park and the
+        // fully-evidenced Success. Demotion is the same one-line reviewed edit — the authority's readiness gate
+        // then re-parks the cohort's in-flight Enforced rows immediately.
+        Profile(RunModeKeys.Supervisor, ProtocolReadiness.Enforceable, PerformanceQualification.Shadow, required: new[]
         {
             CompletionStage.Contract, CompletionStage.Plan, CompletionStage.Execute, CompletionStage.Integrate,
             CompletionStage.Verify, CompletionStage.Capture, CompletionStage.Deliver, CompletionStage.Handoff,

@@ -37,25 +37,18 @@ public class CompletionEnforcedCohortFlowTests
     public CompletionEnforcedCohortFlowTests(PostgresFixture fixture) => _fixture = fixture;
 
     [Fact]
-    public async Task An_enforced_definitions_unbacked_success_parks_instead_of_terminalizing()
+    public async Task An_enforced_opt_in_for_an_unready_mode_refuses_to_launch()
     {
+        // Q3 upgraded this canary: a bare trigger→terminal graph is the GENERIC mode — no conformance story, so
+        // the Enforced opt-in no longer stamps-then-parks at the terminal; the REAL RunStarter refuses the launch
+        // itself, naming the mode and the standing it lacks (cheaper than burning a run to park, same fail-close).
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var workflowId = await CreateWorkflowAsync(teamId, userId, Definition(WorkflowDefinition.CompletionModeEnforced));
-        var runId = await RunManuallyAsync(teamId, userId, workflowId);
 
-        await ForceEnqueuedAsync(runId);
-        await RunEngineAsync(runId);
+        var ex = await Should.ThrowAsync<Exception>(() => RunManuallyAsync(teamId, userId, workflowId));
 
-        using var scope = _fixture.BeginScope();
-        var run = await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
-
-        run.CompletionEnforcementMode.ShouldBe("Enforced", "the definition's opt-in must reach the run row through the real RunStarter");
-        run.Status.ShouldBe(WorkflowRunStatus.Suspended, "an Enforced claim nothing qualified must park, never terminalize");
-        run.Error.ShouldNotBeNull();
-        run.Error.ShouldContain("completion-authority", customMessage: "the park must name its arbiter — check workflow_run.error for the decision detail");
-        // P4: a bare trigger→terminal graph is the GENERIC mode — no registered conformance profile, so the
-        // authority now parks it at the mode gate (before the zero-staked compose even runs), naming the mode.
-        run.Error.ShouldContain("mode 'generic'", customMessage: "the park reason must name the unregistered operating mode");
+        ex.Message.ShouldContain("mode 'generic'", customMessage: "the refusal must name the operating mode the admission read");
+        ex.Message.ShouldContain("Enforced cohort", customMessage: "…and the cohort law it fell short of");
     }
 
     [Fact]
@@ -76,17 +69,13 @@ public class CompletionEnforcedCohortFlowTests
     }
 
     [Fact]
-    public async Task A_snapshot_run_of_an_enforced_definition_stamps_and_parks_too()
+    public async Task A_snapshot_run_of_an_enforced_supervisor_definition_stamps_and_its_unbacked_success_parks()
     {
+        // The ADMITTED half of the gate: the tasks lane's supervisor projection holds Enforceable standing, so
+        // the snapshot starter stamps Enforced through the real admission — and the park safety net still holds:
+        // this run's clean engine Success stakes nothing, so the authority parks it instead of terminalizing.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-
-        Guid runId;
-        using (var scope = _fixture.BeginScope())
-        {
-            runId = await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(
-                Definition(WorkflowDefinition.CompletionModeEnforced), teamId, userId,
-                launchPayloadJson: null, scopeRepositoryIds: null, projectionKind: null, session: null, CancellationToken.None);
-        }
+        var runId = await StartEnforcedSupervisorSnapshotAsync(teamId, userId);
 
         await ForceEnqueuedAsync(runId);
         await RunEngineAsync(runId);
@@ -94,8 +83,26 @@ public class CompletionEnforcedCohortFlowTests
         using var verify = _fixture.BeginScope();
         var run = await verify.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
 
-        run.CompletionEnforcementMode.ShouldBe("Enforced", "the snapshot lane resolves the same opt-in from its frozen definition json");
-        run.Status.ShouldBe(WorkflowRunStatus.Suspended);
+        run.CompletionEnforcementMode.ShouldBe("Enforced", "the snapshot lane admits the opt-in — supervisor is the Enforceable cohort");
+        run.Status.ShouldBe(WorkflowRunStatus.Suspended, "an Enforced claim nothing staked must still park, never terminalize");
+        run.Error.ShouldNotBeNull();
+        run.Error.ShouldContain("completion-authority", customMessage: "the park must name its arbiter — check workflow_run.error for the decision detail");
+    }
+
+    [Fact]
+    public async Task A_snapshot_launch_of_an_enforced_generic_definition_refuses_too()
+    {
+        // Same admission fold, other lane: the snapshot starter derives the mode from the identical
+        // (projection kind, frozen json) pair the row would carry — no projection kind + a bare graph reads
+        // generic, and the launch refuses before any row exists.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        using var scope = _fixture.BeginScope();
+        var ex = await Should.ThrowAsync<InvalidOperationException>(() => scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(
+            Definition(WorkflowDefinition.CompletionModeEnforced), teamId, userId,
+            launchPayloadJson: null, scopeRepositoryIds: null, projectionKind: null, session: null, CancellationToken.None));
+
+        ex.Message.ShouldContain("mode 'generic'");
     }
 
     [Fact]
@@ -117,8 +124,7 @@ public class CompletionEnforcedCohortFlowTests
         // window) — without the park stamp the reconciler would re-dispatch it into a re-walk → re-arbitrate →
         // re-park churn loop forever, each cycle paying a full compose plus a live handoff probe.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var workflowId = await CreateWorkflowAsync(teamId, userId, Definition(WorkflowDefinition.CompletionModeEnforced));
-        var runId = await RunManuallyAsync(teamId, userId, workflowId);
+        var runId = await StartEnforcedSupervisorSnapshotAsync(teamId, userId);
 
         await ForceEnqueuedAsync(runId);
         await RunEngineAsync(runId);
@@ -142,9 +148,7 @@ public class CompletionEnforcedCohortFlowTests
         // full contract and lands the graded merged tape + a pushed manifest; Continue clears the stamp and the
         // re-driven engine stamps Success.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var workflowId = await CreateWorkflowAsync(teamId, userId, Definition(WorkflowDefinition.CompletionModeEnforced));
-        var runId = await RunManuallyAsync(teamId, userId, workflowId);
-        await StampProjectionKindAsync(runId, CodeSpace.Messages.Tasks.TaskProjectionKinds.Supervisor);
+        var runId = await StartEnforcedSupervisorSnapshotAsync(teamId, userId);
 
         await ForceEnqueuedAsync(runId);
         await RunEngineAsync(runId);
@@ -213,15 +217,6 @@ public class CompletionEnforcedCohortFlowTests
     {
         using var scope = _fixture.BeginScope();
         await scope.Resolve<IMediator>().Send(new ReconcileStuckRunsCommand());
-    }
-
-    private async Task StampProjectionKindAsync(Guid runId, string kind)
-    {
-        using var scope = _fixture.BeginScope();
-        var db = scope.Resolve<CodeSpaceDbContext>();
-        var run = await db.WorkflowRun.SingleAsync(r => r.Id == runId);
-        run.ProjectionKind = kind;
-        await db.SaveChangesAsync();
     }
 
     /// <summary>The canonical graded supervisor tape (plan → spawn(passed) → merge → stop) — the same shape <c>CompletionTerminalAuthorityFlowTests</c> seeds, landed AFTER the park as the human's world-fix.</summary>
@@ -303,6 +298,16 @@ public class CompletionEnforcedCohortFlowTests
         {
             new RequirementEnvelope { RequirementRef = requirementRef, Kind = kind, Requiredness = Requiredness.Required, Authority = ContractAuthority.ModelProposal, ContractSchemaVersion = "1" },
         }, CancellationToken.None);
+    }
+
+    /// <summary>The tasks lane's admitted shape: an Enforced opt-in launched with the SUPERVISOR projection kind — the Enforceable cohort — through the real snapshot starter.</summary>
+    private async Task<Guid> StartEnforcedSupervisorSnapshotAsync(Guid teamId, Guid userId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(
+            Definition(WorkflowDefinition.CompletionModeEnforced), teamId, userId,
+            launchPayloadJson: null, scopeRepositoryIds: null,
+            projectionKind: CodeSpace.Messages.Tasks.TaskProjectionKinds.Supervisor, session: null, CancellationToken.None);
     }
 
     /// <summary>Tests run the engine inline (no Hangfire worker), so the dispatcher's Pending→Enqueued CAS is mirrored directly — same discipline as <c>ErrorRoutingFlowTests.ReEnqueueAsync</c>.</summary>

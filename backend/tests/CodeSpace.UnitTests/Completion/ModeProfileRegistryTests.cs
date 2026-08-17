@@ -18,7 +18,7 @@ public class ModeProfileRegistryTests
     private static readonly ModeProfileRegistry Registry = new();
 
     [Theory]
-    [InlineData(RunModeKeys.Supervisor, ProtocolReadiness.Shadow, PerformanceQualification.Shadow)]
+    [InlineData(RunModeKeys.Supervisor, ProtocolReadiness.Enforceable, PerformanceQualification.Shadow)]
     [InlineData(RunModeKeys.PlanMap, ProtocolReadiness.Open, PerformanceQualification.Unmeasured)]
     [InlineData(RunModeKeys.SingleAgent, ProtocolReadiness.Shadow, PerformanceQualification.Shadow)]
     public void The_registered_lanes_declare_total_stage_maps(string mode, ProtocolReadiness readiness, PerformanceQualification performance)
