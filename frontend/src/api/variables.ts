@@ -40,8 +40,17 @@ export interface VariableSummary {
 }
 
 export interface SetVariableInput {
-  /** JSON-encodable value. Secret type expects a JSON-string; other types accept matching JSON. */
-  value: unknown;
+  /**
+   * JSON-encodable value. Secret type expects a JSON-string; other types accept matching JSON.
+   *
+   * Omit it to leave the stored value untouched — which is what an edit to only the description or
+   * the name must do. A Secret's plaintext is never returned to a client, so a caller with no value
+   * to send has none it could invent; it used to send "" and the server encrypted that over the real
+   * credential.
+   */
+  value?: unknown;
+  /** The name this variable is stored under today, when this write is a rename. The server moves the name onto the existing row, so the value never has to be reproduced. */
+  renameFrom?: string;
   valueType: VariableValueType;
   description?: string | null;
 }
@@ -58,7 +67,8 @@ export const teamVariablesApi = {
       body: JSON.stringify({
         name,
         valueType: input.valueType,
-        value: input.value,
+        ...(input.value === undefined ? {} : { value: input.value }),
+        ...(input.renameFrom === undefined ? {} : { renameFrom: input.renameFrom }),
         description: input.description ?? null,
       }),
     }),
@@ -78,7 +88,8 @@ export const workflowVariablesApi = {
         workflowId,
         name,
         valueType: input.valueType,
-        value: input.value,
+        ...(input.value === undefined ? {} : { value: input.value }),
+        ...(input.renameFrom === undefined ? {} : { renameFrom: input.renameFrom }),
         description: input.description ?? null,
       }),
     }),
@@ -98,7 +109,8 @@ export const projectVariablesApi = {
         projectId,
         name,
         valueType: input.valueType,
-        value: input.value,
+        ...(input.value === undefined ? {} : { value: input.value }),
+        ...(input.renameFrom === undefined ? {} : { renameFrom: input.renameFrom }),
         description: input.description ?? null,
       }),
     }),

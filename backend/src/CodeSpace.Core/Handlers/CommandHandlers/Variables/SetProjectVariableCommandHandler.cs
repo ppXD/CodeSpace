@@ -21,6 +21,12 @@ public sealed class SetProjectVariableCommandHandler : IRequestHandler<SetProjec
 
     public async Task<Unit> Handle(SetProjectVariableCommand request, CancellationToken cancellationToken)
     {
+
+        // Rename first: it moves the name onto the row that already holds the value, so the
+        // Set below rotates the right row and never has to reproduce a Secret.
+        if (request.RenameFrom is { } from)
+            await _service.RenameAsync(VariableScope.Project, request.ProjectId, _currentTeam.Id!.Value, from, request.Name, _currentUser.Id!.Value, cancellationToken).ConfigureAwait(false);
+
         await _service.SetAsync(VariableScope.Project, request.ProjectId, _currentTeam.Id!.Value, request.Name, request.ValueType, request.Value, request.Description, _currentUser.Id!.Value, cancellationToken).ConfigureAwait(false);
         return Unit.Value;
     }

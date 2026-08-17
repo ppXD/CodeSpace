@@ -65,8 +65,8 @@ export function VariableTablePanel({ scope, workflowId, projectId, refPrefix, ti
     setTeam.isPending || setWf.isPending || setProj.isPending ||
     delTeam.isPending || delWf.isPending || delProj.isPending;
 
-  const setVar = (name: string, valueType: VariableValueType, value: unknown, description: string | null) => {
-    const input = { valueType, value, description };
+  const setVar = (name: string, valueType: VariableValueType, value: unknown | undefined, description: string | null, renameFrom?: string) => {
+    const input = { valueType, value, description, renameFrom };
     if (scope === "Team") return setTeam.mutateAsync({ name, input });
     if (scope === "Workflow") return setWf.mutateAsync({ name, input });
     return setProj.mutateAsync({ name, input });
@@ -123,14 +123,16 @@ export function VariableTablePanel({ scope, workflowId, projectId, refPrefix, ti
               variable={v}
               isMutating={isMutating}
               onSetType={(newType) => setVar(v.name, newType, defaultFor(newType), v.description)}
-              onSetDescription={(desc) => setVar(v.name, v.valueType, parsePlain(v.valuePlain, v.valueType), desc)}
+              // No value: a description edit must not touch the stored one. parsePlain returns "" for a
+              // Secret ("never available; caller shouldn't ask") and the server encrypted that over the
+              // real credential, which nothing holds a copy of.
+              onSetDescription={(desc) => setVar(v.name, v.valueType, undefined, desc)}
               onSetValue={(val) => setVar(v.name, v.valueType, val, v.description)}
-              onRename={async (next) => {
-                // Rename = delete-old + create-new. Order matters: create first to fail-fast
-                // on name conflict, then delete the old row.
-                await setVar(next, v.valueType, parsePlain(v.valuePlain, v.valueType), v.description);
-                await deleteVar(v.name);
-              }}
+              // The server moves the name onto the row that already holds the value. It used to be
+              // delete-old + create-new here, which cannot work for a Secret: the client is never
+              // given the plaintext, so it recreated the row holding an empty string and then deleted
+              // the only copy of the real one.
+              onRename={(next) => setVar(next, v.valueType, undefined, v.description, v.name)}
               onRemove={() => deleteVar(v.name)}
             />
           ))}
@@ -319,12 +321,6 @@ function defaultFor(valueType: VariableValueType): unknown {
   return "";
 }
 
-function parsePlain(valuePlain: string | null, valueType: VariableValueType): unknown {
-  if (valueType === "Secret") return "";   // never available; caller shouldn't ask
-  if (valuePlain == null || valuePlain === "") return defaultFor(valueType);
-  try { return JSON.parse(valuePlain); }
-  catch { return valuePlain; }
-}
 
 function parsePlainAs(valueType: VariableValueType, draft: string): unknown {
   if (valueType === "String") return draft;
