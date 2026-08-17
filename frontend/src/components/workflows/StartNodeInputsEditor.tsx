@@ -22,7 +22,10 @@ export function StartNodeInputsEditor({ inputs, onChange }: StartNodeInputsEdito
   const [editing, setEditing] = useState<{ index: number | null } | null>(null);
 
   const upsert = (field: WorkflowVariable) => {
-    onChange(editing?.index == null ? [...inputs, field] : inputs.map((v, i) => (i === editing.index ? field : v)));
+    // Merge onto the stored row rather than swapping it out. The modal already carries the untouched
+    // facets through, so this is belt-and-braces -- but it is the half that keeps a future control
+    // added to that modal from silently dropping a field it does not know about.
+    onChange(editing?.index == null ? [...inputs, field] : inputs.map((v, i) => (i === editing.index ? { ...v, ...field } : v)));
     setEditing(null);
   };
 

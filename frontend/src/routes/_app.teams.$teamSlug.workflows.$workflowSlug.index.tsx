@@ -214,10 +214,30 @@ function EditorShell() {
     );
   }
 
+  // Fail closed. The editor re-derives the workflow's event subscriptions on every save by
+  // classifying each node through this list, so an empty list does not mean "nothing to classify" --
+  // it means every node reads as not-a-trigger and the next save deletes every activation the
+  // workflow had. `?? []` let a transient query error say that, and the workflow simply stopped
+  // firing with nothing on screen to say why.
+  if (manifests.error || !manifests.data) {
+    return (
+      <section className="ct">
+        <div className="ct-body">
+          <div className="cn-banner cn-banner-err" style={{ margin: 16 }}>
+            <div className="cn-banner-h">Couldn't load node types</div>
+            <div className="cn-banner-p">
+              The editor can't classify this workflow's nodes, so saving now would drop its triggers. {manifests.error?.message ?? "Reload to try again."}
+            </div>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
   return (
     <Editor
       workflow={workflow.data}
-      manifests={manifests.data ?? []}
+      manifests={manifests.data}
       saving={update.isPending}
       onSave={(input) => update.mutateAsync({ workflowId: workflow.data.id, input })}
     />

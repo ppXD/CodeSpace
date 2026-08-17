@@ -43,4 +43,41 @@ describe("AddInputFieldModal — a Select requires an option", () => {
     const saved = onSave.mock.calls.at(-1)![0];
     expect((saved.schema as Record<string, unknown>).enum).toEqual(["Yes"]);   // enum present → reopens as Select
   });
+
+  it("keeps a stored default this editor cannot represent", () => {
+    // The plan projector writes an array of subtask objects as a field's default. None of this modal's
+    // default controls can hold that, and resolveDefault answers `undefined` for it — so a save that
+    // wrote its answer unconditionally deleted the operator's whole plan. Untouched means untouched.
+    const onSave = vi.fn();
+    const stored = {
+      name: "subtasks",
+      label: "Subtasks",
+      description: "The planned subtasks the workflow fans out over.",
+      schema: { type: "array", items: { type: "object" } },
+      default: [{ title: "Add the migration" }, { title: "Wire the handler" }],
+      required: false,
+    } as never;
+
+    render(<AddInputFieldModal initial={stored} takenNames={[]} onSave={onSave} onClose={vi.fn()} />);
+
+    // Edit something else entirely.
+    fireEvent.change(screen.getByPlaceholderText("subtasks"), { target: { value: "Planned subtasks" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    const saved = onSave.mock.calls.at(-1)![0];
+    expect(saved.default).toEqual([{ title: "Add the migration" }, { title: "Wire the handler" }]);
+    expect(saved.description).toBe("The planned subtasks the workflow fans out over.");
+  });
+
+  it("writes a default the operator did change", () => {
+    // The other half — the preserve rule must not make the control one-way.
+    const onSave = vi.fn();
+    render(<AddInputFieldModal takenNames={[]} onSave={onSave} onClose={vi.fn()} />);
+
+    fireEvent.change(screen.getByPlaceholderText("e.g. start_time"), { target: { value: "greeting" } });
+    fireEvent.change(screen.getByPlaceholderText(/used when the runner leaves it blank/), { target: { value: "hello" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(onSave.mock.calls.at(-1)![0].default).toBe("hello");
+  });
 });
