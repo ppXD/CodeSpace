@@ -48,8 +48,30 @@ export interface InputFieldDraft {
 }
 
 /** Build the per-field JSON Schema for an input field from the editor draft. */
-export function buildFieldSchema(draft: InputFieldDraft): Record<string, unknown> {
-  const schema: Record<string, unknown> = { type: jsonTypeOf(draft.type) };
+/**
+ * The keywords this editor OWNS — the ones its controls can turn on, and therefore the only ones it
+ * may turn off. Everything else in a stored schema belongs to whoever wrote it and is carried
+ * through untouched.
+ *
+ * <p>The list exists because the alternative is rebuilding the schema from `{}`, which silently
+ * deletes any keyword the editor has no control for: a `description`, a `format`, a `pattern`, an
+ * `x-*` a planner wrote. Clearing only what you own is the difference between "I unticked Hidden"
+ * and "I erased everything I did not know about".</p>
+ */
+const EDITOR_OWNED_KEYWORDS = ["type", "x-selector", "x-long", "enum", "maxLength", "x-hidden"] as const;
+
+/**
+ * The draft as a PATCH over `base` — the fragment currently stored, when there is one.
+ *
+ * <p>Owned keywords are dropped first so unticking a box really clears it; everything else survives.
+ * Called with no base (a new field) this is identical to building from scratch.</p>
+ */
+export function buildFieldSchema(draft: InputFieldDraft, base?: Record<string, unknown>): Record<string, unknown> {
+  const schema: Record<string, unknown> = { ...(base ?? {}) };
+
+  for (const owned of EDITOR_OWNED_KEYWORDS) delete schema[owned];
+
+  schema.type = jsonTypeOf(draft.type);
 
   // An entity-picker field is a string id rendered by its selector (x-selector dispatch); the
   // selector key is the type name (repository → project→repo picker, conversation → conversation picker).

@@ -133,4 +133,32 @@ describe("coerceNumberInput", () => {
   it("keeps a non-numeric literal verbatim (operator sees + fixes the typo)", () => {
     expect(coerceNumberInput("abc")).toBe("abc");
   });
+
+  it("carries through a keyword the editor has no control for", () => {
+    // A planner (or a hand-edited definition) can put anything in a field's schema. Rebuilding from
+    // {} deleted all of it; the editor may only clear the keywords it owns.
+    const stored = { type: "string", description: "Set by the planner", format: "uri", "x-spotlight": 3 };
+
+    const patched = buildFieldSchema({ type: "text", maxLength: null, options: [], hidden: false }, stored);
+
+    expect(patched.description).toBe("Set by the planner");
+    expect(patched.format).toBe("uri");
+    expect(patched["x-spotlight"]).toBe(3);
+  });
+
+  it("still clears a keyword it does own", () => {
+    // The other half: unticking Hidden has to actually remove x-hidden, or the merge would make the
+    // control one-way.
+    const stored = { type: "string", "x-hidden": true, maxLength: 40, description: "kept" };
+
+    const patched = buildFieldSchema({ type: "text", maxLength: null, options: [], hidden: false }, stored);
+
+    expect(patched["x-hidden"]).toBeUndefined();
+    expect(patched.maxLength).toBeUndefined();
+    expect(patched.description).toBe("kept");
+  });
+
+  it("builds from scratch when there is nothing stored", () => {
+    expect(buildFieldSchema({ type: "text", maxLength: null, options: [], hidden: false })).toEqual({ type: "string" });
+  });
 });

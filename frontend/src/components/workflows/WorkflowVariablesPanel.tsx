@@ -179,8 +179,13 @@ function VariableRow({ kind, refPrefix, value, onChange, onRemove }: VariableRow
 
   const schemaType = extractSchemaType(value.schema);
 
+  // Merge, not replace: the dropdown owns `type` and nothing else. Replacing the whole fragment
+  // deleted every other keyword the schema carried -- an x-hidden, an x-selector, a description a
+  // planner wrote -- none of which this row even displays, so the loss was invisible.
   const changeType = (next: SchemaTypeKey) => {
-    onChange({ schema: { type: next } as unknown });
+    const base = typeof value.schema === "object" && value.schema !== null ? (value.schema as Record<string, unknown>) : {};
+
+    onChange({ schema: { ...base, type: next } as unknown });
   };
 
   return (
