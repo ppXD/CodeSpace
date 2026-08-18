@@ -27,10 +27,13 @@ public static class AgentSessionIdReader
     public static string? TryRead(IReadOnlyList<AgentEvent> events)
     {
         foreach (var e in events)
-            if (e.Data is { } data && TryReadFrom(data, out var id)) return id;
+            if (TryRead(e) is { } id) return id;
 
         return null;
     }
+
+    /// <summary>The per-event primitive: the id ONE event carries, or null. <see cref="AgentResultFold"/> keeps the first non-null so it never has to retain the stream.</summary>
+    public static string? TryRead(AgentEvent normalized) => normalized.Data is { } data && TryReadFrom(data, out var id) ? id : null;
 
     /// <summary>Read a non-empty id from one structured payload — the payload itself, then the <c>msg</c> envelope.</summary>
     private static bool TryReadFrom(JsonElement data, out string id)

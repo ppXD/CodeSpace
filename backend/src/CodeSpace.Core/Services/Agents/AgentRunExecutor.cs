@@ -527,7 +527,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             return await CompleteFromMarkerWithCaptureGapAsync(context, "redactor-fingerprint-mismatch", "The durable native log could not be captured because its redaction credential changed after worker recovery.", cancellationToken).ConfigureAwait(false);
         }
 
-        var events = new List<AgentEvent>();
+        var fold = new AgentResultFold();   // BOUNDED, exactly as the live tail folds — a re-attached run must not be able to exhaust the heap either
         var transcript = new System.Text.StringBuilder();   // D3: the faithful raw stream of the RESUMED tail (the pre-crash prefix lived in the dead observer's run)
         var writer = new BufferedEventWriter(_runs, context.RunId);   // same batched-append + flush-at-checkpoint path as the live tail
 
@@ -540,7 +540,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 var redacted = Redact(normalized, redactor);
 
                 await writer.BufferAsync(redacted, cancellationToken).ConfigureAwait(false);
-                events.Add(redacted);
+                fold.Add(redacted);
             }
         }
 
@@ -555,7 +555,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // Final flush for the terminal-drain lines (no trailing checkpoint), as in the live path.
         await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
 
-        var result = MapSandboxResult(sandbox, context.Harness, events) with { Transcript = transcript.ToString() };
+        var result = MapSandboxResult(sandbox, context.Harness, fold) with { Transcript = transcript.ToString() };
 
         // Capture the resumable session transcript here too — a run that completes via durable re-attach (worker restart
         // mid-run) is exactly the durability case continuity serves; the config home still lives under the handle's spool.
@@ -570,18 +570,18 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// Both forced-terminal branches also capture <see cref="AgentRunResult.SessionId"/> when the events carry one —
     /// the sole missing input a later RETRY needs to WARM-resume the killed agent's conversation instead of cold-starting.
     /// </summary>
-    internal static AgentRunResult MapSandboxResult(SandboxResult sandbox, IAgentHarness harness, IReadOnlyList<AgentEvent> events) => sandbox.Status switch
+    internal static AgentRunResult MapSandboxResult(SandboxResult sandbox, IAgentHarness harness, AgentResultFold fold) => sandbox.Status switch
     {
         // A timed-out / stalled agent still BURNED tokens before we killed it — capture the usage from its events
         // (the harness's own fold does this for a clean/non-zero exit; these forced-terminal paths must too) so the
         // spend shows on the run regardless of outcome. It may ALSO have a resumable session (a harness's early
         // lifecycle event — Claude's system/init line, Codex's thread.started — carries the id before the kill), so
         // capture that too: this is what turns a forced-terminal's later RETRY warm (continuing the conversation)
-        // instead of always cold — AgentSessionIdReader.TryRead + the AgentRun.SessionId write + the supervisor's
+        // instead of always cold — the fold's first-seen session id + the AgentRun.SessionId write + the supervisor's
         // FindResumableSubtaskAttemptAsync are already generic over every terminal status; this was the missing input.
-        SandboxStatus.TimedOut => new AgentRunResult { Status = AgentRunStatus.TimedOut, ExitReason = "timed-out", Error = "The agent run exceeded its time budget and was terminated.", TokenUsage = AgentTokenUsageReader.TryRead(events), SessionId = AgentSessionIdReader.TryRead(events), Model = AgentModelReader.TryRead(events) },
-        SandboxStatus.Stalled => new AgentRunResult { Status = AgentRunStatus.NeedsReview, CompletionDisposition = CompletionDisposition.Blocked, ExitReason = AgentAcceptanceContract.StalledExitReason, Error = "The agent produced no output for the configured idle window and was terminated as stalled — it is likely blocked at an interactive prompt it cannot answer unattended; a human must take over.", TokenUsage = AgentTokenUsageReader.TryRead(events), SessionId = AgentSessionIdReader.TryRead(events), Model = AgentModelReader.TryRead(events) },
-        _ => harness.BuildResult(events, sandbox.ExitCode),
+        SandboxStatus.TimedOut => new AgentRunResult { Status = AgentRunStatus.TimedOut, ExitReason = "timed-out", Error = "The agent run exceeded its time budget and was terminated.", TokenUsage = fold.TokenUsage, SessionId = fold.SessionId, Model = fold.Model },
+        SandboxStatus.Stalled => new AgentRunResult { Status = AgentRunStatus.NeedsReview, CompletionDisposition = CompletionDisposition.Blocked, ExitReason = AgentAcceptanceContract.StalledExitReason, Error = "The agent produced no output for the configured idle window and was terminated as stalled — it is likely blocked at an interactive prompt it cannot answer unattended; a human must take over.", TokenUsage = fold.TokenUsage, SessionId = fold.SessionId, Model = fold.Model },
+        _ => harness.BuildResult(fold, sandbox.ExitCode),
     };
 
     /// <summary>Fallback when the credential can't be re-resolved to redact a re-attached tail: complete from the exit marker WITHOUT re-tailing (so no unredacted line reaches the log) — Succeeded/Failed by the code if it's present, Failed if the process is gone, or null (leave Running for a later sweep) if it's still alive and we can't safely observe it.</summary>
@@ -2051,7 +2051,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
     private async Task<AgentRunResult> RunHarnessAsync(HarnessRunContext context, CancellationToken cancellationToken)
     {
-        var events = new List<AgentEvent>();
+        var fold = new AgentResultFold();   // BOUNDED: the harness's reductions, not the run's events — a long run must not be able to exhaust the heap here
         var transcript = new System.Text.StringBuilder();   // D3: the FAITHFUL raw stream — every redacted line, incl. ones ParseEvent drops
         var writer = new BufferedEventWriter(_runs, context.RunId);   // batches the DB inserts; flushed at each spool checkpoint + once at the end
 
@@ -2069,7 +2069,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 var redacted = Redact(normalized, context.Redactor);
 
                 await writer.BufferAsync(redacted, cancellationToken).ConfigureAwait(false);   // buffered — one batched INSERT per spool checkpoint, not one per line
-                events.Add(redacted);   // in-memory, for the harness's result fold
+                fold.Add(redacted);   // O(1) in-memory reduction; the full ordered log lives durably in agent_run_event
             }
         }
 
@@ -2086,7 +2086,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
 
         // Events are already redacted, so a result the harness folds from them (summary / error) is redacted too.
-        var result = MapSandboxResult(sandbox, context.Harness, events);
+        var result = MapSandboxResult(sandbox, context.Harness, fold);
 
         // D3: attach the faithful raw transcript (offloaded to an artifact at completion if large — the common case).
         return result with { Transcript = transcript.ToString() };

@@ -19,5 +19,8 @@ public static class AgentTerminalOutcomeReader
     /// against, so the exit code alone decides) or the last one was Completed.
     /// </summary>
     public static bool ReportedFailure(IReadOnlyList<AgentEvent> events) =>
-        events.LastOrDefault(e => e.Kind is AgentEventKind.Completed or AgentEventKind.Error)?.Kind == AgentEventKind.Error;
+        events.LastOrDefault(e => IsTerminal(e.Kind))?.Kind == AgentEventKind.Error;
+
+    /// <summary>The kinds that count as a harness-reported terminal outcome — the per-event predicate <see cref="AgentResultFold"/> keeps its LAST match of, so both readings agree by construction.</summary>
+    public static bool IsTerminal(AgentEventKind kind) => kind is AgentEventKind.Completed or AgentEventKind.Error;
 }

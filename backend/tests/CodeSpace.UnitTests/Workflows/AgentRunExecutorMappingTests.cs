@@ -15,7 +15,7 @@ public class AgentRunExecutorMappingTests
     {
         // C3: a stalled run (no output for the idle window — likely a nested prompt) is surfaced for a human as
         // NeedsReview(Blocked), not buried as a bare timeout. The harness is not consulted for a non-exit terminal.
-        var result = AgentRunExecutor.MapSandboxResult(Sandbox(SandboxStatus.Stalled), harness: null!, System.Array.Empty<AgentEvent>());
+        var result = AgentRunExecutor.MapSandboxResult(Sandbox(SandboxStatus.Stalled), harness: null!, new AgentResultFold());
 
         result.Status.ShouldBe(AgentRunStatus.NeedsReview);
         result.CompletionDisposition.ShouldBe(CompletionDisposition.Blocked);
@@ -26,7 +26,7 @@ public class AgentRunExecutorMappingTests
     [Fact]
     public void A_timed_out_sandbox_still_maps_to_timed_out()
     {
-        var result = AgentRunExecutor.MapSandboxResult(Sandbox(SandboxStatus.TimedOut), harness: null!, System.Array.Empty<AgentEvent>());
+        var result = AgentRunExecutor.MapSandboxResult(Sandbox(SandboxStatus.TimedOut), harness: null!, new AgentResultFold());
 
         result.Status.ShouldBe(AgentRunStatus.TimedOut);
         result.ExitReason.ShouldBe("timed-out");
@@ -41,7 +41,7 @@ public class AgentRunExecutorMappingTests
         // events, so the spend shows on the run regardless of outcome (parity with the harness fold for a clean exit).
         var events = new[] { UsageEvent(input: 1200, output: 340) };
 
-        var result = AgentRunExecutor.MapSandboxResult(Sandbox(status), harness: null!, events);
+        var result = AgentRunExecutor.MapSandboxResult(Sandbox(status), harness: null!, AgentResultFold.From(events));
 
         result.TokenUsage.ShouldNotBeNull();
         result.TokenUsage!.InputTokens.ShouldBe(1200);
@@ -64,7 +64,7 @@ public class AgentRunExecutorMappingTests
         // can warm-resume the conversation instead of always cold-starting.
         var events = new[] { SessionIdEvent("sess-forced-terminal-1") };
 
-        var result = AgentRunExecutor.MapSandboxResult(Sandbox(status), harness: null!, events);
+        var result = AgentRunExecutor.MapSandboxResult(Sandbox(status), harness: null!, AgentResultFold.From(events));
 
         result.SessionId.ShouldBe("sess-forced-terminal-1");
     }
@@ -76,7 +76,7 @@ public class AgentRunExecutorMappingTests
     {
         // Byte-identical to before this fix when the stream carried no id at all (e.g. the process was killed
         // before even its first lifecycle line) — never a fabricated value.
-        var result = AgentRunExecutor.MapSandboxResult(Sandbox(status), harness: null!, System.Array.Empty<AgentEvent>());
+        var result = AgentRunExecutor.MapSandboxResult(Sandbox(status), harness: null!, new AgentResultFold());
 
         result.SessionId.ShouldBeNull();
     }
