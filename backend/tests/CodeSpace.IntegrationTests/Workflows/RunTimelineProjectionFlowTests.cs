@@ -61,7 +61,7 @@ public sealed class RunTimelineProjectionFlowTests
     {
         // The recording substrate writes interaction.started/completed for every in-process model call; the timeline
         // renders the OUTCOME (kind + model + token cost) at Detail and drops the started open bracket. Proves the render
-        // chain end-to-end: the source loads the interaction.* records (no type filter) and the new map arm surfaces them.
+        // chain end-to-end: the source's pushed-down filter admits the interaction.* outcome records and the map arm surfaces them.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var runId = await SeedRunAsync(teamId);
 

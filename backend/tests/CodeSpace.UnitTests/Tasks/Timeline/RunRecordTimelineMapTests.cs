@@ -1,3 +1,4 @@
+using System.Reflection;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Tasks.Timeline.Sources;
 using CodeSpace.Messages.Constants;
@@ -189,6 +190,76 @@ public class RunRecordTimelineMapTests
         levelByTitle["Run replayed"].ShouldHaveSingleItem().Level.ShouldBe(TimelineLevel.Detail, "a replay is always a resume mechanic");
         levelByTitle["Run failed"].ShouldHaveSingleItem().Level.ShouldBe(TimelineLevel.Milestone, "the real outcome stays a milestone");
     }
+
+    [Fact]
+    public void Every_record_type_the_map_turns_into_an_event_is_in_the_pushed_down_predicate_set()
+    {
+        // DRIFT DETECTOR. RunRecordTimelineSource pushes `record_type IN (NarrativeRecordTypes)` into SQL, so the two
+        // must agree on EVERY canonical type: a type the switch maps but the predicate omits is a SILENTLY DROPPED
+        // timeline event (an intelligence regression — the operator judges the run by this list); a type the predicate
+        // keeps but the switch drops is only wasted bytes. Enumerated by reflection so adding a constant can't slip past.
+        foreach (var recordType in AllCanonicalRecordTypes())
+        {
+            var maps = RunRecordTimelineMap.ToEvent(Record(recordType)) != null;
+
+            RunRecordTimelineMap.NarrativeRecordTypes.Contains(recordType).ShouldBe(maps,
+                $"'{recordType}' {(maps ? "maps to an event but is MISSING from" : "drops to null but is present in")} the SQL predicate set — " +
+                "derive NarrativeRecordTypes from ToEvent (never hand-copy it), or the pushed-down filter silently changes the timeline");
+        }
+    }
+
+    [Theory]
+    // The SQL predicate keys on record_type ALONE, which is only equivalent to the C# drop if the map's keep/drop
+    // verdict is payload-independent. Re-probe every canonical type against payloads / node / iteration shapes that
+    // drive every read path in the map (error, wait_kind, reason, attempt, usage) plus unparseable JSON, and compare
+    // against the bare-payload verdict the predicate set is derived from — it must never move.
+    [InlineData("""{"error":"boom","wait_kind":"Timer","reason":"dead edge","attempt":1,"max_attempts":3,"kind":"llm.complete","model":"m","usage":{"inputTokens":3,"outputTokens":4,"finishReason":"length"}}""", "code", "map#2")]
+    [InlineData("not json at all", "code", "")]
+    public void The_keep_or_drop_verdict_depends_only_on_the_record_type_never_the_payload(string payloadJson, string? nodeId, string iterationKey)
+    {
+        foreach (var recordType in AllCanonicalRecordTypes())
+        {
+            var bare = RunRecordTimelineMap.ToEvent(Record(recordType)) != null;
+            var loaded = RunRecordTimelineMap.ToEvent(Record(recordType, nodeId, payloadJson, iterationKey: iterationKey)) != null;
+
+            loaded.ShouldBe(bare, $"'{recordType}' changed its keep/drop verdict with the payload — a record_type-only SQL filter would then diverge from the C# map");
+        }
+    }
+
+    [Fact]
+    public void Projecting_only_the_predicate_matched_records_yields_the_same_events_as_projecting_everything()
+    {
+        // The pure half of the equivalence proof (the DB half lives in RunRecordTimelineFilterFlowTests): pre-filtering
+        // by NarrativeRecordTypes must not disturb Project's stateful RunStarted fold — the noise rows it removes are
+        // exactly the rows ToEvent already dropped, and none of them is the first RunStarted the fold keys on.
+        var ledger = BuildEveryRecordTypeLedger();
+
+        var everything = RunRecordTimelineMap.Project(ledger);
+        var filtered = RunRecordTimelineMap.Project(ledger.Where(r => RunRecordTimelineMap.NarrativeRecordTypes.Contains(r.RecordType)));
+
+        filtered.ShouldBe(everything, "the SQL-filtered projection must be event-for-event identical to load-everything-then-filter");
+        everything.ShouldNotBeEmpty();
+        ledger.Count.ShouldBeGreaterThan(everything.Count, "the fixture must actually contain dropped noise, or the equivalence claim is vacuous");
+    }
+
+    /// <summary>A ledger holding EVERY canonical record type (narrative + noise) plus an unknown plugin type, with a repeated RunStarted / RunReplayed so Project's resume fold is exercised.</summary>
+    private static List<WorkflowRunRecord> BuildEveryRecordTypeLedger()
+    {
+        const string richPayload = """{"error":"boom","wait_kind":"Timer","reason":"dead edge","attempt":1,"max_attempts":3,"kind":"llm.complete","model":"m","usage":{"inputTokens":3,"outputTokens":4,"finishReason":"length"}}""";
+
+        var types = AllCanonicalRecordTypes()
+            .Concat([WorkflowRunRecordTypes.RunStarted, WorkflowRunRecordTypes.RunReplayed, "plugin.custom_event"])
+            .ToList();
+
+        return types.Select((t, i) => Record(t, nodeId: "code", payloadJson: richPayload, sequence: i + 1)).ToList();
+    }
+
+    /// <summary>Every canonical engine-emitted record type, by reflection over the constants — so a newly added type is covered without editing this test.</summary>
+    private static IReadOnlyList<string> AllCanonicalRecordTypes() =>
+        typeof(WorkflowRunRecordTypes).GetFields(BindingFlags.Public | BindingFlags.Static)
+            .Where(f => f.IsLiteral && f.FieldType == typeof(string))
+            .Select(f => (string)f.GetRawConstantValue()!)
+            .ToArray();
 
     [Fact]
     public void A_fanned_out_branch_failure_folds_to_detail_while_the_container_and_top_level_failures_stay_milestones()

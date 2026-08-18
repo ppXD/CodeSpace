@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text.Json;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows.Llm;
@@ -18,6 +19,23 @@ public static class RunRecordTimelineMap
 {
     /// <summary>The lifecycle source's provenance key — stamped on every event this mapper emits.</summary>
     public const string Key = "run-record";
+
+    /// <summary>
+    /// The record types <see cref="ToEvent"/> turns into an event — DERIVED from the switch itself by probing every
+    /// canonical <see cref="WorkflowRunRecordTypes"/> constant, never a hand-copied list, so the source's pushed-down
+    /// SQL <c>record_type IN (…)</c> predicate and this switch cannot drift: a new narrative arm lands here for free.
+    /// Sound as a SQL filter because the switch keys on <see cref="WorkflowRunRecord.RecordType"/> ALONE — whether a
+    /// record maps is never payload-dependent — and an unknown / plugin type falls to the default arm, which the
+    /// predicate drops identically. Pinned by <c>RunRecordTimelineMapTests</c>'s drift detector.
+    /// </summary>
+    public static readonly IReadOnlyList<string> NarrativeRecordTypes = BuildNarrativeRecordTypes();
+
+    private static IReadOnlyList<string> BuildNarrativeRecordTypes() =>
+        typeof(WorkflowRunRecordTypes).GetFields(BindingFlags.Public | BindingFlags.Static)
+            .Where(f => f.IsLiteral && f.FieldType == typeof(string))
+            .Select(f => (string)f.GetRawConstantValue()!)
+            .Where(t => ToEvent(new WorkflowRunRecord { RecordType = t }) != null)
+            .ToArray();
 
     /// <summary>
     /// Map an ORDERED record stream to events, folding the durable-RESUME mechanics. The engine writes a

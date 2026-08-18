@@ -30,10 +30,31 @@ public sealed class RunRecordTimelineSource : IRunTimelineSource, IScopedDepende
         return RunRecordTimelineMap.Project(records);
     }
 
-    /// <summary>The run's ledger records in ledger order (Sequence). The run is already team-checked by the projector, so reading by RunId is in-scope. AsNoTracking — pure read.</summary>
     private async Task<List<WorkflowRunRecord>> LoadRecordsAsync(Guid runId, CancellationToken cancellationToken) =>
-        await _db.WorkflowRunRecord.AsNoTracking()
-            .Where(r => r.RunId == runId)
+        await NarrativeRecordsQuery(_db, runId).ToListAsync(cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// The run's NARRATIVE ledger records in ledger order (Sequence). The record-type predicate is pushed into SQL from
+    /// <see cref="RunRecordTimelineMap.NarrativeRecordTypes"/> — the map's OWN derived set, so the filter and the switch
+    /// cannot disagree — and it is index-compatible with <c>idx_wrr_run_type(run_id, record_type)</c>. Trace-level bulk
+    /// (a streamed run's per-second <c>interaction.delta</c> rows, log lines, scope / release snapshots, external-call
+    /// detail) therefore never crosses the wire; the drop used to happen in C# AFTER every row and its
+    /// <c>payload_json</c> had been materialized, once per turn, per 2s poll, per viewer. Only the columns
+    /// <see cref="RunRecordTimelineMap.ToEvent"/> actually reads are selected — id / run_id / correlation_id /
+    /// parent_record_id stay in the database. Internal (not private) so the pushed-down SQL is pinned directly.
+    /// The run is already team-checked by the projector, so reading by RunId is in-scope. AsNoTracking — pure read.
+    /// </summary>
+    internal static IQueryable<WorkflowRunRecord> NarrativeRecordsQuery(CodeSpaceDbContext db, Guid runId) =>
+        db.WorkflowRunRecord.AsNoTracking()
+            .Where(r => r.RunId == runId && RunRecordTimelineMap.NarrativeRecordTypes.Contains(r.RecordType))
             .OrderBy(r => r.Sequence)
-            .ToListAsync(cancellationToken).ConfigureAwait(false);
+            .Select(r => new WorkflowRunRecord
+            {
+                Sequence = r.Sequence,
+                RecordType = r.RecordType,
+                NodeId = r.NodeId,
+                IterationKey = r.IterationKey,
+                OccurredAt = r.OccurredAt,
+                PayloadJson = r.PayloadJson,
+            });
 }
