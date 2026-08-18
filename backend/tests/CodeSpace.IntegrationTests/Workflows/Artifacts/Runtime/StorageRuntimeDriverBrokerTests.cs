@@ -5,6 +5,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
+using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers.Local;
 using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
@@ -33,7 +34,7 @@ public sealed class StorageRuntimeDriverBrokerTests
 
             using var scope = _fixture.BeginScope();
             var broker = scope.Resolve<IStorageRuntimeDriverBroker>();
-            var resolution = await broker.OpenAsync(new StorageRuntimeDriverRequest(teamId, profileId, 1), CancellationToken.None);
+            var resolution = await broker.OpenAsync(new StorageRuntimeDriverRequest(teamId, profileId, 1, StorageProfileEligibility.Write), CancellationToken.None);
 
             var ready = resolution.ShouldBeOfType<StorageRuntimeDriverResolution.Ready>();
             await using (ready.Lease)

@@ -13,8 +13,11 @@ public interface IStorageProfileSnapshotResolver : IScopedDependency
     Task<StorageProfileSnapshotResolution> ResolveAsync(StorageProfileSnapshotRequest request, CancellationToken cancellationToken);
 }
 
-/// <summary>An explicit team/profile/revision pin. There is deliberately no implicit "current" sentinel.</summary>
-public sealed record StorageProfileSnapshotRequest(Guid TeamId, Guid ProfileId, int ProfileRevision);
+/// <summary>
+/// An explicit team/profile/revision pin plus what the caller wants the profile for. There is deliberately no implicit
+/// "current" sentinel and no implicit eligibility: <see cref="StorageProfileEligibility"/> is stated at every call site.
+/// </summary>
+public sealed record StorageProfileSnapshotRequest(Guid TeamId, Guid ProfileId, int ProfileRevision, StorageProfileEligibility Eligibility);
 
 /// <summary>Closed result vocabulary for expected runtime readiness outcomes.</summary>
 public abstract record StorageProfileSnapshotResolution

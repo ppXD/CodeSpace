@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Executors;
@@ -145,6 +147,204 @@ public class SupervisorDependencyStagingTests
         };
 
         reasons.Distinct().Count().ShouldBe(4, "two gates sharing a reason string are two gates a forensic reader cannot tell apart — the whole point of naming them");
+    }
+
+    // ── The producer patch source: staging must read BOTH carriers, never a hard-coded empty one ──
+
+    [Fact]
+    public void A_producers_patch_source_carries_every_coordinate_the_shared_reader_needs()
+    {
+        var agentRunId = Guid.NewGuid();
+        var artifactId = Guid.NewGuid();
+
+        var source = RealSupervisorActionExecutor.PatchSourceFor(new PublishManifest
+        {
+            AgentRunId = agentRunId, RepositoryAlias = "web", PatchArtifactId = artifactId,
+        });
+
+        source.AgentRunId.ShouldBe(agentRunId, "dropping the run id silently degrades every sub-threshold producer back to patch-less");
+        source.RepositoryAlias.ShouldBe("web", "the alias selects the matching per-repo entry of a multi-repo result — 'primary' would read the wrong repository's diff");
+        source.PatchArtifactId.ShouldBe(artifactId);
+    }
+
+    /// <summary>
+    /// The regression pin (drift detector, Rule 12.5 shape): staging used to build every contribution with
+    /// <c>ResolveRequiredAsync(context.TeamId, "", producer.PatchArtifactId, …)</c> — a HARD-CODED empty inline
+    /// argument. Because patch offload is size-gated, that resolved every sub-8KB producer to an empty patch, which
+    /// <c>LocalGitBranchIntegrator</c> correctly refuses and <c>Spawn</c> correctly turns into a whole-turn abort:
+    /// one small diff anywhere in a multi-producer handoff blocked all of it.
+    ///
+    /// <para>Reverting to that shape leaves every unit test on the pure surfaces green (they never reach the
+    /// contribution build) and only the real-Postgres integration tier red — so this cheap source-level pin exists to
+    /// fail in the same second the literal comes back, on a machine with no database at all.</para>
+    /// </summary>
+    [Fact]
+    public void Dependency_staging_never_resolves_a_producers_patch_from_a_hard_coded_empty_inline_argument()
+    {
+        var source = File.ReadAllText(LocateDependencyStagingSource());
+
+        HardCodedEmptyInlinePatch.IsMatch(source).ShouldBeFalse(
+            "a producer's diff must be resolved through the shared IAgentPatchReader (artifact OR the producing run's inline patch), never by handing the offloader an empty inline argument and reading the manifest's artifact id alone");
+
+        source.ShouldContain(nameof(AgentPatchSource),
+            customMessage: "the contribution build must go through the shared patch seam — if this identifier is gone, staging has grown its own private patch resolution again");
+    }
+
+    /// <summary>Matches <c>ResolveRequiredAsync(&lt;anything&gt;, "", …)</c>. In a verbatim string a doubled quote is ONE literal quote, so <c>""""</c> is the empty-string argument.</summary>
+    private static readonly Regex HardCodedEmptyInlinePatch = new(@"ResolveRequiredAsync\([^,)]+,\s*""""\s*,", RegexOptions.Compiled);
+
+    private static string LocateDependencyStagingSource()
+    {
+        const string relative = "backend/src/CodeSpace.Core/Services/Supervisor/Executors/RealSupervisorActionExecutor.DependencyStaging.cs";
+
+        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
+        {
+            var candidate = Path.Combine(dir.FullName, relative.Replace('/', Path.DirectorySeparatorChar));
+            if (File.Exists(candidate)) return candidate;
+        }
+
+        throw new FileNotFoundException($"{relative} not found walking up from {AppContext.BaseDirectory}");
+    }
+
+    // ── HandoffIntegrationBranch: one branch per PRODUCER SET, never per turn ───────────
+
+    private static readonly Guid Run = Guid.Parse("3f4b1c2d-0000-4000-8000-abcdefabcdef");
+    private static readonly Guid Repo = Guid.Parse("11111111-2222-4333-8444-555555555555");
+
+    /// <summary>
+    /// The P1 collision. Keyed on run + turn alone, EVERY dependent staged in one turn asked for the SAME branch
+    /// name — so the second one's integration found a remote branch carrying the FIRST one's (different) tree, and
+    /// <c>LocalGitBranchIntegrator.ReconcileExistingBranchAsync</c> correctly refused to clobber it. That refusal is
+    /// a non-Clean staging, which <c>Spawn</c> correctly turns into a whole-turn abort — so a manufactured name
+    /// collision staged ZERO agents, including the dependent whose own staging was clean.
+    ///
+    /// <para>Every row is a set that DIFFERS from <c>{p1, p2}</c> in some way — disjoint, overlapping, a strict
+    /// subset, a strict superset — because each of those integrates to a different tree and so must never contend
+    /// for one ref.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("p3", "p4")]         // disjoint
+    [InlineData("p1", "p3")]         // overlapping
+    [InlineData("p1")]               // a strict subset
+    [InlineData("p1", "p2", "p3")]   // a strict superset
+    public void A_different_producer_set_never_contends_for_the_same_handoff_branch(params string[] otherProducers)
+    {
+        var mine = RealSupervisorActionExecutor.HandoffIntegrationBranch(Run, 4, Repo, new[] { "p1", "p2" });
+        var theirs = RealSupervisorActionExecutor.HandoffIntegrationBranch(Run, 4, Repo, otherProducers);
+
+        theirs.ShouldNotBe(mine, "two dependents staged in the SAME turn over different producers must not collide — the collision is what trips the (correct) no-clobber reconcile and aborts the whole turn's spawn");
+    }
+
+    /// <summary>
+    /// The SAME collision, one axis over: a dependent's target repository is resolved PER SUBTASK
+    /// (<c>.Spawn.cs</c>'s <c>ResolveTargetRepositoryId</c>), so two dependents in one turn can declare the IDENTICAL
+    /// <c>dependsOn</c> and still target DIFFERENT repositories. The producer identity is repository-agnostic (an
+    /// agent run id), but <c>ResolveProducerManifestsAsync</c> selects a different manifest ROW per repository — so
+    /// the same labels stand for different patch bytes and integrate to a different tree. Two repository rows may
+    /// carry one clone URL (the repositories table is unique on provider instance + external id, not on URL), and
+    /// there the two trees meet on one remote: the second push is a clobber refusal, and one blocked subtask aborts
+    /// the whole turn. Folding the resolved repository into the digest is what keeps the name a name for the TREE.
+    /// </summary>
+    [Fact]
+    public void The_same_producer_set_resolved_against_a_different_repository_gets_its_own_handoff_branch()
+    {
+        var mine = RealSupervisorActionExecutor.HandoffIntegrationBranch(Run, 4, Repo, new[] { "p1", "p2" });
+        var otherRepo = RealSupervisorActionExecutor.HandoffIntegrationBranch(Run, 4, Guid.Parse("99999999-8888-4777-8666-555555555555"), new[] { "p1", "p2" });
+
+        otherRepo.ShouldNotBe(mine, "the same producers staged against a different repository integrate a different manifest row's patches onto a different tree — if the two repositories share a clone URL, an identical name puts both trees on one ref and the second staging is refused");
+    }
+
+    /// <summary>
+    /// The idempotent-re-push pin, and the reason the discriminator is a HASH of the producer identities rather than
+    /// anything per-dependent (a subtask id, an index, a fresh guid): an identical producer set must still yield an
+    /// identical name, so it integrates to an identical tree, so the unchanged no-clobber reconcile short-circuits on
+    /// tree equality instead of blocking. Two dependents inheriting the SAME work legitimately share one branch.
+    /// </summary>
+    [Fact]
+    public void An_identical_producer_set_yields_the_identical_branch_so_the_no_clobber_reconcile_still_short_circuits()
+    {
+        RealSupervisorActionExecutor.HandoffIntegrationBranch(Run, 4, Repo, new[] { "p1", "p2" })
+            .ShouldBe(RealSupervisorActionExecutor.HandoffIntegrationBranch(Run, 4, Repo, new[] { "p1", "p2" }),
+                "a per-dependent discriminator would fork a second branch for the same work AND break re-execution of the same turn — the reconcile can only short-circuit on a name it already pushed");
+    }
+
+    /// <summary>
+    /// The NAME is order-invariant: the digest is over the sorted set, so the incidental order a plan declared its
+    /// <c>dependsOn</c> in — which <c>SupervisorDependencyGate.LatestSucceededAgentRunIds</c> re-derives on every
+    /// turn — never moves it. That is all this pins, and all that is true.
+    ///
+    /// <para>The INTEGRATION is NOT order-invariant, and nothing here claims it is:
+    /// <c>LocalGitBranchIntegrator.ApplyAllAsync</c> applies the contributions in list order through
+    /// <c>git apply --index --3way</c>, which does not commute in general (verified: one producer renaming a file a
+    /// second one appends to applies cleanly in one order and conflicts in the other). What makes a SHARED name safe
+    /// is not commutativity but <c>ReconcileExistingBranchAsync</c>, which is gated on TREE equality, never on the
+    /// name: a dependent inherits an existing handoff branch only when its own integration independently reproduced
+    /// the byte-identical tree, and otherwise the push is refused and the staging BLOCKS — the same degradation the
+    /// pre-change per-turn name already produced, never a graft of a tree this dependent's producers did not
+    /// produce.</para>
+    /// </summary>
+    [Fact]
+    public void Shuffling_the_producer_ids_does_not_move_the_handoff_branch()
+    {
+        var declared = RealSupervisorActionExecutor.HandoffIntegrationBranch(Run, 4, Repo, new[] { "p-a", "p-b", "p-c" });
+
+        RealSupervisorActionExecutor.HandoffIntegrationBranch(Run, 4, Repo, new[] { "p-c", "p-a", "p-b" }).ShouldBe(declared);
+        RealSupervisorActionExecutor.HandoffIntegrationBranch(Run, 4, Repo, new[] { "p-b", "p-c", "p-a" }).ShouldBe(declared, "the same producers in a different order inherit the same work — an order-sensitive name would fork a redundant branch for it");
+    }
+
+    /// <summary>
+    /// The digest must be stable ACROSS PROCESSES, not merely within one. <c>string.GetHashCode()</c> is randomized
+    /// per process in .NET, so a hash built on it would give a run resuming on a different worker a DIFFERENT branch
+    /// for the identical producer set — forking the handoff and defeating the idempotent re-push above, while every
+    /// single-process test stayed green. Pinning the literal is what makes that substitution fail loudly.
+    /// </summary>
+    [Fact]
+    public void The_producer_digest_is_a_stable_content_hash_not_a_per_process_one()
+    {
+        RealSupervisorActionExecutor.HandoffIntegrationBranch(Run, 4, Repo, new[] { "p1", "p2" })
+            .ShouldBe($"codespace/handoff/{Run:N}/turn4-3a832230b4a5", "SHA-256 over the repository id (N format) then the newline-joined ordinal-sorted labels, truncated to 12 lowercase hex chars — reproduce with: printf '11111111222243338444555555555555\\np1\\np2' | shasum -a 256 | cut -c1-12");
+    }
+
+    /// <summary>
+    /// The name is pushed as a real ref and read by a real operator, so it must stay both legal and legible. The turn
+    /// number stays in it deliberately: it tells the operator which turn staged the handoff, and it keeps this change
+    /// purely ADDITIVE — a name written before this change (<c>…/turn4</c>) can never equal one written after
+    /// (<c>…/turn4-{12 hex}</c>), so a run resuming across the change creates its branch instead of colliding with the
+    /// one its own earlier turn already pushed.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(97)]
+    public void The_handoff_branch_is_a_valid_git_ref_that_still_names_the_run_and_the_turn(int turn)
+    {
+        var branch = RealSupervisorActionExecutor.HandoffIntegrationBranch(Run, turn, Repo, new[] { Guid.NewGuid().ToString(), Guid.NewGuid().ToString() });
+
+        branch.ShouldStartWith($"codespace/handoff/{Run:N}/turn{turn}-", customMessage: "the run and the turn stay readable at the front — the digest is a suffix, not a replacement");
+        RejectedByGitRefFormat(branch).ShouldBeNull("a name git refuses is a handoff that can never be pushed at all");
+        branch.Length.ShouldBeLessThan(255, "every ref component and the whole name stay far inside git's loose-ref path limits");
+    }
+
+    /// <summary>The subset of <c>git check-ref-format</c>'s rules a generated branch name could plausibly break, as a NAMED failure (null ⇒ accepted). Encoded here rather than shelled out so the unit tier stays git-free — a real <c>git push</c> of this exact name is exercised at the integration tier.</summary>
+    private static string? RejectedByGitRefFormat(string name)
+    {
+        if (name.Length == 0) return "an empty name";
+        if (name.StartsWith('/') || name.EndsWith('/') || name.Contains("//", StringComparison.Ordinal)) return "an empty path component";
+        if (name.Contains("..", StringComparison.Ordinal) || name.EndsWith('.')) return "a dot sequence";
+        if (name.Contains("@{", StringComparison.Ordinal)) return "an @{ sequence";
+        if (name.Any(c => char.IsControl(c) || " ~^:?*[\\".Contains(c))) return "a forbidden character";
+
+        return name.Split('/').FirstOrDefault(c => c.StartsWith('.') || c.EndsWith(".lock", StringComparison.Ordinal)) is { } bad ? $"the component '{bad}'" : null;
+    }
+
+    /// <summary>The producer identity the digest is taken over is the SAME one the contribution is labelled with — a digest over a different projection could name a set the integrator never actually applied.</summary>
+    [Fact]
+    public void A_producer_without_an_agent_run_still_contributes_a_stable_identity()
+    {
+        var agentRunId = Guid.NewGuid();
+        var rowId = Guid.NewGuid();
+
+        RealSupervisorActionExecutor.ProducerLabel(new PublishManifest { Id = rowId, AgentRunId = agentRunId }).ShouldBe(agentRunId.ToString());
+        RealSupervisorActionExecutor.ProducerLabel(new PublishManifest { Id = rowId, AgentRunId = null }).ShouldBe(rowId.ToString(), "a manifest row with no agent run still identifies its own contribution — falling back to a constant would collapse two such producers onto one branch");
     }
 
     // ── DependsOnFor: BaseSubtaskId override precedence ─────────────────────────────────

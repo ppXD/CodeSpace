@@ -23,6 +23,13 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// hands the integrator a deterministic contribution set, and a CLEAN integration records the run-level
 /// <c>Integration</c> manifest row (the durable "unique integrated candidate" fact). Git itself is faked here:
 /// the integrator core has its own coverage, and the real-git arc is the supervisor whole-loop E2E's job.
+///
+/// <para>Includes the per-unit reduction over real rows, on BOTH sides of its lane fence. A map body's agent node
+/// retries by RESPAWNING and a manifest row lands for every attempt regardless of how it ended, so the retried
+/// branch used to hand the integrator the same unit twice; a supervisor instead stamps ONE turn cell on all K
+/// agents of a turn, so those must all still reach the integrator. Both tests assert on the contribution set the
+/// node HANDS the integrator — never on a status the fake was told to return: whether a duplicated unit then
+/// conflicts under the sequential apply is the real integrator's own coverage, not something a fake can prove.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -39,8 +46,8 @@ public class GitIntegrateRunNodeFlowTests
         var runId = await SeedRunAsync(teamId, userId);
         var repositoryId = Guid.NewGuid();
 
-        var first = await SeedAgentRunAsync(teamId, runId, "map#0", minutesAgo: 9);
-        var second = await SeedAgentRunAsync(teamId, runId, "map#1", minutesAgo: 3);
+        var first = await SeedAgentRunAsync(teamId, runId, new AgentRunSeed("map#0", MinutesAgo: 9));
+        var second = await SeedAgentRunAsync(teamId, runId, new AgentRunSeed("map#1", MinutesAgo: 3));
         await SeedAgentManifestAsync(teamId, runId, first, repositoryId, branch: "codespace/agent/a");
         await SeedAgentManifestAsync(teamId, runId, second, repositoryId, branch: "codespace/agent/b");
 
@@ -104,7 +111,7 @@ public class GitIntegrateRunNodeFlowTests
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var runId = await SeedRunAsync(teamId, userId);
         var repositoryId = Guid.NewGuid();
-        var agentRunId = await SeedAgentRunAsync(teamId, runId, "map#0", minutesAgo: 5);
+        var agentRunId = await SeedAgentRunAsync(teamId, runId, new AgentRunSeed("map#0", MinutesAgo: 5));
         await SeedAgentManifestAsync(teamId, runId, agentRunId, repositoryId, branch: "codespace/agent/a");
 
         using var scope = _fixture.BeginScope();
@@ -126,7 +133,7 @@ public class GitIntegrateRunNodeFlowTests
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var runId = await SeedRunAsync(teamId, userId);
         var repositoryId = Guid.NewGuid();
-        var agentRunId = await SeedAgentRunAsync(teamId, runId, "map#0", minutesAgo: 5);
+        var agentRunId = await SeedAgentRunAsync(teamId, runId, new AgentRunSeed("map#0", MinutesAgo: 5));
         await SeedAgentManifestAsync(teamId, runId, agentRunId, repositoryId, branch: "codespace/agent/a");
 
         using var scope = _fixture.BeginScope();
@@ -157,7 +164,7 @@ public class GitIntegrateRunNodeFlowTests
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var runId = await SeedRunAsync(teamId, userId);
         var repositoryId = Guid.NewGuid();
-        var agentRunId = await SeedAgentRunAsync(teamId, runId, "map#0", minutesAgo: 5);
+        var agentRunId = await SeedAgentRunAsync(teamId, runId, new AgentRunSeed("map#0", MinutesAgo: 5));
         await SeedAgentManifestAsync(teamId, runId, agentRunId, repositoryId, branch: "codespace/agent/a");
 
         using var scope = _fixture.BeginScope();
@@ -181,7 +188,7 @@ public class GitIntegrateRunNodeFlowTests
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var runId = await SeedRunAsync(teamId, userId);
         var repositoryId = Guid.NewGuid();
-        var agentRunId = await SeedAgentRunAsync(teamId, runId, "map#0", minutesAgo: 5);
+        var agentRunId = await SeedAgentRunAsync(teamId, runId, new AgentRunSeed("map#0", MinutesAgo: 5));
         await SeedAgentManifestAsync(teamId, runId, agentRunId, repositoryId, branch: "codespace/agent/a");
 
         using var scope = _fixture.BeginScope();
@@ -199,6 +206,59 @@ public class GitIntegrateRunNodeFlowTests
             new ContributionOutcome { Label = "agent#map#0", Disposition = ContributionDisposition.Applied },
             new ContributionOutcome { Label = "agent#map#1", Disposition = ContributionDisposition.Conflicted, ConflictedFiles = new[] { "shared.txt" }, FallbackBranch = "codespace/agent/b", Reason = "textual conflict" },
         }, "a contribution conflicted while integrating");
+
+    // ─── The per-unit reduction over real rows, and the lane fence that bounds it ───
+
+    [Fact]
+    public async Task A_retried_subtask_hands_the_integrator_only_its_latest_attempt()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId, userId);
+        var repositoryId = Guid.NewGuid();
+
+        var abandoned = await SeedAgentRunAsync(teamId, runId, new AgentRunSeed("map#0", MinutesAgo: 9, Patch: "diff --git a/shared.txt b/shared.txt\nhalf-done\n"));
+        var respawned = await SeedAgentRunAsync(teamId, runId, new AgentRunSeed("map#0", MinutesAgo: 4, Patch: "diff --git a/shared.txt b/shared.txt\nfinished\n"));
+        var sibling = await SeedAgentRunAsync(teamId, runId, new AgentRunSeed("map#1", MinutesAgo: 2));
+        await SeedAgentManifestAsync(teamId, runId, abandoned, repositoryId, branch: "codespace/agent/a1");
+        await SeedAgentManifestAsync(teamId, runId, respawned, repositoryId, branch: "codespace/agent/a2");
+        await SeedAgentManifestAsync(teamId, runId, sibling, repositoryId, branch: "codespace/agent/b");
+
+        using var scope = _fixture.BeginScope();
+        var integrator = new RecordingIntegrator();
+        var node = new GitIntegrateRunNode(integrator, new StubResolver(), scope.Resolve<IPublishManifestStore>(), scope.Resolve<CodeSpaceDbContext>());
+
+        await node.RunAsync(Context(repositoryId, teamId, runId, parkOnConflict: true), CancellationToken.None);
+
+        integrator.LastRequest!.Contributions.Select(c => c.Label).ShouldBe(new[] { "agent#map#0", "agent#map#1" },
+            customMessage: "one contribution per (node, iteration) unit, still in agent-run creation order — the fan-out's sibling is a different unit and survives");
+        integrator.LastRequest.Contributions.First().Patch.ShouldContain("finished", customMessage: "the UNSUPERSEDED attempt's bytes integrate, never the abandoned attempt's");
+        integrator.LastRequest.Contributions.First().ProducedBranch.ShouldBe("codespace/agent/a2");
+    }
+
+    [Fact]
+    public async Task A_supervisor_turns_parallel_agents_all_reach_the_integrator()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId, userId);
+        var repositoryId = Guid.NewGuid();
+
+        // RealSupervisorActionExecutor stamps ONE turn cell on every agent it spawns in a turn, so these two rows
+        // share a (node, iteration) cell while being concurrent deliverables of DIFFERENT subtasks.
+        var alpha = await SeedAgentRunAsync(teamId, runId, new AgentRunSeed("sup#turn1", MinutesAgo: 9, NodeId: "sup", Patch: "diff-alpha", SubtaskId: "subtask-a"));
+        var beta = await SeedAgentRunAsync(teamId, runId, new AgentRunSeed("sup#turn1", MinutesAgo: 8, NodeId: "sup", Patch: "diff-beta", SubtaskId: "subtask-b"));
+        await SeedAgentManifestAsync(teamId, runId, alpha, repositoryId, branch: "codespace/agent/s1");
+        await SeedAgentManifestAsync(teamId, runId, beta, repositoryId, branch: "codespace/agent/s2");
+
+        using var scope = _fixture.BeginScope();
+        var integrator = new RecordingIntegrator();
+        var node = new GitIntegrateRunNode(integrator, new StubResolver(), scope.Resolve<IPublishManifestStore>(), scope.Resolve<CodeSpaceDbContext>());
+
+        await node.RunAsync(Context(repositoryId, teamId, runId), CancellationToken.None);
+
+        integrator.LastRequest!.Contributions.Select(c => c.ProducedBranch).ShouldBe(new[] { "codespace/agent/s1", "codespace/agent/s2" },
+            customMessage: "the supervisor's K parallel agents share a TURN cell, not a unit — reducing them to one silently drops K-1 real, unsuperseded contributions");
+        integrator.LastRequest.Contributions.Select(c => c.Patch).ShouldBe(new[] { "diff-alpha", "diff-beta" }, customMessage: "and each sibling's own bytes reach the integrator");
+    }
 
     // ─── Seeds ──────────────────────────────────────────────────────────────────
 
@@ -220,18 +280,23 @@ public class GitIntegrateRunNodeFlowTests
         return await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
     }
 
-    private async Task<Guid> SeedAgentRunAsync(Guid teamId, Guid runId, string iterationKey, int minutesAgo)
+    /// <summary>One agent-run row to seed. <see cref="SubtaskId"/> is the supervisor's per-agent stamp — set it and the row lands in the supervisor lane, whose turn cell is a container rather than a unit.</summary>
+    private sealed record AgentRunSeed(string IterationKey, int MinutesAgo, string NodeId = "agent", string? Patch = null, string? SubtaskId = null);
+
+    private async Task<Guid> SeedAgentRunAsync(Guid teamId, Guid runId, AgentRunSeed seed)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         var id = Guid.NewGuid();
-        var at = DateTimeOffset.UtcNow.AddMinutes(-minutesAgo);
+        var at = DateTimeOffset.UtcNow.AddMinutes(-seed.MinutesAgo);
 
+        // A REAL task envelope, never "{}": the contribution reduction reads it to tell which lane the row is in.
         db.AgentRun.Add(new AgentRun
         {
-            Id = id, TeamId = teamId, WorkflowRunId = runId, NodeId = "agent", IterationKey = iterationKey,
-            Harness = "codex-cli", Status = AgentRunStatus.Succeeded, TaskJson = "{}",
-            ResultJson = JsonSerializer.Serialize(new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Patch = $"diff --git a/{iterationKey} b/{iterationKey}\n" }, Core.Services.Agents.AgentJson.Options),
+            Id = id, TeamId = teamId, WorkflowRunId = runId, NodeId = seed.NodeId, IterationKey = seed.IterationKey,
+            Harness = "codex-cli", Status = AgentRunStatus.Succeeded,
+            TaskJson = JsonSerializer.Serialize(new AgentTask { Goal = "do the work", Harness = "codex-cli", SubtaskId = seed.SubtaskId }, Core.Services.Agents.AgentJson.Options),
+            ResultJson = JsonSerializer.Serialize(new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Patch = seed.Patch ?? $"diff --git a/{seed.IterationKey} b/{seed.IterationKey}\n" }, Core.Services.Agents.AgentJson.Options),
             CreatedDate = at, CreatedBy = SystemUsers.SeederId, LastModifiedDate = at, LastModifiedBy = SystemUsers.SeederId,
         });
         await db.SaveChangesAsync();

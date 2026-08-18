@@ -52,6 +52,7 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
     private readonly IBranchIntegrator _integrator;
     private readonly IAgentWorkspaceResolver _workspaces;
     private readonly IPublishManifestStore _manifests;
+    private readonly IAgentPatchReader _patches;
     private readonly ILLMClientRegistry _llm;
     private readonly IModelPoolSelector _modelSelector;
     private readonly IAgentHarnessRegistry _harnesses;
@@ -64,7 +65,7 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
     private readonly ISupervisorPullRequestOpener _pullRequestOpener;
     private readonly ILogger<RealSupervisorActionExecutor> _logger;
 
-    public RealSupervisorActionExecutor(CodeSpaceDbContext db, IAgentRunService agentRuns, IAgentDefinitionResolver agentDefinitionResolver, IChatBotService bot, IInteractionComponentRegistry components, IArtifactOffloader offloader, IBranchIntegrator integrator, IAgentWorkspaceResolver workspaces, IPublishManifestStore manifests, ILLMClientRegistry llm, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses, IWorkPlanService workPlans, Completion.ICompletionContractStore contracts, Workflows.Budget.IBudgetLedger budget, IEnumerable<IPublishGuard> publishGuards, ISupervisorPullRequestOpener pullRequestOpener, ILogger<RealSupervisorActionExecutor> logger)
+    public RealSupervisorActionExecutor(CodeSpaceDbContext db, IAgentRunService agentRuns, IAgentDefinitionResolver agentDefinitionResolver, IChatBotService bot, IInteractionComponentRegistry components, IArtifactOffloader offloader, IBranchIntegrator integrator, IAgentWorkspaceResolver workspaces, IPublishManifestStore manifests, IAgentPatchReader patches, ILLMClientRegistry llm, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses, IWorkPlanService workPlans, Completion.ICompletionContractStore contracts, Workflows.Budget.IBudgetLedger budget, IEnumerable<IPublishGuard> publishGuards, ISupervisorPullRequestOpener pullRequestOpener, ILogger<RealSupervisorActionExecutor> logger)
     {
         _db = db;
         _agentRuns = agentRuns;
@@ -75,6 +76,7 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
         _integrator = integrator;
         _workspaces = workspaces;
         _manifests = manifests;
+        _patches = patches;
         _llm = llm;
         _modelSelector = modelSelector;
         _harnesses = harnesses;

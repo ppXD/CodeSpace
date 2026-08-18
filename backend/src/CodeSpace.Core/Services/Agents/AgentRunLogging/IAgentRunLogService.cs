@@ -78,6 +78,9 @@ public sealed record AgentRunLogFailCaptureRequest
     public required string ErrorCode { get; init; }
     public string? ErrorMessage { get; init; }
     public AgentRunLogRecoveryClaimRef? RecoveryClaim { get; init; }
+
+    /// <summary>Which error-bearing terminal capture state to record. <see cref="AgentRunLogStreamState.CaptureFailed"/> (the default) means capture itself broke; <see cref="AgentRunLogStreamState.Truncated"/> means capture succeeded but the source was cut short by its own size cap. Both carry a completion timestamp + an error code, which is exactly what the terminal check constraint demands of a non-Completed state.</summary>
+    public AgentRunLogStreamState TerminalState { get; init; } = AgentRunLogStreamState.CaptureFailed;
 }
 
 public sealed record AgentRunLogFinalizeSourceRequest

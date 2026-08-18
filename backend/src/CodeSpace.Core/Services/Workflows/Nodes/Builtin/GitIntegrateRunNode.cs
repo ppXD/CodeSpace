@@ -210,9 +210,9 @@ public sealed class GitIntegrateRunNode : INodeRuntime
     private async Task<IReadOnlyList<RunAgentWork>> LoadAgentWorkAsync(Guid runId, Guid teamId, CancellationToken cancellationToken) =>
         (await _db.AgentRun.AsNoTracking()
             .Where(r => r.WorkflowRunId == runId && r.TeamId == teamId)
-            .Select(r => new { r.Id, r.NodeId, r.IterationKey, r.CreatedDate, r.ResultJson })
+            .Select(r => new { r.Id, r.NodeId, r.IterationKey, r.CreatedDate, r.ResultJson, r.TaskJson })
             .ToListAsync(cancellationToken).ConfigureAwait(false))
-        .Select(r => new RunAgentWork(r.Id, r.NodeId, r.IterationKey, r.CreatedDate, r.ResultJson))
+        .Select(r => new RunAgentWork(r.Id, r.NodeId, r.IterationKey, r.CreatedDate, r.ResultJson, r.TaskJson))
         .ToList();
 
     private static Dictionary<string, JsonElement> SkippedOutputs(string reason) => new()

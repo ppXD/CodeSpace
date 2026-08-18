@@ -91,6 +91,9 @@ public interface IRunRecordLogger
     /// wait state lives in <c>workflow_run_wait</c>. <paramref name="waitKind"/> is one of
     /// <c>WorkflowWaitKinds</c>; <paramref name="wakeAt"/> is set for Timer waits.
     /// </summary>
+    /// <summary>Record that a settled node's outputs could not reach the configured destination and were written inline instead — the only place a green run over an empty destination becomes visible.</summary>
+    Task NodeStorageUnavailableAsync(Guid runId, string nodeId, string iterationKey, string reason, string code, CancellationToken cancellationToken);
+
     Task NodeSuspendedAsync(Guid runId, string nodeId, string iterationKey, string waitKind, DateTimeOffset? wakeAt, CancellationToken cancellationToken);
 
     /// <summary>Emit <c>iteration.started</c> for flow.iterate boundary.</summary>

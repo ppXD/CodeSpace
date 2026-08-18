@@ -28,10 +28,13 @@ public static class AgentTokenUsageReader
     public static AgentTokenUsage? TryRead(IReadOnlyList<AgentEvent> events)
     {
         for (var i = events.Count - 1; i >= 0; i--)
-            if (events[i].Data is { } data && TryReadFrom(data, out var usage)) return usage;
+            if (TryRead(events[i]) is { } usage) return usage;
 
         return null;
     }
+
+    /// <summary>The per-event primitive: the usage ONE event carries, or null. <see cref="AgentRunFacts"/> keeps the LAST non-null — the same figure this newest-first scan returns — so it never has to retain the stream.</summary>
+    public static AgentTokenUsage? TryRead(AgentEvent normalized) => normalized.Data is { } data && TryReadFrom(data, out var usage) ? usage : null;
 
     /// <summary>
     /// Read input + output token counts from one structured payload. Checks a bounded list of known

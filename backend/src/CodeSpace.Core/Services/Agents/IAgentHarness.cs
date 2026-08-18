@@ -34,6 +34,36 @@ public interface IAgentHarness
     /// </summary>
     IReadOnlyList<AgentEvent> ParseEvents(string rawLine);
 
-    /// <summary>Fold the run's normalized events + process exit code into the normalized <see cref="AgentRunResult"/>.</summary>
-    AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode);
+    /// <summary>
+    /// Open a fresh <see cref="IAgentEventFolder"/> for ONE run: the accumulator this harness folds its
+    /// <see cref="AgentRunResult"/> from, which the executor drives event-by-event and then asks for the result.
+    /// The harness owns the reduction's SHAPE — retention has to be O(1) (a long agent's whole event list exhausted
+    /// the heap and failed a run that had actually succeeded), but WHAT is retained is this harness's own business,
+    /// so a reduction only one harness needs never becomes a field on a type every harness shares (Rule 7 / ISP).
+    /// </summary>
+    IAgentEventFolder CreateFolder();
+}
+
+/// <summary>
+/// Fold a stream that is already fully in hand through the same harness reduction the streaming executor drives
+/// event-by-event. INTERNAL on purpose: the whole point of narrowing the seam to <see cref="IAgentHarness.CreateFolder"/>
+/// is that re-materializing a run's events becomes a visible decision, and a public convenience over the narrow
+/// interface would hand that back. The guard is stronger than before — the interface carries no <c>BuildResult</c>
+/// at all now, so this cannot be reached by an overload silently binding to a list; naming it is the only way in.
+/// Only the test assemblies (which genuinely hold a finished stream — replay fixtures, the fake-CLI drift detector,
+/// the harness unit suites) reach it, via InternalsVisibleTo.
+/// </summary>
+internal static class AgentHarnessFoldExtensions
+{
+    internal static AgentRunResult BuildResult(this IAgentHarness harness, IReadOnlyList<AgentEvent> events, int exitCode) => harness.Folded(events).BuildResult(AgentRunFacts.From(events), exitCode);
+
+    /// <summary>The folder this harness would have accumulated over the whole stream — for the callers that need the FOLDER rather than the result (the executor's own mapping, driven with a finished stream).</summary>
+    internal static IAgentEventFolder Folded(this IAgentHarness harness, IReadOnlyList<AgentEvent> events)
+    {
+        var folder = harness.CreateFolder();
+
+        foreach (var normalized in events) folder.Add(normalized);
+
+        return folder;
+    }
 }

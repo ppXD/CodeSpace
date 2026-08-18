@@ -696,10 +696,10 @@ public sealed class AgentRunReattachFlowTests : IDisposable
         public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) =>
             string.IsNullOrWhiteSpace(rawLine) ? Array.Empty<AgentEvent>() : new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine.Trim() } };
 
-        public AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode) =>
+        public IAgentEventFolder CreateFolder() => new TestEventFolder((fold, exitCode) =>
             exitCode == 0
-                ? new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = events.Count > 0 ? events[^1].Text : null }
-                : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" };
+                ? new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = fold.LastText }
+                : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" });
     }
 
     /// <summary>A scripted harness that also projects a model credential — so ReattachAsync can RE-RESOLVE the credential (via this projector's provider) purely to rebuild the redactor for the resumed tail.</summary>
@@ -726,8 +726,8 @@ public sealed class AgentRunReattachFlowTests : IDisposable
             return line.Length == 0 ? Array.Empty<AgentEvent>() : new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = line, Data = JsonSerializer.SerializeToElement(new { line }) } };
         }
 
-        public AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode) =>
-            new() { Status = exitCode == 0 ? AgentRunStatus.Succeeded : AgentRunStatus.Failed, ExitReason = "completed", Summary = events.Count > 0 ? events[^1].Text : null };
+        public IAgentEventFolder CreateFolder() => new TestEventFolder((fold, exitCode) =>
+            new() { Status = exitCode == 0 ? AgentRunStatus.Succeeded : AgentRunStatus.Failed, ExitReason = "completed", Summary = fold.LastText });
 
         public IReadOnlyList<string> SupportedProviders => new[] { _provider };
 

@@ -22,7 +22,7 @@ public sealed class StorageRuntimeDriverBrokerTests
         typeof(IStorageRuntimeDriverBroker).GetInterfaces().ShouldContain(typeof(IScopedDependency));
         typeof(IStorageRuntimeDriverBroker).GetMethods().Select(method => method.Name).ShouldBe(["OpenAsync"]);
         typeof(IStorageRuntimeDriverBroker).GetMethod("OpenAsync")!.GetParameters().Length.ShouldBe(2);
-        typeof(StorageRuntimeDriverRequest).GetProperties().Select(property => property.Name).ShouldBe(["TeamId", "ProfileId", "ProfileRevision"]);
+        typeof(StorageRuntimeDriverRequest).GetProperties().Select(property => property.Name).ShouldBe(["TeamId", "ProfileId", "ProfileRevision", "Eligibility"]);
         typeof(StorageRuntimeDriverLease).GetInterfaces().ShouldContain(typeof(IAsyncDisposable));
 
         var runtimeProperties = typeof(StorageRuntimeDriverResolution).Assembly.GetTypes()
@@ -71,7 +71,7 @@ public sealed class StorageRuntimeDriverBrokerTests
 
         var result = await Broker(profile, new StubCredentialResolver(), factory).OpenAsync(Request(), CancellationToken.None);
 
-        observed.ShouldBe(new StorageProfileSnapshotRequest(_teamId, _profileId, 7));
+        observed.ShouldBe(new StorageProfileSnapshotRequest(_teamId, _profileId, 7, StorageProfileEligibility.Write));
         result.ShouldBe(new StorageRuntimeDriverResolution.ConfigurationInvalid(StorageRuntimeConfigurationFailureReason.SnapshotIdentityMismatch));
         factory.CreateCalls.ShouldBe(0);
     }
@@ -379,7 +379,7 @@ public sealed class StorageRuntimeDriverBrokerTests
     private static StorageRuntimeDriverBroker Broker(IStorageProfileSnapshotResolver profile, IStorageCredentialSecretResolver credential, IArtifactStorageDriverFactoryCatalog catalog) =>
         new(profile, credential, catalog);
 
-    private StorageRuntimeDriverRequest Request() => new(_teamId, _profileId, 7);
+    private StorageRuntimeDriverRequest Request() => new(_teamId, _profileId, 7, StorageProfileEligibility.Write);
 
     private StubProfileResolver ProfileResolver(StorageProfileSnapshot snapshot) =>
         new((_, _) => Task.FromResult<StorageProfileSnapshotResolution>(new StorageProfileSnapshotResolution.Ready(snapshot)));

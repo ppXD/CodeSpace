@@ -31,7 +31,7 @@ public sealed class StorageRuntimeDriverBroker : IStorageRuntimeDriverBroker
         StorageProfileSnapshotResolution profileResolution;
         try
         {
-            profileResolution = await _profileResolver.ResolveAsync(new StorageProfileSnapshotRequest(request.TeamId, request.ProfileId, request.ProfileRevision), cancellationToken).ConfigureAwait(false);
+            profileResolution = await _profileResolver.ResolveAsync(new StorageProfileSnapshotRequest(request.TeamId, request.ProfileId, request.ProfileRevision, request.Eligibility), cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

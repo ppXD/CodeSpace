@@ -257,6 +257,124 @@ public sealed class SupervisorDependencyStagingFlowTests
             "the producer's RECORDED PATCH (resolved back from the artifact store) was applied onto a fresh integration branch even though it never pushed a branch of its own");
     }
 
+    /// <summary>
+    /// The size-gated twin of the test above, and the one the handoff used to lose: patch offload is SIZE-gated
+    /// (<c>ArtifactOffloader.OffloadIfLargeAsync</c> returns no artifact id at or below the 8KB inline threshold), so a
+    /// SMALL diff exists nowhere but the producer's own <c>agent_run.result_jsonb</c>. Staging read only the manifest's
+    /// <c>PatchArtifactId</c> and passed a hard-coded empty inline argument, so every sub-8KB patch-only producer
+    /// resolved to an empty patch and blocked the whole spawn — the exact case a cheap one-file fix produces.
+    /// </summary>
+    [Fact]
+    public async Task A_small_patch_only_producer_stages_from_the_inline_patch_the_manifest_never_carries()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedRepositoryAsync(teamId, remote.Url, await SeedCredentialAsync(teamId), RepositoryPublishMode.PatchOnly);
+        var runId = await SeedSupervisorRunAsync(teamId);
+
+        var (producerRunId, _) = await RunProducerAsync(teamId, repoId, "printf 'by a small producer\\n' > small.txt; echo edited");
+        var manifest = await SingleManifestAsync(producerRunId, teamId);
+        manifest.Branch.ShouldBeNull("the repo policy blocked the push");
+        manifest.PatchArtifactId.ShouldBeNull("a sub-threshold diff is never offloaded — the precondition this test exists to exercise; if this ever becomes non-null the test is silently covering the artifact path instead");
+
+        var context = ContextWith(runId, teamId, repoId,
+            plan: Plan(("producer", null), ("dependent", new[] { "producer" })),
+            priorSpawns: await SucceededSpawn(teamId, ("producer", producerRunId)));
+
+        await ExecuteSpawnAsync(context, "dependent");
+
+        var task = await SingleStagedTaskAsync(runId);
+        task.Workspace.ShouldNotBeNull("a producer whose only surviving artifact is an inline patch still has real work to hand off — blocking here strands every dependent of a small diff");
+
+        (await remote.FileOnBranchAsync(task.Workspace!.Repositories.Single().Ref!, "small.txt")).Trim()
+            .ShouldBe("by a small producer", "the producer's INLINE patch was applied onto a fresh integration branch");
+    }
+
+    /// <summary>
+    /// The multi-producer shape the size gate breaks: the integrator is all-or-nothing, so ONE contribution that
+    /// resolves to no patch aborts the whole set (<c>LocalGitBranchIntegrator.Preflight</c>) and blocks the spawn.
+    /// Mixing one sub-threshold and one offloaded producer therefore proves the two patch sources compose — reading
+    /// only the artifact half would leave this permanently blocked no matter how large the other diff is.
+    /// </summary>
+    [Fact]
+    public async Task A_small_and_an_offloaded_producer_integrate_together()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedRepositoryAsync(teamId, remote.Url, await SeedCredentialAsync(teamId), RepositoryPublishMode.Branch);
+        var runId = await SeedSupervisorRunAsync(teamId);
+
+        var (small, _) = await RunProducerAsync(teamId, repoId, "printf 'tiny\\n' > small.txt; echo edited");
+        var (large, _) = await RunProducerAsync(teamId, repoId, "head -c 9000 /dev/zero | tr '\\0' 'q' > large.txt; echo edited");
+
+        (await SingleManifestAsync(small, teamId)).PatchArtifactId.ShouldBeNull("the small producer's diff stayed inline");
+        (await SingleManifestAsync(large, teamId)).PatchArtifactId.ShouldNotBeNull("the large producer's diff was offloaded");
+
+        var context = ContextWith(runId, teamId, repoId,
+            plan: Plan(("small", null), ("large", null), ("dependent", new[] { "small", "large" })),
+            priorSpawns: await SucceededSpawn(teamId, ("small", small), ("large", large)));
+
+        await ExecuteSpawnAsync(context, "dependent");
+
+        var task = await SingleStagedTaskAsync(runId);
+        var integratedRef = task.Workspace!.Repositories.Single().Ref!;
+
+        (await remote.FileOnBranchAsync(integratedRef, "small.txt")).Trim().ShouldBe("tiny", "the inline-patch producer contributed alongside the offloaded one — one empty contribution would have aborted the whole set");
+        (await remote.FileOnBranchAsync(integratedRef, "large.txt")).Trim().ShouldBe(new string('q', 9000));
+    }
+
+    /// <summary>
+    /// The shared seam itself, driven directly against real producers instead of through staging: whichever carrier a
+    /// producer's diff actually landed in, <see cref="IAgentPatchReader"/> returns THAT one and only that one. The two
+    /// producers run the identical production capture path with only the diff SIZE changed, which is the whole
+    /// variable — the offload gate decides the carrier, and a reader that knows one carrier is blind to half of them.
+    /// </summary>
+    [Fact]
+    public async Task The_shared_patch_reader_returns_whichever_carrier_the_offload_gate_chose()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedRepositoryAsync(teamId, remote.Url, await SeedCredentialAsync(teamId), RepositoryPublishMode.PatchOnly);
+
+        var (small, _) = await RunProducerAsync(teamId, repoId, "printf 'inline only\\n' > small.txt; echo edited");
+        var (large, _) = await RunProducerAsync(teamId, repoId, "head -c 9000 /dev/zero | tr '\\0' 'z' > large.txt; echo edited");
+
+        var inlineSource = await PatchSourceOfAsync(small, teamId);
+        var offloadedSource = await PatchSourceOfAsync(large, teamId);
+
+        inlineSource.PatchArtifactId.ShouldBeNull("the sub-threshold diff was not offloaded — the carrier this seam exists to reach");
+        offloadedSource.PatchArtifactId.ShouldNotBeNull();
+
+        using var scope = _fixture.BeginScope();
+        var reader = scope.Resolve<IAgentPatchReader>();
+
+        (await reader.ReadAsync(teamId, inlineSource, CancellationToken.None))
+            .ShouldContain("small.txt", customMessage: "no artifact id ⇒ the diff lives in the producing run's result, which is exactly what the manifest cannot tell you");
+
+        (await reader.ReadAsync(teamId, offloadedSource, CancellationToken.None))
+            .ShouldContain("large.txt", customMessage: "an artifact id ⇒ the artifact store holds the whole diff — unchanged from the pre-fix behaviour");
+
+        (await reader.ReadAsync(Guid.NewGuid(), inlineSource, CancellationToken.None))
+            .ShouldBeEmpty("the inline read is team-scoped — another team's id must never resolve this run's diff");
+    }
+
+    /// <summary>The producer's manifest row projected onto the reader's coordinates, exactly as dependency staging projects it.</summary>
+    private async Task<AgentPatchSource> PatchSourceOfAsync(Guid agentRunId, Guid teamId)
+    {
+        var manifest = await SingleManifestAsync(agentRunId, teamId);
+
+        return new AgentPatchSource { AgentRunId = manifest.AgentRunId, RepositoryAlias = manifest.RepositoryAlias, PatchArtifactId = manifest.PatchArtifactId };
+    }
+
     [Fact]
     public async Task Two_disjoint_producers_integrate_onto_one_branch_the_dependent_clones()
     {
@@ -284,6 +402,104 @@ public sealed class SupervisorDependencyStagingFlowTests
 
         (await remote.FileOnBranchAsync(integratedRef, "p1.txt")).Trim().ShouldBe(new string('p', 9000), "both disjoint producers' changes are combined onto the one branch the dependent clones");
         (await remote.FileOnBranchAsync(integratedRef, "p2.txt")).Trim().ShouldBe(new string('q', 9000));
+    }
+
+    /// <summary>
+    /// The P1 live-run break, at the only tier that can show it: TWO dependents staged in the SAME turn over
+    /// DIFFERENT producer sets. With the handoff branch keyed on run + turn alone both asked for one name, so the
+    /// second integration found a remote branch carrying the first's (different) tree,
+    /// <c>LocalGitBranchIntegrator.ReconcileExistingBranchAsync</c> correctly refused to clobber it, and
+    /// <c>Spawn</c>'s correct abort-on-blocked rule staged ZERO agents — including <c>d1</c>, whose own staging
+    /// had already completed cleanly. None of those rules changed; the manufactured collision did.
+    ///
+    /// <para>Mutation check: revert the branch name to <c>…/turn{N}</c> and this goes RED with zero staged tasks.
+    /// No unit test can reach it — the collision only exists once a real integrator really pushes a real ref.</para>
+    /// </summary>
+    [Fact]
+    public async Task Two_dependents_over_different_producer_sets_both_stage_in_one_turn()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedRepositoryAsync(teamId, remote.Url, await SeedCredentialAsync(teamId), RepositoryPublishMode.Branch);
+        var runId = await SeedSupervisorRunAsync(teamId);
+
+        // Each dependent needs ≥2 producers to reach the INTEGRATION arm (a lone branch-producer takes the verbatim
+        // branch and never touches the integrator), and each diff must clear the 8KB inline-offload threshold.
+        var (p1, _) = await RunProducerAsync(teamId, repoId, "head -c 9000 /dev/zero | tr '\\0' 'a' > p1.txt; echo edited");
+        var (p2, _) = await RunProducerAsync(teamId, repoId, "head -c 9000 /dev/zero | tr '\\0' 'b' > p2.txt; echo edited");
+        var (p3, _) = await RunProducerAsync(teamId, repoId, "head -c 9000 /dev/zero | tr '\\0' 'c' > p3.txt; echo edited");
+        var (p4, _) = await RunProducerAsync(teamId, repoId, "head -c 9000 /dev/zero | tr '\\0' 'd' > p4.txt; echo edited");
+
+        var context = ContextWith(runId, teamId, repoId,
+            plan: Plan(("p1", null), ("p2", null), ("p3", null), ("p4", null), ("d1", new[] { "p1", "p2" }), ("d2", new[] { "p3", "p4" })),
+            priorSpawns: await SucceededSpawn(teamId, ("p1", p1), ("p2", p2), ("p3", p3), ("p4", p4)));
+
+        await ExecuteSpawnAsync(context, new[] { "d1", "d2" });
+
+        var tasks = await StagedTasksAsync(runId);
+        tasks.Count.ShouldBe(2, "both dependents stage — a collision on one branch name blocked the turn's spawn entirely, staging neither");
+
+        var d1Ref = tasks.Single(t => t.SubtaskId == "d1").Workspace!.Repositories.Single().Ref!;
+        var d2Ref = tasks.Single(t => t.SubtaskId == "d2").Workspace!.Repositories.Single().Ref!;
+
+        d1Ref.ShouldNotBe(d2Ref, "two different producer sets integrate to two different trees, so they must never contend for one ref");
+
+        (await remote.FileOnBranchAsync(d1Ref, "p1.txt")).Trim().ShouldBe(new string('a', 9000), "d1's branch carries exactly ITS producers' work");
+        (await remote.FileOnBranchAsync(d1Ref, "p2.txt")).Trim().ShouldBe(new string('b', 9000));
+        (await remote.FileOnBranchAsync(d2Ref, "p3.txt")).Trim().ShouldBe(new string('c', 9000), "d2's branch carries exactly ITS producers' work");
+        (await remote.FileOnBranchAsync(d2Ref, "p4.txt")).Trim().ShouldBe(new string('d', 9000));
+    }
+
+    /// <summary>
+    /// The idempotent-re-push pin at the real-git tier: two dependents whose producer sets are EQUAL but DECLARED IN
+    /// OPPOSITE ORDER. The digest is taken over the sorted set, so both resolve the same NAME; these two producers
+    /// touch disjoint files, so the second integration reproduces the identical tree, and the UNCHANGED no-clobber
+    /// reconcile short-circuits on tree equality instead of refusing.
+    ///
+    /// <para>Both failure modes this fix must not introduce are visible here: an order-SENSITIVE digest forks a
+    /// second branch (the remote-branch count goes to 2), and a discriminator that broke idempotence — anything
+    /// per-dependent, or a per-process hash — makes the second dependent's push a clobber refusal, which blocks the
+    /// spawn and leaves ZERO staged tasks.</para>
+    ///
+    /// <para>What this does NOT pin, because it is not true: that INTEGRATING a set is order-invariant.
+    /// <c>LocalGitBranchIntegrator.ApplyAllAsync</c> applies in the declared order via <c>git apply --3way</c>, which
+    /// does not commute in general — these two producers write disjoint new files, i.e. the case that commutes by
+    /// construction. A non-commuting set presented in two orders shares this name and then diverges, at which point
+    /// the tree-equality reconcile refuses the second push and the staging BLOCKS — today's behaviour under the
+    /// per-turn name, and never a graft. Pinning that case needs its own row (a producer renaming a file another
+    /// appends to); it is not pinned here and this comment must not be read as if it were.</para>
+    /// </summary>
+    [Fact]
+    public async Task Two_dependents_over_the_same_producer_set_share_one_branch_and_the_second_push_short_circuits()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedRepositoryAsync(teamId, remote.Url, await SeedCredentialAsync(teamId), RepositoryPublishMode.Branch);
+        var runId = await SeedSupervisorRunAsync(teamId);
+
+        var (p1, _) = await RunProducerAsync(teamId, repoId, "head -c 9000 /dev/zero | tr '\\0' 'a' > p1.txt; echo edited");
+        var (p2, _) = await RunProducerAsync(teamId, repoId, "head -c 9000 /dev/zero | tr '\\0' 'b' > p2.txt; echo edited");
+
+        var context = ContextWith(runId, teamId, repoId,
+            plan: Plan(("p1", null), ("p2", null), ("d1", new[] { "p1", "p2" }), ("d2", new[] { "p2", "p1" })),
+            priorSpawns: await SucceededSpawn(teamId, ("p1", p1), ("p2", p2)));
+
+        await ExecuteSpawnAsync(context, new[] { "d1", "d2" });
+
+        var tasks = await StagedTasksAsync(runId);
+        tasks.Count.ShouldBe(2, "the second dependent re-pushed the IDENTICAL tree under the identical name — the reconcile short-circuits on that, it does not refuse it");
+
+        var d1Ref = tasks.Single(t => t.SubtaskId == "d1").Workspace!.Repositories.Single().Ref!;
+        tasks.Single(t => t.SubtaskId == "d2").Workspace!.Repositories.Single().Ref.ShouldBe(d1Ref, "the same producers in a different declared order inherit the same work, so they legitimately share one branch");
+
+        (await remote.BranchesAsync()).Count(b => b.StartsWith("codespace/handoff/", StringComparison.Ordinal))
+            .ShouldBe(1, "exactly ONE handoff branch exists on the remote — an order-sensitive digest would have forked a second, redundant one for the identical set");
     }
 
     [Fact]
@@ -348,8 +564,9 @@ public sealed class SupervisorDependencyStagingFlowTests
         var repoId = await SeedRepositoryAsync(teamId, remote.Url, await SeedCredentialAsync(teamId), RepositoryPublishMode.Branch);
         var runId = await SeedSupervisorRunAsync(teamId);
 
-        // A defensive, should-never-happen state per I1: a manifest row recording a diff but with NEITHER a branch
-        // NOR a patch artifact. Seeded directly (bypassing the normal capture path) to prove the fail-closed guard.
+        // A defensive, should-never-happen state per I1: a manifest row recording a diff but with NO branch, NO patch
+        // artifact — and no agent run at all behind it, so no inline patch either. Seeded directly (bypassing the
+        // normal capture path) to prove the fail-closed guard now that a sub-threshold inline patch is a real carrier.
         var producerRunId = Guid.NewGuid();
         await SeedAnomalousManifestAsync(teamId, producerRunId, repoId);
 
@@ -363,7 +580,7 @@ public sealed class SupervisorDependencyStagingFlowTests
 
         using var doc = JsonDocument.Parse(spawnDecision.OutcomeJson!);
         doc.RootElement.GetProperty("blockedSubtasks").EnumerateArray().Single().GetProperty("reason").GetString()
-            .ShouldContain("neither a branch nor a patch was captured", customMessage: "the loud reason names exactly what went wrong");
+            .ShouldContain("no branch, no patch artifact and no inline patch", customMessage: "the loud reason names every carrier that was actually consulted — the old wording implied a patch might exist that staging simply never read, which for a sub-threshold diff was exactly true");
     }
 
     [Fact]
@@ -395,12 +612,15 @@ public sealed class SupervisorDependencyStagingFlowTests
     // ─── Drive the real executor ──────────────────────────────────────────────────
 
     /// <summary>Execute a Spawn decision through the real executor, returning it as a TERMINAL <see cref="SupervisorPriorDecision"/> — ready to both inspect (OutcomeJson) and feed back in as a later turn's prior tape (e.g. for resolve to read its conflict).</summary>
-    private async Task<SupervisorPriorDecision> ExecuteSpawnAsync(SupervisorTurnContext context, string subtaskId, IReadOnlyList<SupervisorAgentDispatch>? agents = null)
+    private Task<SupervisorPriorDecision> ExecuteSpawnAsync(SupervisorTurnContext context, string subtaskId, IReadOnlyList<SupervisorAgentDispatch>? agents = null) => ExecuteSpawnAsync(context, new[] { subtaskId }, agents);
+
+    /// <summary>The K-at-once shape: ONE turn's spawn fanning out over several subtask ids — the only way to exercise what two dependents staged in the SAME turn do to each other.</summary>
+    private async Task<SupervisorPriorDecision> ExecuteSpawnAsync(SupervisorTurnContext context, IReadOnlyList<string> subtaskIds, IReadOnlyList<SupervisorAgentDispatch>? agents = null)
     {
         using var scope = _fixture.BeginScope();
         var executor = scope.Resolve<ISupervisorActionExecutor>();
 
-        var payload = JsonSerializer.Serialize(new SupervisorSpawnPayload { SubtaskIds = new[] { subtaskId }, Agents = agents }, AgentJson.Options);
+        var payload = JsonSerializer.Serialize(new SupervisorSpawnPayload { SubtaskIds = subtaskIds, Agents = agents }, AgentJson.Options);
         var decision = new SupervisorDecision { Kind = SupervisorDecisionKinds.Spawn, PayloadJson = payload };
 
         var execution = await executor.ExecuteAsync(decision, context, CancellationToken.None);
@@ -694,6 +914,10 @@ public sealed class SupervisorDependencyStagingFlowTests
 
         public Task<string> FileOnBranchAsync(string branch, string file) => RunGitAsync(_root, "--git-dir", _bare, "show", $"{branch}:{file}");
 
+        /// <summary>Every branch the remote actually carries — real-git ground truth for "how many handoff branches did this turn create".</summary>
+        public async Task<IReadOnlyList<string>> BranchesAsync() =>
+            (await RunGitAsync(_root, "--git-dir", _bare, "for-each-ref", "--format=%(refname:short)", "refs/heads")).Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
         private static async Task<string> RunGitAsync(string workdir, params string[] args)
         {
             var result = await new LocalProcessRunner().RunAsync(
@@ -727,9 +951,9 @@ public sealed class SupervisorDependencyStagingFlowTests
         public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) =>
             string.IsNullOrWhiteSpace(rawLine) ? Array.Empty<AgentEvent>() : new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine.Trim() } };
 
-        public AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode) =>
+        public IAgentEventFolder CreateFolder() => new TestEventFolder((fold, exitCode) =>
             exitCode == 0
-                ? new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = events.Count > 0 ? events[^1].Text : null }
-                : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" };
+                ? new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = fold.LastText }
+                : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" });
     }
 }

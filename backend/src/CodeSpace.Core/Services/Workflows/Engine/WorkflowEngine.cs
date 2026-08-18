@@ -19,6 +19,7 @@ using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Workflows;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
@@ -217,13 +218,14 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         try
         {
             var walkerOutputs = await WalkGraphAsync(run, definition, scope, cancellationToken).ConfigureAwait(false);
-            run.OutputsJson = JsonSerializer.Serialize(walkerOutputs);
-            await CompleteRunAsync(run, WorkflowRunStatus.Success, error: null, cancellationToken).ConfigureAwait(false);
+            await CompleteRunAsync(run, WorkflowRunStatus.Success, error: null, JsonSerializer.Serialize(walkerOutputs), cancellationToken).ConfigureAwait(false);
             await _recordLogger.RunCompletedAsync(run.Id, DateTimeOffset.UtcNow - engineStartedAt, outputsPresent: walkerOutputs.Count > 0, cancellationToken).ConfigureAwait(false);
         }
         catch (NodeFailureException ex)
         {
-            await CompleteRunAsync(run, WorkflowRunStatus.Failure, ex.Message, cancellationToken).ConfigureAwait(false);
+            // A failed walk declares no new outputs: the run's own current value travels back in unchanged, so the
+            // terminal write below is the SAME statement on every path and none of them leaves the column behind.
+            await CompleteRunAsync(run, WorkflowRunStatus.Failure, ex.Message, run.OutputsJson, cancellationToken).ConfigureAwait(false);
             await _recordLogger.RunFailedAsync(run.Id, ex.Message, DateTimeOffset.UtcNow - engineStartedAt, cancellationToken).ConfigureAwait(false);
         }
         catch (RunSuspendedException)
@@ -247,7 +249,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             // Contract violation — Terminal output referenced a Secret variable. Surface the
             // exact message (it names the node + path) so the operator can fix the wiring.
             _logger.LogError("Run {RunId} failed: secret-leak guard tripped. {Message}", run.Id, ex.Message);
-            await CompleteRunAsync(run, WorkflowRunStatus.Failure, ex.Message, cancellationToken).ConfigureAwait(false);
+            await CompleteRunAsync(run, WorkflowRunStatus.Failure, ex.Message, run.OutputsJson, cancellationToken).ConfigureAwait(false);
             await _recordLogger.RunFailedAsync(run.Id, ex.Message, DateTimeOffset.UtcNow - engineStartedAt, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
@@ -906,8 +908,13 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// after the app-level verify can fail the stamp but can never be terminalized over. Returns false on zero
     /// rows (the caller parks). Internal for direct pinning: the verify→stamp window has no seam a test could
     /// inject into, so the CAS is proven at its own boundary instead.
+    ///
+    /// <para>The statement writes the terminal row COMPLETE — the whole <paramref name="terminal"/> included. An
+    /// <c>ExecuteUpdate</c> never flushes tracked state, so outputs left on the tracked entity reached the row
+    /// only when something else in the scope happened to save first; carrying them here makes status, outcome
+    /// and outputs ONE row transition, and a losing racer still writes nothing at all.</para>
     /// </summary>
-    internal async Task<bool> TryStampArbitratedTerminalAsync(Guid runId, WorkflowRunStatus status, string? error, string? outcome, long ledgerVersionRead, CancellationToken cancellationToken)
+    internal async Task<bool> TryStampArbitratedTerminalAsync(Guid runId, ArbitratedTerminal terminal, long ledgerVersionRead, CancellationToken cancellationToken)
     {
         var now = DateTimeOffset.UtcNow;
 
@@ -915,17 +922,24 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             .Where(r => r.Id == runId && r.Status == WorkflowRunStatus.Running
                 && _db.CompletionLedgerHead.Where(h => h.WorkflowRunId == runId).Select(h => h.Version).FirstOrDefault() == ledgerVersionRead)
             .ExecuteUpdateAsync(s => s
-                .SetProperty(r => r.Status, status)
-                .SetProperty(r => r.Error, error)
-                .SetProperty(r => r.Outcome, outcome)
+                .SetProperty(r => r.Status, terminal.Status)
+                .SetProperty(r => r.Error, terminal.Error)
+                .SetProperty(r => r.Outcome, terminal.Outcome)
+                .SetProperty(r => r.OutputsJson, terminal.OutputsJson)
                 .SetProperty(r => r.CompletionParkedAt, (DateTimeOffset?)null)
                 .SetProperty(r => r.CompletedAt, now), cancellationToken).ConfigureAwait(false);
 
         return updated == 1;
     }
 
-    private async Task CompleteRunAsync(WorkflowRun run, WorkflowRunStatus status, string? error, CancellationToken cancellationToken)
+    private async Task CompleteRunAsync(WorkflowRun run, WorkflowRunStatus status, string? error, string outputsJson, CancellationToken cancellationToken)
     {
+        // The run's declared outputs are part of the terminal row, so they arrive WITH it — ONE value feeding
+        // every writer below, and the tracked copy the post-terminal readers (the sub-workflow parent resume) see.
+        // Assigned by the caller instead, they persisted on the tracked-save branches only: the arbitrated stamp
+        // is an ExecuteUpdate (no tracked flush) and the detach after it dropped the pending modification.
+        run.OutputsJson = outputsJson;
+
         // P2b-1 (Lock Clause 1): the terminal SUCCESS claim has ONE production owner — the completion authority.
         // Legacy/Shadow runs (and every non-Success claim) pass through verbatim; an Enforced run's Success is
         // arbitrated against its own contract ledger, and a non-clean decision parks or honestly fails it here.
@@ -972,7 +986,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         // Legacy/Shadow terminals (no watermarks) keep the tracked save byte-identically.
         if (arbitration.Watermarks is { } watermarks)
         {
-            if (!await TryStampArbitratedTerminalAsync(run.Id, status, error, outcome, watermarks.LedgerVersion, cancellationToken).ConfigureAwait(false))
+            var terminal = new ArbitratedTerminal { Status = status, Error = error, Outcome = outcome, OutputsJson = outputsJson };
+
+            if (!await TryStampArbitratedTerminalAsync(run.Id, terminal, watermarks.LedgerVersion, cancellationToken).ConfigureAwait(false))
             {
                 _logger.LogWarning("Terminal CAS refused for run {RunId} — the ledger moved at the stamp itself; parking", run.Id);
 
@@ -3319,6 +3335,18 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         {
             ledgerOutputs = await NodeOutputArtifacts.OffloadLargeAsync(_artifactStore, teamId, outputs, ArtifactStoreConfig.InlineThresholdBytes, cancellationToken).ConfigureAwait(false);
         }
+        catch (Workflows.Artifacts.Exceptions.ArtifactStorageDestinationUnavailableException ex)
+        {
+            // The team CONFIGURED a destination and it refused the bytes — an operator's misconfiguration, not
+            // transient IO, so it repeats for every node of every run until they fix it. Settling is still
+            // mandatory (the side effect already fired), but a LogWarning would leave the only symptom a green run
+            // over an empty destination. Record it so it reaches the run's own timeline.
+            _logger.LogError(ex, "Run {RunId} node {NodeId}: the configured storage destination refused the node's outputs ({Code}); settling with full inline outputs so the node never re-fires its side effect", runId, nodeId, DestinationProblemOf(ex));
+
+            await RecordStorageUnavailableAsync(runId, nodeId, iterationKey, ex, cancellationToken).ConfigureAwait(false);
+
+            ledgerOutputs = outputs;
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Run {RunId} node {NodeId}: output offload failed; writing node.completed with full inline outputs so the node is recorded settled and never re-fires its side effect", runId, nodeId);
@@ -3326,6 +3354,27 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         }
 
         await _recordLogger.NodeCompletedAsync(runId, nodeId, iterationKey, ledgerOutputs, routingHints, duration, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>WHICH refusal this was, as a stable token: routing policy refused before the provider was reached, or the transfer itself did not commit. The IFailure code is one constant for both, so it cannot tell the two apart.</summary>
+    private static string DestinationProblemOf(Workflows.Artifacts.Exceptions.ArtifactStorageDestinationUnavailableException ex) =>
+        ex.RoutingProblem?.ToString() ?? ex.TransferProblem?.ToString() ?? "Unknown";
+
+    /// <summary>
+    /// Append the storage-unavailable record, swallowing any failure of THAT write. This runs inside the offload
+    /// fail-open, whose whole purpose is that the node settles: a ledger hiccup while reporting a storage problem
+    /// must not stop node.completed from being written, or the node re-dispatches and re-fires its side effect.
+    /// </summary>
+    private async Task RecordStorageUnavailableAsync(Guid runId, string nodeId, string iterationKey, Workflows.Artifacts.Exceptions.ArtifactStorageDestinationUnavailableException ex, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _recordLogger.NodeStorageUnavailableAsync(runId, nodeId, iterationKey, ex.Message, DestinationProblemOf(ex), cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception recordFailure) when (recordFailure is not OperationCanceledException)
+        {
+            _logger.LogWarning(recordFailure, "Run {RunId} node {NodeId}: could not record the storage-unavailable signal; the node still settles", runId, nodeId);
+        }
     }
 
     /// <summary>

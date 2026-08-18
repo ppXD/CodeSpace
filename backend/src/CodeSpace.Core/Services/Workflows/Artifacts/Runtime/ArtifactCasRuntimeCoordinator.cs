@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
@@ -11,7 +12,7 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 /// Profile-pinned streaming transfer/read coordinator for the additive CAS v2 tables. Provider I/O is deliberately
 /// outside database transactions; durable intent + monotonic revision/fence claims make every commit replay-safe.
 /// </summary>
-public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinator
+public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinator, IArtifactCasRangeReader
 {
     private static readonly TimeSpan DefaultOperationTimeout = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan MaximumOperationTimeout = TimeSpan.FromMinutes(10);
@@ -36,7 +37,7 @@ public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinat
         // accepting it would let a replaced/zombie attempt mint a fresh effect intent.
         if (request.ExecutionIdentity != null)
             return new ArtifactCasTransferResult.Rejected(null, Problem(ArtifactCasProblemCode.ExecutionAdmissionUnavailable));
-        var resolved = await ResolveProfileRevisionAsync(request.TeamId, request.StorageProfileId, request.StorageProfileRevision, cancellationToken).ConfigureAwait(false);
+        var resolved = await ResolveProfileRevisionAsync(request.TeamId, request.StorageProfileId, request.StorageProfileRevision, StorageProfileEligibility.Write, cancellationToken).ConfigureAwait(false);
         if (resolved.Problem != null) return new ArtifactCasTransferResult.Rejected(null, resolved.Problem);
 
         var intent = await EnsureIntentAsync(request, resolved.ProfileRevisionId!.Value, input.Digest, cancellationToken).ConfigureAwait(false);
@@ -67,7 +68,7 @@ public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinat
                 claim = await TransitionAsync(claim, ArtifactTransferState.Uploading, request.ActorId, cancellationToken).ConfigureAwait(false);
                 if (claim.IsStale) return Stale(intent.Id);
             }
-            var create = await OpenDriverAsync(new DriverActivationRequest(request.TeamId, request.StorageProfileId, request.StorageProfileRevision, input.Timeout, StorageProviderCapabilities.StreamingWrite | StorageProviderCapabilities.StreamingRead | StorageProviderCapabilities.ConditionalCreate), cancellationToken).ConfigureAwait(false);
+            var create = await OpenDriverAsync(new DriverActivationRequest(request.TeamId, request.StorageProfileId, request.StorageProfileRevision, StorageProfileEligibility.Write, input.Timeout, StorageProviderCapabilities.StreamingWrite | StorageProviderCapabilities.StreamingRead | StorageProviderCapabilities.ConditionalCreate), cancellationToken).ConfigureAwait(false);
             if (create.Problem != null) return await HandleProblemAsync(claim, request.ActorId, create.Problem, cancellationToken).ConfigureAwait(false);
             driverLease = create.Lease!;
             return await DriveTransferAsync(request, input, claim, driverLease, cancellationToken).ConfigureAwait(false);
@@ -81,24 +82,12 @@ public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinat
     public async Task<ArtifactCasReadResult> OpenReadAsync(ArtifactCasReadRequest request, CancellationToken cancellationToken)
     {
         var timeout = Validate(request);
-        var resolved = await ResolveProfileRevisionAsync(request.TeamId, request.StorageProfileId, request.StorageProfileRevision, cancellationToken).ConfigureAwait(false);
+        var resolved = await ResolveProfileRevisionAsync(request.TeamId, request.StorageProfileId, request.StorageProfileRevision, StorageProfileEligibility.Read, cancellationToken).ConfigureAwait(false);
         if (resolved.Problem != null) return new ArtifactCasReadResult.Unavailable(resolved.Problem);
 
-        ReadLocation? stored;
-        await using (var db = CreateDb())
-        {
-            stored = await (from location in db.ArtifactLocation.AsNoTracking()
-                            join artifact in db.ArtifactObject.AsNoTracking()
-                                on new { location.TeamId, Id = location.ArtifactObjectId } equals new { artifact.TeamId, artifact.Id }
-                            where location.TeamId == request.TeamId && location.ArtifactObjectId == request.ArtifactObjectId
-                                && location.StorageProfileRevisionId == resolved.ProfileRevisionId && location.State == ArtifactLocationState.Available
-                            orderby location.VerifiedAt descending, location.Id
-                            select new ReadLocation(location.ObjectKey, location.ProviderETag, location.ProviderObjectVersion, artifact.SizeBytes, artifact.Digest))
-                .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-        }
-
+        var stored = await StoredLocationAsync(request.TeamId, request.ArtifactObjectId, resolved.ProfileRevisionId!.Value, cancellationToken).ConfigureAwait(false);
         if (stored == null) return new ArtifactCasReadResult.Unavailable(Problem(ArtifactCasProblemCode.ArtifactMissing));
-        var create = await OpenDriverAsync(new DriverActivationRequest(request.TeamId, request.StorageProfileId, request.StorageProfileRevision, timeout, StorageProviderCapabilities.StreamingRead), cancellationToken).ConfigureAwait(false);
+        var create = await OpenDriverAsync(new DriverActivationRequest(request.TeamId, request.StorageProfileId, request.StorageProfileRevision, StorageProfileEligibility.Read, timeout, StorageProviderCapabilities.StreamingRead), cancellationToken).ConfigureAwait(false);
         if (create.Problem != null) return new ArtifactCasReadResult.Unavailable(create.Problem);
 
         StorageRuntimeDriverLease? driverLease = create.Lease!;
@@ -493,7 +482,7 @@ public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinat
         }
     }
 
-    private async Task<ResolvedProfileRevision> ResolveProfileRevisionAsync(Guid teamId, Guid profileId, int profileRevision, CancellationToken cancellationToken)
+    private async Task<ResolvedProfileRevision> ResolveProfileRevisionAsync(Guid teamId, Guid profileId, int profileRevision, StorageProfileEligibility eligibility, CancellationToken cancellationToken)
     {
         await using var db = CreateDb();
         var row = await (from profile in db.StorageProfile.AsNoTracking()
@@ -504,7 +493,7 @@ public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinat
                          select new ProfileRevisionRow(profile.State, revision == null ? null : revision.Id))
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
         if (row == null) return new ResolvedProfileRevision(null, Problem(ArtifactCasProblemCode.ProfileMissing));
-        if (row.State != StorageProfileState.Active) return new ResolvedProfileRevision(null, Problem(ArtifactCasProblemCode.ProfileNotActive));
+        if (!StorageProfileRules.Admits(row.State, eligibility)) return new ResolvedProfileRevision(null, Problem(ArtifactCasProblemCode.ProfileNotActive));
         return row.RevisionId == null
             ? new ResolvedProfileRevision(null, Problem(ArtifactCasProblemCode.ProfileRevisionMissing))
             : new ResolvedProfileRevision(row.RevisionId, null);
@@ -517,7 +506,7 @@ public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinat
         Task<StorageRuntimeDriverResolution>? pending = null;
         try
         {
-            pending = _driverBroker.OpenAsync(new StorageRuntimeDriverRequest(request.TeamId, request.ProfileId, request.ProfileRevision), timeoutSource.Token).AsTask();
+            pending = _driverBroker.OpenAsync(new StorageRuntimeDriverRequest(request.TeamId, request.ProfileId, request.ProfileRevision, request.Eligibility), timeoutSource.Token).AsTask();
             var resolution = await pending.WaitAsync(timeoutSource.Token).ConfigureAwait(false);
             if (resolution is not StorageRuntimeDriverResolution.Ready ready)
             {
@@ -973,7 +962,7 @@ public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinat
     };
 
     private sealed record ResolvedProfileRevision(Guid? ProfileRevisionId, ArtifactCasProblem? Problem);
-    private sealed record DriverActivationRequest(Guid TeamId, Guid ProfileId, int ProfileRevision, TimeSpan Timeout, StorageProviderCapabilities RequiredCapabilities);
+    private sealed record DriverActivationRequest(Guid TeamId, Guid ProfileId, int ProfileRevision, StorageProfileEligibility Eligibility, TimeSpan Timeout, StorageProviderCapabilities RequiredCapabilities);
     private sealed record DriverCreation(StorageRuntimeDriverLease? Lease, ArtifactCasProblem? Problem);
     private sealed record ProfileRevisionRow(StorageProfileState State, Guid? RevisionId);
     private sealed record ClaimResult(IntentSnapshot Intent, bool Acquired);

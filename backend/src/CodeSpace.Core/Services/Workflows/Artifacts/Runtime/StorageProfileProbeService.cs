@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers;
 using CodeSpace.Messages.Dtos.Storage;
 
@@ -48,7 +49,7 @@ public sealed class StorageProfileProbeService : IStorageProfileProbeService
         StorageRuntimeDriverResolution resolution;
         try
         {
-            resolution = await _broker.OpenAsync(new StorageRuntimeDriverRequest(request.TeamId, request.ProfileId, revision), cancellationToken).ConfigureAwait(false);
+            resolution = await _broker.OpenAsync(new StorageRuntimeDriverRequest(request.TeamId, request.ProfileId, revision, StorageProfileEligibility.Write), cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

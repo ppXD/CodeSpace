@@ -25,8 +25,8 @@ public class ListHarnessesQueryHandlerTests
 
         public SandboxSpec BuildInvocation(AgentTask task) => new() { Command = "x" };
         public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) => Array.Empty<AgentEvent>();
-        public AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode) =>
-            new() { Status = AgentRunStatus.Succeeded, ExitReason = "completed" };
+        public IAgentEventFolder CreateFolder() => new TestEventFolder((fold, exitCode) =>
+            new() { Status = AgentRunStatus.Succeeded, ExitReason = "completed" });
     }
 
     /// <summary>A harness that ALSO implements the projector capability — so its SupportedProviders flows onto the DTO.</summary>
@@ -45,8 +45,8 @@ public class ListHarnessesQueryHandlerTests
 
         public SandboxSpec BuildInvocation(AgentTask task) => new() { Command = "x" };
         public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) => Array.Empty<AgentEvent>();
-        public AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode) =>
-            new() { Status = AgentRunStatus.Succeeded, ExitReason = "completed" };
+        public IAgentEventFolder CreateFolder() => new TestEventFolder((fold, exitCode) =>
+            new() { Status = AgentRunStatus.Succeeded, ExitReason = "completed" });
         public IReadOnlyDictionary<string, string> ProjectToEnv(ResolvedModelCredential credential) =>
             new Dictionary<string, string> { ["KEY"] = credential.ApiKey ?? "" };
     }

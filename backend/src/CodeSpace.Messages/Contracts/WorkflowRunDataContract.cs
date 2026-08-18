@@ -9,6 +9,9 @@ public static class WorkflowRunDataContract
     public const string Sha256Algorithm = "sha256/v1";
 
     public static bool IsSupported(int version) => version == CurrentVersion;
+
+    /// <summary>Whether a digest is a canonical lowercase SHA-256 value. Shared by every reference that binds bytes, so one spelling of "a digest is well-formed" cannot drift from another.</summary>
+    public static bool IsCanonicalSha256(string? digest) => digest is { Length: 64 } && digest.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
 }
 
 /// <summary>
@@ -23,6 +26,8 @@ public static class WorkflowRunDataNames
     public const string ModelCallAttempt = Prefix + "model_call_attempt";
     public const string HarnessExecution = Prefix + "harness_execution";
     public const string HarnessProcessAttempt = Prefix + "harness_process_attempt";
+    public const string HarnessDescriptor = Prefix + "harness_descriptor";
+    public const string RunnerHandle = Prefix + "runner_handle";
     public const string NativeRecord = Prefix + "native_record";
     public const string SemanticEvent = Prefix + "semantic_event";
     public const string ToolCall = Prefix + "tool_call";
@@ -36,8 +41,9 @@ public static class WorkflowRunDataNames
 
     private static readonly IReadOnlyList<string> Registered = Array.AsReadOnly(new[]
     {
-        ModelCall, ModelCallAttempt, HarnessExecution, HarnessProcessAttempt, NativeRecord, SemanticEvent,
-        ToolCall, ToolCallAttempt, LogStream, LogSegment, Session, SessionStateRevision, CaptureGap, DataManifest,
+        ModelCall, ModelCallAttempt, HarnessExecution, HarnessProcessAttempt, HarnessDescriptor, RunnerHandle,
+        NativeRecord, SemanticEvent, ToolCall, ToolCallAttempt, LogStream, LogSegment, Session, SessionStateRevision,
+        CaptureGap, DataManifest,
     });
 
     public static IReadOnlyList<string> All => Registered;
@@ -52,6 +58,8 @@ public static class WorkflowRunDataOwnerKinds
     public const string ModelCallAttempt = "model-call-attempt";
     public const string HarnessExecution = "harness-execution";
     public const string HarnessProcessAttempt = "harness-process-attempt";
+    public const string HarnessDescriptor = "harness-descriptor";
+    public const string RunnerHandle = "runner-handle";
     public const string NativeRecord = "native-record";
     public const string SemanticEvent = "semantic-event";
     public const string ToolCall = "tool-call";
@@ -65,8 +73,9 @@ public static class WorkflowRunDataOwnerKinds
 
     private static readonly IReadOnlySet<string> Registered = new HashSet<string>(StringComparer.Ordinal)
     {
-        ModelCall, ModelCallAttempt, HarnessExecution, HarnessProcessAttempt, NativeRecord, SemanticEvent,
-        ToolCall, ToolCallAttempt, LogStream, LogSegment, Session, SessionStateRevision, CaptureGap, DataManifest,
+        ModelCall, ModelCallAttempt, HarnessExecution, HarnessProcessAttempt, HarnessDescriptor, RunnerHandle,
+        NativeRecord, SemanticEvent, ToolCall, ToolCallAttempt, LogStream, LogSegment, Session, SessionStateRevision,
+        CaptureGap, DataManifest,
     };
 
     public static bool IsSupported(string? ownerKind) => ownerKind is not null && Registered.Contains(ownerKind);
@@ -141,7 +150,7 @@ public sealed record WorkflowRunArtifactRefV1
             errors.Add("artifactId must be non-empty");
         if (!string.Equals(DigestAlgorithm, WorkflowRunDataContract.Sha256Algorithm, StringComparison.Ordinal))
             errors.Add($"digestAlgorithm '{DigestAlgorithm}' is unsupported");
-        if (!IsCanonicalSha256(Digest))
+        if (!WorkflowRunDataContract.IsCanonicalSha256(Digest))
             errors.Add("digest must be a canonical lowercase SHA-256 value");
         if (SizeBytes < 0)
             errors.Add("sizeBytes must be non-negative");
@@ -158,6 +167,4 @@ public sealed record WorkflowRunArtifactRefV1
 
         return errors;
     }
-
-    private static bool IsCanonicalSha256(string? digest) => digest is { Length: 64 } && digest.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
 }

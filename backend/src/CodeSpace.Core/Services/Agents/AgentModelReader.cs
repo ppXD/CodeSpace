@@ -22,10 +22,13 @@ public static class AgentModelReader
     public static string? TryRead(IReadOnlyList<AgentEvent> events)
     {
         foreach (var e in events)
-            if (e.Data is { } data && TryReadFrom(data, out var model)) return model;
+            if (TryRead(e) is { } model) return model;
 
         return null;
     }
+
+    /// <summary>The per-event primitive: the model ONE event names, or null. <see cref="AgentRunFacts"/> keeps the first non-null so it never has to retain the stream.</summary>
+    public static string? TryRead(AgentEvent normalized) => normalized.Data is { } data && TryReadFrom(data, out var model) ? model : null;
 
     /// <summary>Read a non-empty model from one structured payload — the payload itself, then the <c>msg</c> envelope.</summary>
     private static bool TryReadFrom(JsonElement data, out string model)
