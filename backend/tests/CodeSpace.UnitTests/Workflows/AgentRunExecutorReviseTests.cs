@@ -194,13 +194,9 @@ public sealed class AgentRunExecutorReviseTests
     }
 
     [Fact]
-    public void Transcripts_join_with_a_visible_seam()
-    {
-        AgentRunExecutor.JoinTranscripts("round0", "round1").ShouldBe("round0\n--- revise round ---\nround1");
-        AgentRunExecutor.JoinTranscripts(null, "only").ShouldBe("only");
-        AgentRunExecutor.JoinTranscripts("only", null).ShouldBe("only");
-        AgentRunExecutor.JoinTranscripts(null, null).ShouldBeNull();
-    }
+    public void The_transcript_seam_between_rounds_is_pinned() =>
+        AgentRunExecutor.ReviseTranscriptSeam.ShouldBe("\n--- revise round ---\n",
+            "the separator is frozen into every offloaded multi-round transcript already in the store; AgentTranscriptSpoolTests pins the JOIN behaviour around it, including the empty-round cases");
 
     [Fact]
     public void Token_usage_sums_across_rounds_so_the_cost_plane_bills_the_whole_run()

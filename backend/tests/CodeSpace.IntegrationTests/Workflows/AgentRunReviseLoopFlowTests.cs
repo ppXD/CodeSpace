@@ -84,6 +84,13 @@ public sealed class AgentRunReviseLoopFlowTests
         var branch = AgentRunExecutor.BuildBranchName(runId);
         (await remote.BranchFileContentAsync(branch, "feature.txt")).ShouldContain("revised", customMessage: "the re-pushed branch tip carries the REVISED work — the same branch name, force-updated");
 
+        // G0: BOTH rounds' raw streams reach the durable transcript, in order, separated by exactly one seam. The
+        // rounds now stream into one bounded spool instead of each returning its own string for the loop to join, so
+        // this is what proves the seam is still MARKED at the round boundary — a wiring fact a unit test can't see.
+        result.TranscriptArtifactId.ShouldBeNull("this run's two-line transcript is far under the inline threshold");
+        result.Transcript.ShouldBe($"drafted{Environment.NewLine}{AgentRunExecutor.ReviseTranscriptSeam}revised{Environment.NewLine}",
+            "the whole run's faithful stream: round 1, the seam, round 2 — byte-for-byte what the pre-spool string join produced");
+
         var events = await LoadEventsAsync(runId);
         events.Count(e => e.Contains("revising (round 1 of 1)")).ShouldBe(1, "the operator sees WHY the run took another pass");
         events.Single(e => e.Contains("revising")).ShouldContain("acceptance check failed", Case.Insensitive, "the revise event names the oracle failure it feeds back");
