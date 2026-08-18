@@ -12,7 +12,7 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 /// Profile-pinned streaming transfer/read coordinator for the additive CAS v2 tables. Provider I/O is deliberately
 /// outside database transactions; durable intent + monotonic revision/fence claims make every commit replay-safe.
 /// </summary>
-public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinator
+public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinator, IArtifactCasRangeReader
 {
     private static readonly TimeSpan DefaultOperationTimeout = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan MaximumOperationTimeout = TimeSpan.FromMinutes(10);
@@ -85,19 +85,7 @@ public sealed class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinat
         var resolved = await ResolveProfileRevisionAsync(request.TeamId, request.StorageProfileId, request.StorageProfileRevision, StorageProfileEligibility.Read, cancellationToken).ConfigureAwait(false);
         if (resolved.Problem != null) return new ArtifactCasReadResult.Unavailable(resolved.Problem);
 
-        ReadLocation? stored;
-        await using (var db = CreateDb())
-        {
-            stored = await (from location in db.ArtifactLocation.AsNoTracking()
-                            join artifact in db.ArtifactObject.AsNoTracking()
-                                on new { location.TeamId, Id = location.ArtifactObjectId } equals new { artifact.TeamId, artifact.Id }
-                            where location.TeamId == request.TeamId && location.ArtifactObjectId == request.ArtifactObjectId
-                                && location.StorageProfileRevisionId == resolved.ProfileRevisionId && location.State == ArtifactLocationState.Available
-                            orderby location.VerifiedAt descending, location.Id
-                            select new ReadLocation(location.ObjectKey, location.ProviderETag, location.ProviderObjectVersion, artifact.SizeBytes, artifact.Digest))
-                .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-        }
-
+        var stored = await StoredLocationAsync(request.TeamId, request.ArtifactObjectId, resolved.ProfileRevisionId!.Value, cancellationToken).ConfigureAwait(false);
         if (stored == null) return new ArtifactCasReadResult.Unavailable(Problem(ArtifactCasProblemCode.ArtifactMissing));
         var create = await OpenDriverAsync(new DriverActivationRequest(request.TeamId, request.StorageProfileId, request.StorageProfileRevision, StorageProfileEligibility.Read, timeout, StorageProviderCapabilities.StreamingRead), cancellationToken).ConfigureAwait(false);
         if (create.Problem != null) return new ArtifactCasReadResult.Unavailable(create.Problem);

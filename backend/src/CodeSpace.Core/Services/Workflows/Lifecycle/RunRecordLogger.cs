@@ -126,6 +126,14 @@ public sealed class RunRecordLogger : IRunRecordLogger, IScopedDependency
         await InsertAsync(runId, WorkflowRunRecordTypes.NodeSkipped, nodeId, iterationKey, payload, correlationId: null, parentRecordId: null, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>Record that the node's outputs could not reach the configured destination and were written inline instead. Never throws: it is called from the offload fail-open, where a second failure must not stop the node settling.</summary>
+    public async Task NodeStorageUnavailableAsync(Guid runId, string nodeId, string iterationKey, string reason, string code, CancellationToken cancellationToken)
+    {
+        var payload = JsonSerializer.Serialize(new { reason, code, outputs = EmptyObject() });
+
+        await InsertAsync(runId, WorkflowRunRecordTypes.NodeStorageUnavailable, nodeId, iterationKey, payload, correlationId: null, parentRecordId: null, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task NodeSuspendedAsync(Guid runId, string nodeId, string iterationKey, string waitKind, DateTimeOffset? wakeAt, CancellationToken cancellationToken)
     {
         // outputs included as empty object for view-projection consistency (the view's

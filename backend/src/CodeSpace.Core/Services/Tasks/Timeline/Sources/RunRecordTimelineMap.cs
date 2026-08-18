@@ -88,6 +88,10 @@ public static class RunRecordTimelineMap
             WorkflowRunRecordTypes.NodeFailed    => Event(r, $"{node} failed", TimelineSeverity.Error, NodeFailureLevel(r), ReadString(r, "error")),
             WorkflowRunRecordTypes.NodeSuspended => Event(r, $"{node} waiting", TimelineSeverity.Warning, TimelineLevel.Detail, ReadString(r, "wait_kind")),
             WorkflowRunRecordTypes.NodeSkipped   => Event(r, $"{node} skipped", TimelineSeverity.Info, TimelineLevel.Detail, ReadString(r, "reason")),
+
+            // A MILESTONE despite the node having settled: the run is green and its configured destination is empty,
+            // which the operator can only learn here. Warning-toned — nothing failed, something was not stored.
+            WorkflowRunRecordTypes.NodeStorageUnavailable => Event(r, "Storage unavailable", TimelineSeverity.Warning, TimelineLevel.Milestone, ReadString(r, "reason")),
             WorkflowRunRecordTypes.AttemptFailed => Event(r, $"{node} retry", TimelineSeverity.Warning, TimelineLevel.Milestone, RetrySummary(r)),
 
             // An operator force-resolved a stranded wait — a manual intervention that explains WHY a parked run resumed,

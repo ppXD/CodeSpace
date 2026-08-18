@@ -73,6 +73,15 @@ public static class WorkflowRunRecordTypes
     /// <summary>Node was skipped (every incoming edge dead). Payload: {"reason":"..."}.</summary>
     public const string NodeSkipped = "node.skipped";
 
+    /// <summary>
+    /// The node settled, but its oversize outputs could NOT be placed in the team's configured storage, so the
+    /// ledger carries them inline instead. Payload: {"reason":"...","code":"..."}. A record rather than a log line
+    /// because the cause is an operator's configuration and the symptom — a green run over an empty destination —
+    /// is otherwise invisible: the node's side effect already fired, so settling is mandatory and the offload
+    /// failure cannot be surfaced by failing the node.
+    /// </summary>
+    public const string NodeStorageUnavailable = "node.storage_unavailable";
+
     /// <summary>Node suspended awaiting external input. Payload: {"resume_token":"..."}.</summary>
     public const string NodeSuspended = "node.suspended";
 
