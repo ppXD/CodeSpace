@@ -1,5 +1,6 @@
 using System.Text.Json.Serialization;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers;
 
 namespace CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
@@ -13,7 +14,7 @@ public interface IStorageRuntimeDriverBroker : IScopedDependency
     ValueTask<StorageRuntimeDriverResolution> OpenAsync(StorageRuntimeDriverRequest request, CancellationToken cancellationToken);
 }
 
-public sealed record StorageRuntimeDriverRequest(Guid TeamId, Guid ProfileId, int ProfileRevision);
+public sealed record StorageRuntimeDriverRequest(Guid TeamId, Guid ProfileId, int ProfileRevision, StorageProfileEligibility Eligibility);
 
 /// <summary>Closed, secret-free runtime activation result.</summary>
 public abstract record StorageRuntimeDriverResolution

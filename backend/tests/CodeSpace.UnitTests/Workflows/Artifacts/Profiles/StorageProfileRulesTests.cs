@@ -136,6 +136,27 @@ public sealed class StorageProfileRulesTests
         Should.Throw<ArgumentException>(() => StorageProfileRules.EnsureRevisionAllowed(StorageProfileState.Retired)).Message.ShouldContain("terminal");
     }
 
+    [Theory]
+    [InlineData(StorageProfileState.Draft, StorageProfileEligibility.Write, false)]
+    [InlineData(StorageProfileState.Active, StorageProfileEligibility.Write, true)]
+    [InlineData(StorageProfileState.Disabled, StorageProfileEligibility.Write, false)]
+    [InlineData(StorageProfileState.Retired, StorageProfileEligibility.Write, false)]
+    [InlineData(StorageProfileState.Draft, StorageProfileEligibility.Read, true)]
+    [InlineData(StorageProfileState.Active, StorageProfileEligibility.Read, true)]
+    [InlineData(StorageProfileState.Disabled, StorageProfileEligibility.Read, true)]
+    [InlineData(StorageProfileState.Retired, StorageProfileEligibility.Read, true)]
+    public void Lifecycle_state_gates_writes_only_so_stored_bytes_survive_disable_and_retire(StorageProfileState state, StorageProfileEligibility eligibility, bool expected)
+    {
+        StorageProfileRules.Admits(state, eligibility).ShouldBe(expected);
+    }
+
+    [Fact]
+    public void Default_eligibility_is_the_write_gate_so_an_unset_value_fails_closed()
+    {
+        default(StorageProfileEligibility).ShouldBe(StorageProfileEligibility.Write);
+        StorageProfileRules.Admits(StorageProfileState.Disabled, default).ShouldBeFalse();
+    }
+
     private static JsonElement Json(string value)
     {
         using var document = JsonDocument.Parse(value);

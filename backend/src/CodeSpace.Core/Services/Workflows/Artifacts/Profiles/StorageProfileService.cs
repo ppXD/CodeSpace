@@ -135,12 +135,51 @@ public sealed class StorageProfileService : IStorageProfileService, IScopedDepen
         ExecuteRule(() => StorageProfileRules.EnsureTransition(profile.State, requested));
         if (profile.State == requested) return await GetAsync(teamId, profile.Id, cancellationToken).ConfigureAwait(false);
 
+        await EnsureRetirementReleasedAsync(teamId, profile.Id, requested, cancellationToken).ConfigureAwait(false);
+
         profile.State = requested;
         profile.LastModifiedDate = DateTimeOffset.UtcNow;
         profile.LastModifiedBy = actorId;
         await SaveConcurrentAsync("The storage profile changed before its state could be updated.", cancellationToken).ConfigureAwait(false);
         return await GetAsync(teamId, profile.Id, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// Retirement is the one irreversible profile transition — <see cref="StorageProfileRules.EnsureTransition"/> gives
+    /// a retired profile no way back — so it must not be reachable while something still names the profile. Disable is
+    /// deliberately unguarded: it is reversible, it no longer strands reads, and quiescing writes with it is exactly how
+    /// an operator drains a profile before retiring it.
+    /// </summary>
+    private async Task EnsureRetirementReleasedAsync(Guid teamId, Guid profileId, StorageProfileState requested, CancellationToken cancellationToken)
+    {
+        if (requested != StorageProfileState.Retired) return;
+
+        var routes = await CountActiveRoutesAsync(teamId, profileId, cancellationToken).ConfigureAwait(false);
+        if (routes > 0)
+            throw new StorageProfileConflictException($"Storage profile cannot be retired while {routes} active storage route(s) still target it. Repoint or disable those routes first.");
+
+        var locations = await CountAvailableLocationsAsync(teamId, profileId, cancellationToken).ConfigureAwait(false);
+        if (locations > 0)
+            throw new StorageProfileConflictException($"Storage profile cannot be retired while {locations} stored artifact location(s) still live under it. Migrate or delete those artifacts first.");
+    }
+
+    private Task<int> CountActiveRoutesAsync(Guid teamId, Guid profileId, CancellationToken cancellationToken) =>
+        (from route in _db.StorageRoute.AsNoTracking()
+         join revision in _db.StorageRouteRevision.AsNoTracking()
+             on new { route.TeamId, StorageRouteId = route.Id, Revision = route.CurrentRevision }
+             equals new { revision.TeamId, revision.StorageRouteId, revision.Revision }
+         where route.TeamId == teamId && route.State == StorageRouteState.Active && revision.StorageProfileId == profileId
+         select route.Id)
+        .CountAsync(cancellationToken);
+
+    private Task<int> CountAvailableLocationsAsync(Guid teamId, Guid profileId, CancellationToken cancellationToken) =>
+        (from location in _db.ArtifactLocation.AsNoTracking()
+         join revision in _db.StorageProfileRevision.AsNoTracking()
+             on new { location.TeamId, Id = location.StorageProfileRevisionId }
+             equals new { revision.TeamId, revision.Id }
+         where location.TeamId == teamId && revision.StorageProfileId == profileId && location.State == ArtifactLocationState.Available
+         select location.Id)
+        .CountAsync(cancellationToken);
 
     private async Task<PreparedRevision> PrepareRevisionAsync(Guid teamId, string providerTypeKey, JsonElement config, string? credentialRef, CancellationToken cancellationToken)
     {

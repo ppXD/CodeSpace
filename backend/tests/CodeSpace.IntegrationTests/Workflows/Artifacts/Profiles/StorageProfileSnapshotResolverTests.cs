@@ -27,7 +27,7 @@ public sealed class StorageProfileSnapshotResolverTests
         await AppendProfileRevisionAsync(profile, actorId, 2, """{"rootPath":"/srv/artifacts-v2"}""");
 
         using var scope = _fixture.BeginScope();
-        var result = await scope.Resolve<IStorageProfileSnapshotResolver>().ResolveAsync(new StorageProfileSnapshotRequest(teamId, profile.Id, 1), CancellationToken.None);
+        var result = await scope.Resolve<IStorageProfileSnapshotResolver>().ResolveAsync(new StorageProfileSnapshotRequest(teamId, profile.Id, 1, StorageProfileEligibility.Write), CancellationToken.None);
 
         var ready = result.ShouldBeOfType<StorageProfileSnapshotResolution.Ready>();
         ready.Snapshot.ProfileId.ShouldBe(profile.Id);
@@ -47,7 +47,7 @@ public sealed class StorageProfileSnapshotResolverTests
         var factory = new RecordingFactory();
 
         using var scope = _fixture.BeginScope(builder => builder.RegisterInstance(new SingleFactoryCatalog(factory)).As<IArtifactStorageDriverFactoryCatalog>());
-        var result = await scope.Resolve<IStorageProfileSnapshotResolver>().ResolveAsync(new StorageProfileSnapshotRequest(teamId, profile.Id, 1), CancellationToken.None);
+        var result = await scope.Resolve<IStorageProfileSnapshotResolver>().ResolveAsync(new StorageProfileSnapshotRequest(teamId, profile.Id, 1, StorageProfileEligibility.Write), CancellationToken.None);
 
         var ready = result.ShouldBeOfType<StorageProfileSnapshotResolution.Ready>();
         ready.Snapshot.SecretReference.ShouldBe(new StorageSecretReference("database/v1", credential.Id.ToString("D"), "1"));
@@ -55,15 +55,31 @@ public sealed class StorageProfileSnapshotResolverTests
         ready.Snapshot.GetType().GetProperties().Select(property => property.Name).ShouldNotContain("EncryptedPayload");
     }
 
-    [Fact]
-    public async Task Disabled_and_retired_profiles_are_not_active()
+    [Theory]
+    [InlineData(StorageProfileState.Disabled)]
+    [InlineData(StorageProfileState.Retired)]
+    public async Task Disabled_and_retired_profiles_refuse_writes_but_still_activate_for_reads(StorageProfileState state)
     {
         var (teamId, actorId) = await SeedTeamAsync();
-        var disabled = await SeedProfileAsync(teamId, actorId, """{"rootPath":"/srv/disabled"}""", state: StorageProfileState.Disabled);
-        var retired = await SeedProfileAsync(teamId, actorId, """{"rootPath":"/srv/retired"}""", state: StorageProfileState.Retired);
+        var profile = await SeedProfileAsync(teamId, actorId, """{"rootPath":"/srv/lifecycle"}""", state: state);
 
-        (await ResolveAsync(teamId, disabled.Id, 1)).ShouldBeOfType<StorageProfileSnapshotResolution.NotActive>();
-        (await ResolveAsync(teamId, retired.Id, 1)).ShouldBeOfType<StorageProfileSnapshotResolution.NotActive>();
+        (await ResolveAsync(teamId, profile.Id, 1, StorageProfileEligibility.Write)).ShouldBe(new StorageProfileSnapshotResolution.NotActive(state));
+
+        var read = (await ResolveAsync(teamId, profile.Id, 1, StorageProfileEligibility.Read)).ShouldBeOfType<StorageProfileSnapshotResolution.Ready>();
+        read.Snapshot.ProfileId.ShouldBe(profile.Id);
+        read.Snapshot.Configuration.GetProperty("rootPath").GetString().ShouldBe("/srv/lifecycle");
+    }
+
+    [Fact]
+    public async Task Read_eligibility_relaxes_lifecycle_state_only_and_still_fails_closed_on_a_revoked_credential()
+    {
+        var (teamId, actorId) = await SeedTeamAsync();
+        var revoked = await SeedCredentialAsync(teamId, actorId, LocalRwxArtifactStorageDriverFactory.TypeKey, StorageCredentialState.Revoked);
+        var profile = await SeedProfileAsync(teamId, actorId, """{"rootPath":"/srv/revoked-read"}""", CredentialRef(revoked.Id, 1), StorageProfileState.Retired);
+
+        var result = await ResolveAsync(teamId, profile.Id, 1, StorageProfileEligibility.Read);
+
+        result.ShouldBe(new StorageProfileSnapshotResolution.CredentialUnavailable(StorageProfileCredentialUnavailableReason.NotActive));
     }
 
     [Fact]
@@ -86,7 +102,7 @@ public sealed class StorageProfileSnapshotResolverTests
 
         using (var scope = _fixture.BeginScope(builder => builder.RegisterInstance(EmptyModuleCatalog.Instance).As<IStorageProviderModuleCatalog>()))
         {
-            var result = await scope.Resolve<IStorageProfileSnapshotResolver>().ResolveAsync(new StorageProfileSnapshotRequest(teamId, profile.Id, 1), CancellationToken.None);
+            var result = await scope.Resolve<IStorageProfileSnapshotResolver>().ResolveAsync(new StorageProfileSnapshotRequest(teamId, profile.Id, 1, StorageProfileEligibility.Write), CancellationToken.None);
             var unavailable = result.ShouldBeOfType<StorageProfileSnapshotResolution.ProviderUnavailable>();
             unavailable.Reason.ShouldBe(StorageProfileProviderUnavailableReason.ModuleMissing);
             unavailable.ProviderTypeKey.ShouldBe(LocalRwxArtifactStorageDriverFactory.TypeKey);
@@ -94,7 +110,7 @@ public sealed class StorageProfileSnapshotResolverTests
 
         using (var scope = _fixture.BeginScope(builder => builder.RegisterInstance(EmptyFactoryCatalog.Instance).As<IArtifactStorageDriverFactoryCatalog>()))
         {
-            var result = await scope.Resolve<IStorageProfileSnapshotResolver>().ResolveAsync(new StorageProfileSnapshotRequest(teamId, profile.Id, 1), CancellationToken.None);
+            var result = await scope.Resolve<IStorageProfileSnapshotResolver>().ResolveAsync(new StorageProfileSnapshotRequest(teamId, profile.Id, 1, StorageProfileEligibility.Write), CancellationToken.None);
             result.ShouldBe(new StorageProfileSnapshotResolution.ProviderUnavailable(LocalRwxArtifactStorageDriverFactory.TypeKey, StorageProfileProviderUnavailableReason.FactoryMissing));
         }
     }
@@ -145,10 +161,10 @@ public sealed class StorageProfileSnapshotResolverTests
         (await ResolveAsync(teamId, mismatchedProfile.Id, 1)).ShouldBe(new StorageProfileSnapshotResolution.CredentialInvalid(StorageProfileCredentialInvalidReason.ProviderMismatch));
     }
 
-    private async Task<StorageProfileSnapshotResolution> ResolveAsync(Guid teamId, Guid profileId, int revision)
+    private async Task<StorageProfileSnapshotResolution> ResolveAsync(Guid teamId, Guid profileId, int revision, StorageProfileEligibility eligibility = StorageProfileEligibility.Write)
     {
         using var scope = _fixture.BeginScope();
-        return await scope.Resolve<IStorageProfileSnapshotResolver>().ResolveAsync(new StorageProfileSnapshotRequest(teamId, profileId, revision), CancellationToken.None);
+        return await scope.Resolve<IStorageProfileSnapshotResolver>().ResolveAsync(new StorageProfileSnapshotRequest(teamId, profileId, revision, eligibility), CancellationToken.None);
     }
 
     private async Task<(Guid TeamId, Guid ActorId)> SeedTeamAsync()

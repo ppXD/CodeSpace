@@ -13,7 +13,7 @@ public sealed class StorageProfileSnapshotProjectionTests
     {
         typeof(IStorageProfileSnapshotResolver).GetMethods().Select(method => method.Name).ShouldBe(["ResolveAsync"]);
         typeof(IStorageProfileSnapshotResolver).GetMethod("ResolveAsync")!.GetParameters().Length.ShouldBe(2);
-        typeof(StorageProfileSnapshotRequest).GetProperties().Select(property => property.Name).ShouldBe(["TeamId", "ProfileId", "ProfileRevision"]);
+        typeof(StorageProfileSnapshotRequest).GetProperties().Select(property => property.Name).ShouldBe(["TeamId", "ProfileId", "ProfileRevision", "Eligibility"]);
     }
 
     [Fact]
