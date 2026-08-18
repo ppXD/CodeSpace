@@ -18,16 +18,22 @@ public class ModeProfileRegistryTests
     private static readonly ModeProfileRegistry Registry = new();
 
     [Theory]
-    [InlineData(RunModeKeys.Supervisor, ProtocolReadiness.Enforceable, PerformanceQualification.Shadow)]
-    [InlineData(RunModeKeys.PlanMap, ProtocolReadiness.Open, PerformanceQualification.Unmeasured)]
-    [InlineData(RunModeKeys.SingleAgent, ProtocolReadiness.Shadow, PerformanceQualification.Shadow)]
-    public void The_registered_lanes_declare_total_stage_maps(string mode, ProtocolReadiness readiness, PerformanceQualification performance)
+    [InlineData(RunModeKeys.Supervisor, ProtocolReadiness.Enforceable)]
+    [InlineData(RunModeKeys.PlanMap, ProtocolReadiness.Open)]
+    [InlineData(RunModeKeys.SingleAgent, ProtocolReadiness.Shadow)]
+    public void The_registered_lanes_declare_total_stage_maps(string mode, ProtocolReadiness readiness)
     {
         var profile = Registry.Resolve(mode).ShouldNotBeNull();
 
         profile.Readiness.ShouldBe(readiness);
-        profile.Performance.ShouldBe(performance, "the two axes are orthogonal — a protocol can be enforceable before any performance number stands");
         profile.Stages.Keys.ShouldBe(Enum.GetValues<CompletionStage>(), ignoreOrder: true, customMessage: "every stage declared — a new stage must break here, never sit silently unmapped");
+    }
+
+    [Fact]
+    public void The_registry_enumerates_exactly_the_registered_lanes()
+    {
+        Registry.RegisteredModes.ShouldBe(new[] { RunModeKeys.Supervisor, RunModeKeys.PlanMap, RunModeKeys.SingleAgent }, ignoreOrder: true,
+            customMessage: "the claim board iterates this — a new lane must consciously appear here, and generic must never");
     }
 
     [Fact]

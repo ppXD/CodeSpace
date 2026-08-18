@@ -30,7 +30,7 @@ public enum StageRequiredness
 
 /// <summary>
 /// P4 (Lock Clause 4): one operating mode's declared conformance shape — which of the ten stages its runs owe,
-/// and the mode's own qualification standing. A COMMITTED noun: profiles live in the registry's source, changed
+/// and the mode's protocol standing. A COMMITTED noun: profiles live in the registry's source, changed
 /// by PR, never by deployment toggle. An unregistered mode resolves null and the terminal authority fails CLOSED
 /// (Unsupported park) — a run whose operating shape has no declared conformance story must never terminalize an
 /// Enforced Success, exactly as an unregistered capability must not.
@@ -43,9 +43,6 @@ public sealed record ModeProfile
     /// <summary>Every stage's declared requiredness — total over <see cref="CompletionStage"/>; the registry validates totality at construction so a new stage cannot be silently unmapped.</summary>
     public required IReadOnlyDictionary<CompletionStage, StageRequiredness> Stages { get; init; }
 
-    /// <summary>The mode's PROTOCOL axis — can its fail-close conformance chain be trusted (Enforced graduation is argued per (mode, capability) on accumulated evidence).</summary>
+    /// <summary>The mode's PROTOCOL axis — can its fail-close conformance chain be trusted (Enforced graduation is argued per (mode, capability) on accumulated evidence). Deliberately the ONLY qualification column here: measured performance is never a committed constant — it resolves from the qualification-receipt ledger (Q4's claim gate).</summary>
     public required ProtocolReadiness Readiness { get; init; }
-
-    /// <summary>The mode's PERFORMANCE axis — whether a measured claim stands for it.</summary>
-    public required PerformanceQualification Performance { get; init; }
 }
