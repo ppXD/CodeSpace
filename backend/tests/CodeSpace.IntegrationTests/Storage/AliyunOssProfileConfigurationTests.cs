@@ -1,3 +1,5 @@
+using CodeSpace.Messages.Failures;
+using CodeSpace.Core.Services.Workflows.Artifacts.Profiles.Exceptions;
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
@@ -80,9 +82,15 @@ public sealed class AliyunOssProfileConfigurationTests
             })
         };
 
-        var error = await Should.ThrowAsync<ArgumentException>(() => scope.Resolve<IStorageProfileService>().CreateAsync(world.TeamId, world.ActorId, command, CancellationToken.None));
+        // The refusal is the platform's TYPED invalid-configuration failure, not a bare argument check: the control
+        // plane maps it to a client-facing code, so pinning the type and the code is what keeps a secret-bearing
+        // config rejected THROUGH the API rather than merely rejected somewhere.
+        var error = await Should.ThrowAsync<StorageProfileInvalidException>(() => scope.Resolve<IStorageProfileService>().CreateAsync(world.TeamId, world.ActorId, command, CancellationToken.None));
 
-        error.Message.ShouldNotContain(AccessKeySecret);
+        error.Code.ShouldBe(FailureCodes.StorageProfileInvalid);
+        error.Kind.ShouldBe(FailureKind.Invalid);
+        error.Message.ShouldNotContain(AccessKeySecret, customMessage: "a refusal must name the offending property, never echo the value it refused");
+        error.ClientMessage.ShouldNotContain(AccessKeySecret, customMessage: "the client-facing text is what actually reaches an operator's screen");
     }
 
     private async Task<(Guid ProfileId, int Revision)> ConfigureAsync(World world)
