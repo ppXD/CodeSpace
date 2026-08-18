@@ -5,8 +5,10 @@ namespace CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 /// <summary>
 /// Per-run resource caps for a sandboxed command, via the util-linux <c>prlimit</c> wrapper (Linux): the command
 /// is rewritten <c>prlimit --nproc=N --fsize=BYTES -- &lt;command&gt; &lt;args&gt;</c>, so the kernel enforces
-/// <c>RLIMIT_NPROC</c> (a fork-bomb cap) and <c>RLIMIT_FSIZE</c> (a single-file / runaway-stdout-spool size cap) on
-/// the agent and every descendant. Composes OUTSIDE bubblewrap (prlimit sets the rlimits, then execs bwrap, which
+/// <c>RLIMIT_NPROC</c> (a fork-bomb cap) and <c>RLIMIT_FSIZE</c> (a single-file size cap) on the agent and every
+/// descendant. It does NOT bound the durable runner's stdout/stderr spool: that is written by the supervisor's own
+/// copier children, outside this wrap, and RLIMIT_FSIZE does not apply to pipe writes — the spool has its own byte
+/// budget (<c>LocalProcessRunner.SpoolCapBytes</c>) off the same knob. Composes OUTSIDE bubblewrap (prlimit sets the rlimits, then execs bwrap, which
 /// inherits them). Chosen over the shell's <c>ulimit</c> because dash — the default <c>/bin/sh</c> — has no
 /// <c>ulimit -u</c>, so the cap would silently no-op; <c>prlimit</c> is shell-agnostic with explicit byte units.
 ///

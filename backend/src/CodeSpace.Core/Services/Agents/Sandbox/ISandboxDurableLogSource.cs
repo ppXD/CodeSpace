@@ -29,8 +29,8 @@ public abstract record SandboxDurableLogReadResult
 {
     private SandboxDurableLogReadResult() { }
     public sealed record Available(ReadOnlyMemory<byte> Bytes) : SandboxDurableLogReadResult;
-    /// <summary>The producer is gone and the durable byte source remained quiescent across the runner's seal check. This is the only result that authorizes a final capture receipt.</summary>
-    public sealed record EndOfSource : SandboxDurableLogReadResult;
+    /// <summary>The producer is gone and the durable byte source remained quiescent across the runner's seal check. This is the only result that authorizes a final capture receipt. <paramref name="Truncated"/> is true when the source hit its own size cap and therefore proves only the CAPPED HEAD of what the producer wrote — the receipt is complete, the content is not.</summary>
+    public sealed record EndOfSource(bool Truncated = false) : SandboxDurableLogReadResult;
     /// <summary>No bytes are currently readable. This is always transient and must never be interpreted as EOF.</summary>
     public sealed record NoData : SandboxDurableLogReadResult;
     public sealed record Unavailable(SandboxDurableLogProblem Problem) : SandboxDurableLogReadResult;

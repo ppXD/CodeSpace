@@ -351,6 +351,26 @@ public sealed class AgentRunLogCaptureBridgeTests
         logs.Heads.ShouldBeEmpty("a typed declaration rejection must fail closed before any stream is opened");
     }
 
+    [Fact]
+    public async Task A_truncated_source_terminalizes_its_stream_as_Truncated_with_every_captured_byte_kept()
+    {
+        // The spool size cap drops bytes the agent wrote. That loss must land as the FIRST-CLASS Truncated capture
+        // state (already modelled + already surfaced by the read API), never be laundered into a clean Completed.
+        var logs = new FakeLogService { CurrentFence = 1 };
+        var source = new FakeLogSource { TruncatedAtEnd = true };
+        source.Set("stdout", "capped-head"u8.ToArray());
+        source.Set("stderr", []);
+        var bridge = Bridge(logs);
+
+        await (await bridge.OpenAsync(Request(source, 1, Guid.NewGuid()), CancellationToken.None)).ObserveAsync((_, _) => Task.FromResult(Result()), CancellationToken.None);
+        await bridge.CompleteRunAsync(TeamId, RunId, 1, CancellationToken.None);
+
+        logs.Bytes(AgentRunLogKinds.StandardOutput).ShouldBe("capped-head"u8.ToArray(), "everything the source DID yield is still captured — truncation loses the tail, not the head");
+        logs.Heads.ShouldAllBe(head => head.Metadata.State == AgentRunLogStreamState.Truncated, "a capped source is Truncated, never Completed");
+        logs.Heads.ShouldAllBe(head => head.Metadata.ErrorCode == "source-truncated");
+        logs.CompletedCount.ShouldBe(0, "terminalization must not also claim a complete capture for a source it knows was cut short");
+    }
+
     private static AgentRunLogCaptureBridge Bridge(FakeLogService logs) => new(logs, new ReadyStorageResolver(), new FakeRecoveryService(), NullLogger<AgentRunLogCaptureBridge>.Instance);
 
     private static AgentRunLogCaptureOpenRequest Request(FakeLogSource source, long fence, Guid sessionId, SecretRedactor? redactor = null) => new()
@@ -403,6 +423,7 @@ public sealed class AgentRunLogCaptureBridgeTests
     {
         private readonly ConcurrentDictionary<string, byte[]> _sources = new(StringComparer.Ordinal);
         public bool EmitEndOfSource { get; init; } = true;
+        public bool TruncatedAtEnd { get; init; }
 
         public IReadOnlyList<SandboxDurableLogDescriptor> DescribeLogs(SandboxHandle handle) =>
         [
@@ -419,7 +440,7 @@ public sealed class AgentRunLogCaptureBridgeTests
                 return Task.FromResult<SandboxDurableLogReadResult>(new SandboxDurableLogReadResult.Unavailable(new SandboxDurableLogProblem(SandboxDurableLogProblemCode.SourceReset)));
             var available = bytes.LongLength - request.OffsetBytes;
             if (available == 0 && request.FinalDrain && EmitEndOfSource)
-                return Task.FromResult<SandboxDurableLogReadResult>(new SandboxDurableLogReadResult.EndOfSource());
+                return Task.FromResult<SandboxDurableLogReadResult>(new SandboxDurableLogReadResult.EndOfSource(TruncatedAtEnd));
             if (available == 0 || !request.FinalDrain && available < request.MinimumBytes)
                 return Task.FromResult<SandboxDurableLogReadResult>(new SandboxDurableLogReadResult.NoData());
             var length = (int)Math.Min(available, request.MaximumBytes);
@@ -564,10 +585,10 @@ public sealed class AgentRunLogCaptureBridgeTests
                     stream.Head = stream.Head with { Metadata = stream.Head.Metadata with { Revision = stream.Head.Metadata.Revision + 1 } };
                     return Task.FromResult<AgentRunLogFailCaptureResult>(new AgentRunLogFailCaptureResult.Rejected(new AgentRunLogProblem(AgentRunLogProblemCode.ConcurrentMutation, true)));
                 }
-                if (stream.Head.Metadata.State == AgentRunLogStreamState.CaptureFailed)
+                if (stream.Head.Metadata.State == request.TerminalState)
                     return Task.FromResult<AgentRunLogFailCaptureResult>(new AgentRunLogFailCaptureResult.Failed(stream.Head.Metadata, true));
                 var now = DateTimeOffset.UtcNow;
-                stream.Head = stream.Head with { Metadata = stream.Head.Metadata with { State = AgentRunLogStreamState.CaptureFailed, Revision = stream.Head.Metadata.Revision + 1, ErrorCode = request.ErrorCode, CompletedAt = now, LastModifiedAt = now } };
+                stream.Head = stream.Head with { Metadata = stream.Head.Metadata with { State = request.TerminalState, Revision = stream.Head.Metadata.Revision + 1, ErrorCode = request.ErrorCode, CompletedAt = now, LastModifiedAt = now } };
                 return Task.FromResult<AgentRunLogFailCaptureResult>(new AgentRunLogFailCaptureResult.Failed(stream.Head.Metadata, false));
             }
         }
