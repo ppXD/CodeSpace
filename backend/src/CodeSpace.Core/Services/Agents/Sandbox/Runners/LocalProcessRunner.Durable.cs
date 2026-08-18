@@ -433,21 +433,21 @@ public sealed partial class LocalProcessRunner
     public async Task<SandboxResult> AttachAsync(SandboxHandle handle, Func<string, CancellationToken, Task> onStdoutLine, CancellationToken cancellationToken, Func<long, CancellationToken, Task>? onCheckpoint = null)
     {
         var stdoutPath = Path.Combine(handle.SpoolDirectory, StdoutFile);
-        var stderrPath = Path.Combine(handle.SpoolDirectory, StderrFile);
         var exitPath = Path.Combine(handle.SpoolDirectory, ExitMarkerFile);
 
         // Resume from the handle's checkpoint (0 on a first attach / an older handle) so a re-attach after a
         // restart picks up where the dead observer stopped instead of re-emitting the whole spool.
         var offset = handle.StdoutOffset;
 
-        // C3 stall watchdog (opt-in): the wall-clock of the LAST observed output. No new output for the idle window
-        // ⇒ the run is stalled (e.g. blocked at a nested interactive prompt) ⇒ terminate early as Stalled. Re-attach
-        // restarts this clock (a fresh observation), which is correct — it never fires on a run that is still emitting.
-        // "Output" is BYTE growth of either spool file, NOT completed-line delivery — so a run streaming a newline-less
-        // progress bar (\r updates) or a single slow long line is alive, not falsely stalled.
-        var idleTimeout = IdleTimeout();
-        var lastAdvance = DateTimeOffset.UtcNow;
-        var lastByteLength = SafeFileLength(stdoutPath) + SafeFileLength(stderrPath);
+        // The NO-PROGRESS watchdog (C3, now progress-lease based): a run that shows no EVIDENCE OF WORKING for the
+        // whole window is stalled (e.g. blocked at a nested interactive prompt) and is terminated early as Stalled.
+        // Evidence is every AgentProgressSignal the watch can reach — spool bytes, plus an in-flight platform request
+        // (the parked-on-a-human-approval case) — NOT stdout alone, which is what used to kill quiet-but-working runs.
+        // The lease is honoured only while the run HAS a wall deadline; without one the watch is spool bytes only (see
+        // ProgressWatch.LeaseFor). Re-attach restarts the window (a fresh observation), which is correct: it never fires
+        // on a run that is still showing evidence. Null window ⇒ the operator opted out.
+        var window = NoProgressWindow();
+        var progress = window is { } configured ? new ProgressWatch(handle, configured) : null;
 
         while (true)
         {
@@ -460,20 +460,22 @@ public sealed partial class LocalProcessRunner
 
             offset = advanced;
 
-            // Reset the idle clock on ANY byte growth (incl. stderr-only or a not-yet-complete line), not only a
-            // delivered line — the watchdog's signal is true silence, and an actively-emitting run is never silent.
-            var byteLength = SafeFileLength(stdoutPath) + SafeFileLength(stderrPath);
-            if (byteLength > lastByteLength) lastAdvance = DateTimeOffset.UtcNow;
-            lastByteLength = byteLength;
-
             if (TryReadExitCode(exitPath, out var code))
                 return await CompleteFromSpoolAsync(handle, offset, code, onStdoutLine, cancellationToken).ConfigureAwait(false);
 
+            // The execution wall deadline is checked BEFORE the lease and nothing can renew past it. It is not the whole
+            // safety argument though — it is optional (TimeoutSeconds ≤0 ⇒ MaxValue), and a run without one refuses the
+            // lease outright so this watchdog keeps its pre-lease bound.
             if (DateTimeOffset.UtcNow >= handle.Deadline)
                 return await TimeoutAsync(handle, offset, onStdoutLine, cancellationToken).ConfigureAwait(false);
 
-            if (idleTimeout is { } idle && DateTimeOffset.UtcNow - lastAdvance >= idle)
-                return await StalledAsync(handle, offset, onStdoutLine, cancellationToken).ConfigureAwait(false);
+            if (progress is not null)
+            {
+                progress.Observe();
+
+                if (progress.NoProgress)
+                    return await StalledAsync(handle, offset, onStdoutLine, cancellationToken).ConfigureAwait(false);
+            }
 
             if (!IsProcessAlive(handle.ProcessId, handle.ProcessStartTimeUtc))
                 return await VanishedAsync(handle, offset, onStdoutLine, cancellationToken).ConfigureAwait(false);
@@ -567,7 +569,7 @@ public sealed partial class LocalProcessRunner
         return new SandboxResult { Status = SandboxStatus.TimedOut, ExitCode = -1, Stdout = "", Stderr = stderr };
     }
 
-    /// <summary>C3 stall watchdog tripped (no output for the idle window): terminate the process tree, drain what landed, return Stalled.</summary>
+    /// <summary>The no-progress watchdog tripped (no progress signal of any kind for the whole window): terminate the process tree, drain what landed, return Stalled — the SAME terminal it has always resolved to; only WHEN it is reached changed.</summary>
     private async Task<SandboxResult> StalledAsync(SandboxHandle handle, long offset, Func<string, CancellationToken, Task> onLine, CancellationToken ct)
     {
         await KillByIdAndWaitAsync(handle, ct).ConfigureAwait(false);

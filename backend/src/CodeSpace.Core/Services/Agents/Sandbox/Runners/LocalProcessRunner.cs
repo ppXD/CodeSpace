@@ -49,7 +49,7 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
         "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
     };
 
-    /// <summary>Stall watchdog (Slice C3): seconds of NO streamed output before a run is judged STALLED and terminated early as <see cref="SandboxStatus.Stalled"/> — faster than waiting the full <see cref="SandboxSpec.TimeoutSeconds"/>. Unset ⇒ ON at <see cref="DefaultIdleTimeoutSeconds"/> (P2.4: real production runs get the protection by default — a genuinely-stuck agent no longer silently burns its whole wall-clock budget). Set explicitly to 0 / negative / non-numeric ⇒ the operator's OWN opt-OUT escape hatch (a repo/workload with known long silent tool calls). A positive value picks that window instead. Pinned by a test (Rule 8).</summary>
+    /// <summary>The NO-PROGRESS WINDOW: seconds without any evidence the run is working before it is judged STALLED and terminated early as <see cref="SandboxStatus.Stalled"/> — faster than waiting the full <see cref="SandboxSpec.TimeoutSeconds"/> (the distinct execution wall deadline). On the durable path "evidence" is every <see cref="AgentProgressSignal"/> the observer can reach, which is spool bytes plus an in-flight platform request — and only while the run HAS a wall deadline, since without one this watchdog is the run's only bound (see <c>LocalProcessRunner.Progress.cs</c>). On the streaming fallback path it is stdout bytes only, since that path has no durable spool to host a lease. Unset ⇒ ON at <see cref="DefaultIdleTimeoutSeconds"/> (P2.4: real production runs get the protection by default — a genuinely-stuck agent no longer silently burns its whole wall-clock budget). Set explicitly to 0 / negative / non-numeric ⇒ the operator's OWN opt-OUT escape hatch (a repo/workload with known long silent tool calls). A positive value picks that window instead. The NAME is the operator's contract and is pinned by a test (Rule 8) — it keeps its original stdout-era spelling deliberately, because renaming it would silently disable the watchdog for every operator who tuned it.</summary>
     public const string StdoutIdleTimeoutEnvVar = "CODESPACE_AGENT_STDOUT_IDLE_TIMEOUT_SECONDS";
 
     /// <summary>
@@ -62,8 +62,8 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
     /// </summary>
     public const int DefaultIdleTimeoutSeconds = 600;
 
-    /// <summary>The configured stall-watchdog idle window: <see cref="DefaultIdleTimeoutSeconds"/> when the env var is genuinely unset, the parsed value when it's a positive integer, or null (disabled) when it's explicitly 0 / negative / non-numeric. Read per call so a test (and an operator) can toggle it without a restart.</summary>
-    internal static TimeSpan? IdleTimeout()
+    /// <summary>The configured no-progress window: <see cref="DefaultIdleTimeoutSeconds"/> when the env var is genuinely unset, the parsed value when it's a positive integer, or null (the watchdog disabled) when it's explicitly 0 / negative / non-numeric. Read per call so a test (and an operator) can toggle it without a restart.</summary>
+    internal static TimeSpan? NoProgressWindow()
     {
         var raw = Environment.GetEnvironmentVariable(StdoutIdleTimeoutEnvVar);
 
@@ -121,7 +121,7 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
 
         try
         {
-            await PumpStdoutAsync(process, onStdoutLine, linkedCts.Token, IdleTimeout()).ConfigureAwait(false);
+            await PumpStdoutAsync(process, onStdoutLine, linkedCts.Token, NoProgressWindow()).ConfigureAwait(false);
             await process.WaitForExitAsync(linkedCts.Token).ConfigureAwait(false);
         }
         catch (AgentStalledException)

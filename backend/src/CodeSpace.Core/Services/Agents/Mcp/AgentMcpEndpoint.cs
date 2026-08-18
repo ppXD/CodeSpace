@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net.Sockets;
 using System.Text;
+using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Tools;
 using CodeSpace.Core.Services.Chat;
 using CodeSpace.Core.Services.Chat.Interactions;
@@ -196,7 +197,13 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
         var components = connectionScope?.ServiceProvider.GetRequiredService<IInteractionComponentRegistry>();
 
         var handler = new McpRequestHandler(_registry, _autonomy, _teamId, _redactor, _runId, ledger, _fenceEpoch, _governanceEnabled, _approvalConversationId, bot, waiters, components, _catalogMode, _counters);
-        var loop = new McpFramingLoop(handler);
+
+        // A request in flight — including a tools/call parked on a human approval, which blocks for minutes while the
+        // run emits nothing — RENEWS the run's progress lease, so the no-progress watchdog never kills a run that is
+        // waiting on us. The lease comes from the layout owner keyed by run id, the same single source of truth the
+        // observer's handle was stamped from at launch. A run with no wall deadline has its lease refused by the
+        // observer, not here: renewing a lease nobody reads is inert.
+        var loop = new McpFramingLoop(new ProgressLeaseRenewingHandler(handler, LocalProcessRunner.ProgressLeaseFor(_runId)));
 
         try { await loop.RunAsync(reader, writer, ct).ConfigureAwait(false); }
         catch (OperationCanceledException) { /* cancel unwound the pump */ }

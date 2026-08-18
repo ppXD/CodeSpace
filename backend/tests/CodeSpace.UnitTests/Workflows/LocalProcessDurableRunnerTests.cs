@@ -492,6 +492,63 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         finally { Environment.SetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar, prior); }
     }
 
+    [Theory]
+    [InlineData(60, true, SandboxStatus.Success)]
+    [InlineData(60, false, SandboxStatus.Stalled)]
+    [InlineData(null, true, SandboxStatus.Stalled)]
+    public async Task A_silent_durable_run_survives_its_no_progress_window_only_while_a_platform_request_renews_a_lease_a_wall_deadline_backs(int? timeoutSeconds, bool renew, SandboxStatus expected)
+    {
+        // THE BUG THIS LANE EXISTS TO REMOVE (leg 1): a run parked on an authorised human decision emits nothing, and the
+        // only progress signal used to be spool bytes — so the watchdog killed it. Here the run is silent for FIVE
+        // no-progress windows while an in-flight platform request renews its lease, and it reaches its own exit code.
+        //
+        // Leg 2 is the falsifier for the signal: identical run, renewal removed, must still reach Stalled.
+        //
+        // Leg 3 is the falsifier for the BOUND, and it is the one that keeps this lane honest: TimeoutSeconds null is a
+        // supported "no wall-clock" choice, and there this watchdog is the run's ONLY bound — nothing else terminates it
+        // and the reconciler cannot collect a run whose observer still heartbeats. So the SAME renewal that rescues leg 1
+        // must be refused here, or a wedged unbounded run becomes immortal.
+        if (OperatingSystem.IsWindows()) return;
+
+        var prior = Environment.GetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar);
+        using var renewing = new CancellationTokenSource();
+        try
+        {
+            Environment.SetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar, "1");
+
+            var handle = await LaunchAsync(ContractSpecs.Sleep(5) with { TimeoutSeconds = timeoutSeconds });
+            var leaseDirectory = Path.Combine(handle.SpoolDirectory, "progress");
+            handle = handle with { ProgressLeaseDirectory = leaseDirectory };
+
+            if (renew) _ = RenewUntilCancelledAsync(new AgentProgressLease(leaseDirectory), renewing.Token);
+
+            var (result, _) = await AttachCollectAsync(handle);
+
+            result.Status.ShouldBe(expected, timeoutSeconds is null
+                ? "with NO wall deadline the watchdog is the only bound, so a renewal must not defer it — otherwise a wedged unbounded run can never be collected"
+                : renew
+                    ? "a silent run whose platform request keeps renewing the lease is WORKING — killing it is the failure mode this signal removes"
+                    : "with the renewal removed the same silent run must still be judged stalled");
+        }
+        finally
+        {
+            renewing.Cancel();
+            Environment.SetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar, prior);
+        }
+    }
+
+    /// <summary>Stand in for the host-side platform endpoint holding the run's lease while a tools/call is parked on a human decision — the same <see cref="AgentProgressLease"/> the real <c>ProgressLeaseRenewingHandler</c> writes.</summary>
+    private static async Task RenewUntilCancelledAsync(AgentProgressLease lease, CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            lease.Renew(AgentProgressSignal.PlatformRequest);
+
+            try { await Task.Delay(TimeSpan.FromMilliseconds(200), cancellationToken); }
+            catch (OperationCanceledException) { return; }
+        }
+    }
+
     [Fact]
     public async Task Cancelling_the_attach_stops_observing_WITHOUT_killing_the_process()
     {
