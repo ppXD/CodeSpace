@@ -89,6 +89,8 @@ public class FailureTaxonomyTests
         FailureCodes.RoleOutranksActor.ShouldBe("role_outranks_actor");
         FailureCodes.AccountDeactivated.ShouldBe("account_deactivated");
         FailureCodes.PasswordResetNotUsable.ShouldBe("password_reset_not_usable");
+        FailureCodes.HarnessReductionGap.ShouldBe("harness_reduction_gap");
+        FailureCodes.HarnessRecordUnreadable.ShouldBe("harness_record_unreadable");
         FailureCodes.Internal.ShouldBe("internal_error");
     }
 
