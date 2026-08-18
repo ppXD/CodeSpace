@@ -6,6 +6,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Services.Providers.Modules;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers;
+using CodeSpace.Core.Services.Workflows.Artifacts.Providers.AliyunOss;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers.Local;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Nodes;
@@ -186,6 +187,7 @@ public class CodeSpaceModule : Autofac.Module
 
         foreach (var type in moduleTypes) builder.RegisterType(type).As<IStorageProviderModule>().SingleInstance();
         builder.RegisterType<LocalRwxArtifactStorageDriverFactory>().As<IArtifactStorageDriverFactory>().SingleInstance();
+        builder.RegisterType<AliyunOssArtifactStorageDriverFactory>().As<IArtifactStorageDriverFactory>().SingleInstance();
 
         // Resolve both unions at container build time, not captured Core-assembly lists: an external Azure/OSS package
         // can contribute its module and factory from its own Autofac module without editing this central switch.

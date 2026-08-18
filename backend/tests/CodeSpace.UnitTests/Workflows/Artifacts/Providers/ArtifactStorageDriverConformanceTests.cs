@@ -32,11 +32,18 @@ public abstract class ArtifactStorageDriverConformanceTests
             put.Metadata.Sha256.ShouldBe(Sha256(bytes));
             put.Metadata.ETag.ShouldNotBeNullOrWhiteSpace();
             if ((driver.Capabilities & StorageProviderCapabilities.ObjectVersioning) != 0) put.Metadata.Version.ShouldNotBeNullOrWhiteSpace();
+            else put.Metadata.Version.ShouldBeNull("a driver that does not declare ObjectVersioning must report no version: callers round-trip this field back as ExpectedVersion, so reporting one it will refuse makes every write unverifiable and every read unavailable");
 
             var head = await driver.HeadAsync(new ArtifactStorageHeadRequest(key), CancellationToken.None);
             head.IsSuccess.ShouldBeTrue(head.Error?.Message);
             head.Metadata!.ETag.ShouldBe(put.Metadata.ETag);
             head.Metadata.Version.ShouldBe(put.Metadata.Version);
+
+            // Exactly the round trip ArtifactCasRuntimeCoordinator performs: whatever HEAD reports is fed straight
+            // back as the read condition, so a driver may only report conditions it will honour.
+            var conditional = await driver.OpenReadAsync(new ArtifactStorageReadRequest(key) { ExpectedETag = head.Metadata.ETag, ExpectedVersion = head.Metadata.Version }, CancellationToken.None);
+            conditional.IsSuccess.ShouldBeTrue(conditional.Error?.Message);
+            if (conditional.Content != null) await conditional.Content.DisposeAsync();
 
             var opened = await driver.OpenReadAsync(new ArtifactStorageReadRequest(key), CancellationToken.None);
             opened.IsSuccess.ShouldBeTrue(opened.Error?.Message);
