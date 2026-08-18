@@ -5,6 +5,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.AgentRunLogging;
+using CodeSpace.Core.Services.Agents.Capture;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Review;
@@ -125,12 +126,17 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private readonly IArtifactManifestStore _artifactManifests;
     private readonly Capture.ICaptureIntentService _captureIntents;
     private readonly IAgentRunLogCaptureBridge? _logCapture;
+    // G1: the lossless native-record plane, dual-written beside the normalized event log. Optional for the same reason
+    // _logCapture is — a hand-built test double must not have to know about a shadow plane, and a run must never depend
+    // on one. Null (or a plane that will not open) leaves the streaming path byte-for-byte what it was; a plane that
+    // DOES open only adds rows of its own, on its own unit of work, and re-raises a harness parser's throw unchanged.
+    private readonly INativeRecordPlane? _nativeRecords;
     // The publish guard chain (Order ascending) — see EvaluatePublishGuardsAsync. Sorted once at construction so
     // production reads a stable sequence regardless of DI registration order.
     private readonly IReadOnlyList<IPublishGuard> _publishGuards;
     private readonly ILogger<AgentRunExecutor> _logger;
 
-    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, Workflows.Artifacts.IArtifactStore artifacts, IPublishManifestStore manifests, IArtifactManifestStore artifactManifests, Capture.ICaptureIntentService captureIntents, IEnumerable<IPublishGuard> publishGuards, ILogger<AgentRunExecutor> logger, IAgentRunLogCaptureBridge? logCapture = null)
+    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, Workflows.Artifacts.IArtifactStore artifacts, IPublishManifestStore manifests, IArtifactManifestStore artifactManifests, Capture.ICaptureIntentService captureIntents, IEnumerable<IPublishGuard> publishGuards, ILogger<AgentRunExecutor> logger, IAgentRunLogCaptureBridge? logCapture = null, INativeRecordPlane? nativeRecords = null)
     {
         _runs = runs;
         _harnesses = harnesses;
@@ -149,6 +155,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         _artifactManifests = artifactManifests;
         _captureIntents = captureIntents;
         _logCapture = logCapture;
+        _nativeRecords = nativeRecords;
         // Tolerate a null enumerable (a hand-built test double that never exercises the push path) — zero guards
         // registered is a legitimate state (every push clears), not a constructor-time crash.
         _publishGuards = (publishGuards ?? Enumerable.Empty<IPublishGuard>()).OrderBy(g => g.Order).ToList();
@@ -568,7 +575,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var capture = await OpenLogCaptureAsync(new LogCaptureContext(context.TeamId, context.RunId, context.ActorId, context.WorkerFenceEpoch, redactor), context.Durable, handle, cancellationToken).ConfigureAwait(false);
         if (!ReferenceEquals(capture.Handle, handle) && capture.Handle != handle)
             await _runs.SetRunnerHandleAsync(context.RunId, JsonSerializer.Serialize(capture.Handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
-        var sandbox = await capture.ObserveAsync((capturedHandle, token) => context.Durable.AttachAsync(capturedHandle, (line, _) => PersistLineAsync(line), token, CheckpointHandleOffset(context.RunId, capturedHandle, writer)), cancellationToken).ConfigureAwait(false);
+        // No frame capture on this path, stated rather than forgotten: a re-attach resumes mid-spool, so its stream's
+        // source geometry would have to start from the handle's committed offset instead of from zero, and a resumed
+        // opening's fence and ordinals belong with the re-attach slice rather than being guessed here.
+        var sandbox = await capture.ObserveAsync((capturedHandle, token) => context.Durable.AttachAsync(capturedHandle, (line, _) => PersistLineAsync(line), token, CheckpointHandleOffset(context.RunId, capturedHandle, new HarnessSinks(writer, AgentNativeRecordPump.Disabled(_logger)))), cancellationToken).ConfigureAwait(false);
 
         // Final flush for the terminal-drain lines (no trailing checkpoint), as in the live path.
         await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
@@ -2105,22 +2115,33 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var folder = context.Harness.CreateFolder();   // BOUNDED: the harness's OWN reductions, not the run's events — a long run must not be able to exhaust the heap here
         var facts = new AgentRunFacts();   // the three harness-independent facts a forced terminal reports without ever consulting the harness
         var writer = new BufferedEventWriter(_runs, context.RunId);   // batches the DB inserts; flushed at each spool checkpoint + once at the end
+        var native = await OpenNativeCaptureAsync(context, cancellationToken).ConfigureAwait(false);   // G1: the lossless frame plane, dual-written beside the log; a plane that won't open leaves this path unchanged
 
         async Task PersistLineAsync(string line)
         {
+            var redactedLine = context.Redactor.Redact(line);
+
             // Capture the faithful transcript FIRST — redact the raw line, then keep it whether or not ParseEvents
             // surfaces any event. ParseEvents drops blank/unrecognized lines; the transcript keeps them so a replay
             // is exact. Redacted before it's held, so no secret reaches the offloaded artifact.
-            await context.Transcript.AppendLineAsync(context.Redactor.Redact(line), cancellationToken).ConfigureAwait(false);
+            await context.Transcript.AppendLineAsync(redactedLine, cancellationToken).ConfigureAwait(false);
+
+            // The redacted frame becomes its own durable record BEFORE the harness is asked to interpret it, so a line
+            // ParseEvents DROPS is still recorded (which is the whole point — the normalized log has no row for a
+            // native class the adapter never learned). The pump owns the parse from here, and owns it TRANSPARENTLY:
+            // a parser that throws gets its record marked normalization-failed and the throw is then re-raised, so
+            // this loop fails exactly where `foreach (var e in Harness.ParseEvents(line))` used to.
+            var frame = await native.CaptureAsync(line, redactedLine, context.Harness, cancellationToken).ConfigureAwait(false);
 
             // ONE native line can carry several content blocks (reasoning + tool_use + text) → several events, in
             // stream order. Each is redacted BEFORE the append-only log freezes it (the log can't be edited later).
-            foreach (var normalized in context.Harness.ParseEvents(line))
+            foreach (var normalized in frame.Events)
             {
                 var redacted = Redact(normalized, context.Redactor);
 
                 await writer.BufferAsync(redacted, cancellationToken).ConfigureAwait(false);   // buffered — one batched INSERT per spool checkpoint, not one per line
 
+                native.Project(frame, redacted);   // the projection cites the exact frame it came from, and never replaces it
                 folder.Add(redacted);   // O(1) in-memory reduction; the full ordered log lives durably in agent_run_event
                 facts.Add(redacted);
             }
@@ -2131,18 +2152,51 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // redactor's fingerprint is stamped onto the durable handle so a re-attach can prove it rebuilt the SAME
         // key before re-tailing the spool (a rotated/deleted key → marker-only, never an unmaskable leak). The MCP
         // token rides the handle too so a re-attach re-binds the SAME socket+token the agent's declaration carries.
-        var sandbox = await RunSandboxAsync(context, PersistLineAsync, writer, cancellationToken).ConfigureAwait(false);
+        var sandbox = await RunSandboxAsync(context, PersistLineAsync, new HarnessSinks(writer, native), cancellationToken).ConfigureAwait(false);
 
         // Final flush: the durable runner's terminal-drain paths (CompleteFromSpool/Timeout/Vanished) deliver the last
         // lines WITHOUT a trailing checkpoint, so anything buffered after the last checkpoint must be flushed here
         // before the result is folded + the run completes. (A no-op when the buffer is already empty.)
         await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
 
+        // Same terminal drain for the frame plane, then close its process attempt. A forced terminal observed NO exit
+        // code (the runner reports -1 because it killed the process), so that attempt is recorded Lost with a reason
+        // rather than as an exit nobody saw. Both halves are best-effort: neither can change the run's own outcome.
+        await native.CloseAsync(ObservedExitCode(sandbox), cancellationToken).ConfigureAwait(false);
+
         // Events are already redacted, so a result the harness folds from them (summary / error) is redacted too. The
         // faithful raw transcript is NOT attached here: it belongs to the whole run (every revise round streams into
         // the same spool) and is materialized once, at the end, by AttachTranscriptAsync.
         return MapSandboxResult(sandbox, folder, facts);
     }
+
+    /// <summary>
+    /// Open this round's frame-capture stream. The runner locator is the ROUND's spool key — the backend-owned address
+    /// this process's output is reachable at, and the only thing about it that is knowable before launch; a pid belongs
+    /// to the runner and lands with the durable handle, not here.
+    /// </summary>
+    private Task<AgentNativeRecordPump> OpenNativeCaptureAsync(HarnessRunContext context, CancellationToken cancellationToken) =>
+        AgentNativeRecordPump.OpenAsync(_nativeRecords, new NativeRecordCaptureRequest
+        {
+            TeamId = context.TeamId,
+            AgentRunId = context.RunId,
+            HarnessTypeKey = AgentNativeRecordPump.HarnessTypeKeyOf(context.Harness),
+            RunnerKind = context.Runner.Kind,
+            RunnerLocatorJson = JsonSerializer.Serialize(new { spoolKey = context.SpoolKey }, AgentJson.Options),
+            WorkerFenceEpoch = context.WorkerFenceEpoch,
+
+            // The executor's pump reads ONE stream: the runner delivers stdout line by line and buffers stderr
+            // separately, so labelling these frames anything else would be a claim the delivery cannot support.
+            Channel = NativeRecordChannel.Stdout,
+        }, context.Redactor, _logger, cancellationToken);
+
+    /// <summary>
+    /// The exit code the observer actually SAW, or null when nothing did. A timeout or a stall is a process this side
+    /// killed, and the runner reports -1 for it — recording that as an observed exit would turn "we do not know how it
+    /// ended" into a fact, which is precisely the distinction the attempt's Exited/Lost states exist to keep.
+    /// </summary>
+    private static int? ObservedExitCode(SandboxResult sandbox) =>
+        sandbox.Status is SandboxStatus.TimedOut or SandboxStatus.Stalled ? null : sandbox.ExitCode;
 
     /// <summary>Redact any echoed secret out of a normalized event — its text AND its structured payload — before it reaches the append-only log. No-op when the run has no secret.</summary>
     private static AgentEvent Redact(AgentEvent normalized, SecretRedactor redactor)
@@ -2172,10 +2226,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// otherwise the live-stream / batch path. Feature-detected via <c>runner is ISandboxDurableRunner</c>, so
     /// a runner that can't be durable transparently falls back to streaming.
     /// </summary>
-    private async Task<SandboxResult> RunSandboxAsync(HarnessRunContext context, Func<string, Task> persistLine, BufferedEventWriter writer, CancellationToken cancellationToken)
+    private async Task<SandboxResult> RunSandboxAsync(HarnessRunContext context, Func<string, Task> persistLine, HarnessSinks sinks, CancellationToken cancellationToken)
     {
         if (context.Runner is ISandboxDurableRunner durable)
-            return await RunDurableAsync(context, durable, persistLine, writer, cancellationToken).ConfigureAwait(false);
+            return await RunDurableAsync(context, durable, persistLine, sinks, cancellationToken).ConfigureAwait(false);
 
         // Non-durable fallback (no spool/checkpoint): the writer's size cap + the caller's final flush drain it.
         return await RunAndStreamAsync(context.Runner, context.Spec, persistLine, cancellationToken).ConfigureAwait(false);
@@ -2187,7 +2241,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// observer dies mid-tail. On a host-shutdown cancel the attach stops observing WITHOUT killing the
     /// process (leaving the run Running for re-attach/recovery); only the spec timeout terminates it.
     /// </summary>
-    private async Task<SandboxResult> RunDurableAsync(HarnessRunContext context, ISandboxDurableRunner durable, Func<string, Task> persistLine, BufferedEventWriter writer, CancellationToken cancellationToken)
+    private async Task<SandboxResult> RunDurableAsync(HarnessRunContext context, ISandboxDurableRunner durable, Func<string, Task> persistLine, HarnessSinks sinks, CancellationToken cancellationToken)
     {
         // Stamp the injected-key fingerprint + the MCP run token onto the handle at launch. The fingerprint lets a
         // re-attach verify it rebuilt the same redactor before re-tailing (rotated/deleted credential → marker-only);
@@ -2215,7 +2269,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         // Checkpoint the advancing spool offset onto the handle as we tail, so a backend restart mid-run can
         // re-attach (ReattachAsync) and resume from here instead of re-emitting the whole spool.
-        return await capture.ObserveAsync((capturedHandle, token) => durable.AttachAsync(capturedHandle, (line, _) => persistLine(line), token, CheckpointHandleOffset(context.RunId, capturedHandle, writer)), cancellationToken).ConfigureAwait(false);
+        return await capture.ObserveAsync((capturedHandle, token) => durable.AttachAsync(capturedHandle, (line, _) => persistLine(line), token, CheckpointHandleOffset(context.RunId, capturedHandle, sinks)), cancellationToken).ConfigureAwait(false);
     }
 
     private SandboxHandle EnsureLogCaptureHandle(SandboxHandle handle, ISandboxDurableRunner durable)
@@ -2248,12 +2302,20 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// durability invariant — the persisted offset must never run ahead of flushed events, so a re-attach at worst
     /// re-emits the last batch (never loses a line). A pure jsonb UPDATE for the offset; never blocks completion.
     /// </summary>
-    private Func<long, CancellationToken, Task> CheckpointHandleOffset(Guid runId, SandboxHandle handle, BufferedEventWriter writer) =>
+    private Func<long, CancellationToken, Task> CheckpointHandleOffset(Guid runId, SandboxHandle handle, HarnessSinks sinks) =>
         async (offset, ct) =>
         {
-            await writer.FlushAsync(ct).ConfigureAwait(false);
+            await sinks.Events.FlushAsync(ct).ConfigureAwait(false);
+            await sinks.Frames.FlushAsync(ct).ConfigureAwait(false);   // the frame plane rides the same checkpoint — best-effort, so a refused frame flush stops capture for the round rather than holding the offset back
             await _runs.SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle with { StdoutOffset = offset }, AgentJson.Options), ct).ConfigureAwait(false);
         };
+
+    /// <summary>
+    /// The two durable sinks one harness round streams into: the normalized event log and the native-frame plane. One
+    /// record rather than two parameters because they are flushed together, at the same checkpoints, for the same
+    /// reason — and because threading a second one through the observe path put its signatures over the parameter cap.
+    /// </summary>
+    private sealed record HarnessSinks(BufferedEventWriter Events, AgentNativeRecordPump Frames);
 
     private sealed record HarnessRunContext
     {
