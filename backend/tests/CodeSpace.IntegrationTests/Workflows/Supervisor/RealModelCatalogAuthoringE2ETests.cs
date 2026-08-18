@@ -67,7 +67,7 @@ public sealed class RealModelCatalogAuthoringE2ETests
 
         public SandboxSpec BuildInvocation(AgentTask task) => throw new NotSupportedException();
         public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) => throw new NotSupportedException();
-        public AgentRunResult BuildResult(AgentResultFold fold, int exitCode) => throw new NotSupportedException();
+        public IAgentEventFolder CreateFolder() => throw new NotSupportedException();
         public IReadOnlyDictionary<string, string> ProjectToEnv(ResolvedModelCredential credential) => throw new NotSupportedException();
     }
 

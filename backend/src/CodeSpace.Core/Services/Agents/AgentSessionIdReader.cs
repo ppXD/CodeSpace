@@ -32,7 +32,7 @@ public static class AgentSessionIdReader
         return null;
     }
 
-    /// <summary>The per-event primitive: the id ONE event carries, or null. <see cref="AgentResultFold"/> keeps the first non-null so it never has to retain the stream.</summary>
+    /// <summary>The per-event primitive: the id ONE event carries, or null. <see cref="AgentRunFacts"/> keeps the first non-null so it never has to retain the stream.</summary>
     public static string? TryRead(AgentEvent normalized) => normalized.Data is { } data && TryReadFrom(data, out var id) ? id : null;
 
     /// <summary>Read a non-empty id from one structured payload — the payload itself, then the <c>msg</c> envelope.</summary>

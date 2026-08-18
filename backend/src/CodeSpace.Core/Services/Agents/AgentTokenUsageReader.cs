@@ -33,7 +33,7 @@ public static class AgentTokenUsageReader
         return null;
     }
 
-    /// <summary>The per-event primitive: the usage ONE event carries, or null. <see cref="AgentResultFold"/> keeps the LAST non-null — the same figure this newest-first scan returns — so it never has to retain the stream.</summary>
+    /// <summary>The per-event primitive: the usage ONE event carries, or null. <see cref="AgentRunFacts"/> keeps the LAST non-null — the same figure this newest-first scan returns — so it never has to retain the stream.</summary>
     public static AgentTokenUsage? TryRead(AgentEvent normalized) => normalized.Data is { } data && TryReadFrom(data, out var usage) ? usage : null;
 
     /// <summary>

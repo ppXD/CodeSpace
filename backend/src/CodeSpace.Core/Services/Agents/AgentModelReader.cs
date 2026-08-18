@@ -27,7 +27,7 @@ public static class AgentModelReader
         return null;
     }
 
-    /// <summary>The per-event primitive: the model ONE event names, or null. <see cref="AgentResultFold"/> keeps the first non-null so it never has to retain the stream.</summary>
+    /// <summary>The per-event primitive: the model ONE event names, or null. <see cref="AgentRunFacts"/> keeps the first non-null so it never has to retain the stream.</summary>
     public static string? TryRead(AgentEvent normalized) => normalized.Data is { } data && TryReadFrom(data, out var model) ? model : null;
 
     /// <summary>Read a non-empty model from one structured payload — the payload itself, then the <c>msg</c> envelope.</summary>

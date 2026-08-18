@@ -122,10 +122,10 @@ public class AgentRunReconcileRepairFlowTests
         public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) =>
             string.IsNullOrWhiteSpace(rawLine) ? Array.Empty<AgentEvent>() : new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine.Trim() } };
 
-        public AgentRunResult BuildResult(AgentResultFold fold, int exitCode) =>
+        public IAgentEventFolder CreateFolder() => new TestEventFolder((fold, exitCode) =>
             exitCode == 0
                 ? new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = fold.LastText }
-                : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" };
+                : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" });
 
         public IReadOnlyDictionary<string, string> ProjectToEnv(ResolvedModelCredential credential) =>
             new Dictionary<string, string> { ["PROBE_KEY"] = credential.ApiKey ?? "" };

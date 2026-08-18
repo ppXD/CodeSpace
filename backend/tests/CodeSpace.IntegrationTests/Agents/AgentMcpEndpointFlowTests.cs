@@ -1423,10 +1423,10 @@ public class AgentMcpEndpointFlowTests
         public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) =>
             string.IsNullOrWhiteSpace(rawLine) ? Array.Empty<AgentEvent>() : new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine.Trim() } };
 
-        public AgentRunResult BuildResult(AgentResultFold fold, int exitCode) =>
+        public IAgentEventFolder CreateFolder() => new TestEventFolder((fold, exitCode) =>
             exitCode == 0
                 ? new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = fold.LastText }
-                : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" };
+                : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" });
     }
 
     /// <summary>A scripted harness that ALSO declares an MCP server + requests a per-run config home — so the runner has somewhere to write the declaration the wiring produces. Mirrors a real harness's BuildMcpDeclaration shape without a CLI.</summary>
@@ -1455,10 +1455,10 @@ public class AgentMcpEndpointFlowTests
         public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) =>
             string.IsNullOrWhiteSpace(rawLine) ? Array.Empty<AgentEvent>() : new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine.Trim() } };
 
-        public AgentRunResult BuildResult(AgentResultFold fold, int exitCode) =>
+        public IAgentEventFolder CreateFolder() => new TestEventFolder((fold, exitCode) =>
             exitCode == 0
                 ? new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = fold.LastText }
-                : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" };
+                : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" });
     }
 
     /// <summary>
@@ -1498,9 +1498,9 @@ public class AgentMcpEndpointFlowTests
         public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) =>
             string.IsNullOrWhiteSpace(rawLine) ? Array.Empty<AgentEvent>() : new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine.Trim() } };
 
-        public AgentRunResult BuildResult(AgentResultFold fold, int exitCode) =>
+        public IAgentEventFolder CreateFolder() => new TestEventFolder((fold, exitCode) =>
             exitCode == 0
                 ? new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = fold.LastText }
-                : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" };
+                : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" });
     }
 }

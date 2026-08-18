@@ -1444,13 +1444,13 @@ public class AgentRunExecutorTests
         public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) =>
             string.IsNullOrWhiteSpace(rawLine) ? Array.Empty<AgentEvent>() : new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine.Trim() } };
 
-        public AgentRunResult BuildResult(AgentResultFold fold, int exitCode) =>
+        public IAgentEventFolder CreateFolder() => new TestEventFolder((fold, exitCode) =>
             exitCode == 0
                 ? new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = fold.LastText }
-                : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" };
+                : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" });
     }
 
-    /// <summary>A scripted harness (kind "scripted") whose ParseEvent attaches the raw JSON as Data and whose BuildResult reads token usage off the <see cref="AgentResultFold"/> — exactly as the real Codex/Claude adapters do — so the executor→persist path for AgentRunResult.TokenUsage is exercised end-to-end.</summary>
+    /// <summary>A scripted harness (kind "scripted") whose ParseEvent attaches the raw JSON as Data and whose folder reads token usage off its fold — exactly as the real Codex/Claude adapters do — so the executor→persist path for AgentRunResult.TokenUsage is exercised end-to-end.</summary>
     private sealed class UsageReportingHarness : IAgentHarness
     {
         private readonly string _script;
@@ -1475,14 +1475,14 @@ public class AgentRunExecutorTests
             return new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = line } };
         }
 
-        public AgentRunResult BuildResult(AgentResultFold fold, int exitCode) =>
+        public IAgentEventFolder CreateFolder() => new TestEventFolder((fold, exitCode) =>
             new()
             {
                 Status = exitCode == 0 ? AgentRunStatus.Succeeded : AgentRunStatus.Failed,
                 ExitReason = exitCode == 0 ? "completed" : "non-zero-exit",
                 Summary = fold.LastTextOf(AgentEventKind.AssistantMessage),
                 TokenUsage = fold.TokenUsage,
-            };
+            });
     }
 
     /// <summary>A scripted harness that ALSO projects a model credential (kind "scripted-projector"): maps the resolved credential to one env var and — critically — carries <c>task.Environment</c> (the injected secret) into the sandbox spec, exactly as the real harnesses do.</summary>
@@ -1508,10 +1508,10 @@ public class AgentRunExecutorTests
         public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) =>
             string.IsNullOrWhiteSpace(rawLine) ? Array.Empty<AgentEvent>() : new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine.Trim() } };
 
-        public AgentRunResult BuildResult(AgentResultFold fold, int exitCode) =>
+        public IAgentEventFolder CreateFolder() => new TestEventFolder((fold, exitCode) =>
             exitCode == 0
                 ? new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = fold.LastText }
-                : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" };
+                : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" });
 
         public IReadOnlyList<string> SupportedProviders => new[] { _provider };
 
@@ -1543,8 +1543,8 @@ public class AgentRunExecutorTests
             return line.Length == 0 ? Array.Empty<AgentEvent>() : new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = line, Data = JsonSerializer.SerializeToElement(new { line }) } };
         }
 
-        public AgentRunResult BuildResult(AgentResultFold fold, int exitCode) =>
-            new() { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = fold.LastText };
+        public IAgentEventFolder CreateFolder() => new TestEventFolder((fold, exitCode) =>
+            new() { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = fold.LastText });
 
         public IReadOnlyList<string> SupportedProviders => new[] { _provider };
 
