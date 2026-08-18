@@ -34,6 +34,23 @@ public interface IAgentHarness
     /// </summary>
     IReadOnlyList<AgentEvent> ParseEvents(string rawLine);
 
-    /// <summary>Fold the run's normalized events + process exit code into the normalized <see cref="AgentRunResult"/>.</summary>
-    AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode);
+    /// <summary>
+    /// Fold the run's accumulated event reductions + process exit code into the normalized <see cref="AgentRunResult"/>.
+    /// Takes the BOUNDED <see cref="AgentResultFold"/> rather than the run's events: retention has to be O(1), because a
+    /// long agent's whole event list exhausted the heap and failed a run that had actually succeeded. Reductions a new
+    /// harness needs land as fields on the fold (they are all last/first/distinct), never as a re-materialized list.
+    /// </summary>
+    AgentRunResult BuildResult(AgentResultFold fold, int exitCode);
+}
+
+/// <summary>
+/// Fold a stream that is already fully in hand through the same harness reduction the streaming executor drives
+/// event-by-event. INTERNAL on purpose: the whole point of narrowing <see cref="IAgentHarness.BuildResult"/> to the
+/// bounded fold is that re-materializing a run's events becomes a visible decision, and a public convenience over the
+/// narrow interface would hand that back. Only the test assemblies (which genuinely hold a finished stream — replay
+/// fixtures, the fake-CLI drift detector, the harness unit suites) reach it, via InternalsVisibleTo.
+/// </summary>
+internal static class AgentHarnessFoldExtensions
+{
+    internal static AgentRunResult BuildResult(this IAgentHarness harness, IReadOnlyList<AgentEvent> events, int exitCode) => harness.BuildResult(AgentResultFold.From(events), exitCode);
 }
