@@ -1,5 +1,4 @@
 using CodeSpace.Core.Services.Agents.Workspace;
-using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Messages.Agents;
 using Microsoft.Extensions.Logging;
 
@@ -18,8 +17,11 @@ namespace CodeSpace.Core.Services.Supervisor.Executors;
 ///   <item>Otherwise (≥2 producers, or the lone producer is patch-only) → reuse the SAME <see cref="IBranchIntegrator"/>
 ///         the supervisor's <c>merge</c> already drives (<c>.Integrate.cs</c>) to combine the producers' RECORDED
 ///         PATCHES onto a fresh run integration branch — works even when a producer never pushed a branch.</item>
-///   <item>A producer manifest missing BOTH a branch and a patch (an I1 violation) → BLOCKED, loud reason, never a
-///         silent default. An integration CONFLICT → BLOCKED, naming the conflicted files + the producers' own
+///   <item>A producer with NO branch, NO offloaded patch artifact and NO inline patch (an I1 violation) → BLOCKED,
+///         loud reason, never a silent default. All three carriers are asked through the shared
+///         <see cref="Agents.Publish.IAgentPatchReader"/>, because patch offload is SIZE-gated: a sub-threshold diff
+///         is recorded ONLY in the producing run's result, so a manifest-only check reads it as lost work.</item>
+///   <item>An integration CONFLICT → BLOCKED, naming the conflicted files + the producers' own
 ///         preserved branches so the decider can reach for the EXISTING <c>resolve</c> verb next turn (see
 ///         <c>.Resolve.cs</c>'s widened <c>FindMostRecentConflictDecision</c> — no new escalation mechanism).</item>
 /// </list>
@@ -39,15 +41,10 @@ public sealed partial class RealSupervisorActionExecutor
 
         if (producers.Count == 0) return NoStaging(dependsOn, repoId, producerAgentRunIds.Count, 0, context);   // every producer made no changes to THIS repo — nothing to hand off
 
-        // A manifest row with NEITHER a pushed branch NOR an offloaded patch artifact has nothing this staging can
-        // hand off — a small (below the 8KB inline-offload threshold) patch-only diff legitimately carries no
-        // PatchArtifactId (it lives only in the producer's own AgentRunResult.Patch, which staging never reads —
-        // the manifest, not the run result, is the single source of truth per I2), so BOTH must be absent before
-        // this defends against the true I1 violation, never a silent clone of the default branch over real work.
-        var missing = producers.Where(m => string.IsNullOrEmpty(m.Branch) && m.PatchArtifactId is null).ToList();
+        var missing = await ProducersWithNothingToHandOffAsync(producers, context.TeamId, cancellationToken).ConfigureAwait(false);
 
         if (missing.Count > 0)
-            return BlockedStaging($"producer(s) {string.Join(", ", missing.Select(m => m.AgentRunId))} recorded a diff but neither a branch nor a patch was captured for it — the handoff cannot proceed silently", context);
+            return BlockedStaging($"producer(s) {string.Join(", ", missing.Select(m => m.AgentRunId))} recorded a diff but captured no branch, no patch artifact and no inline patch — the handoff cannot proceed silently", context);
 
         if (producers.Count == 1 && !string.IsNullOrEmpty(producers[0].Branch))
         {
@@ -57,6 +54,36 @@ public sealed partial class RealSupervisorActionExecutor
 
         return await IntegrateProducersAsync(producers, repoId, context, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// The producers this staging genuinely cannot hand off — the fail-closed I1 guard, asked of ALL THREE carriers
+    /// rather than only the two the manifest names. A row with no branch and no <c>PatchArtifactId</c> is not yet
+    /// evidence of lost work: patch offload is SIZE-gated, so a diff at or below the artifact store's inline
+    /// threshold is recorded ONLY in the producing run's result. Consulting the manifest alone therefore blocked
+    /// every sub-threshold handoff while reporting it as a data-integrity violation. Only a producer whose inline
+    /// carrier is ALSO empty has nothing to hand off, and only that one blocks the spawn.
+    /// </summary>
+    private async Task<IReadOnlyList<Persistence.Entities.PublishManifest>> ProducersWithNothingToHandOffAsync(IReadOnlyList<Persistence.Entities.PublishManifest> producers, Guid teamId, CancellationToken cancellationToken)
+    {
+        var empty = new List<Persistence.Entities.PublishManifest>();
+
+        foreach (var producer in producers.Where(m => string.IsNullOrEmpty(m.Branch) && m.PatchArtifactId is null))
+        {
+            var inline = await _patches.ReadAsync(teamId, PatchSourceFor(producer), cancellationToken).ConfigureAwait(false);
+
+            if (string.IsNullOrWhiteSpace(inline)) empty.Add(producer);
+        }
+
+        return empty;
+    }
+
+    /// <summary>Where THIS producer's diff bytes live, as the shared <see cref="Agents.Publish.IAgentPatchReader"/> reads them: the offloaded artifact when the manifest names one, else the producing run's own inline patch under this row's alias.</summary>
+    internal static AgentPatchSource PatchSourceFor(Persistence.Entities.PublishManifest producer) => new()
+    {
+        AgentRunId = producer.AgentRunId,
+        RepositoryAlias = producer.RepositoryAlias,
+        PatchArtifactId = producer.PatchArtifactId,
+    };
 
     /// <summary>
     /// WHICH gate a staging no-op fell through, as a named reason. Pure + <c>internal static</c> so the LADDER is
@@ -177,7 +204,7 @@ public sealed partial class RealSupervisorActionExecutor
                 Label = producer.AgentRunId?.ToString() ?? producer.Id.ToString(),
                 SourceRepositoryId = repositoryId,
                 BaseSha = producer.BaseSha,
-                Patch = await _offloader.ResolveRequiredAsync(context.TeamId, "", producer.PatchArtifactId, cancellationToken).ConfigureAwait(false),
+                Patch = await _patches.ReadAsync(context.TeamId, PatchSourceFor(producer), cancellationToken).ConfigureAwait(false),
                 ProducedBranch = producer.Branch,
             });
 

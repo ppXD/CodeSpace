@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Executors;
@@ -145,6 +147,63 @@ public class SupervisorDependencyStagingTests
         };
 
         reasons.Distinct().Count().ShouldBe(4, "two gates sharing a reason string are two gates a forensic reader cannot tell apart — the whole point of naming them");
+    }
+
+    // ── The producer patch source: staging must read BOTH carriers, never a hard-coded empty one ──
+
+    [Fact]
+    public void A_producers_patch_source_carries_every_coordinate_the_shared_reader_needs()
+    {
+        var agentRunId = Guid.NewGuid();
+        var artifactId = Guid.NewGuid();
+
+        var source = RealSupervisorActionExecutor.PatchSourceFor(new PublishManifest
+        {
+            AgentRunId = agentRunId, RepositoryAlias = "web", PatchArtifactId = artifactId,
+        });
+
+        source.AgentRunId.ShouldBe(agentRunId, "dropping the run id silently degrades every sub-threshold producer back to patch-less");
+        source.RepositoryAlias.ShouldBe("web", "the alias selects the matching per-repo entry of a multi-repo result — 'primary' would read the wrong repository's diff");
+        source.PatchArtifactId.ShouldBe(artifactId);
+    }
+
+    /// <summary>
+    /// The regression pin (drift detector, Rule 12.5 shape): staging used to build every contribution with
+    /// <c>ResolveRequiredAsync(context.TeamId, "", producer.PatchArtifactId, …)</c> — a HARD-CODED empty inline
+    /// argument. Because patch offload is size-gated, that resolved every sub-8KB producer to an empty patch, which
+    /// <c>LocalGitBranchIntegrator</c> correctly refuses and <c>Spawn</c> correctly turns into a whole-turn abort:
+    /// one small diff anywhere in a multi-producer handoff blocked all of it.
+    ///
+    /// <para>Reverting to that shape leaves every unit test on the pure surfaces green (they never reach the
+    /// contribution build) and only the real-Postgres integration tier red — so this cheap source-level pin exists to
+    /// fail in the same second the literal comes back, on a machine with no database at all.</para>
+    /// </summary>
+    [Fact]
+    public void Dependency_staging_never_resolves_a_producers_patch_from_a_hard_coded_empty_inline_argument()
+    {
+        var source = File.ReadAllText(LocateDependencyStagingSource());
+
+        HardCodedEmptyInlinePatch.IsMatch(source).ShouldBeFalse(
+            "a producer's diff must be resolved through the shared IAgentPatchReader (artifact OR the producing run's inline patch), never by handing the offloader an empty inline argument and reading the manifest's artifact id alone");
+
+        source.ShouldContain(nameof(AgentPatchSource),
+            customMessage: "the contribution build must go through the shared patch seam — if this identifier is gone, staging has grown its own private patch resolution again");
+    }
+
+    /// <summary>Matches <c>ResolveRequiredAsync(&lt;anything&gt;, "", …)</c>. In a verbatim string a doubled quote is ONE literal quote, so <c>""""</c> is the empty-string argument.</summary>
+    private static readonly Regex HardCodedEmptyInlinePatch = new(@"ResolveRequiredAsync\([^,)]+,\s*""""\s*,", RegexOptions.Compiled);
+
+    private static string LocateDependencyStagingSource()
+    {
+        const string relative = "backend/src/CodeSpace.Core/Services/Supervisor/Executors/RealSupervisorActionExecutor.DependencyStaging.cs";
+
+        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
+        {
+            var candidate = Path.Combine(dir.FullName, relative.Replace('/', Path.DirectorySeparatorChar));
+            if (File.Exists(candidate)) return candidate;
+        }
+
+        throw new FileNotFoundException($"{relative} not found walking up from {AppContext.BaseDirectory}");
     }
 
     // ── DependsOnFor: BaseSubtaskId override precedence ─────────────────────────────────

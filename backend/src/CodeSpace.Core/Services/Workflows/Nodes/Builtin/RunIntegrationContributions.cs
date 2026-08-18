@@ -1,7 +1,7 @@
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Messages.Agents;
-using System.Text.Json;
 
 namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 
@@ -31,31 +31,11 @@ public static class RunIntegrationContributions
             {
                 Label = AgentAcceptanceContract.UnitId(pair.Work!.NodeId, pair.Work.IterationKey ?? ""),
                 BaseSha = pair.Manifest.BaseSha,
-                Patch = pair.Manifest.PatchArtifactId is null ? InlinePatch(pair.Work.ResultJson, pair.Manifest.RepositoryAlias) : "",
+                Patch = pair.Manifest.PatchArtifactId is null ? AgentInlinePatch.From(pair.Work.ResultJson, pair.Manifest.RepositoryAlias) : "",
                 PatchArtifactId = pair.Manifest.PatchArtifactId,
                 ProducedBranch = pair.Manifest.Branch,
                 SourceRepositoryId = repositoryId,
             })
             .ToList();
-    }
-
-    /// <summary>The inline diff the manifest doesn't carry: the result's top-level patch (single-repo run), else the matching per-repo entry's (multi-repo run). Empty when the result is absent/unparseable — the integrator then names the contribution unintegrable instead of this layer guessing.</summary>
-    private static string InlinePatch(string? resultJson, string repositoryAlias)
-    {
-        if (string.IsNullOrWhiteSpace(resultJson)) return "";
-
-        try
-        {
-            var result = JsonSerializer.Deserialize<AgentRunResult>(resultJson, AgentJson.Options);
-
-            if (result is null) return "";
-            if (result.Patch is { Length: > 0 } patch) return patch;
-
-            return result.RepositoryResults?.FirstOrDefault(r => string.Equals(r.Alias, repositoryAlias, StringComparison.Ordinal))?.Patch ?? "";
-        }
-        catch (JsonException)
-        {
-            return "";
-        }
     }
 }

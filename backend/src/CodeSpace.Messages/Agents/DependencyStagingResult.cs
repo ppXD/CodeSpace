@@ -18,7 +18,7 @@ public sealed record DependencyStagingResult
     /// <summary>The server-authored block (producer branch(es) + summary + file count) to prepend to the dependent's goal, so the agent's prompt names what it is building on. Null when <see cref="Ref"/> is null.</summary>
     public string? GoalFoldText { get; init; }
 
-    /// <summary>Non-null ⇒ the subtask must NOT be spawned this turn — a producer's manifest carries neither a branch nor a patch (an I1 violation), or its work could not be auto-integrated. Never silently defaults to the repository's default branch.</summary>
+    /// <summary>Non-null ⇒ the subtask must NOT be spawned this turn — a producer carries no branch, no patch artifact and no inline patch (an I1 violation), or its work could not be auto-integrated. Never silently defaults to the repository's default branch.</summary>
     public string? BlockedReason { get; init; }
 
     /// <summary>The repo-relative paths that conflicted while integrating the producers' work (empty unless the block was a conflict, not a missing-manifest fail-closed).</summary>

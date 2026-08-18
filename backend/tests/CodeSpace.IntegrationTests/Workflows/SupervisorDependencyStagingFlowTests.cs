@@ -257,6 +257,124 @@ public sealed class SupervisorDependencyStagingFlowTests
             "the producer's RECORDED PATCH (resolved back from the artifact store) was applied onto a fresh integration branch even though it never pushed a branch of its own");
     }
 
+    /// <summary>
+    /// The size-gated twin of the test above, and the one the handoff used to lose: patch offload is SIZE-gated
+    /// (<c>ArtifactOffloader.OffloadIfLargeAsync</c> returns no artifact id at or below the 8KB inline threshold), so a
+    /// SMALL diff exists nowhere but the producer's own <c>agent_run.result_jsonb</c>. Staging read only the manifest's
+    /// <c>PatchArtifactId</c> and passed a hard-coded empty inline argument, so every sub-8KB patch-only producer
+    /// resolved to an empty patch and blocked the whole spawn — the exact case a cheap one-file fix produces.
+    /// </summary>
+    [Fact]
+    public async Task A_small_patch_only_producer_stages_from_the_inline_patch_the_manifest_never_carries()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedRepositoryAsync(teamId, remote.Url, await SeedCredentialAsync(teamId), RepositoryPublishMode.PatchOnly);
+        var runId = await SeedSupervisorRunAsync(teamId);
+
+        var (producerRunId, _) = await RunProducerAsync(teamId, repoId, "printf 'by a small producer\\n' > small.txt; echo edited");
+        var manifest = await SingleManifestAsync(producerRunId, teamId);
+        manifest.Branch.ShouldBeNull("the repo policy blocked the push");
+        manifest.PatchArtifactId.ShouldBeNull("a sub-threshold diff is never offloaded — the precondition this test exists to exercise; if this ever becomes non-null the test is silently covering the artifact path instead");
+
+        var context = ContextWith(runId, teamId, repoId,
+            plan: Plan(("producer", null), ("dependent", new[] { "producer" })),
+            priorSpawns: await SucceededSpawn(teamId, ("producer", producerRunId)));
+
+        await ExecuteSpawnAsync(context, "dependent");
+
+        var task = await SingleStagedTaskAsync(runId);
+        task.Workspace.ShouldNotBeNull("a producer whose only surviving artifact is an inline patch still has real work to hand off — blocking here strands every dependent of a small diff");
+
+        (await remote.FileOnBranchAsync(task.Workspace!.Repositories.Single().Ref!, "small.txt")).Trim()
+            .ShouldBe("by a small producer", "the producer's INLINE patch was applied onto a fresh integration branch");
+    }
+
+    /// <summary>
+    /// The multi-producer shape the size gate breaks: the integrator is all-or-nothing, so ONE contribution that
+    /// resolves to no patch aborts the whole set (<c>LocalGitBranchIntegrator.Preflight</c>) and blocks the spawn.
+    /// Mixing one sub-threshold and one offloaded producer therefore proves the two patch sources compose — reading
+    /// only the artifact half would leave this permanently blocked no matter how large the other diff is.
+    /// </summary>
+    [Fact]
+    public async Task A_small_and_an_offloaded_producer_integrate_together()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedRepositoryAsync(teamId, remote.Url, await SeedCredentialAsync(teamId), RepositoryPublishMode.Branch);
+        var runId = await SeedSupervisorRunAsync(teamId);
+
+        var (small, _) = await RunProducerAsync(teamId, repoId, "printf 'tiny\\n' > small.txt; echo edited");
+        var (large, _) = await RunProducerAsync(teamId, repoId, "head -c 9000 /dev/zero | tr '\\0' 'q' > large.txt; echo edited");
+
+        (await SingleManifestAsync(small, teamId)).PatchArtifactId.ShouldBeNull("the small producer's diff stayed inline");
+        (await SingleManifestAsync(large, teamId)).PatchArtifactId.ShouldNotBeNull("the large producer's diff was offloaded");
+
+        var context = ContextWith(runId, teamId, repoId,
+            plan: Plan(("small", null), ("large", null), ("dependent", new[] { "small", "large" })),
+            priorSpawns: await SucceededSpawn(teamId, ("small", small), ("large", large)));
+
+        await ExecuteSpawnAsync(context, "dependent");
+
+        var task = await SingleStagedTaskAsync(runId);
+        var integratedRef = task.Workspace!.Repositories.Single().Ref!;
+
+        (await remote.FileOnBranchAsync(integratedRef, "small.txt")).Trim().ShouldBe("tiny", "the inline-patch producer contributed alongside the offloaded one — one empty contribution would have aborted the whole set");
+        (await remote.FileOnBranchAsync(integratedRef, "large.txt")).Trim().ShouldBe(new string('q', 9000));
+    }
+
+    /// <summary>
+    /// The shared seam itself, driven directly against real producers instead of through staging: whichever carrier a
+    /// producer's diff actually landed in, <see cref="IAgentPatchReader"/> returns THAT one and only that one. The two
+    /// producers run the identical production capture path with only the diff SIZE changed, which is the whole
+    /// variable — the offload gate decides the carrier, and a reader that knows one carrier is blind to half of them.
+    /// </summary>
+    [Fact]
+    public async Task The_shared_patch_reader_returns_whichever_carrier_the_offload_gate_chose()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedRepositoryAsync(teamId, remote.Url, await SeedCredentialAsync(teamId), RepositoryPublishMode.PatchOnly);
+
+        var (small, _) = await RunProducerAsync(teamId, repoId, "printf 'inline only\\n' > small.txt; echo edited");
+        var (large, _) = await RunProducerAsync(teamId, repoId, "head -c 9000 /dev/zero | tr '\\0' 'z' > large.txt; echo edited");
+
+        var inlineSource = await PatchSourceOfAsync(small, teamId);
+        var offloadedSource = await PatchSourceOfAsync(large, teamId);
+
+        inlineSource.PatchArtifactId.ShouldBeNull("the sub-threshold diff was not offloaded — the carrier this seam exists to reach");
+        offloadedSource.PatchArtifactId.ShouldNotBeNull();
+
+        using var scope = _fixture.BeginScope();
+        var reader = scope.Resolve<IAgentPatchReader>();
+
+        (await reader.ReadAsync(teamId, inlineSource, CancellationToken.None))
+            .ShouldContain("small.txt", customMessage: "no artifact id ⇒ the diff lives in the producing run's result, which is exactly what the manifest cannot tell you");
+
+        (await reader.ReadAsync(teamId, offloadedSource, CancellationToken.None))
+            .ShouldContain("large.txt", customMessage: "an artifact id ⇒ the artifact store holds the whole diff — unchanged from the pre-fix behaviour");
+
+        (await reader.ReadAsync(Guid.NewGuid(), inlineSource, CancellationToken.None))
+            .ShouldBeEmpty("the inline read is team-scoped — another team's id must never resolve this run's diff");
+    }
+
+    /// <summary>The producer's manifest row projected onto the reader's coordinates, exactly as dependency staging projects it.</summary>
+    private async Task<AgentPatchSource> PatchSourceOfAsync(Guid agentRunId, Guid teamId)
+    {
+        var manifest = await SingleManifestAsync(agentRunId, teamId);
+
+        return new AgentPatchSource { AgentRunId = manifest.AgentRunId, RepositoryAlias = manifest.RepositoryAlias, PatchArtifactId = manifest.PatchArtifactId };
+    }
+
     [Fact]
     public async Task Two_disjoint_producers_integrate_onto_one_branch_the_dependent_clones()
     {
@@ -348,8 +466,9 @@ public sealed class SupervisorDependencyStagingFlowTests
         var repoId = await SeedRepositoryAsync(teamId, remote.Url, await SeedCredentialAsync(teamId), RepositoryPublishMode.Branch);
         var runId = await SeedSupervisorRunAsync(teamId);
 
-        // A defensive, should-never-happen state per I1: a manifest row recording a diff but with NEITHER a branch
-        // NOR a patch artifact. Seeded directly (bypassing the normal capture path) to prove the fail-closed guard.
+        // A defensive, should-never-happen state per I1: a manifest row recording a diff but with NO branch, NO patch
+        // artifact — and no agent run at all behind it, so no inline patch either. Seeded directly (bypassing the
+        // normal capture path) to prove the fail-closed guard now that a sub-threshold inline patch is a real carrier.
         var producerRunId = Guid.NewGuid();
         await SeedAnomalousManifestAsync(teamId, producerRunId, repoId);
 
@@ -363,7 +482,7 @@ public sealed class SupervisorDependencyStagingFlowTests
 
         using var doc = JsonDocument.Parse(spawnDecision.OutcomeJson!);
         doc.RootElement.GetProperty("blockedSubtasks").EnumerateArray().Single().GetProperty("reason").GetString()
-            .ShouldContain("neither a branch nor a patch was captured", customMessage: "the loud reason names exactly what went wrong");
+            .ShouldContain("no branch, no patch artifact and no inline patch", customMessage: "the loud reason names every carrier that was actually consulted — the old wording implied a patch might exist that staging simply never read, which for a sub-threshold diff was exactly true");
     }
 
     [Fact]
