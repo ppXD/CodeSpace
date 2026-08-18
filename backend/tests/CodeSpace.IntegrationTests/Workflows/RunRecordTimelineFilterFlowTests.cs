@@ -64,8 +64,17 @@ public sealed class RunRecordTimelineFilterFlowTests
         rows.ShouldAllBe(r => RunRecordTimelineMap.NarrativeRecordTypes.Contains(r.RecordType));
     }
 
+    /// <summary>
+    /// What this CAN pin: the predicate is evaluated by PostgreSQL, in the one shape an index on (run_id, record_type)
+    /// is able to answer, and the run's rows are still reached through a run_id index. What it deliberately does NOT
+    /// pin: WHICH run_id index the planner picks. That is a cost decision over table-wide statistics, and this table is
+    /// shared with the rest of the suite — an earlier revision asserted idx_wrr_run_type and failed on CI because the
+    /// planner served the same predicate from idx_wrr_run_sequence (which also satisfies the ORDER BY) as a heap
+    /// recheck filter. Both plans filter server-side; asserting the choice pins the planner, not the behaviour. The
+    /// scaling property that actually matters — dropped types never cross the wire — is pinned by the flood test above.
+    /// </summary>
     [Fact]
-    public async Task The_pushed_down_record_type_predicate_can_be_served_by_idx_wrr_run_type()
+    public async Task The_record_type_predicate_reaches_the_database_in_an_index_servable_shape()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var runId = await SeedRunAsync(teamId);
@@ -74,7 +83,8 @@ public sealed class RunRecordTimelineFilterFlowTests
 
         var plan = await ExplainNarrativeFilterAsync(runId);
 
-        plan.ShouldContain("idx_wrr_run_type", customMessage: $"the (run_id, record_type) predicate must be index-servable — a shape the index can't answer (a function over record_type, a client-evaluated list) sends the scan back to the heap. Plan was:\n{plan}");
+        plan.ShouldContain("record_type = ANY", customMessage: $"the type predicate must reach PostgreSQL as a plain equality-any over the column — a function over record_type, or a list the client evaluates, is neither pushed down nor index-servable. Plan was:\n{plan}");
+        plan.ShouldNotContain("Seq Scan on workflow_run_record", customMessage: $"the run's records must still be reached through a run_id index, never a full table scan. Plan was:\n{plan}");
     }
 
     /// <summary>The production source, resolved through DI exactly as the projector fans out to it — the run is team-prechecked upstream, so calling it directly mirrors production.</summary>
