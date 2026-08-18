@@ -109,7 +109,7 @@ public sealed record NativeRecordV1
     /// <summary>When capture observed the frame. Always known, and the only clock the capture side controls.</summary>
     public required DateTimeOffset IngestedAt { get; init; }
 
-    /// <summary>Byte offset of the ORIGINAL frame within its stream — what a re-attach resumes from, so a resumed capture neither duplicates nor skips.</summary>
+    /// <summary>Offset of the ORIGINAL frame within its stream: a per-stream cursor derived from the frames as delivered, NOT a byte-exact index into a spool file. A resume reads the log-capture plane's committed source head, never this — a writer that only sees delivered lines cannot know what the stream carried between them.</summary>
     public required long ByteOffset { get; init; }
 
     /// <summary>Byte length of the ORIGINAL frame in the stream. It differs from <see cref="SizeBytes"/> whenever the payload was masked or withheld, which is precisely how much was dropped.</summary>
