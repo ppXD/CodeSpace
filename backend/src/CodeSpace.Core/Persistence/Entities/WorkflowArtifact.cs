@@ -27,8 +27,17 @@ public class WorkflowArtifact : IEntity<Guid>
     /// <summary>Bytes for small artifacts (NULL when content lives at <see cref="StorageUrl"/>).</summary>
     public byte[]? InlineBytes { get; set; }
 
-    /// <summary>External storage URL for large artifacts (NULL when inline).</summary>
+    /// <summary>External storage URL for large artifacts held by the local blob backend (NULL when inline or routed).</summary>
     public string? StorageUrl { get; set; }
+
+    /// <summary>
+    /// The <c>artifact_object</c> this row's bytes were placed under when the team routes <c>workflow-artifact/v1</c>
+    /// through a configured storage profile (NULL when inline or on the local backend). The profile revisions those
+    /// bytes live under are recorded on the object's <c>artifact_location</c> rows; a read resolves through those
+    /// durable locations — never through the current route. The row records the object, not one chosen location, so
+    /// a second location for the same object (replication, backfill) would be an equally valid source for the read.
+    /// </summary>
+    public Guid? CasArtifactObjectId { get; set; }
 
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 

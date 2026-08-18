@@ -3335,6 +3335,18 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         {
             ledgerOutputs = await NodeOutputArtifacts.OffloadLargeAsync(_artifactStore, teamId, outputs, ArtifactStoreConfig.InlineThresholdBytes, cancellationToken).ConfigureAwait(false);
         }
+        catch (Workflows.Artifacts.Exceptions.ArtifactStorageDestinationUnavailableException ex)
+        {
+            // The team CONFIGURED a destination and it refused the bytes — an operator's misconfiguration, not
+            // transient IO, so it repeats for every node of every run until they fix it. Settling is still
+            // mandatory (the side effect already fired), but a LogWarning would leave the only symptom a green run
+            // over an empty destination. Record it so it reaches the run's own timeline.
+            _logger.LogError(ex, "Run {RunId} node {NodeId}: the configured storage destination refused the node's outputs ({Code}); settling with full inline outputs so the node never re-fires its side effect", runId, nodeId, DestinationProblemOf(ex));
+
+            await RecordStorageUnavailableAsync(runId, nodeId, iterationKey, ex, cancellationToken).ConfigureAwait(false);
+
+            ledgerOutputs = outputs;
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Run {RunId} node {NodeId}: output offload failed; writing node.completed with full inline outputs so the node is recorded settled and never re-fires its side effect", runId, nodeId);
@@ -3342,6 +3354,27 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         }
 
         await _recordLogger.NodeCompletedAsync(runId, nodeId, iterationKey, ledgerOutputs, routingHints, duration, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>WHICH refusal this was, as a stable token: routing policy refused before the provider was reached, or the transfer itself did not commit. The IFailure code is one constant for both, so it cannot tell the two apart.</summary>
+    private static string DestinationProblemOf(Workflows.Artifacts.Exceptions.ArtifactStorageDestinationUnavailableException ex) =>
+        ex.RoutingProblem?.ToString() ?? ex.TransferProblem?.ToString() ?? "Unknown";
+
+    /// <summary>
+    /// Append the storage-unavailable record, swallowing any failure of THAT write. This runs inside the offload
+    /// fail-open, whose whole purpose is that the node settles: a ledger hiccup while reporting a storage problem
+    /// must not stop node.completed from being written, or the node re-dispatches and re-fires its side effect.
+    /// </summary>
+    private async Task RecordStorageUnavailableAsync(Guid runId, string nodeId, string iterationKey, Workflows.Artifacts.Exceptions.ArtifactStorageDestinationUnavailableException ex, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _recordLogger.NodeStorageUnavailableAsync(runId, nodeId, iterationKey, ex.Message, DestinationProblemOf(ex), cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception recordFailure) when (recordFailure is not OperationCanceledException)
+        {
+            _logger.LogWarning(recordFailure, "Run {RunId} node {NodeId}: could not record the storage-unavailable signal; the node still settles", runId, nodeId);
+        }
     }
 
     /// <summary>

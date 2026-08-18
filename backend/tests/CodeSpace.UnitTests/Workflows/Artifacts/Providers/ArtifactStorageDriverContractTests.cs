@@ -77,6 +77,28 @@ public sealed class LocalRwxArtifactStorageDriverContractTests : ArtifactStorage
         head.Metadata.ETag.ShouldBe(put.Metadata.ETag);
     }
 
+    [Fact]
+    public async Task Local_open_read_serves_the_requested_window_without_the_bytes_before_it()
+    {
+        // The CAS range reader (IArtifactCasRangeReader) exists so a paging viewer costs the bytes it shows. That is
+        // only true while the driver honours Range: a driver that ignored it and returned the whole object would put
+        // the amplification straight back, silently, with every routed range read still returning correct bytes.
+        await using var driver = await CreateDriverAsync();
+        var content = Encoding.UTF8.GetBytes(new string('a', 100_000) + "NEEDLE" + new string('b', 100_000));
+        await using var input = new MemoryStream(content);
+        await driver.PutAsync(new ArtifactStoragePutRequest("range/window", input), CancellationToken.None);
+
+        var read = await driver.OpenReadAsync(new ArtifactStorageReadRequest("range/window") { Range = new ArtifactStorageByteRange(100_000, 6) }, CancellationToken.None);
+
+        read.ContentLength.ShouldBe(6, "the provider must deliver the window, not the object");
+        read.TotalLength.ShouldBe(content.LongLength, "the caller still learns the object's real length");
+        await using var window = read.Content!;
+        var bytes = new byte[6];
+        await window.ReadExactlyAsync(bytes, CancellationToken.None);
+        Encoding.UTF8.GetString(bytes).ShouldBe("NEEDLE");
+        (await window.ReadAsync(new byte[1], CancellationToken.None)).ShouldBe(0, "the window ends where it was asked to end");
+    }
+
     public void Dispose()
     {
         try { if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true); } catch { }

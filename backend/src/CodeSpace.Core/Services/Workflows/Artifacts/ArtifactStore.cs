@@ -2,6 +2,8 @@ using System.Security.Cryptography;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
+using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.Workflows.Artifacts;
@@ -12,19 +14,29 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts;
 /// existing id on duplicate.
 ///
 /// Bytes up to <see cref="ArtifactStoreConfig.InlineThresholdBytes"/> live inline in the DB row; larger payloads
-/// are offloaded to the <see cref="IArtifactBlobBackend"/> (out-of-band) and the row keeps only a
-/// <c>storage_url</c> reference. Either way the metadata row (sha, size, content type, tenant) is the durable
-/// source of truth.
+/// are offloaded out-of-band and the row keeps only a reference. Either way the metadata row (sha, size, content
+/// type, tenant) is the durable source of truth.
+///
+/// <para>An offloaded payload goes wherever the team's <c>workflow-artifact/v1</c> storage route says (see
+/// the <c>ArtifactStore.Routing</c> partial). With no route — the shipped state of every existing team —
+/// that is the <see cref="IArtifactBlobBackend"/> and a <c>storage_url</c>, unchanged. The threshold decision itself
+/// is untouched by routing: routing changes WHERE an offloaded blob goes, never WHETHER it is offloaded.</para>
 /// </summary>
-public sealed class ArtifactStore : IArtifactStore, IArtifactRangeReader, IScopedDependency
+public sealed partial class ArtifactStore : IArtifactStore, IArtifactRangeReader, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
     private readonly IArtifactBlobBackend _blobs;
+    private readonly IWorkflowArtifactDestinationResolver _destinations;
+    private readonly ArtifactRoutedPlane _routed;
+    private readonly TimeProvider _clock;
 
-    public ArtifactStore(CodeSpaceDbContext db, IArtifactBlobBackend blobs)
+    public ArtifactStore(CodeSpaceDbContext db, IArtifactBlobBackend blobs, IWorkflowArtifactDestinationResolver destinations, ArtifactRoutedPlane routed, TimeProvider clock)
     {
         _db = db;
         _blobs = blobs;
+        _destinations = destinations;
+        _routed = routed;
+        _clock = clock;
     }
 
     public async Task<Guid> PutAsync(Guid teamId, ReadOnlyMemory<byte> bytes, string contentType, CancellationToken cancellationToken)
@@ -50,16 +62,18 @@ public sealed class ArtifactStore : IArtifactStore, IArtifactRangeReader, IScope
             // matched), so restore the blob instead of failing: self-healing beats a dead reference. Content
             // correctness on the healthy path stays the read's verification; inline rows have nothing to check.
             if (existing.StorageUrl is { } url && !await _blobs.ExistsAsync(url, cancellationToken).ConfigureAwait(false))
-                await _blobs.WriteAsync(sha, bytes, cancellationToken).ConfigureAwait(false);
+                await RestoreLocalBlobAsync(teamId, sha, bytes, cancellationToken).ConfigureAwait(false);
 
             return existing.Id;
         }
 
-        // Size-routed storage: small payloads stay inline in the DB row; large ones are offloaded to the
-        // out-of-band backend (content-addressed by sha, so the write is idempotent) and the row keeps only the
-        // storage_url. Exactly one of inline_bytes / storage_url is set (the table's CHECK enforces it).
+        // Size-routed storage: small payloads stay inline in the DB row; large ones are offloaded out-of-band
+        // (content-addressed by sha, so the write is idempotent) and the row keeps only the reference. Exactly one of
+        // inline_bytes / storage_url / cas_artifact_object_id is set (the table's CHECK enforces it).
         var offload = bytes.Length > ArtifactStoreConfig.InlineThresholdBytes;
-        var storageUrl = offload ? await _blobs.WriteAsync(sha, bytes, cancellationToken).ConfigureAwait(false) : null;
+        var placement = offload
+            ? await PlaceOffloadedAsync(new OffloadedWrite(teamId, sha, bytes, contentType), cancellationToken).ConfigureAwait(false)
+            : ArtifactPlacement.Inline;
 
         var artifact = new WorkflowArtifact
         {
@@ -69,7 +83,8 @@ public sealed class ArtifactStore : IArtifactStore, IArtifactRangeReader, IScope
             ContentType = contentType,
             SizeBytes = bytes.Length,
             InlineBytes = offload ? null : bytes.ToArray(),
-            StorageUrl = storageUrl,
+            StorageUrl = placement.StorageUrl,
+            CasArtifactObjectId = placement.CasArtifactObjectId,
             CreatedAt = DateTimeOffset.UtcNow,
         };
 
@@ -97,6 +112,20 @@ public sealed class ArtifactStore : IArtifactStore, IArtifactRangeReader, IScope
         }
     }
 
+    /// <summary>
+    /// Puts a local row's missing blob back — but only while local disk is still where this team's new offloaded bytes
+    /// belong. Once the team routes this data class, a restore would mint fresh local-disk bytes for a routed team,
+    /// which is the same silent fallback the write path refuses; the dead reference then surfaces as a typed read
+    /// failure instead of being papered over. Refusing here rather than throwing keeps the dedup contract intact:
+    /// PutAsync still returns the existing id for content the store already knows.
+    /// </summary>
+    private async Task RestoreLocalBlobAsync(Guid teamId, string sha, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken)
+    {
+        if (await _destinations.ResolveAsync(teamId, cancellationToken).ConfigureAwait(false) is not WorkflowArtifactDestination.Local) return;
+
+        await _blobs.WriteAsync(sha, bytes, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<ArtifactBytes?> GetBytesAsync(Guid teamId, Guid artifactId, CancellationToken cancellationToken)
     {
         var row = await _db.WorkflowArtifact.AsNoTracking()
@@ -106,11 +135,8 @@ public sealed class ArtifactStore : IArtifactStore, IArtifactRangeReader, IScope
 
         if (row == null) return null;
 
-        // Inline rows carry their bytes directly; offloaded rows resolve their storage_url through the backend.
-        var bytes = row.InlineBytes
-            ?? await _blobs.ReadAsync(
-                row.StorageUrl ?? throw new InvalidOperationException($"Artifact {artifactId} has neither inline bytes nor a storage_url."),
-                cancellationToken).ConfigureAwait(false);
+        // Inline rows carry their bytes directly; offloaded rows resolve through whichever destination THEY recorded.
+        var bytes = row.InlineBytes ?? await ReadOffloadedAsync(teamId, row, cancellationToken).ConfigureAwait(false);
 
         // P2 slice 2 (a read proves its bytes): the row's sha/size are the artifact's IDENTITY — the store's own
         // claims about the content. A blob that no longer matches (a corrupted/truncated file, a foreign write
@@ -154,7 +180,7 @@ public sealed class ArtifactStore : IArtifactStore, IArtifactRangeReader, IScope
 
         var row = await _db.WorkflowArtifact.AsNoTracking()
             .Where(a => a.Id == artifactId && a.TeamId == teamId)
-            .Select(a => new { a.Sha256, a.ContentType, a.SizeBytes, a.InlineBytes, a.StorageUrl })
+            .Select(a => new { a.Sha256, a.ContentType, a.SizeBytes, a.InlineBytes, a.StorageUrl, a.CasArtifactObjectId })
             .SingleOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false);
 
@@ -179,7 +205,9 @@ public sealed class ArtifactStore : IArtifactStore, IArtifactRangeReader, IScope
             }
             else
             {
-                var range = await _blobs.ReadRangeAsync(row.StorageUrl ?? throw new InvalidOperationException("Artifact storage locator is missing."), offset, length, cancellationToken).ConfigureAwait(false);
+                var range = row.StorageUrl is { } url
+                    ? await _blobs.ReadRangeAsync(url, offset, length, cancellationToken).ConfigureAwait(false)
+                    : await ReadRoutedRangeAsync(RoutedReadFor(teamId, artifactId, row.CasArtifactObjectId), offset, length, cancellationToken).ConfigureAwait(false);
                 bytes = range.Bytes;
                 observedLength = range.TotalLength;
             }
@@ -196,6 +224,17 @@ public sealed class ArtifactStore : IArtifactStore, IArtifactRangeReader, IScope
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (ArtifactContentUnavailableException ex)
+        {
+            // The routed path already classified the storage-plane fact; a bounded read reports it, never throws.
+            return Unavailable(RangeStateOf(ex.Kind), row.SizeBytes, row.Sha256, row.ContentType);
+        }
+        catch (InvalidDataException)
+        {
+            // A verifying stream reports a truncated or digest-mismatched object this way, and InvalidDataException
+            // derives from SystemException — the IOException arm below would never have caught it.
+            return Unavailable(ArtifactRangeReadState.IntegrityFailure, row.SizeBytes, row.Sha256, row.ContentType);
         }
         catch (FileNotFoundException)
         {
@@ -229,6 +268,9 @@ public sealed class ArtifactStore : IArtifactStore, IArtifactRangeReader, IScope
 
     private static ArtifactRangeReadResult Unavailable(ArtifactRangeReadState state, long totalLength, string sha256, string contentType) =>
         ArtifactRangeReadResult.Failed(state, totalLength, sha256, contentType);
+
+    private static RoutedRead RoutedReadFor(Guid teamId, Guid artifactId, Guid? artifactObjectId) =>
+        new(teamId, artifactId, artifactObjectId ?? throw new InvalidOperationException("Artifact storage locator is missing."));
 
     /// <summary>
     /// SHA-256 of <paramref name="bytes"/> as hex-lowercase. Deterministic, no salt — the

@@ -6,8 +6,9 @@ using System.Text.Json;
 namespace CodeSpace.Core.Services.Workflows.Artifacts.Providers.Local;
 
 /// <summary>
-/// Inert factory for the profile-driven local RWX contract. Nothing resolves this factory into the current
-/// <see cref="ArtifactStore"/> path; it exists so the module descriptor points at a real streaming implementation.
+/// Factory for the profile-driven local RWX contract. A team that routes a data class at a profile of this provider
+/// reaches this driver through the CAS runtime — including <see cref="ArtifactStore"/>, whose offloaded writes resolve
+/// the <c>workflow-artifact/v1</c> route before they place any bytes.
 /// The configured root is trusted operator infrastructure and must not be writable by untrusted tenants (including
 /// the ability to introduce symlinks); object keys are still lexically contained beneath that root.
 /// </summary>
