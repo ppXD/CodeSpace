@@ -404,6 +404,104 @@ public sealed class SupervisorDependencyStagingFlowTests
         (await remote.FileOnBranchAsync(integratedRef, "p2.txt")).Trim().ShouldBe(new string('q', 9000));
     }
 
+    /// <summary>
+    /// The P1 live-run break, at the only tier that can show it: TWO dependents staged in the SAME turn over
+    /// DIFFERENT producer sets. With the handoff branch keyed on run + turn alone both asked for one name, so the
+    /// second integration found a remote branch carrying the first's (different) tree,
+    /// <c>LocalGitBranchIntegrator.ReconcileExistingBranchAsync</c> correctly refused to clobber it, and
+    /// <c>Spawn</c>'s correct abort-on-blocked rule staged ZERO agents — including <c>d1</c>, whose own staging
+    /// had already completed cleanly. None of those rules changed; the manufactured collision did.
+    ///
+    /// <para>Mutation check: revert the branch name to <c>…/turn{N}</c> and this goes RED with zero staged tasks.
+    /// No unit test can reach it — the collision only exists once a real integrator really pushes a real ref.</para>
+    /// </summary>
+    [Fact]
+    public async Task Two_dependents_over_different_producer_sets_both_stage_in_one_turn()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedRepositoryAsync(teamId, remote.Url, await SeedCredentialAsync(teamId), RepositoryPublishMode.Branch);
+        var runId = await SeedSupervisorRunAsync(teamId);
+
+        // Each dependent needs ≥2 producers to reach the INTEGRATION arm (a lone branch-producer takes the verbatim
+        // branch and never touches the integrator), and each diff must clear the 8KB inline-offload threshold.
+        var (p1, _) = await RunProducerAsync(teamId, repoId, "head -c 9000 /dev/zero | tr '\\0' 'a' > p1.txt; echo edited");
+        var (p2, _) = await RunProducerAsync(teamId, repoId, "head -c 9000 /dev/zero | tr '\\0' 'b' > p2.txt; echo edited");
+        var (p3, _) = await RunProducerAsync(teamId, repoId, "head -c 9000 /dev/zero | tr '\\0' 'c' > p3.txt; echo edited");
+        var (p4, _) = await RunProducerAsync(teamId, repoId, "head -c 9000 /dev/zero | tr '\\0' 'd' > p4.txt; echo edited");
+
+        var context = ContextWith(runId, teamId, repoId,
+            plan: Plan(("p1", null), ("p2", null), ("p3", null), ("p4", null), ("d1", new[] { "p1", "p2" }), ("d2", new[] { "p3", "p4" })),
+            priorSpawns: await SucceededSpawn(teamId, ("p1", p1), ("p2", p2), ("p3", p3), ("p4", p4)));
+
+        await ExecuteSpawnAsync(context, new[] { "d1", "d2" });
+
+        var tasks = await StagedTasksAsync(runId);
+        tasks.Count.ShouldBe(2, "both dependents stage — a collision on one branch name blocked the turn's spawn entirely, staging neither");
+
+        var d1Ref = tasks.Single(t => t.SubtaskId == "d1").Workspace!.Repositories.Single().Ref!;
+        var d2Ref = tasks.Single(t => t.SubtaskId == "d2").Workspace!.Repositories.Single().Ref!;
+
+        d1Ref.ShouldNotBe(d2Ref, "two different producer sets integrate to two different trees, so they must never contend for one ref");
+
+        (await remote.FileOnBranchAsync(d1Ref, "p1.txt")).Trim().ShouldBe(new string('a', 9000), "d1's branch carries exactly ITS producers' work");
+        (await remote.FileOnBranchAsync(d1Ref, "p2.txt")).Trim().ShouldBe(new string('b', 9000));
+        (await remote.FileOnBranchAsync(d2Ref, "p3.txt")).Trim().ShouldBe(new string('c', 9000), "d2's branch carries exactly ITS producers' work");
+        (await remote.FileOnBranchAsync(d2Ref, "p4.txt")).Trim().ShouldBe(new string('d', 9000));
+    }
+
+    /// <summary>
+    /// The idempotent-re-push pin at the real-git tier: two dependents whose producer sets are EQUAL but DECLARED IN
+    /// OPPOSITE ORDER. The digest is taken over the sorted set, so both resolve the same NAME; these two producers
+    /// touch disjoint files, so the second integration reproduces the identical tree, and the UNCHANGED no-clobber
+    /// reconcile short-circuits on tree equality instead of refusing.
+    ///
+    /// <para>Both failure modes this fix must not introduce are visible here: an order-SENSITIVE digest forks a
+    /// second branch (the remote-branch count goes to 2), and a discriminator that broke idempotence — anything
+    /// per-dependent, or a per-process hash — makes the second dependent's push a clobber refusal, which blocks the
+    /// spawn and leaves ZERO staged tasks.</para>
+    ///
+    /// <para>What this does NOT pin, because it is not true: that INTEGRATING a set is order-invariant.
+    /// <c>LocalGitBranchIntegrator.ApplyAllAsync</c> applies in the declared order via <c>git apply --3way</c>, which
+    /// does not commute in general — these two producers write disjoint new files, i.e. the case that commutes by
+    /// construction. A non-commuting set presented in two orders shares this name and then diverges, at which point
+    /// the tree-equality reconcile refuses the second push and the staging BLOCKS — today's behaviour under the
+    /// per-turn name, and never a graft. Pinning that case needs its own row (a producer renaming a file another
+    /// appends to); it is not pinned here and this comment must not be read as if it were.</para>
+    /// </summary>
+    [Fact]
+    public async Task Two_dependents_over_the_same_producer_set_share_one_branch_and_the_second_push_short_circuits()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedRepositoryAsync(teamId, remote.Url, await SeedCredentialAsync(teamId), RepositoryPublishMode.Branch);
+        var runId = await SeedSupervisorRunAsync(teamId);
+
+        var (p1, _) = await RunProducerAsync(teamId, repoId, "head -c 9000 /dev/zero | tr '\\0' 'a' > p1.txt; echo edited");
+        var (p2, _) = await RunProducerAsync(teamId, repoId, "head -c 9000 /dev/zero | tr '\\0' 'b' > p2.txt; echo edited");
+
+        var context = ContextWith(runId, teamId, repoId,
+            plan: Plan(("p1", null), ("p2", null), ("d1", new[] { "p1", "p2" }), ("d2", new[] { "p2", "p1" })),
+            priorSpawns: await SucceededSpawn(teamId, ("p1", p1), ("p2", p2)));
+
+        await ExecuteSpawnAsync(context, new[] { "d1", "d2" });
+
+        var tasks = await StagedTasksAsync(runId);
+        tasks.Count.ShouldBe(2, "the second dependent re-pushed the IDENTICAL tree under the identical name — the reconcile short-circuits on that, it does not refuse it");
+
+        var d1Ref = tasks.Single(t => t.SubtaskId == "d1").Workspace!.Repositories.Single().Ref!;
+        tasks.Single(t => t.SubtaskId == "d2").Workspace!.Repositories.Single().Ref.ShouldBe(d1Ref, "the same producers in a different declared order inherit the same work, so they legitimately share one branch");
+
+        (await remote.BranchesAsync()).Count(b => b.StartsWith("codespace/handoff/", StringComparison.Ordinal))
+            .ShouldBe(1, "exactly ONE handoff branch exists on the remote — an order-sensitive digest would have forked a second, redundant one for the identical set");
+    }
+
     [Fact]
     public async Task Two_conflicting_producers_block_the_spawn_and_the_existing_resolve_verb_can_reconcile_it()
     {
@@ -514,12 +612,15 @@ public sealed class SupervisorDependencyStagingFlowTests
     // ─── Drive the real executor ──────────────────────────────────────────────────
 
     /// <summary>Execute a Spawn decision through the real executor, returning it as a TERMINAL <see cref="SupervisorPriorDecision"/> — ready to both inspect (OutcomeJson) and feed back in as a later turn's prior tape (e.g. for resolve to read its conflict).</summary>
-    private async Task<SupervisorPriorDecision> ExecuteSpawnAsync(SupervisorTurnContext context, string subtaskId, IReadOnlyList<SupervisorAgentDispatch>? agents = null)
+    private Task<SupervisorPriorDecision> ExecuteSpawnAsync(SupervisorTurnContext context, string subtaskId, IReadOnlyList<SupervisorAgentDispatch>? agents = null) => ExecuteSpawnAsync(context, new[] { subtaskId }, agents);
+
+    /// <summary>The K-at-once shape: ONE turn's spawn fanning out over several subtask ids — the only way to exercise what two dependents staged in the SAME turn do to each other.</summary>
+    private async Task<SupervisorPriorDecision> ExecuteSpawnAsync(SupervisorTurnContext context, IReadOnlyList<string> subtaskIds, IReadOnlyList<SupervisorAgentDispatch>? agents = null)
     {
         using var scope = _fixture.BeginScope();
         var executor = scope.Resolve<ISupervisorActionExecutor>();
 
-        var payload = JsonSerializer.Serialize(new SupervisorSpawnPayload { SubtaskIds = new[] { subtaskId }, Agents = agents }, AgentJson.Options);
+        var payload = JsonSerializer.Serialize(new SupervisorSpawnPayload { SubtaskIds = subtaskIds, Agents = agents }, AgentJson.Options);
         var decision = new SupervisorDecision { Kind = SupervisorDecisionKinds.Spawn, PayloadJson = payload };
 
         var execution = await executor.ExecuteAsync(decision, context, CancellationToken.None);
@@ -812,6 +913,10 @@ public sealed class SupervisorDependencyStagingFlowTests
         }
 
         public Task<string> FileOnBranchAsync(string branch, string file) => RunGitAsync(_root, "--git-dir", _bare, "show", $"{branch}:{file}");
+
+        /// <summary>Every branch the remote actually carries — real-git ground truth for "how many handoff branches did this turn create".</summary>
+        public async Task<IReadOnlyList<string>> BranchesAsync() =>
+            (await RunGitAsync(_root, "--git-dir", _bare, "for-each-ref", "--format=%(refname:short)", "refs/heads")).Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
         private static async Task<string> RunGitAsync(string workdir, params string[] args)
         {

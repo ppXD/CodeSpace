@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Messages.Agents;
 using Microsoft.Extensions.Logging;
@@ -201,7 +203,7 @@ public sealed partial class RealSupervisorActionExecutor
         foreach (var producer in producers)
             contributions.Add(new BranchContribution
             {
-                Label = producer.AgentRunId?.ToString() ?? producer.Id.ToString(),
+                Label = ProducerLabel(producer),
                 SourceRepositoryId = repositoryId,
                 BaseSha = producer.BaseSha,
                 Patch = await _patches.ReadAsync(context.TeamId, PatchSourceFor(producer), cancellationToken).ConfigureAwait(false),
@@ -216,9 +218,7 @@ public sealed partial class RealSupervisorActionExecutor
             BaseSha = baseSha!,
             Token = workspace.Token,
             TokenUsername = workspace.TokenUsername,
-            // Per-turn, not per-run (mirrors .Integrate.cs's IntegrationBranch): a run may stage several dependency
-            // handoffs across turns, each over a possibly larger/different producer set → each gets its own branch.
-            IntegrationBranch = $"codespace/handoff/{context.SupervisorRunId:N}/turn{context.TurnNumber}",
+            IntegrationBranch = HandoffIntegrationBranch(context.SupervisorRunId, context.TurnNumber, repositoryId, contributions.Select(c => c.Label)),
             Depth = 0,
             Contributions = contributions,
         };
@@ -253,6 +253,67 @@ public sealed partial class RealSupervisorActionExecutor
 
         return new DependencyStagingResult { Ref = branch, GoalFoldText = FoldIntegratedProducers(producers, branch) };
     }
+
+    /// <summary>
+    /// The handoff integration branch for ONE dependent, discriminated by WHAT it integrates — the target repository
+    /// and the producer set — rather than by the turn alone. Keyed on run + turn only, EVERY dependent staged in one
+    /// turn asked for the SAME name — so the second one's integration found a remote branch carrying the FIRST one's
+    /// (different) tree and <see cref="IBranchIntegrator"/>'s no-clobber reconcile correctly refused it, which
+    /// <c>.Spawn.cs</c> correctly turns into a whole-turn abort. A manufactured name collision therefore staged ZERO
+    /// agents, including the dependent whose own staging was clean. Nothing about those two rules changes here; the
+    /// collision does.
+    ///
+    /// <para><b>Idempotent re-push</b> (the property the reconcile needs): the digest is a pure content hash of the
+    /// repository and the producer identities, so an identical (repository, set) always yields an identical name and
+    /// re-integrates the identical patches, and the reconcile short-circuits on tree equality exactly as before —
+    /// which is also why the discriminator is the producer set and NOT anything per-dependent (a subtask id, an
+    /// index, a fresh guid would fork a second branch for the same work and break re-execution of the same turn).
+    /// <b>Distinctness</b>: different sets, and the same set against a different repository, hash differently, so
+    /// they never contend for one ref at all.</para>
+    ///
+    /// <para>A shared name is never a shared TREE by assumption: the apply is order-sensitive
+    /// (<c>LocalGitBranchIntegrator.ApplyAllAsync</c> runs <c>git apply --3way</c> in the declared order, which does
+    /// not commute in general), so two dependents that share a name can still integrate to different trees — and
+    /// <c>ReconcileExistingBranchAsync</c> is gated on tree equality, not on the name, so the second one is REFUSED
+    /// and its staging blocks. That is the same degradation the per-turn name already produced, and it is the reason
+    /// this change is safe to make without touching the reconcile: the failure mode stays a block, never a graft.</para>
+    ///
+    /// <para>The turn number stays for the operator scanning branches, and keeps this change purely ADDITIVE — a name
+    /// written before it (<c>…/turn4</c>) can never equal one written after (<c>…/turn4-{12 hex}</c>), so a run
+    /// resuming across the change creates its branch instead of colliding with the one its own earlier turn pushed.</para>
+    /// </summary>
+    internal static string HandoffIntegrationBranch(Guid supervisorRunId, int turnNumber, Guid repositoryId, IEnumerable<string> producerLabels) =>
+        $"codespace/handoff/{supervisorRunId:N}/turn{turnNumber}-{ProducerSetDigest(repositoryId, producerLabels)}";
+
+    /// <summary>
+    /// A short, deterministic digest of WHAT this handoff integrates: SHA-256 over the target repository followed by
+    /// the newline-joined ordinal-sorted producer labels, truncated to 12 lowercase hex chars (48 bits — a collision
+    /// within one run's handoffs is not a real risk, and the branch stays readable).
+    ///
+    /// <para>The <b>repository</b> is in it because a producer label is an agent RUN id, which is repository-agnostic,
+    /// while <c>.Spawn.cs</c> resolves the target repository PER SUBTASK — so two dependents in one turn can declare
+    /// the identical <c>dependsOn</c> and still target different repositories, for which
+    /// <see cref="ResolveProducerManifestsAsync"/> selects different manifest rows and therefore integrates different
+    /// patches onto a different tree. Two repository rows may carry ONE clone URL (the repositories table is unique on
+    /// provider instance + external id, never on URL), and there those two trees would meet on one ref.</para>
+    ///
+    /// <para>The labels are <b>sorted</b> because the order a plan happened to declare its <c>dependsOn</c> in is
+    /// re-derived every turn by <see cref="SupervisorDependencyGate.LatestSucceededAgentRunIds"/>, so an
+    /// order-sensitive name would fork a redundant branch for the identical set. A content hash rather than
+    /// <c>GetHashCode</c>, which .NET randomizes per process — a run resuming on another worker must compute the
+    /// same name for the same producers or the idempotent re-push above silently stops holding.</para>
+    /// </summary>
+    private static string ProducerSetDigest(Guid repositoryId, IEnumerable<string> producerLabels)
+    {
+        var canonical = string.Join("\n", producerLabels.OrderBy(label => label, StringComparer.Ordinal).Prepend(repositoryId.ToString("N")));
+
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)))[..ProducerSetDigestLength].ToLowerInvariant();
+    }
+
+    private const int ProducerSetDigestLength = 12;
+
+    /// <summary>The identity ONE producer contributes under — its agent run, else its own manifest row. Shared by the contribution's <see cref="BranchContribution.Label"/> and the branch digest, so the branch name can never name a different set than the one actually applied onto it.</summary>
+    internal static string ProducerLabel(Persistence.Entities.PublishManifest producer) => producer.AgentRunId?.ToString() ?? producer.Id.ToString();
 
     private static DependencyStagingResult BlockedResult(string reason, IReadOnlyList<string>? conflictedFiles = null, IReadOnlyList<string>? preservedBranches = null) => new()
     {
