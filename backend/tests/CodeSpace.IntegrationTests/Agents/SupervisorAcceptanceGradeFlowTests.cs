@@ -494,6 +494,6 @@ public sealed class SupervisorAcceptanceGradeFlowTests
 
         public SandboxSpec BuildInvocation(AgentTask task) => throw new NotSupportedException();
         public IReadOnlyList<CodeSpace.Messages.Agents.AgentEvent> ParseEvents(string rawLine) => throw new NotSupportedException();
-        public AgentRunResult BuildResult(CodeSpace.Core.Services.Agents.AgentResultFold fold, int exitCode) => throw new NotSupportedException();
+        public CodeSpace.Core.Services.Agents.IAgentEventFolder CreateFolder() => throw new NotSupportedException();
     }
 }

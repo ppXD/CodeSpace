@@ -18,8 +18,8 @@ public class AgentHarnessRegistryTests
 
         public SandboxSpec BuildInvocation(AgentTask task) => new() { Command = "x" };
         public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) => Array.Empty<AgentEvent>();
-        public AgentRunResult BuildResult(AgentResultFold fold, int exitCode) =>
-            new() { Status = AgentRunStatus.Succeeded, ExitReason = "completed" };
+        public IAgentEventFolder CreateFolder() => new TestEventFolder((fold, exitCode) =>
+            new() { Status = AgentRunStatus.Succeeded, ExitReason = "completed" });
     }
 
     [Fact]

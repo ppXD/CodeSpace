@@ -267,44 +267,7 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
         return new[] { new AgentEvent { Kind = AgentEventKind.Warning, Text = type, Data = root } };   // unknown → surfaced, never dropped
     }
 
-    public AgentRunResult BuildResult(AgentResultFold fold, int exitCode)
-    {
-        var changedFiles = fold.ChangedFiles;
-
-        // The fallbacks chain over the LAST EVENT of each kind, so a FinalSummary whose text is blank still wins
-        // (LastTextOf returns "" for a kind that was seen blank, null only for one never seen) — the harness reports
-        // what the CLI actually said last, never a nicer-looking earlier line.
-        var summary = fold.LastTextOf(AgentEventKind.FinalSummary)
-                      ?? fold.LastTextOf(AgentEventKind.Completed)
-                      ?? fold.LastTextOf(AgentEventKind.AssistantMessage);
-
-        // D3b-i: cost-accounting figure — Claude's final result line carries a usage object; the fold
-        // tolerantly extracts input/output tokens from it. Null when the stream carried none. On failure too.
-        var usage = fold.TokenUsage;
-
-        // P3.1a: capture the CLI session id (Claude's result line carries session_id) — the handle a rerun
-        // threads back as `claude --resume <id>` to CONTINUE this conversation. Null when the stream carried none.
-        var sessionId = fold.SessionId;
-        var model = fold.Model;
-
-        // exitCode==0 only means the CLI process itself didn't crash — Claude Code's own result line can still
-        // carry is_error:true (e.g. a gateway 429 mid-turn), which IsErrorResult already normalizes into an
-        // Error event above. Trusting the exit code alone would silently report that failed turn as Succeeded.
-        if (exitCode == 0 && !fold.ReportedFailure)
-            return new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = summary, ChangedFiles = changedFiles, TokenUsage = usage, SessionId = sessionId, Model = model };
-
-        // Surface the most actionable text we have: an explicit Error event, else the CLI's final
-        // message (on a non-zero exit that's the failure reason — e.g. a provider 401), else the bare
-        // exit code. Folding the summary in here means it reaches AgentRun.error and the node's failure
-        // message, instead of the run failing with an opaque "claude exited with code 1".
-        var error = fold.LastTextOf(AgentEventKind.Error)
-                    ?? (string.IsNullOrWhiteSpace(summary) ? null : summary)
-                    ?? $"claude exited with code {Sandbox.SandboxExitCode.Describe(exitCode)}";
-
-        var exitReason = exitCode != 0 ? "non-zero-exit" : "harness-reported-failure";
-
-        return new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = exitReason, Summary = summary, ChangedFiles = changedFiles, Error = error, TokenUsage = usage, SessionId = sessionId, Model = model };
-    }
+    public IAgentEventFolder CreateFolder() => new ClaudeCodeResultFolder();
 
     /// <summary>Direct Anthropic, or any Anthropic-compatible gateway/proxy via a base-URL + auth-token override ("Custom").</summary>
     public IReadOnlyList<string> SupportedProviders { get; } = new[] { AnthropicProvider, "Custom" };
