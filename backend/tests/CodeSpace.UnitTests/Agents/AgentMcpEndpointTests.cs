@@ -148,7 +148,7 @@ public class AgentMcpEndpointTests
         using (var client = await ConnectAsync(socketPath))
         {
             await SendLineAsync(client, "wrong-token");
-            await SendLineAsync(client, """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}""");
+            await TrySendLineAsync(client, """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}""");
             await Task.Delay(150);
         }
 
@@ -271,7 +271,9 @@ public class AgentMcpEndpointTests
     ///
     /// <para>Only used for a send whose whole purpose is "give a still-serving endpoint something to reply to".
     /// The FIRST send must still throw if it fails — that one has to reach the endpoint for the test to mean
-    /// anything, which is why <see cref="SendLineAsync"/> stays strict.</para>
+    /// anything, which is why <see cref="SendLineAsync"/> stays strict. EVERY post-rejection send belongs here:
+    /// the evidence test kept the strict helper for its second write and reddened main the same way, on a wave
+    /// touching nothing near sockets.</para>
     /// </summary>
     private static async Task TrySendLineAsync(Socket socket, string line)
     {
