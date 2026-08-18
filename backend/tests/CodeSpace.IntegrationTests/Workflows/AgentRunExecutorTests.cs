@@ -539,7 +539,7 @@ public class AgentRunExecutorTests
         // new default doesn't regress the common case: a real run through the actual durable/watchdog-bearing
         // AttachAsync path (the same one AgentRunExecutor uses in production) still succeeds normally when it emits
         // output well inside the (10-minute) default window. The kill mechanism itself is proven generically by the
-        // existing LocalProcessRunnerEnvScrubTests C3 suite for whatever window IdleTimeout() returns.
+        // existing LocalProcessRunnerEnvScrubTests C3 suite for whatever window NoProgressWindow() returns.
         if (OperatingSystem.IsWindows()) return;
 
         var original = Environment.GetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar);

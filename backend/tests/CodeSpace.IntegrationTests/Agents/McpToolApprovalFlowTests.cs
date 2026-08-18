@@ -4,6 +4,8 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Mcp;
+using CodeSpace.Core.Services.Agents.Sandbox;
+using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Tools;
 using CodeSpace.Core.Services.Chat;
 using CodeSpace.Core.Services.Chat.Interactions;
@@ -494,6 +496,66 @@ public class McpToolApprovalFlowTests
         result.GetProperty("isError").GetBoolean().ShouldBeFalse("the approved call returns the real result back over the UDS");
         Text(result).ShouldContain("opened");
         tool.CallCount.ShouldBe(1, "exactly one execution, end-to-end through the real endpoint + handler + respond path");
+    }
+
+    [Fact]
+    public async Task Over_the_real_UDS_endpoint_a_call_parked_on_a_human_approval_keeps_its_progress_lease_fresher_than_the_no_progress_window()
+    {
+        // THE 600s-VERSUS-600s COLLISION, end to end. DefaultApprovalBoundSeconds and the default no-progress window are
+        // both 600s, so a run parked on a human decision used to reach the stall watchdog at the very instant its
+        // approval could still arrive — and be killed for the platform's own latency. The park emits NOTHING to the
+        // run's spool, so spool bytes (the watchdog's only signal before this) could never save it.
+        //
+        // The assertion is the exact quantity the observer compares before concluding Stalled: the AGE of this run's
+        // progress lease. It must stay under the window for the whole park (here a scaled window, so the test runs in
+        // seconds rather than ten minutes), and the approval must still land and return the real result.
+        if (OperatingSystem.IsWindows()) return;
+        if (!System.Net.Sockets.Socket.OSSupportsUnixDomainSockets) return;
+
+        var (teamId, ownerId, channelId) = await SeedTeamChannelAsync();
+        var runId = Guid.NewGuid();
+        var tool = new CountingWriteTool();
+
+        // The lease the OBSERVER would read, resolved from the run id exactly as AgentRunExecutor stamps it onto the
+        // durable handle at launch — if the endpoint renewed some other directory this read would find nothing.
+        var lease = LocalProcessRunner.ProgressLeaseFor(runId);
+        var window = AgentProgressLease.RenewalHeartbeat * 3;
+
+        var socketPath = Path.Combine(Path.GetTempPath(), $"cs-lease-approval-{Guid.NewGuid():N}.sock");
+        var token = $"tok-{Guid.NewGuid():N}";
+
+        try
+        {
+            await using var endpoint = NewEndpoint(runId, teamId, channelId, socketPath, token, tool);
+
+            await using var client = await UdsClient.ConnectAsync(socketPath, token);
+
+            var call = Task.Run(() => client.CallToolAsync(1, "git.open_pr", new { branch = "main" }));
+
+            var (_, messageId) = await WaitForPostedCardAsync(teamId, runId);
+
+            await Task.Delay(window * 2);   // stay parked for TWICE the window — the shape the watchdog used to kill
+
+            call.IsCompleted.ShouldBeFalse("the call is genuinely parked on the human decision, emitting nothing");
+
+            var renewedAt = lease.LastRenewalUtc();
+
+            renewedAt.ShouldNotBeNull("a parked platform request must renew the run's progress lease — otherwise the watchdog is racing the approval again");
+            (DateTimeOffset.UtcNow - renewedAt!.Value).ShouldBeLessThan(window,
+                customMessage: "the lease age is what the observer tests before killing a run; parked past the window it must still read as fresh");
+
+            await RespondAsync(teamId, messageId, ApproveKey, ownerId);
+
+            var result = await call;
+
+            result.GetProperty("isError").GetBoolean().ShouldBeFalse("the approval still lands and the call returns the real result — renewing the lease changed nothing about the decision path");
+            tool.CallCount.ShouldBe(1, "exactly one execution after the human approved");
+        }
+        finally
+        {
+            // The lease materialised the run-scoped spool dir; reap it (Rule 12.3) so a run of this test leaves nothing.
+            try { Directory.Delete(LocalProcessRunner.SpoolDirectoryFor(runId.ToString("N")), recursive: true); } catch { /* best-effort */ }
+        }
     }
 
     // ─── Build the handler / endpoint with the full approval surface ─────────────

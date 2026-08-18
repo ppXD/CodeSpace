@@ -119,4 +119,20 @@ public sealed record SandboxHandle
 
     /// <summary>The primary repo's cloned HEAD revision (<c>WorkspaceRepositoryHandle.BaseSha</c>) at launch — the base a re-attach diffs <see cref="WorkspaceDirectory"/> against. Null exactly when <see cref="WorkspaceDirectory"/> is.</summary>
     public string? WorkspaceBaseSha { get; init; }
+
+    /// <summary>
+    /// The RUN-scoped directory holding this run's progress lease — the markers host-side components stamp to say
+    /// "this run is working" (see <c>AgentProgressSignal</c>), which the observer reads before concluding a run is
+    /// <see cref="SandboxStatus.Stalled"/>. Persisting it on the handle is what makes the lease survive the thing it
+    /// exists for: a worker restart while a run is parked on a human approval hands the FRESH observer the same lease
+    /// the still-open platform endpoint keeps renewing, instead of an empty in-memory one it would kill the run over.
+    /// Run-scoped rather than round-scoped, matching the platform endpoint that renews it (one per run, outliving a
+    /// revise round). Null on a handle written before the lease existed, and for a runner that keeps no lease.
+    ///
+    /// <para>An observer reads it ONLY while <see cref="Deadline"/> is a real instant. A run launched with no wall clock
+    /// (<see cref="SandboxSpec.TimeoutSeconds"/> null or ≤0 ⇒ <see cref="DateTimeOffset.MaxValue"/>) has the no-progress
+    /// watchdog as its ONLY bound, so the lease is ignored there and the watchdog keeps its pre-lease form. A directory
+    /// on the handle is therefore permission to renew, never a guarantee that a renewal will be honoured.</para>
+    /// </summary>
+    public string? ProgressLeaseDirectory { get; init; }
 }

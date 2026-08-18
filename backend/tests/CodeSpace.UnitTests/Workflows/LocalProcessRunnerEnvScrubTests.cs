@@ -188,14 +188,14 @@ public sealed class LocalProcessRunnerEnvScrubTests
     [InlineData("", -1)]
     [InlineData("nope", -1)]
     [InlineData(null, LocalProcessRunner.DefaultIdleTimeoutSeconds)]   // P2.4: unset → ON at the default window, not disabled
-    public void IdleTimeout_defaults_on_but_any_explicit_non_positive_value_opts_out(string? raw, int expectedSeconds)
+    public void NoProgressWindow_defaults_on_but_any_explicit_non_positive_value_opts_out(string? raw, int expectedSeconds)
     {
         var prior = Environment.GetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar);
         try
         {
             Environment.SetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar, raw);
 
-            var idle = LocalProcessRunner.IdleTimeout();
+            var idle = LocalProcessRunner.NoProgressWindow();
 
             if (expectedSeconds < 0) idle.ShouldBeNull("an EXPLICIT 0 / negative / non-numeric value is the operator's own opt-out — it must stay disabled");
             else idle.ShouldBe(TimeSpan.FromSeconds(expectedSeconds));

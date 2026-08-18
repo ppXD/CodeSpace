@@ -19,7 +19,21 @@ public sealed record SandboxSpec
     /// <summary>Extra environment variables layered onto the runner's own environment. Secrets belong here, never in <see cref="Args"/>.</summary>
     public IReadOnlyDictionary<string, string> Environment { get; init; } = new Dictionary<string, string>();
 
-    /// <summary>Wall-clock cap. On expiry the runner terminates the command (and its children) and returns <see cref="SandboxStatus.TimedOut"/>. <c>null</c> (or ≤0) ⇒ NO wall-clock — the run is bounded only by caller cancellation, the stall watchdog, and (for an agent run) the cost cap.</summary>
+    /// <summary>
+    /// The EXECUTION WALL DEADLINE: this run's whole budget. On expiry the runner terminates the command (and its
+    /// children) and returns <see cref="SandboxStatus.TimedOut"/>. <c>null</c> (or ≤0) ⇒ NO wall-clock — the run is then
+    /// bounded only by caller cancellation and the no-progress watchdog, which is precisely why THAT watchdog refuses
+    /// every renewable signal in this configuration (see <see cref="AgentProgressSignal"/>): it is the run's only bound,
+    /// so a renewal there would make a wedged run unkillable. (There is no in-run cost cap: spend is consulted at
+    /// supervisor decision and spawn boundaries, never inside an agent run's own observe loop.)
+    ///
+    /// <para>It is ONE of three deliberately DISTINCT deadlines, which a single "timeout" used to conflate: this wall
+    /// deadline ("the run has had its whole budget"), the NO-PROGRESS WINDOW ("the run has shown no evidence of working
+    /// for too long" → <see cref="SandboxStatus.Stalled"/>, renewed by an <see cref="AgentProgressSignal"/>), and the
+    /// OBSERVER LEASE ("this observer may no longer hold observation") — the last of which is named but deliberately
+    /// unbuilt. Nothing renews or defers THIS deadline. It is what makes granting a renewal safe — and, being optional,
+    /// it is the PRESENCE of this deadline that gates renewal at all, rather than a backstop that can be assumed.</para>
+    /// </summary>
     public int? TimeoutSeconds { get; init; } = 600;
 
     /// <summary>
@@ -151,6 +165,6 @@ public enum SandboxStatus
     /// <summary>Did not finish within <see cref="SandboxSpec.TimeoutSeconds"/> and was terminated.</summary>
     TimedOut,
 
-    /// <summary>Slice C3: produced NO output for the configured idle window and was terminated early — the run is stalled (e.g. a nested tool waiting at an interactive prompt the agent can't answer, a deadlock). Distinct from <see cref="TimedOut"/> (a run that was making progress but ran past its budget): a stall is surfaced for a human as NeedsReview(Blocked), faster than the full timeout. Only ever produced when the idle watchdog is enabled.</summary>
+    /// <summary>Showed NO evidence of working — no <see cref="AgentProgressSignal"/> at all — for the configured no-progress window, and was terminated early: the run is stalled (e.g. a nested tool waiting at an interactive prompt the agent can't answer, a deadlock). Distinct from <see cref="TimedOut"/> (a run that was making progress but ran past its budget): a stall is surfaced for a human as NeedsReview(Blocked), faster than the full timeout. Only ever produced when the no-progress watchdog is enabled.</summary>
     Stalled,
 }

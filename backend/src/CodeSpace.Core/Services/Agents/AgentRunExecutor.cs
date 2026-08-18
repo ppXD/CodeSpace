@@ -2152,10 +2152,16 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // The spool key is round-scoped (ReviseSpoolKey) — a revise round must never inherit a finished spool's exit marker.
         // The workspace directory + base SHA (primary repo only) let a re-attach capture the agent's diff via
         // IWorkspacePathCapture even though the live IWorkspaceHandle that prepared the clone died with this worker.
+        // The progress-lease directory is RUN-scoped (not round-scoped, like the spool key): it is the same path the
+        // run's platform endpoint renews from LocalProcessRunner.ProgressLeaseFor, so the observer's no-progress
+        // watchdog reads exactly the lease the endpoint writes — including across a worker restart, which re-attaches to
+        // this handle. Resolved from the layout owner here for the same reason the MCP socket path is (MintMcpConnect);
+        // a durable runner with its own spool layout would supply its own, and a null directory means "no lease".
         var handle = (await durable.LaunchAsync(context.Spec, context.SpoolKey, cancellationToken).ConfigureAwait(false)) with
         {
             InjectedKeyFingerprint = context.Redactor.Fingerprint, McpRunToken = context.McpToken,
             WorkspaceDirectory = context.WorkspaceDirectory, WorkspaceBaseSha = context.WorkspaceBaseSha,
+            ProgressLeaseDirectory = LocalProcessRunner.ProgressLeaseDirectoryFor(context.RunId),
         };
         handle = EnsureLogCaptureHandle(handle, durable);
 
