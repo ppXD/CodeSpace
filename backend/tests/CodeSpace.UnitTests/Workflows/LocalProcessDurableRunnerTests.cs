@@ -215,6 +215,170 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         end.ShouldBeOfType<SandboxDurableLogReadResult.EndOfSource>();
     }
 
+    // ─── Spool size cap: SandboxSpec.MaxFileSizeMb bounds what the FIFO copiers write ─────────────────────────────
+
+    /// <summary>A spec whose command floods stdout with <paramref name="mib"/> MiB (no newlines), then prints a trailing marker and exits with <paramref name="exitCode"/>. Pure shell builtins so it behaves identically under dash and bash.</summary>
+    private static SandboxSpec OverflowSpec(int mib, int exitCode) => new()
+    {
+        Command = "/bin/sh",
+        Args = new[] { "-c", $"b=0123456789abcdef; b=$b$b$b$b; b=$b$b$b$b; b=$b$b$b$b; i=0; while [ $i -lt {mib * 1024} ]; do printf %s \"$b\"; i=$((i+1)); done; printf FINALMARKER; exit {exitCode}" },
+        TimeoutSeconds = 60,
+    };
+
+    [Fact]
+    public async Task A_run_flooding_past_the_spool_cap_stops_at_the_cap_and_still_completes_with_its_real_exit_code()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The P0: MaxFileSizeMb documented a spool bound that nothing enforced — the FIFO copiers were unbounded
+        // `cat`, so a looping agent filled the worker's disk. The copier now stops the file AT the cap while still
+        // draining the pipe, so the run terminalizes on its OWN exit code (never TimedOut, never Stalled).
+        var handle = await LaunchAsync(OverflowSpec(mib: 4, exitCode: 7) with { MaxFileSizeMb = 1 });
+
+        var (result, _) = await AttachCollectAsync(handle);
+
+        new FileInfo(Path.Combine(handle.SpoolDirectory, "out.log")).Length.ShouldBe(1L * 1024 * 1024,
+            "the spool stops AT the cap — 4 MiB of agent chatter must not land 4 MiB on the worker's disk");
+        result.Status.ShouldBe(SandboxStatus.Failed, "capping the spool never reinterprets the command's own outcome");
+        result.ExitCode.ShouldBe(7, "the exit-code capture path is untouched by the cap — NOT TimedOut, NOT Stalled");
+    }
+
+    [Fact]
+    public async Task A_run_writing_past_the_spool_cap_is_never_blocked_and_still_seals_its_logs()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The hang this design must never cause: a copier that stopped READING at the cap would leave the agent
+        // blocked forever writing into a full pipe. The bounded copier drains to EOF and exits normally, so the
+        // command reaches its trailing marker, exits 0, `wait` returns, and the host still mints the seal.
+        var handle = await LaunchAsync(OverflowSpec(mib: 4, exitCode: 0) with { MaxFileSizeMb = 1 });
+
+        var (result, _) = await AttachCollectAsync(handle);
+
+        result.Status.ShouldBe(SandboxStatus.Success, "the command ran past the cap to its final marker and exited 0 — a blocked writer would have timed out instead");
+        result.ExitCode.ShouldBe(0);
+        File.ReadAllText(Path.Combine(handle.SpoolDirectory, "logs.copy-status")).Trim().ShouldBe("0:0", "both bounded copiers exit normally, so `wait` still yields a clean copier status");
+        File.Exists(Path.Combine(handle.SpoolDirectory, "logs.sealed")).ShouldBeTrue("draining to real EOF keeps the seal authority intact");
+    }
+
+    [Fact]
+    public async Task A_copier_that_fails_for_any_reason_other_than_the_budget_withholds_the_seal()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The cap must not become a laundry for host failures. Reaching the budget is a DELIBERATE truncation the
+        // receipt may claim; a full disk, a read-only spool or an I/O error is a capture failure the seal must
+        // withhold. Both used to produce the same clean status, which recorded a failure as a success.
+        var spool = Directory.CreateTempSubdirectory("csp-copier-fault-").FullName;
+        Directory.CreateDirectory(Path.Combine(spool, "out.log"));   // `cat >out.log` now fails EISDIR — never SIGXFSZ
+
+        var exitCode = await RunSupervisorScriptAsync(spool, maxBytes: 1024 * 1024, command: "printf hello; exit 3");
+
+        exitCode.ShouldBe(0, "the supervisor itself completes — a copier fault must never leave the agent blocked on a full pipe");
+        File.ReadAllText(Path.Combine(spool, "exit")).Trim().ShouldBe("3", "the command's own outcome is never reinterpreted by a copier fault");
+        File.ReadAllText(Path.Combine(spool, "logs.copy-status")).Trim().ShouldNotBe("0:0", "a non-budget write failure keeps its non-zero copier status, so the seal is withheld");
+        File.Exists(Path.Combine(spool, "out.log.truncated")).ShouldBeFalse("only reaching the byte budget mints a truncation marker — a host fault must not masquerade as a deliberate head");
+    }
+
+    /// <summary>Drive the supervisor script itself, so the copier's status discrimination is tested at the layer that owns it rather than through a runner lifecycle that cannot stage a write fault.</summary>
+    private static async Task<int> RunSupervisorScriptAsync(string spoolDirectory, long maxBytes, string command)
+    {
+        var info = new ProcessStartInfo("/bin/sh") { UseShellExecute = false };
+
+        info.ArgumentList.Add("-c");
+        info.ArgumentList.Add(LocalProcessRunner.SupervisorScript);
+        info.ArgumentList.Add("sh");
+        info.ArgumentList.Add("/bin/sh");
+        info.ArgumentList.Add("-c");
+        info.ArgumentList.Add(command);
+
+        info.Environment["CSP_PID"] = Path.Combine(spoolDirectory, "pid");
+        info.Environment["CSP_OUT"] = Path.Combine(spoolDirectory, "out.log");
+        info.Environment["CSP_ERR"] = Path.Combine(spoolDirectory, "err.log");
+        info.Environment["CSP_EXIT"] = Path.Combine(spoolDirectory, "exit");
+        info.Environment["CSP_LOG_COPY_STATUS"] = Path.Combine(spoolDirectory, "logs.copy-status");
+        info.Environment["CSP_MAX_BYTES"] = maxBytes.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        using var process = Process.Start(info)!;
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await process.WaitForExitAsync(timeout.Token);   // a blocked copier would hang here — that is the assertion
+
+        return process.ExitCode;
+    }
+
+    [Fact]
+    public async Task A_run_under_the_spool_cap_spools_byte_identical_output()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // Non-breaking: under the cap the bounded copier must write exactly what an unbounded `cat` wrote.
+        var handle = await LaunchAsync(ContractSpecs.MultiLine("alpha", "beta", "gamma"));
+
+        var (result, lines) = await AttachCollectAsync(handle);
+
+        File.ReadAllBytes(Path.Combine(handle.SpoolDirectory, "out.log")).ShouldBe("alpha\nbeta\ngamma\n"u8.ToArray(), "an under-cap spool is byte-identical to the unbounded copier's");
+        result.Status.ShouldBe(SandboxStatus.Success);
+        lines.ShouldBe(new[] { "alpha", "beta", "gamma" });
+    }
+
+    [Fact]
+    public void BuildDurableStartInfo_derives_the_copier_byte_cap_from_the_spec_file_size_knob()
+    {
+        // The documented knob finally means what it says: MaxFileSizeMb (MiB) becomes the copiers' byte budget.
+        var capped = LocalProcessRunner.BuildDurableStartInfo(new SandboxSpec { Command = "mycmd", MaxFileSizeMb = 3 }, "/tmp/spool-cap");
+        var uncapped = LocalProcessRunner.BuildDurableStartInfo(new SandboxSpec { Command = "mycmd", MaxFileSizeMb = 0 }, "/tmp/spool-uncap");
+
+        capped.Environment["CSP_MAX_BYTES"].ShouldBe((3L * 1024 * 1024).ToString(), "the copier budget is the spec's MiB knob in bytes");
+        uncapped.Environment["CSP_MAX_BYTES"].ShouldBe("0", "0 = unlimited keeps the unbounded copier — byte-identical to before the cap existed");
+    }
+
+    [Fact]
+    public void Supervisor_script_bounds_the_copiers_without_leaking_the_budget_to_the_child()
+    {
+        var info = LocalProcessRunner.BuildDurableStartInfo(new SandboxSpec { Command = "mycmd" }, "/tmp/spool-script");
+        var script = info.ArgumentList[info.ArgumentList.IndexOf("-c") + 1];
+
+        script.Contains("unset CSP_PID CSP_OUT CSP_ERR CSP_EXIT CSP_LOG_COPY_STATUS CSP_MAX_BYTES", StringComparison.Ordinal)
+            .ShouldBeTrue("the child never inherits the copier budget any more than it inherits the spool paths");
+        script.Contains("cat >/dev/null", StringComparison.Ordinal)
+            .ShouldBeTrue("the bounded copier must keep draining the FIFO after the cap, or the agent blocks forever on a full pipe");
+        script.Contains("ulimit -f", StringComparison.Ordinal)
+            .ShouldBeTrue("the cap is the kernel's RLIMIT_FSIZE on a plain `cat`, so the spool still writes through immediately for the live tail");
+        script.Contains("head -c", StringComparison.Ordinal)
+            .ShouldBeFalse("a byte-counting copier would stdio-buffer its output and starve both the live tail and the stall watchdog");
+        script.Contains("spool_block=512", StringComparison.Ordinal)
+            .ShouldBeTrue("ulimit counts 512-byte blocks under POSIX shells and 1024 under bash — the enforced ceiling must be the same byte count on every host");
+    }
+
+    [Fact]
+    public async Task Durable_log_source_reports_truncation_only_when_the_spool_reached_its_cap()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // Truncation is a RECORDED state, not silence: the durable source's final receipt says whether the bytes it
+        // just proved complete are the whole source or only the capped head of it.
+        var capped = await LaunchAsync(OverflowSpec(mib: 2, exitCode: 0) with { MaxFileSizeMb = 1 });
+        await AttachCollectAsync(capped);
+        var whole = await LaunchAsync(ContractSpecs.Print("small"));
+        await AttachCollectAsync(whole);
+
+        var source = (ISandboxDurableLogSource)_runner;
+
+        var cappedEnd = await source.ReadAsync(EndRequest(source, capped, 1L * 1024 * 1024), CancellationToken.None);
+        var wholeEnd = await source.ReadAsync(EndRequest(source, whole, "small\n".Length), CancellationToken.None);
+
+        cappedEnd.ShouldBeOfType<SandboxDurableLogReadResult.EndOfSource>().Truncated.ShouldBeTrue("a spool that reached its cap lost bytes the agent wrote — the receipt must say so");
+        wholeEnd.ShouldBeOfType<SandboxDurableLogReadResult.EndOfSource>().Truncated.ShouldBeFalse("an under-cap spool is complete, so its receipt claims no truncation");
+    }
+
+    private static SandboxDurableLogReadRequest EndRequest(ISandboxDurableLogSource source, SandboxHandle handle, long offset) => new()
+    {
+        Handle = handle,
+        SourceKey = source.DescribeLogs(handle).Single(value => value.StreamKind == AgentRunLogKinds.StandardOutput).SourceKey,
+        OffsetBytes = offset, MinimumBytes = 1, MaximumBytes = 32, FinalDrain = true,
+    };
+
     [Fact]
     public async Task Durable_log_source_rejects_root_escape_dot_segments_and_symlinked_spools_or_files()
     {

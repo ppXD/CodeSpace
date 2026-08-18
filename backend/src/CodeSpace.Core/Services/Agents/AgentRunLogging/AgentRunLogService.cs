@@ -236,7 +236,7 @@ public sealed partial class AgentRunLogService : IAgentRunLogService
         if (run.FenceEpoch != request.WorkerFenceEpoch) return RejectFailCapture(AgentRunLogProblemCode.StaleWorker);
         var stream = await db.AgentRunLogStream.SingleOrDefaultAsync(value => value.TeamId == request.TeamId && value.Id == request.StreamId && value.AgentRunId == request.AgentRunId, cancellationToken).ConfigureAwait(false);
         if (stream == null) return RejectFailCapture(AgentRunLogProblemCode.Missing);
-        if (stream.State == AgentRunLogStreamState.CaptureFailed && stream.WorkerFenceEpoch == request.WorkerFenceEpoch && stream.CaptureSessionId == request.CaptureSessionId && stream.ErrorCode == request.ErrorCode && stream.ErrorMessage == request.ErrorMessage)
+        if (stream.State == request.TerminalState && stream.WorkerFenceEpoch == request.WorkerFenceEpoch && stream.CaptureSessionId == request.CaptureSessionId && stream.ErrorCode == request.ErrorCode && stream.ErrorMessage == request.ErrorMessage)
             return new AgentRunLogFailCaptureResult.Failed(Project(stream), true);
         if (stream.State != AgentRunLogStreamState.Open) return RejectFailCapture(AgentRunLogProblemCode.StreamTerminal);
         if (stream.WorkerFenceEpoch != request.WorkerFenceEpoch || stream.CaptureSessionId != request.CaptureSessionId)
@@ -250,7 +250,7 @@ public sealed partial class AgentRunLogService : IAgentRunLogService
             return new AgentRunLogFailCaptureResult.Failed(await RequireMetadataAsync(request.TeamId, request.StreamId, cancellationToken).ConfigureAwait(false), false);
         }
 
-        stream.State = AgentRunLogStreamState.CaptureFailed;
+        stream.State = request.TerminalState;
         stream.ErrorCode = request.ErrorCode;
         stream.ErrorMessage = request.ErrorMessage;
         stream.Revision++;
@@ -602,8 +602,10 @@ public sealed partial class AgentRunLogService : IAgentRunLogService
     private static bool Valid(AgentRunLogAppendRequest value) => value.TeamId != Guid.Empty && value.AgentRunId != Guid.Empty && value.StreamId != Guid.Empty && value.WorkerFenceEpoch > 0 && value.CaptureSessionId != Guid.Empty && value.ExpectedSegmentOrdinal > 0 && value.ExpectedOffsetBytes >= 0 && value.ExpectedSourceOffsetBytes >= 0 && value.SourceLengthBytes > 0 && value.StorageProfileId != Guid.Empty && value.StorageProfileRevision > 0 && value.ActorId != Guid.Empty && value.Bytes.Length is > 0 and <= MaximumAppendBytes && ValidTimeout(value.OperationTimeout);
     private static bool Valid(AgentRunLogFinalizeSourceRequest value) => value.TeamId != Guid.Empty && value.AgentRunId != Guid.Empty && value.StreamId != Guid.Empty && value.WorkerFenceEpoch > 0 && value.CaptureSessionId != Guid.Empty && value.ExpectedRevision > 0 && value.ExpectedSourceOffsetBytes >= 0;
     private static bool Valid(AgentRunLogCompleteRequest value) => value.TeamId != Guid.Empty && value.AgentRunId != Guid.Empty && value.StreamId != Guid.Empty && value.WorkerFenceEpoch > 0 && value.CaptureSessionId != Guid.Empty && value.ExpectedRevision > 0 && Valid(value.RecoveryClaim) && ValidTimeout(value.OperationTimeout);
-    private static bool Valid(AgentRunLogFailCaptureRequest value) => value.TeamId != Guid.Empty && value.AgentRunId != Guid.Empty && value.StreamId != Guid.Empty && value.WorkerFenceEpoch > 0 && value.CaptureSessionId != Guid.Empty && value.ExpectedRevision > 0 && Valid(value.RecoveryClaim) && ErrorCodePattern().IsMatch(value.ErrorCode ?? "") && (value.ErrorMessage == null || value.ErrorMessage.Length <= 2048);
+    private static bool Valid(AgentRunLogFailCaptureRequest value) => value.TeamId != Guid.Empty && value.AgentRunId != Guid.Empty && value.StreamId != Guid.Empty && value.WorkerFenceEpoch > 0 && value.CaptureSessionId != Guid.Empty && value.ExpectedRevision > 0 && Valid(value.RecoveryClaim) && ValidTerminal(value.TerminalState, value.RecoveryClaim) && ErrorCodePattern().IsMatch(value.ErrorCode ?? "") && (value.ErrorMessage == null || value.ErrorMessage.Length <= 2048);
     private static bool Valid(AgentRunLogRecoveryClaimRef? value) => value == null || (value.IntentId != Guid.Empty && value.OwnerId != Guid.Empty && value.FenceEpoch > 0);
+    /// <summary>The terminal states this seam may write: capture broke, or capture succeeded on a source its own size cap cut short. A recovery-claimed commit is CaptureFailed only — its fenced statement writes that state literally.</summary>
+    private static bool ValidTerminal(AgentRunLogStreamState value, AgentRunLogRecoveryClaimRef? claim) => value == AgentRunLogStreamState.CaptureFailed || (value == AgentRunLogStreamState.Truncated && claim == null);
     private static bool ValidTimeout(TimeSpan? value) => value == null || (value > TimeSpan.Zero && value <= TimeSpan.FromMinutes(10));
     private static AgentRunLogOpenResult.Rejected RejectOpen(AgentRunLogProblemCode code, bool retryable = false) => new(Problem(code, retryable));
     private static AgentRunLogAppendResult.Rejected RejectAppend(AgentRunLogProblemCode code, bool retryable = false) => new(Problem(code, retryable));

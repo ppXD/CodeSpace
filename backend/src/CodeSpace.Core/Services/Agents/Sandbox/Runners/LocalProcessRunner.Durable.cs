@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Text;
 using CodeSpace.Core.Services.Agents.AgentRunLogging;
 using CodeSpace.Core.Services.Agents.Mcp;
@@ -26,6 +27,10 @@ public sealed partial class LocalProcessRunner
     private const string ExitMarkerFile = "exit";
     private const string LogSealMarkerFile = "logs.sealed";
     private const string LogCopyStatusFile = "logs.copy-status";
+
+    /// <summary>Sibling marker a bounded copier writes next to its spool file (<c>out.log.truncated</c>) when the file hit the run's byte budget — the durable record that the capture is a head, not a whole.</summary>
+    private const string TruncationMarkerSuffix = ".truncated";
+
     private const string PidFile = "pid";
     private const string StdoutSourceKey = "stdout";
     private const string StderrSourceKey = "stderr";
@@ -88,8 +93,35 @@ public sealed partial class LocalProcessRunner
     /// prompt in argv; the prompt itself always rides argv) would otherwise BLOCK FOREVER when the worker was launched with
     /// an open, never-closing stdin (e.g. a supervising process's pipe) — a hung run with zero output. Neither harness needs
     /// stdin, so closing it is always safe. Pinned by a test.</para>
+    ///
+    /// <para>Each copier is BOUNDED by <c>CSP_MAX_BYTES</c> (<see cref="SpoolCapBytes"/>, from the documented
+    /// <see cref="SandboxSpec.MaxFileSizeMb"/> knob), so a chatty or looping agent cannot fill the worker's disk. The
+    /// copier stays a plain <c>cat</c> — the ONLY shape that writes through immediately, which the live tail and the
+    /// stall watchdog both depend on (<c>head -c</c> is byte-exact but stdio-buffers its output, so a run emitting less
+    /// than a buffer would show NOTHING until it exited) — and the bound is the kernel's own <c>RLIMIT_FSIZE</c>, set
+    /// per copier subshell via <c>ulimit -f</c>. At the budget the writing <c>cat</c> takes SIGXFSZ and dies, the copier
+    /// records a per-file <c>.truncated</c> marker, and a second <c>cat</c> keeps draining the FIFO to
+    /// <c>/dev/null</c>. That drain is LOAD-BEARING: a copier that stopped reading would leave the agent blocked forever
+    /// on a full pipe, and one that closed the read end would SIGPIPE it. Because it drains to real EOF and exits
+    /// normally, the <c>wait</c> / exit-marker structure is untouched — <c>0</c> is still the copier status a seal
+    /// requires. ONLY a SIGXFSZ death (status 153) is read as reaching the budget: any OTHER write failure — a full
+    /// disk, a read-only spool, an I/O error — keeps its non-zero copier status, so <see cref="IsDurableSourceSealedAsync"/>
+    /// withholds the seal instead of relabelling a host failure as a deliberate truncation. A budget of 0 (unlimited)
+    /// keeps the plain unbounded <c>cat</c>, byte-identical to before the cap
+    /// existed. <c>ulimit -f</c> counts 512-byte blocks under POSIX shells but 1024-byte blocks under bash (which is
+    /// <c>/bin/sh</c> on macOS and RHEL), so the block size is chosen from <c>$BASH_VERSION</c> and the enforced
+    /// ceiling is the SAME byte count on every host. prlimit cannot do this job at all: it wraps only the agent chain
+    /// inside <c>"$@"</c>, never this supervisor, and RLIMIT_FSIZE does not apply to pipe writes.</para>
     /// </summary>
-    internal const string SupervisorScript = "pid_path=\"$CSP_PID\"; out_path=\"$CSP_OUT\"; err_path=\"$CSP_ERR\"; exit_path=\"$CSP_EXIT\"; copy_status_path=\"$CSP_LOG_COPY_STATUS\"; unset CSP_PID CSP_OUT CSP_ERR CSP_EXIT CSP_LOG_COPY_STATUS; printf '%s' \"$$\" >\"$pid_path\"; out_pipe=\"${out_path}.pipe\"; err_pipe=\"${err_path}.pipe\"; rm -f \"$out_pipe\" \"$err_pipe\"; mkfifo \"$out_pipe\" \"$err_pipe\" || exit 125; cat <\"$out_pipe\" >\"$out_path\" & out_cat=$!; cat <\"$err_pipe\" >\"$err_path\" & err_cat=$!; \"$@\" >\"$out_pipe\" 2>\"$err_pipe\" </dev/null; code=$?; wait \"$out_cat\"; out_status=$?; wait \"$err_cat\"; err_status=$?; rm -f \"$out_pipe\" \"$err_pipe\"; printf '%s' \"$code\" >\"$exit_path\"; printf '%s:%s' \"$out_status\" \"$err_status\" >\"$copy_status_path\"";
+    internal const string SupervisorScript = "pid_path=\"$CSP_PID\"; out_path=\"$CSP_OUT\"; err_path=\"$CSP_ERR\"; exit_path=\"$CSP_EXIT\"; copy_status_path=\"$CSP_LOG_COPY_STATUS\"; max_bytes=\"${CSP_MAX_BYTES:-0}\"; unset CSP_PID CSP_OUT CSP_ERR CSP_EXIT CSP_LOG_COPY_STATUS CSP_MAX_BYTES; spool_block=512; [ -n \"$BASH_VERSION\" ] && spool_block=1024; copy_spool() { if [ \"$max_bytes\" -le 0 ]; then cat >\"$1\"; return 0; fi; ulimit -c 0; ulimit -f $((max_bytes/spool_block)) 2>/dev/null; { cat >\"$1\"; } 2>/dev/null; copy_status=$?; if [ \"$copy_status\" -eq 153 ]; then : >\"$1.truncated\"; copy_status=0; fi; cat >/dev/null; return \"$copy_status\"; }; printf '%s' \"$$\" >\"$pid_path\"; out_pipe=\"${out_path}.pipe\"; err_pipe=\"${err_path}.pipe\"; rm -f \"$out_pipe\" \"$err_pipe\"; mkfifo \"$out_pipe\" \"$err_pipe\" || exit 125; copy_spool \"$out_path\" <\"$out_pipe\" & out_cat=$!; copy_spool \"$err_path\" <\"$err_pipe\" & err_cat=$!; \"$@\" >\"$out_pipe\" 2>\"$err_pipe\" </dev/null; code=$?; wait \"$out_cat\"; out_status=$?; wait \"$err_cat\"; err_status=$?; rm -f \"$out_pipe\" \"$err_pipe\"; printf '%s' \"$code\" >\"$exit_path\"; printf '%s:%s' \"$out_status\" \"$err_status\" >\"$copy_status_path\"";
+
+    /// <summary>
+    /// The per-spool-file byte budget for this run's FIFO copiers: the documented <see cref="SandboxSpec.MaxFileSizeMb"/>
+    /// knob resolved to bytes, through the SAME operator override prlimit already honours — so one knob governs both the
+    /// kernel's RLIMIT_FSIZE on the agent chain and the supervisor's spool copiers, and disabling it disables both.
+    /// <c>0</c> ⇒ unlimited (the unbounded copier, byte-identical to before the cap existed).
+    /// </summary>
+    internal static long SpoolCapBytes(SandboxSpec spec) => Math.Max(0, ProcessRlimits.EffectiveMaxFileSizeMb(spec.MaxFileSizeMb)) * 1024L * 1024L;
 
     /// <summary>How long the filtered-egress netns setup may take before the launch fails closed — the ip/nft/sysctl commands are sub-second, so a slow setup is a host problem, not a long-running run.</summary>
     private const int EgressSetupTimeoutSeconds = 20;
@@ -186,7 +218,7 @@ public sealed partial class LocalProcessRunner
             if (available == 0)
             {
                 if (request.FinalDrain && await IsDurableSourceSealedAsync(request.Handle, path, cancellationToken).ConfigureAwait(false))
-                    return new SandboxDurableLogReadResult.EndOfSource();
+                    return new SandboxDurableLogReadResult.EndOfSource(IsSourceTruncated(path));
                 return new SandboxDurableLogReadResult.NoData();
             }
             if (!request.FinalDrain && available < request.MinimumBytes) return new SandboxDurableLogReadResult.NoData();
@@ -212,6 +244,14 @@ public sealed partial class LocalProcessRunner
             return new SandboxDurableLogReadResult.Unavailable(new SandboxDurableLogProblem(SandboxDurableLogProblemCode.IoUnavailable, true));
         }
     }
+
+    /// <summary>
+    /// True when the copier that owned this spool file recorded hitting its byte budget — the file is the head of a
+    /// longer output whose tail was drained away. Read from the copier's own sibling marker rather than inferred from a
+    /// size comparison, so it stays correct for a re-attaching observer on another worker (which never saw the budget)
+    /// and never mislabels a run that merely happened to stop on the boundary. Absent marker ⇒ the capture is whole.
+    /// </summary>
+    private static bool IsSourceTruncated(string path) => File.Exists(path + TruncationMarkerSuffix);
 
     private static bool ValidLogRead(SandboxDurableLogReadRequest request) => request.Handle.Kind == LocalKind && Path.IsPathFullyQualified(request.Handle.SpoolDirectory) && request.OffsetBytes >= 0 && request.MinimumBytes > 0 && request.MaximumBytes >= request.MinimumBytes && request.MaximumBytes <= MaximumDurableLogReadBytes;
 
@@ -630,6 +670,7 @@ public sealed partial class LocalProcessRunner
         info.Environment["CSP_EXIT"] = Path.Combine(spoolDir, ExitMarkerFile);
         info.Environment["CSP_LOG_COPY_STATUS"] = Path.Combine(spoolDir, LogCopyStatusFile);
         info.Environment["CSP_PID"] = Path.Combine(spoolDir, PidFile);
+        info.Environment["CSP_MAX_BYTES"] = SpoolCapBytes(spec).ToString(CultureInfo.InvariantCulture);
 
         // Point the config-isolating tool at the per-run home so a shelled-out CLI reads ONLY the credentials we
         // inject — never the operator's personal ~/.claude / ~/.codex. Set AFTER the scrub so the injected value wins.
@@ -697,8 +738,11 @@ public sealed partial class LocalProcessRunner
             command = bwrap;
         }
 
-        // 2. Resource caps (prlimit), outermost — sets RLIMIT_NPROC + RLIMIT_FSIZE, then execs bwrap/agent which
-        //    inherit them. Fork-bomb + runaway-file caps; memory-RSS + total-disk need the cgroup tier (a later slice).
+        // 2. Resource caps (prlimit) — outermost WITHIN "$@" ONLY: it wraps the agent chain, never the supervisor shell
+        //    that owns the spool. So its RLIMIT_FSIZE bounds files the AGENT writes, and cannot bound out.log/err.log at
+        //    all: those are written by the supervisor's own (unlimited) FIFO copier children, and RLIMIT_FSIZE does not
+        //    apply to pipe writes either. The spool's byte budget is enforced by those bounded copiers (CSP_MAX_BYTES,
+        //    SpoolCapBytes) instead. Fork-bomb + runaway-agent-file caps; memory-RSS + total-disk need the cgroup tier.
         if (ProcessRlimits.Available is { } prlimit)
             (command, args) = ProcessRlimits.Wrap(prlimit, command, args, ProcessRlimits.EffectiveMaxProcesses(spec.MaxProcesses), ProcessRlimits.EffectiveMaxFileSizeMb(spec.MaxFileSizeMb));
 

@@ -13,6 +13,10 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan DefaultOperationTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan DefaultFinalizationBudget = TimeSpan.FromSeconds(30);
+
+    /// <summary>The source proved complete but its own size cap cut it short: everything captured stays readable, and the stream terminalizes Truncated rather than claiming a whole capture it knows it does not have.</summary>
+    private static readonly CaptureFailure Truncation = new("source-truncated", "The durable sandbox log source reached its spool size cap; the captured bytes are the head of a longer output.", AgentRunLogStreamState.Truncated);
+
     private readonly IAgentRunLogService _logs;
     private readonly IAgentRunLogStorageResolver _storage;
     private readonly IAgentRunLogCaptureRecoveryService _recovery;
@@ -71,12 +75,12 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
                 }
                 if (storage is AgentRunLogStorageResolution.Unavailable unavailable)
                 {
-                    await FailQuietlyAsync(failure, ready.Metadata, $"storage-profile-{Code(unavailable.Code)}", "No Active valid storage route was authorized for the Agent Run log data class.", captureToken).ConfigureAwait(false);
+                    await FailQuietlyAsync(failure, ready.Metadata, new CaptureFailure($"storage-profile-{Code(unavailable.Code)}", "No Active valid storage route was authorized for the Agent Run log data class."), captureToken).ConfigureAwait(false);
                     continue;
                 }
                 if (ready.CaptureSourceBaseOffsetBytes < 0 || ready.Metadata.SourceOffsetBytes < ready.CaptureSourceBaseOffsetBytes)
                 {
-                    await FailQuietlyAsync(failure, ready.Metadata, "source-cursor-invalid", "The durable source cursor could not be reconciled with its persisted spool base.", captureToken).ConfigureAwait(false);
+                    await FailQuietlyAsync(failure, ready.Metadata, new CaptureFailure("source-cursor-invalid", "The durable source cursor could not be reconciled with its persisted spool base."), captureToken).ConfigureAwait(false);
                     continue;
                 }
                 streams.Add(new CaptureStream(descriptor, ready.Metadata, (AgentRunLogStorageResolution.Ready)storage, ready.CaptureSourceBaseOffsetBytes, request.Redactor.CreateUtf8Stream()));
@@ -118,7 +122,7 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
                     ContentEncoding = descriptor.ContentEncoding, CaptureSource = descriptor.CaptureSource,
                 }, captureToken).ConfigureAwait(false);
                 if (opened is AgentRunLogOpenResult.Opened ready)
-                    await FailQuietlyAsync(failure, ready.Metadata, request.ErrorCode, request.ErrorMessage, captureToken).ConfigureAwait(false);
+                    await FailQuietlyAsync(failure, ready.Metadata, new CaptureFailure(request.ErrorCode, request.ErrorMessage), captureToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (captureToken.IsCancellationRequested) { }
@@ -174,7 +178,7 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
                     if (Transient(rejected.Problem))
                         _logger.LogWarning("Agent run {RunId} log stream {StreamId} terminalization is transiently unavailable and remains Open for recovery: {Problem}", agentRunId, stream.Metadata.StreamId, rejected.Problem.Code);
                     else
-                        await FailQuietlyAsync(failure, stream.Metadata, $"complete-{Code(rejected.Problem.Code)}", "The finalized Agent Run log could not be verified before terminalization.", captureToken).ConfigureAwait(false);
+                        await FailQuietlyAsync(failure, stream.Metadata, new CaptureFailure($"complete-{Code(rejected.Problem.Code)}", "The finalized Agent Run log could not be verified before terminalization."), captureToken).ConfigureAwait(false);
                 }
             }
             catch (OperationCanceledException) when (captureToken.IsCancellationRequested)
@@ -235,7 +239,7 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
             {
                 return;
             }
-            if (read is SandboxDurableLogReadResult.EndOfSource)
+            if (read is SandboxDurableLogReadResult.EndOfSource end)
             {
                 if (!final)
                 {
@@ -251,7 +255,8 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
                     await FailStreamAsync(request, captureSessionId, stream, new CaptureFailure("source-cursor-gap", "The durable source ended before every observed source byte was committed."), cancellationToken).ConfigureAwait(false);
                     return;
                 }
-                await FinalizeSourceAsync(request, captureSessionId, stream, cancellationToken).ConfigureAwait(false);
+                if (await FinalizeSourceAsync(request, captureSessionId, stream, cancellationToken).ConfigureAwait(false) && end.Truncated)
+                    await FailQuietlyAsync(new CaptureFailureContext(request.TeamId, request.AgentRunId, request.WorkerFenceEpoch, captureSessionId), stream.Metadata, Truncation, cancellationToken).ConfigureAwait(false);
                 return;
             }
 
@@ -308,7 +313,8 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
         }
     }
 
-    private async Task FinalizeSourceAsync(AgentRunLogCaptureOpenRequest request, Guid captureSessionId, CaptureStream stream, CancellationToken cancellationToken)
+    /// <summary>Commit the source's final-drain receipt. True only when the stream is now provably finalized — the caller's licence to write any further terminal fact about it.</summary>
+    private async Task<bool> FinalizeSourceAsync(AgentRunLogCaptureOpenRequest request, Guid captureSessionId, CaptureStream stream, CancellationToken cancellationToken)
     {
         var result = await _logs.FinalizeSourceAsync(new AgentRunLogFinalizeSourceRequest
         {
@@ -320,17 +326,18 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
         {
             stream.Metadata = finalized.Metadata;
             stream.Terminal = true;
-            return;
+            return true;
         }
         var problem = ((AgentRunLogFinalizeSourceResult.Rejected)result).Problem;
-        if (Transient(problem)) return;
+        if (Transient(problem)) return false;
         await FailStreamAsync(request, captureSessionId, stream, new CaptureFailure($"finalize-{Code(problem.Code)}", "The Agent Run log source final-drain receipt could not be committed."), cancellationToken).ConfigureAwait(false);
+        return false;
     }
 
     private async Task FailStreamAsync(AgentRunLogCaptureOpenRequest request, Guid captureSessionId, CaptureStream stream, CaptureFailure failure, CancellationToken cancellationToken)
     {
         stream.Terminal = true;
-        await FailQuietlyAsync(new CaptureFailureContext(request.TeamId, request.AgentRunId, request.WorkerFenceEpoch, captureSessionId), stream.Metadata, failure.Code, failure.Message, cancellationToken).ConfigureAwait(false);
+        await FailQuietlyAsync(new CaptureFailureContext(request.TeamId, request.AgentRunId, request.WorkerFenceEpoch, captureSessionId), stream.Metadata, failure, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task FailStreamsAsync(AgentRunLogCaptureOpenRequest request, Guid captureSessionId, IReadOnlyList<CaptureStream> streams, CaptureFailure failure, CancellationToken cancellationToken)
@@ -339,7 +346,7 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
             await FailStreamAsync(request, captureSessionId, stream, failure, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task FailQuietlyAsync(CaptureFailureContext context, AgentRunLogMetadata metadata, string errorCode, string message, CancellationToken cancellationToken)
+    private async Task FailQuietlyAsync(CaptureFailureContext context, AgentRunLogMetadata metadata, CaptureFailure failure, CancellationToken cancellationToken)
     {
         var current = metadata;
         for (var attempt = 0; attempt < 3; attempt++)
@@ -350,7 +357,8 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
                 {
                     TeamId = context.TeamId, AgentRunId = context.AgentRunId, StreamId = current.StreamId,
                     WorkerFenceEpoch = context.WorkerFenceEpoch, CaptureSessionId = context.CaptureSessionId,
-                    ExpectedRevision = current.Revision, ErrorCode = errorCode, ErrorMessage = message,
+                    ExpectedRevision = current.Revision, ErrorCode = failure.Code, ErrorMessage = failure.Message,
+                    TerminalState = failure.TerminalState,
                 }, cancellationToken).ConfigureAwait(false);
                 if (result is AgentRunLogFailCaptureResult.Failed) return;
                 var problem = ((AgentRunLogFailCaptureResult.Rejected)result).Problem;
@@ -494,7 +502,8 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
     }
 
     private sealed record PendingAppend(ReadOnlyMemory<byte> Bytes, int SourceBytesConsumed);
-    private sealed record CaptureFailure(string Code, string Message);
+    /// <summary>One terminal capture fact: the machine-readable code, the operator-readable reason, and which non-Completed state it lands the stream in (capture broke, vs. a source its own size cap cut short).</summary>
+    private sealed record CaptureFailure(string Code, string Message, AgentRunLogStreamState TerminalState = AgentRunLogStreamState.CaptureFailed);
     private sealed record CaptureFailureContext(Guid TeamId, Guid AgentRunId, long WorkerFenceEpoch, Guid CaptureSessionId);
 }
 

@@ -58,9 +58,13 @@ public sealed record SandboxSpec
     public int MaxProcesses { get; init; } = 4096;
 
     /// <summary>
-    /// Max size of any single file the command may write, in MiB (RLIMIT_FSIZE) — bounds a runaway file / log / the
-    /// run's own stdout spool from filling the disk. <c>0</c> = unlimited. Enforced by a sandboxing runner. (A total
-    /// disk quota needs cgroup io delegation — a later slice; the memory + cpu caps below land via cgroup.)
+    /// Max size of any single file the command may write, in MiB — bounds a runaway file / log / the run's own stdout
+    /// spool from filling the disk. <c>0</c> = unlimited. Enforced by a sandboxing runner on TWO tiers, because one
+    /// mechanism cannot cover both: RLIMIT_FSIZE (prlimit) for files the COMMAND writes, and a byte budget on the
+    /// durable runner's stdout/stderr spool copiers — which RLIMIT_FSIZE provably cannot bound, since those copiers are
+    /// the supervisor's own children and read from pipes. A spool that reaches the budget keeps its capped head and
+    /// records the loss as a Truncated capture, never drops it silently. (A total disk quota needs cgroup io delegation
+    /// — a later slice; the memory + cpu caps below land via cgroup.)
     /// </summary>
     public int MaxFileSizeMb { get; init; } = 2048;
 
