@@ -489,6 +489,11 @@ public static class RealModelGate
         // gateway timeout: the model drove its DECISIONS fine; its agents broke underneath it, so this is infra, never
         // a CapabilityMiss. Does not consume a best-of-N capability slot.
         AgentExecutionInfraException => true,
+        // InfraParkRide spent its WHOLE budget with the run still parked on the engine's own model-plane park — the
+        // plane never came back. Same routing as a gateway timeout, because it IS one: the run behaved exactly as
+        // designed (park, don't die), so the shortfall is the owner's gateway, never a model CapabilityMiss and never
+        // a code fault. Does not consume a best-of-N capability slot.
+        InfraParkUnresolvedException => true,
         System.Net.Sockets.SocketException se => !WiringSocketErrors.Contains(se.SocketErrorCode),
         // The decider classifies a gateway fault into a TYPED LlmApiException and PROPAGATES the infra categories
         // (Transient / RateLimited / AuthFailed) rather than fail-closing them — so the EXCEPTION path (trajectory /

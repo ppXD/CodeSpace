@@ -138,8 +138,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);   // a FRESH run per attempt — re-seed, never reuse a parked-short run
 
             await AssertRanEnforcedAsync(runId);
-            await RunEngineAsync(runId);
-            await jobClient.WaitForPendingAsync();
+            await DriveUntilSettledAsync(runId);
 
             var (outcome, note) = await EvaluateAsync(runId, teamId, FileWritingFakeCli.StubbedHarnessKinds);   // headline arc = FileWritingFakeCli (always patches on success — but ONLY on the harness it arms)
             return (outcome, $"{Provider} model '{model}' whole-loop — {note}");
@@ -198,14 +197,13 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             jobClient.Clear();
             var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
-            await RunEngineAsync(runId);
-            await jobClient.WaitForPendingAsync();
+            await DriveUntilSettledAsync(runId);
 
             // The co-sign loop — the test is the human: approve each parked AMEND card (and only amend cards — a
             // content ask is the model converging some other way, which the evaluator below reads honestly).
             // Bounded: a live brain that keeps amending past this is a miss, not a hang.
             for (var round = 0; round < 4 && await ApproveParkedAmendCardAsync(runId, teamId, userId); round++)
-                await jobClient.WaitForPendingAsync();
+                await DrainUntilSettledAsync(runId);   // the co-signed retry can itself park on a plane blip — ride it, don't score it a miss
 
             var (outcome, note) = await EvaluateOracleRepairAsync(runId, teamId, FileWritingFakeCli.StubbedHarnessKinds);
             return (outcome, $"{Provider} model '{model}' oracle-repair — {note}");
@@ -332,8 +330,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         {
             var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
-            await RunEngineAsync(runId);
-            await jobClient.WaitForPendingAsync();
+            await DriveUntilSettledAsync(runId);
 
             using var verify = _fixture.BeginScope();
             var db = verify.Resolve<CodeSpaceDbContext>();
@@ -409,8 +406,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         {
             var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
-            await RunEngineAsync(runId);
-            await jobClient.WaitForPendingAsync();
+            await DriveUntilSettledAsync(runId);
 
             using var verify = _fixture.BeginScope();
             var db = verify.Resolve<CodeSpaceDbContext>();
@@ -499,8 +495,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         {
             var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
-            await RunEngineAsync(runId);
-            await jobClient.WaitForPendingAsync();
+            await DriveUntilSettledAsync(runId);
 
             using var verify = _fixture.BeginScope();
             var db = verify.Resolve<CodeSpaceDbContext>();
@@ -605,8 +600,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         {
             var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
-            await RunEngineAsync(runId);
-            await jobClient.WaitForPendingAsync();
+            await DriveUntilSettledAsync(runId);
 
             using var verify = _fixture.BeginScope();
             var db = verify.Resolve<CodeSpaceDbContext>();
@@ -701,8 +695,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             jobClient.Clear();
             var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
-            await RunEngineAsync(runId);
-            await jobClient.WaitForPendingAsync();
+            await DriveUntilSettledAsync(runId);
 
             var (outcome, note) = await EvaluateI3InvariantAsync(runId, teamId, remote, repoId);
             return (outcome, $"{Provider} model '{model}' I3 publish-or-park — {note}");
@@ -875,8 +868,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             jobClient.Clear();
             var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);   // a FRESH run per best-of-N attempt
 
-            await RunEngineAsync(runId);
-            await jobClient.WaitForPendingAsync();
+            await DriveUntilSettledAsync(runId);
 
             var (outcome, note) = await EvaluateConflictResolveAsync(runId, teamId);
             return (outcome, $"{Provider} model '{model}' conflict→resolve — {note}");
@@ -935,8 +927,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             jobClient.Clear();
             var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);   // a FRESH run per best-of-N attempt
 
-            await RunEngineAsync(runId);
-            await jobClient.WaitForPendingAsync();
+            await DriveUntilSettledAsync(runId);
 
             var (outcome, note) = await EvaluateFailureRetryAsync(runId, teamId);
             return (outcome, $"{Provider} model '{model}' failure→retry — {note}");
@@ -993,8 +984,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             jobClient.Clear();   // SAFE under [Collection(PostgresCollection)] (serial); a no-op-on-empty between attempts
             var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);   // a FRESH run per best-of-N attempt — never reuse a parked-short run
 
-            await RunEngineAsync(runId);
-            await jobClient.WaitForPendingAsync();
+            await DriveUntilSettledAsync(runId);
 
             var (outcome, note) = await EvaluateAsync(runId, teamId, Array.Empty<string>());   // REAL claude — 0 patches IS a capability outcome, never a capture-infra skip; no fake to lose control of
 
@@ -1307,6 +1297,29 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         await scope.Resolve<IWorkflowEngine>().ExecuteRunAsync(runId, CancellationToken.None);
     }
 
+    /// <summary>
+    /// Drive the run, drain its jobs, then RIDE any model-plane park to settlement. A node that calls a model parks on a
+    /// transient gateway fault instead of failing the run (the shared <c>InfraPark</c> ladder), and the in-memory job
+    /// client only RECORDS the park's scheduled deadline — so without the ride a flapping gateway leaves the run merely
+    /// Suspended and every evaluator below scores that a park-short CapabilityMiss, red-ing main for a run that behaved
+    /// exactly as designed. Riding beats skipping: a parked run is designed to RESUME AND FINISH, so the gate drives it
+    /// there and judges the finished run with every assertion intact. A park that outlives the ride's budget throws
+    /// <see cref="InfraParkUnresolvedException"/>, which <see cref="RealModelGate"/> routes to its LOUD non-gating infra
+    /// skip — honest, never a green pass, and it does not consume a best-of-N capability slot.
+    /// </summary>
+    private async Task DriveUntilSettledAsync(Guid runId)
+    {
+        await RunEngineAsync(runId);
+        await DrainUntilSettledAsync(runId);
+    }
+
+    /// <summary>Drain a resume's re-dispatch, then ride out any park it hit — the human-resume counterpart of <see cref="DriveUntilSettledAsync"/> (the resume drives the engine itself, so this must not re-enter it).</summary>
+    private async Task DrainUntilSettledAsync(Guid runId)
+    {
+        await ResolveJobClient().WaitForPendingAsync();
+        await InfraParkRide.RideAsync(_fixture, runId);
+    }
+
     /// <summary>Seed a KEYED credentialed-model row for the supervisor brain (the live decider reads its key + base url from this row). Returns the row id → the supervisor's <c>supervisorModelId</c>.</summary>
     private async Task<(Guid RowId, Guid CredId)> SeedBrainModelAsync(Guid teamId, string baseUrl, string apiKey, string modelId)
     {
@@ -1381,8 +1394,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         {
             var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
-            await RunEngineAsync(runId);
-            await jobClient.WaitForPendingAsync();
+            await DriveUntilSettledAsync(runId);
 
             using var verify = _fixture.BeginScope();
             var db = verify.Resolve<CodeSpaceDbContext>();
@@ -1455,8 +1467,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         {
             var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
-            await RunEngineAsync(runId);
-            await jobClient.WaitForPendingAsync();
+            await DriveUntilSettledAsync(runId);
 
             using var verify = _fixture.BeginScope();
             var db = verify.Resolve<CodeSpaceDbContext>();

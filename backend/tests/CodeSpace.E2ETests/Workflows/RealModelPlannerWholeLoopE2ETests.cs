@@ -95,9 +95,15 @@ public sealed class RealModelPlannerWholeLoopE2ETests
         var startedAt = DateTimeOffset.UtcNow;
         await RunEngineAsync(runId);
         await jobClient.WaitForPendingAsync();
-        var elapsed = DateTimeOffset.UtcNow - startedAt;
+        var firstWalk = DateTimeOffset.UtcNow - startedAt;
 
-        await AssertTheLivePlannerActuallyRanAsync(runId, teamId, model!, elapsed);
+        var ride = await RodeOutTheParkAsync(runId);
+
+        if (ride == null) return;   // the plane never came back → honest NOT-EVALUATED infra skip, never a green pass
+
+        // The live-call floor measures DRIVE time, and a park MOVES the successful call out of the first walk and into
+        // the ride — so the floor has to be given both halves, with the ride's deliberate pauses already subtracted.
+        await AssertTheLivePlannerActuallyRanAsync(runId, teamId, model!, firstWalk + ride.DriveTime, ride.Rode);
 
         await RealModelGate.AssessLiveAsync(Provider, async () =>
         {
@@ -170,10 +176,42 @@ public sealed class RealModelPlannerWholeLoopE2ETests
     }
 
     /// <summary>
+    /// Ride out any model-plane park BEFORE judging the planner cell. The planner's <c>llm.complete</c> parks on a
+    /// transient gateway fault instead of failing the run (the shared <c>InfraPark</c> ladder), and the in-memory job
+    /// client only RECORDS the park's scheduled deadline — so without this the assertion below reads the cell MID-PARK,
+    /// where the <c>node.suspended</c> record carries no <c>outputs</c> key and the <c>workflow_run_node</c> view's
+    /// COALESCE yields <c>{}</c>: "Output keys: []" and "(no model stamped on the plan)", a WIRING red for a run that
+    /// behaved exactly as designed. Riding rather than skipping is what keeps the gate honest — a parked run is designed
+    /// to RESUME AND FINISH, so the gate drives it there and then judges the settled cell with every assertion intact.
+    ///
+    /// <para>NULL means the plane never came back inside the ride's budget: surfaced LOUDLY as NOT EVALUATED (skip ≠
+    /// pass) and the caller must return WITHOUT asserting — an infra outcome, never a planner verdict and never a green
+    /// pass. A genuine assertion failure is untouched by this: only <see cref="InfraParkUnresolvedException"/> is caught.</para>
+    ///
+    /// <para>Otherwise the <see cref="ParkRide"/> report says whether a park was actually ridden and how much wall clock
+    /// the ride spent DRIVING the engine — which the live-call floor NEEDS, because a park moves the successful gateway
+    /// call onto a re-entry inside the ride. Timing only the first walk would leave the floor measuring one FAST failed
+    /// 429/503 (the fixture's named LLM clients carry no retry pipeline) and red-ing a run that parked, resumed and
+    /// finished — the very false red this ride exists to remove, just non-deterministic instead of certain.</para>
+    /// </summary>
+    private async Task<ParkRide?> RodeOutTheParkAsync(Guid runId)
+    {
+        try
+        {
+            return await InfraParkRide.RideAsync(_fixture, runId);
+        }
+        catch (InfraParkUnresolvedException ex)
+        {
+            RealModelGate.ReportSkipped(Provider, ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>
     /// The gated half: did a LIVE planner actually run? Every assertion here is a code/wiring fact, so each one is a
     /// hard red — none of them can be moved by a model having a bad day. Plan QUALITY stays report-only afterwards.
     /// </summary>
-    private async Task AssertTheLivePlannerActuallyRanAsync(Guid runId, Guid teamId, string expectedModel, TimeSpan elapsed)
+    private async Task AssertTheLivePlannerActuallyRanAsync(Guid runId, Guid teamId, string expectedModel, TimeSpan driveTime, bool rodeAPark)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -200,8 +238,16 @@ public sealed class RealModelPlannerWholeLoopE2ETests
 
         // A gateway round trip cannot complete in milliseconds. This is the assertion that would have caught the
         // fake outright: the wreck it reported as green ran the whole engine, planner included, in 221ms.
-        elapsed.ShouldBeGreaterThan(LiveCallFloor,
-            $"the whole run took {elapsed.TotalMilliseconds:0}ms — too fast for a live gateway call, so the planner was almost certainly served by an in-process fake");
+        //
+        // What is measured is DRIVE time: the first walk PLUS, when the plane blipped, the ride's re-entries — with the
+        // ride's deliberate pauses subtracted. Both halves matter and neither is optional. Timing the first walk alone
+        // would red a run that parked, resumed and finished, because a park moves the SUCCESSFUL call onto a re-entry
+        // and leaves the walk covering one fast failed 429/503. Counting the ride's pauses would hand a fake-served run
+        // ~40s of free credit. So the window contains every millisecond spent driving the engine, and nothing else.
+        driveTime.ShouldBeGreaterThan(LiveCallFloor,
+            $"the run spent {driveTime.TotalMilliseconds:0}ms driving the engine "
+          + $"({(rodeAPark ? "the first walk PLUS the ride's re-entries after a model-plane park" : "no park — the first walk is the whole drive")}) "
+          + "— too fast for a live gateway call, so the planner was almost certainly served by an in-process fake");
     }
 
     /// <summary>Below this, no network round trip happened. Deliberately far under any real latency so it can only ever catch a fake, never a fast day.</summary>
