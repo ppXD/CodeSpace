@@ -80,4 +80,10 @@ public static class FailureCodes
 
     /// <summary>W-hard: the run's cost cap is spent — the budget ledger refused the next model call. Remedy: a bigger cap or a narrower goal, never a retry.</summary>
     public const string RunBudgetExhausted = "run_budget_exhausted";
+
+    /// <summary>A harness capture stream skipped ordinals, so the records between them can never be folded. Remedy: recover or record the gap — a reduction that advanced over it would store a partial prefix as a whole one.</summary>
+    public const string HarnessReductionGap = "harness_reduction_gap";
+
+    /// <summary>A captured native record does not hold together — its payload binding, digest, redaction claim or projection attribution contradicts itself — so it cannot be reduced. Remedy: fix the producer; the record is retained either way.</summary>
+    public const string HarnessRecordUnreadable = "harness_record_unreadable";
 }

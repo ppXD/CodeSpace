@@ -27,6 +27,7 @@ public static class WorkflowRunDataNames
     public const string HarnessExecution = Prefix + "harness_execution";
     public const string HarnessProcessAttempt = Prefix + "harness_process_attempt";
     public const string HarnessDescriptor = Prefix + "harness_descriptor";
+    public const string HarnessReductionCheckpoint = Prefix + "harness_reduction_checkpoint";
     public const string RunnerHandle = Prefix + "runner_handle";
     public const string NativeRecord = Prefix + "native_record";
     public const string SemanticEvent = Prefix + "semantic_event";
@@ -41,9 +42,9 @@ public static class WorkflowRunDataNames
 
     private static readonly IReadOnlyList<string> Registered = Array.AsReadOnly(new[]
     {
-        ModelCall, ModelCallAttempt, HarnessExecution, HarnessProcessAttempt, HarnessDescriptor, RunnerHandle,
-        NativeRecord, SemanticEvent, ToolCall, ToolCallAttempt, LogStream, LogSegment, Session, SessionStateRevision,
-        CaptureGap, DataManifest,
+        ModelCall, ModelCallAttempt, HarnessExecution, HarnessProcessAttempt, HarnessDescriptor,
+        HarnessReductionCheckpoint, RunnerHandle, NativeRecord, SemanticEvent, ToolCall, ToolCallAttempt, LogStream,
+        LogSegment, Session, SessionStateRevision, CaptureGap, DataManifest,
     });
 
     public static IReadOnlyList<string> All => Registered;
@@ -59,6 +60,7 @@ public static class WorkflowRunDataOwnerKinds
     public const string HarnessExecution = "harness-execution";
     public const string HarnessProcessAttempt = "harness-process-attempt";
     public const string HarnessDescriptor = "harness-descriptor";
+    public const string HarnessReductionCheckpoint = "harness-reduction-checkpoint";
     public const string RunnerHandle = "runner-handle";
     public const string NativeRecord = "native-record";
     public const string SemanticEvent = "semantic-event";
@@ -73,9 +75,9 @@ public static class WorkflowRunDataOwnerKinds
 
     private static readonly IReadOnlySet<string> Registered = new HashSet<string>(StringComparer.Ordinal)
     {
-        ModelCall, ModelCallAttempt, HarnessExecution, HarnessProcessAttempt, HarnessDescriptor, RunnerHandle,
-        NativeRecord, SemanticEvent, ToolCall, ToolCallAttempt, LogStream, LogSegment, Session, SessionStateRevision,
-        CaptureGap, DataManifest,
+        ModelCall, ModelCallAttempt, HarnessExecution, HarnessProcessAttempt, HarnessDescriptor,
+        HarnessReductionCheckpoint, RunnerHandle, NativeRecord, SemanticEvent, ToolCall, ToolCallAttempt, LogStream,
+        LogSegment, Session, SessionStateRevision, CaptureGap, DataManifest,
     };
 
     public static bool IsSupported(string? ownerKind) => ownerKind is not null && Registered.Contains(ownerKind);

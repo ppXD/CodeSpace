@@ -54,6 +54,7 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork, IDataProtectionKeyCont
     public DbSet<WorkflowRunToolCallAttempt> WorkflowRunToolCallAttempt => Set<WorkflowRunToolCallAttempt>();
     public DbSet<WorkflowRunNativeRecord> WorkflowRunNativeRecord => Set<WorkflowRunNativeRecord>();
     public DbSet<WorkflowRunSemanticEvent> WorkflowRunSemanticEvent => Set<WorkflowRunSemanticEvent>();
+    public DbSet<WorkflowRunHarnessReductionCheckpoint> WorkflowRunHarnessReductionCheckpoint => Set<WorkflowRunHarnessReductionCheckpoint>();
     public DbSet<AgentRunLogStream> AgentRunLogStream => Set<AgentRunLogStream>();
     public DbSet<AgentRunLogCaptureSession> AgentRunLogCaptureSession => Set<AgentRunLogCaptureSession>();
     public DbSet<AgentRunLogCaptureIntent> AgentRunLogCaptureIntent => Set<AgentRunLogCaptureIntent>();
