@@ -12,6 +12,7 @@ using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using CodeSpace.Core.Settings;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Queries.Agents;
 using Microsoft.EntityFrameworkCore;
@@ -287,6 +288,82 @@ public sealed class AgentRunLogRuntimeTests
         {
             if (Directory.Exists(rootPath)) Directory.Delete(rootPath, recursive: true);
         }
+    }
+
+    [Fact]
+    public async Task Log_bytes_stay_available_to_the_read_api_after_their_storage_profile_is_disabled_and_retired()
+    {
+        var world = await SeedWorldAsync();
+        var rootPath = Path.Combine(Path.GetTempPath(), "codespace-agent-log-retired-profile", Guid.NewGuid().ToString("N"));
+        using var settings = RuntimeSettings.Override(current => current with { ArtifactStoreDirectory = rootPath, ArtifactLocalRwxShared = true });
+        try
+        {
+            var captureSessionId = Guid.NewGuid();
+            var bytes = "history-outlives-its-profile"u8.ToArray();
+            Guid streamId;
+            Guid storageProfileId;
+            long revision;
+
+            using (var writeScope = _fixture.BeginScope())
+            {
+                var storage = (await writeScope.Resolve<IAgentRunLogStorageResolver>().ResolveAsync(world.TeamId, CancellationToken.None)).ShouldBeOfType<AgentRunLogStorageResolution.Ready>();
+                storageProfileId = storage.StorageProfileId;
+                var logs = writeScope.Resolve<IAgentRunLogService>();
+                var opened = (await logs.OpenAsync(Open(world, captureSessionId, AgentRunLogKinds.StandardOutput), CancellationToken.None)).ShouldBeOfType<AgentRunLogOpenResult.Opened>();
+                streamId = opened.Metadata.StreamId;
+                var appended = (await logs.AppendAsync(Append(world, streamId, captureSessionId, 1, 0, bytes) with
+                {
+                    StorageProfileId = storage.StorageProfileId,
+                    StorageProfileRevision = storage.StorageProfileRevision,
+                }, CancellationToken.None)).ShouldBeOfType<AgentRunLogAppendResult.Appended>();
+                var finalized = (await logs.FinalizeSourceAsync(new AgentRunLogFinalizeSourceRequest
+                {
+                    TeamId = world.TeamId, AgentRunId = world.AgentRunId, StreamId = streamId,
+                    WorkerFenceEpoch = 7, CaptureSessionId = captureSessionId, ExpectedRevision = appended.Metadata.Revision,
+                    ExpectedSourceOffsetBytes = appended.Metadata.SourceOffsetBytes,
+                }, CancellationToken.None)).ShouldBeOfType<AgentRunLogFinalizeSourceResult.Finalized>();
+                revision = finalized.Metadata.Revision;
+            }
+
+            // Written straight to the ledger: SetStateAsync now refuses this exact transition, but deployments that
+            // already disabled or retired a profile must still be able to read the history stamped under it.
+            await SetProfileStateAsync(storageProfileId, StorageProfileState.Disabled);
+            (await ReadAvailabilityAsync(world, streamId, bytes)).ShouldBe(AgentRunLogReadAvailability.Available);
+
+            using (var completeScope = _fixture.BeginScope())
+            {
+                var completed = (await completeScope.Resolve<IAgentRunLogService>().CompleteAsync(new AgentRunLogCompleteRequest
+                {
+                    TeamId = world.TeamId, AgentRunId = world.AgentRunId, StreamId = streamId,
+                    WorkerFenceEpoch = 7, CaptureSessionId = captureSessionId, ExpectedRevision = revision,
+                }, CancellationToken.None)).ShouldBeOfType<AgentRunLogCompleteResult.Completed>();
+                completed.Metadata.Sha256.ShouldBe(Convert.ToHexStringLower(SHA256.HashData(bytes)));
+            }
+
+            await SetProfileStateAsync(storageProfileId, StorageProfileState.Retired);
+            (await ReadAvailabilityAsync(world, streamId, bytes)).ShouldBe(AgentRunLogReadAvailability.Available);
+        }
+        finally
+        {
+            if (Directory.Exists(rootPath)) Directory.Delete(rootPath, recursive: true);
+        }
+    }
+
+    private async Task<AgentRunLogReadAvailability> ReadAvailabilityAsync(World world, Guid streamId, byte[] expected)
+    {
+        using var scope = _fixture.BeginScopeAs(world.ActorId, world.TeamId);
+        var handler = new ReadAgentRunLogRangeQueryHandler(scope.Resolve<IAgentRunLogService>(), scope.Resolve<ICurrentTeam>());
+        var read = await handler.Handle(new ReadAgentRunLogRangeQuery { AgentRunId = world.AgentRunId, StreamId = streamId, LimitBytes = expected.Length }, CancellationToken.None);
+        read.ShouldNotBeNull();
+        if (read.Availability == AgentRunLogReadAvailability.Available) read.Content.ShouldBe(expected);
+        return read.Availability;
+    }
+
+    private async Task SetProfileStateAsync(Guid profileId, StorageProfileState state)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<CodeSpaceDbContext>().StorageProfile.Where(value => value.Id == profileId)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(value => value.State, state));
     }
 
     [Fact]

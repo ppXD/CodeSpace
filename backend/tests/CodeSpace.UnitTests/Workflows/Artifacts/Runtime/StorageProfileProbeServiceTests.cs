@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Handlers.CommandHandlers.Storage;
 using CodeSpace.Core.Services.Identity;
+using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers;
 using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using CodeSpace.Messages.Authorization;
@@ -28,7 +29,7 @@ public sealed class StorageProfileProbeServiceTests
         command.RequiredPermission.ShouldBe(CodeSpace.Messages.Constants.TeamPermissions.StorageManage);
         var result = await handler.Handle(command, CancellationToken.None);
 
-        broker.Request.ShouldBe(new StorageRuntimeDriverRequest(_teamId, _profileId, 2));
+        broker.Request.ShouldBe(new StorageRuntimeDriverRequest(_teamId, _profileId, 2, StorageProfileEligibility.Write));
         result.ProfileRevision.ShouldBe(2);
         result.Failure!.Code.ShouldBe(StorageProfileProbeFailureCodeValue.ProfileNotActive);
     }
@@ -41,7 +42,7 @@ public sealed class StorageProfileProbeServiceTests
 
         var result = await service.ProbeAsync(new StorageProfileProbeRequest(_teamId, _profileId, null, true), CancellationToken.None);
 
-        broker.Request.ShouldBe(new StorageRuntimeDriverRequest(_teamId, _profileId, 7));
+        broker.Request.ShouldBe(new StorageRuntimeDriverRequest(_teamId, _profileId, 7, StorageProfileEligibility.Write));
         result.ProfileRevision.ShouldBe(7);
         result.WriteAccessRequested.ShouldBeTrue();
     }

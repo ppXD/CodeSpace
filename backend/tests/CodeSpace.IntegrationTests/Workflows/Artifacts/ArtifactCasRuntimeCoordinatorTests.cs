@@ -369,6 +369,52 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
     }
 
     [Fact]
+    public async Task Committed_bytes_stay_readable_after_the_profile_is_disabled_and_then_retired()
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState();
+        var bytes = RandomNumberGenerator.GetBytes(9_000);
+        var committed = (await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "outlives-lifecycle"))).ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+
+        foreach (var state in new[] { StorageProfileState.Disabled, StorageProfileState.Retired })
+        {
+            await SetProfileStateAsync(world, state);
+
+            using var readScope = Scope(storage);
+            var read = await readScope.Resolve<IArtifactCasRuntimeCoordinator>().OpenReadAsync(new ArtifactCasReadRequest
+            {
+                TeamId = world.TeamId, ArtifactObjectId = committed.ArtifactObjectId,
+                StorageProfileId = world.ProfileId, StorageProfileRevision = 1,
+            }, CancellationToken.None);
+
+            var opened = read.ShouldBeOfType<ArtifactCasReadResult.Opened>($"a {state} profile must still serve the bytes its own revision stamped");
+            await using var content = opened.Content;
+            using var received = new MemoryStream();
+            await content.CopyToAsync(received);
+            received.ToArray().ShouldBe(bytes);
+        }
+    }
+
+    [Theory]
+    [InlineData(StorageProfileState.Disabled)]
+    [InlineData(StorageProfileState.Retired)]
+    public async Task New_writes_are_still_refused_once_the_profile_leaves_active(StorageProfileState state)
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState();
+        var bytes = RandomNumberGenerator.GetBytes(512);
+        await SetProfileStateAsync(world, state);
+
+        var result = await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "write-after-lifecycle"));
+
+        result.ShouldBeOfType<ArtifactCasTransferResult.Rejected>().Problem.Code.ShouldBe(ArtifactCasProblemCode.ProfileNotActive);
+        storage.FactoryCreateCalls.ShouldBe(0);
+        storage.PutCalls.ShouldBe(0);
+        using var scope = _fixture.BeginScope();
+        (await scope.Resolve<CodeSpaceDbContext>().ArtifactTransferIntent.CountAsync(value => value.TeamId == world.TeamId)).ShouldBe(0);
+    }
+
+    [Fact]
     public async Task Encrypted_credential_backed_profile_activates_the_factory_without_exposing_secret_material()
     {
         var world = await SeedWorldAsync(withCredential: true);
@@ -599,6 +645,14 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         db.StorageProfile.Add(profile);
         await db.SaveChangesAsync();
         return new World(teamId, actorId, profileId, profileRevisionId);
+    }
+
+    private async Task SetProfileStateAsync(World world, StorageProfileState state)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<CodeSpaceDbContext>().StorageProfile
+            .Where(value => value.TeamId == world.TeamId && value.Id == world.ProfileId)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(value => value.State, state));
     }
 
     private static ArtifactCasTransferRequest Request(World world, Stream content, byte[] bytes, string key) => new()

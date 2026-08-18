@@ -33,7 +33,7 @@ public sealed class StorageProfileSnapshotResolver : IStorageProfileSnapshotReso
 
         var row = await ReadProfileRevisionAsync(request, cancellationToken).ConfigureAwait(false);
         if (row == null) return new StorageProfileSnapshotResolution.Missing();
-        if (row.State != StorageProfileState.Active) return new StorageProfileSnapshotResolution.NotActive(row.State);
+        if (!StorageProfileRules.Admits(row.State, request.Eligibility)) return new StorageProfileSnapshotResolution.NotActive(row.State);
         if (row.RevisionId == null) return new StorageProfileSnapshotResolution.RevisionMissing();
 
         var providerTypeKey = row.ProviderTypeKey!;

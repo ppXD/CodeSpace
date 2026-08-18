@@ -51,6 +51,14 @@ internal static class StorageProfileRules
         return true;
     }
 
+    /// <summary>
+    /// Lifecycle state gates writes only. A read names one exact revision that durable bytes already stamped, so it
+    /// stays admitted through Disabled and through terminal Retired; gating it here would make disabling a profile
+    /// silently strand every artifact ever written under it. Blocking reads is a separate concept, not a side effect.
+    /// </summary>
+    public static bool Admits(StorageProfileState state, StorageProfileEligibility eligibility) =>
+        eligibility == StorageProfileEligibility.Read || state == StorageProfileState.Active;
+
     public static void EnsureRevisionAllowed(StorageProfileState state)
     {
         if (state == StorageProfileState.Retired) throw new ArgumentException("A retired storage profile is terminal and cannot receive a new revision.");
