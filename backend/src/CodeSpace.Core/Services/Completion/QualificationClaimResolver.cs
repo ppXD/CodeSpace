@@ -56,7 +56,7 @@ public sealed class QualificationClaimResolver : IQualificationClaimResolver, IS
         {
             Mode = mode,
             CapabilityKey = capabilityKey,
-            Performance = backing is null ? PerformanceQualification.Unmeasured : PerformanceQualification.Sealed,
+            Performance = backing?.GrantedPerformance ?? PerformanceQualification.Unmeasured,
             ReceiptId = backing?.Id,
             SuiteDigest = backing?.SuiteDigest,
             ExpiresAt = backing?.ExpiresAt,
