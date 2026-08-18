@@ -299,11 +299,19 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // points at it. Null when no endpoint → nothing to re-open.
             var mcpToken = mcp is null ? null : token;
 
+            // D3/G0: the run's faithful raw stream, accumulated across EVERY revise round without being retained —
+            // bounded at the artifact offloader's own inline threshold, so what the durable record carries is
+            // unchanged while the heap stops growing with stdout. Disposed with the run (its spill file with it), and
+            // anything past the budget spills into the run's OWN spool directory — so if this worker dies before that
+            // dispose, the spool reaper reclaims the spill with the rest of the run's spool instead of leaking it.
+            await using var transcript = new AgentTranscriptSpool(TranscriptSpillDirectory(agentRunId));
+
             var runContext = new HarnessRunContext
             {
                 RunId = agentRunId, TeamId = run.TeamId, ActorId = run.CreatedBy, WorkerFenceEpoch = claimedEpoch,
                 Harness = harness, Runner = runner, Spec = spec, McpToken = mcpToken, Redactor = redactor,
-                SpoolKey = ReviseSpoolKey(agentRunId, round: 0), WorkspaceDirectory = workspaceDirectory, WorkspaceBaseSha = workspaceBaseSha,
+                SpoolKey = ReviseSpoolKey(agentRunId, round: 0), Transcript = transcript,
+                WorkspaceDirectory = workspaceDirectory, WorkspaceBaseSha = workspaceBaseSha,
             };
             var result = await RunHarnessAsync(runContext, cancellationToken).ConfigureAwait(false);
 
@@ -345,10 +353,15 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 var reviseTask = BuildReviseTask(effectiveTask, result, reason);
                 var reviseSpec = ApplyEgressPolicy(harness.BuildInvocation(AugmentToolsForMcp(reviseTask, mcp, mcpWiring)) with { Mcp = mcpWiring }, reviseTask.Permissions, modelBaseUrl, modelProvider, workspaceProvision);
 
-                var priorTranscript = result.Transcript;
                 var priorUsage = result.TokenUsage;
+
+                // The seam separating this round's raw stream from what came before. Marked, not written: the same
+                // spool carries every round, and a round that emits nothing must contribute no seam — exactly what
+                // the string join's empty short-circuits did.
+                transcript.MarkSeam(ReviseTranscriptSeam);
+
                 result = await RunHarnessAsync(runContext with { Spec = reviseSpec, SpoolKey = ReviseSpoolKey(agentRunId, round) }, cancellationToken).ConfigureAwait(false);
-                result = result with { Transcript = JoinTranscripts(priorTranscript, result.Transcript), TokenUsage = SumTokenUsage(priorUsage, result.TokenUsage), ReviseRounds = round };
+                result = result with { TokenUsage = SumTokenUsage(priorUsage, result.TokenUsage), ReviseRounds = round };
 
                 // Verify under the ORIGINAL goal: the composed REVISE goal is for the harness invocation only — the
                 // output critic must judge goal-alignment against what the task actually asked for, not the feedback
@@ -363,6 +376,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // original launch's declaration facts are not durably observable across a restart, and evidence is
             // never fabricated.
             result = AttachMcpEvidence(result, effectiveTask, mcp, mcpWiring);
+
+            result = await AttachTranscriptAsync(result, run.TeamId, transcript, cancellationToken).ConfigureAwait(false);
 
             // The capture sequence ran to its persist (a CONFIRMED empty included) — commit the promise with the
             // observed facts before the terminal CAS, so a crash between the two replays as re-verify + idempotent
@@ -529,12 +544,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         var folder = context.Harness.CreateFolder();   // BOUNDED, exactly as the live tail folds — a re-attached run must not be able to exhaust the heap either
         var facts = new AgentRunFacts();   // driven alongside the folder, exactly as the live tail does, so both paths reach MapSandboxResult with the same inputs
-        var transcript = new System.Text.StringBuilder();   // D3: the faithful raw stream of the RESUMED tail (the pre-crash prefix lived in the dead observer's run)
+        await using var transcript = new AgentTranscriptSpool(TranscriptSpillDirectory(context.RunId));   // D3/G0: the faithful raw stream of the RESUMED tail (the pre-crash prefix lived in the dead observer's run), bounded exactly as the live tail's is and spilled into the SAME run-owned, reaper-swept spool directory
         var writer = new BufferedEventWriter(_runs, context.RunId);   // same batched-append + flush-at-checkpoint path as the live tail
 
         async Task PersistLineAsync(string line)
         {
-            transcript.AppendLine(redactor.Redact(line));
+            await transcript.AppendLineAsync(redactor.Redact(line), cancellationToken).ConfigureAwait(false);
 
             foreach (var normalized in context.Harness.ParseEvents(line))
             {
@@ -558,7 +573,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // Final flush for the terminal-drain lines (no trailing checkpoint), as in the live path.
         await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
 
-        var result = MapSandboxResult(sandbox, folder, facts) with { Transcript = transcript.ToString() };
+        var result = await AttachTranscriptAsync(MapSandboxResult(sandbox, folder, facts), context.TeamId, transcript, cancellationToken).ConfigureAwait(false);
 
         // Capture the resumable session transcript here too — a run that completes via durable re-attach (worker restart
         // mid-run) is exactly the durability case continuity serves; the config home still lives under the handle's spool.
@@ -1371,11 +1386,41 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// <summary>Round-scoped durable spool key: round 0 (the first attempt) keeps the bare run key — byte-identical spool paths for every non-revised run — and each revise round gets its own suffixed directory, because a spool is single-use (its exit marker means THIS launch finished; reusing round 1's would complete round 2 instantly with a stale code). Re-attach is unaffected: it reads the ACTUAL spool path off the persisted handle, never recomputes it.</summary>
     internal static string ReviseSpoolKey(Guid runId, int round) => round == 0 ? runId.ToString("N") : $"{runId:N}-r{round}";
 
-    /// <summary>Concatenate the rounds' faithful raw streams with a visible seam, so the final offloaded transcript holds the WHOLE run — every round — not just the last one.</summary>
-    internal static string? JoinTranscripts(string? prior, string? current) =>
-        string.IsNullOrEmpty(prior) ? current
-        : string.IsNullOrEmpty(current) ? prior
-        : $"{prior}\n--- revise round ---\n{current}";
+    /// <summary>The visible seam between the rounds' faithful raw streams, so the run's transcript holds the WHOLE run — every round — not just the last one. Marked on the spool at each round boundary and emitted lazily, which is what keeps an empty round from contributing one.</summary>
+    internal const string ReviseTranscriptSeam = "\n--- revise round ---\n";
+
+    /// <summary>
+    /// Where a run's transcript spill file lives: the run's OWN round-0 spool directory — the operator's configured
+    /// <c>Agents:RunSpoolDirectory</c> volume, never the system temp directory a Production host is refused
+    /// (<see cref="CodeSpace.Core.Settings.DurableRootsGuard"/>) and never a path nothing can reclaim. Round 0
+    /// deliberately, not the current revise round: ONE spool carries every round, and the bare round-0 directory is the
+    /// first entry of <see cref="AgentRunSpoolReaper.RoundSpoolFamily"/> — so the existing terminal-gated sweep already
+    /// reclaims the spill along with the rest of the run's spool, with no new reaper and under the same retention
+    /// window. Derived from the run id alone, so the re-attach path resolves the same directory after a restart.
+    /// </summary>
+    internal static string TranscriptSpillDirectory(Guid runId) => LocalProcessRunner.SpoolDirectoryFor(ReviseSpoolKey(runId, round: 0));
+
+    /// <summary>The transcript artifact's content type. MUST stay equal to the one <c>AgentRunService.OffloadLargeTranscriptAsync</c> uses: both paths mint an artifact for the same bytes, so a drift would file one run's transcript under a different type than the next's.</summary>
+    private const string TranscriptContentType = "text/plain";
+
+    /// <summary>
+    /// The transcript's ONE materialization point (G0). A spool still inside its budget becomes the inline string —
+    /// byte-identical to the whole-run <c>StringBuilder</c> it replaced, and small enough that
+    /// <c>AgentRunService.OffloadLargeTranscriptAsync</c> keeps it inline exactly as before. A SPILLED spool is
+    /// content that offloader was always going to move out, so it goes straight to the artifact store here and the
+    /// result carries the same <c>("" + ref)</c> shape the offloader would have produced — the content-addressed
+    /// store dedups by sha, so the very same bytes even land on the very same artifact id. Either way the persisted
+    /// <c>result_jsonb</c> is unchanged; what changes is that the full string never has to exist.
+    /// </summary>
+    private async Task<AgentRunResult> AttachTranscriptAsync(AgentRunResult result, Guid teamId, AgentTranscriptSpool transcript, CancellationToken cancellationToken)
+    {
+        if (!transcript.Spilled) return result with { Transcript = transcript.RetainedText() };
+
+        var bytes = await transcript.ReadAllAsync(cancellationToken).ConfigureAwait(false);
+        var artifactId = await _artifacts.PutAsync(teamId, bytes, TranscriptContentType, cancellationToken).ConfigureAwait(false);
+
+        return result with { Transcript = "", TranscriptArtifactId = artifactId };
+    }
 
     /// <summary>The revise-round announcement's pinned prefix — the journal describer matches it to classify the Warning as a REVISE beat, so the copy and the classification can't drift apart.</summary>
     internal const string ReviseAnnouncementPrefix = "Verification failed — revising";
@@ -2059,7 +2104,6 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     {
         var folder = context.Harness.CreateFolder();   // BOUNDED: the harness's OWN reductions, not the run's events — a long run must not be able to exhaust the heap here
         var facts = new AgentRunFacts();   // the three harness-independent facts a forced terminal reports without ever consulting the harness
-        var transcript = new System.Text.StringBuilder();   // D3: the FAITHFUL raw stream — every redacted line, incl. ones ParseEvent drops
         var writer = new BufferedEventWriter(_runs, context.RunId);   // batches the DB inserts; flushed at each spool checkpoint + once at the end
 
         async Task PersistLineAsync(string line)
@@ -2067,7 +2111,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // Capture the faithful transcript FIRST — redact the raw line, then keep it whether or not ParseEvents
             // surfaces any event. ParseEvents drops blank/unrecognized lines; the transcript keeps them so a replay
             // is exact. Redacted before it's held, so no secret reaches the offloaded artifact.
-            transcript.AppendLine(context.Redactor.Redact(line));
+            await context.Transcript.AppendLineAsync(context.Redactor.Redact(line), cancellationToken).ConfigureAwait(false);
 
             // ONE native line can carry several content blocks (reasoning + tool_use + text) → several events, in
             // stream order. Each is redacted BEFORE the append-only log freezes it (the log can't be edited later).
@@ -2094,11 +2138,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // before the result is folded + the run completes. (A no-op when the buffer is already empty.)
         await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
 
-        // Events are already redacted, so a result the harness folds from them (summary / error) is redacted too.
-        var result = MapSandboxResult(sandbox, folder, facts);
-
-        // D3: attach the faithful raw transcript (offloaded to an artifact at completion if large — the common case).
-        return result with { Transcript = transcript.ToString() };
+        // Events are already redacted, so a result the harness folds from them (summary / error) is redacted too. The
+        // faithful raw transcript is NOT attached here: it belongs to the whole run (every revise round streams into
+        // the same spool) and is materialized once, at the end, by AttachTranscriptAsync.
+        return MapSandboxResult(sandbox, folder, facts);
     }
 
     /// <summary>Redact any echoed secret out of a normalized event — its text AND its structured payload — before it reaches the append-only log. No-op when the run has no secret.</summary>
@@ -2224,6 +2267,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         public string? McpToken { get; init; }
         public required SecretRedactor Redactor { get; init; }
         public required string SpoolKey { get; init; }
+
+        /// <summary>The run's transcript accumulator, shared across every revise round (the seam between them is marked on it), so the whole run's faithful stream lands in ONE record without any round retaining its own copy.</summary>
+        public required AgentTranscriptSpool Transcript { get; init; }
         public string? WorkspaceDirectory { get; init; }
         public string? WorkspaceBaseSha { get; init; }
     }

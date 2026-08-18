@@ -925,9 +925,13 @@ public class AgentRunExecutorTests
 
         var artifact = await scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, result.TranscriptArtifactId!.Value, CancellationToken.None);
         artifact.ShouldNotBeNull();
-        var recovered = System.Text.Encoding.UTF8.GetString(artifact!.Bytes);
-        recovered.ShouldContain("transcript line 0001 padding-padding", customMessage: "the first raw line round-trips from the store");
-        recovered.ShouldContain("transcript line 0500 padding-padding", customMessage: "the last raw line round-trips — the whole session is durable, not a head-truncated sample");
+
+        // G0: byte-identity, not a spot check. The executor now streams this transcript past its retained budget into
+        // a spill file and offloads THAT, so the artifact's bytes are asserted whole against the stream the script
+        // produced — every line, in order, terminated exactly as the pre-spool builder terminated them. A
+        // head-truncated or reordered spill cannot pass this, and a contains-check would not have caught either.
+        var expected = string.Concat(Enumerable.Range(1, 500).Select(i => $"transcript line {i:D4} padding-padding{Environment.NewLine}"));
+        System.Text.Encoding.UTF8.GetString(artifact!.Bytes).ShouldBe(expected, "the whole raw session round-trips from the store byte-for-byte");
         artifact.ContentType.ShouldBe("text/plain");
     }
 
