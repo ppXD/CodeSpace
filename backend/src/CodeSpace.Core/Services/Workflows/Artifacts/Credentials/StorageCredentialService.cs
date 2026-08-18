@@ -118,6 +118,8 @@ public sealed class StorageCredentialService : IStorageCredentialService, IScope
         EnsureExpected(credential, command.ExpectedXmin, command.ExpectedCurrentRevision);
         ExecuteRule(() => StorageCredentialRules.EnsureRevocationAllowed(credential.State));
 
+        await EnsureCredentialReleasedAsync(teamId, credential.Id, cancellationToken).ConfigureAwait(false);
+
         var current = await _db.StorageCredentialRevision.AsNoTracking()
             .Where(value => value.TeamId == teamId && value.StorageCredentialId == credential.Id && value.Revision == credential.CurrentRevision)
             .Select(value => new CurrentRevisionMetadata { ProviderTypeKey = value.ProviderTypeKey, SafeHint = value.SafeHint, CreatedDate = value.CreatedDate })
@@ -130,6 +132,50 @@ public sealed class StorageCredentialService : IStorageCredentialService, IScope
         await SaveConcurrentAsync("The storage credential changed before it could be revoked.", cancellationToken).ConfigureAwait(false);
         return Metadata(Projection(credential, current));
     }
+
+    /// <summary>
+    /// Revocation is terminal and the secret resolver admits none but an Active credential, so revoking one a stored
+    /// object still depends on makes those bytes permanently unreadable — the same stranding the profile lifecycle
+    /// used to cause, one layer down. Refuse while anything still needs it, and name what to release first. An
+    /// operator who genuinely must kill a leaked key does it at the provider, where it takes effect for real rather
+    /// than only for this platform's readers.
+    /// </summary>
+    private async Task EnsureCredentialReleasedAsync(Guid teamId, Guid credentialId, CancellationToken cancellationToken)
+    {
+        var locations = await CountAvailableLocationsAsync(teamId, credentialId, cancellationToken).ConfigureAwait(false);
+
+        if (locations > 0)
+            throw new StorageCredentialConflictException($"Storage credential cannot be revoked while {locations} stored artifact location(s) still resolve through it — revoking would make those bytes permanently unreadable. Migrate or delete those artifacts first.");
+
+        var profiles = await CountLiveProfilesAsync(teamId, credentialId, cancellationToken).ConfigureAwait(false);
+
+        if (profiles > 0)
+            throw new StorageCredentialConflictException($"Storage credential cannot be revoked while {profiles} storage profile(s) still reference it. Point those profiles at another credential first.");
+    }
+
+    /// <summary>Stored objects whose profile revision resolves through this credential. The reference is the structured <c>db:{id}:{version}</c> form, so the id plus its trailing separator is an exact prefix — no other credential's reference can share it.</summary>
+    private Task<int> CountAvailableLocationsAsync(Guid teamId, Guid credentialId, CancellationToken cancellationToken) =>
+        (from location in _db.ArtifactLocation.AsNoTracking()
+         join revision in _db.StorageProfileRevision.AsNoTracking()
+             on new { location.TeamId, Id = location.StorageProfileRevisionId }
+             equals new { revision.TeamId, revision.Id }
+         where location.TeamId == teamId && location.State == ArtifactLocationState.Available
+             && revision.CredentialRef != null && revision.CredentialRef.StartsWith(CredentialRefPrefix(credentialId))
+         select location.Id)
+        .CountAsync(cancellationToken);
+
+    /// <summary>Profiles that have not been retired and whose CURRENT revision resolves through this credential — the live configuration a revoke would break for new writes as well as old reads.</summary>
+    private Task<int> CountLiveProfilesAsync(Guid teamId, Guid credentialId, CancellationToken cancellationToken) =>
+        (from profile in _db.StorageProfile.AsNoTracking()
+         join revision in _db.StorageProfileRevision.AsNoTracking()
+             on new { profile.TeamId, StorageProfileId = profile.Id, Revision = profile.CurrentRevision }
+             equals new { revision.TeamId, revision.StorageProfileId, revision.Revision }
+         where profile.TeamId == teamId && profile.State != StorageProfileState.Retired
+             && revision.CredentialRef != null && revision.CredentialRef.StartsWith(CredentialRefPrefix(credentialId))
+         select profile.Id)
+        .CountAsync(cancellationToken);
+
+    private static string CredentialRefPrefix(Guid credentialId) => $"db:{credentialId}:";
 
     private IQueryable<StorageCredentialProjection> CurrentRows() =>
         from credential in _db.StorageCredential.AsNoTracking()
