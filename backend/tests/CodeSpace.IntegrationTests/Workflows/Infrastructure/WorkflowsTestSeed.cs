@@ -188,7 +188,8 @@ public static class WorkflowsTestSeed
             .Where(v => v.WorkflowId == workflowId && v.Version == workflowVersion)
             .Select(v => v.DefinitionJson)
             .SingleOrDefaultAsync().ConfigureAwait(false);
-        var enforcementMode = CodeSpace.Core.Services.Completion.CompletionPolicy.StampModeFor(CodeSpace.Core.Services.Workflows.RunSources.DefinitionCompletionMode.Read(definitionJson));
+        var seedMode = CodeSpace.Core.Services.Completion.RunModeClassifier.DeriveFromJson(null, definitionJson);
+        var enforcementMode = CodeSpace.Core.Services.Completion.CompletionPolicy.StampModeFor(CodeSpace.Core.Services.Workflows.RunSources.DefinitionCompletionMode.Read(definitionJson), seedMode, new CodeSpace.Core.Services.Completion.ModeProfileRegistry().Resolve(seedMode));
 
         db.WorkflowRunRequest.Add(new WorkflowRunRequest
         {

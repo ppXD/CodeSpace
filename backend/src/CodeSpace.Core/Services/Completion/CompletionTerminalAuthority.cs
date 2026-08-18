@@ -76,6 +76,13 @@ public sealed class CompletionTerminalAuthority : ICompletionTerminalAuthority, 
         if (_modes.Resolve(mode) is not { } profile)
             return new TerminalArbitration(WorkflowRunStatus.Suspended, $"completion-authority: Unsupported — mode '{mode}' has no registered conformance profile", TerminalDecision.Unsupported);
 
+        // Q3 (cohort admission, arbitration side): the mode must HOLD Enforceable standing at arbitration time,
+        // not merely at launch — a cohort demoted by a reviewed registry edit stops terminalizing IMMEDIATELY:
+        // its in-flight Enforced rows park here until re-graduation. Structural like the two registration gates
+        // above (recomputed from the registry on every arbitration, nothing baked into the shadow mirror).
+        if (profile.Readiness != ProtocolReadiness.Enforceable)
+            return new TerminalArbitration(WorkflowRunStatus.Suspended, $"completion-authority: Unsupported — mode '{mode}' holds ProtocolReadiness.{profile.Readiness}, below the Enforceable standing the Enforced cohort requires", TerminalDecision.Unsupported);
+
         // Lock Clause 2: capture the ledgers' watermarks BEFORE composing — conservative direction: a fact that
         // lands mid-compose reads as moved at the terminal boundary and forces a recompose, never a stale stamp.
         var watermarks = await CompletionLedgerWatermarks.CaptureAsync(_db, workflowRunId, teamId, cancellationToken).ConfigureAwait(false);

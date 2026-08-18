@@ -29,9 +29,10 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
     private readonly IWorkflowRunDispatcher _runDispatcher;
     private readonly IPostCommitActions _postCommit;
     private readonly Sessions.IWorkSessionService _sessions;
+    private readonly Completion.IModeProfileRegistry _modes;
     private readonly ILogger<RunFromSnapshotStarter> _logger;
 
-    public RunFromSnapshotStarter(CodeSpaceDbContext db, DefinitionValidator validator, IRunRecordLogger recordLogger, IWorkflowRunDispatcher runDispatcher, IPostCommitActions postCommit, Sessions.IWorkSessionService sessions, ILogger<RunFromSnapshotStarter> logger)
+    public RunFromSnapshotStarter(CodeSpaceDbContext db, DefinitionValidator validator, IRunRecordLogger recordLogger, IWorkflowRunDispatcher runDispatcher, IPostCommitActions postCommit, Sessions.IWorkSessionService sessions, Completion.IModeProfileRegistry modes, ILogger<RunFromSnapshotStarter> logger)
     {
         _db = db;
         _validator = validator;
@@ -39,6 +40,7 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
         _runDispatcher = runDispatcher;
         _postCommit = postCommit;
         _sessions = sessions;
+        _modes = modes;
         _logger = logger;
     }
 
@@ -168,6 +170,10 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
         // staging path can't produce a session-less run either.
         var resolved = await _sessions.ResolveForRunAsync(session, teamId, null, actorUserId, cancellationToken).ConfigureAwait(false);
 
+        // Q3: same admission as RunStarter — the mode derives from the SAME (projection kind, frozen json) pair
+        // this row is about to carry, so the gate and the terminal authority can never read different modes.
+        var mode = Completion.RunModeClassifier.DeriveFromJson(projectionKind, definitionJson);
+
         _db.WorkflowRun.Add(new WorkflowRun
         {
             Id = runId,
@@ -186,7 +192,7 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
             // never an inherited or inferred one. P2b: the enforcement mode is the exception BY DESIGN — it reads
             // the frozen definition's own opt-in, so a rerun of an enforced definition is enforced again.
             CompletionPolicyVersion = Completion.CompletionPolicy.CurrentVersion,
-            CompletionEnforcementMode = Completion.CompletionPolicy.StampModeFor(DefinitionCompletionMode.Read(definitionJson)).ToString(),
+            CompletionEnforcementMode = Completion.CompletionPolicy.StampModeFor(DefinitionCompletionMode.Read(definitionJson), mode, _modes.Resolve(mode)).ToString(),
             ActorId = actorUserId,   // snapshot / task runs are always user-launched (mirrors the request's ActorId)
             ProjectionKind = projectionKind,
             ScopeRepositoryIds = scopeRepositoryIds.ToList(),

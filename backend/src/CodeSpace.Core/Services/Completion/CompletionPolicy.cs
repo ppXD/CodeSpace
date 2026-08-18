@@ -28,18 +28,24 @@ public static class CompletionPolicy
         Enum.TryParse<CompletionEnforcementMode>(storedMode, ignoreCase: false, out var mode) ? mode : CompletionEnforcementMode.Legacy;
 
     /// <summary>
-    /// P2b (Enforced cohort): the mode a NEW run is stamped with, from its definition's own
-    /// <see cref="Messages.Dtos.Workflows.WorkflowDefinition.CompletionMode"/> opt-in — null inherits
-    /// <see cref="CurrentMode"/>, the two vocabulary values map exactly, and anything else THROWS: a definition
-    /// whose enforcement vocabulary the policy cannot read never launches (silently stamping a weaker mode than
-    /// the author declared would be the one unacceptable direction). The validator rejects unknown values at
-    /// authoring time; this throw is the launch-time backstop for rows that predate (or evaded) it.
+    /// P2b (Enforced cohort) + Q3 (cohort admission): the mode a NEW run is stamped with, from its definition's
+    /// own <see cref="Messages.Dtos.Workflows.WorkflowDefinition.CompletionMode"/> opt-in — null inherits
+    /// <see cref="CurrentMode"/>, 'shadow' maps without consulting the cohort, and 'enforced' is a COHORT
+    /// PRIVILEGE: it stamps only when the run's operating mode holds <see cref="ProtocolReadiness.Enforceable"/>
+    /// standing and REFUSES TO LAUNCH otherwise — admission is the registry's graduation decision (a reviewed
+    /// edit arguing accumulated conformance evidence), never a per-launch bypass, and silently stamping a weaker
+    /// mode than the author declared stays the one unacceptable direction. Unknown vocabulary THROWS as before:
+    /// the validator rejects it at authoring time; this throw is the launch-time backstop for rows that predate
+    /// (or evaded) it. Callers derive <paramref name="mode"/> with <c>RunModeClassifier</c> from the SAME
+    /// (projection kind, definition json) pair the run row will carry, so the admission decision and the
+    /// terminal authority's later mode reading can never disagree.
     /// </summary>
-    public static CompletionEnforcementMode StampModeFor(string? definitionCompletionMode) => definitionCompletionMode switch
+    public static CompletionEnforcementMode StampModeFor(string? definitionCompletionMode, string mode, ModeProfile? profile) => definitionCompletionMode switch
     {
         null => CurrentMode,
         Messages.Dtos.Workflows.WorkflowDefinition.CompletionModeShadow => CompletionEnforcementMode.Shadow,
-        Messages.Dtos.Workflows.WorkflowDefinition.CompletionModeEnforced => CompletionEnforcementMode.Enforced,
+        Messages.Dtos.Workflows.WorkflowDefinition.CompletionModeEnforced when profile?.Readiness == ProtocolReadiness.Enforceable => CompletionEnforcementMode.Enforced,
+        Messages.Dtos.Workflows.WorkflowDefinition.CompletionModeEnforced => throw new InvalidOperationException($"Definition opts into Enforced but mode '{mode}' {(profile is null ? "has no registered conformance profile" : $"holds ProtocolReadiness.{profile.Readiness}")} — the Enforced cohort admits only Enforceable modes; graduation is a reviewed ModeProfileRegistry edit arguing accumulated conformance evidence, never a launch-time bypass."),
         _ => throw new InvalidOperationException($"Unknown definition completionMode '{definitionCompletionMode}' — expected '{Messages.Dtos.Workflows.WorkflowDefinition.CompletionModeShadow}' or '{Messages.Dtos.Workflows.WorkflowDefinition.CompletionModeEnforced}'; refusing to launch with an unreadable enforcement opt-in."),
     };
 }

@@ -86,6 +86,24 @@ public sealed class CompletionTerminalAuthorityFlowTests
     }
 
     [Fact]
+    public async Task An_enforced_row_whose_mode_lost_enforceable_standing_parks_at_the_readiness_gate()
+    {
+        // Q3: the launch gate admitted this row while its cohort stood Enforceable; a later reviewed demotion
+        // (modeled by restamping a registered mode that holds Shadow standing) must stop the cohort IMMEDIATELY —
+        // the authority re-reads the registry every arbitration, so the row parks before any evidence composes.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunningRunAsync(teamId, userId, mode: "Enforced");
+        await RestampProjectionKindAsync(runId, CodeSpace.Messages.Tasks.TaskProjectionKinds.SingleAgent);
+
+        using var scope = _fixture.BeginScope();
+        var arbitration = await scope.Resolve<ICompletionTerminalAuthority>().ArbitrateAsync(runId, teamId, "Enforced", WorkflowRunStatus.Success, CancellationToken.None);
+
+        arbitration.Status.ShouldBe(WorkflowRunStatus.Suspended);
+        arbitration.Decision.ShouldBe(TerminalDecision.Unsupported);
+        arbitration.Reason!.ShouldContain("ProtocolReadiness.Shadow", customMessage: "the park must name the standing that fell short — a demotion is legible, never a mystery park");
+    }
+
+    [Fact]
     public async Task An_enforced_success_claim_with_an_unsettled_obligation_parks()
     {
         // Acceptance passed but the staked delivery/output never settled (no manifest) — Unknown obligations
@@ -379,6 +397,15 @@ public sealed class CompletionTerminalAuthorityFlowTests
         run.ProjectionKind = CodeSpace.Messages.Tasks.TaskProjectionKinds.Supervisor;
         await db.SaveChangesAsync();
         return runId;
+    }
+
+    private async Task RestampProjectionKindAsync(Guid runId, string kind)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var run = await db.WorkflowRun.SingleAsync(r => r.Id == runId);
+        run.ProjectionKind = kind;
+        await db.SaveChangesAsync();
     }
 
     /// <summary>The canonical graded supervisor tape: plan → spawn → merge → stop. <paramref name="merged"/> false drops the merge decision — the exact tape P4's stage gate must refuse (fresh spawned work nothing ever integrated).</summary>

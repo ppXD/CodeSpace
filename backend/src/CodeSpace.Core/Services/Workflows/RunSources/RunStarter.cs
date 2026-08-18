@@ -24,16 +24,18 @@ public sealed class RunStarter : IRunStarter, IScopedDependency
     private readonly CodeSpaceDbContext _db;
     private readonly IRunRecordLogger _recordLogger;
     private readonly Sessions.IWorkSessionService _sessions;
+    private readonly Completion.IModeProfileRegistry _modes;
     private readonly ILogger<RunStarter> _logger;
 
     /// <summary>Postgres unique-constraint violation SQLSTATE. <see cref="DbUpdateException"/> wraps this when our duplicate-event index fires.</summary>
     private const string PostgresUniqueViolation = "23505";
 
-    public RunStarter(CodeSpaceDbContext db, IRunRecordLogger recordLogger, Sessions.IWorkSessionService sessions, ILogger<RunStarter> logger)
+    public RunStarter(CodeSpaceDbContext db, IRunRecordLogger recordLogger, Sessions.IWorkSessionService sessions, Completion.IModeProfileRegistry modes, ILogger<RunStarter> logger)
     {
         _db = db;
         _recordLogger = recordLogger;
         _sessions = sessions;
+        _modes = modes;
         _logger = logger;
     }
 
@@ -85,12 +87,16 @@ public sealed class RunStarter : IRunStarter, IScopedDependency
 
         // P2b (Enforced cohort): the enforcement mode comes from the run's own frozen definition — the version row
         // this run targets — so every lane launching an opted-in definition stamps Enforced, and a definition
-        // carrying an unreadable opt-in value refuses to launch (StampModeFor throws, fail-closed).
+        // carrying an unreadable opt-in value refuses to launch (StampModeFor throws, fail-closed). Q3: the
+        // Enforced opt-in is a cohort privilege — the mode derives from the same definition json the row will
+        // carry (the authored lane stamps no projection kind), and an opt-in for a mode without Enforceable
+        // standing refuses to launch here, before any row exists.
         var definitionJson = await _db.WorkflowVersion.AsNoTracking()
             .Where(v => v.WorkflowId == envelope.WorkflowId && v.Version == envelope.WorkflowVersion)
             .Select(v => v.DefinitionJson)
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-        var enforcementMode = Completion.CompletionPolicy.StampModeFor(DefinitionCompletionMode.Read(definitionJson));
+        var mode = Completion.RunModeClassifier.DeriveFromJson(projectionKind: null, definitionJson);
+        var enforcementMode = Completion.CompletionPolicy.StampModeFor(DefinitionCompletionMode.Read(definitionJson), mode, _modes.Resolve(mode));
 
         _db.WorkflowRun.Add(new WorkflowRun
         {
