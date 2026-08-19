@@ -96,7 +96,10 @@ public sealed class HarnessModelCallProjectionFlowTests
         }, customMessage: "the CLI prints no request id and no timing, and the row must say so rather than leave a NULL nobody can interpret");
         attempt.ProviderRequestId.ShouldBeNull();
         attempt.CompletedAt.ShouldBeNull("repeating the ingest instant here would claim a call of zero duration");
-        attempt.StartedAt.ShouldBe(frame.IngestedAt);
+        // Compared to the microsecond, which is all a timestamptz round-trip preserves: .NET keeps 100-ns ticks, Postgres
+        // does not, so an exact compare depends on the ingest instant happening to land on a whole microsecond. macOS's
+        // clock granularity makes that always true and Linux's does not, so this passed locally and failed in CI.
+        attempt.StartedAt.ShouldBe(frame.IngestedAt, TimeSpan.FromMicroseconds(1), "the row must carry the frame's own ingest instant, to the precision the column stores");
     }
 
     /// <summary>
