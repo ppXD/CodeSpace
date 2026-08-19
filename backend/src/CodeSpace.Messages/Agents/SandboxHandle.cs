@@ -25,11 +25,15 @@ namespace CodeSpace.Messages.Agents;
 ///
 /// <para><b>SAME HOST, any process — the boundary the pid draws.</b> "Without the launching process still being alive"
 /// means a different process, not a different machine. Every liveness and teardown answer the local runner gives is
-/// host-local: <c>ProbeAsync</c> resolves <see cref="ProcessId"/> through <c>Process.GetProcessById</c>, the spool and
-/// the lease are local paths, and the netns / cgroup teardowns run local tools. This record carries no host identity
-/// and the runner path has no host-affinity check, so a worker on a DIFFERENT host reading this handle sees its pid as
-/// absent — a live run reads as <c>Gone</c> and a terminate is a no-op. Single-host deployment is the standing
-/// assumption; making it multi-host is a runner change, not a field on this record.</para>
+/// host-local: liveness resolves <see cref="ProcessId"/> through <c>Process.GetProcessById</c>, the spool and the lease
+/// are local paths, and the netns / cgroup teardowns run local tools. <see cref="LaunchHost"/> is what keeps that
+/// boundary honest on a multi-worker deployment: the runner stamps the launching host and then REFUSES every
+/// pid-derived answer for a handle some OTHER host minted — <c>ProbeAsync</c> returns
+/// <see cref="SandboxRunState.Indeterminate"/> instead of guessing, and no kill is issued — because a foreign pid
+/// either resolves nothing (a live run read as gone, and abandoned) or resolves an UNRELATED local process wearing the
+/// same number. What DOES cross hosts is only what lives on the spool: the exit marker and the log files, and only
+/// when the deployment puts the spool on storage both hosts can see. Terminating another host's process remains
+/// something this runner cannot do at all.</para>
 /// </summary>
 public sealed record SandboxHandle
 {
@@ -47,6 +51,17 @@ public sealed record SandboxHandle
     /// guard is then skipped (the probe falls back to liveness alone).
     /// </summary>
     public DateTimeOffset? ProcessStartTimeUtc { get; init; }
+
+    /// <summary>
+    /// Identity of the host that LAUNCHED this run — the process namespace <see cref="ProcessId"/> is a number inside.
+    /// A worker compares it against its OWN host before answering any pid-derived question: equal means the pid is
+    /// resolvable here, different means it is not, and the answer is then <see cref="SandboxRunState.Indeterminate"/>
+    /// rather than a dead-or-alive guess about a number that belongs to someone else's namespace. Null on a handle
+    /// written before the stamp existed — the pid is then probed exactly as it always was, because a deployment that
+    /// recorded no host identity has none to disagree with (an in-flight run from an older backend must not become
+    /// unanswerable by upgrading).
+    /// </summary>
+    public string? LaunchHost { get; init; }
 
     /// <summary>Resolved absolute path to the run's spool directory holding <c>out.log</c>, <c>err.log</c>, and the <c>exit</c> marker.</summary>
     public required string SpoolDirectory { get; init; }

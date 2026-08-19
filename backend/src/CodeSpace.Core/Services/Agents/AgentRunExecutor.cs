@@ -646,7 +646,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         _ => folder.BuildResult(facts, sandbox.ExitCode),
     };
 
-    /// <summary>Fallback when the credential can't be re-resolved to redact a re-attached tail: complete from the exit marker WITHOUT re-tailing (so no unredacted line reaches the log) — Succeeded/Failed by the code if it's present, Failed if the process is gone, or null (leave Running for a later sweep) if it's still alive and we can't safely observe it.</summary>
+    /// <summary>Fallback when the credential can't be re-resolved to redact a re-attached tail: complete from the exit marker WITHOUT re-tailing (so no unredacted line reaches the log) — Succeeded/Failed by the code if it's present, Failed if the process is gone, or null (leave Running for a later sweep) both when it's still alive and we can't safely observe it AND when this worker can't answer the handle's liveness at all (<see cref="SandboxRunState.Indeterminate"/> — another host minted it).</summary>
     private static async Task<AgentRunResult?> CompleteFromMarkerOnlyAsync(ISandboxDurableRunner durable, SandboxHandle handle, CancellationToken cancellationToken)
     {
         var probe = await durable.ProbeAsync(handle, cancellationToken).ConfigureAwait(false);

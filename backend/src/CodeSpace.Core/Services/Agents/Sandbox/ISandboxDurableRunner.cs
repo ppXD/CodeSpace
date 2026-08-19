@@ -68,9 +68,13 @@ public interface ISandboxDurableRunner
     /// Snapshot a launched run's liveness from its <paramref name="handle"/> WITHOUT observing it:
     /// <see cref="SandboxRunState.Exited"/> (its exit marker is present, carrying the code),
     /// <see cref="SandboxRunState.Running"/> (the supervised process is still alive, no marker yet), or
-    /// <see cref="SandboxRunState.Gone"/> (the process is gone and never recorded a marker — killed). Lets a
+    /// <see cref="SandboxRunState.Gone"/> (the process is gone and never recorded a marker — killed), or
+    /// <see cref="SandboxRunState.Indeterminate"/> (this worker cannot answer for this handle at all — the local
+    /// runner returns it for a handle another HOST minted, whose pid means nothing here). Lets a
     /// reconciler recover a run that finished unobserved, leave one still running, or abandon one truly lost —
-    /// instead of blindly abandoning every run whose live observer disappeared.
+    /// instead of blindly abandoning every run whose live observer disappeared. A caller must not fold
+    /// <see cref="SandboxRunState.Indeterminate"/> into <see cref="SandboxRunState.Gone"/>: it is the absence of
+    /// evidence, so terminalizing on it destroys live runs.
     /// </summary>
     Task<SandboxProbe> ProbeAsync(SandboxHandle handle, CancellationToken cancellationToken);
 
@@ -81,7 +85,10 @@ public interface ISandboxDurableRunner
     /// observing and deliberately leaves the process alive. A reconciler issues it when it ABANDONS a stale run
     /// whose process is (or may still be) alive, so the orphaned agent stops holding its workspace and burning the
     /// injected model credential after the run is already marked Failed. Best-effort + idempotent: a run that has
-    /// already exited / been reaped is a no-op. Returns once the kill signal has been issued.
+    /// already exited / been reaped is a no-op — as is a handle the runner cannot act on from here, which for the local
+    /// runner means one another HOST minted: killing by a foreign pid would reach an unrelated local process, so no
+    /// signal is issued and that host's process keeps running to its own deadline. Returns once the kill signal has
+    /// been issued (or deliberately withheld).
     /// </summary>
     Task TerminateAsync(SandboxHandle handle, CancellationToken cancellationToken);
 }

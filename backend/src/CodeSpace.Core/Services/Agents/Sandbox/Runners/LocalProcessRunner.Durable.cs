@@ -67,6 +67,32 @@ public sealed partial class LocalProcessRunner
     /// <summary>The published <c>codespace-mcp</c> binary file name (its <c>AssemblyName</c>) used to build the default path under <see cref="AppContext.BaseDirectory"/>.</summary>
     private const string McpProxyFile = "codespace-mcp";
 
+    /// <summary>
+    /// Operator override for THIS worker's host identity — the value stamped onto
+    /// <see cref="SandboxHandle.LaunchHost"/> at launch and compared against before any pid-derived answer. Default:
+    /// <see cref="Environment.MachineName"/>, which is the machine on bare metal and the pod name in Kubernetes; both
+    /// are exactly the process-namespace boundary a pid lives inside. Pinned by a test (Rule 8).
+    ///
+    /// <para>It is an IDENTITY, not a switch: the only reason to set it is a topology where the default disagrees with
+    /// the real namespace boundary (workers that DO share a pid namespace but report different hostnames). Setting the
+    /// same value on workers that do NOT share a namespace re-enables exactly the cross-host misread
+    /// <see cref="PidAnswerableHere"/> exists to prevent.</para>
+    /// </summary>
+    public const string SandboxHostEnvVar = "CODESPACE_AGENT_SANDBOX_HOST";
+
+    /// <summary>This worker's host identity — the operator's <see cref="SandboxHostEnvVar"/> when set to a non-blank value, else <see cref="Environment.MachineName"/>.</summary>
+    internal static string CurrentHost =>
+        Environment.GetEnvironmentVariable(SandboxHostEnvVar)?.Trim() is { Length: > 0 } configured ? configured : Environment.MachineName;
+
+    /// <summary>
+    /// Whether this worker may answer a pid-derived question about <paramref name="handle"/> at all: true when the
+    /// handle was minted HERE (or carries no host stamp — an older handle, which keeps the pre-stamp behaviour rather
+    /// than becoming unanswerable on upgrade), false when some other host minted it. Hostnames are compared
+    /// case-insensitively because that is how hosts name themselves.
+    /// </summary>
+    internal static bool PidAnswerableHere(SandboxHandle handle) =>
+        handle.LaunchHost is not { Length: > 0 } minted || string.Equals(minted, CurrentHost, StringComparison.OrdinalIgnoreCase);
+
     /// <summary>Tail cadence — how often the observer re-reads the spool for new lines / checks the exit marker.</summary>
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(250);
 
@@ -163,6 +189,7 @@ public sealed partial class LocalProcessRunner
                     Kind = LocalKind,
                     ProcessId = supervisorPid,
                     ProcessStartTimeUtc = TryReadStartTimeUtc(supervisorPid),
+                    LaunchHost = CurrentHost,
                     SpoolDirectory = spoolDir,
                     Deadline = spec.TimeoutSeconds is { } secs && secs > 0 ? DateTimeOffset.UtcNow.AddSeconds(secs) : DateTimeOffset.MaxValue,
                     EgressNetnsKey = egress.Key,
@@ -299,12 +326,14 @@ public sealed partial class LocalProcessRunner
     private static async Task<bool> IsDurableSourceSealedAsync(SandboxHandle handle, string path, CancellationToken cancellationToken)
     {
         var seal = new FileInfo(Path.Combine(handle.SpoolDirectory, LogSealMarkerFile));
-        if (!seal.Exists || IsLinkOrReparsePoint(seal) || IsProcessAlive(handle.ProcessId, handle.ProcessStartTimeUtc) || !TryFileLength(path, out var stableLength)) return false;
+        // "Not PROVABLY gone" withholds the seal, so a worker that cannot resolve the pid never certifies EOF on a
+        // source another host's producer may still be appending to.
+        if (!seal.Exists || IsLinkOrReparsePoint(seal) || !IsSupervisorGone(handle) || !TryFileLength(path, out var stableLength)) return false;
 
         for (var observation = 0; observation < SourceQuiescenceChecks; observation++)
         {
             await Task.Delay(PollInterval, cancellationToken).ConfigureAwait(false);
-            if (IsProcessAlive(handle.ProcessId, handle.ProcessStartTimeUtc) || !TryFileLength(path, out var observedLength) || observedLength != stableLength)
+            if (!IsSupervisorGone(handle) || !TryFileLength(path, out var observedLength) || observedLength != stableLength)
                 return false;
             stableLength = observedLength;
         }
@@ -480,7 +509,11 @@ public sealed partial class LocalProcessRunner
                     return await StalledAsync(handle, offset, onStdoutLine, cancellationToken).ConfigureAwait(false);
             }
 
-            if (!IsProcessAlive(handle.ProcessId, handle.ProcessStartTimeUtc))
+            // Only a pid THIS worker can resolve may end the observation as vanished. A re-attach dispatched onto a
+            // worker on another host (the Hangfire queue is fleet-wide) keeps tailing instead, so it completes from the
+            // exit marker on a shared spool — and otherwise lands on the deadline / no-progress bound rather than
+            // reporting a live run as failed.
+            if (IsSupervisorGone(handle))
                 return await VanishedAsync(handle, offset, onStdoutLine, cancellationToken).ConfigureAwait(false);
 
             await Task.Delay(PollInterval, cancellationToken).ConfigureAwait(false);
@@ -535,8 +568,15 @@ public sealed partial class LocalProcessRunner
     public Task<SandboxProbe> ProbeAsync(SandboxHandle handle, CancellationToken cancellationToken)
     {
         // Marker first: it's written BEFORE the supervisor exits, so its presence authoritatively means "finished".
+        // It is a FILE, so it stays authoritative from any host that can see the spool — which is why the host gate
+        // below sits after it: a finished run's outcome is still salvageable off a shared spool volume.
         if (TryReadExitCode(Path.Combine(handle.SpoolDirectory, ExitMarkerFile), out var code))
             return Task.FromResult(new SandboxProbe { State = SandboxRunState.Exited, ExitCode = code });
+
+        // No marker, so the only remaining evidence is the pid — a number inside the launching host's process
+        // namespace. Answering it from anywhere else is a guess in both directions, so say so instead.
+        if (!PidAnswerableHere(handle))
+            return Task.FromResult(new SandboxProbe { State = SandboxRunState.Indeterminate });
 
         var state = IsProcessAlive(handle.ProcessId, handle.ProcessStartTimeUtc) ? SandboxRunState.Running : SandboxRunState.Gone;
 
@@ -1038,10 +1078,20 @@ public sealed partial class LocalProcessRunner
     }
 
     /// <summary>
+    /// True ONLY when this worker can see that the run's supervisor is gone: the pid is answerable here
+    /// (<see cref="PidAnswerableHere"/>) AND resolving it says not-alive. A handle another host minted answers FALSE —
+    /// "not provably gone" — so no caller can mistake a pid it is unable to resolve for a death. The reverse reading
+    /// (treating it as alive) is the safe one at every site that consumes this: the observer keeps tailing, and a log
+    /// source stays unsealed.
+    /// </summary>
+    private static bool IsSupervisorGone(SandboxHandle handle) => PidAnswerableHere(handle) && !IsProcessAlive(handle.ProcessId, handle.ProcessStartTimeUtc);
+
+    /// <summary>
     /// True when the supervisor pid is still our live run. When a start time was recorded (<paramref
     /// name="expectedStartUtc"/>), it also guards against PID reuse: a live process whose start time no longer
     /// matches is a recycled pid — a DIFFERENT process the OS handed our old number — so it's NOT alive for us.
     /// An unreadable start time skips the guard rather than risk a false "gone" that would abandon a live run.
+    /// Only ever asked about a pid this worker minted — see <see cref="PidAnswerableHere"/>.
     /// </summary>
     private static bool IsProcessAlive(int pid, DateTimeOffset? expectedStartUtc)
     {
@@ -1075,9 +1125,11 @@ public sealed partial class LocalProcessRunner
         catch { return null; }
     }
 
-    /// <summary>Terminate the supervisor's process tree, then boundedly wait for the producer to close its spool handles. A recycled pid is never touched.</summary>
+    /// <summary>Terminate the supervisor's process tree, then boundedly wait for the producer to close its spool handles. A recycled pid is never touched — nor a pid from another host, where that number is either nothing or an unrelated local process this worker would kill instead (the start-time guard cannot catch that: it is skipped whenever the handle recorded no start time).</summary>
     private static async Task<bool> KillByIdAndWaitAsync(SandboxHandle handle, CancellationToken cancellationToken)
     {
+        if (!PidAnswerableHere(handle)) return false;
+
         try
         {
             using var process = Process.GetProcessById(handle.ProcessId);
@@ -1091,8 +1143,11 @@ public sealed partial class LocalProcessRunner
         catch { return false; /* best-effort: already exited / reaped between the check and the kill */ }
     }
 
+    /// <summary>Boundedly wait for the run's producer to exit, so a completion can certify the spool is quiescent. FALSE for a handle another host minted: its exit is not something this worker can witness, so the caller withholds the seal rather than certifying on a guess.</summary>
     private static async Task<bool> WaitForProducerExitAsync(SandboxHandle handle, CancellationToken cancellationToken)
     {
+        if (!PidAnswerableHere(handle)) return false;
+
         try
         {
             using var process = Process.GetProcessById(handle.ProcessId);

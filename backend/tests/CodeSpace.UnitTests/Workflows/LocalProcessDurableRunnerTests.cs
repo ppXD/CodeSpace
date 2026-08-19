@@ -945,6 +945,87 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task Probe_refuses_to_answer_liveness_for_a_handle_another_host_minted()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The multi-worker loss case: worker B sweeps a run worker A launched. A's supervisor pid is a number in A's
+        // process namespace — looked up on B it resolves nothing (a LIVE run read as Gone, then abandoned) or an
+        // UNRELATED local process wearing the same number. B must decline the question, not answer it wrongly.
+        var handle = await LaunchAsync(ContractSpecs.Sleep(10) with { TimeoutSeconds = 30 });
+
+        (await _runner.ProbeAsync(handle, default)).State.ShouldBe(SandboxRunState.Running,
+            "the same-host path is unchanged: this worker minted the handle, so its pid is still the answer");
+
+        var foreign = handle with { LaunchHost = handle.LaunchHost + "-another-worker" };
+
+        (await _runner.ProbeAsync(foreign, default)).State.ShouldBe(SandboxRunState.Indeterminate,
+            "a pid is meaningless outside the host that minted it — this worker must report that it cannot tell, never Gone");
+
+        KillTree(handle.ProcessId);
+    }
+
+    [Fact]
+    public async Task Probe_still_reports_exited_from_a_foreign_handles_exit_marker()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The host refusal covers the PID only. The exit marker is a file, so on a shared spool volume it is
+        // authoritative from any host — a finished run's outcome must still be salvageable rather than deferred.
+        var handle = await LaunchAsync(ContractSpecs.PrintThenExit("x", 7));
+        await WaitForExitMarkerAsync(handle);
+
+        var probe = await _runner.ProbeAsync(handle with { LaunchHost = "another-worker" }, default);
+
+        probe.State.ShouldBe(SandboxRunState.Exited, "the marker outranks the pid, so a foreign handle still recovers its outcome");
+        probe.ExitCode.ShouldBe(7);
+    }
+
+    [Theory]
+    [InlineData(false)]   // stamped by THIS worker at launch
+    [InlineData(true)]    // an older handle persisted before the stamp existed
+    public async Task Probe_answers_from_the_pid_for_a_handle_this_host_owns(bool clearTheStamp)
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var launched = await LaunchAsync(ContractSpecs.Sleep(10) with { TimeoutSeconds = 30 });
+        launched.LaunchHost.ShouldNotBeNullOrWhiteSpace("the launch stamps the host whose namespace the pid belongs to");
+
+        var handle = clearTheStamp ? launched with { LaunchHost = null } : launched;
+
+        (await _runner.ProbeAsync(handle, default)).State.ShouldBe(SandboxRunState.Running,
+            "an unstamped handle keeps the pre-stamp behaviour, so upgrading never makes an in-flight run unanswerable");
+
+        KillTree(launched.ProcessId);
+    }
+
+    [Fact]
+    public async Task Terminate_does_not_kill_a_local_process_for_a_handle_another_host_minted()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // Worse than a wrong liveness read: killing by a FOREIGN pid reaches whatever local process happens to wear
+        // that number (the start-time guard is skipped on any handle with no recorded start time). Refuse outright.
+        var handle = await LaunchAsync(ContractSpecs.Sleep(10) with { TimeoutSeconds = 30 });
+
+        await _runner.TerminateAsync(handle with { LaunchHost = "another-worker", ProcessStartTimeUtc = null }, default);
+
+        ProcessIsAlive(handle.ProcessId).ShouldBeTrue(
+            "a kill aimed at another host's pid must not be issued here — on this host that number is somebody else's process");
+
+        KillTree(handle.ProcessId);
+    }
+
+    [Fact]
+    public void Sandbox_host_override_env_var_name_is_pinned()
+    {
+        // Rule 8: an operator whose topology makes MachineName the wrong identity (workers sharing one pid namespace
+        // under different hostnames) pins the host through this name. Renaming it silently splits their fleet into
+        // hosts that refuse to answer for each other's runs.
+        LocalProcessRunner.SandboxHostEnvVar.ShouldBe("CODESPACE_AGENT_SANDBOX_HOST");
+    }
+
+    [Fact]
     public void BuildDurableStartInfo_wraps_the_command_in_a_sh_supervisor_pointing_at_the_spool()
     {
         var info = LocalProcessRunner.BuildDurableStartInfo(
