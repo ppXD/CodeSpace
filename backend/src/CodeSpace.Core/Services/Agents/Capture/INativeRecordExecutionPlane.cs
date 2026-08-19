@@ -140,17 +140,23 @@ public sealed partial class NativeRecordPlane : INativeRecordExecutionPlane
     /// reduction that never opened, or that stopped mid-round, leaves frames recorded with no checkpoint covering them
     /// at all. The records cannot lag themselves.</para>
     ///
-    /// <para>The <c>+ 1</c> is the line terminator the stream carried and the delivered line did not — the same step
-    /// <see cref="AgentNativeRecordPump"/> advances its cursor by, so the head names the first byte no record
-    /// describes.</para>
+    /// <para>The terminator is added only for a FINAL record, matching the step <see cref="AgentNativeRecordPump"/>
+    /// advances its cursor by, so the head names the first byte no record describes. A record the reader had to CUT
+    /// carried no terminator, so adding one here would name a byte the cut frame already covered and the resume would
+    /// skip it — the two sides have to agree on this or the seam loses a byte per cut.</para>
+    ///
+    /// <para>This is the plane's ONLY read of the record table, and every resumed opening pays it — including the
+    /// per-round diagnostics opening, which is why <c>ix_workflow_run_native_record_attempt</c> leads with
+    /// <c>(team_id, attempt_id, channel)</c>: without the channel in the key the equality prefix is incomplete and the
+    /// answer costs a walk of every frame the attempt has recorded, on every round.</para>
     /// </summary>
     private static async Task<long> RecordedHeadAsync(CodeSpaceDbContext db, NativeRecordCaptureRequest request, Guid attemptId, CancellationToken cancellationToken)
     {
         var head = await db.WorkflowRunNativeRecord.AsNoTracking()
             .Where(record => record.TeamId == request.TeamId && record.AttemptId == attemptId && record.Channel == request.Channel)
-            .MaxAsync(record => (long?)(record.SourceOffsetBytes + record.SourceLengthBytes), cancellationToken).ConfigureAwait(false);
+            .MaxAsync(record => (long?)(record.SourceOffsetBytes + record.SourceLengthBytes + (record.IsFinal ? 1 : 0)), cancellationToken).ConfigureAwait(false);
 
-        return head is null ? 0 : head.Value + 1;
+        return head ?? 0;
     }
 
     private static async Task<LiveExecution?> LiveExecutionAsync(CodeSpaceDbContext db, Guid teamId, Guid agentRunId, CancellationToken cancellationToken) =>

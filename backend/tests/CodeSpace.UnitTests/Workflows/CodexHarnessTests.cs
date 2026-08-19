@@ -540,6 +540,43 @@ public class CodexHarnessTests
         AgentSessionIdReader.TryRead(events).ShouldBe("019f01b0-6aad-72a0-a14e-1c9fc9d1387a");
     }
 
+    /// <summary>
+    /// The EXACTLY GROUNDED read of the same line: <c>thread.started</c> IS Codex's session record, so a fact taken
+    /// from it may claim what the harness said — the only source the reduction takes a named once-only fact from.
+    /// </summary>
+    [Fact]
+    public void The_thread_started_line_is_read_as_the_session_codex_stated()
+    {
+        var grounded = Harness.ReadSessionFrame("""{"type":"thread.started","thread_id":"019f01b0-6aad-72a0-a14e-1c9fc9d1387a"}""");
+
+        grounded.ShouldNotBeNull("thread.started IS the session record — its content is the identity, not a mention of one");
+        grounded.SessionId.ShouldBe(Guid.Parse("019f01b0-6aad-72a0-a14e-1c9fc9d1387a"));
+    }
+
+    /// <summary>
+    /// Nothing else grounds one. The <c>msg</c> envelope is deliberately refused even though <c>ReadType</c> accepts
+    /// it for NORMALIZATION: this adapter has verified the top-level shape against codex 0.142.2 and not that one, and
+    /// an exact claim over an unverified shape is a guess with a certificate.
+    /// </summary>
+    [Theory]
+    [InlineData("""{"type":"turn.completed","thread_id":"019f01b0-6aad-72a0-a14e-1c9fc9d1387a"}""")]
+    [InlineData("""{"msg":{"type":"thread.started","thread_id":"019f01b0-6aad-72a0-a14e-1c9fc9d1387a"}}""")]
+    // Isolates the DISCRIMINATOR guard: the id is where this reader looks and only the envelope is unverified.
+    [InlineData("""{"msg":{"type":"thread.started"},"thread_id":"019f01b0-6aad-72a0-a14e-1c9fc9d1387a"}""")]
+    [InlineData("""{"type":"thread.started","thread_id":"thr-xyz"}""")]
+    // Isolates the CANONICAL-FORM guard: Guid.TryParse would accept this bare 32-hex form and hand back an id Codex never wrote.
+    [InlineData("""{"type":"thread.started","thread_id":"019f01b06aad72a0a14e1c9fc9d1387a"}""")]
+    // Canonical and still naming nothing: TryParseExact accepts the all-zero UUID, which this project spells "absent".
+    [InlineData("""{"type":"thread.started","thread_id":"00000000-0000-0000-0000-000000000000"}""")]
+    [InlineData("""{"type":"item.completed","item":{"type":"agent_message","text":"thread 019f01b0-6aad-72a0-a14e-1c9fc9d1387a"}}""")]
+    [InlineData("not json at all")]
+    [InlineData("")]
+    public void Nothing_else_grounds_a_session(string line)
+    {
+        Harness.ReadSessionFrame(line).ShouldBeNull(
+            customMessage: "an id on another frame, in an unverified envelope, or quoted inside a message must never reach the reduction as a fact Codex stated");
+    }
+
     [Fact]
     public void Keeps_turn_completed_so_the_token_usage_reader_still_finds_the_usage()
     {

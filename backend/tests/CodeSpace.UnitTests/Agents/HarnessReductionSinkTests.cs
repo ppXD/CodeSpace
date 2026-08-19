@@ -22,12 +22,12 @@ public sealed class HarnessReductionSinkTests
     /// that it reduced this exact prefix rather than a shorter one that merely looks consistent.
     ///
     /// <para><b>What is and is not production here.</b> The counts, the channel set and the prefix digest are recovered
-    /// on every real run. The NAMED once-only facts asserted below are recovered only from an exactly-grounded
-    /// projection, and this stream is hand-built to carry one; the sole projector in production stamps
-    /// <c>Derived</c> unconditionally and correctly, so on a real run <c>FirstSessionId</c> is null before the restart
-    /// and null after it, and nothing is lost by the resume because nothing was there. The assertion pins the
-    /// RESUME — that a grounded fact reaching the fold survives a worker replacement — against the day an
-    /// exactly-grounded projector lands; it is not evidence that a session id survives one today.</para>
+    /// on every real run, and so is <c>FirstSessionId</c> — <c>GroundedFrameProjector</c> fills it from the harness's
+    /// own structured session record for a harness that implements <c>IAgentGroundedFrameReader</c>. This stream is
+    /// still hand-built rather than pumped, so what it pins is the SINK's half: that a grounded fact reaching the fold
+    /// survives a worker replacement. That the projector produces one is pinned over the real pump in
+    /// <c>AgentNativeRecordPumpTests</c>, and end to end over a real re-attach in
+    /// <c>HarnessReductionReattachFlowTests</c>.</para>
     /// </summary>
     [Fact]
     public async Task A_replaced_worker_resumes_the_prefix_and_keeps_a_fact_stated_once_before_it()
@@ -43,7 +43,7 @@ public sealed class HarnessReductionSinkTests
         resumed.State.PrefixDigest.ShouldBe(WholeStreamState(frames).PrefixDigest,
             customMessage: "the digest of the whole prefix is what a real run recovers here, and it is the witness that the resumed fold consumed the frames before the restart rather than only its own tail");
         resumed.State.FirstSessionId.ShouldBe(HarnessReductionStream.SessionId,
-            customMessage: "a fact stated ONCE before the worker was replaced is the one a tail-only fold loses — pinned over a grounded stream this fixture builds, since the only production projector is Derived and cannot yet state one");
+            customMessage: "a fact stated ONCE before the worker was replaced is the one a tail-only fold loses");
         resumed.State.ShouldBe(WholeStreamState(frames),
             customMessage: "a resumed reduction must be indistinguishable from a fold of the whole stream, or the recovered state is a different value no reader can tell apart from the right one");
         resumed.Position.RecordsConsumed.ShouldBe(frames.Count);

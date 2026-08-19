@@ -39,7 +39,10 @@ public interface ISandboxDurableRunner
     /// for each line as it lands, until the process exits (its exit marker appears) or the
     /// <see cref="SandboxHandle.Deadline"/> elapses (the process is terminated → <see cref="SandboxStatus.TimedOut"/>).
     /// Returns the terminal <see cref="SandboxResult"/> (stdout empty — delivered live via the callback;
-    /// stderr captured from the spool). Cancelling <paramref name="cancellationToken"/> stops observing and
+    /// <see cref="SandboxResult.Stderr"/> a BOUNDED excerpt of the spooled diagnostics rather than one string that
+    /// grows with the run — the stream itself stays on the spool and is READABLE through the sibling
+    /// <see cref="ISandboxDurableDiagnosticSource"/>, a budget at a time, line by line except where a line is longer
+    /// than one of its read passes). Cancelling <paramref name="cancellationToken"/> stops observing and
     /// leaves the process running, throwing <see cref="OperationCanceledException"/> (see the type remarks).
     ///
     /// <para><paramref name="onCheckpoint"/> (optional) is invoked with the advanced byte offset after each

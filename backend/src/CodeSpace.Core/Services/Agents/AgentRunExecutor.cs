@@ -601,6 +601,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // Final flush for the terminal-drain lines (no trailing checkpoint), as in the live path.
         await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
 
+        // Same ordering as the live path: this stream's frames and their checkpoint become durable, and only then does
+        // the diagnostics opening resume the execution's reduction from that checkpoint.
+        await native.FlushAsync(cancellationToken).ConfigureAwait(false);
+        await RecordDiagnosticsAsync(new DiagnosticCapture(context.TeamId, context.RunId, context.WorkerFenceEpoch, context.Harness, redactor, capture.Handle, context.Durable), cancellationToken).ConfigureAwait(false);
+
         // Same terminal drain for the frame plane, then close the process this re-attach was observing — the SAME
         // attempt the original launch appended, because a resumed opening records against it rather than inventing a
         // second row for one process.
@@ -2351,8 +2356,130 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         // Checkpoint the advancing spool offset onto the handle as we tail, so a backend restart mid-run can
         // re-attach (ReattachAsync) and resume from here instead of re-emitting the whole spool.
-        return await capture.ObserveAsync((capturedHandle, token) => durable.AttachAsync(capturedHandle, (line, _) => persistLine(line), token, CheckpointHandleOffset(context.RunId, capturedHandle, sinks)), cancellationToken).ConfigureAwait(false);
+        var result = await capture.ObserveAsync((capturedHandle, token) => durable.AttachAsync(capturedHandle, (line, _) => persistLine(line), token, CheckpointHandleOffset(context.RunId, capturedHandle, sinks)), cancellationToken).ConfigureAwait(false);
+
+        // The stdout stream's terminal-drain frames and the checkpoint they complete must be durable BEFORE the
+        // diagnostics fold resumes from that checkpoint — two openings of one execution advance one reduction, and
+        // they may only do it in sequence.
+        await sinks.Frames.FlushAsync(cancellationToken).ConfigureAwait(false);
+        await RecordDiagnosticsAsync(new DiagnosticCapture(context.TeamId, context.RunId, context.WorkerFenceEpoch, context.Harness, context.Redactor, capture.Handle, durable), cancellationToken).ConfigureAwait(false);
+
+        return result;
     }
+
+    /// <summary>
+    /// Most frames of a harness's diagnostics that one round records. The drain joins the flushes that already sat
+    /// between a round's terminal <see cref="SandboxResult"/> and the mapping of it, and unlike them it would scale
+    /// with the run: one durable row per stderr line, and a <c>set -x</c> trace or a crash loop can spool hundreds of
+    /// megabytes — the round's outcome sitting unwritten behind millions of INSERTs. This ceiling is what bounds the
+    /// ROW COUNT of that stretch. Frames past it are not recorded; the whole stream stays on the run's spool, which is
+    /// where it lived before this plane existed.
+    /// </summary>
+    private const int MaxDiagnosticFrames = 2_000;
+
+    /// <summary>
+    /// Most SOURCE bytes of those diagnostics that one round reads. It is not a bound on what is WRITTEN: the read is decoded as UTF-8, so a byte that is not valid UTF-8 becomes a replacement character costing three bytes, and a pathological stderr can therefore write up to three times this figure.
+    /// A frame ceiling alone does not give one: each frame carries its line inline into a <c>text</c> column with no
+    /// length of its own, so two thousand frames of a megabyte each is two gigabytes written between the round's
+    /// terminal <see cref="SandboxResult"/> and the mapping of it — a bound in rows and none at all in bytes, which is
+    /// the dimension the delay is actually paid in. The two together are what make the stretch a constant.
+    ///
+    /// <para>It does not decide what happens to a line longer than one of the reader's own passes: that line is
+    /// delivered cut and recorded as a partial whatever this is set to, because forward progress is the reader's
+    /// guarantee. What this bounds is how many bytes of such a stream one round pays for.</para>
+    /// </summary>
+    private const int MaxDiagnosticBytes = 8 * 1024 * 1024;
+
+    /// <summary>
+    /// Record the harness's OWN diagnostics — its stderr — as native records on their own stream.
+    ///
+    /// <para><b>Why they are not parsed.</b> A harness parser is written against that harness's stdout protocol. A
+    /// diagnostic that happened to resemble a protocol frame would be normalized into a semantic event and projected as
+    /// something the harness never said, so the frames land with no parse attempted at all
+    /// (<see cref="NativeRecordNormalization.NotParsed"/>) and nothing here reaches the normalized event log.</para>
+    ///
+    /// <para><b>Why a RESUMED opening.</b> The process being drained is the one the stdout opening already recorded, so
+    /// re-entering it records against the SAME process attempt on a stream of its own — a launching opening would
+    /// append a second process row for one process. It is also why nothing here closes the attempt: one process is
+    /// closed once, by the round that owns it.</para>
+    ///
+    /// <para><b>Where it sits, and why that is survivable.</b> This runs on the completion path: the round's terminal
+    /// <see cref="SandboxResult"/> already exists, and <see cref="MapSandboxResult"/> has not yet turned it into the
+    /// run's outcome. Two properties, together, are what keep that placement from costing a run its result.
+    /// It CANNOT THROW — every exception is contained here, <see cref="OperationCanceledException"/> included, so a
+    /// worker tear-down landing inside the drain never unwinds past a computed-but-unmapped result; the round returns
+    /// from here and carries on into exactly the statement that would have ended it had the tear-down landed a moment
+    /// earlier. That containment is the opposite of what <see cref="AgentNativeRecordPump.CaptureAsync"/> does with a
+    /// parser's throw, and deliberately: the parser already failed the run before this plane existed, while every line
+    /// of this method is work that did not exist, and work that did not exist may not decide a round.
+    /// And it is BOUNDED IN BOTH DIMENSIONS — at most <see cref="MaxDiagnosticFrames"/> frames AND at most
+    /// <see cref="MaxDiagnosticBytes"/> source bytes, one bounded read pass at a time — so the stretch it adds before
+    /// the mapping is a constant of this executor in rows and in bytes, and not a function of the run's stderr volume
+    /// in either. Reaching either budget is LOGGED: the drain answers where it stopped, and a drain that began at 0
+    /// answers exactly what it read, so "recorded a whole stream" is distinguishable here from "recorded a prefix and
+    /// parked the rest". What it costs the round is that bounded delay and nothing else: it returns nothing, and the
+    /// status, exit reason and error text <see cref="MapSandboxResult"/> then computes are exactly what they are with
+    /// no plane deployed.</para>
+    ///
+    /// <para><b>A diagnostic the reader had to cut.</b> A single line longer than one of the reader's passes is
+    /// delivered cut rather than stopping the drain, and is recorded as a NON-FINAL frame — the honest record of a
+    /// frame this side holds half of. Recording it as two whole frames would put two diagnostics in the durable stream
+    /// where the harness wrote one.</para>
+    /// </summary>
+    private async Task RecordDiagnosticsAsync(DiagnosticCapture capture, CancellationToken cancellationToken)
+    {
+        if (_nativeRecords is null || capture.Durable is not ISandboxDurableDiagnosticSource diagnostics) return;
+
+        try
+        {
+            var pump = await AgentNativeRecordPump.OpenAsync(_nativeRecords, DiagnosticRequest(capture), capture.Redactor, _logger, cancellationToken).ConfigureAwait(false);
+
+            if (!pump.IsCapturing) return;
+
+            var delivered = 0;
+
+            async Task RecordAsync(SandboxDiagnosticLine line, CancellationToken token)
+            {
+                delivered++;
+                await pump.CaptureDiagnosticAsync(line.Text, capture.Redactor.Redact(line.Text), line.IsComplete, token).ConfigureAwait(false);
+            }
+
+            var budget = new SandboxDiagnosticBudget { MaxLines = MaxDiagnosticFrames, MaxBytes = MaxDiagnosticBytes };
+            var parked = await diagnostics.DrainDiagnosticsAsync(capture.Handle, 0, budget, RecordAsync, cancellationToken).ConfigureAwait(false);
+
+            await pump.FlushAsync(cancellationToken).ConfigureAwait(false);
+
+            // The drain began at 0, so what it answers IS the number of source bytes it read — comparing it with the
+            // byte budget is how a drain that stopped at a budget is told apart from one that reached the end. Counted
+            // as DELIVERED rather than recorded: a line the pump drops as already below its recorded head still cost
+            // the budget, and the budget is what this reports on.
+            if (delivered >= MaxDiagnosticFrames || parked >= MaxDiagnosticBytes)
+                _logger.LogWarning("Agent run {RunId}: drained {Lines} diagnostic lines covering the first {Bytes} bytes of the harness's stderr and stopped at the budget; anything past that stays on the run's spool and was not made durable", capture.RunId, delivered, parked);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "Agent run {RunId}: the harness's diagnostics could not be recorded; the run completes exactly as it does where the native record plane is not deployed", capture.RunId);
+        }
+    }
+
+    /// <summary>
+    /// The diagnostics opening: this process again, on the <see cref="NativeRecordChannel.Stderr"/> channel, reading
+    /// its source from the beginning. Zero is the honest cursor because a diagnostic stream is drained at a terminal
+    /// rather than tailed, so there is no observation position to resume from; the plane's recorded head — scoped to
+    /// this attempt AND this channel — is what keeps a second drain of the same process from recording a line twice.
+    /// </summary>
+    private static NativeRecordCaptureRequest DiagnosticRequest(DiagnosticCapture capture) => new()
+    {
+        TeamId = capture.TeamId,
+        AgentRunId = capture.RunId,
+        HarnessTypeKey = AgentNativeRecordPump.HarnessTypeKeyOf(capture.Harness),
+        RunnerKind = capture.Handle.Kind,
+        RunnerLocatorJson = JsonSerializer.Serialize(new { spoolDirectory = capture.Handle.SpoolDirectory }, AgentJson.Options),
+        WorkerFenceEpoch = capture.WorkerFenceEpoch,
+        Channel = NativeRecordChannel.Stderr,
+        Resume = true,
+        ResumeSourceOffset = 0,
+    };
 
     private SandboxHandle EnsureLogCaptureHandle(SandboxHandle handle, ISandboxDurableRunner durable)
     {
@@ -2431,6 +2558,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     }
 
     private sealed record LogCaptureContext(Guid TeamId, Guid RunId, Guid ActorId, long WorkerFenceEpoch, SecretRedactor Redactor);
+
+    /// <summary>What recording a round's diagnostics needs: the run it belongs to and the fence it speaks under, the harness and redactor its frames are captured with, and the launched process whose spooled stderr is the source. One record because both observe paths assemble it and it is well past the parameter cap.</summary>
+    private sealed record DiagnosticCapture(Guid TeamId, Guid RunId, long WorkerFenceEpoch, IAgentHarness Harness, SecretRedactor Redactor, SandboxHandle Handle, ISandboxDurableRunner Durable);
 
     private sealed class PassthroughLogCaptureSession(SandboxHandle handle) : IAgentRunLogCaptureSession
     {

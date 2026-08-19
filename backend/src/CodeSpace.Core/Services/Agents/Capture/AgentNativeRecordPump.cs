@@ -20,6 +20,18 @@ namespace CodeSpace.Core.Services.Agents.Capture;
 /// cannot be dropped by the parser's opinion of it, and a projection can never be durable while the frame it cites is
 /// not.</para>
 ///
+/// <para><b>Two projections, two fidelities.</b> What the parser yields is a NORMALIZATION and is projected
+/// <see cref="SemanticProjectionQuality.Derived"/>. Beside it, <see cref="GroundedFrameProjector"/> asks the harness
+/// whether the captured bytes ARE one of its own structured session records, and a frame that is one also yields an
+/// EXACTLY GROUNDED projection — the only kind the reduction takes a named fact from. Neither replaces the other, and
+/// the grounded reader is asked independently of the parser, so a fact the bytes stated is not the parser's to lose.</para>
+///
+/// <para><b>One opening, one channel.</b> A pump reads a single stream. The harness's stdout goes through
+/// <see cref="CaptureAsync"/>, which parses; its stderr goes through <see cref="CaptureDiagnosticAsync"/>, which
+/// records the frame and asks no parser anything, because a parser written for one channel's protocol would read the
+/// other's diagnostics as events nobody emitted. Stderr is therefore a second opening of the same process on its own
+/// stream, never a second meaning for this one.</para>
+///
 /// <para><b>Retention is O(1) in the event count.</b> The buffer is capped and flushed, exactly as
 /// <c>BufferedEventWriter</c> is, because a long run must not be able to exhaust the heap here — the two accumulators
 /// #1479 and #1489 removed are not to be replaced by a third. Per line the pump holds one record and its events, and
@@ -168,7 +180,9 @@ internal sealed class AgentNativeRecordPump
     {
         await FlushIfFullAsync(cancellationToken).ConfigureAwait(false);
 
-        var frame = IsCapturing ? BuildFrame(rawLine, redactedLine) : null;
+        var frame = IsCapturing ? BuildFrame(rawLine, redactedLine, isFinal: true) : null;
+
+        if (frame is not null) Ground(frame, harness);
 
         try
         {
@@ -184,6 +198,38 @@ internal sealed class AgentNativeRecordPump
 
             throw;
         }
+    }
+
+    /// <summary>
+    /// Capture one DIAGNOSTIC line — a frame of the harness's own stderr — as a record, and ask no parser anything
+    /// about it.
+    ///
+    /// <para><b>Why no parser.</b> A harness parser is written against that harness's stdout protocol. Feeding a
+    /// diagnostic line to it would not merely waste a call: a warning that happens to look like a protocol frame would
+    /// be normalized into a semantic event, and the projection would then carry as an event something the harness never
+    /// said. So the record states <see cref="NativeRecordNormalization.NotParsed"/> — no parse ran, which is a
+    /// different fact from a parse that found nothing.</para>
+    ///
+    /// <para><b>Why the reader's cut is carried, not smoothed over.</b> A diagnostic longer than the reader's own pass
+    /// arrives cut — the alternative is a reader that stops at it for good. Recording the two halves as two final
+    /// frames would put in the durable stream two diagnostics the harness never wrote, so
+    /// <paramref name="isComplete"/> false is recorded as <see cref="NativeRecordV1.IsFinal"/> false: the reader that
+    /// stops there is told it holds half a frame. It is also what keeps the cursor true — a cut line carried no
+    /// terminator byte, so none is counted for it and its continuation opens at exactly the byte the reader resumes
+    /// from.</para>
+    ///
+    /// <para>Everything else is the stdout path exactly: the payload is the REDACTED line, the geometry describes the
+    /// raw one, the cursor advances per line and the ordinal per RECORDED line, and retention stays one buffered record
+    /// per line with nothing surviving a flush. A frame below this opening's recorded head is one an earlier drain of
+    /// the same process already recorded and is dropped rather than counted twice.</para>
+    /// </summary>
+    internal async Task CaptureDiagnosticAsync(string rawLine, string redactedLine, bool isComplete, CancellationToken cancellationToken)
+    {
+        await FlushIfFullAsync(cancellationToken).ConfigureAwait(false);
+
+        if (!IsCapturing) return;
+
+        if (BuildFrame(rawLine, redactedLine, isComplete) is { } frame) _records.Add(Diagnostic(frame));
     }
 
     /// <summary>Buffer the projection of one normalized event onto the frame it came from. Silently a no-op when the frame was never captured, so the caller's loop reads the same either way.</summary>
@@ -207,9 +253,38 @@ internal sealed class AgentNativeRecordPump
             // Derived, and never Exact: ParseEvents NORMALIZES a frame (it maps a native kind onto the shared
             // vocabulary and renders a display line) rather than transcribing it, and a projection that claimed the
             // harness's own words for a normalization is exactly how a guessed fact gets audited as a stated one. The
-            // projector that may honestly claim more is the exact-telemetry one reading ModelWire/ToolWire frames.
+            // projector that may honestly claim more is GroundedFrameProjector, which reads the harness's OWN
+            // structured record out of the captured bytes rather than this normalization of them.
             ProjectionQuality = SemanticProjectionQuality.Derived,
         });
+    }
+
+    /// <summary>
+    /// Buffer the EXACTLY GROUNDED projection of this frame, when the harness recognises its own structured session
+    /// record in the captured bytes. It rides beside the derived projections of the same frame rather than replacing
+    /// them: they are two readings of one frame at two fidelities, and the reduction takes its named facts only from
+    /// the grounded one.
+    ///
+    /// <para>Asked BEFORE the parser and independently of it, so a frame whose parser then throws still contributes the
+    /// fact its bytes stated — the fact was never the parser's to lose.</para>
+    ///
+    /// <para>A reader that throws is CONTAINED here, and that asymmetry with <see cref="CaptureAsync"/>'s parser is
+    /// deliberate. The parser's throw already failed the run before this plane existed, so containing it would change
+    /// what a run resolves to; reading a grounded fact is work that did not exist before, so letting it throw would
+    /// make a run's outcome depend on whether this plane is deployed — the one thing a dual write may not do.</para>
+    /// </summary>
+    private void Ground(NativeRecordV1 record, IAgentHarness harness)
+    {
+        if (_handle is not { } handle) return;
+
+        try
+        {
+            if (GroundedFrameProjector.Project(harness, handle, record) is { } projection) _events.Add(projection);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "Harness {Harness} could not read a grounded fact from a native frame; the frame is recorded unchanged, no exact projection is made, and the run is untouched", harness.Kind);
+        }
     }
 
     /// <summary>Write everything buffered. A plane that will not accept a batch disables capture for the rest of the round rather than taking the run down with it. A worker tear-down is the one thing not contained here — that cancellation IS the round ending, and it belongs to the caller.</summary>
@@ -314,23 +389,25 @@ internal sealed class AgentNativeRecordPump
     /// source, which the skipped line occupies whether or not this opening records it, while the ordinal counts this
     /// stream's own frames and 0139 requires it contiguous.</para>
     ///
-    /// <para>The cursor is reconstructed from the delivered lines plus one terminator byte each. For the
-    /// newline-terminated spool a runner writes that is the source's own byte offset, which is what lets the resume
-    /// position and the recorded head be compared at all. Where the reader cannot preserve the accounting — a CR it
-    /// trimmed from a CRLF ending, a partial it forced without a terminator — the two drift, and the seam then carries
-    /// a re-delivered line the head no longer covers. That is a duplicate the byte ranges show, not one they hide, and
-    /// closing it needs the reader to state each line's true offset rather than this side to guess better.</para>
+    /// <para>The cursor is reconstructed from the delivered lines plus the terminator byte a TERMINATED one carried.
+    /// For the newline-terminated spool a runner writes that is the source's own byte offset, which is what lets the
+    /// resume position and the recorded head be compared at all. A line the reader states it had to CUT carried no
+    /// terminator and is counted without one, so its continuation opens exactly where it ended. Where the reader
+    /// cannot preserve the accounting — a CR it trimmed from a CRLF ending, an unterminated final line it delivered as
+    /// whole — the two drift, and the seam then carries a re-delivered line the head no longer covers. That is a
+    /// duplicate the byte ranges show, not one they hide, and closing it needs the reader to state each line's true
+    /// offset rather than this side to guess better.</para>
     /// </summary>
-    private NativeRecordV1? BuildFrame(string rawLine, string redactedLine)
+    private NativeRecordV1? BuildFrame(string rawLine, string redactedLine, bool isFinal)
     {
         var handle = _handle!;
         var captured = Encoding.UTF8.GetBytes(redactedLine);
         var sourceLength = Encoding.UTF8.GetByteCount(rawLine);
         var offset = _sourceOffset;
 
-        // The line terminator the stream carried but the delivered line does not. A final partial line without one
-        // leaves the cursor one byte long.
-        _sourceOffset += sourceLength + 1;
+        // The line terminator the stream carried but the delivered line does not — a cut line carried none, so counting
+        // one for it would put its own continuation a byte past where the reader will resume.
+        _sourceOffset += sourceLength + (isFinal ? 1 : 0);
 
         if (offset < _recordedHead) return null;
 
@@ -351,7 +428,7 @@ internal sealed class AgentNativeRecordPump
             SizeBytes = captured.Length,
             Encoding = NativeRecordPayloadEncoding.Utf8,
             Redaction = string.Equals(rawLine, redactedLine, StringComparison.Ordinal) ? NativeRecordRedaction.None : NativeRecordRedaction.Masked,
-            IsFinal = true,
+            IsFinal = isFinal,
         };
     }
 
@@ -363,6 +440,12 @@ internal sealed class AgentNativeRecordPump
             : NativeRecordNormalization.Unrecognized,
         NormalizationErrorCode = failure is null ? null : NormalizationThrewErrorCode,
         NormalizationErrorMessage = failure is null ? null : Clamp(failure, 2048),
+    };
+
+    private static NativeRecordCapture Diagnostic(NativeRecordV1 frame) => new()
+    {
+        Frame = frame,
+        Normalization = NativeRecordNormalization.NotParsed,
     };
 
     /// <summary>

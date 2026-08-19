@@ -18,7 +18,7 @@ namespace CodeSpace.Core.Services.Agents.Harnesses.Codex;
 /// table is calibrated against real <c>codex exec --json</c> output when execution is wired (B0.4); the
 /// normalization shape tested here is the stable contract.</para>
 /// </summary>
-public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, IAgentTranscriptModelSource, ISingletonDependency
+public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, IAgentTranscriptModelSource, IAgentGroundedFrameReader, ISingletonDependency
 {
     public const string HarnessKind = "codex-cli";
 
@@ -336,6 +336,36 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
     private const string TurnFailedType = "turn.failed";
     private const string ItemStartedType = "item.started";
     private const string ItemCompletedType = "item.completed";
+
+    /// <summary>
+    /// The session Codex STATED, read out of its own <c>thread.started</c> record — the frame whose content IS the
+    /// thread identity (verified against codex 0.142.2 <c>exec --json</c>, where <c>thread_id</c> is a canonical UUID).
+    /// Read at the TOP LEVEL only: <see cref="ReadType"/> also accepts the older <c>msg</c> envelope, and a fact taken
+    /// from a shape this adapter has not verified would be a guess wearing an exact claim.
+    ///
+    /// <para>The MODEL is deliberately not reported. Codex names it only in a rollout's <c>turn_context</c>, which is a
+    /// session-state file rather than a frame of this stream, so there is nothing here to ground it in — and
+    /// <see cref="HarnessReducedStateV1"/> has no field for a model either way.</para>
+    ///
+    /// <para>The id must be a canonical dashed UUID for the same reason Claude Code's is: <c>Guid.TryParse</c> would
+    /// also accept a bare 32-hex-digit form and hand back an id the harness never wrote. An older Codex whose thread id
+    /// is not that shape grounds nothing here rather than something reshaped, and neither does the all-zero UUID, which
+    /// is canonical and still names nothing — see <see cref="GroundedSessionFrame.For"/>.</para>
+    /// </summary>
+    public GroundedSessionFrame? ReadSessionFrame(string nativeFrame)
+    {
+        using var document = TryParse(nativeFrame.Trim());
+
+        if (document is null || document.RootElement.ValueKind != JsonValueKind.Object) return null;
+
+        var root = document.RootElement;
+
+        if (!TryReadString(root, "type", out var type) || type != ThreadStartedType) return null;
+
+        return TryReadString(root, "thread_id", out var threadId) && Guid.TryParseExact(threadId, "D", out var sessionId)
+            ? GroundedSessionFrame.For(sessionId)
+            : null;
+    }
 
     public IAgentEventFolder CreateFolder() => new CodexResultFolder();
 

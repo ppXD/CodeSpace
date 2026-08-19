@@ -523,6 +523,41 @@ public class ClaudeCodeHarnessTests
         AgentSessionIdReader.TryRead(new[] { ev }).ShouldBe("sess-early-1", "the session reader must find the id off this early event, not only the terminal result line");
     }
 
+    /// <summary>
+    /// The EXACTLY GROUNDED read of the same line. It is the harness's own session record, so a fact taken from it may
+    /// claim what the harness said — which is the only source the reduction takes a NAMED once-only fact from, and
+    /// therefore the only thing that makes a session id survive a worker replacement.
+    /// </summary>
+    [Fact]
+    public void The_system_init_line_is_read_as_the_session_claude_stated()
+    {
+        var grounded = Harness.ReadSessionFrame("""{"type":"system","subtype":"init","cwd":"/tmp/ws","session_id":"0f4d1a2e-9c31-4a7b-9f8e-2b1d5c7a4e60","model":"claude-opus-4-8"}""");
+
+        grounded.ShouldNotBeNull("the init line IS Claude Code's session record — its content is the identity, not a mention of one");
+        grounded.SessionId.ShouldBe(Guid.Parse("0f4d1a2e-9c31-4a7b-9f8e-2b1d5c7a4e60"));
+    }
+
+    /// <summary>
+    /// Everything that is NOT that record grounds nothing — including the terminal <c>result</c> line, which carries
+    /// the same id. A reader that answered for every frame repeating an id would be scraping rather than reading a
+    /// record, and the fold cannot afterwards tell the two apart.
+    /// </summary>
+    [Theory]
+    [InlineData("""{"type":"result","subtype":"success","session_id":"0f4d1a2e-9c31-4a7b-9f8e-2b1d5c7a4e60"}""")]
+    [InlineData("""{"type":"system","subtype":"hook_started","session_id":"0f4d1a2e-9c31-4a7b-9f8e-2b1d5c7a4e60"}""")]
+    [InlineData("""{"type":"assistant","message":{"content":[{"type":"text","text":"session 0f4d1a2e-9c31-4a7b-9f8e-2b1d5c7a4e60"}]}}""")]
+    [InlineData("""{"type":"system","subtype":"init","session_id":"sess-early-1"}""")]
+    [InlineData("""{"type":"system","subtype":"init","session_id":"0f4d1a2e9c314a7b9f8e2b1d5c7a4e60"}""")]
+    // Canonical and still naming nothing: TryParseExact accepts the all-zero UUID, which this project spells "absent".
+    [InlineData("""{"type":"system","subtype":"init","session_id":"00000000-0000-0000-0000-000000000000"}""")]
+    [InlineData("not json at all")]
+    [InlineData("")]
+    public void Nothing_else_grounds_a_session(string line)
+    {
+        Harness.ReadSessionFrame(line).ShouldBeNull(
+            customMessage: "an id mentioned in prose, repeated on another frame, or written in a shape Claude Code does not emit must not arrive at a warm resume wearing the shape of a stated fact");
+    }
+
     [Theory]
     [InlineData("hook_started")]
     [InlineData("hook_response")]
