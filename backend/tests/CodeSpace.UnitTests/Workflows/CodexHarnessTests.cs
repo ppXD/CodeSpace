@@ -73,6 +73,20 @@ public class CodexHarnessTests
     }
 
     [Fact]
+    public void The_stop_hook_script_resolves_THIS_harnesss_own_config_home_variable()
+    {
+        var task = Task() with { Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } } };
+
+        var spec = Harness.BuildInvocation(task);
+        var script = spec.ConfigHomeFiles.Single(f => f.RelativePath == InLoopAcceptanceHook.ScriptRelativePath).Content;
+
+        script.ShouldContain($"CFG=\"${CodexHarness.ConfigHomeEnvVar}\"", Case.Sensitive,
+            "the hook body must name THIS harness's own config-home var — a hard-coded guess at a fixed set of harnesses resolves to the empty string for any other harness and the fail-soft guard then exits 0 silently");
+        script.ShouldContain($"CFG=\"${spec.ConfigHomeEnvVars.Single()}\"", Case.Sensitive,
+            "drift detector: the hook must read the SAME variable this spec tells the runner to export — the two diverging leaves $CFG empty and the in-loop check silently never runs");
+    }
+
+    [Fact]
     public void The_stop_hook_script_is_marked_executable_and_hooks_json_is_not()
     {
         var task = Task() with { Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } } };

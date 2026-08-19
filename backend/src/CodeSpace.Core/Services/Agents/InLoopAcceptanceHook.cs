@@ -56,14 +56,26 @@ public static class InLoopAcceptanceHook
     public static bool AppliesTo(AgentTask task) => AgentAcceptanceContract.RequiresGrade(task);
 
     /// <summary>
-    /// The POSIX-<c>sh</c> Stop-hook script content, harness-agnostic (both Claude Code's <c>settings.json</c> and
-    /// Codex's <c>hooks.json</c> point a <c>command</c> handler at the SAME generated file). Resolves its own config
-    /// home at runtime via <c>${CLAUDE_CONFIG_DIR:-$CODEX_HOME}</c> (mirroring the harness-agnostic fallback already
-    /// used elsewhere for exactly this purpose) so one script body serves either harness without needing to know
-    /// which one invoked it.
+    /// The POSIX-<c>sh</c> Stop-hook script content, harness-PARAMETERIZED. Both Claude Code's <c>settings.json</c>
+    /// and Codex's <c>hooks.json</c> point a <c>command</c> handler at the same generated FILE, but the BODY is
+    /// generated per harness: <paramref name="configHomeEnvVar"/> is the ONE config-home variable name the calling
+    /// harness declares in its own <see cref="SandboxSpec.ConfigHomeEnvVars"/> (Claude Code's
+    /// <c>CLAUDE_CONFIG_DIR</c>, Codex's <c>CODEX_HOME</c>), and the script resolves <c>$CFG</c> from exactly that
+    /// name. So a harness the hook has never heard of gets a WORKING hook simply by passing its own constant — it
+    /// does not have to come here and widen a baked-in list of names.
+    ///
+    /// <para>That parameter is what turns the <c>[ -n "$CFG" ]</c> line into a real guard. The body previously
+    /// resolved <c>${CLAUDE_CONFIG_DIR:-$CODEX_HOME}</c>, so for any harness overriding a THIRD variable <c>$CFG</c>
+    /// was the empty string, the guard exited 0, and — this class being fail-soft everywhere — the in-loop check
+    /// silently never ran at all: no block, nothing on stderr, the run quietly degraded to control-plane-only
+    /// grading. Empty <c>$CFG</c> now has exactly one cause left — the declared variable reaching the hook unset or
+    /// empty — and the harness-vs-spec drift that would cause it is pinned by a unit test on each harness.</para>
     /// </summary>
-    public static string BuildScript(IReadOnlyList<string> acceptanceCommand, int maxBlocks)
+    public static string BuildScript(IReadOnlyList<string> acceptanceCommand, int maxBlocks, string configHomeEnvVar)
     {
+        if (!IsPosixShellName(configHomeEnvVar))
+            throw new ArgumentException($"Config-home env var name is interpolated into the generated script as $NAME, so it must be a POSIX shell name ([A-Za-z_][A-Za-z0-9_]*); got '{configHomeEnvVar}'.", nameof(configHomeEnvVar));
+
         var sb = new StringBuilder();
 
         sb.Append("#!/bin/sh\n");
@@ -71,8 +83,8 @@ public static class InLoopAcceptanceHook
         sb.Append("# (unreadable counter dir, the check binary missing, anything unexpected) lets the harness stop —\n");
         sb.Append("# the control-plane grader is the unconditional final judge regardless of what this hook decides.\n");
         sb.Append("cat >/dev/null 2>&1\n");   // drain + ignore stdin — never depend on parsing the harness's hook payload
-        sb.Append("CFG=\"${CLAUDE_CONFIG_DIR:-$CODEX_HOME}\"\n");
-        sb.Append("[ -n \"$CFG\" ] || exit 0\n");
+        sb.Append($"CFG=\"${configHomeEnvVar}\"\n");   // the CALLING harness's own config-home variable — never a guess across a fixed set of harnesses
+        sb.Append("[ -n \"$CFG\" ] || exit 0\n");   // the declared variable wasn't exported — fail-soft, the control plane still grades
         sb.Append($"COUNTER_FILE=\"$CFG/{CounterRelativePath}\"\n");
         sb.Append($"MAX_BLOCKS={maxBlocks}\n");
         sb.Append("COUNT=$(cat \"$COUNTER_FILE\" 2>/dev/null)\n");
@@ -100,6 +112,10 @@ public static class InLoopAcceptanceHook
 
         return sb.ToString();
     }
+
+    /// <summary>Whether a name is safe to interpolate into the generated script as <c>$NAME</c> — a POSIX shell name, so a mistyped harness constant is a loud <c>ArgumentException</c> at spec-build time rather than a script whose <c>$CFG</c> silently resolves to nothing.</summary>
+    private static bool IsPosixShellName(string name) =>
+        name.Length > 0 && (char.IsAsciiLetter(name[0]) || name[0] == '_') && name.All(c => char.IsAsciiLetterOrDigit(c) || c == '_');
 
     /// <summary>Emits <c>set -- 'arg1' 'arg2' ...</c> with each argv token single-quoted (internal single quotes escaped as <c>'\''</c>) so an arbitrary acceptance command — spaces, quotes, globs and all — reaches the check UNCHANGED, never re-split or glob-expanded by the shell. The standard, injection-safe way to embed a dynamic argv in a generated POSIX script.</summary>
     private static void AppendArgv(StringBuilder sb, IReadOnlyList<string> argv)

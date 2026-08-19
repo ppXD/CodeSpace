@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Harnesses.Claude;
+using CodeSpace.Core.Services.Agents.Harnesses.Codex;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Agents;
@@ -21,7 +23,7 @@ public sealed class InLoopAcceptanceHookScriptFlowTests
         if (OperatingSystem.IsWindows()) return;
 
         using var scratch = new Scratch();
-        var script = scratch.WriteScript(InLoopAcceptanceHook.BuildScript(new[] { "true" }, maxBlocks: 1));
+        var script = scratch.WriteScript(InLoopAcceptanceHook.BuildScript(new[] { "true" }, maxBlocks: 1, scratch.ConfigHomeEnvVar));
 
         var result = await scratch.RunAsync(script);
 
@@ -35,7 +37,7 @@ public sealed class InLoopAcceptanceHookScriptFlowTests
         if (OperatingSystem.IsWindows()) return;
 
         using var scratch = new Scratch();
-        var script = scratch.WriteScript(InLoopAcceptanceHook.BuildScript(new[] { "false" }, maxBlocks: 1));
+        var script = scratch.WriteScript(InLoopAcceptanceHook.BuildScript(new[] { "false" }, maxBlocks: 1, scratch.ConfigHomeEnvVar));
 
         var result = await scratch.RunAsync(script);
 
@@ -57,7 +59,7 @@ public sealed class InLoopAcceptanceHookScriptFlowTests
         File.WriteAllText(checker, "#!/bin/sh\necho 'assertion failed: expected DONE.txt to exist' 1>&2\nexit 1\n");
         MakeExecutable(checker);
 
-        var script = scratch.WriteScript(InLoopAcceptanceHook.BuildScript(new[] { checker }, maxBlocks: 1));
+        var script = scratch.WriteScript(InLoopAcceptanceHook.BuildScript(new[] { checker }, maxBlocks: 1, scratch.ConfigHomeEnvVar));
 
         var result = await scratch.RunAsync(script);
 
@@ -72,7 +74,7 @@ public sealed class InLoopAcceptanceHookScriptFlowTests
         if (OperatingSystem.IsWindows()) return;
 
         using var scratch = new Scratch();
-        var script = scratch.WriteScript(InLoopAcceptanceHook.BuildScript(new[] { "false" }, maxBlocks: 2));
+        var script = scratch.WriteScript(InLoopAcceptanceHook.BuildScript(new[] { "false" }, maxBlocks: 2, scratch.ConfigHomeEnvVar));
 
         var first = await scratch.RunAsync(script);
         var second = await scratch.RunAsync(script);
@@ -91,7 +93,7 @@ public sealed class InLoopAcceptanceHookScriptFlowTests
         if (OperatingSystem.IsWindows()) return;
 
         using var scratch = new Scratch();
-        var script = scratch.WriteScript(InLoopAcceptanceHook.BuildScript(new[] { "/no/such/binary/codespace-proof-xyz" }, maxBlocks: 1));
+        var script = scratch.WriteScript(InLoopAcceptanceHook.BuildScript(new[] { "/no/such/binary/codespace-proof-xyz" }, maxBlocks: 1, scratch.ConfigHomeEnvVar));
 
         var result = await scratch.RunAsync(script);
 
@@ -106,7 +108,7 @@ public sealed class InLoopAcceptanceHookScriptFlowTests
         if (OperatingSystem.IsWindows()) return;
 
         using var scratch = new Scratch();
-        var script = scratch.WriteScript(InLoopAcceptanceHook.BuildScript(new[] { "false" }, maxBlocks: 1));
+        var script = scratch.WriteScript(InLoopAcceptanceHook.BuildScript(new[] { "false" }, maxBlocks: 1, scratch.ConfigHomeEnvVar));
 
         var result = await scratch.RunAsync(script, stdin: "{ this is not json at all ]][[");
 
@@ -123,7 +125,7 @@ public sealed class InLoopAcceptanceHookScriptFlowTests
         // reach a clean exit rather than aborting on the read/write error.
         Directory.CreateDirectory(scratch.CounterPath);
 
-        var script = scratch.WriteScript(InLoopAcceptanceHook.BuildScript(new[] { "false" }, maxBlocks: 1));
+        var script = scratch.WriteScript(InLoopAcceptanceHook.BuildScript(new[] { "false" }, maxBlocks: 1, scratch.ConfigHomeEnvVar));
 
         var result = await scratch.RunAsync(script);
 
@@ -147,21 +149,46 @@ public sealed class InLoopAcceptanceHookScriptFlowTests
         File.WriteAllText(checker, $"#!/bin/sh\n[ \"$#\" -eq 1 ] && [ \"$1\" = \"{tricky}\" ]\n");
         MakeExecutable(checker);
 
-        var script = scratch.WriteScript(InLoopAcceptanceHook.BuildScript(new[] { checker, tricky }, maxBlocks: 1));
+        var script = scratch.WriteScript(InLoopAcceptanceHook.BuildScript(new[] { checker, tricky }, maxBlocks: 1, scratch.ConfigHomeEnvVar));
 
         var result = await scratch.RunAsync(script);
 
         result.ExitCode.ShouldBe(0, "the checker only exits 0 when it received the tricky token intact as ONE argument — proving the check PASSED, so the hook let it stop");
     }
 
+    [Fact]
+    public async Task A_third_harnesss_own_config_home_variable_really_resolves_under_a_real_shell()
+    {
+        // The generic-seam proof, and the one that catches the silent-degradation defect: a harness whose
+        // config-home override is neither of the two shipped names must still get a WORKING hook. With the name
+        // baked in, $CFG resolved to the empty string, the fail-soft guard exited 0, and a genuinely failing
+        // acceptance check was never surfaced — no log, no block, the run silently degraded to control-plane-only
+        // grading. A real /bin/sh with ONLY the third name exported is the only honest arbiter of that.
+        if (OperatingSystem.IsWindows()) return;
+
+        using var scratch = new Scratch { ConfigHomeEnvVar = ThirdHarnessConfigHomeEnvVar };
+        var script = scratch.WriteScript(InLoopAcceptanceHook.BuildScript(new[] { "false" }, maxBlocks: 1, scratch.ConfigHomeEnvVar));
+
+        var result = await scratch.RunAsync(script);
+
+        result.ExitCode.ShouldBe(2, $"only {ThirdHarnessConfigHomeEnvVar} is exported — the hook must resolve its config home from the name its OWN harness sets and block on the failing check, never exit 0 with nothing logged");
+        File.ReadAllText(scratch.CounterPath).Trim().ShouldBe("1", "the counter lives under the config home the hook resolved — a hook that silently exited would have written nothing");
+    }
+
+    /// <summary>A synthetic stand-in for harness #3's config-home override — deliberately neither shipped harness's name, so the only way this test's hook can work is by being told which name to read.</summary>
+    private const string ThirdHarnessConfigHomeEnvVar = "FAKE_THIRD_HARNESS_HOME";
+
     private static void MakeExecutable(string path) =>
         File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
 
-    /// <summary>A throwaway config-home-shaped directory: <c>CLAUDE_CONFIG_DIR</c> points at it, <c>hooks/</c> holds the script + counter, exactly mirroring where the real harnesses materialize <see cref="InLoopAcceptanceHook.ScriptRelativePath"/>.</summary>
+    /// <summary>A throwaway config-home-shaped directory: <see cref="ConfigHomeEnvVar"/> points at it, <c>hooks/</c> holds the script + counter, exactly mirroring where the real harnesses materialize <see cref="InLoopAcceptanceHook.ScriptRelativePath"/>.</summary>
     private sealed class Scratch : IDisposable
     {
         public string Dir { get; } = Path.Combine(Path.GetTempPath(), "cs-stophook-" + Guid.NewGuid().ToString("N"));
         public string CounterPath => Path.Combine(Dir, "hooks", ".stop-hook-counter");
+
+        /// <summary>The ONE config-home variable this scratch exports — and therefore the one the generated hook must be told to read. Claude Code's by default (Rule 12.7: the production constant, never a hardcoded copy); a case overrides it to stand in for a harness the hook has never heard of.</summary>
+        public string ConfigHomeEnvVar { get; init; } = ClaudeCodeHarness.ConfigDirEnvVar;
 
         public Scratch() => Directory.CreateDirectory(Path.Combine(Dir, "hooks"));
 
@@ -185,7 +212,12 @@ public sealed class InLoopAcceptanceHookScriptFlowTests
                 UseShellExecute = false,
             };
             psi.ArgumentList.Add(scriptPath);
-            psi.Environment["CLAUDE_CONFIG_DIR"] = Dir;
+            // Only THIS scratch's variable may be visible: strip every OTHER shipped config-home name, so a value
+            // inherited from the developer's own shell can never stand in for the one the hook was told to read.
+            foreach (var other in new[] { ClaudeCodeHarness.ConfigDirEnvVar, CodexHarness.ConfigHomeEnvVar }.Where(v => v != ConfigHomeEnvVar))
+                psi.Environment.Remove(other);
+
+            psi.Environment[ConfigHomeEnvVar] = Dir;
 
             using var proc = Process.Start(psi)!;
 
