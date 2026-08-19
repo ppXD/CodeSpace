@@ -1296,24 +1296,42 @@ public class SupervisorDeciderTests
         client.Requests[1].SystemPrompt.ShouldContain("corrected decision JSON", customMessage: "repair-only framing — same intent, no new decisions");
     }
 
-    [Fact]
-    public async Task A_top_level_flattened_spawn_is_repaired_with_the_flattened_ids_echoed()
+    [Theory]
+    [InlineData("""{"kind":"spawn","subtaskIds":["st-1"]}""", SupervisorDecisionKinds.Spawn, "st-1")]
+    [InlineData("""{"kind":"retry","subtaskId":"st-1","revisedInstruction":"try harder"}""", SupervisorDecisionKinds.Retry, "st-1")]
+    [InlineData("""{"kind":"stop","outcome":"completed","summary":"shipped it"}""", SupervisorDecisionKinds.Stop, "shipped it")]
+    public async Task A_top_level_flattened_payload_is_nested_deterministically_with_no_repair_round_trip(string flattenedJson, string kind, string marker)
     {
-        // The live-probed defect shape (2026-08-07): the subtask ids EXIST but at the decision's top level, where
-        // nothing reads them. The DTO binds (extra fields are lenient), the spawn sub-object is null, and before
-        // this gate the projector substituted an empty payload — so the executor's correction quoted a payload the
-        // model never wrote, and the model re-authored the same shape turn after turn.
-        var flattened = JsonDocument.Parse("""{"kind":"spawn","subtaskIds":["st-1"]}""").RootElement;
-        var repaired = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":["st-1"]}}""").RootElement;
-        var client = new SequencedRawJsonStructuredClient(flattened, repaired);
+        // The live-probed defect shape (2026-08-07, still dominant on 2026-08-19: 68 in one eval run — 46 spawn, 21
+        // retry, 1 stop): the payload's fields EXIST, under their own names, at the decision's top level where nothing
+        // reads them. Every value the payload needs is therefore already in the FIRST reply, so the nesting is corrected
+        // deterministically by SupervisorDecisionPayloadLift and the model is not asked again. The fake supplies only ONE
+        // reply on purpose: a second request would dequeue nothing and the assertion below would be vacuous.
+        var client = new SequencedRawJsonStructuredClient(JsonDocument.Parse(flattenedJson).RootElement);
         var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
-        decision.Kind.ShouldBe(SupervisorDecisionKinds.Spawn);
-        decision.PayloadJson.ShouldContain("st-1", customMessage: "the repaired, correctly-nested payload lands");
-        client.Requests[1].UserPrompt.ShouldContain("\"subtaskIds\":[\"st-1\"]", customMessage: "the repair echoes the model's OWN flattened ids — the evidence it needs to self-diagnose the nesting");
-        client.Requests[1].UserPrompt.ShouldContain("anywhere else", customMessage: "the defect says top-level fields are never read");
+        decision.Kind.ShouldBe(kind);
+        decision.PayloadJson.ShouldContain(marker, customMessage: "the correctly-nested payload lands, carrying the values the model authored");
+        client.Requests.Count.ShouldBe(1, "a flattened payload is a nesting error, not missing information — spending a round-trip to recover what the first reply already carried is waste, and it only ever worked while the repair model complied");
+    }
+
+    [Fact]
+    public async Task A_payload_that_is_genuinely_absent_still_buys_the_repair_round_trip()
+    {
+        // The other half, and the reason the lift declines rather than guesses: no payload field is present anywhere, so
+        // nesting cannot invent one. This is the case the model must still answer, and it must keep echoing the raw reply.
+        var bare = JsonDocument.Parse("""{"kind":"spawn"}""").RootElement;
+        var repaired = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":["st-1"]}}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(bare, repaired);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        decision.PayloadJson.ShouldContain("st-1");
+        client.Requests.Count.ShouldBe(2, "exactly one bounded repair round-trip — the lift cannot fix a payload that is not there");
+        client.Requests[1].UserPrompt.ShouldContain("anywhere else", customMessage: "the defect still says top-level fields are never read");
     }
 
     [Fact]
