@@ -52,6 +52,23 @@ public sealed class WorkflowRunModelCallConfiguration : IEntityTypeConfiguration
 
 public sealed class WorkflowRunModelCallAttemptConfiguration : IEntityTypeConfiguration<WorkflowRunModelCallAttempt>
 {
+    /// <summary>
+    /// The declared-unavailable set's two rules, in the one spelling 0145 also carries: every member is a figure this
+    /// plane knows, and a figure named there stores no value. Each nullable comparison is paired with its own
+    /// <c>IS NOT NULL</c> inside the negation rather than left bare, because a PostgreSQL CHECK admits a row it evaluates
+    /// to NULL — and the array itself is never NULL, so no arm can go NULL from the left side either.
+    /// </summary>
+    private const string UnavailableFiguresCheck =
+        "COALESCE(array_ndims(unavailable_figures), 1) = 1 AND array_position(unavailable_figures, NULL::text) IS NULL"
+        + " AND unavailable_figures <@ ARRAY['cache_read_tokens', 'cache_write_tokens', 'completed_at', 'cost_amount', 'first_token_at', 'provider_request_id', 'reasoning_tokens']::text[]"
+        + " AND NOT ('provider_request_id' = ANY (unavailable_figures) AND provider_request_id IS NOT NULL)"
+        + " AND NOT ('cache_read_tokens' = ANY (unavailable_figures) AND cache_read_tokens IS NOT NULL)"
+        + " AND NOT ('cache_write_tokens' = ANY (unavailable_figures) AND cache_write_tokens IS NOT NULL)"
+        + " AND NOT ('reasoning_tokens' = ANY (unavailable_figures) AND reasoning_tokens IS NOT NULL)"
+        + " AND NOT ('cost_amount' = ANY (unavailable_figures) AND cost_amount IS NOT NULL)"
+        + " AND NOT ('first_token_at' = ANY (unavailable_figures) AND first_token_at IS NOT NULL)"
+        + " AND NOT ('completed_at' = ANY (unavailable_figures) AND completed_at IS NOT NULL)";
+
     public void Configure(EntityTypeBuilder<WorkflowRunModelCallAttempt> builder)
     {
         builder.ToTable(WorkflowRunDataNames.ModelCallAttempt, table =>
@@ -63,6 +80,8 @@ public sealed class WorkflowRunModelCallAttemptConfiguration : IEntityTypeConfig
             table.HasCheckConstraint("ck_workflow_run_model_call_attempt_source_identity", "(source_started_record_id IS NULL AND source_terminal_record_id IS NULL AND source_evidence_revision = 0) OR (source_terminal_record_id IS NOT NULL AND source_evidence_revision > 0)");
             table.HasCheckConstraint("ck_workflow_run_model_call_attempt_status", "status IN ('Pending', 'Running', 'Succeeded', 'Failed', 'Cancelled', 'TimedOut', 'Indeterminate')");
             table.HasCheckConstraint("ck_workflow_run_model_call_attempt_timing", "(first_token_at IS NULL OR first_token_at >= started_at) AND (completed_at IS NULL OR completed_at >= started_at) AND (first_token_at IS NULL OR completed_at IS NULL OR first_token_at <= completed_at)");
+            table.HasCheckConstraint("ck_workflow_run_model_call_attempt_source_native_record", "source_native_record_id IS NULL OR source_native_record_id <> '00000000-0000-0000-0000-000000000000'::uuid");
+            table.HasCheckConstraint("ck_workflow_run_model_call_attempt_unavailable_figures", UnavailableFiguresCheck);
         });
         builder.HasKey(a => a.Id);
 
@@ -80,6 +99,7 @@ public sealed class WorkflowRunModelCallAttemptConfiguration : IEntityTypeConfig
         builder.Property(a => a.CostCurrency).HasMaxLength(3);
         builder.Property(a => a.PricingVersion).HasMaxLength(200);
         builder.Property(a => a.SourceEvidenceRevision).IsConcurrencyToken();
+        builder.Property(a => a.UnavailableFigures).HasColumnType("text[]");
 
         builder.HasOne<WorkflowRunModelCall>().WithMany()
             .HasForeignKey(a => new { a.ModelCallId, a.TeamId, a.WorkflowRunId })
@@ -104,5 +124,10 @@ public sealed class WorkflowRunModelCallAttemptConfiguration : IEntityTypeConfig
             .HasDatabaseName("ux_workflow_run_model_call_attempt_source_terminal").HasFilter("source_terminal_record_id IS NOT NULL");
         builder.HasIndex(a => new { a.WorkflowRunId, a.ModelCallId }).HasDatabaseName("ix_workflow_run_model_call_attempt_late_start")
             .HasFilter("source_terminal_record_id IS NOT NULL AND source_started_record_id IS NULL");
+
+        // One captured frame evidences at most one attempt. It is the second, independent guard on re-projection: the
+        // call-level source identity collapses two frames of one response, and this one refuses two attempts from one frame.
+        builder.HasIndex(a => new { a.TeamId, a.WorkflowRunId, a.SourceNativeRecordId }).IsUnique()
+            .HasDatabaseName("ux_workflow_run_model_call_attempt_source_native_record").HasFilter("source_native_record_id IS NOT NULL");
     }
 }

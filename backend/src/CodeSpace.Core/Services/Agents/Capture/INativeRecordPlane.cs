@@ -22,10 +22,18 @@ namespace CodeSpace.Core.Services.Agents.Capture;
 /// run carries no per-call model or cost because those facts were never captured as first-class records, and a
 /// re-attach can only fold a tail because there is no durable record stream to fold a prefix from.</para>
 ///
-/// <para>This is a DUAL WRITE. Nothing reads these tables yet, the normalized log and the run's result keep their
-/// present semantics, and no failure here may change what an Agent Run resolves to. That is a property of the wiring,
-/// not a promise: capture runs on its OWN unit of work (see <see cref="NativeRecordPlane"/>), so a refused write
-/// cannot strand rows in the tracker the run's next save replays, and the pump above it contains every failure.</para>
+/// <para>This is a DUAL WRITE. Nothing reads the record and event tables yet, the normalized log and the run's result
+/// keep their present semantics, and no failure here may change what an Agent Run resolves to. That is a property of
+/// the wiring, not a promise: capture runs on its OWN unit of work (see <see cref="NativeRecordPlane"/>), so a refused
+/// write cannot strand rows in the tracker the run's next save replays, and the pump above it contains every
+/// failure.</para>
+///
+/// <para><b>One thing it writes IS read, and it is telemetry.</b> A batch also carries the model calls a harness's own
+/// records state, and those land in the model-call plane, whose rows the id-addressed model-call reader surfaces
+/// alongside a workflow node's calls — that is the point of projecting them. What they remain outside of is every
+/// authority: nothing here is read by completion, terminal decision, planner, oracle, critic or model routing, and the
+/// derived per-run token aggregate on <c>AgentRunResult</c> is computed exactly as it was and is unaffected by whether
+/// a single call row was written.</para>
 ///
 /// <para><b>What this interface does and does not own.</b> It owns ONE live opening: mint or re-enter the execution,
 /// write batches, record how the round's process ended. The two things an opening cannot see — resuming the process a
@@ -45,7 +53,7 @@ public interface INativeRecordPlane
     /// </summary>
     Task<NativeRecordCaptureHandle?> OpenAsync(NativeRecordCaptureRequest request, CancellationToken cancellationToken);
 
-    /// <summary>Persist one batch of captured frames and the events projected from them, in ONE transaction — so a projection can never be durable while the frame it cites is not.</summary>
+    /// <summary>Persist one batch of captured frames, the events projected from them and the model calls those frames record, in ONE transaction — so a projection can never be durable while the frame it cites is not.</summary>
     Task WriteAsync(NativeRecordBatch batch, CancellationToken cancellationToken);
 
     /// <summary>Record how this round's physical process ended: <see cref="HarnessProcessAttemptState.Exited"/> with the code when it is known, <see cref="HarnessProcessAttemptState.Lost"/> with a reason when it is not.</summary>
@@ -115,7 +123,7 @@ public sealed partial class NativeRecordPlane : INativeRecordPlane, IScopedDepen
 
     public async Task WriteAsync(NativeRecordBatch batch, CancellationToken cancellationToken)
     {
-        if (batch.Records.Count == 0 && batch.Events.Count == 0) return;
+        if (batch.Records.Count == 0 && batch.Events.Count == 0 && batch.ModelCalls.Count == 0) return;
 
         EnsureContractual(batch);
 
@@ -124,6 +132,8 @@ public sealed partial class NativeRecordPlane : INativeRecordPlane, IScopedDepen
 
         foreach (var capture in batch.Records) db.WorkflowRunNativeRecord.Add(RecordRow(batch.Handle, capture));
         foreach (var projection in batch.Events) db.WorkflowRunSemanticEvent.Add(EventRow(batch.Handle, projection));
+
+        await StageModelCallsAsync(db, batch, cancellationToken).ConfigureAwait(false);
 
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
@@ -248,6 +258,7 @@ public sealed partial class NativeRecordPlane : INativeRecordPlane, IScopedDepen
     {
         foreach (var error in batch.Records.SelectMany(capture => capture.Frame.Validate())) yield return $"record: {error}";
         foreach (var error in batch.Events.SelectMany(projection => projection.Validate())) yield return $"projection: {error}";
+        foreach (var error in batch.ModelCalls.SelectMany(projection => projection.Validate())) yield return $"model call: {error}";
 
         // The handle is the authority on which execution this opening writes into; the projection merely repeats it.
         // A disagreement is caught here rather than by the composite foreign key at commit, where it would take the

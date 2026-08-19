@@ -88,8 +88,9 @@ public sealed class WorkflowRunModelCallSchemaTests
             "CostAmount", "CostCurrency", "CreatedBy", "CreatedDate", "EffectiveModel", "EffectiveModelRowId", "EffectiveProvider",
             "EndpointFingerprint", "ErrorArtifactId", "ErrorCode", "FinishReason", "FirstTokenAt", "HttpStatusCode", "Id",
             "InputTokens", "LastModifiedBy", "LastModifiedDate", "ModelCallId", "OutputTokens", "PricingVersion", "ProviderRequestId",
-            "ReasoningTokens", "RequestArtifactId", "ResponseArtifactId", "SchemaVersion", "SourceEvidenceRevision", "SourceStartedRecordId",
-            "SourceTerminalRecordId", "StartedAt", "Status", "TeamId", "TransportKind", "WorkflowRunId",
+            "ReasoningTokens", "RequestArtifactId", "ResponseArtifactId", "SchemaVersion", "SourceEvidenceRevision", "SourceNativeRecordId",
+            "SourceStartedRecordId", "SourceTerminalRecordId", "StartedAt", "Status", "TeamId", "TransportKind", "UnavailableFigures",
+            "WorkflowRunId",
         }.Order());
 
         entity.FindProperty(nameof(WorkflowRunModelCallAttempt.CostAmount))!.GetPrecision().ShouldBe(18);
@@ -119,6 +120,15 @@ public sealed class WorkflowRunModelCallSchemaTests
         Index(entity, "ix_workflow_run_model_call_attempt_late_start").Properties.Select(p => p.Name)
             .ShouldBe(new[] { "WorkflowRunId", "ModelCallId" });
 
+        // One frame evidences at most one attempt — the guard that makes re-projecting a harness's captured frames a
+        // no-op even under a writer that did not check first.
+        var frame = Index(entity, "ux_workflow_run_model_call_attempt_source_native_record");
+        frame.IsUnique.ShouldBeTrue();
+        frame.Properties.Select(p => p.Name).ShouldBe(new[] { "TeamId", "WorkflowRunId", "SourceNativeRecordId" });
+        entity.FindProperty(nameof(WorkflowRunModelCallAttempt.SourceNativeRecordId))!.IsNullable.ShouldBeTrue();
+        entity.FindProperty(nameof(WorkflowRunModelCallAttempt.UnavailableFigures))!.IsNullable.ShouldBeFalse(
+            customMessage: "a NULL set could not be told from an empty one, and the no-value CHECK would go NULL — which ADMITS the row it exists to refuse");
+
         var sourceRecords = entity.GetForeignKeys().Where(f => f.PrincipalEntityType.ClrType == typeof(WorkflowRunRecord)).ToList();
         sourceRecords.Count.ShouldBe(2);
         sourceRecords.ShouldAllBe(f => f.DeleteBehavior == DeleteBehavior.Restrict);
@@ -135,8 +145,10 @@ public sealed class WorkflowRunModelCallSchemaTests
             "ck_workflow_run_model_call_attempt_http_status",
             "ck_workflow_run_model_call_attempt_positive_values",
             "ck_workflow_run_model_call_attempt_source_identity",
+            "ck_workflow_run_model_call_attempt_source_native_record",
             "ck_workflow_run_model_call_attempt_status",
             "ck_workflow_run_model_call_attempt_timing",
+            "ck_workflow_run_model_call_attempt_unavailable_figures",
         }, ignoreOrder: true);
     }
 

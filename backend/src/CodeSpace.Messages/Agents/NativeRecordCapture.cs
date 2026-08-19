@@ -126,13 +126,22 @@ public sealed record NativeRecordCapture
 }
 
 /// <summary>
-/// One BATCH of captured frames and the events projected from them, written in a single transaction so a projection
-/// can never outlive the frame it cites. Batched for the same reason the normalized event writer is: one round trip
-/// per line would put a database write in the middle of the harness's output loop.
+/// One BATCH of captured frames and everything projected from them — the semantic events, and the model calls the
+/// harness's own records state — written in a single transaction so a projection can never outlive the frame it cites.
+/// Batched for the same reason the normalized event writer is: one round trip per line would put a database write in
+/// the middle of the harness's output loop.
 /// </summary>
 public sealed record NativeRecordBatch
 {
     public required NativeRecordCaptureHandle Handle { get; init; }
     public required IReadOnlyList<NativeRecordCapture> Records { get; init; }
     public required IReadOnlyList<AgentSemanticEventV1> Events { get; init; }
+
+    /// <summary>
+    /// The model calls the harness's own records in this batch state, projected into the shape the model-call plane
+    /// takes. Empty for a harness that prints no per-call record, and for every frame that is not one. It rides the same
+    /// batch rather than opening a write of its own because a call and the frame that evidences it become durable
+    /// together or not at all.
+    /// </summary>
+    public IReadOnlyList<HarnessModelCallProjectionV1> ModelCalls { get; init; } = Array.Empty<HarnessModelCallProjectionV1>();
 }

@@ -7,9 +7,10 @@ namespace CodeSpace.Core.Persistence.Entities;
 /// separate from <see cref="WorkflowRunModelCallAttempt"/>: retries, provider fallbacks and transport replays append
 /// physical attempts without overwriting which workflow/node/work-unit attempt requested the inference.
 ///
-/// <para>This first slice is schema-only. No producer or completion consumer reads it yet; nullable requested-route
-/// and execution identity fields allow later adapters to record honest Partial/Unavailable capture rather than inventing
-/// an exact model or a plan identity they could not observe.</para>
+/// <para>Two producers write these rows today — the interaction-tape projection and the harness capture plane — and an
+/// id-addressed telemetry reader surfaces them. None of that is read by completion or terminal authority. The nullable
+/// requested-route and execution-identity fields are what let each adapter record honest Partial/Unavailable capture
+/// rather than inventing an exact model or a plan identity it could not observe.</para>
 /// </summary>
 public class WorkflowRunModelCall : IEntity<Guid>, IAuditable
 {

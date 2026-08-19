@@ -20,11 +20,14 @@ namespace CodeSpace.Core.Services.Agents.Capture;
 /// cannot be dropped by the parser's opinion of it, and a projection can never be durable while the frame it cites is
 /// not.</para>
 ///
-/// <para><b>Two projections, two fidelities.</b> What the parser yields is a NORMALIZATION and is projected
-/// <see cref="SemanticProjectionQuality.Derived"/>. Beside it, <see cref="GroundedFrameProjector"/> asks the harness
-/// whether the captured bytes ARE one of its own structured session records, and a frame that is one also yields an
-/// EXACTLY GROUNDED projection — the only kind the reduction takes a named fact from. Neither replaces the other, and
-/// the grounded reader is asked independently of the parser, so a fact the bytes stated is not the parser's to lose.</para>
+/// <para><b>Two kinds of reading, two fidelities.</b> What the parser yields is a NORMALIZATION and is projected
+/// <see cref="SemanticProjectionQuality.Derived"/>. Beside it, the grounded projectors ask the harness whether the
+/// captured bytes ARE one of its own structured records — its session record
+/// (<see cref="GroundedFrameProjector"/>) or the record of one model call it made
+/// (<see cref="GroundedModelCallProjector"/>) — and a frame that is one also yields an EXACTLY GROUNDED projection, the
+/// only kind the reduction takes a named fact from and the only kind a model-call row is written from. None of them
+/// replaces another, and every grounded reader is asked independently of the parser, so a fact the bytes stated is not
+/// the parser's to lose.</para>
 ///
 /// <para><b>One opening, one channel.</b> A pump reads a single stream. The harness's stdout goes through
 /// <see cref="CaptureAsync"/>, which parses; its stderr goes through <see cref="CaptureDiagnosticAsync"/>, which
@@ -32,10 +35,10 @@ namespace CodeSpace.Core.Services.Agents.Capture;
 /// other's diagnostics as events nobody emitted. Stderr is therefore a second opening of the same process on its own
 /// stream, never a second meaning for this one.</para>
 ///
-/// <para><b>Retention is O(1) in the event count.</b> The buffer is capped and flushed, exactly as
+/// <para><b>Retention is O(1) in the event count.</b> Every buffer is capped and flushed, exactly as
 /// <c>BufferedEventWriter</c> is, because a long run must not be able to exhaust the heap here — the two accumulators
-/// #1479 and #1489 removed are not to be replaced by a third. Per line the pump holds one record and its events, and
-/// nothing that survives a flush.</para>
+/// #1479 and #1489 removed are not to be replaced by a third. Per line the pump holds one record, its events and at
+/// most one model call, and nothing that survives a flush.</para>
 ///
 /// <para><b>The reduction rides the write, not beside it.</b> A batch is folded into
 /// <see cref="HarnessReductionSink"/> immediately BEFORE it is persisted, and the checkpoint that fold produces is
@@ -53,7 +56,8 @@ namespace CodeSpace.Core.Services.Agents.Capture;
 ///
 /// <para><b>It cannot change what the run resolves to.</b> A plane that will not open, a reduction that will not
 /// resume, and a write that will not land each disable their half for the round with a warning; the harness's own
-/// output path is untouched, and nothing reads the record and event tables yet. Nor does capture SWALLOW anything: a
+/// output path is untouched, nothing reads the record and event tables yet, and the model-call rows a grounded read
+/// does produce are telemetry that no authority consults. Nor does capture SWALLOW anything: a
 /// parser that throws has its frame recorded with the reason and the throw then propagates exactly as it did before
 /// this plane existed. Containing it here would have made the run's outcome depend on whether a shadow plane happened
 /// to be deployed, which is the one thing a dual write may not do.</para>
@@ -78,6 +82,7 @@ internal sealed class AgentNativeRecordPump
     private readonly ILogger _logger;
     private readonly List<NativeRecordCapture> _records = new();
     private readonly List<AgentSemanticEventV1> _events = new();
+    private readonly List<HarnessModelCallProjectionV1> _modelCalls = new();
 
     private NativeRecordCaptureHandle? _handle;
     private long _ordinal;
@@ -260,30 +265,67 @@ internal sealed class AgentNativeRecordPump
     }
 
     /// <summary>
-    /// Buffer the EXACTLY GROUNDED projection of this frame, when the harness recognises its own structured session
-    /// record in the captured bytes. It rides beside the derived projections of the same frame rather than replacing
-    /// them: they are two readings of one frame at two fidelities, and the reduction takes its named facts only from
-    /// the grounded one.
+    /// Buffer every EXACTLY GROUNDED projection of this frame — the facts the harness recognises in its OWN structured
+    /// records among the captured bytes. They ride beside the derived projection of the same frame rather than replacing
+    /// it: one frame can be read at more than one fidelity, and the reduction takes its named facts only from a
+    /// grounded reading.
     ///
     /// <para>Asked BEFORE the parser and independently of it, so a frame whose parser then throws still contributes the
-    /// fact its bytes stated — the fact was never the parser's to lose.</para>
+    /// facts its bytes stated — they were never the parser's to lose.</para>
+    ///
+    /// <para>Each grounded reader is contained SEPARATELY, so one that throws costs only its own fact: a harness that
+    /// records both its session and its model calls loses one reading and keeps the other, and each warning is true of
+    /// exactly what failed.</para>
+    /// </summary>
+    private void Ground(NativeRecordV1 record, IAgentHarness harness)
+    {
+        if (_handle is not { } handle) return;
+
+        GroundSession(record, harness, handle);
+        GroundModelCall(record, harness, handle);
+    }
+
+    /// <summary>
+    /// Buffer the session identity the harness stated in this frame, if it stated one.
     ///
     /// <para>A reader that throws is CONTAINED here, and that asymmetry with <see cref="CaptureAsync"/>'s parser is
     /// deliberate. The parser's throw already failed the run before this plane existed, so containing it would change
     /// what a run resolves to; reading a grounded fact is work that did not exist before, so letting it throw would
     /// make a run's outcome depend on whether this plane is deployed — the one thing a dual write may not do.</para>
     /// </summary>
-    private void Ground(NativeRecordV1 record, IAgentHarness harness)
+    private void GroundSession(NativeRecordV1 record, IAgentHarness harness, NativeRecordCaptureHandle handle)
     {
-        if (_handle is not { } handle) return;
-
         try
         {
             if (GroundedFrameProjector.Project(harness, handle, record) is { } projection) _events.Add(projection);
         }
         catch (Exception exception)
         {
-            _logger.LogWarning(exception, "Harness {Harness} could not read a grounded fact from a native frame; the frame is recorded unchanged, no exact projection is made, and the run is untouched", harness.Kind);
+            _logger.LogWarning(exception, "Harness {Harness} could not read a grounded session fact from a native frame; the frame is recorded unchanged, no session projection is made from it, and the run is untouched", harness.Kind);
+        }
+    }
+
+    /// <summary>
+    /// Buffer the MODEL CALL this frame is the harness's own record of, if it is one — the row plus the exactly grounded
+    /// event that cites the same frame and names the call, so the two planes join on a fact read out of one frame's
+    /// bytes. Nothing for a harness that prints no per-call record, which is the honest outcome rather than a row
+    /// derived from a line that merely mentions a model.
+    ///
+    /// <para>Contained exactly as the session reader is, and for the same reason: a cost row is a fact this plane did
+    /// not have before, so failing to read one must not be able to decide a run.</para>
+    /// </summary>
+    private void GroundModelCall(NativeRecordV1 record, IAgentHarness harness, NativeRecordCaptureHandle handle)
+    {
+        try
+        {
+            if (GroundedModelCallProjector.Project(harness, handle, record) is not { } projection) return;
+
+            _modelCalls.Add(projection);
+            _events.Add(GroundedModelCallProjector.NamedEvent(handle, projection));
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "Harness {Harness} could not read a model call from a native frame; the frame is recorded unchanged, no model-call row is written for it, and the run is untouched", harness.Kind);
         }
     }
 
@@ -291,12 +333,13 @@ internal sealed class AgentNativeRecordPump
     internal async Task FlushAsync(CancellationToken cancellationToken)
     {
         if (_plane is null || _handle is not { } handle) return;
-        if (_records.Count == 0 && _events.Count == 0) return;
+        if (_records.Count == 0 && _events.Count == 0 && _modelCalls.Count == 0) return;
 
-        var batch = new NativeRecordBatch { Handle = handle, Records = _records.ToList(), Events = _events.ToList() };
+        var batch = new NativeRecordBatch { Handle = handle, Records = _records.ToList(), Events = _events.ToList(), ModelCalls = _modelCalls.ToList() };
 
         _records.Clear();
         _events.Clear();
+        _modelCalls.Clear();
 
         // Folded BEFORE the write, so a frame that becomes durable is already in the reduction, and the checkpoint it
         // produces then commits with that very batch — the window in which a durable frame is missing from the stored
@@ -309,7 +352,7 @@ internal sealed class AgentNativeRecordPump
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
-            _logger.LogWarning(exception, "Native record capture could not persist {RecordCount} frame(s) and {EventCount} projection(s) for agent run {RunId}; capture stops for this round and the run continues unchanged", batch.Records.Count, batch.Events.Count, handle.AgentRunId);
+            _logger.LogWarning(exception, "Native record capture could not persist {RecordCount} frame(s), {EventCount} projection(s) and {ModelCallCount} model call(s) for agent run {RunId}; capture stops for this round and the run continues unchanged", batch.Records.Count, batch.Events.Count, batch.ModelCalls.Count, handle.AgentRunId);
 
             _handle = null;
         }
@@ -346,7 +389,7 @@ internal sealed class AgentNativeRecordPump
 
     private async Task FlushIfFullAsync(CancellationToken cancellationToken)
     {
-        if (_records.Count < MaxBuffered && _events.Count < MaxBuffered) return;
+        if (_records.Count < MaxBuffered && _events.Count < MaxBuffered && _modelCalls.Count < MaxBuffered) return;
 
         await FlushAsync(cancellationToken).ConfigureAwait(false);
     }
