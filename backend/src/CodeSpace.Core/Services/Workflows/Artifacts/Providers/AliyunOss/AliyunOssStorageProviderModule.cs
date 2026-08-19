@@ -27,15 +27,15 @@ public sealed class AliyunOssStorageProviderModule : IStorageProviderModule
               "minLength": 2,
               "maxLength": 64,
               "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$",
-              "title": "Region",
-              "description": "The region id without the oss- prefix, for example cn-hangzhou. It is scoped into every request signing key and must match the endpoint's region."
+              "title": "Region override",
+              "description": "Optional. The region id without the oss- prefix, for example cn-hangzhou. Leave it empty for an oss-{region}.aliyuncs.com endpoint or its -internal VPC form: the region is read from the endpoint host. Supply it for an endpoint that names no region - an accelerate endpoint, or a custom domain - because the region is scoped into every request signing key and a profile that cannot resolve one is refused when it is saved."
             },
             "bucket": {
               "type": "string",
               "minLength": 3,
               "maxLength": 63,
               "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$",
-              "title": "Bucket",
+              "title": "Bucket name",
               "description": "An existing bucket with versioning DISABLED. This driver never creates or deletes buckets. On a versioning-enabled bucket its staging discard leaves a delete marker and keeps the staged bytes as a non-current version, so every write would retain and bill a second full copy."
             },
             "keyPrefix": {
@@ -46,7 +46,7 @@ public sealed class AliyunOssStorageProviderModule : IStorageProviderModule
               "description": "Optional namespace inside the bucket, ending in a slash. Changing it is a new storage namespace, not a migration."
             }
           },
-          "required": ["endpoint", "region", "bucket"],
+          "required": ["endpoint", "bucket"],
           "additionalProperties": false
         }
         """);
@@ -101,6 +101,14 @@ public sealed class AliyunOssStorageProviderModule : IStorageProviderModule
         | StorageProviderCapabilities.HealthProbe;
 
     public Type FactoryType => typeof(AliyunOssArtifactStorageDriverFactory);
+
+    /// <summary>
+    /// The schema admits an endpoint as a host pattern, but the signing region is read out of that host and a host
+    /// naming none is configurable only with an explicit <c>region</c>. Leaving that to activation would let Settings
+    /// store a profile whose first artifact write fails inside a run, so the control plane runs the same parser the
+    /// factory activates with - one implementation, so admission and activation cannot answer differently.
+    /// </summary>
+    public void EnsureConfigurationReadable(JsonElement nonSecretConfiguration) => AliyunOssTarget.Parse(nonSecretConfiguration);
 
     private static JsonElement ParseSchema(string json)
     {

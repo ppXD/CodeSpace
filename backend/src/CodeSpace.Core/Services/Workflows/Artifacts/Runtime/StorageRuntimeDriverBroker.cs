@@ -3,6 +3,7 @@ using System.Text.Json;
 using CodeSpace.Core.Services.Workflows.Artifacts.Credentials;
 using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers;
+using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 
@@ -12,12 +13,14 @@ public sealed class StorageRuntimeDriverBroker : IStorageRuntimeDriverBroker
     private readonly IStorageProfileSnapshotResolver _profileResolver;
     private readonly IStorageCredentialSecretResolver _credentialResolver;
     private readonly IArtifactStorageDriverFactoryCatalog _factoryCatalog;
+    private readonly ILogger<StorageRuntimeDriverBroker> _logger;
 
-    public StorageRuntimeDriverBroker(IStorageProfileSnapshotResolver profileResolver, IStorageCredentialSecretResolver credentialResolver, IArtifactStorageDriverFactoryCatalog factoryCatalog)
+    public StorageRuntimeDriverBroker(IStorageProfileSnapshotResolver profileResolver, IStorageCredentialSecretResolver credentialResolver, IArtifactStorageDriverFactoryCatalog factoryCatalog, ILogger<StorageRuntimeDriverBroker> logger)
     {
         _profileResolver = profileResolver;
         _credentialResolver = credentialResolver;
         _factoryCatalog = factoryCatalog;
+        _logger = logger;
     }
 
     public async ValueTask<StorageRuntimeDriverResolution> OpenAsync(StorageRuntimeDriverRequest request, CancellationToken cancellationToken)
@@ -122,6 +125,8 @@ public sealed class StorageRuntimeDriverBroker : IStorageRuntimeDriverBroker
         catch (Exception exception) when (exception is ArgumentException or NotSupportedException)
         {
             if (cancellationToken.IsCancellationRequested) return new StorageRuntimeDriverResolution.Cancelled(StorageRuntimeCancellationStage.DriverInitialization);
+
+            LogConfigurationRefusal(snapshot, exception);
             return new StorageRuntimeDriverResolution.ConfigurationInvalid(StorageRuntimeConfigurationFailureReason.FactoryRejectedConfiguration);
         }
         catch (Exception exception) when (IsRecoverable(exception))
@@ -141,6 +146,15 @@ public sealed class StorageRuntimeDriverBroker : IStorageRuntimeDriverBroker
         if (driver == null) return new StorageRuntimeDriverResolution.DriverInitializationFailed(StorageRuntimeDriverInitializationFailureReason.NullDriver);
         return new StorageRuntimeDriverResolution.Ready(new StorageRuntimeDriverLease(driver));
     }
+
+    /// <summary>
+    /// The provider's own refusal text is the only copy that says which field is wrong and what to put there, and the
+    /// resolution this method returns deliberately carries none of it - provider text may quote a secret, so the caller
+    /// gets a closed reason code instead. Writing it here is therefore what keeps the refusal readable at all; without
+    /// this line the operator sees a reason code with no way back to the field that produced it.
+    /// </summary>
+    private void LogConfigurationRefusal(StorageProfileSnapshot snapshot, Exception exception) =>
+        _logger.LogWarning(exception, "Storage provider {ProviderTypeKey} refused the configuration of storage profile {StorageProfileId} revision {StorageProfileRevision}.", snapshot.ProviderTypeKey, snapshot.ProfileId, snapshot.ProfileRevision);
 
     private static StorageRuntimeDriverResolution? ValidateSnapshot(StorageRuntimeDriverRequest request, StorageProfileSnapshot? snapshot)
     {

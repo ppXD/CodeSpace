@@ -28,6 +28,15 @@ public interface IStorageProviderModule
     /// </summary>
     JsonElement GetNamespaceConfiguration(JsonElement nonSecretConfiguration) => nonSecretConfiguration.Clone();
 
+    /// <summary>
+    /// Raise the refusal this module's own activation path would raise for a configuration <see cref="ConfigSchema"/>
+    /// already admits. The control plane calls it while admitting a profile revision, so a configuration the provider
+    /// cannot read is refused as the revision is saved instead of at the first artifact write. It proves only that
+    /// the provider can READ the configuration - never that the credential, the network, or the bucket is usable - so a
+    /// module whose schema is its whole readability rule keeps this no-op default.
+    /// </summary>
+    void EnsureConfigurationReadable(JsonElement nonSecretConfiguration) { }
+
     /// <summary>Provider-native behaviours available to a future policy admission layer.</summary>
     StorageProviderCapabilities Capabilities { get; }
 
