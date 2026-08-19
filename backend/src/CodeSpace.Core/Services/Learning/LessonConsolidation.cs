@@ -62,7 +62,7 @@ public static class LessonConsolidation
 
         foreach (var raw in proposal.SourceRunIds)
         {
-            if (!Guid.TryParse(raw, out var id) || !candidates.ContainsKey(id))
+            if (!Guid.TryParse(raw, out var id))
             {
                 rejections.Add($"citation '{raw}' is not a run this round showed the brain — refused (a lesson may only cite what it was taught from)");
                 return null;

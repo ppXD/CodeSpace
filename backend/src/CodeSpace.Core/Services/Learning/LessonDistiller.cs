@@ -126,7 +126,7 @@ public sealed class LessonDistiller : ILessonDistiller, IScopedDependency
         var cited = (await _db.Lesson.AsNoTracking().Where(l => l.TeamId == teamId).Select(l => l.SourceRunIds).ToListAsync(cancellationToken).ConfigureAwait(false))
             .SelectMany(ids => ids).ToHashSet();
 
-        var fresh = rows.Where(r => !cited.Contains(r.Id)).ToList();
+        var fresh = rows.ToList();
 
         if (fresh.Count > MaxRunsPerRound)
             _logger.LogInformation("Lesson distillation for team {TeamId}: {Deferred} candidate run(s) beyond the {Cap}-run cap deferred to the next round", teamId, fresh.Count - MaxRunsPerRound, MaxRunsPerRound);
