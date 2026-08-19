@@ -44,13 +44,12 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     private readonly IAgentRunService _agentRunService;
     private readonly Rerun.IRerunCellSeeder _cellSeeder;
     private readonly Engine.IRunCancellationRegistry _cancellationRegistry;
-    private readonly Artifacts.IArtifactStore _artifactStore;
     private readonly ILogger<WorkflowService> _logger;
 
     /// <summary>Reason stamped on a branch agent run aborted by the kill-wave when an operator cancels its parent workflow run.</summary>
     private const string OperatorCancelledAgentReason = "Cancelled because its parent workflow run was cancelled by an operator.";
 
-    public WorkflowService(CodeSpaceDbContext db, DefinitionValidator validator, INodeRegistry nodeRegistry, Lifecycle.IRunRecordLogger recordLogger, IRunStarter runStarter, RunSources.IRunFromSnapshotStarter snapshotStarter, IWorkflowRunDispatcher runDispatcher, Engine.IWorkflowResumeService resumeService, IPostCommitActions postCommit, IAgentRunService agentRunService, Rerun.IRerunCellSeeder cellSeeder, Engine.IRunCancellationRegistry cancellationRegistry, Artifacts.IArtifactStore artifactStore, ILogger<WorkflowService> logger)
+    public WorkflowService(CodeSpaceDbContext db, DefinitionValidator validator, INodeRegistry nodeRegistry, Lifecycle.IRunRecordLogger recordLogger, IRunStarter runStarter, RunSources.IRunFromSnapshotStarter snapshotStarter, IWorkflowRunDispatcher runDispatcher, Engine.IWorkflowResumeService resumeService, IPostCommitActions postCommit, IAgentRunService agentRunService, Rerun.IRerunCellSeeder cellSeeder, Engine.IRunCancellationRegistry cancellationRegistry, ILogger<WorkflowService> logger)
     {
         _db = db;
         _validator = validator;
@@ -64,7 +63,6 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         _agentRunService = agentRunService;
         _cellSeeder = cellSeeder;
         _cancellationRegistry = cancellationRegistry;
-        _artifactStore = artifactStore;
         _logger = logger;
     }
 
@@ -1537,11 +1535,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
     public async Task<WorkflowRunDetail?> GetRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken, bool mergeLineage = true)
     {
-        var run = await _db.WorkflowRun
-            .Include(r => r.Workflow)
-            .Include(r => r.RunRequest)
-            .SingleOrDefaultAsync(r => r.Id == runId, cancellationToken)
-            .ConfigureAwait(false);
+        var run = await LoadRunDetailHeaderAsync(runId, cancellationToken).ConfigureAwait(false);
         if (run == null) return null;
 
         // Tenancy via the denormalised run.TeamId — same value as run.Workflow.TeamId for an authored
@@ -1564,9 +1558,9 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             : new Dictionary<Guid, DateTimeOffset> { [run.Id] = run.CreatedDate };
         var lineageIds = createdByRun.Keys.ToList();
 
-        var allNodes = await _db.WorkflowRunNode.Where(n => lineageIds.Contains(n.RunId)).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var allNodes = await LoadLineageCellsAsync(lineageIds, cancellationToken).ConfigureAwait(false);
         var nodes = LatestPerCell(allNodes, n => (n.NodeId, n.IterationKey), n => n.RunId, createdByRun).OrderBy(n => n.StartedAt).ToList();
-        var normalizedPayload = SafeParseJson(run.RunRequest?.NormalizedPayloadJson);
+        var normalizedPayload = SafeParseJson(run.RequestNormalizedPayloadJson);
         var outputs = SafeParseJson(run.OutputsJson);
 
         // The outstanding wait (if any) — drives the run-detail's resume affordance. Stays on the REQUESTED run (the
@@ -1580,10 +1574,6 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         // branch links to its agent run on the earlier attempt and the re-run one to the latest.
         var childRunByNode = await LoadSubworkflowChildLinksAsync(lineageIds, createdByRun, cancellationToken).ConfigureAwait(false);
         var agentRunByNode = await LoadAgentRunLinksAsync(lineageIds, createdByRun, cancellationToken).ConfigureAwait(false);
-
-        // Re-inflate any offloaded-value refs in each node's outputs so the run-detail surfaces the REAL values,
-        // not the bare {"$artifact_ref":…} pointers the engine writes to the ledger for oversize outputs.
-        var resolvedOutputsByNode = await ResolveNodeOutputsForDisplayAsync(nodes, run.TeamId, cancellationToken).ConfigureAwait(false);
 
         // The exact graph this run executed — the VERSION-PINNED snapshot (the exact JSON this run ran),
         // NOT the workflow's current definition. Feeds the run canvas faithfully, and gives each iterated
@@ -1606,7 +1596,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             RunNumber = run.RunNumber,
             WorkflowId = run.WorkflowId,
             WorkflowVersion = run.WorkflowVersion,
-            SourceType = run.RunRequest?.SourceType ?? string.Empty,
+            SourceType = run.RequestSourceType ?? string.Empty,
             ParentRunId = run.ParentRunId,
             NormalizedPayload = normalizedPayload,
             Status = run.Status,
@@ -1614,7 +1604,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             StartedAt = run.StartedAt,
             CompletedAt = run.CompletedAt,
             CreatedDate = run.CreatedDate,
-            Nodes = nodes.Select(n => MapRunNode(n, childRunByNode, agentRunByNode, typeKeyByNodeId, resolvedOutputsByNode, rerunnableNodeIds)).ToList(),
+            Nodes = nodes.Select(n => MapRunNode(n, childRunByNode, agentRunByNode, typeKeyByNodeId, rerunnableNodeIds)).ToList(),
             Definition = definition,
             Outputs = outputs,
             PendingWait = pending == null ? null : new WorkflowRunWaitInfo
@@ -1627,6 +1617,99 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
                 Payload = SafeParseJson(pending.PayloadJson),
             },
         };
+    }
+
+    /// <summary>
+    /// The run-detail header: an <c>AsNoTracking</c> projection of exactly the columns
+    /// <see cref="GetRunAsync"/> reads, replacing a tracked <c>Include(Workflow).Include(RunRequest)</c> graph load
+    /// whose <c>Workflow</c> half was never read at all.
+    ///
+    /// <para>Safe to stop tracking, rather than merely cheaper: nothing on this path writes. The callers are the
+    /// run-detail query handlers plus the read-only Journal / Room / phase-board / timeline projectors those queries
+    /// drive; no command handler reaches <see cref="GetRunAsync"/>, and <c>TransactionalBehavior</c> — the request-level
+    /// flush that could otherwise write back a tracked entity — is constrained to <c>ICommand</c> and never runs for
+    /// these. So dropping the tracked graph (and the <c>xmin</c> concurrency token it pinned) changes no write.</para>
+    /// </summary>
+    private async Task<RunDetailHeader?> LoadRunDetailHeaderAsync(Guid runId, CancellationToken cancellationToken) =>
+        await _db.WorkflowRun.AsNoTracking()
+            .Where(r => r.Id == runId)
+            .Select(r => new RunDetailHeader
+            {
+                Id = r.Id,
+                TeamId = r.TeamId,
+                RunNumber = r.RunNumber,
+                WorkflowId = r.WorkflowId,
+                WorkflowVersion = r.WorkflowVersion,
+                DefinitionSnapshotJson = r.DefinitionSnapshotJson,
+                ParentRunId = r.ParentRunId,
+                RootRunId = r.RootRunId,
+                Status = r.Status,
+                Error = r.Error,
+                StartedAt = r.StartedAt,
+                CompletedAt = r.CompletedAt,
+                CreatedDate = r.CreatedDate,
+                OutputsJson = r.OutputsJson,
+                RequestSourceType = r.RunRequest.SourceType,
+                RequestNormalizedPayloadJson = r.RunRequest.NormalizedPayloadJson,
+            })
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// The lineage's cells, projected to the columns the detail maps. Leaves <c>routing_hints_jsonb</c> — the durable
+    /// walker's column, which the detail never reads — in the database. <c>workflow_run_node</c> is a keyless view
+    /// (<c>HasNoKey().ToView(…)</c>), so this read was never tracked; the projection narrows what crosses the wire,
+    /// not what EF holds.
+    /// </summary>
+    private async Task<List<RunDetailCell>> LoadLineageCellsAsync(IReadOnlyCollection<Guid> lineageIds, CancellationToken cancellationToken) =>
+        await _db.WorkflowRunNode
+            .Where(n => lineageIds.Contains(n.RunId))
+            .Select(n => new RunDetailCell
+            {
+                RunId = n.RunId,
+                NodeId = n.NodeId,
+                IterationKey = n.IterationKey,
+                Status = n.Status,
+                InputsJson = n.InputsJson,
+                OutputsJson = n.OutputsJson,
+                Error = n.Error,
+                StartedAt = n.StartedAt,
+                CompletedAt = n.CompletedAt,
+            })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+    /// <summary>The run columns <see cref="GetRunAsync"/> reads, plus the two it reads through the request nav. Private to the read — it crosses no seam; the seam-crossing shape is <see cref="WorkflowRunDetail"/>.</summary>
+    private sealed record RunDetailHeader
+    {
+        public required Guid Id { get; init; }
+        public required Guid TeamId { get; init; }
+        public required long RunNumber { get; init; }
+        public Guid? WorkflowId { get; init; }
+        public int? WorkflowVersion { get; init; }
+        public string? DefinitionSnapshotJson { get; init; }
+        public Guid? ParentRunId { get; init; }
+        public Guid? RootRunId { get; init; }
+        public required WorkflowRunStatus Status { get; init; }
+        public string? Error { get; init; }
+        public DateTimeOffset? StartedAt { get; init; }
+        public DateTimeOffset? CompletedAt { get; init; }
+        public required DateTimeOffset CreatedDate { get; init; }
+        public required string OutputsJson { get; init; }
+        public string? RequestSourceType { get; init; }
+        public string? RequestNormalizedPayloadJson { get; init; }
+    }
+
+    /// <summary>One <c>workflow_run_node</c> cell, narrowed to what <see cref="MapRunNode"/> and the lineage merge read.</summary>
+    private sealed record RunDetailCell
+    {
+        public required Guid RunId { get; init; }
+        public required string NodeId { get; init; }
+        public required string IterationKey { get; init; }
+        public required NodeStatus Status { get; init; }
+        public required string InputsJson { get; init; }
+        public required string OutputsJson { get; init; }
+        public string? Error { get; init; }
+        public DateTimeOffset? StartedAt { get; init; }
+        public DateTimeOffset? CompletedAt { get; init; }
     }
 
     public IReadOnlyList<NodeManifestDto> ListNodeManifests()
@@ -1798,12 +1881,17 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     private static IEnumerable<T> LatestPerCell<T>(IEnumerable<T> rows, Func<T, (string, string)> cell, Func<T, Guid> runId, IReadOnlyDictionary<Guid, DateTimeOffset> createdByRun) =>
         rows.GroupBy(cell).Select(g => g.OrderByDescending(x => createdByRun[runId(x)]).ThenByDescending(x => runId(x).ToString(), StringComparer.Ordinal).First());
 
+    /// <summary>
+    /// One cell → its summary. <see cref="WorkflowRunNodeSummary.Outputs"/> is the LEDGER's outputs verbatim: an
+    /// oversize value stays the compact <c>{"$artifact_ref":…}</c> pointer the engine wrote, and the callers that read
+    /// an output's content exchange it for the bytes through <see cref="Artifacts.IRunNodeOutputInflater"/> for the
+    /// cells they actually read.
+    /// </summary>
     private static WorkflowRunNodeSummary MapRunNode(
-        WorkflowRunNode n,
+        RunDetailCell n,
         IReadOnlyDictionary<(string NodeId, string IterationKey), string> childRunByNode,
         IReadOnlyDictionary<(string NodeId, string IterationKey), string> agentRunByNode,
         IReadOnlyDictionary<string, string> typeKeyByNodeId,
-        IReadOnlyDictionary<(string NodeId, string IterationKey), JsonElement> resolvedOutputsByNode,
         IReadOnlySet<string> rerunnableTopLevelNodeIds) => new()
     {
         NodeId = n.NodeId,
@@ -1811,7 +1899,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         ContainerKind = ResolveContainerKind(n.IterationKey, typeKeyByNodeId),
         Status = n.Status,
         Inputs = SafeParseJson(n.InputsJson),
-        Outputs = resolvedOutputsByNode.TryGetValue((n.NodeId, n.IterationKey), out var resolved) ? resolved : SafeParseJson(n.OutputsJson),
+        Outputs = SafeParseJson(n.OutputsJson),
         Error = n.Error,
         StartedAt = n.StartedAt,
         CompletedAt = n.CompletedAt,
@@ -1867,35 +1955,6 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         status is NodeStatus.Success or NodeStatus.Skipped
         || (status == NodeStatus.Failure && definition.Edges.Any(e => e.From == nodeId && e.SourceHandle == WorkflowHandles.Error));
 
-    /// <summary>Re-inflate offloaded-value refs in each node's outputs for the run-detail display. Cheap when no refs are present (ResolveAsync only fetches a value that IS a ref); keyed by (nodeId, iterationKey) to match the per-cell rows.</summary>
-    private async Task<Dictionary<(string NodeId, string IterationKey), JsonElement>> ResolveNodeOutputsForDisplayAsync(IReadOnlyList<WorkflowRunNode> nodes, Guid teamId, CancellationToken cancellationToken)
-    {
-        var result = new Dictionary<(string, string), JsonElement>();
-
-        foreach (var n in nodes)
-        {
-            var resolved = await Artifacts.NodeOutputArtifacts.ResolveAsync(_artifactStore, teamId, ParseOutputsObject(n.OutputsJson), cancellationToken).ConfigureAwait(false);
-            result[(n.NodeId, n.IterationKey)] = JsonSerializer.SerializeToElement(resolved);
-        }
-
-        return result;
-    }
-
-    /// <summary>Parse a node's <c>outputs_jsonb</c> into a property dictionary for ref resolution; empty for null / non-object.</summary>
-    private static Dictionary<string, JsonElement> ParseOutputsObject(string? json)
-    {
-        var dict = new Dictionary<string, JsonElement>();
-
-        if (string.IsNullOrWhiteSpace(json)) return dict;
-
-        var root = JsonDocument.Parse(json).RootElement;
-        if (root.ValueKind != JsonValueKind.Object) return dict;
-
-        foreach (var prop in root.EnumerateObject()) dict[prop.Name] = prop.Value.Clone();
-
-        return dict;
-    }
-
     /// <summary>
     /// nodeId → typeKey for the run's VERSION-PINNED definition (the exact JSON it executed, not the
     /// workflow's current draft). Mirrors how the engine + <c>ActorIdentityRequirementGate</c> read the
@@ -1908,7 +1967,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     /// (and the canvas it feeds) stays faithful to how the run actually ran even after later edits.
     /// Resilient: <c>null</c> if that snapshot can't be loaded (missing version row / corrupt JSON).
     /// </summary>
-    private async Task<WorkflowDefinition?> LoadRunDefinitionAsync(WorkflowRun run, CancellationToken cancellationToken)
+    private async Task<WorkflowDefinition?> LoadRunDefinitionAsync(RunDetailHeader run, CancellationToken cancellationToken)
     {
         var definitionJson = run.DefinitionSnapshotJson ?? await _db.WorkflowVersion.AsNoTracking()
             .Where(v => v.WorkflowId == run.WorkflowId && v.Version == run.WorkflowVersion)

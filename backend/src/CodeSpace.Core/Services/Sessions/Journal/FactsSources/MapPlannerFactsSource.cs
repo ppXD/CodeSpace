@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.Services.Agents.Cost;
 using CodeSpace.Core.Services.Tasks.Timeline.Sources;
 using CodeSpace.Core.Services.Workflows;
+using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Messages.Dtos.Sessions.Journal;
 
 namespace CodeSpace.Core.Services.Sessions.Journal.FactsSources;
@@ -17,10 +18,12 @@ namespace CodeSpace.Core.Services.Sessions.Journal.FactsSources;
 public sealed class MapPlannerFactsSource : IJournalFactsSource
 {
     private readonly IWorkflowService _workflows;
+    private readonly IRunNodeOutputInflater _inflater;
 
-    public MapPlannerFactsSource(IWorkflowService workflows)
+    public MapPlannerFactsSource(IWorkflowService workflows, IRunNodeOutputInflater inflater)
     {
         _workflows = workflows;
+        _inflater = inflater;
     }
 
     public async Task<IReadOnlyDictionary<string, JournalStepFacts>> GatherAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
@@ -29,9 +32,13 @@ public sealed class MapPlannerFactsSource : IJournalFactsSource
 
         if (run == null) return EmptyFacts;
 
+        // The plan itself lives in the producer cell's outputs, and a large one is offloaded to an artifact ref — so
+        // exchange the ref for its bytes on the map PRODUCER cells only, never on every cell of the run.
+        var planned = await _inflater.InflateAsync(run, teamId, MapPlan.ProducerNodeIds(run), cancellationToken).ConfigureAwait(false);
+
         var facts = new Dictionary<string, JournalStepFacts>();
 
-        foreach (var planner in MapPlan.PlannersOf(run))
+        foreach (var planner in MapPlan.PlannersOf(planned))
         {
             var subtasks = ReadSubtasks(planner.Subtasks);
 
