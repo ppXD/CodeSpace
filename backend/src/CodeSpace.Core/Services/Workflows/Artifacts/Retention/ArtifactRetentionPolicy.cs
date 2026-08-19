@@ -33,7 +33,8 @@ public static class ArtifactRetentionPolicy
         new Dictionary<ArtifactRetentionClass, ArtifactRetentionRule> { [ArtifactManifestContent.Class] = ArtifactManifestContent };
 
     /// <summary>The rule for <paramref name="value"/>, or null when the running policy does not register it — which the reaper reads as "cannot tell" and keeps.</summary>
-    public static ArtifactRetentionRule? For(ArtifactRetentionClass value) => Rules.TryGetValue(value, out var rule) ? rule : null;
+    /// <summary>The rule for a class NAME, or null when this build registers none — including a name a rolled-back build wrote that this one has never heard of. Null settles as keep.</summary>
+    public static ArtifactRetentionRule? For(string value) => Enum.TryParse<ArtifactRetentionClass>(value, ignoreCase: false, out var parsed) && Rules.TryGetValue(parsed, out var rule) ? rule : null;
 
     /// <summary>
     /// The smallest age floor across every registered class. The claim query uses it as a cheap SQL pre-filter; the

@@ -81,6 +81,13 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
         var ageCeiling = cutoff - ArtifactRetentionPolicy.MinimumAgeFloor;
         await using var db = CreateDb();
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        // The three concurrently-mutable guards are repeated on the OUTER select on purpose, and the duplication is
+        // load-bearing rather than defensive: FOR UPDATE re-evaluates a locked row through EPQ against the quals of
+        // the query it locked in, and quals inside a MATERIALIZED CTE are not among them. Without the repeat, a row
+        // this sweep saw as Declared but a concurrent transaction settled terminally before the lock was granted
+        // comes back anyway — and the claim then writes an owner and a lease onto a terminal row, which the state
+        // CHECK refuses, killing the whole sweep rather than skipping one row. The artifact-side guards are not
+        // repeated because neither created_at nor inline_bytes can change under this row.
         var rows = await db.WorkflowArtifactRetention.FromSqlInterpolated($$"""
             WITH fair AS MATERIALIZED (
                 SELECT DISTINCT ON (retention.team_id) retention.artifact_id, retention.team_id, retention.next_sweep_at
@@ -95,6 +102,9 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
             )
             SELECT retention.*, retention.xmin FROM workflow_artifact_retention retention
             JOIN fair ON fair.artifact_id = retention.artifact_id
+            WHERE retention.state IN ('Declared', 'Quarantined')
+              AND retention.next_sweep_at <= {{cutoff}}
+              AND (retention.lease_expires_at IS NULL OR retention.lease_expires_at <= clock_timestamp())
             ORDER BY retention.next_sweep_at, retention.team_id, retention.artifact_id
             LIMIT {{limit}}
             FOR UPDATE OF retention SKIP LOCKED
@@ -289,7 +299,7 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
     {
         public Guid ArtifactId => Claimed.ArtifactId;
         public Guid TeamId => Claimed.TeamId;
-        public ArtifactRetentionClass RetentionClass => Claimed.RetentionClass;
+        public string RetentionClass => Claimed.RetentionClass;
         public string HolderKind => Claimed.HolderKind;
         public Guid HolderId => Claimed.HolderId;
         public ArtifactRetentionState State => Claimed.State;

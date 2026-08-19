@@ -300,7 +300,7 @@ public sealed class ArtifactRetentionReaperFlowTests
         var db = scope.Resolve<CodeSpaceDbContext>();
         var payload = $"{{\"outputs\":{{\"body\":{{\"$artifact_ref\":{{\"id\":\"{artifactId}\",\"size_bytes\":42,\"content_type\":\"application/json\"}}}}}}}}";
         await db.Database.ExecuteSqlInterpolatedAsync($"""
-            INSERT INTO workflow_run_record (id, run_id, record_type, payload_json, created_at)
+            INSERT INTO workflow_run_record (id, run_id, record_type, payload_json, occurred_at)
             VALUES ({Guid.NewGuid()}, {world.WorkflowRunId}, 'node.completed', CAST({payload} AS jsonb), clock_timestamp())
             """);
 
@@ -328,12 +328,18 @@ public sealed class ArtifactRetentionReaperFlowTests
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
 
-        // workflow_artifact rejects UPDATE outright (migration 0016), and this suite must not weaken that trigger — so
-        // the row is aged by disabling the trigger for this statement only, which is a test-local privilege the
-        // production path never has.
+        // workflow_artifact rejects UPDATE outright (migration 0016) and this suite must not weaken that trigger, so the
+        // row is aged with the trigger disabled — inside ONE transaction, which is what actually scopes it. DISABLE
+        // TRIGGER is a catalog change visible to EVERY session, not to this statement, and it is transactional: without
+        // the transaction a throw between disable and enable would leave artifact immutability disarmed for the rest of
+        // this shared fixture's run, and a concurrent class could mutate a row the schema promises is append-only.
+        await using var transaction = await db.Database.BeginTransactionAsync();
+
         await db.Database.ExecuteSqlRawAsync("ALTER TABLE workflow_artifact DISABLE TRIGGER workflow_artifact_enforce_immutability");
         await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE workflow_artifact SET created_at = clock_timestamp() - {age}::interval WHERE id = {artifactId}");
         await db.Database.ExecuteSqlRawAsync("ALTER TABLE workflow_artifact ENABLE TRIGGER workflow_artifact_enforce_immutability");
+
+        await transaction.CommitAsync();
     }
 
     private async Task AgeQuarantineAsync(Guid artifactId, TimeSpan age)

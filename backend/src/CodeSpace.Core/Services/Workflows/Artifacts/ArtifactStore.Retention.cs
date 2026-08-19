@@ -31,13 +31,13 @@ public sealed partial class ArtifactStore : IArtifactRetentionWriter
     /// </summary>
     private static WorkflowArtifactRetention DeclarationFor(ArtifactRetentionWriteRequest request, WorkflowArtifact artifact)
     {
-        var floor = ArtifactRetentionPolicy.For(request.RetentionClass)?.MinimumAge ?? ArtifactRetentionPolicy.MinimumAgeFloor;
+        var floor = ArtifactRetentionPolicy.For(request.RetentionClass.ToString())?.MinimumAge ?? ArtifactRetentionPolicy.MinimumAgeFloor;
 
         return new WorkflowArtifactRetention
         {
             ArtifactId = artifact.Id,
             TeamId = artifact.TeamId,
-            RetentionClass = request.RetentionClass,
+            RetentionClass = request.RetentionClass.ToString(),
             HolderKind = request.HolderKind,
             HolderId = request.HolderId,
             State = ArtifactRetentionState.Declared,

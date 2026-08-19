@@ -23,7 +23,13 @@ public class WorkflowArtifactRetention
     public Guid TeamId { get; set; }
 
     /// <summary>The producer class this declaration is filed under. A class the running policy does not register reads as <see cref="ArtifactRetentionState.Indeterminate"/>, which keeps the artifact.</summary>
-    public ArtifactRetentionClass RetentionClass { get; set; }
+    /// <summary>
+    /// The retention class, stored and read as TEXT rather than as a mapped enum. A rolled-back build leaves rows
+    /// naming a class the running one has never heard of, and the policy already answers that correctly by having
+    /// no rule for it — which settles as KEEP. Mapping the column to the enum made that unreachable: EF threw on the
+    /// READ, so the sweep died on the batch instead of keeping the row, turning a safety property into an outage.
+    /// </summary>
+    public string RetentionClass { get; set; } = string.Empty;
 
     /// <summary>What kind of row the producer said it was about to write (diagnosis only — the oracle checks every reference site regardless).</summary>
     public string HolderKind { get; set; } = "";

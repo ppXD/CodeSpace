@@ -25,18 +25,23 @@ public sealed class ArtifactRetentionPolicyTests
     [Fact]
     public void The_only_registered_class_keeps_captured_deliverable_bytes_for_a_week_then_quarantines_them_for_a_day()
     {
-        var rule = ArtifactRetentionPolicy.For(ArtifactRetentionClass.ArtifactManifestContent).ShouldNotBeNull();
+        var rule = ArtifactRetentionPolicy.For(ArtifactRetentionClass.ArtifactManifestContent.ToString()).ShouldNotBeNull();
 
         rule.MinimumAge.ShouldBe(TimeSpan.FromDays(7));
         rule.QuarantineWindow.ShouldBe(TimeSpan.FromHours(24));
         ArtifactRetentionPolicy.MinimumAgeFloor.ShouldBe(TimeSpan.FromDays(7), "the claim query pre-filters on the smallest floor across all classes");
     }
 
-    [Fact]
-    public void A_class_the_policy_does_not_register_has_no_rule()
+    [Theory]
+    [InlineData("SomeClassARollbackRemoved")]   // the real case: a newer build declared it, this build was rolled back past it
+    [InlineData("9999")]                        // a numeric name is not a member name either
+    [InlineData("")]                            // an empty column value names nothing
+    public void A_class_the_policy_does_not_register_has_no_rule(string unregistered)
     {
-        // The reaper reads a null rule as Indeterminate, so an unregistered value can never be collected.
-        ArtifactRetentionPolicy.For((ArtifactRetentionClass)9999).ShouldBeNull();
+        // The reaper reads a null rule as Indeterminate, so an unregistered value can never be collected. The lookup takes
+        // the stored NAME, not the enum, precisely so an unknown name reaches this null instead of throwing on the EF read —
+        // a throw there would kill the whole sweep batch, which is strictly worse than the keep it was meant to guarantee.
+        ArtifactRetentionPolicy.For(unregistered).ShouldBeNull();
     }
 
     [Theory]

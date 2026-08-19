@@ -17,7 +17,7 @@ public sealed class WorkflowArtifactRetentionConfiguration : IEntityTypeConfigur
         builder.ToTable("workflow_artifact_retention");
         builder.HasKey(row => row.ArtifactId);
 
-        builder.Property(row => row.RetentionClass).HasConversion<string>().HasMaxLength(64);
+        builder.Property(row => row.RetentionClass).HasMaxLength(64);
         builder.Property(row => row.State).HasConversion<string>().HasMaxLength(32);
         builder.Property(row => row.HolderKind).HasMaxLength(64);
         builder.Property(row => row.LastErrorCode).HasMaxLength(128);

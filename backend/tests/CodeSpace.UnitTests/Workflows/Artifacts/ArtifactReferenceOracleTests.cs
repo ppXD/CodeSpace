@@ -48,7 +48,7 @@ public sealed class ArtifactReferenceOracleTests
 
         var mapped = db.Model.GetEntityTypes()
             .SelectMany(entity => entity.GetProperties().Select(property => (Table: entity.GetTableName(), Column: ColumnNameOf(entity, property))))
-            .Where(column => column.Column is not null && IsArtifactSoftLink(column.Column!))
+            .Where(column => column.Column is not null && IsArtifactSoftLink(column.Table, column.Column!))
             .Select(column => $"{column.Table}.{column.Column}")
             .Distinct(StringComparer.Ordinal)
             .Order(StringComparer.Ordinal)
@@ -76,8 +76,16 @@ public sealed class ArtifactReferenceOracleTests
     /// <c>artifact_id</c> is excluded because the only column with that name is the retention ledger's own primary
     /// key — the declaration itself, not a reference that would keep the artifact alive.
     /// </summary>
-    private static bool IsArtifactSoftLink(string column) =>
-        column.EndsWith("artifact_id", StringComparison.Ordinal) && !column.EndsWith("artifact_object_id", StringComparison.Ordinal) && column != "artifact_id";
+    /// <summary>
+    /// Whether this (table, column) is a soft link the oracle must probe. The exclusion is scoped to the retention
+    /// ledger's own PRIMARY KEY, not to the bare column name: excluding "artifact_id" everywhere would silently wave
+    /// through a future reference column that happens to be named exactly that — and a reference the oracle never
+    /// probes is a reference the reaper cannot see, which is the one failure mode this detector exists to prevent.
+    /// </summary>
+    private static bool IsArtifactSoftLink(string table, string column) =>
+        column.EndsWith("artifact_id", StringComparison.Ordinal)
+        && !column.EndsWith("artifact_object_id", StringComparison.Ordinal)
+        && !string.Equals($"{table}.{column}", "workflow_artifact_retention.artifact_id", StringComparison.Ordinal);
 
     private static string? ColumnNameOf(IEntityType entity, IProperty property) =>
         entity.GetTableName() is { } table ? property.GetColumnName(StoreObjectIdentifier.Table(table, entity.GetSchema())) : null;
