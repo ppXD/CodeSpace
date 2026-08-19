@@ -72,8 +72,23 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// artifact offloader encodes) — and it is NOT bounded across concurrency, so the worst-case envelope is roughly
     /// <c>runningParallelism × 3× cap</c> when many runs complete at once (raise the cap only on a worker sized for it;
     /// LOWER it on a constrained one). Beyond the cap the capture SKIPS (a continue cold-starts) rather than risk an OOM.
-    /// Full-fidelity capture of an over-cap session would need a streaming artifact put — a separate slice; skipping is
-    /// the safe floor (a cold-start is strictly better than an OOM).
+    ///
+    /// <para>The skip is a DECIDED limit, not a missing slice — measured, so the next author does not re-derive it. A
+    /// streaming segmented put removes the capture-side peak but NOT the limit, for two reasons the write side cannot
+    /// see. (1) Restore does not shrink: the harness consumes the transcript as a <c>string</c>
+    /// (<c>ConfigHomeFile.Content</c>), so a resume must still materialize the whole session — the unbounded read moves
+    /// from capture to restore rather than disappearing. (2) The storage is permanent and mostly orphaned: this capture
+    /// runs once per S6 revise round (up to <c>1 + MaxReviseRoundsCap</c> times per run) and each round's result
+    /// OVERWRITES the last, whereas the inline carrier offloads once at completion — so every superseded round's bytes
+    /// stay in <c>workflow_artifact</c>, which has no reaper anywhere in the codebase.</para>
+    ///
+    /// <para>So removing the cliff costs an artifact RETENTION path first; until one exists, RAISING this cap is the
+    /// supported lever, and its cost is BOTH halves: worker memory (the envelope above) AND a proportional durable
+    /// one — the captured transcript is offloaded once at completion, so a raised cap raises, linearly, the size of
+    /// one permanent <c>workflow_artifact</c> object per run, in the same reaper-less table this paragraph names.
+    /// It is one object rather than one per MiB per revise round, which is why it is the supported lever and the
+    /// segmented carrier was not; it is not free. Pinned by
+    /// <c>An_over_cap_session_is_skipped_and_leaves_the_result_untouched</c>.</para>
     /// </summary>
     public const string MaxSessionTranscriptBytesEnvVar = "CODESPACE_AGENT_MAX_SESSION_TRANSCRIPT_BYTES";
 
@@ -595,7 +610,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         // Capture the resumable session transcript here too — a run that completes via durable re-attach (worker restart
         // mid-run) is exactly the durability case continuity serves; the config home still lives under the handle's spool.
-        return await CaptureSessionTranscriptAsync(context.RunId, context.Task, result, context.Harness, capture.Handle, cancellationToken).ConfigureAwait(false);
+        return await CaptureSessionTranscriptAsync(new SessionCapture(context.RunId, context.Task, context.Harness, capture.Handle), result, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -743,23 +758,25 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// restore the conversation. No-op unless the harness declares a session-transcript location
     /// (<see cref="IAgentSessionTranscript"/>), the run captured a session id, and a durable handle's on-disk config
     /// home holds the file. Best-effort: any read failure logs + keeps the result unchanged (a continue then cold-starts;
-    /// it NEVER flips an otherwise-successful run to Failed). The live path passes a null <paramref name="handle"/> and
-    /// re-reads the one recorded at launch; the durable RE-ATTACH path passes its in-scope handle (the config home under
+    /// it NEVER flips an otherwise-successful run to Failed). The live path passes a null <see cref="SessionCapture.Handle"/>
+    /// and re-reads the one recorded at launch; the durable RE-ATTACH path passes its in-scope handle (the config home under
     /// its spool is exactly what re-attach is tailing) so a run that completes after a worker restart stays resumable too.
     /// Also LAST-RESORT model capture: when the live stream named no model (<see cref="AgentModelReader"/> found none) but the
     /// harness reads one from this same transcript (<see cref="IAgentTranscriptModelSource"/> — Codex records its model only
     /// in the rollout), the captured model backfills <see cref="AgentRunResult.Model"/>. Rides the same guards as resume, so
     /// it degrades exactly where resume does (no session id / no durable handle / rollout not on disk / over the size cap).
+    /// Internal (not private) so the size cap's SKIP is unit-pinned directly — that limit is a decision, and an untested
+    /// decision is indistinguishable from an accident to the next author who deletes it.
     /// </summary>
-    private async Task<AgentRunResult> CaptureSessionTranscriptAsync(Guid runId, AgentTask task, AgentRunResult result, IAgentHarness harness, SandboxHandle? handle, CancellationToken cancellationToken)
+    internal async Task<AgentRunResult> CaptureSessionTranscriptAsync(SessionCapture capture, AgentRunResult result, CancellationToken cancellationToken)
     {
-        if (harness is not IAgentSessionTranscript resumable) return result;
+        if (capture.Harness is not IAgentSessionTranscript resumable) return result;
 
         if (string.IsNullOrEmpty(result.SessionId)) return result;   // no captured session → nothing to resume (both harness shapes need it)
 
         try
         {
-            handle ??= DeserializeHandle((await _runs.GetAsync(runId, cancellationToken).ConfigureAwait(false)).RunnerHandleJson);
+            var handle = capture.Handle ?? DeserializeHandle((await _runs.GetAsync(capture.RunId, cancellationToken).ConfigureAwait(false)).RunnerHandleJson);
 
             if (handle is null) return result;   // a non-durable runner has no on-disk config home to read
 
@@ -767,11 +784,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             // Locate the transcript WITHIN the config home — a computable path (Claude) or a glob (Codex, whose rollout
             // name carries a timestamp unknown ahead of time). Null → this run can't address one → cold-start on continue.
-            if (resumable.SessionTranscriptRelativePath(configHome, task.WorkspaceDirectory, result.SessionId) is not { } relativePath) return result;
+            if (resumable.SessionTranscriptRelativePath(configHome, capture.Task.WorkspaceDirectory, result.SessionId) is not { } relativePath) return result;
 
             if (ResolveSessionTranscriptPath(configHome, relativePath) is not { } path)
             {
-                _logger.LogWarning("Agent run {RunId}: the session-transcript path escaped the config home (hostile session id?); skipping capture", runId);
+                _logger.LogWarning("Agent run {RunId}: the session-transcript path escaped the config home (hostile session id?); skipping capture", capture.RunId);
                 return result;
             }
 
@@ -782,13 +799,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             if (length > cap)   // a pathological session file — skip rather than read it whole into memory (cold-start >> OOM)
             {
-                _logger.LogWarning("Agent run {RunId}: session transcript is {Bytes} bytes (> {Cap} cap); skipping capture — a continue will cold-start", runId, length, cap);
+                _logger.LogWarning("Agent run {RunId}: session transcript is {Bytes} bytes (> {Cap} cap); skipping capture — a continue will cold-start", capture.RunId, length, cap);
                 return result;
             }
 
             var transcript = await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false);
 
-            return BackfillTranscriptModel(result, harness) with { SessionTranscript = transcript };
+            return BackfillTranscriptModel(result, capture.Harness) with { SessionTranscript = transcript };
 
             AgentRunResult BackfillTranscriptModel(AgentRunResult captured, IAgentHarness h) =>
                 string.IsNullOrEmpty(captured.Model) && h is IAgentTranscriptModelSource source && source.TryReadModelFromTranscript(transcript) is { Length: > 0 } model
@@ -797,10 +814,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogWarning(ex, "Agent run {RunId}: could not capture the session transcript for resume; a continue will cold-start", runId);
+            _logger.LogWarning(ex, "Agent run {RunId}: could not capture the session transcript for resume; a continue will cold-start", capture.RunId);
             return result;
         }
     }
+
+    /// <summary>The coordinates one session capture needs, as a record rather than a parameter list: which run owns it, the task whose workspace directory keys the harness's session path, the harness that locates the file, and the durable handle whose spool holds the config home (null on the live path, which re-reads the handle recorded at launch).</summary>
+    internal sealed record SessionCapture(Guid RunId, AgentTask Task, IAgentHarness Harness, SandboxHandle? Handle);
 
     /// <summary>
     /// P3 (3.2c): resolve a REFERENCED restored transcript (the producer stamped <c>RestoredTranscriptArtifactId</c> to
@@ -1242,7 +1262,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// <summary>The post-harness verification chain — capture the session for resume, capture the diff, publish the branch, then the OBJECTIVE oracle and the SUBJECTIVE critic. One named unit because the S6 revise loop re-runs it after every round: a revision is only ever judged by the same full chain that judged the first attempt.</summary>
     private async Task<AgentRunResult> VerifyProducedWorkAsync(Guid runId, AgentRun run, IAgentHarness harness, AgentTask task, AgentRunResult result, IWorkspaceHandle? workspace, long claimedEpoch, CancellationToken cancellationToken)
     {
-        result = await CaptureSessionTranscriptAsync(runId, task, result, harness, handle: null, cancellationToken).ConfigureAwait(false);
+        result = await CaptureSessionTranscriptAsync(new SessionCapture(runId, task, harness, Handle: null), result, cancellationToken).ConfigureAwait(false);
 
         result = await EnrichWithWorkspaceChangesAsync(runId, run.TeamId, task, result, workspace, cancellationToken).ConfigureAwait(false);
 
