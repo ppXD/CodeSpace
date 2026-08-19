@@ -2,10 +2,11 @@ import { describe, expect, it } from "vitest";
 
 /// Unit: the guarantees vitest.setup.ts makes about the test environment itself.
 ///
-/// This exists because those guarantees have already failed silently once. `localStorage` disappeared from the
-/// environment under a dependency bump, and because request.ts / client.ts read it directly and the setup's `beforeEach`
-/// clears it, the symptom was all 1728 specs failing at once — a signal that reads as "the suite is broken" and says
-/// nothing about the cause. These assertions fail with the cause named instead.
+/// This exists because those guarantees already failed once, on a node version CI does not run. On node 26 node's own
+/// experimental `localStorage` getter occupies `globalThis` and happy-dom's real one never lands; because request.ts /
+/// client.ts read it directly and the setup's `beforeEach` clears it, all 1728 specs failed at once — while CI, pinned to
+/// node 22, stayed green. A signal that reads as "the suite is broken" locally and as "nothing is wrong" remotely says
+/// nothing about the cause either way. These assertions fail with the cause named instead.
 describe("test environment", () => {
   it.each(["localStorage", "sessionStorage"] as const)("provides a working %s", (name) => {
     const storage = (globalThis as unknown as Record<string, Storage>)[name];
