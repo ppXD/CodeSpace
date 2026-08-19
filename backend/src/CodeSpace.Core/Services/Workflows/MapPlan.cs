@@ -41,6 +41,27 @@ public static class MapPlan
         return planners;
     }
 
+    /// <summary>
+    /// The TOP-LEVEL node ids the run's maps bind their elements from — the ids of every cell <see cref="PlannersOf"/>
+    /// reads subtasks out of. It names NODE IDS, not cells, so an inflation scoped by them covers those cells and, if a
+    /// map ever sits under a loop, that producer's other iterations too: a superset of what is read, never a miss.
+    /// Resolved from the pinned definition alone (it reads no outputs), so a caller can re-inflate just those cells'
+    /// offloaded outputs before calling <see cref="PlannersOf"/>: a plan large enough to be offloaded to an artifact
+    /// ref is still read in full, and no cell outside those node ids is fetched to do it.
+    /// </summary>
+    public static IReadOnlySet<string> ProducerNodeIds(WorkflowRunDetail run)
+    {
+        if (run.Definition is not { } definition) return EmptyProducerIds;
+
+        return MapFanout.MapNodesOf(run.Nodes)
+            .Select(map => ResolveProducerId(definition, map.Node.NodeId))
+            .Where(producerId => producerId is not null)
+            .Select(producerId => producerId!)
+            .ToHashSet(StringComparer.Ordinal);
+    }
+
+    private static readonly IReadOnlySet<string> EmptyProducerIds = new HashSet<string>(StringComparer.Ordinal);
+
     /// <summary>The node id the map's <c>items</c> bind their subtasks from — null when items are a literal array or a non-node binding.</summary>
     private static string? ResolveProducerId(WorkflowDefinition definition, string mapNodeId)
     {
