@@ -49,6 +49,14 @@ public class QualificationRunnerFlowTests
         var metrics = JsonDocument.Parse(row.MetricsJson!).RootElement;
         metrics.GetProperty("solved").GetInt32().ShouldBe(19);
         metrics.GetProperty("solveRateLowerBound").GetDouble().ShouldBe(outcome.SolveRateLowerBound);
+
+        // Q5: the round's identity lands as the TYPED nouns — a claim reader parses them back verbatim.
+        var cohort = JsonDocument.Parse(row.CohortJson!).RootElement;
+        cohort.GetProperty("teamId").GetGuid().ShouldBe(teamId);
+        cohort.GetProperty("mode").GetString().ShouldBe(mode);
+        cohort.GetProperty("tier").GetString().ShouldBe("internal-qualification");
+        cohort.GetProperty("completionPolicyVersion").GetInt32().ShouldBe(CodeSpace.Core.Services.Completion.CompletionPolicy.CurrentVersion);
+        JsonDocument.Parse(row.VerifierBundleJson!).RootElement.GetProperty("harness").GetString().ShouldBe("codex-cli");
     }
 
     [Fact]

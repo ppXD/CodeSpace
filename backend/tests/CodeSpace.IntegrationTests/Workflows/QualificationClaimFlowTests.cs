@@ -38,6 +38,8 @@ public class QualificationClaimFlowTests
         claim.Performance.ShouldBe(PerformanceQualification.Sealed);
         claim.ReceiptId.ShouldBe(receipt.Id, "the claim must carry the round that earned it — auditable, never a bare adjective");
         claim.SuiteDigest.ShouldBe(receipt.SuiteDigest);
+        claim.Seal.ShouldNotBeNull().VerifierBundle.ShouldNotBeNull().Harness.ShouldBe("codex-cli", "the standing names WHO earned it — parsed back from the ledger row, not recomputed");
+        claim.Cohort.ShouldNotBeNull().Tier.ShouldBe(LaunchCohortDescriptor.InternalQualificationTier);
 
         (await store.RevokeAsync(receipt.Id, CancellationToken.None)).ShouldBeTrue();
 
@@ -86,6 +88,8 @@ public class QualificationClaimFlowTests
         Mode = mode,
         CapabilityKey = "git-branch",
         SuiteDigest = "sha256:claim-suite-" + Guid.NewGuid().ToString("N")[..8],
+        VerifierBundleJson = """{"harness":"codex-cli","model":"test-model","modelCredentialId":null}""",
+        CohortJson = $$"""{"teamId":"{{Guid.NewGuid()}}","mode":"{{mode}}","tier":"internal-qualification","completionPolicyVersion":2}""",
         GrantedPerformance = granted,
         EffectiveFrom = DateTimeOffset.UtcNow.AddDays(-effectiveDaysAgo),
         ExpiresAt = DateTimeOffset.UtcNow.AddDays(-effectiveDaysAgo + validityDays),

@@ -49,6 +49,35 @@ public class QualificationClaimResolverTests
     }
 
     [Fact]
+    public void The_seal_and_cohort_are_composed_from_the_backing_receipts_own_columns()
+    {
+        var receipt = Receipt(PerformanceQualification.Sealed, daysAgo: 1);
+        receipt.VerifierBundleJson = """{"harness":"codex-cli","model":"gpt-x","modelCredentialId":null}""";
+        receipt.CohortJson = $$"""{"teamId":"{{Guid.NewGuid()}}","mode":"supervisor","tier":"internal-qualification","completionPolicyVersion":2}""";
+
+        var claim = QualificationClaimResolver.Fold("supervisor", "git-branch", new[] { receipt });
+
+        claim.Seal.ShouldNotBeNull();
+        claim.Seal.CapabilityKey.ShouldBe("git-branch");
+        claim.Seal.SuiteDigest.ShouldBe(receipt.SuiteDigest, "the seal summarizes the row it came from — it can never drift from it");
+        claim.Seal.VerifierBundle.ShouldNotBeNull().Harness.ShouldBe("codex-cli", "the standing names WHO earned it");
+        claim.Cohort.ShouldNotBeNull().Tier.ShouldBe("internal-qualification");
+        claim.Cohort.CompletionPolicyVersion.ShouldBe(2, "a standing earned under one protocol revision never silently covers another");
+    }
+
+    [Fact]
+    public void Legacy_ad_hoc_json_reads_no_identity_never_a_half_filled_one()
+    {
+        var receipt = Receipt(PerformanceQualification.Sealed, daysAgo: 1);   // helper leaves both json columns at their "{}" default
+
+        var claim = QualificationClaimResolver.Fold("supervisor", "git-branch", new[] { receipt });
+
+        claim.Cohort.ShouldBeNull("a cohort missing its required keys is no cohort");
+        claim.Seal.ShouldNotBeNull("capability + digest are the receipt's own columns — always present");
+        claim.Seal.VerifierBundle.ShouldBeNull("legacy json without the bundle keys must read null, never an empty bundle pretending someone judged");
+    }
+
+    [Fact]
     public void The_claim_copies_the_grant_verbatim_never_above_it()
     {
         var shadowReceipt = Receipt(PerformanceQualification.Shadow, daysAgo: 1);

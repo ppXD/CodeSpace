@@ -23,6 +23,12 @@ public sealed record PerformanceClaim
 
     /// <summary>When the backing claim lapses — re-qualification is owed by then.</summary>
     public DateTimeOffset? ExpiresAt { get; init; }
+
+    /// <summary>Layer 1 of the backing round's identity: WHICH cohort the standing covers — null when nothing backs the pair or the backing receipt predates the typed noun.</summary>
+    public LaunchCohortDescriptor? Cohort { get; init; }
+
+    /// <summary>Layer 2: WHAT was measured and WHO judged it — null exactly when <see cref="Performance"/> is Unmeasured.</summary>
+    public ContractSeal? Seal { get; init; }
 }
 
 /// <summary>The full claim board — every registered (mode × capability) pair's standing at <see cref="AsOf"/>, ordered (mode, capability) ordinal.</summary>

@@ -76,14 +76,19 @@ public sealed class QualificationRunner : IQualificationRunner, DependencyInject
         var lowerBound = QualificationStatistics.WilsonLowerBound(score.Solved, score.Total);
         var granted = Grant(spec, score, lowerBound);
 
+        // Q5: the round's identity is minted as the TYPED nouns — the cohort it covers (launch-knowable facts
+        // only) and the verifier bundle that judged it — never ad-hoc json a reader has to guess at.
+        var cohort = new LaunchCohortDescriptor { TeamId = teamId, Mode = mode, Tier = LaunchCohortDescriptor.InternalQualificationTier, CompletionPolicyVersion = Completion.CompletionPolicy.CurrentVersion };
+        var verifier = new VerifierBundle { Harness = selection.Harness, Model = selection.Model, ModelCredentialId = selection.ModelCredentialId };
+
         var receipt = new QualificationReceipt
         {
             Id = Guid.NewGuid(),
             Mode = mode,
             CapabilityKey = capabilityKey,
             SuiteDigest = suite.SuiteContentHash,
-            VerifierBundleJson = JsonSerializer.Serialize(new { harness = selection.Harness, model = selection.Model, modelCredentialId = selection.ModelCredentialId }, Agents.AgentJson.Options),
-            CohortJson = JsonSerializer.Serialize(new { teamId, tier = "internal-qualification" }, Agents.AgentJson.Options),
+            VerifierBundleJson = JsonSerializer.Serialize(verifier, Agents.AgentJson.Options),
+            CohortJson = JsonSerializer.Serialize(cohort, Agents.AgentJson.Options),
             GrantedPerformance = granted,
             MetricsJson = JsonSerializer.Serialize(new
             {
