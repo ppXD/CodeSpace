@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Agents;
 using Autofac;
 using Autofac.Extensions.DependencyInjection;
 using CodeSpace.Core;
@@ -23,8 +24,24 @@ public sealed class PostgresFixture : IAsyncLifetime
 
     private Autofac.IContainer? _ioc;
 
+    /// <summary>
+    /// The admission cap counts agent runs that have not reached a terminal, which in a DEPLOYMENT measures
+    /// concurrency. In this suite it measures nothing of the kind: most tests create a run to inspect a row, a
+    /// projection or a guard and never dispatch it, so the count only ever grows across the run and every class
+    /// after the crossing point fails at creation with a message about concurrency that is not what happened.
+    ///
+    /// <para>Raised here rather than in the CI workflow so a local run behaves the same, and raised rather than
+    /// worked around because the cap is a real production safety limit that tests must not disable — this is the
+    /// escape hatch <see cref="AdmissionController.MaxInflightGlobalEnvVar"/> exists for, and the suite is the
+    /// deployment whose shape it does not fit. If this number is ever reached again the answer is not to raise it
+    /// twice: it means the suite has started leaking runs faster than it grows, which is worth finding.</para>
+    /// </summary>
+    private const string IntegrationSuiteInflightCap = "20000";
+
     public PostgresFixture()
     {
+        Environment.SetEnvironmentVariable(AdmissionController.MaxInflightGlobalEnvVar, IntegrationSuiteInflightCap);
+
         _testConfig = BuildTestConfiguration();
 
         _adminConnectionString = new TestPostgresAdminConnectionString(_testConfig).Value;
