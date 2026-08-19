@@ -1,4 +1,10 @@
+using System.Text;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Harnesses.Claude;
+using CodeSpace.Core.Services.Agents.Sandbox.Runners;
+using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Enums;
+using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Workflows;
@@ -146,5 +152,92 @@ public class AgentRunExecutorSessionTranscriptTests
     public void The_capture_cap_override_parses_a_positive_long_else_falls_back(string? raw, long expected)
     {
         AgentRunExecutor.ParseMaxSessionTranscriptBytes(raw, fallback: 42).ShouldBe(expected);
+    }
+
+    // ─── A0b: what the cap DOES — pinned against the real capture, not asserted in a doc-comment ────────
+    //
+    // The cap's whole observable behaviour is a pair: at-or-under it a session IS captured, over it the capture is
+    // SKIPPED and the result comes back untouched. Only the pair is meaningful — "over-cap captures nothing" alone
+    // would still pass if capture were broken outright, and "under-cap captures" alone would still pass if the skip
+    // were deleted. Both drive the REAL CaptureSessionTranscriptAsync against a REAL ClaudeCodeHarness and a real
+    // on-disk config home, so the file layout and the security clamp are the production ones.
+    //
+    // The skip is a DECIDED limit (see MaxSessionTranscriptBytesEnvVar's doc for the measured cost of removing it),
+    // so deleting it must turn a test red rather than pass silently.
+
+    [Fact]
+    public async Task An_over_cap_session_is_skipped_and_leaves_the_result_untouched()
+    {
+        using var spool = new SessionSpool(AgentRunExecutor.DefaultMaxSessionTranscriptBytes + 1);
+        var outcome = Result() with { Summary = "shipped it", ProducedBranch = "agent/run-1" };
+
+        var captured = await CaptureAsync(spool, outcome);
+
+        captured.ShouldBe(outcome, "over the cap the capture reads NOTHING — same status, same exit reason, same produced work");
+        captured.SessionTranscript.ShouldBeEmpty("a session past the cap is not read whole into memory; a continue cold-starts instead");
+    }
+
+    [Fact]
+    public async Task An_under_cap_session_is_captured_so_the_skip_is_not_a_dead_path()
+    {
+        using var spool = new SessionSpool(64 * 1024);
+
+        var captured = await CaptureAsync(spool, Result());
+
+        Encoding.UTF8.GetBytes(captured.SessionTranscript).ShouldBe(spool.SessionBytes, "under the cap the session is captured byte-for-byte; without this the skip test would pass on a capture that never works");
+    }
+
+    /// <summary>Run the production capture over a staged spool and return the result it produced.</summary>
+    private static async Task<AgentRunResult> CaptureAsync(SessionSpool spool, AgentRunResult result)
+    {
+        var executor = new AgentRunExecutor(null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, NullLogger<AgentRunExecutor>.Instance);
+        var task = new AgentTask { Goal = "Fix the failing billing tests", Harness = ClaudeCodeHarness.HarnessKind, WorkspaceDirectory = SessionSpool.WorkspaceDirectory };
+
+        return await executor.CaptureSessionTranscriptAsync(new AgentRunExecutor.SessionCapture(Guid.NewGuid(), task, new ClaudeCodeHarness(), spool.Handle), result, CancellationToken.None);
+    }
+
+    private static AgentRunResult Result() => new() { Status = AgentRunStatus.Succeeded, ExitReason = "completed", SessionId = "sess-cap-boundary" };
+
+    /// <summary>A real on-disk per-run spool: the config home the runner would have created, holding a session file at the path the REAL harness locates it by — so the test never restates the layout the production code owns.</summary>
+    private sealed class SessionSpool : IDisposable
+    {
+        public const string WorkspaceDirectory = "/tmp/ws-cap-boundary";
+
+        private readonly string _root = Path.Combine(Path.GetTempPath(), $"cs-spool-{Guid.NewGuid():N}");
+
+        public SessionSpool(long atLeastBytes)
+        {
+            var configHome = LocalProcessRunner.ConfigHomePath(_root);
+            var relative = ((IAgentSessionTranscript)new ClaudeCodeHarness()).SessionTranscriptRelativePath(configHome, WorkspaceDirectory, "sess-cap-boundary")
+                ?? throw new InvalidOperationException("The harness could not address a session transcript for the staged run.");
+            var path = Path.Combine(configHome, relative.Replace('/', Path.DirectorySeparatorChar));
+
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            SessionBytes = BuildSession(atLeastBytes);
+            File.WriteAllBytes(path, SessionBytes);
+
+            Handle = new SandboxHandle { Kind = "local", ProcessId = 4242, SpoolDirectory = _root, Deadline = DateTimeOffset.UtcNow.AddHours(1) };
+        }
+
+        public byte[] SessionBytes { get; }
+
+        public SandboxHandle Handle { get; }
+
+        public void Dispose()
+        {
+            if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);
+        }
+
+        /// <summary>A session of at least <paramref name="atLeastBytes"/>, repeating a realistic mixed-script line block — multi-byte CJK and an astral-plane emoji, so a byte comparison is not satisfied by pure ASCII.</summary>
+        private static byte[] BuildSession(long atLeastBytes)
+        {
+            var block = Encoding.UTF8.GetBytes("{\"role\":\"user\",\"text\":\"重構結帳流程，先寫測試 🚀\"}\n");
+
+            using var session = new MemoryStream();
+
+            while (session.Length < atLeastBytes) session.Write(block);
+
+            return session.ToArray();
+        }
     }
 }
