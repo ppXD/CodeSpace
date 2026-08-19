@@ -465,6 +465,24 @@ public class McpToolApprovalFlowTests
         }
     }
 
+    /// <summary>
+    /// A unique socket path that FITS. An AF_UNIX address cannot exceed <see cref="LocalProcessRunner.UnixSocketPathCap"/>
+    /// bytes, and on macOS <c>Path.GetTempPath()</c> is a ~49-char <c>/var/folders/…/T/</c> — so a name built from a full
+    /// 32-hex GUID lands at 98–104 chars, i.e. one of these tests failed here and the other passed by a single character.
+    /// Production already solves this in <c>LocalProcessRunner.McpSocketPathFor</c> by falling back to a short path; these
+    /// tests hand-built their own and so did not. Short name, and the cap asserted rather than assumed: an over-long path
+    /// otherwise surfaces as an ArgumentOutOfRangeException from Bind with nothing pointing at the length.
+    /// </summary>
+    private static string SocketPath(string tag)
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"cs-{tag}{Guid.NewGuid():N}"[..12] + ".sock");
+
+        path.Length.ShouldBeLessThanOrEqualTo(LocalProcessRunner.UnixSocketPathCap,
+            $"the socket path is {path.Length} bytes; AF_UNIX caps it at {LocalProcessRunner.UnixSocketPathCap}. Shorten the name — this host's temp dir is {Path.GetTempPath().Length} chars.");
+
+        return path;
+    }
+
     // ── The REAL endpoint over a per-run UDS (Tier 🟢 — proves the endpoint threads the D2 deps + blocks over the socket) ──
 
     [Fact]
@@ -477,7 +495,7 @@ public class McpToolApprovalFlowTests
         var runId = Guid.NewGuid();
         var tool = new CountingWriteTool();
 
-        var socketPath = Path.Combine(Path.GetTempPath(), $"cs-approval-{Guid.NewGuid():N}.sock");
+        var socketPath = SocketPath("ap");
         var token = $"tok-{Guid.NewGuid():N}";
 
         await using var endpoint = NewEndpoint(runId, teamId, channelId, socketPath, token, tool);
@@ -521,7 +539,7 @@ public class McpToolApprovalFlowTests
         var lease = LocalProcessRunner.ProgressLeaseFor(runId);
         var window = AgentProgressLease.RenewalHeartbeat * 3;
 
-        var socketPath = Path.Combine(Path.GetTempPath(), $"cs-lease-approval-{Guid.NewGuid():N}.sock");
+        var socketPath = SocketPath("le");
         var token = $"tok-{Guid.NewGuid():N}";
 
         try
