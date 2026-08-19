@@ -3,6 +3,8 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark.Graders;
 using CodeSpace.Core.Services.Workflows.Artifacts;
+using CodeSpace.Core.Services.Workflows.Artifacts.Retention;
+using CodeSpace.Messages.Artifacts;
 using CodeSpace.Messages.Agents;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -40,14 +42,17 @@ public sealed class ArtifactManifestStore : IArtifactManifestStore, IScopedDepen
     /// <summary>Per-file capture cap. Past it the file is SKIPPED with a warning, never truncated — a captured artifact's bytes ARE the deliverable, and a silently-clipped dataset is a lie; absence is honest.</summary>
     public const long MaxArtifactBytes = 4 * 1024 * 1024;
 
+    /// <summary>The holder this store's retention declarations name. Diagnostic only — the reaper checks every reference site regardless of what a declaration claims.</summary>
+    public const string HolderKind = "artifact_manifest";
+
     private readonly CodeSpaceDbContext _db;
-    private readonly IArtifactStore _artifacts;
+    private readonly IArtifactRetentionWriter _retention;
     private readonly ILogger<ArtifactManifestStore> _logger;
 
-    public ArtifactManifestStore(CodeSpaceDbContext db, IArtifactStore artifacts, ILogger<ArtifactManifestStore> logger)
+    public ArtifactManifestStore(CodeSpaceDbContext db, IArtifactRetentionWriter retention, ILogger<ArtifactManifestStore> logger)
     {
         _db = db;
-        _artifacts = artifacts;
+        _retention = retention;
         _logger = logger;
     }
 
@@ -65,7 +70,13 @@ public sealed class ArtifactManifestStore : IArtifactManifestStore, IScopedDepen
 
             if (bytes is null) continue;
 
-            var artifactId = await _artifacts.PutAsync(teamId, bytes, ContentTypeFor(path), cancellationToken).ConfigureAwait(false);
+            // Declaring write (see IArtifactRetentionWriter): content_artifact_id below is the ONLY reference this
+            // method writes, and it is written AFTER the bytes land, so a throw in between leaves bytes nothing ever
+            // pointed at. The declaration is what lets the retention reaper reclaim exactly those. A dedup hit declares
+            // nothing — the bytes are then shared with a producer whose references are not enumerable — so this call is
+            // safe to make unconditionally.
+            var write = await _retention.PutDeclaredAsync(Declaration(teamId, bytes, path, agentRunId), cancellationToken).ConfigureAwait(false);
+            var artifactId = write.ArtifactId;
 
             await UpsertAsync(new ArtifactManifest
             {
@@ -87,6 +98,10 @@ public sealed class ArtifactManifestStore : IArtifactManifestStore, IScopedDepen
 
         return captured;
     }
+
+    /// <summary>The declaring write's request for one captured deliverable. The holder it names is the <c>artifact_manifest</c> row the caller writes next.</summary>
+    private static ArtifactRetentionWriteRequest Declaration(Guid teamId, byte[] bytes, string path, Guid agentRunId) =>
+        new(teamId, bytes, ContentTypeFor(path), ArtifactRetentionClass.ArtifactManifestContent, HolderKind, agentRunId);
 
     /// <summary>The workspace-relative deliverable list a non-<c>TestsPass</c> acceptance declares — <c>TestsPass</c> (or an absent kind, which defaults to it) carries an ARGV, never paths, so it declares nothing capturable.</summary>
     internal static IReadOnlyList<string> DeclaredDeliverablePaths(AgentTask task) =>

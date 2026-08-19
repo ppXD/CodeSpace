@@ -3,6 +3,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
+using CodeSpace.Core.Services.Workflows.Artifacts.Retention;
 using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using Microsoft.EntityFrameworkCore;
 
@@ -44,15 +45,22 @@ public sealed partial class ArtifactStore : IArtifactStore, IArtifactRangeReader
         if (string.IsNullOrWhiteSpace(contentType))
             throw new ArgumentException("contentType is required.", nameof(contentType));
 
+        return (await WriteAsync(new ArtifactWrite(teamId, bytes, contentType, null), cancellationToken).ConfigureAwait(false)).ArtifactId;
+    }
+
+    /// <summary>
+    /// The one write path. Reports whether THIS call inserted the row, which is what
+    /// <see cref="PutDeclaredAsync"/> needs: a retention declaration is only sound when it rides the insert, because
+    /// nothing can dedup against a row that has not committed yet.
+    /// </summary>
+    private async Task<ArtifactRetentionWrite> WriteAsync(ArtifactWrite write, CancellationToken cancellationToken)
+    {
+        var (teamId, bytes, contentType, declaration) = write;
         var sha = ComputeSha256Hex(bytes.Span);
 
-        // Idempotency: if (team, sha) already exists, return that id without an INSERT.
-        // The query is cheap (unique index lookup) and avoids racing the DB constraint.
-        var existing = await _db.WorkflowArtifact.AsNoTracking()
-            .Where(a => a.TeamId == teamId && a.Sha256 == sha)
-            .Select(a => new { a.Id, a.StorageUrl })
-            .SingleOrDefaultAsync(cancellationToken)
-            .ConfigureAwait(false);
+        // Idempotency: if (team, sha) already exists, return that id without an INSERT. The lookup is a unique-index
+        // probe, so it is cheap and avoids racing the DB constraint on the common path.
+        var existing = await FindDedupTargetAsync(teamId, sha, cancellationToken).ConfigureAwait(false);
 
         if (existing is not null)
         {
@@ -64,7 +72,7 @@ public sealed partial class ArtifactStore : IArtifactStore, IArtifactRangeReader
             if (existing.StorageUrl is { } url && !await _blobs.ExistsAsync(url, cancellationToken).ConfigureAwait(false))
                 await RestoreLocalBlobAsync(teamId, sha, bytes, cancellationToken).ConfigureAwait(false);
 
-            return existing.Id;
+            return new ArtifactRetentionWrite(existing.Id, false);
         }
 
         // Size-routed storage: small payloads stay inline in the DB row; large ones are offloaded out-of-band
@@ -90,10 +98,16 @@ public sealed partial class ArtifactStore : IArtifactStore, IArtifactRangeReader
 
         _db.WorkflowArtifact.Add(artifact);
 
+        // Only an INLINE insert may be declared: collecting an offloaded row would delete the metadata row and strand
+        // its bytes, because neither the blob backend nor the routed storage plane has a purge path (see
+        // IArtifactBlobBackend, which is deliberately read/write only).
+        var declared = declaration is not null && !offload ? DeclarationFor(declaration, artifact) : null;
+        if (declared is not null) _db.WorkflowArtifactRetention.Add(declared);
+
         try
         {
             await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-            return artifact.Id;
+            return new ArtifactRetentionWrite(artifact.Id, declared is not null);
         }
         catch (DbUpdateException ex) when (IsUniqueViolation(ex))
         {
@@ -101,6 +115,7 @@ public sealed partial class ArtifactStore : IArtifactStore, IArtifactRangeReader
             // their id. We don't re-throw because the contract is "PutAsync is idempotent
             // and ALWAYS returns a valid id for the given content".
             _db.Entry(artifact).State = EntityState.Detached;
+            if (declared is not null) _db.Entry(declared).State = EntityState.Detached;
 
             var raceWinner = await _db.WorkflowArtifact.AsNoTracking()
                 .Where(a => a.TeamId == teamId && a.Sha256 == sha)
@@ -108,9 +123,46 @@ public sealed partial class ArtifactStore : IArtifactStore, IArtifactRangeReader
                 .SingleAsync(cancellationToken)
                 .ConfigureAwait(false);
 
-            return raceWinner;
+            // We are the SECOND writer of these bytes: the winner's id is now held by two producers, so any retention
+            // declaration on it no longer enumerates every reference and must die.
+            await RevokeDeclarationAsync(teamId, raceWinner, cancellationToken).ConfigureAwait(false);
+
+            return new ArtifactRetentionWrite(raceWinner, false);
         }
     }
+
+    /// <summary>
+    /// The dedup lookup, plus the two things a dedup hit owes the retention ledger. First it REVOKES any declaration on
+    /// the row, because handing this id to a second producer means the ledger can no longer enumerate the artifact's
+    /// references. Then it re-reads the row: the revoke serializes against a collector holding that ledger row, so a
+    /// zero-row revoke can mean the collector just won — and returning a deleted row's id would hand back an id whose
+    /// read is already doomed. A vanished row reads as "no dedup target" and the caller writes the bytes afresh.
+    ///
+    /// <para>Cost on the healthy path: one extra index probe and one UPDATE that matches no rows (so no tuple is
+    /// written), and only on a dedup hit — a first write of new content pays nothing.</para>
+    /// </summary>
+    private async Task<ArtifactDedupTarget?> FindDedupTargetAsync(Guid teamId, string sha, CancellationToken cancellationToken)
+    {
+        var existing = await ReadDedupTargetAsync(teamId, sha, cancellationToken).ConfigureAwait(false);
+
+        if (existing is null) return null;
+
+        await RevokeDeclarationAsync(teamId, existing.Id, cancellationToken).ConfigureAwait(false);
+
+        return await ReadDedupTargetAsync(teamId, sha, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<ArtifactDedupTarget?> ReadDedupTargetAsync(Guid teamId, string sha, CancellationToken cancellationToken) =>
+        await _db.WorkflowArtifact.AsNoTracking()
+            .Where(a => a.TeamId == teamId && a.Sha256 == sha)
+            .Select(a => new ArtifactDedupTarget(a.Id, a.StorageUrl))
+            .SingleOrDefaultAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+    private sealed record ArtifactDedupTarget(Guid Id, string? StorageUrl);
+
+    /// <summary>One write's inputs. <c>Declaration</c> is null for every plain <see cref="PutAsync"/> caller, which is what keeps their bytes permanently unreapable.</summary>
+    private sealed record ArtifactWrite(Guid TeamId, ReadOnlyMemory<byte> Bytes, string ContentType, ArtifactRetentionWriteRequest? Declaration);
 
     /// <summary>
     /// Puts a local row's missing blob back — but only while local disk is still where this team's new offloaded bytes
