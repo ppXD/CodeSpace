@@ -27,7 +27,7 @@ namespace CodeSpace.Core.Services.Agents.Harnesses.Codex;
 /// harness contributes NO model-call rows and the per-run aggregate stays the only figure it has. Recording nothing is
 /// the honest outcome; the fix is a Codex that prints per-call records, not a reader that invents them.</para>
 /// </summary>
-public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, IAgentTranscriptModelSource, IAgentGroundedFrameReader, ISingletonDependency
+public sealed class CodexHarness : IAgentHarness, IAgentHarnessContractGeneration, IModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, IAgentTranscriptModelSource, IAgentGroundedFrameReader, ISingletonDependency
 {
     public const string HarnessKind = "codex-cli";
 
@@ -90,6 +90,17 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
     public string Kind => HarnessKind;
 
     public string Version => System.Environment.GetEnvironmentVariable(VersionEnvVar) is { Length: > 0 } v ? v : DefaultVersion;
+
+    /// <summary>
+    /// This adapter's record-contract generation — the <c>v1</c> in the <c>codex-cli/v1</c> every harness-execution
+    /// row it writes is keyed under. One because this is the adapter's first record contract AND because 1 is the
+    /// floor the key pattern permits; a run on the pinned <see cref="DefaultVersion"/> already wrote this exact key
+    /// (the derivation this replaced read the leading digits of <see cref="Version"/>, got 0 from <c>0.142.x</c>, and
+    /// floored to the same 1). Deliberately independent of <see cref="Version"/>: a codex 1.x or 2.x bump does not change how this
+    /// adapter translates frames into rows, so it must not re-key them. Pinned through the key it produces, by
+    /// <c>AgentNativeRecordPumpTests.Every_shipped_adapter_keys_its_rows_under_the_generation_it_declares</c>.
+    /// </summary>
+    public int ContractGeneration => 1;
 
     public IReadOnlyList<string> Models { get; } = new[] { "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-codex" };
 

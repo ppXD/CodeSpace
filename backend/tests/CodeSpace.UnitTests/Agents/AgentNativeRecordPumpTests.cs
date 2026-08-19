@@ -2,6 +2,8 @@ using System.Security.Cryptography;
 using System.Text;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Capture;
+using CodeSpace.Core.Services.Agents.Harnesses.Claude;
+using CodeSpace.Core.Services.Agents.Harnesses.Codex;
 using CodeSpace.Core.Services.Agents.Reduction;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Messages.Agents;
@@ -220,15 +222,45 @@ public sealed class AgentNativeRecordPumpTests
         refusedWrite.Closed.ShouldBeFalse();
     }
 
-    /// <summary>The execution identity key a capture opening declares. The database's own pattern refuses anything else, so an adapter whose version names no number must still produce a legal key rather than disabling capture.</summary>
+    /// <summary>
+    /// The execution identity key a capture opening declares: the adapter's tag plus the generation of the record
+    /// contract IT declares, never the major of the native CLI version it pins. The two disagree on purpose — a CLI
+    /// major bump leaves an unchanged adapter's rows under one key, and the pinned codex 0.142.x has no leading major
+    /// to borrow at all. A generation below the floor is clamped, because the database's own pattern refuses <c>v0</c>
+    /// and a number must never be what disables an adapter's capture. Null generation ⇒ the adapter declares none.
+    /// </summary>
     [Theory]
-    [InlineData("codex-cli", "2.1.0", "codex-cli/v2")]
-    [InlineData("claude-code", "1.0.60", "claude-code/v1")]
-    [InlineData("Scripted", "test", "scripted/v1")]
-    [InlineData("scripted", "", "scripted/v1")]
-    public void The_harness_execution_key_is_the_adapter_tag_and_its_pinned_major(string kind, string version, string expected)
+    [InlineData("codex-cli", "0.142.2", 1, "codex-cli/v1")]
+    [InlineData("codex-cli", "0.142.2", null, "codex-cli/v1")]
+    [InlineData("claude-code", "2.1.193", 2, "claude-code/v2")]
+    [InlineData("claude-code", "3.0.0", 2, "claude-code/v2")]
+    [InlineData("scripted", "9.9.9", 2, "scripted/v2")]
+    [InlineData("scripted", "2.0.0", null, "scripted/v1")]
+    [InlineData("Scripted", "test", 0, "scripted/v1")]
+    [InlineData("scripted", "", -3, "scripted/v1")]
+    public void The_harness_execution_key_is_the_adapter_tag_and_its_declared_contract_generation(string kind, string version, int? generation, string expected)
     {
-        AgentNativeRecordPump.HarnessTypeKeyOf(new KeyedHarness(kind, version)).ShouldBe(expected);
+        IAgentHarness harness = generation is { } declared ? new GenerationalHarness(kind, version, declared) : new KeyedHarness(kind, version);
+
+        AgentNativeRecordPump.HarnessTypeKeyOf(harness).ShouldBe(expected,
+            customMessage: "the major names the ADAPTER's contract generation, so it must not move with the CLI version string and must not fall below the v1 the database's own key pattern permits");
+    }
+
+    /// <summary>
+    /// The key each SHIPPED adapter actually emits, pinned to the value a run on its pinned CLI already wrote. A row's
+    /// <c>harness_type_key</c> is immutable once written (0137's identity trigger refuses an update to it), so
+    /// changing what an unchanged adapter emits splits its history across two keys with no way to repair it — which
+    /// is the exact harm this key exists to prevent. Both values are therefore deliberate, not derived.
+    /// </summary>
+    [Theory]
+    [InlineData("codex-cli/v1")]
+    [InlineData("claude-code/v2")]
+    public void Every_shipped_adapter_keys_its_rows_under_the_generation_it_declares(string expected)
+    {
+        IAgentHarness harness = expected.StartsWith("codex", StringComparison.Ordinal) ? new CodexHarness() : new ClaudeCodeHarness();
+
+        AgentNativeRecordPump.HarnessTypeKeyOf(harness).ShouldBe(expected,
+            customMessage: "rows already written under this key cannot be re-keyed, so emitting a different one splits one adapter's history in two");
     }
 
     /// <summary>
@@ -943,6 +975,20 @@ public sealed class AgentNativeRecordPumpTests
 
         public override string Kind => _kind;
         public override string Version => _version;
+        public override IReadOnlyList<AgentEvent> ParseEvents(string rawLine) => Array.Empty<AgentEvent>();
+    }
+
+    /// <summary>A <see cref="KeyedHarness"/> that also DECLARES its record-contract generation — the shape every shipped adapter has, and the only way the key can disagree with the CLI version string.</summary>
+    private sealed class GenerationalHarness : StubHarness, IAgentHarnessContractGeneration
+    {
+        private readonly string _kind;
+        private readonly string _version;
+
+        public GenerationalHarness(string kind, string version, int contractGeneration) { _kind = kind; _version = version; ContractGeneration = contractGeneration; }
+
+        public override string Kind => _kind;
+        public override string Version => _version;
+        public int ContractGeneration { get; }
         public override IReadOnlyList<AgentEvent> ParseEvents(string rawLine) => Array.Empty<AgentEvent>();
     }
 }
