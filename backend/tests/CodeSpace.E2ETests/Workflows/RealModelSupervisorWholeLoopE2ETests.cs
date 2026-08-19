@@ -141,6 +141,11 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             await DriveUntilSettledAsync(runId);
 
             var (outcome, note) = await EvaluateAsync(runId, teamId, FileWritingFakeCli.StubbedHarnessKinds);   // headline arc = FileWritingFakeCli (always patches on success — but ONLY on the harness it arms)
+
+            // D3 (Arc D): a Drove round must ALSO clear the north-star floor — the release gate reads the same
+            // M-1 number the operator's scorecard renders, through the real reducer chain.
+            if (outcome == RealModelOutcome.Drove) await AssertNorthStarClearsFloorAsync(teamId);
+
             return (outcome, $"{Provider} model '{model}' whole-loop — {note}");
         });
     }
@@ -1671,5 +1676,32 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         {
             try { Directory.Delete(_root, recursive: true); } catch { /* best-effort */ }
         }
+    }
+
+    /// <summary>
+    /// D3 (Arc D) — the north-star IS the release gate: the same M-1 number the operator's scorecard renders must
+    /// clear a committed floor, measured over THIS round's runs through the real reducer chain (shadow sweep →
+    /// assessment → scorecard). Raise the floor as reliability is confirmed; lowering it is a reviewed decision.
+    /// </summary>
+    private const double MinUnattendedSolveWithDeliveryRate = 1.0;
+
+    private async Task AssertNorthStarClearsFloorAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        // The scorecard's Solved reads the assessment ledger, which ONLY the shadow sweep writes — an unswept
+        // round would read a false 0.0. Sweep first; a round the sweep cannot assess is an instrument fault.
+        await scope.Resolve<CodeSpace.Core.Services.Completion.ICompletionShadowService>().SweepAsync(batchSize: 50, CancellationToken.None);
+
+        var scorecard = await scope.Resolve<CodeSpace.Core.Services.Agents.Eval.IUnattendedDeliveryScorecardService>().ComputeAsync(teamId, since: null, CancellationToken.None);
+
+        if (scorecard.Rollup.TotalRuns == 0 || scorecard.Rollup.UnassessedRuns > 0)
+            throw new AgentExecutionInfraException(
+                $"the M-1 instrument is sick — {scorecard.Rollup.UnassessedRuns} unassessed of {scorecard.Rollup.TotalRuns} run(s) AFTER the shadow sweep; fix the sweep/assessment chain, never read this as capability");
+
+        scorecard.Rollup.UnattendedSolveWithDeliveryRate.ShouldBeGreaterThanOrEqualTo(MinUnattendedSolveWithDeliveryRate,
+            $"north-star gate: unattended solve-with-delivery {scorecard.Rollup.UnattendedSolvedWithDeliveryRuns}/{scorecard.Rollup.TotalRuns} — this arc terminalized an unattended Enforced Success with a real delivery, so the SCORECARD must say exactly that; a lower reading means the reducer chain (sweep → assessment → M-1) dropped the round");
+
+        Console.WriteLine($"[m1-gate] unattended solve-with-delivery {scorecard.Rollup.UnattendedSolvedWithDeliveryRuns}/{scorecard.Rollup.TotalRuns} ({scorecard.Rollup.UnattendedSolveWithDeliveryRate:P0}) ≥ floor {MinUnattendedSolveWithDeliveryRate:P0}");
     }
 }
