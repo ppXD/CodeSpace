@@ -58,6 +58,7 @@ public class RequestAuthorizationInventoryTests
         ["ProbeUnknownModelCapabilitiesCommand"] = "sweep",
         ["ProjectWorkflowRunModelCallsCommand"] = "projects terminal workflow-run interaction evidence; it is dispatched only by the bounded system recurring job.",
         ["ReapAgentRunSpoolsCommand"] = "sweep",
+        ["ReapUnreferencedArtifactsCommand"] = "collects artifacts that a producer declared for retention and that no reference site points at, in bounded lease/fence batches; it is dispatched only by the system recurring job, acts for no user, and can never reach an artifact no producer declared.",
         ["ReconcileAgentRunLogCapturesCommand"] = "reconciles exact durable AgentRun log-capture health in bounded lease/fence batches; it is dispatched only by the system recurring job and never acts for a user or changes an AgentRun outcome.",
         ["ReconcileStuckAgentRunsCommand"] = "sweep",
         ["ReconcileStuckRunsCommand"] = "sweep",

@@ -5,10 +5,14 @@ namespace CodeSpace.Core.Persistence.Entities;
 /// <c>external_call.completed</c> stores <c>response_artifact_id</c>); the run-detail UI
 /// fetches the bytes lazily when the operator expands the artifact card.
 ///
-/// Append-only by trigger. Per-team dedup by (team_id, sha256) so storing identical bytes
-/// twice from the same team returns the existing row. Exactly one of
-/// <see cref="InlineBytes"/> / <see cref="StorageUrl"/> is set — the threshold is enforced
-/// by <c>IArtifactStore.PutAsync</c>.
+/// Never updated: the trigger from migration 0016 rejects UPDATE outright, since the sha IS the identity. A row can be
+/// DELETED only by a purge that asked for the permission in its own session, which today means exactly one caller —
+/// <see cref="Services.Workflows.Artifacts.Retention.IArtifactRetentionReaper"/>, and only for an artifact carrying a
+/// retention declaration that no reference site points at.
+///
+/// Per-team dedup by (team_id, sha256) so storing identical bytes twice from the same team returns the existing row.
+/// Exactly one of <see cref="InlineBytes"/> / <see cref="StorageUrl"/> / <see cref="CasArtifactObjectId"/> is set — the
+/// threshold decides inline vs offloaded and the team's route decides where an offloaded blob goes.
 /// </summary>
 public class WorkflowArtifact : IEntity<Guid>
 {
