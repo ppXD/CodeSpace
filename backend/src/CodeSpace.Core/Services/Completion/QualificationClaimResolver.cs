@@ -66,7 +66,7 @@ public sealed class QualificationClaimResolver : IQualificationClaimResolver, IS
             {
                 CapabilityKey = backing.CapabilityKey,
                 SuiteDigest = backing.SuiteDigest,
-                VerifierBundle = Parse<VerifierBundle>(backing.VerifierBundleJson),
+                VerifierBundle = Parse<VerifierBundle>(backing.CohortJson),
             },
         };
     }
