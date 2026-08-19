@@ -540,9 +540,12 @@ export const sessionsApi = {
     fetchJson<RoomView>(`/api/sessions/${sessionId}/room${focusRunId ? `?focusRunId=${encodeURIComponent(focusRunId)}` : ""}`),
 
   /// The Session Journal for the session a run belongs to, focused on that run's turn — null when the run has no session (404).
-  getRunJournal: async (runId: string): Promise<JournalView | null> => {
+  /// Pass `since` (a prior response's `cursor`) for the DELTA: the response then omits the steps that cursor proves the
+  /// caller already holds, and `mergeJournalDelta` reconciles it. Without it the whole session's walk comes back.
+  getRunJournal: async (runId: string, since?: string): Promise<JournalView | null> => {
     try {
-      return await fetchJson<JournalView>(`/api/sessions/by-run/${runId}/journal`);
+      const delta = since ? `?since=${encodeURIComponent(since)}` : "";
+      return await fetchJson<JournalView>(`/api/sessions/by-run/${runId}/journal${delta}`);
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) return null;
       throw e;

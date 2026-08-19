@@ -7,9 +7,11 @@ using Shouldly;
 namespace CodeSpace.UnitTests.Sessions.Journal;
 
 /// <summary>
-/// 🟢 Unit: the ?since= delta trim. Pins that it keeps only the focused turn's steps AFTER the client's cursor (so a
-/// live poll re-sends only new steps), leaves the structure + collapsed turns intact, and — on an unrecognized cursor —
-/// trims NOTHING (the client re-syncs on the full set, never silently loses steps). No DB.
+/// 🟢 Unit: the ?since= delta trim. Pins what each turn keeps — the focused turn only its steps AFTER the client's
+/// cursor, a non-focused TERMINAL turn none (its walk is finished, so the client's copy is already right), a non-focused
+/// LIVE turn all of them (the client's cursor belongs to another run and says nothing about this one) — that the
+/// structure and every turn's full StepCount survive so the client can detect divergence, and that an unrecognized
+/// cursor trims NOTHING (the client re-syncs on the full set, never silently loses steps). No DB.
 /// </summary>
 [Trait("Category", "Unit")]
 public class JournalDeltaTests
@@ -28,13 +30,13 @@ public class JournalDeltaTests
         return new JournalStep { Id = id, At = T.AddSeconds(tick), Kind = JournalStepKinds.Lifecycle, Title = id, Cursor = cursor };
     }
 
-    private static JournalView View(IReadOnlyList<JournalStep> focusedSteps, IReadOnlyList<JournalStep>? collapsedSteps = null) => new()
+    private static JournalView View(IReadOnlyList<JournalStep> focusedSteps, IReadOnlyList<JournalStep>? collapsedSteps = null, WorkflowRunStatus collapsedStatus = WorkflowRunStatus.Success) => new()
     {
         SessionId = Guid.NewGuid(), Title = "t", Kind = WorkSessionKind.Task, Status = WorkSessionStatus.Open,
         Cursor = focusedSteps.Count > 0 ? focusedSteps[^1].Cursor : "",
         Turns = new[]
         {
-            new JournalTurn { TurnIndex = 1, TurnRunId = Guid.NewGuid(), RunId = Guid.NewGuid(), Status = WorkflowRunStatus.Success, Focused = false, Steps = collapsedSteps ?? Array.Empty<JournalStep>() },
+            new JournalTurn { TurnIndex = 1, TurnRunId = Guid.NewGuid(), RunId = Guid.NewGuid(), Status = collapsedStatus, Focused = false, Steps = collapsedSteps ?? Array.Empty<JournalStep>(), StepCount = collapsedSteps?.Count ?? 0 },
             new JournalTurn { TurnIndex = 2, TurnRunId = Guid.NewGuid(), RunId = Guid.NewGuid(), Status = WorkflowRunStatus.Running, Focused = true, Steps = focusedSteps, StepCount = focusedSteps.Count },
         },
     };
@@ -108,17 +110,40 @@ public class JournalDeltaTests
     }
 
     [Fact]
-    public void Trims_only_the_focused_turn_never_a_non_focused_one()
+    public void A_non_focused_terminal_turns_steps_are_dropped_but_its_total_survives()
     {
-        // A (hypothetical) non-focused turn with steps must be left ENTIRELY untouched — After only ever filters the
-        // focused turn, so the delta can't accidentally drop steps from a card.
+        // The finished history is what makes an unbounded poll expensive: a full fetch carries EVERY turn's steps (the
+        // projector populates all of them), and a terminal turn's walk can never gain another step, so re-sending it on
+        // every 2s poll is pure waste. The delta drops those steps and keeps StepCount, which is the client's proof that
+        // its own copy is still complete — and its trigger to re-fetch in full if it isn't.
         var collapsedSteps = new[] { Step("c1", 1), Step("c2", 2) };
-        var view = View(new[] { Step("s1", 1), Step("s2", 2) }, collapsedSteps);
+        var view = View(new[] { Step("s1", 1), Step("s2", 2) }, collapsedSteps, WorkflowRunStatus.Success);
 
         var delta = JournalDelta.After(view, Step("s1", 1).Cursor);
 
-        delta.Turns.Count.ShouldBe(2, "the turns structure is unchanged");
-        delta.Turns.Single(t => !t.Focused).Steps.Select(s => s.Id).ShouldBe(new[] { "c1", "c2" }, "a non-focused turn's steps are never trimmed");
+        delta.Turns.Count.ShouldBe(2, "the turns structure is unchanged — only steps are trimmed");
+        var collapsed = delta.Turns.Single(t => !t.Focused);
+        collapsed.Steps.ShouldBeEmpty("a terminal turn's walk is finished, so the client's copy is already correct");
+        collapsed.StepCount.ShouldBe(2, "the full total survives — without it the client could not tell a trim from a truncation");
         delta.Cursor.ShouldBe(view.Cursor, "the head cursor is unchanged — the client advances to it");
     }
+
+    [Theory]
+    [InlineData(WorkflowRunStatus.Running)]
+    [InlineData(WorkflowRunStatus.Pending)]
+    public void A_non_focused_LIVE_turns_steps_are_kept_in_full(WorkflowRunStatus liveStatus)
+    {
+        // The client's single cursor is the FOCUSED turn's run. A concurrently-running turn is a different run whose
+        // progress that cursor says nothing about, so there is no sound basis to trim it — sending it in full is correct,
+        // not lazy. Trimming it would make every poll of a concurrent session fail the count check and re-fetch, which is
+        // strictly worse than no delta at all.
+        var collapsedSteps = new[] { Step("c1", 1), Step("c2", 2) };
+        var view = View(new[] { Step("s1", 1), Step("s2", 2) }, collapsedSteps, liveStatus);
+
+        var collapsed = JournalDelta.After(view, Step("s1", 1).Cursor).Turns.Single(t => !t.Focused);
+
+        collapsed.Steps.Select(s => s.Id).ShouldBe(new[] { "c1", "c2" }, "a live turn's steps ride the delta in full");
+        collapsed.StepCount.ShouldBe(2, "and its total agrees with what was sent, so the client's count check passes");
+    }
+
 }
