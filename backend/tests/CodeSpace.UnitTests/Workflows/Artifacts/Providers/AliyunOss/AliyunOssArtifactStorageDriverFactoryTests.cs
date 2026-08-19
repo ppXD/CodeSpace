@@ -35,6 +35,24 @@ public sealed class AliyunOssArtifactStorageDriverFactoryTests : IDisposable
         _oss.Calls.ShouldBeEmpty();
     }
 
+    /// <summary>
+    /// The fake OSS endpoint asserts the region inside the V4 credential scope and answers anything else with
+    /// SignatureDoesNotMatch, so a profile that never stated a region reaching a successful probe is what proves the
+    /// derived region went onto the wire - not merely that activation stopped complaining.
+    /// </summary>
+    [Fact]
+    public async Task A_profile_that_states_no_region_signs_with_the_one_its_endpoint_names()
+    {
+        var profile = AliyunOssTestProfile.Snapshot(new { endpoint = FakeAliyunOssHandler.Host, bucket = FakeAliyunOssHandler.Bucket, keyPrefix = "codespace/" });
+
+        await using var driver = await CreateAsync(profile);
+        var probe = await driver.ProbeAsync(new ArtifactStorageProbeRequest(), CancellationToken.None);
+
+        probe.Status.ShouldBe(ArtifactStorageProbeStatus.Available, probe.Error?.Message);
+        _oss.Authorizations.ShouldNotBeEmpty();
+        _oss.Authorizations.ShouldAllBe(header => header.Contains($"/{FakeAliyunOssHandler.Region}/oss/aliyun_v4_request", StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task A_profile_belonging_to_another_provider_or_schema_version_is_refused()
     {

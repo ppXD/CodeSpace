@@ -33,14 +33,32 @@ public sealed class AliyunOssStorageProviderModuleTests
     }
 
     [Fact]
-    public void The_config_schema_asks_for_the_endpoint_region_and_bucket_the_v4_signature_needs()
+    public void The_config_schema_asks_only_for_the_values_an_operator_holds_and_keeps_region_as_an_override()
     {
         var properties = new AliyunOssStorageProviderModule().ConfigSchema.GetProperty("properties");
 
         properties.EnumerateObject().Select(property => property.Name).OrderBy(name => name, StringComparer.Ordinal)
             .ShouldBe(["bucket", "endpoint", "keyPrefix", "region"]);
         new AliyunOssStorageProviderModule().ConfigSchema.GetProperty("required").EnumerateArray().Select(value => value.GetString())
-            .ShouldBe(["endpoint", "region", "bucket"], "region is not optional: it is scoped into every OSS4-HMAC-SHA256 signing key");
+            .ShouldBe(["endpoint", "bucket"], "region is still scoped into every OSS4-HMAC-SHA256 signing key, but AliyunOssTarget derives it from the endpoint host, so demanding it would demand a value the operator already supplied");
+    }
+
+    /// <summary>
+    /// The Settings form renders <c>title</c> as each field's label, so these strings are what an operator reads while
+    /// copying values across. They are pinned rather than left to drift because the property names stay a single
+    /// camelCase spelling: this schema vocabulary has no anyOf/oneOf (see StorageProviderJson.SupportedSchemaKeywords),
+    /// so "either bucket or bucketName, exactly one" is not expressible, and a second accepted spelling would create a
+    /// disagreeing-duplicates case with no correct answer.
+    /// </summary>
+    [Fact]
+    public void Every_config_field_carries_the_label_the_settings_form_renders()
+    {
+        var properties = new AliyunOssStorageProviderModule().ConfigSchema.GetProperty("properties");
+
+        properties.GetProperty("endpoint").GetProperty("title").GetString().ShouldBe("Endpoint");
+        properties.GetProperty("bucket").GetProperty("title").GetString().ShouldBe("Bucket name");
+        properties.GetProperty("region").GetProperty("title").GetString().ShouldBe("Region override");
+        properties.GetProperty("keyPrefix").GetProperty("title").GetString().ShouldBe("Key prefix");
     }
 
     [Fact]
@@ -56,7 +74,6 @@ public sealed class AliyunOssStorageProviderModuleTests
 
     [Theory]
     [InlineData("""{"region":"cn-hangzhou","bucket":"codespace-artifacts"}""")]
-    [InlineData("""{"endpoint":"oss-cn-hangzhou.aliyuncs.com","bucket":"codespace-artifacts"}""")]
     [InlineData("""{"endpoint":"oss-cn-hangzhou.aliyuncs.com","region":"cn-hangzhou"}""")]
     [InlineData("""{"endpoint":"http://oss-cn-hangzhou.aliyuncs.com","region":"cn-hangzhou","bucket":"codespace-artifacts"}""")]
     [InlineData("""{"endpoint":"oss-cn-hangzhou.aliyuncs.com","region":"cn-hangzhou","bucket":"UPPER"}""")]
@@ -79,6 +96,22 @@ public sealed class AliyunOssStorageProviderModuleTests
 
         error.Message.ShouldContain("accessKeySecret");
         error.Message.ShouldNotContain("super-secret-value");
+    }
+
+    /// <summary>
+    /// The endpoint and the bucket are the only non-secret values an operator holds; the AccessKey pair lives in the
+    /// credential. A profile built from exactly those is admitted by the control plane AND resolves to a signing
+    /// region, so the two halves of admission cannot disagree about whether the profile is configurable.
+    /// </summary>
+    [Fact]
+    public void A_profile_carrying_only_the_endpoint_and_bucket_is_admitted_and_still_resolves_a_signing_region()
+    {
+        var module = new AliyunOssStorageProviderModule();
+        using var config = JsonDocument.Parse("""{"endpoint":"oss-cn-hangzhou.aliyuncs.com","bucket":"codespace-artifacts"}""");
+
+        StorageProfileRules.ValidateConfig(config.RootElement, module.ConfigSchema, module.SecretSchema);
+
+        AliyunOssTarget.Parse(config.RootElement).Region.ShouldBe("cn-hangzhou");
     }
 
     [Fact]

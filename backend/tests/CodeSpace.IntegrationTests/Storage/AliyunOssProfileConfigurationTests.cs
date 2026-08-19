@@ -31,11 +31,19 @@ public sealed class AliyunOssProfileConfigurationTests
 
     public AliyunOssProfileConfigurationTests(PostgresFixture fixture) => _fixture = fixture;
 
-    [Fact]
-    public async Task An_operator_configured_oss_profile_opens_into_a_real_driver_without_exposing_its_secret()
+    /// <summary>
+    /// Both shapes of the same profile open into a driver: the one that states its region and the one that leaves the
+    /// region to the endpoint. The region-less case is the one that proves the provider is configurable without a
+    /// value the operator does not hold, and it has to pass through the REAL control plane - schema admission,
+    /// canonicalization, persistence, activation - not just the target parser.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task An_operator_configured_oss_profile_opens_into_a_real_driver_without_exposing_its_secret(bool withExplicitRegion)
     {
         var world = await SeedWorldAsync();
-        var (profileId, revision) = await ConfigureAsync(world);
+        var (profileId, revision) = await ConfigureAsync(world, withExplicitRegion);
 
         using var scope = _fixture.BeginScope();
         var resolution = await scope.Resolve<IStorageRuntimeDriverBroker>()
@@ -51,7 +59,7 @@ public sealed class AliyunOssProfileConfigurationTests
     public async Task The_persisted_profile_and_credential_never_hand_the_secret_back_to_a_reader()
     {
         var world = await SeedWorldAsync();
-        var (profileId, _) = await ConfigureAsync(world);
+        var (profileId, _) = await ConfigureAsync(world, withExplicitRegion: true);
 
         using var scope = _fixture.BeginScope();
         var profile = await scope.Resolve<IStorageProfileService>().GetAsync(world.TeamId, profileId, CancellationToken.None);
@@ -93,7 +101,7 @@ public sealed class AliyunOssProfileConfigurationTests
         error.ClientMessage.ShouldNotContain(AccessKeySecret, customMessage: "the client-facing text is what actually reaches an operator's screen");
     }
 
-    private async Task<(Guid ProfileId, int Revision)> ConfigureAsync(World world)
+    private async Task<(Guid ProfileId, int Revision)> ConfigureAsync(World world, bool withExplicitRegion)
     {
         using var scope = _fixture.BeginScope();
         var credential = await scope.Resolve<IStorageCredentialService>().CreateAsync(world.TeamId, world.ActorId, new CreateStorageCredentialCommand
@@ -109,13 +117,7 @@ public sealed class AliyunOssProfileConfigurationTests
         {
             StableName = "oss-artifacts",
             ProviderTypeKey = AliyunOssArtifactStorageDriverFactory.TypeKey,
-            NonSecretConfig = JsonSerializer.SerializeToElement(new
-            {
-                endpoint = "oss-cn-hangzhou.aliyuncs.com",
-                region = "cn-hangzhou",
-                bucket = "codespace-artifacts",
-                keyPrefix = "team-artifacts/"
-            }),
+            NonSecretConfig = NonSecretConfig(withExplicitRegion),
             CredentialRef = $"db:{credential.Id:D}:{credential.CurrentRevision}"
         }, CancellationToken.None);
 
@@ -129,6 +131,20 @@ public sealed class AliyunOssProfileConfigurationTests
 
         activated!.State.ShouldBe(StorageProfileStateValue.Active);
         return (created.Id, created.CurrentRevision);
+    }
+
+    /// <summary>The four-value profile, plus the region override only when the case under test states one.</summary>
+    private static JsonElement NonSecretConfig(bool withExplicitRegion)
+    {
+        var config = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["endpoint"] = "oss-cn-hangzhou.aliyuncs.com",
+            ["bucket"] = "codespace-artifacts",
+            ["keyPrefix"] = "team-artifacts/"
+        };
+        if (withExplicitRegion) config["region"] = "cn-hangzhou";
+
+        return JsonSerializer.SerializeToElement(config);
     }
 
     private async Task<World> SeedWorldAsync()
