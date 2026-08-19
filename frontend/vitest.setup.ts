@@ -11,15 +11,20 @@ import { cleanup } from "@testing-library/react";
 /**
  * Web Storage, in memory — installed unconditionally, for the whole suite.
  *
- * Nothing in the stack reliably supplies one. happy-dom's own Window carries a
- * `localStorage`, but under vitest 4 that value does not reach `globalThis` or
- * `window` (`window` and `document` do). What IS on `globalThis` is node's own
- * experimental `localStorage`: a configurable GETTER that yields `undefined`
- * unless node was started with `--localstorage-file`, and that prints an
- * ExperimentalWarning merely for being read. request.ts / client.ts touch
- * `localStorage` directly, so with none present every spec died in the
- * `beforeEach` below before its own body ran — 1728 tests reporting red for one
- * missing global, which reads as a broken suite rather than a missing shim.
+ * Which layer supplies one DEPENDS ON THE NODE VERSION, and that is the whole
+ * problem. happy-dom's Window carries a `localStorage`, and on node 22 — the
+ * version .github/workflows/frontend.yml pins — it reaches `globalThis` and every
+ * spec runs. On node 26, `globalThis` already has node's own experimental
+ * `localStorage`: a configurable getter yielding `undefined` unless node was
+ * started with `--localstorage-file`, which also prints an ExperimentalWarning
+ * merely for being read. happy-dom's value never lands, and since request.ts /
+ * client.ts read `localStorage` directly and the `beforeEach` below clears it,
+ * all 1728 specs died before any body ran.
+ *
+ * So this is not a suite that was broken for everyone — it is a suite that CI
+ * cannot verify is runnable on the node its developers actually have. Installing
+ * storage here makes it runnable on both, and independent of the next change to
+ * either layer.
  *
  * Defined rather than detected on purpose: probing first would mean reading
  * node's getter (the warning, once per worker), and a test suite wants storage
