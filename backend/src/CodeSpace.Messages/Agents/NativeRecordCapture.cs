@@ -40,6 +40,50 @@ public sealed record NativeRecordCaptureRequest
 
     /// <summary>Which native stream this opening captures. One opening, one stream — a second channel is a second opening, never a second meaning for one stream id.</summary>
     public required NativeRecordChannel Channel { get; init; }
+
+    /// <summary>
+    /// Whether this opening RESUMES the observation of a process that is already recorded — a re-attach after a
+    /// worker replacement — rather than launching a new one. A resumed opening appends NO process row, because the
+    /// process it observes already has one; it mints its own stream and starts that stream's cursor at
+    /// <see cref="ResumeSourceOffset"/>. The fields describing a LAUNCH
+    /// (<see cref="HarnessTypeKey"/>, <see cref="RunnerKind"/>, <see cref="RunnerLocatorJson"/>,
+    /// <see cref="WorkerFenceEpoch"/>) are not read on a resumed opening — nothing is written that could carry them.
+    /// </summary>
+    public bool Resume { get; init; }
+
+    /// <summary>
+    /// Where a RESUMED observation restarts reading its source, in the coordinates
+    /// <see cref="NativeRecordV1.ByteOffset"/> is stated in. Zero on a launch, which reads from the beginning.
+    ///
+    /// <para>It is the position the observation ACTUALLY resumes at, and deliberately not the head of what is already
+    /// recorded, because those two can differ: a frame is made durable by its batch write while the resume position is
+    /// persisted afterwards, so the records can run ahead and the span between them is re-delivered. Starting the
+    /// cursor here is what makes a re-delivered line land on the ground its first record already described, instead of
+    /// on invented ground past that head where nothing could tell it apart from a line the process really emitted.</para>
+    /// </summary>
+    public long ResumeSourceOffset { get; init; }
+}
+
+/// <summary>
+/// What a capture opening actually got: the durable identity it writes against, the SOURCE CURSOR its first frame is
+/// recorded at, and how far this process's frames are already recorded.
+///
+/// <para>The last two are separate values because they can disagree, and the disagreement is the whole seam. A
+/// re-attach resumes reading at <see cref="SourceHead"/>, which the write ordering keeps at or behind
+/// <see cref="RecordedHead"/>; the span between them is re-delivered to the resumed observation. Recording at
+/// <see cref="SourceHead"/> keeps every frame's position the position the source really has, and a line below
+/// <see cref="RecordedHead"/> is one an earlier opening already recorded — dropped rather than recorded a second time,
+/// because the fold counts a record and chains its digest and would do both twice.</para>
+/// </summary>
+public sealed record NativeRecordCaptureOpening
+{
+    public required NativeRecordCaptureHandle Handle { get; init; }
+
+    /// <summary>Source cursor this opening's first frame is recorded at: zero for an opening that starts a process's stream, and the position the observation resumes reading at for one that continues it.</summary>
+    public required long SourceHead { get; init; }
+
+    /// <summary>How far this process's frames on this channel are ALREADY recorded, in the same coordinates. Zero for a launch, which has nothing behind it.</summary>
+    public long RecordedHead { get; init; }
 }
 
 /// <summary>The durable identity a capture opening writes against: the execution it belongs to, the physical process inside it, and the stream its ordinals count within.</summary>

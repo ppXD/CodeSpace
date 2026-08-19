@@ -1,0 +1,32 @@
+-- 0142_workflow_run_native_record_source_cursor_comment.sql
+--
+-- COMMENT ONLY. No table, column, constraint, index, trigger or function changes — this script exists because the
+-- slice that wired the harness data plane into the executor makes one sentence in the deployed catalog false, and a
+-- comment asserting something the code no longer does is itself a defect.
+--
+-- 0139 shipped source_offset_bytes with "a resume reads the log-capture plane committed source head, never this."
+-- That was written about resuming the TAIL — where a new observer starts reading the spool, which is still
+-- SandboxHandle.StdoutOffset and still never this column. It is not true of the capture that now runs on the re-attach
+-- path: a resumed opening starts this cursor AT that same StdoutOffset, so both sides of a worker replacement state
+-- their positions in one coordinate instead of each stream restarting at zero. Scoped to the ATTEMPT and to the
+-- CHANNEL: a revise round is a different process reading its own spool from the beginning, and each channel is its own
+-- cursor space, so both legitimately restart at zero.
+--
+-- What the seam does NOT have is a no-overlap guarantee, and the column comment must not imply one. A frame becomes
+-- durable at its batch write while StdoutOffset is persisted after it, so records legitimately run AHEAD of the resume
+-- position and the span between them is delivered to the re-attach a second time. The pump drops a re-delivered line
+-- rather than recording it twice — it records nothing below the head this attempt's records on this channel already
+-- reach — which is why the reduction folded over these rows counts each source line once. That drop is exact only
+-- while the cursor's accounting (each delivered line plus one terminator byte) reproduces what the reader consumed;
+-- where it cannot (a CR trimmed from a CRLF ending, a partial the reader forced without a terminator) a re-delivered
+-- line can still be recorded twice, and these byte ranges are what shows it.
+--
+-- It also records that the two deferrals 0139's own header names are now closed by that wiring: frames ARE captured on
+-- the re-attach path, and the executor terminalizes its harness execution on every path that lands the run terminal.
+-- 0140's reduction checkpoint has a production writer too — the live capture pump, which folds a batch and commits its
+-- checkpoint in that batch's own transaction. None of it changes what an Agent Run resolves to, and no column of
+-- either table is read by completion, terminal decision, planner, oracle or model routing.
+-- Rollback: restore the 0139 wording with COMMENT ON COLUMN workflow_run_native_record.source_offset_bytes IS ...
+
+COMMENT ON COLUMN workflow_run_native_record.source_offset_bytes IS
+    'Offset of the RAW frame in its stream. A per-stream cursor derived from the frames as delivered, each counted as its bytes plus one terminator - the source own offsets for the newline-terminated stream a runner spools, and not otherwise a byte-exact index into one. Resuming the TAIL reads the log-capture plane committed source head and never this column, while a resumed CAPTURE starts its own stream at that same committed offset, so both sides of a re-attach state their positions in one coordinate (a new process, or another channel, reads from its own start and restarts at zero). It is NOT a no-overlap guarantee: the re-attach is re-delivered every line recorded after the last committed offset, and the writer drops those rather than recording them twice by refusing anything below the head this attempt already covers on this channel.';

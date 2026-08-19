@@ -109,7 +109,18 @@ public sealed record NativeRecordV1
     /// <summary>When capture observed the frame. Always known, and the only clock the capture side controls.</summary>
     public required DateTimeOffset IngestedAt { get; init; }
 
-    /// <summary>Offset of the ORIGINAL frame within its stream: a per-stream cursor derived from the frames as delivered, NOT a byte-exact index into a spool file. A resume reads the log-capture plane's committed source head, never this — a writer that only sees delivered lines cannot know what the stream carried between them.</summary>
+    /// <summary>
+    /// Offset of the ORIGINAL frame within its stream: a per-stream cursor derived from the frames as delivered, each
+    /// counted as its bytes plus one terminator. That reproduces the source's own offsets for the newline-terminated
+    /// stream a runner spools and is not otherwise a byte-exact index into one, because a writer that only sees
+    /// delivered lines cannot know what the stream carried between them. Resuming the TAIL reads the log-capture
+    /// plane's committed source head and never this; a resumed CAPTURE starts its own stream at that same committed
+    /// offset, so both sides of a re-attach state their positions in one coordinate (a new process, or another channel,
+    /// reads from its own start and restarts at zero).
+    /// <para>It is not a claim that the seam has no overlap. The re-attach is re-delivered every line recorded after
+    /// that committed offset, and what keeps each source line recorded once is the writer dropping anything below the
+    /// head its process already covers — not this field being contiguous.</para>
+    /// </summary>
     public required long ByteOffset { get; init; }
 
     /// <summary>Byte length of the ORIGINAL frame in the stream. It differs from <see cref="SizeBytes"/> whenever the payload was masked or withheld, which is precisely how much was dropped.</summary>

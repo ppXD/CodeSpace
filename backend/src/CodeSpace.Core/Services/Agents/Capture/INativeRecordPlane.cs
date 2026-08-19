@@ -27,11 +27,13 @@ namespace CodeSpace.Core.Services.Agents.Capture;
 /// not a promise: capture runs on its OWN unit of work (see <see cref="NativeRecordPlane"/>), so a refused write
 /// cannot strand rows in the tracker the run's next save replays, and the pump above it contains every failure.</para>
 ///
-/// <para><b>What this slice does NOT do.</b> It never terminalizes an execution — it opens one and re-enters it, and
-/// 0137's attempt-head arm forces <c>state = 'Running'</c>, so after a run ends the execution row is left Running.
-/// Stale rather than false at insert, and exactly the population 0137's own header says an age-scan over
-/// <c>ix_workflow_run_harness_execution_stale_live</c> must Abandon. That sweeper is not here, and neither is closing
-/// the attempt of a worker that died mid-round: capture is not opened on the re-attach path, so nobody closes it.</para>
+/// <para><b>What this interface does and does not own.</b> It owns ONE live opening: mint or re-enter the execution,
+/// write batches, record how the round's process ended. The two things an opening cannot see — resuming the process a
+/// replaced worker was observing, and closing the execution once the executor reaches a terminal — are
+/// <see cref="INativeRecordExecutionPlane"/>, and folding the captured prefix into a resumable reduction is
+/// <see cref="INativeRecordReductionPlane"/>. Both are SIBLING interfaces (Rule 7) that
+/// <see cref="NativeRecordPlane"/> also implements, so a caller feature-detects them and a caller that does not need
+/// them keeps exactly this contract.</para>
 /// </summary>
 public interface INativeRecordPlane
 {
@@ -72,7 +74,7 @@ public sealed class NativeRecordContractException : Exception, IFailure
 /// bearing, because the refusals are reachable BY DESIGN: 0137 rejects a superseded worker's fence on exactly the
 /// reclaim-for-reattach case, which is the outcome that case is supposed to have.
 /// </summary>
-public sealed class NativeRecordPlane : INativeRecordPlane, IScopedDependency
+public sealed partial class NativeRecordPlane : INativeRecordPlane, IScopedDependency
 {
     /// <summary>Reason stamped on an attempt whose observer never saw an exit code — a forced terminal (timeout, stall) or a worker torn down mid-round.</summary>
     public const string ProcessOutcomeUnobservedErrorCode = "capture.exit-unobserved";
@@ -165,10 +167,9 @@ public sealed class NativeRecordPlane : INativeRecordPlane, IScopedDependency
 
     /// <summary>
     /// The live execution of this Agent Run, or a fresh next generation when it has none. Re-entering a live one is
-    /// what makes a revise round the next PROCESS rather than a new execution — and it is also why an execution this
-    /// slice never terminalizes can wedge nothing: the generation gate refuses a new generation over a live
-    /// predecessor, and this never asks for one. What it does leave behind is a permanently Running row; see the
-    /// interface's note on the age-scan that owes it a terminal state.
+    /// what makes a revise round the next PROCESS rather than a new execution. The row it leaves live is closed by
+    /// <see cref="INativeRecordExecutionPlane.TerminalizeAsync"/> when the executor reaches a terminal, which is what
+    /// keeps the generation gate — a new generation cannot open over a live predecessor — from wedging the next run.
     /// </summary>
     private static async Task<WorkflowRunHarnessExecution> ResolveExecutionAsync(CodeSpaceDbContext db, NativeRecordCaptureRequest request, RunScope run, CancellationToken cancellationToken)
     {

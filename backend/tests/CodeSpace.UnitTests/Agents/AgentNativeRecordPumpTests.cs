@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Capture;
+using CodeSpace.Core.Services.Agents.Reduction;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Contracts;
@@ -230,8 +231,133 @@ public sealed class AgentNativeRecordPumpTests
         AgentNativeRecordPump.HarnessTypeKeyOf(new KeyedHarness(kind, version)).ShouldBe(expected);
     }
 
+    /// <summary>
+    /// The re-attach seam, at the position the observation ACTUALLY resumes at. A resumed opening starts its cursor
+    /// where the re-attach restarts reading the source rather than at zero, so a frame it records is described at the
+    /// position the source really has, and one the pre-restart stream already recorded is recognisable as such instead
+    /// of landing on invented ground past that stream's head.
+    /// </summary>
+    [Fact]
+    public async Task A_resumed_opening_records_at_the_position_its_observation_resumes_from()
+    {
+        // The pre-restart stream recorded "aaa" at 0 and "bb" at 4, so its records reach 7; the last committed offset
+        // covered only "aaa", so the re-attach restarts reading at 4 and is re-delivered "bb" before anything new.
+        var plane = new RecordingPlane { RecordedHead = 7 };
+        var pump = await AgentNativeRecordPump.OpenAsync(plane, Resume(4), SecretRedactor.None, NullLogger.Instance, CancellationToken.None);
+
+        await pump.CaptureAsync("bb", "bb", new DroppingHarness(), CancellationToken.None);
+        await pump.CaptureAsync("ccc", "ccc", new DroppingHarness(), CancellationToken.None);
+        await pump.FlushAsync(CancellationToken.None);
+
+        plane.Reopenings.ShouldBe(1, customMessage: "a resumed opening must re-enter the recorded process, never append a second row for the one it is observing");
+        plane.Openings.ShouldBe(0);
+        plane.Records.Select(record => record.Frame.ByteOffset).ShouldBe(new long[] { 7 },
+            customMessage: "the re-delivered line sits below the recorded head and is already a row; only the line past that head is this stream's to record, at the offset the source gives it");
+        plane.Records.Select(record => record.Frame.Ordinal).ShouldBe(new long[] { 0 },
+            customMessage: "ordinals are per stream and 0139 requires them contiguous, so a dropped line must not consume one");
+    }
+
+    /// <summary>
+    /// The double count this seam used to ship. A tear-down between a frame's write and the offset that covers it
+    /// leaves the records AHEAD of the resume position, so the re-attach is re-delivered lines that already have rows;
+    /// recording them again folds the same source line into the reduction twice, over-counting every count and chaining
+    /// a digest that witnesses a prefix the process never emitted. Every re-delivered line is dropped, and the first
+    /// line past the head is not.
+    /// </summary>
+    [Fact]
+    public async Task A_re_delivered_line_that_already_has_a_record_is_never_recorded_twice()
+    {
+        // Records cover "one\ntwo\nsix6\n" (0, 4, 8) and so reach 13; the committed offset only reached "one\n".
+        var plane = new RecordingPlane { RecordedHead = 13 };
+        var pump = await AgentNativeRecordPump.OpenAsync(plane, Resume(4), SecretRedactor.None, NullLogger.Instance, CancellationToken.None);
+
+        // The executor's own loop: capture the line, then project everything its parser yielded onto that frame.
+        foreach (var line in new[] { "two", "six6", "new" })
+        {
+            var frame = await pump.CaptureAsync(line, line, new EchoHarness(), CancellationToken.None);
+
+            foreach (var normalized in frame.Events) pump.Project(frame, normalized);
+        }
+
+        await pump.FlushAsync(CancellationToken.None);
+
+        plane.Records.Select(record => record.Frame.InlinePayload).ShouldBe(new[] { "new" },
+            customMessage: "a re-delivered line recorded a second time is the double count: the fold counts records and chains their digests, so the stored state would witness a prefix with a segment the process emitted once and this recorded twice");
+        plane.Events.Count.ShouldBe(1, customMessage: "and a projection of a dropped frame would be a projection grounded in nothing, which the plane refuses at the batch");
+        plane.Checkpoints.ShouldHaveSingleItem().State.RecordsConsumed.ShouldBe(1,
+            customMessage: "the checkpoint claims exactly the frames this opening contributed, not the ones it was merely shown again");
+    }
+
+    /// <summary>A re-attach that resumes at or past the recorded head has nothing re-delivered — the ordinary case, and the one where dropping anything would be a lost line rather than a saved duplicate.</summary>
+    [Fact]
+    public async Task A_resume_at_the_recorded_head_drops_nothing()
+    {
+        var plane = new RecordingPlane { RecordedHead = 4 };
+        var pump = await AgentNativeRecordPump.OpenAsync(plane, Resume(4), SecretRedactor.None, NullLogger.Instance, CancellationToken.None);
+
+        await pump.CaptureAsync("two", "two", new EchoHarness(), CancellationToken.None);
+        await pump.FlushAsync(CancellationToken.None);
+
+        plane.Records.Select(record => record.Frame.ByteOffset).ShouldBe(new long[] { 4 },
+            customMessage: "nothing was re-delivered here, so a drop would be a frame lost — the head is a floor, not a skip count");
+    }
+
+    /// <summary>A plane with no live recorded process to resume has nothing this opening could attach frames to, so capture is skipped and the re-attach streams exactly as it did before.</summary>
+    [Fact]
+    public async Task A_resume_with_no_live_process_leaves_the_parse_path_untouched()
+    {
+        var plane = new RecordingPlane { RecordedHead = null };
+        var pump = await AgentNativeRecordPump.OpenAsync(plane, Resume(0), SecretRedactor.None, NullLogger.Instance, CancellationToken.None);
+
+        pump.IsCapturing.ShouldBeFalse();
+        (await pump.CaptureAsync("hello", "hello", new EchoHarness(), CancellationToken.None)).Events.ShouldHaveSingleItem();
+        plane.Records.ShouldBeEmpty();
+    }
+
+    /// <summary>
+    /// The checkpoint rides the batch's own write, so the stored position can neither lead the frames it claims nor
+    /// lag them — the window in which a durable frame is missing from the resumable prefix never opens.
+    /// </summary>
+    [Fact]
+    public async Task A_batch_is_written_together_with_the_checkpoint_of_the_prefix_it_completes()
+    {
+        var plane = new RecordingPlane();
+        var pump = await OpenAsync(plane);
+
+        pump.IsReducing.ShouldBeTrue();
+
+        await pump.CaptureAsync("one", "one", new EchoHarness(), CancellationToken.None);
+        await pump.CaptureAsync("two", "two", new EchoHarness(), CancellationToken.None);
+        await pump.FlushAsync(CancellationToken.None);
+
+        plane.PlainWrites.ShouldBe(0, customMessage: "a batch written apart from its checkpoint is the window this wiring exists to close");
+        var checkpoint = plane.Checkpoints.ShouldHaveSingleItem();
+        checkpoint.State.RecordsConsumed.ShouldBe(2, customMessage: "the checkpoint claims exactly the frames its own transaction makes durable");
+        checkpoint.Position.RecordsConsumed.ShouldBe(2);
+        checkpoint.ReducerKind.ShouldBe(HarnessReductionFold.ReducerKind);
+    }
+
+    /// <summary>A plane that cannot fold — no reduction capability at all — writes its batches exactly as it did before, with no checkpoint and no change to the frames.</summary>
+    [Fact]
+    public async Task A_plane_without_the_reduction_capability_writes_its_batches_unchanged()
+    {
+        var plane = new BatchOnlyPlane();
+        var pump = await AgentNativeRecordPump.OpenAsync(plane, Request(), SecretRedactor.None, NullLogger.Instance, CancellationToken.None);
+
+        pump.IsCapturing.ShouldBeTrue();
+        pump.IsReducing.ShouldBeFalse();
+
+        await pump.CaptureAsync("one", "one", new EchoHarness(), CancellationToken.None);
+        await pump.FlushAsync(CancellationToken.None);
+
+        plane.Records.ShouldBe(1, customMessage: "frames are captured whether or not anything folds them");
+    }
+
     private static Task<AgentNativeRecordPump> OpenAsync(INativeRecordPlane plane) =>
         AgentNativeRecordPump.OpenAsync(plane, Request(), SecretRedactor.None, NullLogger.Instance, CancellationToken.None);
+
+    /// <summary>A re-attach's request: resuming, and carrying the source position its observation is about to restart reading at — which is what the executor hands over from the runner handle.</summary>
+    private static NativeRecordCaptureRequest Resume(long resumeSourceOffset) => Request() with { Resume = true, ResumeSourceOffset = resumeSourceOffset };
 
     private static NativeRecordCaptureRequest Request() => new()
     {
@@ -244,14 +370,98 @@ public sealed class AgentNativeRecordPumpTests
         Channel = NativeRecordChannel.Stdout,
     };
 
-    /// <summary>Accepts every batch and remembers the HIGH-WATER mark of each — which is what a retention claim is actually about, rather than the totals.</summary>
-    private sealed class RecordingPlane : INativeRecordPlane
+    /// <summary>
+    /// Accepts every batch and remembers the HIGH-WATER mark of each — which is what a retention claim is actually
+    /// about, rather than the totals. It also carries both sibling capabilities, because the deployed plane does: a
+    /// double that knew only the batch writer could never show that a checkpoint rides its batch's own write.
+    /// </summary>
+    private sealed class RecordingPlane : INativeRecordPlane, INativeRecordExecutionPlane, INativeRecordReductionPlane
     {
+        private readonly Guid _executionId = Guid.NewGuid();
+
         public List<NativeRecordCapture> Records { get; } = new();
         public List<AgentSemanticEventV1> Events { get; } = new();
+        public List<HarnessReductionCheckpointV1> Checkpoints { get; } = new();
         public int LargestRecordBatch { get; private set; }
         public int LargestEventBatch { get; private set; }
         public int Batches { get; private set; }
+        public int PlainWrites { get; private set; }
+        public int Openings { get; private set; }
+        public int Reopenings { get; private set; }
+        public int Terminalizations { get; private set; }
+
+        /// <summary>How far this process's frames already reach, or null for a run with no live recorded process to resume at all. The cursor a resumed opening starts at comes from the REQUEST, exactly as the deployed plane takes it.</summary>
+        public long? RecordedHead { get; init; } = 0;
+
+        public Task<NativeRecordCaptureHandle?> OpenAsync(NativeRecordCaptureRequest request, CancellationToken cancellationToken)
+        {
+            Openings++;
+
+            return Task.FromResult<NativeRecordCaptureHandle?>(Handle(request.TeamId, request.AgentRunId, request.Channel));
+        }
+
+        public Task<NativeRecordCaptureOpening?> ReopenAsync(NativeRecordCaptureRequest request, CancellationToken cancellationToken)
+        {
+            Reopenings++;
+
+            return Task.FromResult(RecordedHead is not { } head
+                ? null
+                : new NativeRecordCaptureOpening
+                {
+                    Handle = Handle(request.TeamId, request.AgentRunId, request.Channel),
+                    SourceHead = request.ResumeSourceOffset,
+                    RecordedHead = head,
+                });
+        }
+
+        public Task TerminalizeAsync(Guid teamId, Guid agentRunId, long expectedEpoch, CancellationToken cancellationToken)
+        {
+            Terminalizations++;
+
+            return Task.CompletedTask;
+        }
+
+        public Task WriteAsync(NativeRecordBatch batch, CancellationToken cancellationToken)
+        {
+            PlainWrites++;
+
+            return Accept(batch);
+        }
+
+        public Task<HarnessReductionCheckpointV1?> ReadCheckpointAsync(Guid teamId, Guid executionId, string reducerKind, CancellationToken cancellationToken) =>
+            Task.FromResult<HarnessReductionCheckpointV1?>(null);
+
+        public Task WriteReducedAsync(NativeRecordBatch batch, HarnessReductionCheckpointV1 checkpoint, CancellationToken cancellationToken)
+        {
+            Checkpoints.Add(checkpoint);
+
+            return Accept(batch);
+        }
+
+        public Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, CancellationToken cancellationToken) => Task.CompletedTask;
+
+        private NativeRecordCaptureHandle Handle(Guid teamId, Guid agentRunId, NativeRecordChannel channel) => new()
+        {
+            TeamId = teamId, AgentRunId = agentRunId, ExecutionId = _executionId,
+            AttemptId = Guid.NewGuid(), StreamId = Guid.NewGuid(), Channel = channel,
+        };
+
+        private Task Accept(NativeRecordBatch batch)
+        {
+            Batches++;
+            LargestRecordBatch = Math.Max(LargestRecordBatch, batch.Records.Count);
+            LargestEventBatch = Math.Max(LargestEventBatch, batch.Events.Count);
+            Records.AddRange(batch.Records);
+            Events.AddRange(batch.Events);
+
+            return Task.CompletedTask;
+        }
+    }
+
+    /// <summary>The shape of a deployment (or a hand-built double) that knows only the batch writer — no resume, no reduction.</summary>
+    private sealed class BatchOnlyPlane : INativeRecordPlane
+    {
+        public int Records { get; private set; }
 
         public Task<NativeRecordCaptureHandle?> OpenAsync(NativeRecordCaptureRequest request, CancellationToken cancellationToken) =>
             Task.FromResult<NativeRecordCaptureHandle?>(new NativeRecordCaptureHandle
@@ -262,11 +472,7 @@ public sealed class AgentNativeRecordPumpTests
 
         public Task WriteAsync(NativeRecordBatch batch, CancellationToken cancellationToken)
         {
-            Batches++;
-            LargestRecordBatch = Math.Max(LargestRecordBatch, batch.Records.Count);
-            LargestEventBatch = Math.Max(LargestEventBatch, batch.Events.Count);
-            Records.AddRange(batch.Records);
-            Events.AddRange(batch.Events);
+            Records += batch.Records.Count;
 
             return Task.CompletedTask;
         }
