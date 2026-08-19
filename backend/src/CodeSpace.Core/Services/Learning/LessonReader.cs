@@ -45,6 +45,6 @@ public static class LessonArms
     public static string Assign(Guid teamId, string taskText)
     {
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(teamId + "\n" + taskText));
-        return Withheld;
+        return (hash[0] & 1) == 0 ? Injected : Withheld;
     }
 }
