@@ -136,9 +136,9 @@ public sealed record ConfigHomeFile
 }
 
 /// <summary>
-/// Outcome of a sandbox run. A runner that streams (<see cref="ISandboxStreamRunner"/>) delivers stdout
-/// live line-by-line and leaves <see cref="Stdout"/> empty; the non-streaming <see cref="ISandboxRunner.RunAsync"/>
-/// path returns it buffered in full. A stderr size cap for chatty long runs is a future sibling capability.
+/// Outcome of a sandbox run. A runner that streams (<c>ISandboxStreamRunner</c>) delivers stdout
+/// live line-by-line and leaves <see cref="Stdout"/> empty; the non-streaming <c>ISandboxRunner.RunAsync</c>
+/// path returns it buffered in full.
 /// </summary>
 public sealed record SandboxResult
 {
@@ -150,6 +150,14 @@ public sealed record SandboxResult
     /// <summary>Buffered stdout from the non-streaming path; empty when the run streamed line-by-line (the lines were delivered live).</summary>
     public required string Stdout { get; init; }
 
+    /// <summary>
+    /// The run's diagnostics, in memory. HOW MUCH of them is the producing runner's own statement, and a reader that
+    /// needs the whole stream must not take this for it. The local runner's short-lived batch and streaming paths
+    /// buffer stderr entire; its DURABLE path — whose runs are agent-long — returns a bounded excerpt of the spooled
+    /// stderr instead, because reading that file whole grew with the run. The stream is not lost by that bound: it
+    /// stays on the run's spool, readable through a sibling capability a bounded budget at a time — a line at a time,
+    /// except where a line is longer than one of that reader's passes and arrives cut, marked as cut.
+    /// </summary>
     public required string Stderr { get; init; }
 }
 

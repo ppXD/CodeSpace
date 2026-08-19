@@ -16,6 +16,17 @@ public enum NativeRecordNormalization
     /// <summary>The parser yielded nothing. This is the silent drop made durable and countable: today an unrecognised native frame class leaves no trace at all, so nobody can ask which classes are being lost.</summary>
     Unrecognized,
 
+    /// <summary>
+    /// NO parser was asked. The frame arrived on a channel this plane deliberately does not interpret —
+    /// <see cref="NativeRecordChannel.Stderr"/>, whose diagnostics a parser built for the harness's stdout protocol
+    /// would mis-read as protocol events and project into the semantic stream as facts nobody said.
+    ///
+    /// <para>Distinct from <see cref="Unrecognized"/> on purpose: that state means the parser had nothing to say, and
+    /// recording it here would assert a parse that never ran and would fill "which frames could we not interpret" with
+    /// every diagnostic line the run ever wrote.</para>
+    /// </summary>
+    NotParsed,
+
     /// <summary>The parser threw. The frame is still here and the redacted reason is recorded — losing the ability to interpret a frame is not losing the frame. The throw itself is NOT contained: it propagates into the run exactly as it did before this plane existed, so capture records the failure without deciding it.</summary>
     Failed,
 }

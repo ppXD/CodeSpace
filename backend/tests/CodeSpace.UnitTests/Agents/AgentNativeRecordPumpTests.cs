@@ -353,6 +353,228 @@ public sealed class AgentNativeRecordPumpTests
         plane.Records.ShouldBe(1, customMessage: "frames are captured whether or not anything folds them");
     }
 
+    /// <summary>
+    /// The headline of the grounded projector. A frame the harness recognises as its OWN session record yields a
+    /// second projection beside the derived one, claiming exactness — and the fold then takes the NAME from it, which
+    /// is the whole reason the exactness distinction exists.
+    /// </summary>
+    [Fact]
+    public async Task A_frame_the_harness_states_its_session_in_is_projected_exactly_and_names_the_fold()
+    {
+        var plane = new RecordingPlane();
+        var pump = await OpenAsync(plane);
+
+        var frame = await pump.CaptureAsync(SessionNamingHarness.Frame, SessionNamingHarness.Frame, new SessionNamingHarness(), CancellationToken.None);
+        foreach (var normalized in frame.Events) pump.Project(frame, normalized);
+        await pump.FlushAsync(CancellationToken.None);
+
+        var grounded = plane.Events.Where(candidate => candidate.ProjectionQuality.IsExactlyGrounded()).ShouldHaveSingleItem();
+
+        grounded.ProjectionQuality.ShouldBe(SemanticProjectionQuality.Exact,
+            customMessage: "the captured bytes are verbatim, so the strongest honest claim over them is Exact");
+        grounded.SessionId.ShouldBe(SessionNamingHarness.Session);
+        grounded.SourceNativeRecordIds.ShouldBe(new[] { frame.RecordId!.Value },
+            customMessage: "an exact claim with no source frame is a claim about nothing, and both the contract and the database refuse one");
+        grounded.Validate().ShouldBeEmpty();
+
+        plane.Events.Count(candidate => candidate.ProjectionQuality == SemanticProjectionQuality.Derived).ShouldBe(1,
+            customMessage: "the grounded projection rides BESIDE the normalization of the same frame; replacing it would trade one reading of the frame for another instead of keeping both");
+
+        plane.Checkpoints.ShouldHaveSingleItem().State.FirstSessionId.ShouldBe(SessionNamingHarness.Session,
+            customMessage: "the fold takes a named fact only from an exactly grounded projection, so this is the first slice on which a re-attach recovers anything that NAMES something");
+    }
+
+    /// <summary>
+    /// The rule the quality vocabulary exists for, at the seam that could break it. A harness with no grounded-frame
+    /// reader emits frames that MENTION its session all run long, and every projection of them must stay Derived — so
+    /// the fold recovers no name at all rather than one it inferred.
+    /// </summary>
+    [Fact]
+    public async Task A_harness_that_states_nothing_grounds_nothing_however_its_lines_read()
+    {
+        var plane = new RecordingPlane();
+        var pump = await OpenAsync(plane);
+
+        var frame = await pump.CaptureAsync(SessionNamingHarness.Frame, SessionNamingHarness.Frame, new EchoHarness(), CancellationToken.None);
+        foreach (var normalized in frame.Events) pump.Project(frame, normalized);
+        await pump.FlushAsync(CancellationToken.None);
+
+        plane.Events.ShouldAllBe(candidate => candidate.ProjectionQuality == SemanticProjectionQuality.Derived,
+            customMessage: "this line carries a session id in the shape a grounded reader would accept, and a projector that promoted it on those grounds would be pattern-matching prose into an exact claim");
+        plane.Checkpoints.ShouldHaveSingleItem().State.FirstSessionId.ShouldBeNull(
+            customMessage: "recovering nothing is the correct outcome for a harness that states nothing — ExactlyGroundedProjections is one aggregate over the prefix and could never afterwards say WHICH field had been inferred");
+        plane.Checkpoints[0].State.ExactlyGroundedProjections.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Exactness is a claim about the bytes that were STORED. A frame whose secret spans were masked is no longer what
+    /// the harness wrote, so a fact still readable in it is RedactedExact — which is what that value means, and which
+    /// the database independently refuses to let be Exact over a masked source.
+    /// </summary>
+    [Fact]
+    public async Task A_masked_frame_grounds_only_a_redacted_exact_claim()
+    {
+        const string secret = "sk-live-SENTINEL";
+        var plane = new RecordingPlane();
+        var pump = await AgentNativeRecordPump.OpenAsync(plane, Request(), new SecretRedactor(new[] { secret }), NullLogger.Instance, CancellationToken.None);
+
+        await pump.CaptureAsync(SessionNamingHarness.FrameWith(secret), SessionNamingHarness.FrameWith(SecretRedactor.Placeholder), new SessionNamingHarness(), CancellationToken.None);
+        await pump.FlushAsync(CancellationToken.None);
+
+        var grounded = plane.Events.Where(candidate => candidate.ProjectionQuality.IsExactlyGrounded()).ShouldHaveSingleItem();
+
+        grounded.ProjectionQuality.ShouldBe(SemanticProjectionQuality.RedactedExact,
+            customMessage: "the stored bytes differ from the wire, so Exact would be a claim the evidence cannot support — and the database refuses exactly this pairing, so claiming it here would lose the whole batch");
+        grounded.SessionId.ShouldBe(SessionNamingHarness.Session, customMessage: "masking a secret elsewhere in the frame does not stop the harness having stated its session in it");
+        plane.Records.ShouldHaveSingleItem().Frame.Redaction.ShouldBe(NativeRecordRedaction.Masked);
+    }
+
+    /// <summary>
+    /// The all-zero UUID is well-formed and names nothing. <c>Guid.TryParseExact</c> accepts it, so a harness reading a
+    /// zeroed session field states it with a straight face; the fold latches the FIRST session it is handed and would
+    /// latch that one, leaving a warm resume pointed at a session no reader can open. The refusal is at the projector
+    /// and not only in <see cref="GroundedSessionFrame.For"/> because a harness can build the record itself — which is
+    /// exactly what this double does.
+    /// </summary>
+    [Fact]
+    public async Task The_zero_session_id_grounds_nothing_even_when_a_harness_states_it()
+    {
+        var plane = new RecordingPlane();
+        var pump = await OpenAsync(plane);
+
+        await pump.CaptureAsync("zeroed", "zeroed", new ZeroSessionHarness(), CancellationToken.None);
+        await pump.FlushAsync(CancellationToken.None);
+
+        plane.Records.ShouldHaveSingleItem().Frame.InlinePayload.ShouldBe("zeroed", customMessage: "refusing the id must not cost the frame — the record is the evidence either way");
+        plane.Events.ShouldBeEmpty(customMessage: "an id that names nothing is not a fact, and one projected as exactly grounded can never afterwards be told from one that is");
+        plane.Checkpoints.ShouldHaveSingleItem().State.FirstSessionId.ShouldBeNull(
+            customMessage: "null is 'no session was named'; Guid.Empty latched here would be 'a session was named' and would answer a warm resume with an id nothing can resume");
+    }
+
+    /// <summary>
+    /// The containment asymmetry, stated in a test because it is easy to get backwards. A PARSER that throws still
+    /// fails the run — it did before this plane existed and must keep doing so. A GROUNDED READER that throws is new
+    /// work, so it costs the run nothing: the frame is still recorded, and the run resolves as it does with no plane.
+    /// </summary>
+    [Fact]
+    public async Task A_grounded_reader_that_throws_still_records_the_frame_and_costs_the_run_nothing()
+    {
+        var plane = new RecordingPlane();
+        var pump = await OpenAsync(plane);
+
+        var frame = await pump.CaptureAsync("hello", "hello", new ThrowingGroundedHarness(), CancellationToken.None);
+        await pump.FlushAsync(CancellationToken.None);
+
+        frame.Events.ShouldHaveSingleItem(customMessage: "the parse is untouched by a grounded reader that failed before it");
+        plane.Records.ShouldHaveSingleItem().Frame.InlinePayload.ShouldBe("hello");
+        plane.Events.ShouldBeEmpty(customMessage: "no fact was read, so no projection may claim one — and no exception may reach the run, or a shadow plane has decided its outcome");
+    }
+
+    /// <summary>
+    /// The recovery this lane exists for, at the tier that can execute it: a worker records the frame its harness named
+    /// its session in, is replaced, and the reduction the replacement lands on still carries the name. The tail-only
+    /// fold is asserted NOT to know it, or a resume that recovered nothing would pass this test.
+    /// </summary>
+    [Fact]
+    public async Task A_session_named_before_a_worker_replacement_survives_the_resumed_fold()
+    {
+        var plane = new RecordingPlane();
+        var harness = new SessionNamingHarness();
+        var before = await OpenAsync(plane);
+
+        await before.CaptureAsync(SessionNamingHarness.Frame, SessionNamingHarness.Frame, harness, CancellationToken.None);
+        await before.FlushAsync(CancellationToken.None);
+
+        plane.Checkpoints.ShouldHaveSingleItem().State.FirstSessionId.ShouldBe(SessionNamingHarness.Session);
+
+        // The replacement re-enters the SAME process at the head its records already reach, and resumes the execution's
+        // stored reduction — the two halves a re-attach has.
+        var after = await AgentNativeRecordPump.OpenAsync(plane, Resume(SessionNamingHarness.Frame.Length + 1), SecretRedactor.None, NullLogger.Instance, CancellationToken.None);
+
+        await after.CaptureAsync("tail", "tail", harness, CancellationToken.None);
+        await after.FlushAsync(CancellationToken.None);
+
+        plane.Checkpoints[^1].State.FirstSessionId.ShouldBe(SessionNamingHarness.Session,
+            customMessage: "the session was named ONCE, before the replacement — a fold that started from nothing would answer null here, which is exactly the defect this spine exists to end");
+        plane.Checkpoints[^1].State.RecordsConsumed.ShouldBe(2);
+    }
+
+    /// <summary>
+    /// Stderr's own rule. A diagnostic must never reach a parser written for the harness's stdout protocol: a warning
+    /// shaped like a protocol frame would be normalized into an event the harness never emitted. The record still
+    /// lands, and it says NO parse was attempted — which is a different fact from a parse that found nothing.
+    /// </summary>
+    [Fact]
+    public async Task A_diagnostic_line_is_recorded_with_no_parser_ever_asked_about_it()
+    {
+        var plane = new RecordingPlane();
+        var pump = await AgentNativeRecordPump.OpenAsync(plane, Resume(0) with { Channel = NativeRecordChannel.Stderr }, SecretRedactor.None, NullLogger.Instance, CancellationToken.None);
+
+        await pump.CaptureDiagnosticAsync("warn: retrying", "warn: retrying", isComplete: true, CancellationToken.None);
+        await pump.CaptureDiagnosticAsync("{\"type\":\"assistant\"}", "{\"type\":\"assistant\"}", isComplete: true, CancellationToken.None);
+        await pump.FlushAsync(CancellationToken.None);
+
+        plane.Records.Select(record => record.Normalization).ShouldAllBe(normalization => normalization == NativeRecordNormalization.NotParsed,
+            customMessage: "Unrecognized would assert that a parser looked and found nothing; no parser was asked, and the difference is exactly what keeps 'which frames could we not interpret' answerable");
+        plane.Records.Select(record => record.Frame.Channel).ShouldAllBe(channel => channel == NativeRecordChannel.Stderr);
+        plane.Events.ShouldBeEmpty(
+            customMessage: "the second line is a protocol frame by shape; projecting it would put into the semantic stream an assistant turn that only ever appeared in a diagnostic");
+
+        plane.Records.Select(record => record.Frame.Ordinal).ShouldBe(new long[] { 0, 1 });
+        plane.Records.Select(record => record.Frame.ByteOffset).ShouldBe(new long[] { 0, 15 },
+            customMessage: "stderr carries its own contiguous source geometry — the cursor advances by the raw line plus the terminator the stream carried, exactly as stdout's does");
+    }
+
+    /// <summary>
+    /// Retention on the diagnostic path, at the PUMP: many diagnostic frames must flush like stdout's do rather than
+    /// accumulate into a third of the unbounded shapes #1479 and #1489 each removed once. What bounds the SOURCE — how
+    /// many lines are ever handed to this pump — is the drain's own budget, pinned a tier down at
+    /// <c>LocalProcessDurableRunnerTests</c>, because this test's caller is the test itself.
+    /// </summary>
+    [Fact]
+    public async Task Many_diagnostic_frames_never_retain_more_than_the_buffer_cap()
+    {
+        const int lines = 5_000;
+        var plane = new RecordingPlane();
+        var pump = await AgentNativeRecordPump.OpenAsync(plane, Resume(0) with { Channel = NativeRecordChannel.Stderr }, SecretRedactor.None, NullLogger.Instance, CancellationToken.None);
+
+        for (var index = 0; index < lines; index++)
+            await pump.CaptureDiagnosticAsync($"warn {index}", $"warn {index}", isComplete: true, CancellationToken.None);
+
+        await pump.FlushAsync(CancellationToken.None);
+
+        plane.LargestRecordBatch.ShouldBeLessThanOrEqualTo(AgentNativeRecordPump.MaxBuffered,
+            customMessage: $"the diagnostic path retained {plane.LargestRecordBatch} frames in one batch against a cap of {AgentNativeRecordPump.MaxBuffered} — routing stderr through the pump must not reintroduce the unbounded accumulation the pump removed for stdout");
+        plane.Records.Count.ShouldBe(lines, customMessage: "bounding retention must not cost a diagnostic line — a harness's own error output is the thing this makes durable");
+        plane.Batches.ShouldBeGreaterThan(1, customMessage: "a stream far longer than the cap must have been flushed more than once, or the cap never fired at all");
+    }
+
+    /// <summary>
+    /// What a diagnostic the reader had to CUT becomes. A line longer than the reader's own pass is delivered in
+    /// pieces so the drain can get past it at all, and the piece is recorded as the partial it is: a reader of this
+    /// stream that stops on the first record must be able to see that it holds half a frame. Two final records would
+    /// assert two diagnostics where the harness wrote one.
+    ///
+    /// <para>And the cursor stays TRUE across the cut. A cut line carried no terminator byte, so none is counted for
+    /// it — count one and the continuation's own record claims a byte range starting one past where the reader
+    /// resumed, which is how the recorded head and the resume position stop being comparable at all.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_diagnostic_the_reader_cut_is_recorded_as_a_partial_and_costs_the_cursor_no_terminator()
+    {
+        var plane = new RecordingPlane();
+        var pump = await AgentNativeRecordPump.OpenAsync(plane, Resume(0) with { Channel = NativeRecordChannel.Stderr }, SecretRedactor.None, NullLogger.Instance, CancellationToken.None);
+
+        await pump.CaptureDiagnosticAsync("half a stack", "half a stack", isComplete: false, CancellationToken.None);
+        await pump.CaptureDiagnosticAsync(" trace", " trace", isComplete: true, CancellationToken.None);
+        await pump.FlushAsync(CancellationToken.None);
+
+        plane.Records.Select(record => record.Frame.IsFinal).ShouldBe(new[] { false, true },
+            customMessage: "a cut recorded as final is a durable claim that the harness emitted a diagnostic ending mid-word, and nothing downstream could afterwards tell it from one that did");
+        plane.Records.Select(record => record.Frame.ByteOffset).ShouldBe(new long[] { 0, 12 },
+            customMessage: "the cut consumed 12 source bytes and no terminator, so its continuation begins at 12 — counting a terminator the stream never carried drifts every later frame's geometry off the source");
+    }
+
     private static Task<AgentNativeRecordPump> OpenAsync(INativeRecordPlane plane) =>
         AgentNativeRecordPump.OpenAsync(plane, Request(), SecretRedactor.None, NullLogger.Instance, CancellationToken.None);
 
@@ -428,8 +650,9 @@ public sealed class AgentNativeRecordPumpTests
             return Accept(batch);
         }
 
+        /// <summary>The stored reduction, as the deployed plane keeps it: whatever the last accepted write carried. A second opening therefore RESUMES the first one's fold, which is the only way a test can show a fact surviving a worker replacement.</summary>
         public Task<HarnessReductionCheckpointV1?> ReadCheckpointAsync(Guid teamId, Guid executionId, string reducerKind, CancellationToken cancellationToken) =>
-            Task.FromResult<HarnessReductionCheckpointV1?>(null);
+            Task.FromResult(Checkpoints.LastOrDefault(checkpoint => checkpoint.ExecutionId == executionId && checkpoint.ReducerKind == reducerKind));
 
         public Task WriteReducedAsync(NativeRecordBatch batch, HarnessReductionCheckpointV1 checkpoint, CancellationToken cancellationToken)
         {
@@ -547,6 +770,43 @@ public sealed class AgentNativeRecordPumpTests
     {
         public override IReadOnlyList<AgentEvent> ParseEvents(string rawLine) =>
             new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine } };
+    }
+
+    /// <summary>
+    /// A harness that STATES its session in one of its own structured frames — the shape Claude Code's
+    /// <c>system</c>/<c>init</c> line and Codex's <c>thread.started</c> line both have. Its reader answers only for
+    /// that frame, exactly as the real ones do.
+    /// </summary>
+    private sealed class SessionNamingHarness : StubHarness, IAgentGroundedFrameReader
+    {
+        internal static readonly Guid Session = Guid.Parse("3f2504e0-4f89-41d3-9a0c-0305e82c3301");
+
+        internal static string Frame => FrameWith("none");
+
+        internal static string FrameWith(string apiKey) => $"{{\"type\":\"session\",\"session_id\":\"{Session:D}\",\"api_key\":\"{apiKey}\"}}";
+
+        public override IReadOnlyList<AgentEvent> ParseEvents(string rawLine) =>
+            new[] { new AgentEvent { Kind = AgentEventKind.Started, Text = "Session started" } };
+
+        public GroundedSessionFrame? ReadSessionFrame(string nativeFrame) =>
+            nativeFrame.Contains($"\"session_id\":\"{Session:D}\"", StringComparison.Ordinal) ? new GroundedSessionFrame { SessionId = Session } : null;
+    }
+
+    /// <summary>A grounded reader that fails. New work must never be able to fail a run that would otherwise succeed.</summary>
+    private sealed class ThrowingGroundedHarness : StubHarness, IAgentGroundedFrameReader
+    {
+        public override IReadOnlyList<AgentEvent> ParseEvents(string rawLine) =>
+            new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine } };
+
+        public GroundedSessionFrame? ReadSessionFrame(string nativeFrame) => throw new InvalidOperationException("the grounded reader could not read this frame");
+    }
+
+    /// <summary>A harness that STATES the all-zero session, built by hand so it bypasses <see cref="GroundedSessionFrame.For"/> — the shape a third-party adapter reading a zeroed field reaches without meaning to.</summary>
+    private sealed class ZeroSessionHarness : StubHarness, IAgentGroundedFrameReader
+    {
+        public override IReadOnlyList<AgentEvent> ParseEvents(string rawLine) => Array.Empty<AgentEvent>();
+
+        public GroundedSessionFrame? ReadSessionFrame(string nativeFrame) => new() { SessionId = Guid.Empty };
     }
 
     private sealed class KeyedHarness : StubHarness

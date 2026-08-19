@@ -2,6 +2,7 @@ using CodeSpace.Core.Settings;
 using System.Diagnostics;
 using System.Linq;
 using System.Net.Sockets;
+using System.Text;
 using CodeSpace.Core.Services.Agents.AgentRunLogging;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Sandbox;
@@ -127,6 +128,284 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
 
         result.Stderr.ShouldContain("err-on-spool");
         lines.ShouldBeEmpty();
+    }
+
+    /// <summary>A run whose whole output is diagnostics — built here rather than through the shared cross-platform builders, because the tests below are POSIX-guarded and need a shell loop those builders do not express.</summary>
+    private static SandboxSpec Diagnostics(string script) => new() { Command = "/bin/sh", Args = new[] { "-c", script }, TimeoutSeconds = 30 };
+
+    /// <summary>Drain a source under the given budget, collecting what it delivers. The byte budget defaults past any fixture here, so a test that does not name one is testing the line budget alone.</summary>
+    private async Task<(IReadOnlyList<SandboxDiagnosticLine> Delivered, long Advanced)> DrainAsync(SandboxHandle handle, long fromOffset, int maxLines, int maxBytes = 64 * 1024 * 1024)
+    {
+        var delivered = new List<SandboxDiagnosticLine>();
+        var budget = new SandboxDiagnosticBudget { MaxLines = maxLines, MaxBytes = maxBytes };
+        var advanced = await ((ISandboxDurableDiagnosticSource)_runner).DrainDiagnosticsAsync(handle, fromOffset, budget, (line, _) => { delivered.Add(line); return Task.CompletedTask; }, CancellationToken.None);
+
+        return (delivered, advanced);
+    }
+
+    /// <summary>Just the text of what a drain delivered, for the cases whose subject is the lines and not their completeness.</summary>
+    private static IReadOnlyList<string> Texts(IReadOnlyList<SandboxDiagnosticLine> delivered) => delivered.Select(line => line.Text).ToArray();
+
+    /// <summary>
+    /// The diagnostic sibling: the spooled stderr delivered LINE BY LINE. This is what makes a harness's own
+    /// diagnostics durable — they used to be read whole into one string on every terminal path and then dropped on the
+    /// floor by the executor's mapping, so they survived only as long as the spool did.
+    /// </summary>
+    [Fact]
+    public async Task Diagnostics_are_delivered_line_by_line_from_the_spool()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var handle = await LaunchAsync(Diagnostics("printf 'warn one\\nwarn two\\n' >&2"));
+        await AttachCollectAsync(handle);
+
+        var (delivered, advanced) = await DrainAsync(handle, 0, maxLines: 64);
+
+        Texts(delivered).ShouldBe(new[] { "warn one", "warn two" });
+        delivered.ShouldAllBe(line => line.IsComplete, "the source terminated both, so neither is a cut the caller has to record as half a frame");
+        advanced.ShouldBe(new FileInfo(Path.Combine(handle.SpoolDirectory, "err.log")).Length,
+            customMessage: "the drain answers where the next one resumes, so a second drain of the same process delivers nothing rather than everything again");
+
+        var second = await DrainAsync(handle, advanced, maxLines: 64);
+
+        second.Advanced.ShouldBe(advanced);
+        second.Delivered.ShouldBeEmpty();
+    }
+
+    /// <summary>
+    /// The drain is BOUNDED by the caller's budget, and the bound is what keeps a round's completion path a constant
+    /// rather than a function of how much stderr the run produced. A hundred-megabyte <c>set -x</c> trace must not be
+    /// able to hold a computed-but-unmapped result behind a row-per-line write.
+    ///
+    /// <para>An exhausted budget is a POSITION, not a loss: the answered offset is where the next drain resumes, and
+    /// resuming there delivers exactly the lines the first one stopped short of.</para>
+    /// </summary>
+    [Fact]
+    public async Task The_drain_stops_at_the_callers_budget_and_answers_where_to_resume()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var handle = await LaunchAsync(Diagnostics("i=0; while [ $i -lt 12 ]; do printf 'warn %d\\n' $i >&2; i=$((i+1)); done"));
+        await AttachCollectAsync(handle);
+
+        var (first, advanced) = await DrainAsync(handle, 0, maxLines: 5);
+
+        Texts(first).ShouldBe(new[] { "warn 0", "warn 1", "warn 2", "warn 3", "warn 4" },
+            customMessage: "the budget is a hard stop, not a hint: without it one line of stderr is one durable row and the drain is as long as the run was chatty");
+        advanced.ShouldBe(first.Sum(line => line.Text.Length + 1),
+            customMessage: "the answered offset must cover exactly the lines delivered — over-claiming it silently drops the remainder, under-claiming it re-delivers a line the caller already recorded");
+
+        var (rest, _) = await DrainAsync(handle, advanced, maxLines: 64);
+
+        Texts(rest).ShouldBe(Enumerable.Range(5, 7).Select(index => $"warn {index}").ToArray(),
+            customMessage: "an exhausted budget parks the remainder at a resumable position rather than losing it");
+    }
+
+    /// <summary>
+    /// A line longer than one read pass must never be delivered as two. The reader works in
+    /// <c>MaxReadChunk</c>-bounded passes, so a line straddling that boundary would otherwise be cut at an arbitrary
+    /// byte — two records for one diagnostic, each side of the cut opening or closing on a half-decoded character.
+    ///
+    /// <para>Written straight into the spool rather than produced by a shell loop: what is under test is the READER's
+    /// chunking, and 24 MiB through a pipe would buy nothing but seconds.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_line_straddling_a_read_chunk_is_delivered_whole()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var handle = await LaunchAsync(Diagnostics("printf 'placeholder\\n' >&2"));
+        await AttachCollectAsync(handle);
+
+        // Three 5 MiB lines: the second one spans the 8 MiB chunk boundary, and the third starts past it.
+        var written = Enumerable.Range(0, 3).Select(index => new string((char)('a' + index), 5 * 1024 * 1024)).ToArray();
+        await File.WriteAllTextAsync(Path.Combine(handle.SpoolDirectory, "err.log"), string.Join('\n', written) + "\n");
+
+        var (delivered, advanced) = await DrainAsync(handle, 0, maxLines: 64);
+
+        Texts(delivered).ShouldBe(written, customMessage: "a line cut at the read-chunk boundary arrives as two records, and the split is a raw byte cut");
+        delivered.ShouldAllBe(line => line.IsComplete, "every one of these IS terminated in the source — a straddling line is rejoined by the reader, not reported as a cut");
+        advanced.ShouldBe(new FileInfo(Path.Combine(handle.SpoolDirectory, "err.log")).Length);
+    }
+
+    /// <summary>
+    /// The pure boundary rule the chunked reader turns on, pinned directly because its hard cases need megabytes to
+    /// reach through the file: a pass that does not reach the end of the source stops at its LAST newline, and one that
+    /// holds no newline at all consumes the pass ANYWAY and reports that it did not end a line.
+    ///
+    /// <para>That last row is the one that matters. Consuming nothing there is not a delay, it is a permanent stop: the
+    /// pass can never hold a newline however often it is retried, so the drain answers the same offset, its caller
+    /// reads that as a finished stream, and every diagnostic after one over-long line is unreachable while the run
+    /// records a clean drain.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("one\ntwo\nthree", 999, false, 8, true)]
+    [InlineData("one\ntwo\nthree", 999, true, 13, true)]
+    [InlineData("one\ntwo\nthree", 2, false, 8, true)]
+    [InlineData("one\ntwo\nthree", 1, false, 4, true)]
+    [InlineData("no newline here", 999, true, 15, true)]
+    // A line no pass can terminate: the pass is consumed, and the caller is told it holds part of a line.
+    [InlineData("no newline here", 999, false, 15, false)]
+    public void A_read_pass_consumes_only_whole_lines_unless_it_reaches_the_end(string text, int maxLines, bool reachesEnd, int expectedBytes, bool expectedEndsLine)
+    {
+        var buffer = Encoding.UTF8.GetBytes(text);
+
+        var (bytes, endsLine) = LocalProcessRunner.DiagnosticBoundary(buffer, buffer.Length, maxLines, reachesEnd);
+
+        bytes.ShouldBe(expectedBytes,
+            customMessage: "a pass that consumes past its last newline while the source continues hands the caller half a line, and one that consumes NOTHING ends the drain at that byte for good");
+        endsLine.ShouldBe(expectedEndsLine,
+            customMessage: "a cut reported as a whole line becomes two durable diagnostics where the harness wrote one");
+    }
+
+    /// <summary>
+    /// Where a FORCED cut lands, decided in bytes, so the one case that cannot stop at a newline still cannot open or
+    /// close on half a character. The mirror of <see cref="LocalProcessRunner.TailStart"/> at the other end of a buffer,
+    /// and pinned the same way — reaching it through a real spool costs megabytes for a question about three bytes.
+    ///
+    /// <para>The rule is deliberately conservative: it also defers a character that ENDS exactly at the cut, because
+    /// telling that from a truncated one costs a length table for three bytes the next pass reads anyway. What it may
+    /// never do is answer zero, which is why the all-continuation row is here — a binary blob on a diagnostic stream
+    /// has no boundary to find, and a reader that stopped there would strand the rest of the file.</para>
+    /// </summary>
+    [Theory]
+    // Ends on ASCII — nothing to defer.
+    [InlineData(new byte[] { 0x61, 0x62 }, 2)]
+    [InlineData(new byte[] { 0xe2, 0x98, 0x83, 0x61 }, 4)]
+    // Ends inside a 3-byte sequence: back off its continuation bytes and its lead byte.
+    [InlineData(new byte[] { 0x61, 0xe2, 0x98 }, 1)]
+    [InlineData(new byte[] { 0x61, 0xe2 }, 1)]
+    // Ends ON a whole character: deferred to the next pass rather than measured.
+    [InlineData(new byte[] { 0x61, 0xe2, 0x98, 0x83 }, 1)]
+    // No boundary anywhere: take the pass rather than nothing, because progress is the point.
+    [InlineData(new byte[] { 0x83, 0x98 }, 2)]
+    public void A_forced_cut_lands_on_a_character_boundary_and_never_on_nothing(byte[] pass, int expected)
+    {
+        var end = LocalProcessRunner.WholeCharacters(pass, pass.Length);
+
+        end.ShouldBe(expected);
+        end.ShouldBeGreaterThan(0,
+            customMessage: "a forced cut of zero bytes is the dead stop this method exists to prevent");
+    }
+
+    /// <summary>
+    /// The defect this closes, end to end: ONE diagnostic longer than a read pass used to end the drain at that byte
+    /// permanently and silently — the reader answered the same offset, the drain read that as a finished stream, and
+    /// every line after it was lost while the run recorded a clean finish. A harness dumping a stack, a payload or a
+    /// minified blob is exactly that input.
+    ///
+    /// <para>What the over-long line becomes is a deliberate choice: a frame the reader says it CUT, plus its
+    /// continuation. Splicing it silently into two complete-looking lines would put two diagnostics into the durable
+    /// stream where the harness wrote one.</para>
+    ///
+    /// <para>Written straight into the spool rather than produced by a shell loop, for the same reason the straddling
+    /// fixture above is: what is under test is the READER.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_line_longer_than_a_read_pass_is_cut_forward_rather_than_ending_the_drain()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var handle = await LaunchAsync(Diagnostics("printf 'placeholder\\n' >&2"));
+        await AttachCollectAsync(handle);
+
+        // 9 MiB with no line break anywhere in it — longer than the 8 MiB read pass, so no pass can terminate it.
+        var overlong = new string('x', 9 * 1024 * 1024);
+        await File.WriteAllTextAsync(Path.Combine(handle.SpoolDirectory, "err.log"), overlong + "\nafter-the-long-line\n");
+
+        var (delivered, advanced) = await DrainAsync(handle, 0, maxLines: 64);
+
+        Texts(delivered).ShouldContain("after-the-long-line",
+            customMessage: $"the drain delivered {delivered.Count} lines and never reached the diagnostic AFTER the over-long one: it stopped at that byte, and because a stopped drain answers the offset it started from, its caller reads the strand as a finished stream");
+        advanced.ShouldBe(new FileInfo(Path.Combine(handle.SpoolDirectory, "err.log")).Length,
+            customMessage: "an offset short of the source is a drain that parked without a budget saying so");
+
+        delivered[0].IsComplete.ShouldBeFalse(
+            customMessage: "the first piece is half a line, and a caller recording it as whole writes a diagnostic the harness never produced");
+        delivered[1].IsComplete.ShouldBeTrue(
+            customMessage: "the remainder IS terminated in the source, so it completes the frame the cut opened");
+        string.Concat(delivered[0].Text, delivered[1].Text).ShouldBe(overlong,
+            customMessage: "the two pieces must rejoin into exactly what the harness wrote, with nothing dropped or doubled at the cut");
+    }
+
+    /// <summary>
+    /// The BYTE half of the drain's budget. A line budget alone bounds only the row count: two thousand lines of a
+    /// megabyte each is two thousand rows and two gigabytes of payload, which is the dimension the caller's delay is
+    /// actually paid in. So the budget binds in bytes too, and an exhausted byte budget parks at a resumable position
+    /// exactly as an exhausted line budget does.
+    /// </summary>
+    [Fact]
+    public async Task The_drain_stops_at_the_callers_byte_budget_and_answers_where_to_resume()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var handle = await LaunchAsync(Diagnostics("i=0; while [ $i -lt 12 ]; do printf 'warn %d\\n' $i >&2; i=$((i+1)); done"));
+        await AttachCollectAsync(handle);
+
+        // Two whole lines of "warn N\n" and not a byte more.
+        var (first, advanced) = await DrainAsync(handle, 0, maxLines: 64, maxBytes: 14);
+
+        Texts(first).ShouldBe(new[] { "warn 0", "warn 1" },
+            customMessage: "without a byte bound the frame ceiling lets a run write megabytes per row, and the round's outcome waits behind all of it");
+        advanced.ShouldBe(14);
+
+        var (rest, _) = await DrainAsync(handle, advanced, maxLines: 64);
+
+        Texts(rest).ShouldBe(Enumerable.Range(2, 10).Select(index => $"warn {index}").ToArray(),
+            customMessage: "an exhausted byte budget parks the remainder at a resumable position rather than losing it");
+    }
+
+    /// <summary>
+    /// The retention fix. The terminal read used to be <c>File.ReadAllTextAsync</c> over the whole spooled stderr — an
+    /// accumulator that grew with the run, the same shape removed twice before from the transcript and the event
+    /// buffer. It is now a bounded tail, and the bound has to actually bind while staying byte-identical below it.
+    /// </summary>
+    [Fact]
+    public async Task The_buffered_stderr_excerpt_is_bounded_and_cut_at_a_line_boundary()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // 4000 lines of 40 bytes each ≈ 160 KiB, comfortably past the 64 KiB excerpt cap.
+        var handle = await LaunchAsync(Diagnostics("i=0; while [ $i -lt 4000 ]; do printf 'diagnostic-line-%034d\\n' $i >&2; i=$((i+1)); done"));
+
+        var (result, _) = await AttachCollectAsync(handle);
+
+        var spooled = new FileInfo(Path.Combine(handle.SpoolDirectory, "err.log")).Length;
+        spooled.ShouldBeGreaterThan(result.Stderr.Length,
+            customMessage: $"the spool holds {spooled} bytes and the excerpt {result.Stderr.Length}; if they matched, the terminal read is still pulling the whole stream into memory and still grows with the run");
+        result.Stderr.Length.ShouldBeLessThanOrEqualTo(64 * 1024);
+        result.Stderr.ShouldEndWith("diagnostic-line-" + 3999.ToString("D34") + "\n",
+            customMessage: "a diagnostic excerpt that dropped the END would throw away the last thing a failing process managed to say");
+        result.Stderr.Split('\n')[0].ShouldStartWith("diagnostic-line-",
+            customMessage: "a tail holding newlines opens after one of them, so the excerpt never opens mid-line — and a newline is a byte boundary in UTF-8, so that cut cannot split a character either");
+    }
+
+    /// <summary>
+    /// Where the over-cap excerpt begins, decided in BYTES. The tail buffer starts at an arbitrary byte of the source,
+    /// so the previous rule — decode the buffer, then cut at the first newline — was only safe for a tail that HAD a
+    /// newline. One long JSON dump, a minified stack, a progress stream that never terminates a line: those reach the
+    /// same branch and used to be returned as the raw byte cut, decoded from a buffer opening mid-character.
+    ///
+    /// <para>Pinned on the rule rather than through a terminal path: reaching that branch end-to-end needs a spool
+    /// whose last 64 KiB holds no newline, which is minutes of shell for a question about six bytes.</para>
+    /// </summary>
+    [Theory]
+    // A newline anywhere wins: the excerpt opens on a whole line, whatever the buffer began mid-way through.
+    [InlineData(new byte[] { 0xa9, 0x0a, 0x61, 0x62 }, 2)]
+    [InlineData(new byte[] { 0x0a, 0x61 }, 1)]
+    // No newline to cut at, so the cut is the nearest CHARACTER boundary: skip the continuation bytes (10xxxxxx).
+    [InlineData(new byte[] { 0xa9, 0x61, 0x62 }, 1)]
+    [InlineData(new byte[] { 0x9e, 0x98, 0x83, 0x61 }, 3)]
+    // Already on a boundary — nothing to skip, and a lead byte must never be mistaken for a continuation one.
+    [InlineData(new byte[] { 0x61, 0x62 }, 0)]
+    [InlineData(new byte[] { 0xe2, 0x98, 0x83 }, 0)]
+    public void The_over_cap_excerpt_opens_on_a_character_boundary_even_with_no_line_to_cut_at(byte[] tail, int expected)
+    {
+        var start = LocalProcessRunner.TailStart(tail, tail.Length);
+
+        start.ShouldBe(expected);
+        Encoding.UTF8.GetString(tail, start, tail.Length - start).ShouldNotContain("�",
+            customMessage: "the excerpt opened inside a UTF-8 sequence, so the first thing a reader sees of a run's diagnostics is replacement noise");
     }
 
     [Fact]

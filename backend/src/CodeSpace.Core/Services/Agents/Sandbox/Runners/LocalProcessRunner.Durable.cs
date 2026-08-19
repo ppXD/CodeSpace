@@ -35,6 +35,9 @@ public sealed partial class LocalProcessRunner
     private const string StdoutSourceKey = "stdout";
     private const string StderrSourceKey = "stderr";
     private const int MaximumDurableLogReadBytes = 4 * 1024 * 1024;
+
+    /// <summary>How much of a run's diagnostics rides back in memory on <see cref="SandboxResult.Stderr"/>. A ceiling rather than the whole file, so the terminal read stops growing with the run. The excerpt is the END, which is where a failing process says why; the whole spooled stream stays on disk for the run's spool life either way, and a caller that wants more of it than this reads it through <see cref="DrainDiagnosticsAsync"/>.</summary>
+    private const int MaximumBufferedDiagnosticBytes = 64 * 1024;
     private static readonly TimeSpan ProducerExitWait = TimeSpan.FromSeconds(2);
     private const int SourceQuiescenceChecks = 2;
 
@@ -540,7 +543,7 @@ public sealed partial class LocalProcessRunner
         return Task.FromResult(new SandboxProbe { State = state });
     }
 
-    /// <summary>Final drain (incl. a trailing partial line) + buffered stderr, mapped to Success/Failed by the exit code.</summary>
+    /// <summary>Final drain (incl. a trailing partial line) + the bounded stderr excerpt, mapped to Success/Failed by the exit code.</summary>
     private async Task<SandboxResult> CompleteFromSpoolAsync(SandboxHandle handle, long offset, int exitCode, Func<string, CancellationToken, Task> onLine, CancellationToken ct)
     {
         var producerExited = await WaitForProducerExitAsync(handle, ct).ConfigureAwait(false);
@@ -550,7 +553,7 @@ public sealed partial class LocalProcessRunner
 
         await EmitNewLinesAsync(Path.Combine(handle.SpoolDirectory, StdoutFile), offset, onLine, drainPartial: true, ct).ConfigureAwait(false);
 
-        var stderr = await ReadAllSafeAsync(Path.Combine(handle.SpoolDirectory, StderrFile)).ConfigureAwait(false);
+        var stderr = await ReadDiagnosticTailAsync(Path.Combine(handle.SpoolDirectory, StderrFile)).ConfigureAwait(false);
 
         return new SandboxResult { Status = exitCode == 0 ? SandboxStatus.Success : SandboxStatus.Failed, ExitCode = exitCode, Stdout = "", Stderr = stderr };
     }
@@ -564,7 +567,7 @@ public sealed partial class LocalProcessRunner
 
         await EmitNewLinesAsync(Path.Combine(handle.SpoolDirectory, StdoutFile), offset, onLine, drainPartial: true, ct).ConfigureAwait(false);
 
-        var stderr = await ReadAllSafeAsync(Path.Combine(handle.SpoolDirectory, StderrFile)).ConfigureAwait(false);
+        var stderr = await ReadDiagnosticTailAsync(Path.Combine(handle.SpoolDirectory, StderrFile)).ConfigureAwait(false);
 
         return new SandboxResult { Status = SandboxStatus.TimedOut, ExitCode = -1, Stdout = "", Stderr = stderr };
     }
@@ -578,7 +581,7 @@ public sealed partial class LocalProcessRunner
 
         await EmitNewLinesAsync(Path.Combine(handle.SpoolDirectory, StdoutFile), offset, onLine, drainPartial: true, ct).ConfigureAwait(false);
 
-        var stderr = await ReadAllSafeAsync(Path.Combine(handle.SpoolDirectory, StderrFile)).ConfigureAwait(false);
+        var stderr = await ReadDiagnosticTailAsync(Path.Combine(handle.SpoolDirectory, StderrFile)).ConfigureAwait(false);
 
         return new SandboxResult { Status = SandboxStatus.Stalled, ExitCode = -1, Stdout = "", Stderr = stderr };
     }
@@ -597,9 +600,131 @@ public sealed partial class LocalProcessRunner
 
         await EmitNewLinesAsync(Path.Combine(handle.SpoolDirectory, StdoutFile), offset, onLine, drainPartial: true, ct).ConfigureAwait(false);
 
-        var stderr = await ReadAllSafeAsync(Path.Combine(handle.SpoolDirectory, StderrFile)).ConfigureAwait(false);
+        var stderr = await ReadDiagnosticTailAsync(Path.Combine(handle.SpoolDirectory, StderrFile)).ConfigureAwait(false);
 
         return new SandboxResult { Status = SandboxStatus.Failed, ExitCode = -1, Stdout = "", Stderr = stderr };
+    }
+
+    /// <summary>
+    /// Deliver the spooled stderr line by line, holding one read pass at a time and never the stream — peak retention
+    /// is a constant of this runner rather than a function of how much the harness wrote.
+    ///
+    /// <para>Bounded in both dimensions the caller pays in. <see cref="SandboxDiagnosticBudget.MaxLines"/> stops the
+    /// drain on the row count and <see cref="SandboxDiagnosticBudget.MaxBytes"/> on the payload; the answered offset is
+    /// where the next drain resumes, so an exhausted budget parks the remainder rather than losing it. Within a pass
+    /// the read stops at the last newline unless the pass reaches the end of the source, with one exception below — a
+    /// line straddling a chunk boundary would otherwise be delivered as two, each side of the byte cut opening or
+    /// closing on a half-decoded character.</para>
+    ///
+    /// <para>A pass that can hold no newline at all is the exception, and it CONSUMES rather than stops — see
+    /// <see cref="DiagnosticBoundary"/>. Such a pass holds exactly one line (a pass with a newline in it ends at that
+    /// newline), so the incomplete flag belongs to the whole of what it delivered.</para>
+    ///
+    /// <para>The final line of the source is delivered even without a terminator: this drains a stream whose producer
+    /// is gone, and what a crashing process gets out last is usually the line it never finished.</para>
+    /// </summary>
+    public async Task<long> DrainDiagnosticsAsync(SandboxHandle handle, long fromOffset, SandboxDiagnosticBudget budget, Func<SandboxDiagnosticLine, CancellationToken, Task> onLine, CancellationToken cancellationToken)
+    {
+        var path = Path.Combine(handle.SpoolDirectory, StderrFile);
+        var offset = fromOffset;
+        var lineBudget = budget.MaxLines;
+        var byteBudget = budget.MaxBytes;
+
+        while (lineBudget > 0 && byteBudget > 0)
+        {
+            var (lines, advanced, endsLine) = ReadDiagnosticLines(path, offset, lineBudget, byteBudget);
+
+            if (advanced == offset) return offset;
+
+            foreach (var line in lines) await onLine(new SandboxDiagnosticLine(line, endsLine), cancellationToken).ConfigureAwait(false);
+
+            lineBudget -= lines.Count;
+            byteBudget -= (int)(advanced - offset);
+            offset = advanced;
+        }
+
+        return offset;
+    }
+
+    /// <summary>
+    /// One bounded pass of the diagnostics spool: the bytes appended since <paramref name="offset"/>, capped at
+    /// <see cref="MaxReadChunk"/>, at <paramref name="maxBytes"/> and at <paramref name="maxLines"/> whole lines, split
+    /// into lines with the advanced offset that covers exactly them and whether the last of them was terminated. Its
+    /// own reader rather than <see cref="ReadNewLines"/> because that one has no line budget and its final-drain mode
+    /// cuts wherever the chunk ends.
+    /// </summary>
+    private static (IReadOnlyList<string> Lines, long NewOffset, bool EndsLine) ReadDiagnosticLines(string path, long offset, int maxLines, int maxBytes)
+    {
+        if (!File.Exists(path)) return (Array.Empty<string>(), offset, true);
+
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+
+        if (fs.Length <= offset) return (Array.Empty<string>(), offset, true);
+
+        fs.Seek(offset, SeekOrigin.Begin);
+        var buffer = new byte[(int)Math.Min(Math.Min(fs.Length - offset, MaxReadChunk), maxBytes)];
+        var read = fs.Read(buffer, 0, buffer.Length);
+
+        var (boundary, endsLine) = DiagnosticBoundary(buffer, read, maxLines, reachesEnd: offset + read >= fs.Length);
+        if (boundary == 0) return (Array.Empty<string>(), offset, true);
+
+        return (SplitLines(Encoding.UTF8.GetString(buffer, 0, boundary)), offset + boundary, endsLine);
+    }
+
+    /// <summary>
+    /// How many bytes this pass consumes, and whether what it consumed ENDS a line: through the
+    /// <paramref name="maxLines"/>-th newline when the pass holds that many; otherwise every byte read when the pass
+    /// <paramref name="reachesEnd"/> of the source (the producer is gone, so an unterminated last line is a whole
+    /// diagnostic), and through the LAST newline when it does not.
+    ///
+    /// <para>The remaining case is a pass that neither reaches the end of the source nor holds a single newline — one
+    /// diagnostic line longer than a read pass. It consumes the pass ANYWAY, back to its last whole character, and
+    /// answers that it did not end a line. Consuming nothing there would be a dead stop, not a delay: the pass can
+    /// never hold a newline however often it is retried, so the caller sees the same offset twice, reads that as a
+    /// finished stream, and every diagnostic after the long line becomes unreachable through this seam while the record
+    /// says the drain completed. The sibling stdout resolver forces the same progress for the same reason
+    /// (<see cref="ResolveBoundary"/>). What the cut costs is that the line arrives as a frame plus its continuation
+    /// instead of as one frame — which the caller is told, and can record as the partial it is.</para>
+    /// </summary>
+    internal static (int Bytes, bool EndsLine) DiagnosticBoundary(byte[] buffer, int read, int maxLines, bool reachesEnd)
+    {
+        var lastNewline = 0;
+        var lines = 0;
+
+        for (var i = 0; i < read; i++)
+        {
+            if (buffer[i] != (byte)'\n') continue;
+
+            lastNewline = i + 1;
+
+            if (++lines == maxLines) return (lastNewline, true);
+        }
+
+        if (reachesEnd) return (read, true);
+
+        return lastNewline > 0 ? (lastNewline, true) : (WholeCharacters(buffer, read), false);
+    }
+
+    /// <summary>
+    /// The prefix of the pass that holds no half-decoded character, so a forced cut never puts a replacement character
+    /// at either side of itself: back off over the trailing continuation bytes (<c>10xxxxxx</c>) the cut may have split
+    /// off, and over the lead byte in front of them. A character that happens to END exactly at the cut is therefore
+    /// deferred to the next pass rather than measured — at most four bytes for valid UTF-8 (a 4-byte sequence defers all four), and a run of stray continuation bytes defers as far back as that run extends, read again from the answered offset, which
+    /// is the same trade <see cref="TailStart"/> makes at the other end of a buffer.
+    ///
+    /// <para>A buffer that is continuation bytes all the way to its start — a binary blob written to a diagnostic
+    /// stream — has no character boundary to find, and the whole pass is taken rather than nothing: progress is what
+    /// this exists to guarantee, and a decode of bytes that are not UTF-8 is lossy wherever it is cut.</para>
+    /// </summary>
+    internal static int WholeCharacters(byte[] buffer, int read)
+    {
+        var end = read;
+
+        while (end > 0 && (buffer[end - 1] & 0xC0) == 0x80) end--;
+
+        if (end > 0 && (buffer[end - 1] & 0x80) != 0) end--;
+
+        return end > 0 ? end : read;
     }
 
     /// <summary>Read the complete lines that landed since <paramref name="offset"/>, emit each, and return the advanced offset.</summary>
@@ -1038,10 +1163,87 @@ public sealed partial class LocalProcessRunner
         catch { return false; }
     }
 
-    private static async Task<string> ReadAllSafeAsync(string path)
+    /// <summary>
+    /// The excerpt of a run's diagnostics that rides back on <see cref="SandboxResult.Stderr"/>: the whole source while
+    /// it fits within <see cref="MaximumBufferedDiagnosticBytes"/>, and its END once it does not.
+    ///
+    /// <para>This used to read the file entire, on every terminal path — retention that grew with the run, the same
+    /// unbounded shape the transcript accumulator and the event buffer each had removed. What is bounded is the
+    /// in-memory excerpt a caller gets back with the result; the source itself is untouched and stays readable through
+    /// <see cref="DrainDiagnosticsAsync"/> for as long as the run's spool lives — one budget at a time, and a line
+    /// longer than a read pass as a frame plus its continuation rather than as one.</para>
+    ///
+    /// <para>Below the cap the decode is the one <c>File.ReadAllTextAsync</c> performs — UTF-8 with byte-order-mark
+    /// detection — over the same bytes, so the excerpt is character-for-character what every caller got before. Both
+    /// branches read through ONE stream, so the size test and the read cannot disagree about a source that changed
+    /// between them. Only the over-cap branch is new, and where it begins is decided in BYTES before anything is
+    /// decoded (<see cref="TailStart"/>) — the buffer starts at an arbitrary byte of the source, so choosing the cut
+    /// after the decode would have meant choosing it inside a string whose first character was already replacement
+    /// noise.</para>
+    /// </summary>
+    private static async Task<string> ReadDiagnosticTailAsync(string path)
     {
-        try { return File.Exists(path) ? await File.ReadAllTextAsync(path).ConfigureAwait(false) : ""; }
+        try
+        {
+            if (!File.Exists(path)) return "";
+
+            await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+
+            if (stream.Length <= MaximumBufferedDiagnosticBytes) return await ReadWholeAsync(stream).ConfigureAwait(false);
+
+            var (bytes, read) = await ReadTailAsync(stream).ConfigureAwait(false);
+            var start = TailStart(bytes, read);
+
+            return Encoding.UTF8.GetString(bytes, start, read - start);
+        }
         catch { return ""; }
+    }
+
+    /// <summary>
+    /// Where the excerpt begins inside the tail buffer, chosen in bytes so the decode can never start mid-character.
+    ///
+    /// <para>After the first newline when the tail holds one: a newline is a byte boundary in UTF-8, so the excerpt
+    /// opens on a whole line. When it holds NONE — one long JSON dump, a minified stack, a progress stream that never
+    /// terminates a line — there is no line boundary to cut at, so the cut is at the nearest CHARACTER boundary
+    /// instead: skip the continuation bytes (<c>10xxxxxx</c>) the buffer may have opened in the middle of. The excerpt
+    /// then begins mid-line, which is what a tail of a source with no lines is, and not with a replacement
+    /// character.</para>
+    /// </summary>
+    internal static int TailStart(byte[] bytes, int read)
+    {
+        for (var i = 0; i < read; i++)
+            if (bytes[i] == (byte)'\n') return i + 1;
+
+        var start = 0;
+        while (start < read && (bytes[start] & 0xC0) == 0x80) start++;
+
+        return start;
+    }
+
+    /// <summary>The source decoded exactly as <c>File.ReadAllTextAsync</c> decodes it, so a diagnostics excerpt within the cap is what it has always been rather than what a hand-rolled decode makes of it.</summary>
+    private static async Task<string> ReadWholeAsync(FileStream stream)
+    {
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, leaveOpen: true);
+
+        return await reader.ReadToEndAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>The last <see cref="MaximumBufferedDiagnosticBytes"/> bytes, UNDECODED — reached only for a source longer than that, which is why the buffer is a constant and not the file's size. Bytes rather than a string because where this buffer may be cut is a question about UTF-8 sequences, which a decoded string has already answered wrongly.</summary>
+    private static async Task<(byte[] Bytes, int Read)> ReadTailAsync(FileStream stream)
+    {
+        var bytes = new byte[MaximumBufferedDiagnosticBytes];
+
+        stream.Seek(stream.Length - bytes.Length, SeekOrigin.Begin);
+
+        var read = 0;
+        while (read < bytes.Length)
+        {
+            var count = await stream.ReadAsync(bytes.AsMemory(read)).ConfigureAwait(false);
+            if (count == 0) break;
+            read += count;
+        }
+
+        return (bytes, read);
     }
 
     /// <summary>Current byte length of a spool file, 0 when it is absent or unreadable — the watchdog's byte-progress probe.</summary>

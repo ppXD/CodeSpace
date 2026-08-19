@@ -48,8 +48,11 @@ public sealed class WorkflowRunNativeRecordSchemaTests
         var ordinal = Index(entity, "ux_workflow_run_native_record_ordinal");
         ordinal.IsUnique.ShouldBeTrue();
         ordinal.Properties.Select(property => property.Name).ShouldBe(new[] { "TeamId", "StreamId", "Ordinal" });
-        Index(entity, "ix_workflow_run_native_record_unprojected").GetFilter().ShouldBe("normalization <> 'Projected'",
-            customMessage: "'which frames could we not interpret' is the question this plane exists to answer, and a full index over every projected frame would grow with the run");
+        Index(entity, "ix_workflow_run_native_record_attempt").Properties.Select(property => property.Name)
+            .ShouldBe(new[] { "TeamId", "AttemptId", "Channel", "IngestedAt", "Id" },
+                customMessage: "the plane's one read is an attempt's recorded head on ONE channel, and every resumed opening pays it — with the channel outside the key the equality prefix is incomplete and the answer costs a walk of every frame the attempt recorded, on every round");
+        Index(entity, "ix_workflow_run_native_record_unprojected").GetFilter().ShouldBe("normalization IN ('Unrecognized', 'Failed')",
+            customMessage: "'which frames could we not interpret' is the question this plane exists to answer. It names the two states that ARE that question rather than 'not Projected': a full index over every projected frame would grow with the run, and one that also caught NotParsed would grow with every diagnostic line every run writes — burying the answer at exactly the size where it matters");
 
         entity.GetCheckConstraints().Select(constraint => constraint.Name).ShouldBe(new[]
         {
@@ -64,6 +67,8 @@ public sealed class WorkflowRunNativeRecordSchemaTests
             customMessage: "a frame that was deliberately never captured has metadata only, so its payload can never be inline bytes");
         Constraint(entity, "ck_workflow_run_native_record_normalization").ShouldContain("normalization = 'Failed' AND normalization_error_code IS NOT NULL",
             customMessage: "'the parser threw' without a reason is a marker nobody can act on");
+        Constraint(entity, "ck_workflow_run_native_record_normalization").ShouldContain("'NotParsed'",
+            customMessage: "a frame nobody asked a parser about — every stderr line — has its own state; recording it as Unrecognized would assert a parse that never ran, and the database would refuse the row outright if this value were not admitted");
     }
 
     [Fact]
@@ -110,11 +115,18 @@ public sealed class WorkflowRunNativeRecordSchemaTests
     [Fact]
     public void Its_migration_travels_with_the_build()
     {
-        DbUpRunner.DiscoverScriptNames().ShouldContain(
+        var scripts = DbUpRunner.DiscoverScriptNames();
+
+        scripts.ShouldContain(
             name => name.EndsWith("0139_workflow_run_native_record.sql", StringComparison.OrdinalIgnoreCase),
             customMessage: "0139_workflow_run_native_record.sql must be discoverable by DbUp. Migrations are copied next " +
                            "to the assembly by the Content item in CodeSpace.Core.csproj; if this one is not there, a " +
                            "deployed image creates neither table and still reports a successful upgrade.");
+        scripts.ShouldContain(
+            name => name.EndsWith("0143_workflow_run_native_record_unparsed_channel.sql", StringComparison.OrdinalIgnoreCase),
+            customMessage: "0143 admits the NotParsed normalization. Without it deployed, the CHECK constraint refuses " +
+                           "every diagnostic frame the executor now records — and the refusal surfaces only as a warning " +
+                           "from a plane that is designed never to fail a run, so nothing else would report it.");
     }
 
     private static CodeSpaceDbContext BuildContext()

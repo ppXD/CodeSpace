@@ -75,7 +75,7 @@ public sealed class WorkflowRunNativeRecord : IEntity<Guid>
     public NativeRecordPayloadEncoding PayloadEncoding { get; set; } = NativeRecordPayloadEncoding.Utf8;
     public NativeRecordRedaction Redaction { get; set; } = NativeRecordRedaction.None;
 
-    /// <summary>Whether this record completes its native frame. False ⇒ a continuation record follows, so a reader that stops here has half a frame and must know it.</summary>
+    /// <summary>Whether this record completes its native frame. False ⇒ a reader that stops here has half a frame and must know it: the rest is in the continuation record that follows, or — where a bounded capture stopped at the cut — still at the source.</summary>
     public bool IsFinal { get; set; } = true;
 
     public NativeRecordNormalization Normalization { get; set; } = NativeRecordNormalization.Unrecognized;

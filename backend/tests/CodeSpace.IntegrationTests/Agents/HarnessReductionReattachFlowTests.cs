@@ -43,6 +43,15 @@ public sealed class HarnessReductionReattachFlowTests
 {
     private const string SixSteps = "for i in 1 2 3 4 5 6; do echo step$i; sleep 0.4; done";
 
+    /// <summary>The session <see cref="SteppingHarness"/> states in its own structured frame — a canonical UUID, as both real harnesses emit.</summary>
+    private static readonly Guid ScriptedSession = Guid.Parse("6b1f0c74-6b0e-4a0b-8d3a-9d2e5f7c1a42");
+
+    /// <summary>The same six steps, preceded by the frame the harness reads its session out of — stated ONCE, at the start, which is the position a tail-only fold cannot recover from.</summary>
+    private static string SessionThenSixSteps => $"echo '{SteppingHarness.SessionFrame}'; {SixSteps}";
+
+    /// <summary>A run whose diagnostics and exit code are both fixed, so two runs of it differ only in whether the plane was deployed.</summary>
+    private const string StepThenDiagnosticsThenFail = "printf 'step1\\n'; printf 'boom one\\nboom two\\n' >&2; exit 3";
+
     private readonly PostgresFixture _fixture;
 
     public HarnessReductionReattachFlowTests(PostgresFixture fixture) => _fixture = fixture;
@@ -94,6 +103,106 @@ public sealed class HarnessReductionReattachFlowTests
             customMessage: "a resumed reduction that is not the whole-stream fold is exactly today's defect: the tail folded into a state nobody can tell apart from the right one");
         reduced.PrefixDigest.ShouldNotBe(WholeStreamFold(afterRestart.ExecutionId, TailOf(frames, recordsBeforeRestart)).PrefixDigest,
             customMessage: "and the digest of the tail ALONE must differ, or the assertion above would pass for a fold that recovered nothing");
+    }
+
+    /// <summary>
+    /// The headline this lane exists for: a NAMED fact survives a worker replacement, end to end. Until the grounded
+    /// projector landed, every projection in production was <c>Derived</c> and the fold takes a named fact only from an
+    /// exactly grounded one — so a re-attach recovered the counts, the channel set and the prefix digest, and nothing
+    /// that named anything.
+    ///
+    /// <para>The falsifier is the last assertion: the fold of the tail ALONE must not know the session. The harness
+    /// states it once, in the first frame, before the worker is torn down — so a resume that recovered nothing would
+    /// answer null and this test would fail rather than pass on a run that happened to restate it.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_session_stated_before_a_worker_replacement_survives_the_re_attach()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+
+        await TearDownMidStreamAsync(runId, SessionThenSixSteps);
+
+        var beforeRestart = await ReadCheckpointAsync(runId);
+        Reduced(beforeRestart.ShouldNotBeNull()).FirstSessionId.ShouldBe(ScriptedSession,
+            customMessage: "the live worker must have recorded and folded the session frame before it was torn down, or there is no fact for the re-attach to recover and the rest of this test is about nothing");
+
+        var recordsBeforeRestart = await CountRecordsAsync(runId);
+
+        await ReclaimAsync(runId);
+        await ReattachAsync(runId);
+
+        var afterRestart = await ReadCheckpointAsync(runId);
+        Reduced(afterRestart.ShouldNotBeNull()).FirstSessionId.ShouldBe(ScriptedSession,
+            customMessage: "the replacement worker never saw the frame that named this session; recovering it from the stored reduction is the whole point of the checkpoint");
+
+        var projections = await ProjectionsAsync(runId);
+        var grounded = projections.Where(projection => projection.ProjectionQuality is SemanticProjectionQuality.Exact or SemanticProjectionQuality.RedactedExact).ToList();
+
+        grounded.ShouldHaveSingleItem().SessionId.ShouldBe(ScriptedSession,
+            customMessage: "exactly one frame WAS the harness's session record, and only a projection of that frame may claim the harness's own words");
+        grounded[0].SourceNativeRecordIds.Length.ShouldBe(1,
+            customMessage: "the database refuses an exact claim that cites no frame, and refuses one over a frame that was masked or never captured");
+        projections.Count(projection => projection.ProjectionQuality == SemanticProjectionQuality.Derived).ShouldBeGreaterThan(0,
+            customMessage: "the normalized projections must still be Derived — promoting them is exactly the laundering the quality vocabulary exists to prevent");
+
+        var frames = await RecordedStreamAsync(runId);
+        WholeStreamFold(afterRestart.ExecutionId, TailOf(frames, recordsBeforeRestart)).FirstSessionId.ShouldBeNull(
+            customMessage: "if the tail alone knew the session id, this test would pass over a fold that recovered nothing");
+    }
+
+    /// <summary>
+    /// Stderr, which reached no native record at all: it was read whole into memory on every terminal path and then
+    /// dropped by the executor's mapping, so a harness's own diagnostics died with the spool. They now land as records
+    /// of their own channel, with their own contiguous geometry — and NOT as semantic events, because a parser written
+    /// for the harness's stdout protocol would read a diagnostic as an event nobody emitted.
+    ///
+    /// <para>The run's own outcome is asserted against the SAME run with no plane at all, error text included. That is
+    /// the constraint, not politeness: this plane is optional, and a diagnostics path that changed an error message
+    /// would have made a shadow plane load bearing.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_runs_diagnostics_become_records_of_their_own_channel_and_leave_its_outcome_untouched()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var withPlane = await CreateScriptedRunAsync(teamId);
+        var bare = await CreateScriptedRunAsync(teamId);
+
+        await ExecuteAsync(withPlane, new SteppingHarness(StepThenDiagnosticsThenFail));
+        await ExecuteAsync(bare, new SteppingHarness(StepThenDiagnosticsThenFail), plane: _ => null);
+
+        using var scope = _fixture.BeginScope();
+        var runs = scope.Resolve<IAgentRunService>();
+
+        var observed = await runs.GetAsync(withPlane, CancellationToken.None);
+        var expected = await runs.GetAsync(bare, CancellationToken.None);
+
+        observed.Status.ShouldBe(expected.Status);
+        observed.Error.ShouldBe(expected.Error,
+            customMessage: "the run's error text must be byte-identical to the one a run with no plane produces — routing stderr through capture may not change a single character of what the run resolves to");
+
+        var records = await OrderedRecordsAsync(withPlane);
+        var diagnostics = records.Where(record => record.Channel == NativeRecordChannel.Stderr).ToList();
+
+        diagnostics.Select(record => record.InlinePayload).ShouldBe(new[] { "boom one", "boom two" },
+            customMessage: "the harness's own diagnostics are what this makes durable; recording none of them leaves them dying with the spool exactly as before");
+        diagnostics.Select(record => record.Normalization).ShouldAllBe(normalization => normalization == NativeRecordNormalization.NotParsed,
+            customMessage: "Unrecognized would assert a parse that never ran, and would fill 'which frames could we not interpret' with every diagnostic line the run wrote");
+        diagnostics.Select(record => record.Ordinal).ShouldBe(new long[] { 0, 1 });
+        diagnostics.Select(record => record.SourceOffsetBytes).ShouldBe(new long[] { 0, 9 },
+            customMessage: "stderr carries its own contiguous source geometry, counted from its own start — 'boom one' plus the terminator the stream carried");
+        diagnostics.Select(record => record.StreamId).Distinct().Count().ShouldBe(1,
+            customMessage: "one opening is one stream; sharing stdout's would collide two channels' ordinals in a sequence 0139 requires contiguous");
+
+        records.Select(record => record.AttemptId).Distinct().Count().ShouldBe(1,
+            customMessage: "the diagnostics belong to the process the stdout opening already recorded — a second attempt row would claim this run launched two processes");
+
+        Reduced((await ReadCheckpointAsync(withPlane)).ShouldNotBeNull()).ChannelsSeen.ShouldContain(NativeRecordChannel.Stderr,
+            customMessage: "the diagnostics ride the same reduction as the frames beside them, or the stored prefix witnesses a stream the process never produced");
     }
 
     /// <summary>
@@ -315,11 +424,11 @@ public sealed class HarnessReductionReattachFlowTests
     }
 
     /// <summary>Runs the live path until the harness has seen a step, then tears the worker down exactly as a pod shutdown does: the process keeps running, the run stays Running, and the observer is gone.</summary>
-    private async Task TearDownMidStreamAsync(Guid runId)
+    private async Task TearDownMidStreamAsync(Guid runId, string script = SixSteps)
     {
         using var teardown = new CancellationTokenSource();
 
-        await Should.ThrowAsync<OperationCanceledException>(() => ExecuteAsync(runId, new SteppingHarness(SixSteps, teardown, "step3"), teardown.Token));
+        await Should.ThrowAsync<OperationCanceledException>(() => ExecuteAsync(runId, new SteppingHarness(script, teardown, "step3"), teardown.Token));
 
         using var scope = _fixture.BeginScope();
         (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Running,
@@ -382,6 +491,14 @@ public sealed class HarnessReductionReattachFlowTests
 
         return await scope.Resolve<CodeSpaceDbContext>().WorkflowRunHarnessReductionCheckpoint.AsNoTracking()
             .SingleOrDefaultAsync(candidate => candidate.AgentRunId == runId);
+    }
+
+    private async Task<IReadOnlyList<WorkflowRunSemanticEvent>> ProjectionsAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().WorkflowRunSemanticEvent.AsNoTracking()
+            .Where(candidate => candidate.AgentRunId == runId).ToListAsync();
     }
 
     private async Task<int> CountRecordsAsync(Guid runId)
@@ -512,7 +629,7 @@ public sealed class HarnessReductionReattachFlowTests
     /// A harness that echoes each step as one event and, when told to, tears its own worker down the moment a named
     /// step arrives — the pod shutdown, injected at a point the test can name rather than a sleep it has to guess.
     /// </summary>
-    private sealed class SteppingHarness : IAgentHarness
+    private sealed class SteppingHarness : IAgentHarness, IAgentGroundedFrameReader
     {
         private readonly string _script;
         private readonly CancellationTokenSource? _teardown;
@@ -525,11 +642,18 @@ public sealed class HarnessReductionReattachFlowTests
             _tearDownAfter = tearDownAfter;
         }
 
+        /// <summary>This harness's own structured session record — the frame whose CONTENT is the identity, which is what makes a fact read out of it exactly grounded rather than derived.</summary>
+        internal static string SessionFrame => $"{{\"type\":\"session\",\"session_id\":\"{ScriptedSession:D}\"}}";
+
         public string Kind => "scripted";
         public string Version => "test";
         public IReadOnlyList<string> Models { get; } = new[] { "test-model" };
 
         public SandboxSpec BuildInvocation(AgentTask task) => new() { Command = "/bin/sh", Args = new[] { "-c", _script }, WorkingDirectory = task.WorkspaceDirectory, TimeoutSeconds = task.TimeoutSeconds };
+
+        /// <summary>Answers for THAT frame and nothing else, exactly as the real readers do — a line that merely mentions the id grounds nothing.</summary>
+        public GroundedSessionFrame? ReadSessionFrame(string nativeFrame) =>
+            nativeFrame.Trim() == SessionFrame ? new GroundedSessionFrame { SessionId = ScriptedSession } : null;
 
         public IReadOnlyList<AgentEvent> ParseEvents(string rawLine)
         {

@@ -17,7 +17,7 @@ public sealed class WorkflowRunNativeRecordConfiguration : IEntityTypeConfigurat
             table.HasCheckConstraint("ck_workflow_run_native_record_encoding", "payload_encoding IN ('Utf8', 'Base64')");
             table.HasCheckConstraint("ck_workflow_run_native_record_payload", "(inline_payload IS NULL) <> (payload_ref_jsonb IS NULL) AND (payload_ref_jsonb IS NULL OR jsonb_typeof(payload_ref_jsonb) = 'object')");
             table.HasCheckConstraint("ck_workflow_run_native_record_redaction", "redaction IN ('None', 'Masked', 'Withheld') AND (redaction <> 'Withheld' OR inline_payload IS NULL)");
-            table.HasCheckConstraint("ck_workflow_run_native_record_normalization", "normalization IN ('Projected', 'Unrecognized', 'Failed') AND ((normalization = 'Failed' AND normalization_error_code IS NOT NULL AND btrim(normalization_error_code) <> '') OR (normalization <> 'Failed' AND normalization_error_code IS NULL AND normalization_error_message IS NULL))");
+            table.HasCheckConstraint("ck_workflow_run_native_record_normalization", "normalization IN ('Projected', 'Unrecognized', 'NotParsed', 'Failed') AND ((normalization = 'Failed' AND normalization_error_code IS NOT NULL AND btrim(normalization_error_code) <> '') OR (normalization <> 'Failed' AND normalization_error_code IS NULL AND normalization_error_message IS NULL))");
             table.HasCheckConstraint("ck_workflow_run_native_record_time", "created_at >= ingested_at");
         });
         builder.HasKey(record => record.Id);
@@ -45,15 +45,22 @@ public sealed class WorkflowRunNativeRecordConfiguration : IEntityTypeConfigurat
 
         builder.HasIndex(record => new { record.TeamId, record.StreamId, record.Ordinal }).IsUnique()
             .HasDatabaseName("ux_workflow_run_native_record_ordinal");
-        builder.HasIndex(record => new { record.TeamId, record.AttemptId, record.IngestedAt, record.Id })
+        // CHANNEL sits ahead of the ingest order because the plane's one read is "how far do this attempt's records on
+        // this CHANNEL already reach" — the head an opening resumes above, now asked once per round rather than only on
+        // a re-attach. Without it that question is a full walk of the attempt's records with a heap fetch each, i.e.
+        // linear in the stdout frames the round recorded; with it, an opening of a channel that has recorded nothing
+        // yet reads nothing at all. An attempt's records in ingest order stay answerable on the leading pair.
+        builder.HasIndex(record => new { record.TeamId, record.AttemptId, record.Channel, record.IngestedAt, record.Id })
             .HasDatabaseName("ix_workflow_run_native_record_attempt");
         builder.HasIndex(record => new { record.TeamId, record.ExecutionId, record.IngestedAt, record.Id })
             .HasDatabaseName("ix_workflow_run_native_record_execution");
 
         // The whole point of the plane, as a query: which frames could not be interpreted. Partial, because the answer
-        // is rare and an index over every projected frame would grow with the run.
+        // is rare and an index over every projected frame would grow with the run. It names the two states that ARE the
+        // question rather than "not Projected": a frame nobody attempted to interpret (NotParsed — every diagnostic
+        // line of every run) is not a frame that could not be interpreted, and indexing those would bury the answer.
         builder.HasIndex(record => new { record.TeamId, record.ExecutionId, record.Id })
-            .HasDatabaseName("ix_workflow_run_native_record_unprojected").HasFilter("normalization <> 'Projected'");
+            .HasDatabaseName("ix_workflow_run_native_record_unprojected").HasFilter("normalization IN ('Unrecognized', 'Failed')");
     }
 }
 

@@ -21,7 +21,7 @@ namespace CodeSpace.Core.Services.Agents.Harnesses.Claude;
 /// (surfaced, never dropped) and pure setup lines return null — so a CLI version bump degrades gracefully; the
 /// normalization shape tested here is the stable contract, calibrated against real output when execution is wired.</para>
 /// </summary>
-public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, ISingletonDependency
+public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, IAgentGroundedFrameReader, ISingletonDependency
 {
     public const string HarnessKind = "claude-code";
 
@@ -259,12 +259,43 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
         // even when the run is killed before reaching its terminal "result" line (AgentRunExecutor's TimedOut /
         // Stalled forced-terminal paths), mirroring exactly why CodexHarness keeps its thread.started line. Every
         // OTHER system subtype (hook lifecycle noise) still carries no run step and stays dropped, unchanged.
-        if (type is "system")
-            return ReadString(root, "subtype") == "init"
+        if (type is SessionInitType)
+            return ReadString(root, "subtype") == SessionInitSubtype
                 ? new[] { new AgentEvent { Kind = AgentEventKind.Started, Text = "Session started", Data = root } }
                 : Array.Empty<AgentEvent>();
 
         return new[] { new AgentEvent { Kind = AgentEventKind.Warning, Text = type, Data = root } };   // unknown → surfaced, never dropped
+    }
+
+    /// <summary>The stream-json envelope whose <c>init</c> subtype IS Claude Code's session record.</summary>
+    private const string SessionInitType = "system";
+
+    private const string SessionInitSubtype = "init";
+
+    /// <summary>
+    /// The session Claude Code STATED, read out of its own <c>system</c>/<c>init</c> record — the frame whose content
+    /// IS the session identity (confirmed against real claude v2.1.x stream-json output, where <c>session_id</c> is a
+    /// canonical UUID). Every other frame answers null, including the terminal <c>result</c> line that also carries the
+    /// id: this seam exists to name the harness's SESSION RECORD, and widening it to every frame that repeats the id
+    /// would buy nothing the first-wins fold does not already have.
+    ///
+    /// <para>The id must be a canonical dashed UUID. <c>Guid.TryParse</c> would also swallow a bare 32-hex-digit or
+    /// brace-wrapped string and hand back a <see cref="Guid"/> the harness never wrote, which is the reshaping this
+    /// projection may not do — a session whose id is not that shape has no grounded session frame here, and the run
+    /// recovers nothing rather than something invented. Being canonical is not enough to NAME one, which is why the
+    /// frame comes from <see cref="GroundedSessionFrame.For"/>: the all-zero UUID parses and names nothing.</para>
+    /// </summary>
+    public GroundedSessionFrame? ReadSessionFrame(string nativeFrame)
+    {
+        using var document = TryParse(nativeFrame.Trim());
+
+        if (document is null || document.RootElement.ValueKind != JsonValueKind.Object) return null;
+
+        var root = document.RootElement;
+
+        if (ReadString(root, "type") != SessionInitType || ReadString(root, "subtype") != SessionInitSubtype) return null;
+
+        return Guid.TryParseExact(ReadString(root, "session_id"), "D", out var sessionId) ? GroundedSessionFrame.For(sessionId) : null;
     }
 
     public IAgentEventFolder CreateFolder() => new ClaudeCodeResultFolder();

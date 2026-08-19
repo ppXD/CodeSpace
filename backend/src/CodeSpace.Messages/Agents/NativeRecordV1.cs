@@ -147,7 +147,7 @@ public sealed record NativeRecordV1
     /// <summary>How the captured bytes relate to the wire.</summary>
     public required NativeRecordRedaction Redaction { get; init; }
 
-    /// <summary>Whether this record completes its native frame. False ⇒ a continuation record follows, so a reader that stops here has half a frame and must know it.</summary>
+    /// <summary>Whether this record completes its native frame. False ⇒ a reader that stops here has half a frame and must know it: the rest is in the continuation record that follows, or — where a bounded capture stopped at the cut — still at the source.</summary>
     public required bool IsFinal { get; init; }
 
     /// <summary>Every reason this record cannot be trusted as a faithful capture. Empty ⇒ readable.</summary>
