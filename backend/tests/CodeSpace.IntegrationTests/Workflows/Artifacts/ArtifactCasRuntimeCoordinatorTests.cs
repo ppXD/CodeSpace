@@ -658,7 +658,7 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
     private static ArtifactCasTransferRequest Request(World world, Stream content, byte[] bytes, string key) => new()
     {
         TeamId = world.TeamId, StorageProfileId = world.ProfileId, StorageProfileRevision = 1,
-        IdempotencyKey = key, TargetObjectKey = $"cas/{key}.bin", Content = content,
+        IdempotencyScope = key, TargetObjectKey = $"cas/{key}.bin", Content = content,
         ExpectedSizeBytes = bytes.LongLength, ExpectedSha256 = Convert.ToHexStringLower(SHA256.HashData(bytes)),
         ActorId = world.ActorId, ContentType = "application/octet-stream",
     };

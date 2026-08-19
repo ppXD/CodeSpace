@@ -175,7 +175,7 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
                 }, captureToken).ConfigureAwait(false);
                 if (result is AgentRunLogCompleteResult.Rejected rejected)
                 {
-                    if (Transient(rejected.Problem))
+                    if (rejected.Problem.IsTransient)
                         _logger.LogWarning("Agent run {RunId} log stream {StreamId} terminalization is transiently unavailable and remains Open for recovery: {Problem}", agentRunId, stream.Metadata.StreamId, rejected.Problem.Code);
                     else
                         await FailQuietlyAsync(failure, stream.Metadata, new CaptureFailure($"complete-{Code(rejected.Problem.Code)}", "The finalized Agent Run log could not be verified before terminalization."), captureToken).ConfigureAwait(false);
@@ -302,7 +302,7 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
                 return true;
             }
             var problem = ((AgentRunLogAppendResult.Rejected)result).Problem;
-            if (Transient(problem))
+            if (problem.IsTransient)
             {
                 if (!final) return false;
                 await Task.Delay(AppendRetryDelay(++attempt), cancellationToken).ConfigureAwait(false);
@@ -329,7 +329,7 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
             return true;
         }
         var problem = ((AgentRunLogFinalizeSourceResult.Rejected)result).Problem;
-        if (Transient(problem)) return false;
+        if (problem.IsTransient) return false;
         await FailStreamAsync(request, captureSessionId, stream, new CaptureFailure($"finalize-{Code(problem.Code)}", "The Agent Run log source final-drain receipt could not be committed."), cancellationToken).ConfigureAwait(false);
         return false;
     }
@@ -417,7 +417,6 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
     private static bool Valid(AgentRunLogCaptureOpenRequest request, IReadOnlyList<SandboxDurableLogDescriptor> descriptors) => request.TeamId != Guid.Empty && request.AgentRunId != Guid.Empty && request.ActorId != Guid.Empty && request.WorkerFenceEpoch > 0 && request.Handle.AgentRunLogCaptureSessionId is { } sessionId && sessionId != Guid.Empty && descriptors.Count > 0 && descriptors.Select(value => value.SourceKey).Distinct(StringComparer.Ordinal).Count() == descriptors.Count && descriptors.Select(value => value.StreamKind).Distinct(StringComparer.Ordinal).Count() == descriptors.Count;
     private static bool Valid(AgentRunLogCaptureGapRequest request, IReadOnlyList<SandboxDurableLogDescriptor> descriptors) => request.TeamId != Guid.Empty && request.AgentRunId != Guid.Empty && request.WorkerFenceEpoch > 0 && request.Handle.AgentRunLogCaptureSessionId is { } sessionId && sessionId != Guid.Empty && request.ErrorCode is { Length: > 0 and <= 128 } && request.ErrorMessage is { Length: > 0 and <= 2048 } && descriptors.Count > 0 && descriptors.Select(value => value.SourceKey).Distinct(StringComparer.Ordinal).Count() == descriptors.Count && descriptors.Select(value => value.StreamKind).Distinct(StringComparer.Ordinal).Count() == descriptors.Count;
     private static bool IsProcessStream(string streamKind) => streamKind is AgentRunLogKinds.StandardOutput or AgentRunLogKinds.StandardError;
-    private static bool Transient(AgentRunLogProblem problem) => problem.IsRetryable || problem.Code is AgentRunLogProblemCode.BackendUnavailable or AgentRunLogProblemCode.ProviderTimeout or AgentRunLogProblemCode.ConcurrentMutation;
     private static TimeSpan AppendRetryDelay(int attempt) => TimeSpan.FromMilliseconds(Math.Min(1000, 50 * Math.Pow(2, Math.Min(Math.Max(attempt - 1, 0), 5))));
     private static string Code<T>(T value) where T : struct, Enum => string.Concat(value.ToString().Select((character, index) => char.IsUpper(character) && index > 0 ? $"-{char.ToLowerInvariant(character)}" : char.ToLowerInvariant(character).ToString()));
 

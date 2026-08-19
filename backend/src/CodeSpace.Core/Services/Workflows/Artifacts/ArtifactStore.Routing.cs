@@ -30,6 +30,13 @@ public sealed partial class ArtifactStore
     private static string ObjectKeyFor(string sha256) => $"workflow-artifacts/{sha256[..2]}/{sha256.Substring(2, 2)}/{sha256}";
 
     /// <summary>
+    /// The idempotency scope one payload's transfer claims: this data class, plus the content sha. Two writers of the
+    /// same bytes therefore share one intent, and the CAS runtime — which owns attempt generations — picks the exact
+    /// key within this scope. The sha is fixed-width hex, so no payload's scope can ever prefix another's.
+    /// </summary>
+    internal static string IdempotencyScopeFor(string sha256) => $"{WorkflowArtifactDestinationResolver.DataClassTypeKey}/{sha256}";
+
+    /// <summary>
     /// An offloaded row is read through the destination IT recorded, never through today's policy: a local row keeps
     /// resolving its <c>storage_url</c> even after the team adopts a route, and a routed row resolves through the
     /// <c>artifact_location</c> rows its own object carries, even after the route is repointed or retired.
@@ -61,7 +68,7 @@ public sealed partial class ArtifactStore
     }
 
     /// <summary>
-    /// Places one routed write. The intent key is derived from the content, so concurrent writers of identical
+    /// Places one routed write. The intent scope is derived from the content, so concurrent writers of identical
     /// payloads — the normal case for a fan-out whose branches emit the same prompt, file body or transcript prefix —
     /// converge on ONE intent, and only one of them can hold its lease.
     ///
@@ -72,8 +79,7 @@ public sealed partial class ArtifactStore
     /// </summary>
     private async Task<Guid> TransferAsync(OffloadedWrite write, WorkflowArtifactDestination.Routed routed, CancellationToken cancellationToken)
     {
-        var key = await IdempotencyKeyAsync(write, routed, cancellationToken).ConfigureAwait(false);
-        var attempt = new RoutedAttempt(write, routed, key, write.Bytes.ToArray());
+        var attempt = new RoutedAttempt(write, routed, write.Bytes.ToArray());
 
         var deadline = _clock.GetUtcNow() + RoutedWaitBudget;
         var backoff = RoutedPollFloor;
@@ -100,58 +106,11 @@ public sealed partial class ArtifactStore
         return await _routed.Transfers.PutAsync(new ArtifactCasTransferRequest
         {
             TeamId = attempt.Write.TeamId, StorageProfileId = attempt.Routed.StorageProfileId, StorageProfileRevision = attempt.Routed.StorageProfileRevision,
-            IdempotencyKey = attempt.IdempotencyKey, TargetObjectKey = ObjectKeyFor(attempt.Write.Sha),
+            IdempotencyScope = IdempotencyScopeFor(attempt.Write.Sha), TargetObjectKey = ObjectKeyFor(attempt.Write.Sha),
             Content = content, ExpectedSizeBytes = attempt.Payload.Length, ExpectedSha256 = attempt.Write.Sha,
             ContentType = attempt.Write.ContentType, ActorId = SystemUsers.SeederId,
         }, cancellationToken).ConfigureAwait(false);
     }
-
-    /// <summary>
-    /// The intent key for THIS attempt: the content, plus a generation that steps over every intent a non-retryable
-    /// problem already drove to <c>Failed</c> for the same content under the same profile revision.
-    ///
-    /// <para>The generation exists because <c>Failed</c> is a one-way door in the database, not merely in the code.
-    /// <c>artifact_cas_transfer_guard</c> (0131_artifact_transfer_fence_claim.sql) refuses every route back out of it:
-    /// a fence claim raises <c>'terminal rows cannot be claimed'</c> when <c>OLD.state IN ('Committed','Failed',
-    /// 'Cancelled')</c>; a plain transition first demands <c>'saga transition requires an unexpired worker lease'</c>,
-    /// which a Failed row can never satisfy because the same trigger forbids a terminal row from holding one; and the
-    /// transition whitelist has no arm whose <c>OLD.state</c> is <c>'Failed'</c>. So the intent cannot move backwards
-    /// — the repaired attempt has to be a NEW intent, and only a distinct idempotency key can mint one under
-    /// <c>ux_artifact_transfer_intent_idempotency (team_id, storage_profile_revision_id, idempotency_key)</c>.</para>
-    ///
-    /// <para>Repairing what broke the transfer is exactly what does NOT bump <c>storage_profile_revision</c> — a
-    /// corrected credential, a remounted volume, a bucket policy fix all leave the profile revision untouched — so
-    /// without this the first write under a misconfiguration would ban those exact bytes for the team forever.
-    /// <c>TargetObjectKey</c> is deliberately NOT generation-aware: every generation targets the same
-    /// content-addressed object, so a retry that finds the object already there is provider-side dedup, not a
-    /// duplicate upload.</para>
-    ///
-    /// <para><c>Cancelled</c> is deliberately not stepped over: it is an explicit stop rather than a fault, and
-    /// nothing in this codebase produces it today.</para>
-    /// </summary>
-    private async Task<string> IdempotencyKeyAsync(OffloadedWrite write, WorkflowArtifactDestination.Routed routed, CancellationToken cancellationToken)
-    {
-        var content = IdempotencyKeyFor(write.Sha, generation: 0);
-
-        var burned = await (from intent in _db.ArtifactTransferIntent.AsNoTracking()
-                            join revision in _db.StorageProfileRevision.AsNoTracking()
-                                on new { intent.TeamId, Id = intent.StorageProfileRevisionId } equals new { revision.TeamId, revision.Id }
-                            where intent.TeamId == write.TeamId && revision.StorageProfileId == routed.StorageProfileId
-                                && revision.Revision == routed.StorageProfileRevision
-                                && intent.State == ArtifactTransferState.Failed && intent.IdempotencyKey.StartsWith(content)
-                            select intent.Id).CountAsync(cancellationToken).ConfigureAwait(false);
-
-        return IdempotencyKeyFor(write.Sha, burned);
-    }
-
-    /// <summary>
-    /// One attempt generation's intent key. Generation 0 is the bare content key, so the shared-intent behaviour every
-    /// concurrent writer depends on is the default and a healthy destination never mints a second key. The sha is
-    /// fixed-width hex, so no generation of one payload can ever prefix-collide with another payload's key.
-    /// </summary>
-    internal static string IdempotencyKeyFor(string sha, int generation) => generation == 0
-        ? $"{WorkflowArtifactDestinationResolver.DataClassTypeKey}/{sha}"
-        : $"{WorkflowArtifactDestinationResolver.DataClassTypeKey}/{sha}/g{generation}";
 
     private static ArtifactCasProblemCode ProblemOf(ArtifactCasTransferResult transfer) => transfer switch
     {
@@ -283,8 +242,8 @@ public sealed partial class ArtifactStore
     /// <summary>One offloaded write's coordinates, carried as a unit so the placement pipeline stays one step per line.</summary>
     private sealed record OffloadedWrite(Guid TeamId, string Sha, ReadOnlyMemory<byte> Bytes, string ContentType);
 
-    /// <summary>One routed placement in flight: the write, the destination it resolved, the intent key this attempt generation owns, and the payload every retry re-streams.</summary>
-    private sealed record RoutedAttempt(OffloadedWrite Write, WorkflowArtifactDestination.Routed Routed, string IdempotencyKey, byte[] Payload);
+    /// <summary>One routed placement in flight: the write, the destination it resolved, and the payload every retry re-streams.</summary>
+    private sealed record RoutedAttempt(OffloadedWrite Write, WorkflowArtifactDestination.Routed Routed, byte[] Payload);
 
     /// <summary>One routed read's coordinates: the tenant, the row asking, and the object it points at.</summary>
     private sealed record RoutedRead(Guid TeamId, Guid ArtifactId, Guid ArtifactObjectId);

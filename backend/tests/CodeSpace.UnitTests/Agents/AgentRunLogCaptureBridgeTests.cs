@@ -255,6 +255,32 @@ public sealed class AgentRunLogCaptureBridgeTests
     }
 
     [Fact]
+    public async Task A_non_retryable_append_rejection_terminalizes_the_stream_instead_of_retrying_to_the_budget()
+    {
+        // The classification the retry loop must honour is the problem's OWN IsRetryable, not its code: a storage
+        // fault the metadata plane reports as permanent gets one attempt, and the stream carries its real cause.
+        // Retrying it to the finalization budget instead leaves the stream Open, and the terminal reconciler then
+        // stamps "the native log source never produced a final-drain receipt" over a cause that was never the source.
+        var logs = new FakeLogService { CurrentFence = 1, RejectAppendWith = new AgentRunLogProblem(AgentRunLogProblemCode.BackendUnavailable, IsRetryable: false) };
+        var source = new FakeLogSource();
+        source.Set("stdout", Enumerable.Repeat((byte)'p', 300 * 1024).ToArray());
+        source.Set("stderr", []);
+        var bridge = new AgentRunLogCaptureBridge(logs, new ReadyStorageResolver(), new FakeRecoveryService(), NullLogger<AgentRunLogCaptureBridge>.Instance,
+            new AgentRunLogCaptureBridgeOptions(TimeSpan.FromMilliseconds(40), TimeSpan.FromSeconds(4)));
+        var expected = Result();
+        var watch = Stopwatch.StartNew();
+
+        var observed = await (await bridge.OpenAsync(Request(source, 1, Guid.NewGuid()), CancellationToken.None))
+            .ObserveAsync((_, _) => Task.FromResult(expected), CancellationToken.None);
+
+        observed.ShouldBeSameAs(expected);
+        watch.Elapsed.ShouldBeLessThan(TimeSpan.FromSeconds(3), "a permanent rejection must not be retried until the finalization budget cancels the capture");
+        var stdout = logs.Heads.Single(value => value.Metadata.StreamKind == AgentRunLogKinds.StandardOutput);
+        stdout.Metadata.State.ShouldBe(AgentRunLogStreamState.CaptureFailed);
+        stdout.Metadata.ErrorCode.ShouldBe("capture-backend-unavailable");
+    }
+
+    [Fact]
     public async Task Final_drain_budget_exhaustion_on_transient_append_leaves_an_open_recoverable_stream()
     {
         var logs = new FakeLogService { CurrentFence = 1, RetryableAppendFailures = int.MaxValue };
@@ -457,6 +483,7 @@ public sealed class AgentRunLogCaptureBridgeTests
         public long CurrentFence { get; set; }
         public bool RejectAllOpens { get; set; }
         public bool FailAppend { get; set; }
+        public AgentRunLogProblem? RejectAppendWith { get; init; }
         public bool BlockAppend { get; set; }
         public int RetryableAppendFailures { get; set; }
         public bool ConcurrentFailCaptureOnce { get; set; }
@@ -513,6 +540,7 @@ public sealed class AgentRunLogCaptureBridgeTests
             {
                 var stream = Find(request.StreamId);
                 AppendAttempts++;
+                if (RejectAppendWith is { } rejection) return Task.FromResult<AgentRunLogAppendResult>(new AgentRunLogAppendResult.Rejected(rejection));
                 if (RetryableAppendFailures > 0)
                 {
                     RetryableAppendFailures--;

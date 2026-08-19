@@ -382,17 +382,18 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
 
     private async Task<IntentSnapshot> EnsureIntentAsync(ArtifactCasTransferRequest request, Guid profileRevisionId, byte[] digest, CancellationToken cancellationToken)
     {
+        var key = await IdempotencyKeyAsync(request, profileRevisionId, cancellationToken).ConfigureAwait(false);
         for (var attempt = 0; attempt < 2; attempt++)
         {
             await using var db = CreateDb();
-            var existing = await db.ArtifactTransferIntent.AsNoTracking().SingleOrDefaultAsync(value => value.TeamId == request.TeamId && value.StorageProfileRevisionId == profileRevisionId && value.IdempotencyKey == request.IdempotencyKey, cancellationToken).ConfigureAwait(false);
+            var existing = await db.ArtifactTransferIntent.AsNoTracking().SingleOrDefaultAsync(value => value.TeamId == request.TeamId && value.StorageProfileRevisionId == profileRevisionId && value.IdempotencyKey == key, cancellationToken).ConfigureAwait(false);
             if (existing != null) return Snapshot(existing, Matches(existing, request, digest) ? null : Problem(ArtifactCasProblemCode.IdempotencyConflict));
 
             var now = _clock.GetUtcNow();
             var intent = new ArtifactTransferIntent
             {
                 Id = Guid.NewGuid(), TeamId = request.TeamId, StorageProfileRevisionId = profileRevisionId,
-                IdempotencyKey = request.IdempotencyKey, ExpectedDigestAlgorithm = ArtifactDigestAlgorithm.Sha256,
+                IdempotencyKey = key, ExpectedDigestAlgorithm = ArtifactDigestAlgorithm.Sha256,
                 ExpectedDigest = digest, ExpectedSizeBytes = request.ExpectedSizeBytes, TargetLocator = request.TargetObjectKey,
                 TargetObjectKey = request.TargetObjectKey, State = ArtifactTransferState.Intended, Revision = 1,
                 ExecutionAttemptId = request.ExecutionIdentity?.AttemptId, ExecutionAttemptOrdinal = request.ExecutionIdentity?.AttemptOrdinal,
@@ -412,9 +413,53 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
         }
 
         await using var finalDb = CreateDb();
-        var winner = await finalDb.ArtifactTransferIntent.AsNoTracking().SingleAsync(value => value.TeamId == request.TeamId && value.StorageProfileRevisionId == profileRevisionId && value.IdempotencyKey == request.IdempotencyKey, cancellationToken).ConfigureAwait(false);
+        var winner = await finalDb.ArtifactTransferIntent.AsNoTracking().SingleAsync(value => value.TeamId == request.TeamId && value.StorageProfileRevisionId == profileRevisionId && value.IdempotencyKey == key, cancellationToken).ConfigureAwait(false);
         return Snapshot(winner, Matches(winner, request, digest) ? null : Problem(ArtifactCasProblemCode.IdempotencyConflict));
     }
+
+    /// <summary>
+    /// The intent key for THIS attempt: the caller's scope, plus a generation that steps over every intent a
+    /// non-retryable problem already drove to <c>Failed</c> under that scope for this exact profile revision.
+    ///
+    /// <para>The generation exists because <c>Failed</c> is a one-way door in the database, not merely in the code.
+    /// <c>artifact_cas_transfer_guard</c> (0131_artifact_transfer_fence_claim.sql) refuses every route back out of it:
+    /// a fence claim raises <c>'terminal rows cannot be claimed'</c> when <c>OLD.state IN ('Committed','Failed',
+    /// 'Cancelled')</c>; a plain transition first demands <c>'saga transition requires an unexpired worker lease'</c>,
+    /// which a Failed row can never satisfy because the same trigger forbids a terminal row from holding one; and the
+    /// transition whitelist has no arm whose <c>OLD.state</c> is <c>'Failed'</c>. So the intent cannot move backwards
+    /// — the repaired attempt has to be a NEW intent, and only a distinct idempotency key can mint one under
+    /// <c>ux_artifact_transfer_intent_idempotency (team_id, storage_profile_revision_id, idempotency_key)</c>.</para>
+    ///
+    /// <para>Repairing what broke the transfer is exactly what does NOT bump <c>storage_profile_revision</c> — a
+    /// restored credential, a remounted volume, a bucket policy fix all leave the profile revision untouched — so
+    /// without this the first write under a misconfiguration would ban those exact bytes under that scope forever.
+    /// <c>TargetObjectKey</c> is deliberately NOT generation-aware: every generation targets the same object, so a
+    /// retry that finds it already there is provider-side dedup, not a duplicate upload.</para>
+    ///
+    /// <para>The count matches the scope's own key or a <c>/g</c>-suffixed one rather than any prefix of the scope, so
+    /// scopes that end in a number — a log stream's segment ordinal, say — cannot step each other's generations:
+    /// <c>…/1</c> never counts <c>…/10</c>.</para>
+    ///
+    /// <para><c>Cancelled</c> is deliberately not stepped over: it is an explicit stop rather than a fault, and
+    /// nothing in this codebase produces it today.</para>
+    /// </summary>
+    private async Task<string> IdempotencyKeyAsync(ArtifactCasTransferRequest request, Guid profileRevisionId, CancellationToken cancellationToken)
+    {
+        var generationPrefix = $"{request.IdempotencyScope}/g";
+        await using var db = CreateDb();
+        var burned = await db.ArtifactTransferIntent.AsNoTracking()
+            .CountAsync(value => value.TeamId == request.TeamId && value.StorageProfileRevisionId == profileRevisionId && value.State == ArtifactTransferState.Failed
+                && (value.IdempotencyKey == request.IdempotencyScope || value.IdempotencyKey.StartsWith(generationPrefix)), cancellationToken).ConfigureAwait(false);
+
+        return IdempotencyKeyFor(request.IdempotencyScope, burned);
+    }
+
+    /// <summary>
+    /// One attempt generation's intent key. Generation 0 is the bare scope, so the shared-intent behaviour every
+    /// concurrent writer depends on is the default, a healthy destination never mints a second key, and keys already
+    /// committed before generations existed are still found.
+    /// </summary>
+    internal static string IdempotencyKeyFor(string scope, int generation) => generation == 0 ? scope : $"{scope}/g{generation}";
 
     private async Task<ClaimResult> ClaimAsync(Guid teamId, Guid intentId, Guid actorId, TimeSpan timeout, CancellationToken cancellationToken)
     {
@@ -727,8 +772,8 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
         if (request.TeamId == Guid.Empty || request.StorageProfileId == Guid.Empty || request.ActorId == Guid.Empty)
             throw new ArgumentException("Team, storage profile and actor ids are required.", nameof(request));
         if (request.StorageProfileRevision <= 0) throw new ArgumentOutOfRangeException(nameof(request), "A positive profile revision is required.");
-        if (string.IsNullOrWhiteSpace(request.IdempotencyKey) || request.IdempotencyKey.Length > 256)
-            throw new ArgumentException("A 1-256 character idempotency key is required.", nameof(request));
+        if (string.IsNullOrWhiteSpace(request.IdempotencyScope) || request.IdempotencyScope.Length > ArtifactCasTransferRequest.MaximumScopeLength)
+            throw new ArgumentException($"A 1-{ArtifactCasTransferRequest.MaximumScopeLength} character idempotency scope is required.", nameof(request));
         if (string.IsNullOrWhiteSpace(request.TargetObjectKey) || request.TargetObjectKey.Length > 2048)
             throw new ArgumentException("A 1-2048 character target object key is required.", nameof(request));
         if (request.Content == null || !request.Content.CanRead) throw new ArgumentException("A readable content stream is required.", nameof(request));

@@ -14,10 +14,32 @@ public interface IArtifactCasRuntimeCoordinator : IScopedDependency
 
 public sealed record ArtifactCasTransferRequest
 {
+    /// <summary>Mirrors <c>artifact_transfer_intent.idempotency_key</c>, which is VARCHAR(256).</summary>
+    public const int MaximumKeyLength = 256;
+
+    /// <summary>
+    /// The longest <see cref="IdempotencyScope"/> the runtime accepts. The remainder of the column is reserved for the
+    /// attempt-generation suffix the runtime appends, and 12 characters hold <c>/g</c> plus any <see cref="int"/> — so
+    /// a scope at this cap can never mint a key the column cannot store.
+    /// </summary>
+    public const int MaximumScopeLength = MaximumKeyLength - 12;
+
     public required Guid TeamId { get; init; }
     public required Guid StorageProfileId { get; init; }
     public required int StorageProfileRevision { get; init; }
-    public required string IdempotencyKey { get; init; }
+
+    /// <summary>
+    /// The idempotency SCOPE for these bytes under this profile revision: the exact key the first attempt claims, and
+    /// the prefix every later attempt generation extends. Callers that pass the same scope for the same content share
+    /// one durable intent, which is what makes concurrent writers of identical payloads cooperate instead of race.
+    ///
+    /// <para>The runtime — not the caller — picks the generation, because <c>Failed</c> is a one-way door in the
+    /// database and only a distinct key can mint a fresh intent after one is burned. A caller that hand-rolls a bare
+    /// key therefore cannot recover from a repaired misconfiguration at all, which is why this is a scope rather than
+    /// a literal key.</para>
+    /// </summary>
+    public required string IdempotencyScope { get; init; }
+
     public required string TargetObjectKey { get; init; }
     public required Stream Content { get; init; }
     public required long ExpectedSizeBytes { get; init; }

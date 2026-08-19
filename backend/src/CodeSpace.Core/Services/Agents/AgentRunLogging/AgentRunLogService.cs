@@ -100,7 +100,7 @@ public sealed partial class AgentRunLogService : IAgentRunLogService
         var transfer = await _artifacts.PutAsync(new ArtifactCasTransferRequest
         {
             TeamId = request.TeamId, StorageProfileId = request.StorageProfileId, StorageProfileRevision = request.StorageProfileRevision,
-            IdempotencyKey = $"agent-run-log/{request.StreamId:N}/{request.ExpectedSegmentOrdinal}",
+            IdempotencyScope = $"agent-run-log/{request.StreamId:N}/{request.ExpectedSegmentOrdinal}",
             TargetObjectKey = $"agent-runs/{request.AgentRunId:N}/logs/{request.StreamId:N}/{request.ExpectedSegmentOrdinal:D20}-{Convert.ToHexStringLower(digest)}",
             Content = content, ExpectedSizeBytes = request.Bytes.Length, ExpectedSha256 = Convert.ToHexStringLower(digest),
             ContentType = before.Stream!.ContentType, ActorId = request.ActorId, OperationTimeout = request.OperationTimeout,
@@ -620,8 +620,21 @@ public sealed partial class AgentRunLogService : IAgentRunLogService
         ArtifactCasTransferResult.Rejected rejected => Map(rejected.Problem),
         _ => Problem(AgentRunLogProblemCode.BackendUnavailable, true),
     };
-    private static AgentRunLogProblem Map(ArtifactCasProblem value) => value.Code switch
+    /// <summary>
+    /// Projects one CAS verdict onto this seam's vocabulary. Internal so the classification is pinned directly
+    /// (InternalsVisibleTo) instead of only through a full append.
+    ///
+    /// <para>The profile and credential families get their own code: they say the team's configured storage could not
+    /// be activated, which is neither the capture backend being down nor anything the agent's log source did. Folding
+    /// them into <c>BackendUnavailable</c> is what let a credential fault be retried to the capture budget and then
+    /// reported as a source that never produced a final-drain receipt. <c>value.IsRetryable</c> is carried through
+    /// unchanged — the CAS layer marks a temporarily unreachable credential broker retryable, and inventing
+    /// permanence here would be the same class of lie in the other direction.</para>
+    /// </summary>
+    internal static AgentRunLogProblem Map(ArtifactCasProblem value) => value.Code switch
     {
+        ArtifactCasProblemCode.ProfileMissing or ArtifactCasProblemCode.ProfileNotActive or ArtifactCasProblemCode.ProfileRevisionMissing or ArtifactCasProblemCode.ProfileInvalid => Problem(AgentRunLogProblemCode.StorageActivationFailed, value.IsRetryable),
+        ArtifactCasProblemCode.CredentialUnavailable or ArtifactCasProblemCode.CredentialInvalid or ArtifactCasProblemCode.CredentialBrokerUnavailable => Problem(AgentRunLogProblemCode.StorageActivationFailed, value.IsRetryable),
         ArtifactCasProblemCode.IdempotencyConflict => Problem(AgentRunLogProblemCode.IdempotencyConflict),
         ArtifactCasProblemCode.ArtifactMissing or ArtifactCasProblemCode.TargetMissing => Problem(AgentRunLogProblemCode.ArtifactMissing),
         ArtifactCasProblemCode.TargetCorrupt => Problem(AgentRunLogProblemCode.ArtifactCorrupt),
