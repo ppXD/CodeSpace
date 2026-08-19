@@ -212,7 +212,7 @@ public sealed partial class AgentRunLogCaptureRecoveryService : IAgentRunLogCapt
         }, cancellationToken).ConfigureAwait(false);
         if (result is AgentRunLogCompleteResult.Completed) return RecoveryOutcome.Completed(stream.Id);
         var problem = ((AgentRunLogCompleteResult.Rejected)result).Problem;
-        if (problem.IsRetryable || problem.Code is AgentRunLogProblemCode.BackendUnavailable or AgentRunLogProblemCode.ProviderTimeout or AgentRunLogProblemCode.ConcurrentMutation)
+        if (problem.IsTransient)
             return RecoveryOutcome.Retry(stream.Id, AgentRunLogCaptureIntentState.SourceFinalized, $"complete-{Code(problem.Code)}", "The finalized stream could not yet be verified.");
         if (problem.Code is AgentRunLogProblemCode.StaleWorker or AgentRunLogProblemCode.StaleRecoveryClaim or AgentRunLogProblemCode.CaptureClaimConflict)
             return RecoveryOutcome.Superseded(stream.Id, $"complete-{Code(problem.Code)}", "The finalized stream lost its exact capture claim.");

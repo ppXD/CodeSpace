@@ -190,7 +190,25 @@ public abstract record AgentRunLogRangeResult
     public sealed record Unavailable(AgentRunLogProblem Problem, AgentRunLogMetadata? Metadata = null) : AgentRunLogRangeResult;
 }
 
-public sealed record AgentRunLogProblem(AgentRunLogProblemCode Code, bool IsRetryable = false);
+/// <summary>
+/// One typed refusal from this seam. <see cref="IsRetryable"/> is the authority on whether repeating the SAME call can
+/// still succeed — it is set from the storage layer's own verdict, so a code alone must never be read as "transient".
+/// </summary>
+public sealed record AgentRunLogProblem(AgentRunLogProblemCode Code, bool IsRetryable = false)
+{
+    /// <summary>
+    /// Whether a caller may repeat the identical call. Every caller must ask THIS rather than re-deriving it, because
+    /// a fault the storage layer marked permanent — an unresolvable credential, a profile the write is not admitted
+    /// against — has to terminalize the stream with its real cause; retrying it only burns the caller's budget and
+    /// leaves the stream Open, where terminal reconciliation attributes it to the agent's log source instead.
+    ///
+    /// <para><see cref="AgentRunLogProblemCode.ProviderTimeout"/> and
+    /// <see cref="AgentRunLogProblemCode.ConcurrentMutation"/> are transient by CODE as well: both name a race or a
+    /// deadline rather than a verdict about the request, and callers that construct them (including this service's own
+    /// contended-append arm) do not all pass the flag.</para>
+    /// </summary>
+    public bool IsTransient => IsRetryable || Code is AgentRunLogProblemCode.ProviderTimeout or AgentRunLogProblemCode.ConcurrentMutation;
+}
 
 public enum AgentRunLogProblemCode
 {
@@ -209,6 +227,8 @@ public enum AgentRunLogProblemCode
     ArtifactCorrupt,
     AccessDenied,
     BackendUnavailable,
+    /// <summary>The team's storage profile/credential could not be ACTIVATED for this write or read: the profile is missing, not admitted, has no such revision, carries invalid configuration, or its credential cannot be resolved. Distinct from <see cref="BackendUnavailable"/> so the durable cause names storage configuration rather than the capture backend.</summary>
+    StorageActivationFailed,
     ProviderTimeout,
     Unsupported,
 }
