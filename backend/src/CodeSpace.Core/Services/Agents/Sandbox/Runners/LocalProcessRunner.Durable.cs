@@ -583,19 +583,45 @@ public sealed partial class LocalProcessRunner
         return Task.FromResult(new SandboxProbe { State = state });
     }
 
-    /// <summary>Final drain (incl. a trailing partial line) + the bounded stderr excerpt, mapped to Success/Failed by the exit code.</summary>
+    /// <summary>Final drain (incl. a trailing partial line) + the bounded stderr excerpt, mapped to Success / Failed / ResourceExhausted by the exit code and the run's cgroup OOM evidence.</summary>
     private async Task<SandboxResult> CompleteFromSpoolAsync(SandboxHandle handle, long offset, int exitCode, Func<string, CancellationToken, Task> onLine, CancellationToken ct)
     {
         var producerExited = await WaitForProducerExitAsync(handle, ct).ConfigureAwait(false);
         if (producerExited && SuccessfulLogCopiers(handle) && await WaitForSpoolsQuiescentAsync(handle, ct).ConfigureAwait(false))
             await TryWriteLogSealAsync(handle, ct).ConfigureAwait(false);
+
+        // The cgroup counter must be read while the leaf still exists — teardown removes it on the next line.
+        var status = ExitStatusFor(handle, exitCode);
+
         await TearDownIsolationAsync(handle).ConfigureAwait(false);
 
         await EmitNewLinesAsync(Path.Combine(handle.SpoolDirectory, StdoutFile), offset, onLine, drainPartial: true, ct).ConfigureAwait(false);
 
         var stderr = await ReadDiagnosticTailAsync(Path.Combine(handle.SpoolDirectory, StderrFile)).ConfigureAwait(false);
 
-        return new SandboxResult { Status = exitCode == 0 ? SandboxStatus.Success : SandboxStatus.Failed, ExitCode = exitCode, Stdout = "", Stderr = stderr };
+        return new SandboxResult { Status = status, ExitCode = exitCode, Stdout = "", Stderr = stderr };
+    }
+
+    /// <summary>
+    /// Success on 0; otherwise <see cref="SandboxStatus.ResourceExhausted"/> when the kernel OOM-killed something in
+    /// THIS run's cgroup leaf (B4's <c>memory.max</c> was hit), else the plain <see cref="SandboxStatus.Failed"/>. Only
+    /// a NON-ZERO exit is a candidate: a run whose over-allocating child was reaped while the agent recovered and
+    /// finished cleanly did succeed, and must not be failed for surviving. A run with no cgroup (no cap requested, no
+    /// delegated root, not cgroup-v2 — every macOS run) has no counter to read and keeps today's mapping exactly.
+    ///
+    /// <para>Reached from BOTH non-zero terminals a capped run can land on: the exit marker's own code (the usual case —
+    /// the OOM killer took the agent, the supervisor survived to record 128+SIGKILL) and the vanished-with-no-marker
+    /// sentinel (<c>-1</c> — the OOM killer took the supervisor too). It is NOT reached from the timeout / stall
+    /// terminals: those are kills THIS side made on a timer, and our own verdict about why we killed a run outranks the
+    /// cgroup's note that the run was also over its memory.</para>
+    /// </summary>
+    private static SandboxStatus ExitStatusFor(SandboxHandle handle, int exitCode)
+    {
+        if (exitCode == 0) return SandboxStatus.Success;
+
+        if (handle.CgroupRunKey is not { Length: > 0 } key || CgroupResourceLimit.CgroupRoot is not { } root) return SandboxStatus.Failed;
+
+        return CgroupResourceLimit.OomKillCount(root, key) > 0 ? SandboxStatus.ResourceExhausted : SandboxStatus.Failed;
     }
 
     /// <summary>Deadline elapsed: terminate the process tree, drain what landed, return TimedOut.</summary>
@@ -636,13 +662,17 @@ public sealed partial class LocalProcessRunner
         if (TryReadExitCode(Path.Combine(handle.SpoolDirectory, ExitMarkerFile), out var code))
             return await CompleteFromSpoolAsync(handle, offset, code, onLine, ct).ConfigureAwait(false);
 
+        // Same read as the marker path, and for the same reason: the OOM killer can take the supervisor along with the
+        // agent, leaving no marker at all — the cgroup counter is what tells that apart from an external kill.
+        var status = ExitStatusFor(handle, exitCode: -1);
+
         await TearDownIsolationAsync(handle).ConfigureAwait(false);
 
         await EmitNewLinesAsync(Path.Combine(handle.SpoolDirectory, StdoutFile), offset, onLine, drainPartial: true, ct).ConfigureAwait(false);
 
         var stderr = await ReadDiagnosticTailAsync(Path.Combine(handle.SpoolDirectory, StderrFile)).ConfigureAwait(false);
 
-        return new SandboxResult { Status = SandboxStatus.Failed, ExitCode = -1, Stdout = "", Stderr = stderr };
+        return new SandboxResult { Status = status, ExitCode = -1, Stdout = "", Stderr = stderr };
     }
 
     /// <summary>

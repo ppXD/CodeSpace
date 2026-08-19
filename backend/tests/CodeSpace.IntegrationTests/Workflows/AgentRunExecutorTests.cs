@@ -63,6 +63,25 @@ public class AgentRunExecutorTests
     }
 
     [Fact]
+    public async Task The_launch_hands_the_runner_the_autonomy_tier_s_resource_ceilings()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The WIRING pin the unit tests cannot give: those drive the executor's spec post-processing directly, so they
+        // would still pass if ExecuteAsync stopped calling it and every run launched uncapped again — which is exactly
+        // the state this lane found (350 lines of correct, tested cgroup machinery that nothing ever fed).
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+        var runner = new SpecRecordingDurableRunner();
+
+        await ExecuteAsync(runId, new ScriptedHarness("printf 'one\\n'"), runners: new SandboxRunnerRegistry(new ISandboxRunner[] { runner }));
+
+        var launched = runner.Launched.ShouldNotBeNull("the executor must have launched — a null spec means it failed before reaching the runner");
+        launched.MaxMemoryMb.ShouldBe(4096, "the scripted task takes the default Standard tier, whose committed memory ceiling must arrive on the launched spec");
+        launched.MaxCpuPercent.ShouldBe(400, "…and its committed cpu quota with it");
+    }
+
+    [Fact]
     public async Task The_capture_promise_commits_with_the_run()
     {
         // P2 (capture-intent saga, slice 1): the wiring pin — a run that executes end-to-end opens its promise at
@@ -1296,14 +1315,14 @@ public class AgentRunExecutorTests
         }
     }
 
-    private async Task ExecuteAsync(Guid runId, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, IAgentRunCompletionNotifier? notifier = null)
+    private async Task ExecuteAsync(Guid runId, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, IAgentRunCompletionNotifier? notifier = null, ISandboxRunnerRegistry? runners = null)
     {
         using var scope = _fixture.BeginScope();
         var executor = new AgentRunExecutor(
             scope.Resolve<IAgentRunService>(),
             new AgentHarnessRegistry(new[] { harness }),
             new HarnessModelReconciler(new AgentHarnessRegistry(new[] { harness }), scope.Resolve<IModelPoolSelector>(), scope.Resolve<CodeSpaceDbContext>()),
-            scope.Resolve<ISandboxRunnerRegistry>(),
+            runners ?? scope.Resolve<ISandboxRunnerRegistry>(),
             scope.Resolve<IAgentWorkspaceResolver>(),
             scope.Resolve<IModelCredentialResolver>(),
             scope.Resolve<IWorkspaceProviderRegistry>(),
@@ -1319,6 +1338,41 @@ public class AgentRunExecutorTests
             logCapture);
 
         await executor.ExecuteAsync(runId, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Records the <see cref="SandboxSpec"/> the executor hands the runner at launch, then completes the run at once.
+    /// Only the two interfaces the durable path feature-detects; the optional log / diagnostic capabilities are
+    /// deliberately absent, so the executor takes its own "this runner cannot" fallbacks. Every
+    /// <c>LocalProcessRunner</c> member the executor reaches for is static, so a non-LocalProcessRunner instance here
+    /// is safe.
+    /// </summary>
+    private sealed class SpecRecordingDurableRunner : ISandboxRunner, ISandboxDurableRunner
+    {
+        public string Kind => LocalProcessRunner.LocalKind;
+
+        public SandboxSpec? Launched { get; private set; }
+
+        public Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken) =>
+            throw new NotSupportedException("The executor must take the durable path — a call here means the feature detection regressed.");
+
+        public Task<SandboxHandle> LaunchAsync(SandboxSpec spec, string spoolKey, CancellationToken cancellationToken)
+        {
+            Launched = spec;
+
+            var spoolDirectory = LocalProcessRunner.SpoolDirectoryFor(spoolKey);
+            Directory.CreateDirectory(spoolDirectory);
+
+            return Task.FromResult(new SandboxHandle { Kind = Kind, ProcessId = System.Environment.ProcessId, SpoolDirectory = spoolDirectory, Deadline = DateTimeOffset.UtcNow.AddMinutes(5) });
+        }
+
+        public Task<SandboxResult> AttachAsync(SandboxHandle handle, Func<string, CancellationToken, Task> onStdoutLine, CancellationToken cancellationToken, Func<long, CancellationToken, Task>? onCheckpoint = null) =>
+            Task.FromResult(new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "", Stderr = "" });
+
+        public Task<SandboxProbe> ProbeAsync(SandboxHandle handle, CancellationToken cancellationToken) =>
+            Task.FromResult(new SandboxProbe { State = SandboxRunState.Exited, ExitCode = 0 });
+
+        public Task TerminateAsync(SandboxHandle handle, CancellationToken cancellationToken) => Task.CompletedTask;
     }
 
     private sealed class RecordingLogCaptureBridge : IAgentRunLogCaptureBridge

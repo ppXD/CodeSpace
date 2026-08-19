@@ -498,6 +498,7 @@ public class AgentCodeNodeTests
     [InlineData("Cancelled", null, false)]              // the user's own stop — never override it with a respawn
     [InlineData("Failed", "acceptance-failed", false)]  // a fail-closed verdict — same code + same check would fail again
     [InlineData("Failed", "harness-reported-failure", true)]  // exit-0-but-harness-Error — a fresh respawn may survive
+    [InlineData("Failed", "resource-exhausted", false)]  // a cgroup ceiling killed the subtree — a respawn runs at the SAME ceiling and dies identically
     public async Task A_resumed_failure_carries_the_retry_verdict_for_the_engine(string status, string? exitReason, bool expectedRetryable)
     {
         var resume = JsonDocument.Parse($$"""{"status":"{{status}}","error":"x"{{(exitReason is null ? "" : $@",""exitReason"":""{exitReason}""")}}}""").RootElement;

@@ -85,16 +85,35 @@ public sealed record SandboxSpec
     /// <summary>
     /// Max resident memory the command + every descendant may use, in MiB — a cgroup-v2 <c>memory.max</c> cap so a
     /// runaway agent (or its subtree) cannot OOM the worker. This is the capability prlimit cannot give: <c>RLIMIT_AS</c>
-    /// is per-process address space, not a whole-subtree RSS ceiling. <c>0</c> = unlimited (the byte-identical default).
-    /// Enforced only by a runner with cgroup-v2 delegation (the durable local runner on Linux); ignored otherwise. The
-    /// PURE limit plan is <c>CgroupResourcePlan</c>; the privileged executor + lifecycle wiring land in a later slice.
+    /// is per-process address space, not a whole-subtree RSS ceiling.
+    ///
+    /// <para>SET, for an agent run, by <c>AgentRunExecutor.ApplyResourceCeilings</c> from the run's
+    /// <see cref="AgentTask.Autonomy"/> tier via <c>AgentAutonomyPolicy.Ceilings</c> — a committed per-tier value,
+    /// narrowable per deployment by the operator's host budget (<c>RuntimeSettings.AgentMemoryCeilingMb</c>) and by
+    /// nothing else. It is applied at the executor's one spec choke point, so every harness's invocation and every
+    /// revise round carries it. <c>0</c> = unlimited, which is what a spec built OUTSIDE that path still means —
+    /// <c>RunCommandService</c>'s repo-scoped command runs on the NON-durable runner, which has no cgroup path at all.</para>
+    ///
+    /// <para>ENFORCED only by a runner with cgroup-v2 delegation (the durable local runner on Linux under an
+    /// operator-delegated <c>Sandbox:CgroupRoot</c>); carried and ignored otherwise, including on macOS development.
+    /// Exceeding it is a KERNEL OOM KILL of the offending process in the subtree, never a throttle or a graceful
+    /// signal, and the run lands on whichever non-zero terminal follows — a recorded 128+SIGKILL when the supervisor
+    /// survived to write it, or no exit marker at all when the killer took the supervisor too. On BOTH the runner
+    /// reports <see cref="SandboxStatus.ResourceExhausted"/>, distinguished from an ordinary failure by the cgroup's own
+    /// <c>memory.events</c> <c>oom_kill</c> counter rather than by the exit code (which cannot separate a cgroup OOM
+    /// from a host teardown). A run our OWN watchdogs killed keeps its <see cref="SandboxStatus.TimedOut"/> /
+    /// <see cref="SandboxStatus.Stalled"/> verdict regardless.</para>
     /// </summary>
     public int MaxMemoryMb { get; init; }
 
     /// <summary>
     /// Max CPU the command + every descendant may use, as a percent of ONE core — a cgroup-v2 <c>cpu.max</c> quota
-    /// (e.g. <c>50</c> ⇒ "50000 100000", 50% of a core; <c>200</c> allows two cores). <c>0</c> = unlimited (the default).
-    /// Enforced only by a runner with cgroup-v2 delegation; ignored otherwise.
+    /// (e.g. <c>50</c> ⇒ "50000 100000", 50% of a core; <c>400</c> allows four cores). SET from the run's autonomy tier
+    /// by the same <c>AgentRunExecutor.ApplyResourceCeilings</c> that sets <see cref="MaxMemoryMb"/>, from the same
+    /// committed table; unlike the memory row it takes no per-deployment override, because exceeding a cpu quota
+    /// THROTTLES rather than kills, so an over-generous quota degrades a host instead of taking the worker down.
+    /// <c>0</c> = unlimited (a spec built outside that path). Enforced only by a runner with cgroup-v2 delegation;
+    /// carried and ignored otherwise.
     /// </summary>
     public int MaxCpuPercent { get; init; }
 
@@ -175,4 +194,15 @@ public enum SandboxStatus
 
     /// <summary>Showed NO evidence of working — no <see cref="AgentProgressSignal"/> at all — for the configured no-progress window, and was terminated early: the run is stalled (e.g. a nested tool waiting at an interactive prompt the agent can't answer, a deadlock). Distinct from <see cref="TimedOut"/> (a run that was making progress but ran past its budget): a stall is surfaced for a human as NeedsReview(Blocked), faster than the full timeout. Only ever produced when the no-progress watchdog is enabled.</summary>
     Stalled,
+
+    /// <summary>
+    /// Exited non-zero AND the kernel OOM-killed something inside this run's own resource cgroup — the run hit
+    /// <see cref="SandboxSpec.MaxMemoryMb"/>. A <see cref="Failed"/> whose cause is the CEILING, not the agent, which
+    /// matters because the two want opposite retry answers: a fresh respawn runs at the SAME committed ceiling on the
+    /// same task and dies identically, so this one is deterministic where a plain non-zero exit is a candidate
+    /// transient. Produced ONLY by a runner that can read the run's cgroup counter (the durable local runner on a
+    /// cgroup-v2 host with a delegated root); every other runner reports the same kill as <see cref="Failed"/>, since
+    /// the exit code alone cannot separate a cgroup OOM from a host teardown or an operator's kill.
+    /// </summary>
+    ResourceExhausted,
 }
