@@ -167,8 +167,13 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
             if (CompletionIntegrity.Violations(composed.Rejections, composed.ContractErrors, requirements) is { Count: > 0 }) wouldBe = TerminalDecision.Park;
 
             // P4 (stage-gate mirror): the authority also refuses a CleanSuccess missing a Required upstream stage,
-            // so the would-be must too. Only the EVIDENCE-dependent gates are baked in (integrity, stages) — the
-            // structural registration gates (capability, mode) re-derive at query time from the rows themselves.
+            // so the would-be must too. Only the two EVIDENCE-dependent gates are mirrored here (integrity,
+            // stages). The authority's THREE STRUCTURAL gates — capability registered, mode registered, mode
+            // holding Enforceable standing — are NOT applied to the recorded decision and cannot be re-derived
+            // from these rows either: the record carries neither the run's mode nor its capability key. So
+            // would_be_terminal_decision is an UPPER BOUND on what the authority would stamp, and every reader of
+            // it inherits that: a CleanSuccess recorded for a plan-map or single-agent run names a terminal the
+            // readiness gate would in fact park Unsupported.
             else if (_modes.Resolve(await RunModeReader.DeriveAsync(_db, runId, teamId, cancellationToken).ConfigureAwait(false)) is { } profile
                 && UpstreamStageTrace.MissingRequired(profile, composed.ExercisedUpstreamStages).Count > 0) wouldBe = TerminalDecision.Park;
         }

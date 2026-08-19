@@ -86,7 +86,7 @@ public sealed record UnattendedDeliveryRollup
     /// <summary>Assessed runs whose LATEST assessment reads OPERATIONAL Outcome=Solved — the retry-crediting projection beside the primary metric@1 rates. Since the P0-A consumer switch the primary <see cref="SolvedRuns"/> reads the metric@1 verdict; the operational-vs-@1 delta is the retry-credit story.</summary>
     public int AssessmentSolvedRuns { get; init; }
 
-    /// <summary>Assessed runs whose recorded would-be terminal decision is CleanSuccess — the ONLY VDS-eligible state (Lock Clause 5). The Enforced-era north-star numerator, visible while nothing is enforced yet.</summary>
+    /// <summary>Assessed runs whose recorded would-be terminal decision is CleanSuccess — the ONLY VDS-eligible state (Lock Clause 5). An UPPER BOUND on what an Enforced cohort would stamp, not the Enforced-era numerator: the recorded decision mirrors only the shadow's two evidence gates (integrity, stages), so this count ignores the three structural gates the terminal authority also applies — capability registered, mode registered, and the mode holding <c>ProtocolReadiness.Enforceable</c>. Only the supervisor mode holds Enforceable standing today, so every plan-map and single-agent CleanSuccess in here is a run the authority would park Unsupported.</summary>
     public int WouldBeCleanSuccessRuns { get; init; }
 
     /// <summary>Runs the LEGACY manifest ladder (oracle-graded manifests, else engine Success minus degraded stops) would call solved — the status-fallback inference the metric plane removed, kept visible so the legacy-vs-metric delta stays a live query.</summary>

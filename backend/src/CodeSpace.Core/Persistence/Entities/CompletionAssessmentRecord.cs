@@ -17,7 +17,16 @@ public class CompletionAssessmentRecord : IEntity<Guid>, IAuditable
     public string AssessmentJson { get; set; } = string.Empty;
     public bool LegacyIsSolved { get; set; }
 
-    /// <summary>P3b-4 (INACTIVE adapter): the sealed six-state <c>TerminalDecision</c> name this run WOULD receive — parity evidence for P2b; never mutates the run's terminal (Lock Clause 1). Null on pre-P3b-4 rows.</summary>
+    /// <summary>
+    /// P3b-4 (INACTIVE adapter): the sealed six-state <c>TerminalDecision</c> name the shadow derived for this run —
+    /// parity evidence for P2b; never mutates the run's terminal (Lock Clause 1). Null on pre-P3b-4 rows.
+    ///
+    /// <para>An UPPER BOUND on the authority's verdict, not a copy of it: the shadow mirrors only the two
+    /// EVIDENCE-dependent refusals (integrity violations, missing Required stages). The three STRUCTURAL refusals —
+    /// capability registered, mode registered, mode holding <c>ProtocolReadiness.Enforceable</c> — are neither
+    /// applied nor re-derivable here: this row records no mode and no capability key. Every consumer of this column
+    /// therefore counts runs the authority would in fact park.</para>
+    /// </summary>
     public string? WouldBeTerminalDecision { get; set; }
 
     /// <summary>
