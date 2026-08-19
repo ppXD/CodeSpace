@@ -6,8 +6,9 @@ namespace CodeSpace.UnitTests.Workflows.Artifacts.Routing;
 
 /// <summary>
 /// The write-time destination decision for the MAIN artifact plane. Two properties matter more than the mapping table:
-/// an unrouted team keeps local disk (so every existing deployment is untouched), and a route that exists but cannot
-/// take bytes never degrades into local disk — that silent fallback is the dishonesty this plane exists to remove.
+/// a team that has not cut this data class over keeps local disk (so no existing deployment, and no half-finished
+/// Settings edit, changes behaviour), and a route an operator STOPPED never degrades into local disk — that silent
+/// fallback is the dishonesty this plane exists to remove.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class WorkflowArtifactDestinationResolverTests
@@ -20,16 +21,27 @@ public sealed class WorkflowArtifactDestinationResolverTests
         WorkflowArtifactDestinationResolver.DataClassTypeKey.ShouldBe("workflow-artifact/v1");
     }
 
-    [Fact]
-    public async Task No_route_at_all_keeps_the_local_backend_and_never_bootstraps_one()
+    [Theory]
+    [MemberData(nameof(LocalResolutions))]
+    public async Task A_data_class_that_was_never_cut_over_keeps_the_local_backend_and_never_bootstraps_a_route(StorageRouteSnapshotResolution resolution)
     {
-        var routes = new StubRouteResolver(new StorageRouteSnapshotResolution.Missing());
+        var routes = new StubRouteResolver(resolution);
 
         var destination = await new WorkflowArtifactDestinationResolver(routes).ResolveAsync(Guid.NewGuid(), CancellationToken.None);
 
         destination.ShouldBeOfType<WorkflowArtifactDestination.Local>();
-        routes.Requests.Count.ShouldBe(1, "a missing route is the shipped default, not something to repair on the write path");
+        routes.Requests.Count.ShouldBe(1, "neither outcome is something to repair on the write path");
     }
+
+    /// <summary>
+    /// No route at all is the shipped state of every existing team. A Draft route is the state every route is BORN in,
+    /// and the only way an operator can reach it, so pressing "Create data route" must not break offloaded writes.
+    /// </summary>
+    public static TheoryData<StorageRouteSnapshotResolution> LocalResolutions() => new()
+    {
+        new StorageRouteSnapshotResolution.Missing(),
+        new StorageRouteSnapshotResolution.RouteNotActivated(),
+    };
 
     [Fact]
     public async Task Ready_route_forwards_the_exact_frozen_profile_coordinates()

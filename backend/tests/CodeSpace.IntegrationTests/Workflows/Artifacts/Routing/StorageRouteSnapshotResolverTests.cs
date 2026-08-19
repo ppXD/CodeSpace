@@ -76,6 +76,27 @@ public sealed class StorageRouteSnapshotResolverTests
         db.ChangeTracker.Entries().ShouldBeEmpty();
     }
 
+    /// <summary>
+    /// Every lifecycle state a route row can actually hold, mapped through the REAL SQL projection. Draft and
+    /// Disabled/Retired are distinct outcomes because they mean opposite things to a consumer: Draft is a route nobody
+    /// finished cutting over, Disabled/Retired is one an operator stopped. <c>StorageRouteRules.EnsureTransition</c>
+    /// refuses every transition back to Draft, which is what makes the state alone enough to tell them apart.
+    /// </summary>
+    [Theory]
+    [InlineData(StorageRouteState.Draft, typeof(StorageRouteSnapshotResolution.RouteNotActivated))]
+    [InlineData(StorageRouteState.Active, typeof(StorageRouteSnapshotResolution.Ready))]
+    [InlineData(StorageRouteState.Disabled, typeof(StorageRouteSnapshotResolution.RouteNotActive))]
+    [InlineData(StorageRouteState.Retired, typeof(StorageRouteSnapshotResolution.RouteNotActive))]
+    public async Task Each_route_lifecycle_state_resolves_to_exactly_one_outcome(StorageRouteState state, Type expected)
+    {
+        var world = await SeedWorldAsync(StorageProfileRevisionMode.CurrentAtWrite, $"route-state-{state}/v1".ToLowerInvariant(), activate: false);
+        if (state != StorageRouteState.Draft) await SetRouteStateAsync(world.RouteId, state);
+
+        var result = await ResolveAsync(world.TeamId, world.DataClassTypeKey);
+
+        result.ShouldBeOfType(expected);
+    }
+
     [Fact]
     public async Task Missing_foreign_inactive_and_cancelled_routes_fail_closed_with_distinct_results()
     {
@@ -140,7 +161,7 @@ public sealed class StorageRouteSnapshotResolverTests
         return await scope.Resolve<IStorageRouteSnapshotResolver>().ResolveAsync(new StorageRouteSnapshotRequest(teamId, dataClassTypeKey), cancellationToken);
     }
 
-    private async Task<World> SeedWorldAsync(StorageProfileRevisionMode mode, string dataClassTypeKey)
+    private async Task<World> SeedWorldAsync(StorageProfileRevisionMode mode, string dataClassTypeKey, bool activate = true)
     {
         var (teamId, actorId) = await SeedTeamAsync();
         var now = DateTimeOffset.UtcNow;
@@ -167,6 +188,8 @@ public sealed class StorageRouteSnapshotResolverTests
         db.StorageProfile.Add(profile);
         db.StorageRoute.Add(route);
         await db.SaveChangesAsync();
+        if (!activate) return new World(teamId, actorId, route.Id, profile.Id, dataClassTypeKey);
+
         route.State = StorageRouteState.Active;
         route.LastModifiedDate = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync();

@@ -4,7 +4,7 @@ import { createPortal } from "react-dom";
 import { ApiError } from "@/api/request";
 import type { StorageProfileSummary } from "@/api/storage";
 import type { StorageProfileRevisionMode, StorageRouteDetail, StorageRouteRevisionDetail, StorageRouteState, StorageRouteSummary } from "@/api/storageRoutes";
-import { useAppendStorageRouteRevision, useCreateStorageRoute, useSetStorageRouteState, useStorageRoute, useStorageRoutes } from "@/hooks/use-storage-routes";
+import { useAppendStorageRouteRevision, useCreateStorageRoute, useRoutedDataClasses, useSetStorageRouteState, useStorageRoute, useStorageRoutes } from "@/hooks/use-storage-routes";
 
 /** Team-scoped, versioned data-class routing. The control plane does not expose provider config or credentials. */
 export function StorageRouteSettings({ profiles }: { profiles: StorageProfileSummary[] }) {
@@ -30,7 +30,7 @@ export function StorageRouteSettings({ profiles }: { profiles: StorageProfileSum
       {!routes.isLoading && !routes.error && rows.length === 0 && (
         <div className="ct-empty">
           <div className="ct-empty-h">No data routes configured</div>
-          <div className="ct-empty-p">Create an immutable, versioned data-class identity in Draft state. Runtime consumers remain disconnected until an explicit cutover.</div>
+          <div className="ct-empty-p">Create an immutable, versioned data-class identity in Draft state. A Draft route never routes bytes; set it Active to cut over.</div>
         </div>
       )}
       {!routes.isLoading && !routes.error && rows.length > 0 && (
@@ -73,16 +73,18 @@ function StorageRouteRow({ route, onManage }: { route: StorageRouteSummary; onMa
 
 function CreateStorageRouteDialog({ profiles, onClose }: { profiles: StorageProfileSummary[]; onClose: () => void }) {
   const create = useCreateStorageRoute();
-  const [dataClassTypeKey, setDataClassTypeKey] = useState("");
+  const dataClasses = useRoutedDataClasses();
+  const routable = dataClasses.data ?? [];
+  const [chosenDataClass, setChosenDataClass] = useState("");
   const [profileId, setProfileId] = useState(profiles[0]?.id ?? "");
   const [mode, setMode] = useState<StorageProfileRevisionMode>("CurrentAtWrite");
   const [pinnedRevision, setPinnedRevision] = useState(profiles[0]?.currentRevision ?? 1);
   const [actionError, setActionError] = useState<string | null>(null);
   const selectedProfile = profiles.find((profile) => profile.id === profileId);
-  const normalizedKey = dataClassTypeKey.trim().toLowerCase();
-  const validKey = /^[a-z0-9][a-z0-9.-]*\/v[1-9][0-9]*$/.test(normalizedKey) && normalizedKey.length <= 128;
+  // Only a class this deployment reads can be routed, so the key is chosen from the catalog rather than typed.
+  const dataClassTypeKey = routable.some((dataClass) => dataClass.typeKey === chosenDataClass) ? chosenDataClass : routable[0]?.typeKey ?? "";
   const validPinnedRevision = mode === "CurrentAtWrite" || selectedProfile != null && Number.isSafeInteger(pinnedRevision) && pinnedRevision > 0 && pinnedRevision <= selectedProfile.currentRevision;
-  const canSubmit = validKey && selectedProfile != null && validPinnedRevision && !create.isPending;
+  const canSubmit = dataClassTypeKey !== "" && selectedProfile != null && validPinnedRevision && !create.isPending;
 
   const chooseProfile = (id: string) => {
     const profile = profiles.find((candidate) => candidate.id === id);
@@ -95,7 +97,7 @@ function CreateStorageRouteDialog({ profiles, onClose }: { profiles: StorageProf
     if (!canSubmit || !selectedProfile) return;
     setActionError(null);
     create.mutate({
-      dataClassTypeKey: normalizedKey,
+      dataClassTypeKey,
       storageProfileId: selectedProfile.id,
       profileRevisionMode: mode,
       pinnedProfileRevision: mode === "Pinned" ? pinnedRevision : null,
@@ -106,14 +108,19 @@ function CreateStorageRouteDialog({ profiles, onClose }: { profiles: StorageProf
   };
 
   return (
-    <RouteModal label="Create data route" title="Create data route" subtitle="Creates revision 1 in Draft state. The versioned data-class identity cannot be renamed." onClose={onClose}>
+    <RouteModal label="Create data route" title="Create data route" subtitle="Creates revision 1 in Draft state. A Draft route never routes bytes; set it Active to cut over. The versioned data-class identity cannot be renamed." onClose={onClose}>
       <div className="mdl-body">
         <div className="wf-form">
           <div className="wf-form-row">
-            <label className="wf-form-label" htmlFor="storage-route-data-class">Data class type key</label>
-            <input id="storage-route-data-class" className="wf-form-input" value={dataClassTypeKey} onChange={(event) => setDataClassTypeKey(event.target.value)} placeholder="agent-run-log/v1" autoFocus />
-            <span className="wf-form-help">Open, versioned key: lowercase letters, digits, dots, or hyphens followed by /vN.</span>
+            <label className="wf-form-label" htmlFor="storage-route-data-class">Data class</label>
+            <select id="storage-route-data-class" className="wf-form-input" value={dataClassTypeKey} onChange={(event) => setChosenDataClass(event.target.value)} disabled={routable.length === 0} autoFocus>
+              {routable.map((dataClass) => <option key={dataClass.typeKey} value={dataClass.typeKey}>{dataClass.displayName} · {dataClass.typeKey}</option>)}
+            </select>
+            <span className="wf-form-help">Only a class this deployment reads can be routed. While the route is Draft, workflow artifacts keep local storage and agent run log capture is unavailable.</span>
           </div>
+          {dataClasses.isLoading && <LoadingMessage>Loading routable data classes…</LoadingMessage>}
+          {dataClasses.error && <ErrorBanner title="Couldn't load routable data classes" message={errorMessage(dataClasses.error) ?? "The routable data classes could not be loaded."} />}
+          {!dataClasses.isLoading && !dataClasses.error && routable.length === 0 && <Notice title="No routable data class">This deployment reads no routed data class, so a data route cannot be created.</Notice>}
           <ProfileSelectionFields profiles={profiles} profileId={profileId} mode={mode} pinnedRevision={pinnedRevision} idPrefix="storage-route-create" profileLabel="Storage profile" onProfileChange={chooseProfile} onModeChange={setMode} onPinnedRevisionChange={setPinnedRevision} />
           {actionError && <ErrorBanner title="Data route wasn't created" message={actionError} />}
         </div>
@@ -155,7 +162,7 @@ function ManageStorageRouteDialog({ routeId, dataClassTypeKey, profiles, onClose
         )}
       </div>
       <div className="mdl-foot">
-        <span className="mdl-foot-info">Control plane only</span>
+        <span className="mdl-foot-info">Route state takes effect on the next write</span>
         <button type="button" className="btn" onClick={onClose}>Close</button>
       </div>
     </RouteModal>

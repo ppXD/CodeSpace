@@ -7,6 +7,12 @@ export const STORAGE_ROUTE_REVISION_PAGE_SIZE = 25;
 export type StorageRouteState = "Draft" | "Active" | "Disabled" | "Retired";
 export type StorageProfileRevisionMode = "CurrentAtWrite" | "Pinned";
 
+/** One versioned data class this deployment can route. Discovery metadata — never a route target. */
+export interface RoutedDataClass {
+  typeKey: string;
+  displayName: string;
+}
+
 export interface StorageRouteSummary {
   id: string;
   dataClassTypeKey: string;
@@ -68,6 +74,7 @@ export interface SetStorageRouteStateInput {
 }
 
 export const storageRouteApi = {
+  listDataClasses: async (signal?: AbortSignal) => parseDataClasses(await fetchJson<unknown>("/api/storage/data-classes", { signal })),
   listPage: async (cursor: string | null, limit = STORAGE_ROUTE_PAGE_SIZE, signal?: AbortSignal) => {
     const query = new URLSearchParams({ limit: String(limit) });
     if (cursor) query.set("cursor", cursor);
@@ -91,6 +98,17 @@ export const storageRouteApi = {
     body: JSON.stringify(input),
   }), true), routeId),
 };
+
+function parseDataClasses(value: unknown): RoutedDataClass[] {
+  if (!Array.isArray(value)) throw new Error("The routable data class list is invalid.");
+  return value.map((item) => {
+    const dataClass = record(item, "routable data class");
+    return {
+      typeKey: dataClassTypeKey(dataClass.typeKey),
+      displayName: string(dataClass.displayName, "routable data class name"),
+    };
+  });
+}
 
 function parseRoutePage(value: unknown): StoragePage<StorageRouteSummary> {
   const page = record(value, "storage route page");

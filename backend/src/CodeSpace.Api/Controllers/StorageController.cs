@@ -26,6 +26,17 @@ public class StorageController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>
+    /// The versioned data classes a storage route may name in this build. A route for any other key would list as
+    /// configured storage that no runtime consumer ever asks for, so this is the exact set the picker may offer.
+    /// </summary>
+    [HttpGet("data-classes")]
+    public async Task<IActionResult> ListDataClasses(CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new ListRoutedDataClassesQuery(), cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     [HttpGet("profiles")]
     public async Task<IActionResult> ListProfiles(CancellationToken cancellationToken)
     {

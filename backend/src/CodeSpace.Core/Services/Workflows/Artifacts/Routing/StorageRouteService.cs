@@ -11,14 +11,27 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts.Routing;
 
 /// <summary>
 /// Team-admin control plane for storage routing policy. This service never resolves a runtime driver and never writes,
-/// reads, moves, or verifies an artifact; runtime consumers remain deliberately disconnected from this slice.
+/// reads, moves, or verifies an artifact — but the rows it writes ARE what the runtime reads, so a state change here
+/// changes where the next offloaded write lands.
+///
+/// <para>What creating a route does today: a new route is born Draft, and Draft is inert for the
+/// <c>workflow-artifact/v1</c> class — those writes keep the local blob backend until an operator activates the route
+/// (see <c>WorkflowArtifactDestinationResolver</c>). It is NOT inert for <c>agent-run-log/v1</c>: that class has no
+/// local backend, so its resolver reports an un-activated route as unavailable capture
+/// (see <c>AgentRunLogStorageResolver</c>). Activating, disabling or retiring a route takes effect on the next write
+/// either way; bytes already stored keep the exact profile revision their location was stamped with.</para>
 /// </summary>
 public sealed class StorageRouteService : IStorageRouteService, IScopedDependency
 {
     internal const string ConcurrentRouteSqlState = "P7501";
     private readonly CodeSpaceDbContext _db;
+    private readonly IRoutedDataClassCatalog _dataClasses;
 
-    public StorageRouteService(CodeSpaceDbContext db) { _db = db; }
+    public StorageRouteService(CodeSpaceDbContext db, IRoutedDataClassCatalog dataClasses)
+    {
+        _db = db;
+        _dataClasses = dataClasses;
+    }
 
     public async Task<StoragePage<StorageRouteSummary>> ListPageAsync(Guid teamId, string? cursor, int limit, CancellationToken cancellationToken)
     {
@@ -92,6 +105,7 @@ public sealed class StorageRouteService : IStorageRouteService, IScopedDependenc
     public async Task<StorageRouteDetail> CreateAsync(Guid teamId, Guid actorId, CreateStorageRouteCommand command, CancellationToken cancellationToken)
     {
         var dataClassTypeKey = ExecuteRule(() => StorageRouteRules.NormalizeDataClassTypeKey(command.DataClassTypeKey));
+        EnsureRoutedDataClass(dataClassTypeKey);
         var selection = Selection(command.ProfileRevisionMode, command.PinnedProfileRevision);
         var profile = await RequireActiveProfileAsync(teamId, command.StorageProfileId, selection, cancellationToken).ConfigureAwait(false);
         if (await _db.StorageRoute.AsNoTracking().AnyAsync(route => route.TeamId == teamId && route.DataClassTypeKey == dataClassTypeKey, cancellationToken).ConfigureAwait(false))
@@ -150,6 +164,19 @@ public sealed class StorageRouteService : IStorageRouteService, IScopedDependenc
         route.LastModifiedBy = actorId;
         await SaveConcurrentAsync("The storage route changed before its state could be updated.", cancellationToken).ConfigureAwait(false);
         return await GetAsync(teamId, route.Id, null, StorageRouteRevisionPageLimits.DefaultPageSize, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// A NEW route may only name a data class some runtime consumer in this build reads. No consumer ever asks the
+    /// routing plane for any other key, so such a route would list as configured storage and never move a byte. Only
+    /// creation is gated: a row an earlier build accepted keeps its identity and can still be revised or retired.
+    /// </summary>
+    private void EnsureRoutedDataClass(string dataClassTypeKey)
+    {
+        if (_dataClasses.Get(dataClassTypeKey) != null) return;
+
+        var known = string.Join(", ", _dataClasses.DataClasses.Select(dataClass => dataClass.TypeKey));
+        throw new StorageRouteInvalidException($"No runtime consumer in this build reads data class '{dataClassTypeKey}'. Routable data classes: {known}.");
     }
 
     private async Task<StorageProfile> RequireActiveProfileAsync(Guid teamId, Guid profileId, ProfileSelection selection, CancellationToken cancellationToken)

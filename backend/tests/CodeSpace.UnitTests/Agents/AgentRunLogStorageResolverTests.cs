@@ -55,8 +55,11 @@ public sealed class AgentRunLogStorageResolverTests
     [Fact]
     public async Task Non_missing_route_policy_failures_are_typed_and_never_bootstrap_or_fall_back()
     {
+        // Deliberately asymmetric with the main artifact plane: a Draft route sends THAT plane to its local backend,
+        // while Agent Run log capture has no local backend to fall back to, so an un-activated route stays a refusal.
         var cases = new (StorageRouteSnapshotResolution Resolution, AgentRunLogStorageProblemCode Expected)[]
         {
+            (new StorageRouteSnapshotResolution.RouteNotActivated(), AgentRunLogStorageProblemCode.Inactive),
             (new StorageRouteSnapshotResolution.RouteNotActive(), AgentRunLogStorageProblemCode.Inactive),
             (new StorageRouteSnapshotResolution.ProfileNotActive(), AgentRunLogStorageProblemCode.Inactive),
             (new StorageRouteSnapshotResolution.RouteRevisionMissing(), AgentRunLogStorageProblemCode.Invalid),

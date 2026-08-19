@@ -18,10 +18,11 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts;
 /// are offloaded out-of-band and the row keeps only a reference. Either way the metadata row (sha, size, content
 /// type, tenant) is the durable source of truth.
 ///
-/// <para>An offloaded payload goes wherever the team's <c>workflow-artifact/v1</c> storage route says (see
-/// the <c>ArtifactStore.Routing</c> partial). With no route — the shipped state of every existing team —
-/// that is the <see cref="IArtifactBlobBackend"/> and a <c>storage_url</c>, unchanged. The threshold decision itself
-/// is untouched by routing: routing changes WHERE an offloaded blob goes, never WHETHER it is offloaded.</para>
+/// <para>An offloaded payload goes wherever the team's ACTIVE <c>workflow-artifact/v1</c> storage route says (see the
+/// <c>ArtifactStore.Routing</c> partial). With no route — the shipped state of every existing team — or with a route
+/// that was created and never activated, that is the <see cref="IArtifactBlobBackend"/> and a <c>storage_url</c>,
+/// unchanged. The threshold decision itself is untouched by routing: routing changes WHERE an offloaded blob goes,
+/// never WHETHER it is offloaded.</para>
 /// </summary>
 public sealed partial class ArtifactStore : IArtifactStore, IArtifactRangeReader, IScopedDependency
 {

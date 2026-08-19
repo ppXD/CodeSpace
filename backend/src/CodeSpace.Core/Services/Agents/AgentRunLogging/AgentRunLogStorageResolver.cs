@@ -36,7 +36,11 @@ public sealed class AgentRunLogStorageResolver : IAgentRunLogStorageResolver
         {
             StorageRouteSnapshotResolution.Ready ready => new AgentRunLogStorageResolution.Ready(ready.Snapshot.StorageProfileId, ready.Snapshot.StorageProfileRevision),
             StorageRouteSnapshotResolution.Missing => Unavailable(AgentRunLogStorageProblemCode.Missing),
-            StorageRouteSnapshotResolution.RouteNotActive or StorageRouteSnapshotResolution.ProfileNotActive => Unavailable(AgentRunLogStorageProblemCode.Inactive),
+            // Deliberately asymmetric with the main artifact plane, which sends an un-activated (Draft) route to its
+            // local blob backend: this data class HAS no local backend, so there is nothing to degrade to and an
+            // un-activated route stays a typed refusal rather than becoming silently-dropped capture.
+            StorageRouteSnapshotResolution.RouteNotActivated or StorageRouteSnapshotResolution.RouteNotActive
+                or StorageRouteSnapshotResolution.ProfileNotActive => Unavailable(AgentRunLogStorageProblemCode.Inactive),
             StorageRouteSnapshotResolution.RouteRevisionMissing or StorageRouteSnapshotResolution.ProfileMissing
                 or StorageRouteSnapshotResolution.ProfileRevisionMissing or StorageRouteSnapshotResolution.Invalid => Unavailable(AgentRunLogStorageProblemCode.Invalid),
             _ => Unavailable(AgentRunLogStorageProblemCode.ResolutionFailed),

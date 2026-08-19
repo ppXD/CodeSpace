@@ -9,6 +9,11 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts.Routing;
 /// Reads the route identity, its exact current immutable policy revision, the team-owned active profile and the
 /// selected immutable profile revision in one no-tracking database statement. It never invokes a broker/factory and
 /// never selects provider configuration or credential material.
+///
+/// <para>A non-Active route is reported as two distinct outcomes. Draft is reported as
+/// <c>RouteNotActivated</c> — a route nobody has cut over — and Disabled/Retired as <c>RouteNotActive</c>: a route an
+/// operator deliberately stopped. Each consumer decides what those mean for its own data class; this projection never
+/// collapses them.</para>
 /// </summary>
 public sealed class StorageRouteSnapshotResolver : IStorageRouteSnapshotResolver
 {
@@ -65,6 +70,7 @@ public sealed class StorageRouteSnapshotResolver : IStorageRouteSnapshotResolver
              DataClassTypeKey = route.DataClassTypeKey,
              RouteStateIsKnown = route.State == StorageRouteState.Draft || route.State == StorageRouteState.Active
                  || route.State == StorageRouteState.Disabled || route.State == StorageRouteState.Retired,
+             RouteIsDraft = route.State == StorageRouteState.Draft,
              RouteIsActive = route.State == StorageRouteState.Active,
              RouteRevisionExists = routeRevision != null,
              StorageProfileId = routeRevision == null ? Guid.Empty : routeRevision.StorageProfileId,
@@ -97,6 +103,7 @@ internal static partial class StorageRouteSnapshotProjection
     {
         if (row == null) return new StorageRouteSnapshotResolution.Missing();
         if (!row.RouteStateIsKnown) return new StorageRouteSnapshotResolution.Invalid(StorageRouteSnapshotInvalidReason.RouteState);
+        if (row.RouteIsDraft) return new StorageRouteSnapshotResolution.RouteNotActivated();
         if (!row.RouteIsActive) return new StorageRouteSnapshotResolution.RouteNotActive();
         if (!row.RouteRevisionExists) return new StorageRouteSnapshotResolution.RouteRevisionMissing();
         if (row.RouteId == Guid.Empty || row.RouteRevision <= 0 || !IsValidTypeKey(row.DataClassTypeKey) || row.StorageProfileId == Guid.Empty)
@@ -144,6 +151,7 @@ internal sealed record StorageRouteSnapshotRow
     public required int RouteRevision { get; init; }
     public required string DataClassTypeKey { get; init; }
     public required bool RouteStateIsKnown { get; init; }
+    public required bool RouteIsDraft { get; init; }
     public required bool RouteIsActive { get; init; }
     public required bool RouteRevisionExists { get; init; }
     public required Guid StorageProfileId { get; init; }

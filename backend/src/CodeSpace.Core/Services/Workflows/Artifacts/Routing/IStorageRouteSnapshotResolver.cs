@@ -33,6 +33,15 @@ public abstract record StorageRouteSnapshotResolution
 
     public sealed record Ready(StorageRouteSnapshot Snapshot) : StorageRouteSnapshotResolution;
     public sealed record Missing : StorageRouteSnapshotResolution;
+
+    /// <summary>
+    /// The route exists in Draft: it has never been activated. <c>StorageRouteRules.EnsureTransition</c> refuses every
+    /// transition back to Draft, so this state provably means "created, not cut over yet" and never "an operator
+    /// stopped writes here" — which is why it is a distinct outcome from <see cref="RouteNotActive"/>.
+    /// </summary>
+    public sealed record RouteNotActivated : StorageRouteSnapshotResolution;
+
+    /// <summary>The route was activated and is now Disabled or Retired: an operator deliberately stopped it.</summary>
     public sealed record RouteNotActive : StorageRouteSnapshotResolution;
     public sealed record RouteRevisionMissing : StorageRouteSnapshotResolution;
     public sealed record ProfileMissing : StorageRouteSnapshotResolution;
