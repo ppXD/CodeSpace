@@ -100,8 +100,8 @@ public sealed class AliyunOssStorageProviderModuleTests
 
     /// <summary>
     /// The endpoint and the bucket are the only non-secret values an operator holds; the AccessKey pair lives in the
-    /// credential. A profile built from exactly those is admitted by the control plane AND resolves to a signing
-    /// region, so the two halves of admission cannot disagree about whether the profile is configurable.
+    /// credential. A profile built from exactly those clears both halves of admission - the schema and the module's own
+    /// readability check - and resolves a signing region.
     /// </summary>
     [Fact]
     public void A_profile_carrying_only_the_endpoint_and_bucket_is_admitted_and_still_resolves_a_signing_region()
@@ -110,8 +110,28 @@ public sealed class AliyunOssStorageProviderModuleTests
         using var config = JsonDocument.Parse("""{"endpoint":"oss-cn-hangzhou.aliyuncs.com","bucket":"codespace-artifacts"}""");
 
         StorageProfileRules.ValidateConfig(config.RootElement, module.ConfigSchema, module.SecretSchema);
+        module.EnsureConfigurationReadable(config.RootElement);
 
         AliyunOssTarget.Parse(config.RootElement).Region.ShouldBe("cn-hangzhou");
+    }
+
+    /// <summary>
+    /// The schema cannot express "this host names a region", so an accelerate endpoint with no override satisfies it and
+    /// only the parser refuses. The module's readability check is what the control plane calls, so this is the assertion
+    /// that a schema-admitted profile the driver could never open is refused BEFORE it is stored - and it asserts the
+    /// text, because a refusal that does not name <c>region</c> sends the operator hunting through the other fields.
+    /// </summary>
+    [Fact]
+    public void An_endpoint_the_schema_admits_but_no_region_can_be_read_from_is_refused_by_the_module_itself()
+    {
+        var module = new AliyunOssStorageProviderModule();
+        using var config = JsonDocument.Parse("""{"endpoint":"oss-accelerate.aliyuncs.com","bucket":"codespace-artifacts"}""");
+
+        StorageProfileRules.ValidateConfig(config.RootElement, module.ConfigSchema, module.SecretSchema);
+
+        var error = Should.Throw<ArgumentException>(() => module.EnsureConfigurationReadable(config.RootElement));
+        error.Message.ShouldContain("'region'", Case.Sensitive);
+        error.Message.ShouldContain("oss-accelerate.aliyuncs.com", Case.Sensitive);
     }
 
     [Fact]

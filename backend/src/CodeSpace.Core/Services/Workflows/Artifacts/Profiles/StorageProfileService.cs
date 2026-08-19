@@ -195,8 +195,13 @@ public sealed class StorageProfileService : IStorageProfileService, IScopedDepen
 
         ExecuteRule(() => StorageProfileRules.ValidateConfig(config, module.ConfigSchema, module.SecretSchema));
         var canonicalConfig = ExecuteRule(() => StorageProfileRules.CanonicalJson(config));
-        var normalizedCredentialRef = await ValidateCredentialAsync(teamId, module.TypeKey, credentialRef, cancellationToken).ConfigureAwait(false);
+
+        // The provider is asked about the canonical form because that is the form persisted below, and the form the
+        // snapshot resolver re-canonicalizes before handing it to the same provider at activation.
         var canonicalElement = Parse(canonicalConfig);
+        ExecuteRule(() => module.EnsureConfigurationReadable(canonicalElement));
+
+        var normalizedCredentialRef = await ValidateCredentialAsync(teamId, module.TypeKey, credentialRef, cancellationToken).ConfigureAwait(false);
         var namespaceConfig = module.GetNamespaceConfiguration(canonicalElement);
         if (namespaceConfig.ValueKind != JsonValueKind.Object)
             throw new InvalidOperationException($"Storage provider '{module.TypeKey}' namespace configuration projection must be a JSON object.");

@@ -111,6 +111,22 @@ public class StorageProviderModuleCatalogTests
         catalog.Require(module.TypeKey).ShouldBeSameAs(module);
     }
 
+    /// <summary>
+    /// A module whose schema is its whole admission rule must not have to write one: the readability hook the control
+    /// plane calls on every profile revision defaults to a no-op, so adding it cannot make an existing provider start
+    /// refusing a configuration it has always accepted.
+    /// </summary>
+    [Fact]
+    public void A_module_that_adds_no_rule_beyond_its_schema_admits_whatever_the_schema_admits()
+    {
+        IStorageProviderModule local = new LocalRwxStorageProviderModule();
+        IStorageProviderModule declaresNothing = Module("acme-object/v1");
+        using var config = JsonDocument.Parse("""{"rootPath":"/var/lib/codespace/artifacts"}""");
+
+        local.EnsureConfigurationReadable(config.RootElement);
+        declaresNothing.EnsureConfigurationReadable(config.RootElement);
+    }
+
     [Fact]
     public void Every_production_storage_module_is_parameterless_discoverable_and_catalog_valid()
     {

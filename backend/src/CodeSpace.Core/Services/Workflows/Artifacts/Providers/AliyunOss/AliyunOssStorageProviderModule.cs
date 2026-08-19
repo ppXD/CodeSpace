@@ -28,7 +28,7 @@ public sealed class AliyunOssStorageProviderModule : IStorageProviderModule
               "maxLength": 64,
               "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$",
               "title": "Region override",
-              "description": "Optional. The region id without the oss- prefix, for example cn-hangzhou. Leave it empty for an oss-{region}.aliyuncs.com endpoint or its -internal VPC form: the region is read from the endpoint host. Supply it for an endpoint that names no region - an accelerate endpoint, or a custom domain - because the region is scoped into every request signing key and a profile that cannot resolve one is refused at activation."
+              "description": "Optional. The region id without the oss- prefix, for example cn-hangzhou. Leave it empty for an oss-{region}.aliyuncs.com endpoint or its -internal VPC form: the region is read from the endpoint host. Supply it for an endpoint that names no region - an accelerate endpoint, or a custom domain - because the region is scoped into every request signing key and a profile that cannot resolve one is refused when it is saved."
             },
             "bucket": {
               "type": "string",
@@ -101,6 +101,14 @@ public sealed class AliyunOssStorageProviderModule : IStorageProviderModule
         | StorageProviderCapabilities.HealthProbe;
 
     public Type FactoryType => typeof(AliyunOssArtifactStorageDriverFactory);
+
+    /// <summary>
+    /// The schema admits an endpoint as a host pattern, but the signing region is read out of that host and a host
+    /// naming none is configurable only with an explicit <c>region</c>. Leaving that to activation would let Settings
+    /// store a profile whose first artifact write fails inside a run, so the control plane runs the same parser the
+    /// factory activates with - one implementation, so admission and activation cannot answer differently.
+    /// </summary>
+    public void EnsureConfigurationReadable(JsonElement nonSecretConfiguration) => AliyunOssTarget.Parse(nonSecretConfiguration);
 
     private static JsonElement ParseSchema(string json)
     {

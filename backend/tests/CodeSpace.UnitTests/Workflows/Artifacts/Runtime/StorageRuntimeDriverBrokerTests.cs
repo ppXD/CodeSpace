@@ -5,6 +5,8 @@ using CodeSpace.Core.Services.Workflows.Artifacts.Credentials;
 using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers;
 using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Workflows.Artifacts.Runtime;
@@ -244,6 +246,30 @@ public sealed class StorageRuntimeDriverBrokerTests
         result.ToString().ShouldNotContain("secret", Case.Insensitive);
     }
 
+    /// <summary>
+    /// A provider rejection is the one failure whose text says which field is wrong and what to put there, and the
+    /// resolution cannot carry it -
+    /// <see cref="Factory_configuration_rejection_is_distinct_from_provider_initialization_failure"/> pins that provider
+    /// text never reaches a caller. So the log is the only surviving copy, and a refusal naming neither the profile nor
+    /// the reason leaves an operator a bare reason code to act on.
+    /// </summary>
+    [Fact]
+    public async Task A_configuration_refusal_reaches_the_log_naming_the_profile_and_the_field_to_fill()
+    {
+        var logger = new CapturingLogger();
+        var factory = new StubFactory((_, _) => ValueTask.FromException<IArtifactStorageDriver>(
+            new ArgumentException("Aliyun OSS endpoint 'oss-accelerate.aliyuncs.com' does not name a region, so the profile must set 'region'.")));
+
+        var result = await Broker(ProfileResolver(Profile()), new StubCredentialResolver(), new StubCatalog(factory), logger).OpenAsync(Request(), CancellationToken.None);
+
+        result.ShouldBe(new StorageRuntimeDriverResolution.ConfigurationInvalid(StorageRuntimeConfigurationFailureReason.FactoryRejectedConfiguration));
+        var entry = logger.Entries.ShouldHaveSingleItem();
+        entry.Level.ShouldBe(LogLevel.Warning);
+        entry.Exception.ShouldNotBeNull().Message.ShouldContain("'region'", Case.Sensitive, "the log is where the actionable half of the refusal has to survive, so it carries the provider's own text");
+        entry.Message.ShouldContain(_profileId.ToString("D"), Case.Sensitive, "a refusal that does not name the profile cannot be acted on");
+        entry.Message.ShouldContain("revision 7", Case.Sensitive, "revisions are append-only, so the refused one has to be named too");
+    }
+
     [Fact]
     public async Task Supplied_cancellation_is_typed_at_each_async_boundary_and_never_leaks_a_created_driver()
     {
@@ -376,8 +402,8 @@ public sealed class StorageRuntimeDriverBrokerTests
     private StorageRuntimeDriverBroker Broker(IStorageProfileSnapshotResolver profile, IStorageCredentialSecretResolver credential, IArtifactStorageDriverFactory factory) =>
         Broker(profile, credential, new StubCatalog(factory));
 
-    private static StorageRuntimeDriverBroker Broker(IStorageProfileSnapshotResolver profile, IStorageCredentialSecretResolver credential, IArtifactStorageDriverFactoryCatalog catalog) =>
-        new(profile, credential, catalog);
+    private static StorageRuntimeDriverBroker Broker(IStorageProfileSnapshotResolver profile, IStorageCredentialSecretResolver credential, IArtifactStorageDriverFactoryCatalog catalog, ILogger<StorageRuntimeDriverBroker>? logger = null) =>
+        new(profile, credential, catalog, logger ?? NullLogger<StorageRuntimeDriverBroker>.Instance);
 
     private StorageRuntimeDriverRequest Request() => new(_teamId, _profileId, 7, StorageProfileEligibility.Write);
 
@@ -466,6 +492,22 @@ public sealed class StorageRuntimeDriverBrokerTests
         {
             CreateCalls++;
             return _create?.Invoke(request, cancellationToken) ?? ValueTask.FromResult<IArtifactStorageDriver>(new StubDriver());
+        }
+    }
+
+    private sealed class CapturingLogger : ILogger<StorageRuntimeDriverBroker>
+    {
+        public List<(LogLevel Level, string Message, Exception? Exception)> Entries { get; } = [];
+
+        public IDisposable BeginScope<TState>(TState state) where TState : notnull => NullScope.Instance;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            Entries.Add((logLevel, formatter(state, exception), exception));
+
+        private sealed class NullScope : IDisposable
+        {
+            public static readonly NullScope Instance = new();
+            public void Dispose() { }
         }
     }
 

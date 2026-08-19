@@ -101,6 +101,66 @@ public sealed class AliyunOssProfileConfigurationTests
         error.ClientMessage.ShouldNotContain(AccessKeySecret, customMessage: "the client-facing text is what actually reaches an operator's screen");
     }
 
+    /// <summary>
+    /// The schema admits an accelerate endpoint - it is a legal host - and only the parser knows that no region can be
+    /// read from it. So this is the assertion that the refusal reaches the operator where they are standing: nothing is
+    /// stored, and the text names the field to fill. Without it the profile saves, activates, and fails at its first
+    /// artifact write, which happens mid-run.
+    /// </summary>
+    [Fact]
+    public async Task A_profile_whose_endpoint_names_no_region_is_refused_as_it_is_saved_and_leaves_nothing_stored()
+    {
+        var world = await SeedWorldAsync();
+
+        using var scope = _fixture.BeginScope();
+        var profiles = scope.Resolve<IStorageProfileService>();
+        var command = new CreateStorageProfileCommand
+        {
+            StableName = "oss-accelerate",
+            ProviderTypeKey = AliyunOssArtifactStorageDriverFactory.TypeKey,
+            NonSecretConfig = JsonSerializer.SerializeToElement(new { endpoint = "oss-accelerate.aliyuncs.com", bucket = "codespace-artifacts" })
+        };
+
+        var error = await Should.ThrowAsync<StorageProfileInvalidException>(() => profiles.CreateAsync(world.TeamId, world.ActorId, command, CancellationToken.None));
+
+        error.Code.ShouldBe(FailureCodes.StorageProfileInvalid);
+        error.Kind.ShouldBe(FailureKind.Invalid);
+        error.ClientMessage.ShouldNotBeNull().ShouldContain("'region'", Case.Sensitive, "the text that reaches an operator's screen has to name the field to fill, not merely report that the profile is invalid");
+        error.ClientMessage.ShouldContain("oss-accelerate.aliyuncs.com", Case.Sensitive, "naming the host that could not be read is what stops the operator hunting through the other fields");
+        error.ClientMessage.ShouldContain("cn-hangzhou", Case.Sensitive, "an example region id tells the operator what shape of value to supply");
+        (await profiles.ListAsync(world.TeamId, CancellationToken.None)).ShouldBeEmpty("a profile whose driver could never open it must not survive the refusal");
+    }
+
+    /// <summary>
+    /// Appending a revision is the second way the same configuration reaches storage, and revisions are append-only: an
+    /// unopenable one admitted here would become the profile's current revision and break a profile that works today.
+    /// </summary>
+    [Fact]
+    public async Task An_appended_revision_whose_endpoint_names_no_region_is_refused_and_leaves_the_working_revision_current()
+    {
+        var world = await SeedWorldAsync();
+        var (profileId, revision) = await ConfigureAsync(world, withExplicitRegion: false);
+
+        using var scope = _fixture.BeginScope();
+        var profiles = scope.Resolve<IStorageProfileService>();
+        var current = await profiles.GetAsync(world.TeamId, profileId, CancellationToken.None);
+        var command = new AppendStorageProfileRevisionCommand
+        {
+            ProfileId = profileId,
+            ExpectedXmin = current!.Xmin,
+            ExpectedCurrentRevision = revision,
+            ProviderTypeKey = AliyunOssArtifactStorageDriverFactory.TypeKey,
+            NonSecretConfig = JsonSerializer.SerializeToElement(new { endpoint = "artifacts.example.com", bucket = "codespace-artifacts" })
+        };
+
+        var error = await Should.ThrowAsync<StorageProfileInvalidException>(() => profiles.AppendRevisionAsync(world.TeamId, world.ActorId, command, CancellationToken.None));
+
+        error.ClientMessage.ShouldNotBeNull().ShouldContain("'region'", Case.Sensitive);
+        var unchanged = await profiles.GetAsync(world.TeamId, profileId, CancellationToken.None);
+        unchanged!.CurrentRevision.ShouldBe(revision);
+        unchanged.Revisions.Single().NonSecretConfig.GetProperty("endpoint").GetString().ShouldBe("oss-cn-hangzhou.aliyuncs.com");
+    }
+
     private async Task<(Guid ProfileId, int Revision)> ConfigureAsync(World world, bool withExplicitRegion)
     {
         using var scope = _fixture.BeginScope();
