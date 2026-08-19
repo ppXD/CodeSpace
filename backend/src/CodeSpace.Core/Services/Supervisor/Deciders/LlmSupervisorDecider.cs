@@ -137,15 +137,32 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         {
             _logger.LogWarning("Supervisor decision chose kind '{Kind}' without a usable payload — {Defect}; raw reply: {RawReply}", model.Kind, defect, StructuredJsonText.Preview(completion.Json.GetRawText()));
 
-            var repaired = await TryRepairMissingPayloadAsync(structured, pick, completion, defect, cancellationToken).ConfigureAwait(false);
+            // Deterministic first. The dominant shape is FLATTENED, not absent: the payload's own fields are present at
+            // the root under their own names, so the nesting can be corrected here without spending a round-trip to ask
+            // the model for information its first reply already delivered. Only a reply this cannot fix — a genuinely
+            // absent payload, where moving fields would have to invent them — reaches the model repair below.
+            var lifted = SupervisorDecisionPayloadLift.Lift(completion.Json, model.Kind);
+            var nested = lifted is { } moved && TryDeserialize(moved, out _) is { } candidate && SupervisorDecisionCoherence.MissingPayload(candidate) is null ? candidate : null;
 
-            if (repaired is not null && TryDeserialize(repaired.Json, out _) is { } coherent && !string.IsNullOrWhiteSpace(coherent.Kind) && SupervisorDecisionCoherence.MissingPayload(coherent) is null)
+            if (nested is not null)
             {
-                completion = repaired;
-                model = coherent;
+                _logger.LogInformation("Supervisor decision payload for kind '{Kind}' was flattened to the root and nested deterministically — no repair round-trip spent", model.Kind);
+
+                completion = completion with { Json = lifted!.Value };
+                model = nested;
             }
             else
-                _logger.LogWarning("Supervisor decision payload repair missed for kind '{Kind}' — proceeding with the original decision; the executor will refuse it", model.Kind);
+            {
+                var repaired = await TryRepairMissingPayloadAsync(structured, pick, completion, defect, cancellationToken).ConfigureAwait(false);
+
+                if (repaired is not null && TryDeserialize(repaired.Json, out _) is { } coherent && !string.IsNullOrWhiteSpace(coherent.Kind) && SupervisorDecisionCoherence.MissingPayload(coherent) is null)
+                {
+                    completion = repaired;
+                    model = coherent;
+                }
+                else
+                    _logger.LogWarning("Supervisor decision payload repair missed for kind '{Kind}' — proceeding with the original decision; the executor will refuse it", model.Kind);
+            }
         }
 
         // Capture the authoring model call (the pool-picked model + this reply's token usage) — the turn service folds it
