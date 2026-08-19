@@ -29,7 +29,7 @@ public interface INativeRecordReductionPlane
     /// <summary>The stored checkpoint of <paramref name="reducerKind"/> over this execution, or null when none was ever written — the value a fold resumes from, and the whole of what a replaced worker recovers.</summary>
     Task<HarnessReductionCheckpointV1?> ReadCheckpointAsync(Guid teamId, Guid executionId, string reducerKind, CancellationToken cancellationToken);
 
-    /// <summary>Persist one batch of captured frames, the events projected from them, and the checkpoint of the prefix they complete — all in ONE transaction.</summary>
+    /// <summary>Persist one batch of captured frames, the events and model calls projected from them, and the checkpoint of the prefix they complete — all in ONE transaction.</summary>
     Task WriteReducedAsync(NativeRecordBatch batch, HarnessReductionCheckpointV1 checkpoint, CancellationToken cancellationToken);
 }
 
@@ -57,6 +57,8 @@ public sealed partial class NativeRecordPlane : INativeRecordReductionPlane
 
         foreach (var capture in batch.Records) db.WorkflowRunNativeRecord.Add(RecordRow(batch.Handle, capture));
         foreach (var projection in batch.Events) db.WorkflowRunSemanticEvent.Add(EventRow(batch.Handle, projection));
+
+        await StageModelCallsAsync(db, batch, cancellationToken).ConfigureAwait(false);
 
         await StageCheckpointAsync(db, batch.Handle, checkpoint, cancellationToken).ConfigureAwait(false);
 

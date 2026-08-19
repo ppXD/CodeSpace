@@ -17,6 +17,15 @@ namespace CodeSpace.Core.Services.Agents.Harnesses.Codex;
 /// it can't place to <see cref="AgentEventKind.Warning"/> (surfaced, never dropped). The exact type→kind
 /// table is calibrated against real <c>codex exec --json</c> output when execution is wired (B0.4); the
 /// normalization shape tested here is the stable contract.</para>
+///
+/// <para><b>Why there is no <see cref="IAgentModelCallFrameReader"/> here, stated so nobody infers an oversight.</b>
+/// Codex's <c>exec --json</c> stream carries no per-call record. It names no model at all — the model lives only in a
+/// rollout's <c>turn_context</c>, a session-state file rather than a frame of this stream, which is exactly why
+/// <see cref="IAgentTranscriptModelSource"/> exists as a last-resort backfill — and the only usage it reports is
+/// <c>turn.completed</c>'s CUMULATIVE <c>info.total_token_usage</c>, a per-turn running total over calls it never
+/// enumerates. A row built from that would name no model and would credit one call with a whole turn's tokens, so this
+/// harness contributes NO model-call rows and the per-run aggregate stays the only figure it has. Recording nothing is
+/// the honest outcome; the fix is a Codex that prints per-call records, not a reader that invents them.</para>
 /// </summary>
 public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, IAgentTranscriptModelSource, IAgentGroundedFrameReader, ISingletonDependency
 {

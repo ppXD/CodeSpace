@@ -42,7 +42,8 @@ public sealed class WorkflowRunModelCallSchemaFlowTests
             "endpoint_fingerprint", "error_artifact_id", "error_code", "finish_reason", "first_token_at", "http_status_code", "id",
             "input_tokens", "last_modified_by", "last_modified_date", "model_call_id", "output_tokens", "pricing_version",
             "provider_request_id", "reasoning_tokens", "request_artifact_id", "response_artifact_id", "schema_version", "started_at",
-            "status", "source_evidence_revision", "source_started_record_id", "source_terminal_record_id", "team_id", "transport_kind", "workflow_run_id",
+            "status", "source_evidence_revision", "source_native_record_id", "source_started_record_id", "source_terminal_record_id", "team_id",
+            "transport_kind", "unavailable_figures", "workflow_run_id",
         }.Order());
 
         var indexes = await IndexesAsync();
@@ -56,7 +57,133 @@ public sealed class WorkflowRunModelCallSchemaFlowTests
         indexes.ShouldContain("ux_workflow_run_model_call_source_identity");
         indexes.ShouldContain("ux_workflow_run_model_call_attempt_source_terminal");
         indexes.ShouldContain("ix_workflow_run_model_call_attempt_late_start");
+        indexes.ShouldContain("ux_workflow_run_model_call_attempt_source_native_record");
     }
+
+    /// <summary>
+    /// 0145's honesty rule, held by the DATABASE and not only by the producer: a figure declared unavailable may not also
+    /// carry a value, and a figure outside the vocabulary cannot be declared at all. Written outside the contract check
+    /// on purpose — a row that bypasses the C# validator must still be refused, or the declaration is decoration.
+    /// </summary>
+    [Fact]
+    public async Task Database_refuses_a_declared_unavailable_figure_that_carries_a_value_or_a_figure_it_does_not_know()
+    {
+        var (runId, teamId) = await SeedRunAsync();
+        var call = Call(teamId, runId);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.WorkflowRunModelCall.Add(call);
+            await db.SaveChangesAsync();
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var contradiction = Attempt(call, 1);
+            contradiction.CacheReadTokens = 40;
+            contradiction.UnavailableFigures = new[] { "cache_read_tokens" };
+            db.WorkflowRunModelCallAttempt.Add(contradiction);
+            (await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>()).InnerException.ShouldNotBeNull();
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var invented = Attempt(call, 2);
+            invented.UnavailableFigures = new[] { "effective_provider" };
+            db.WorkflowRunModelCallAttempt.Add(invented);
+            await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var honest = Attempt(call, 3);
+            honest.UnavailableFigures = new[] { "cache_read_tokens", "cost_amount", "provider_request_id" };
+            db.WorkflowRunModelCallAttempt.Add(honest);
+            await db.SaveChangesAsync();
+        }
+
+        using var verify = _fixture.BeginScope();
+        var read = verify.Resolve<CodeSpaceDbContext>();
+        var stored = await read.WorkflowRunModelCallAttempt.AsNoTracking().SingleAsync(a => a.ModelCallId == call.Id);
+
+        stored.UnavailableFigures.ShouldBe(new[] { "cache_read_tokens", "cost_amount", "provider_request_id" });
+        stored.CostAmount.ShouldBeNull("an unavailable cost is absent, never zero — a zero cost sums silently into a run total");
+    }
+
+    /// <summary>
+    /// The re-projection guard, at the tier that owns it. A harness's captured frame evidences at most ONE attempt and a
+    /// provider response is admitted as at most ONE logical call, so re-running the projection over the same frames
+    /// cannot double a cost. Both are unique INDEXES rather than a producer's care, which is what makes the claim hold
+    /// under any writer.
+    /// </summary>
+    [Fact]
+    public async Task Re_projecting_the_same_frame_and_the_same_response_is_refused_by_the_plane()
+    {
+        var (runId, teamId) = await SeedRunAsync();
+        var correlationId = Guid.NewGuid();
+        var frameId = Guid.NewGuid();
+        var first = Harness(teamId, runId, correlationId);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.WorkflowRunModelCall.Add(first);
+            var attempt = Attempt(first, 1);
+            attempt.SourceNativeRecordId = frameId;
+            db.WorkflowRunModelCallAttempt.Add(attempt);
+            await db.SaveChangesAsync();
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.WorkflowRunModelCall.Add(Harness(teamId, runId, correlationId));
+            await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var second = Harness(teamId, runId, Guid.NewGuid());
+            db.WorkflowRunModelCall.Add(second);
+            var duplicateFrame = Attempt(second, 1);
+            duplicateFrame.SourceNativeRecordId = frameId;
+            db.WorkflowRunModelCallAttempt.Add(duplicateFrame);
+            await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
+        }
+
+        using var verify = _fixture.BeginScope();
+        var read = verify.Resolve<CodeSpaceDbContext>();
+
+        (await read.WorkflowRunModelCall.AsNoTracking().CountAsync(c => c.WorkflowRunId == runId && c.SourceKind == HarnessSourceKind)).ShouldBe(1,
+            "a re-projected response must be one call, or the same tokens are billed twice");
+        (await read.WorkflowRunModelCallAttempt.AsNoTracking().CountAsync(a => a.SourceNativeRecordId == frameId)).ShouldBe(1);
+    }
+
+    private const string HarnessSourceKind = "harness-native-record/v1";
+
+    private static WorkflowRunModelCall Harness(Guid teamId, Guid runId, Guid correlationId)
+    {
+        var call = Call(teamId, runId);
+        call.Purpose = "harness-inference/v1";
+        call.CaptureSource = HarnessSourceKind;
+        call.SourceKind = HarnessSourceKind;
+        call.SourceCorrelationId = correlationId;
+        return call;
+    }
+
+    private static WorkflowRunModelCallAttempt Attempt(WorkflowRunModelCall call, int ordinal) => new()
+    {
+        Id = Guid.NewGuid(), TeamId = call.TeamId, WorkflowRunId = call.WorkflowRunId, ModelCallId = call.Id,
+        AttemptOrdinal = ordinal, EffectiveModel = "claude-sonnet-4-6", TransportKind = "harness-native/v1",
+        Status = "Succeeded", CaptureSource = HarnessSourceKind, CaptureCompleteness = WorkflowRunCaptureCompleteness.Partial,
+        InputTokens = 1200, OutputTokens = 340, StartedAt = DateTimeOffset.UtcNow,
+        SchemaVersion = WorkflowRunDataContract.CurrentVersion,
+    };
 
     [Fact]
     public async Task Logical_call_and_physical_attempt_round_trip_without_collapsing_requested_and_effective_models()

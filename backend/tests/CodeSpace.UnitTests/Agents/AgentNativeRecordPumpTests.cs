@@ -575,6 +575,86 @@ public sealed class AgentNativeRecordPumpTests
             customMessage: "the cut consumed 12 source bytes and no terminator, so its continuation begins at 12 — counting a terminator the stream never carried drifts every later frame's geometry off the source");
     }
 
+    /// <summary>
+    /// The model-call half of the grounded read, on the pump: a frame the harness records a call in rides the SAME batch
+    /// as the frame itself and the event that cites it, so a cost row can never be durable while its only evidence is
+    /// not — and it is buffered, never written per line.
+    /// </summary>
+    [Fact]
+    public async Task A_frame_that_records_a_model_call_rides_the_frames_own_batch()
+    {
+        var plane = new RecordingPlane();
+        var pump = await OpenAsync(plane);
+
+        await pump.CaptureAsync(ModelCallingHarness.Frame, ModelCallingHarness.Frame, new ModelCallingHarness(), CancellationToken.None);
+
+        plane.Batches.ShouldBe(0, customMessage: "a per-line round trip would put a database write in the middle of the harness's output loop");
+
+        await pump.FlushAsync(CancellationToken.None);
+
+        var batch = plane.ModelCalls.ShouldHaveSingleItem();
+        var record = plane.Records.ShouldHaveSingleItem();
+
+        batch.SourceNativeRecordId.ShouldBe(record.Frame.RecordId, customMessage: "the frame is the row's only evidence, so the two are one write or the row cites nothing");
+        batch.Model.ShouldBe(ModelCallingHarness.Model);
+        batch.Validate().ShouldBeEmpty();
+        plane.Events.ShouldHaveSingleItem().ModelCallId.ShouldBe(batch.ModelCallId,
+            customMessage: "the exactly grounded event is what joins the frame to the call row");
+    }
+
+    /// <summary>A harness that records no model call contributes none, so the write is byte-identical to one where this plane does not exist.</summary>
+    [Fact]
+    public async Task A_harness_that_records_no_model_call_leaves_the_batch_without_one()
+    {
+        var plane = new RecordingPlane();
+        var pump = await OpenAsync(plane);
+
+        await pump.CaptureAsync(ModelCallingHarness.Frame, ModelCallingHarness.Frame, new EchoHarness(), CancellationToken.None);
+        await pump.FlushAsync(CancellationToken.None);
+
+        plane.Records.ShouldHaveSingleItem();
+        plane.ModelCalls.ShouldBeEmpty("a harness with no model-call reader must contribute nothing, however much a frame looks like a response");
+    }
+
+    /// <summary>
+    /// Retention: the buffered calls do not survive their flush, exactly as the records and events do not. A run that
+    /// makes thousands of calls must not accumulate one row per call in managed memory.
+    /// </summary>
+    [Fact]
+    public async Task A_flushed_model_call_does_not_survive_into_the_next_batch()
+    {
+        var plane = new RecordingPlane();
+        var pump = await OpenAsync(plane);
+        var harness = new ModelCallingHarness();
+
+        await pump.CaptureAsync(ModelCallingHarness.Frame, ModelCallingHarness.Frame, harness, CancellationToken.None);
+        await pump.FlushAsync(CancellationToken.None);
+        await pump.CaptureAsync(ModelCallingHarness.FrameWith("msg_02"), ModelCallingHarness.FrameWith("msg_02"), harness, CancellationToken.None);
+        await pump.FlushAsync(CancellationToken.None);
+
+        plane.LargestModelCallBatch.ShouldBe(1, customMessage: "a call re-sent with the next batch would be a second billed call for one response");
+        plane.ModelCalls.Count.ShouldBe(2);
+    }
+
+    /// <summary>
+    /// The containment asymmetry again, for the second grounded reader: a model-call reader that throws costs the run
+    /// nothing AND does not cost the frame its session fact, because each reader is contained on its own.
+    /// </summary>
+    [Fact]
+    public async Task A_model_call_reader_that_throws_keeps_the_frames_other_grounded_fact()
+    {
+        var plane = new RecordingPlane();
+        var pump = await OpenAsync(plane);
+
+        var frame = await pump.CaptureAsync(SessionNamingHarness.Frame, SessionNamingHarness.Frame, new ThrowingModelCallHarness(), CancellationToken.None);
+        await pump.FlushAsync(CancellationToken.None);
+
+        frame.Events.ShouldHaveSingleItem(customMessage: "the parse is untouched by a grounded reader that failed before it");
+        plane.ModelCalls.ShouldBeEmpty("no call was read, so no row may claim one");
+        plane.Events.ShouldHaveSingleItem().SessionId.ShouldBe(SessionNamingHarness.Session,
+            customMessage: "one grounded reader failing must not cost the frame a fact another reader DID state — they are contained separately for exactly this");
+    }
+
     private static Task<AgentNativeRecordPump> OpenAsync(INativeRecordPlane plane) =>
         AgentNativeRecordPump.OpenAsync(plane, Request(), SecretRedactor.None, NullLogger.Instance, CancellationToken.None);
 
@@ -600,12 +680,15 @@ public sealed class AgentNativeRecordPumpTests
     private sealed class RecordingPlane : INativeRecordPlane, INativeRecordExecutionPlane, INativeRecordReductionPlane
     {
         private readonly Guid _executionId = Guid.NewGuid();
+        private readonly Guid _workflowRunId = Guid.NewGuid();
 
         public List<NativeRecordCapture> Records { get; } = new();
         public List<AgentSemanticEventV1> Events { get; } = new();
+        public List<HarnessModelCallProjectionV1> ModelCalls { get; } = new();
         public List<HarnessReductionCheckpointV1> Checkpoints { get; } = new();
         public int LargestRecordBatch { get; private set; }
         public int LargestEventBatch { get; private set; }
+        public int LargestModelCallBatch { get; private set; }
         public int Batches { get; private set; }
         public int PlainWrites { get; private set; }
         public int Openings { get; private set; }
@@ -667,6 +750,7 @@ public sealed class AgentNativeRecordPumpTests
         {
             TeamId = teamId, AgentRunId = agentRunId, ExecutionId = _executionId,
             AttemptId = Guid.NewGuid(), StreamId = Guid.NewGuid(), Channel = channel,
+            WorkflowRunId = _workflowRunId,
         };
 
         private Task Accept(NativeRecordBatch batch)
@@ -674,8 +758,10 @@ public sealed class AgentNativeRecordPumpTests
             Batches++;
             LargestRecordBatch = Math.Max(LargestRecordBatch, batch.Records.Count);
             LargestEventBatch = Math.Max(LargestEventBatch, batch.Events.Count);
+            LargestModelCallBatch = Math.Max(LargestModelCallBatch, batch.ModelCalls.Count);
             Records.AddRange(batch.Records);
             Events.AddRange(batch.Events);
+            ModelCalls.AddRange(batch.ModelCalls);
 
             return Task.CompletedTask;
         }
@@ -691,6 +777,7 @@ public sealed class AgentNativeRecordPumpTests
             {
                 TeamId = request.TeamId, AgentRunId = request.AgentRunId, ExecutionId = Guid.NewGuid(),
                 AttemptId = Guid.NewGuid(), StreamId = Guid.NewGuid(), Channel = request.Channel,
+                WorkflowRunId = Guid.NewGuid(),
             });
 
         public Task WriteAsync(NativeRecordBatch batch, CancellationToken cancellationToken)
@@ -722,6 +809,7 @@ public sealed class AgentNativeRecordPumpTests
             {
                 TeamId = request.TeamId, AgentRunId = request.AgentRunId, ExecutionId = Guid.NewGuid(),
                 AttemptId = Guid.NewGuid(), StreamId = Guid.NewGuid(), Channel = request.Channel,
+                WorkflowRunId = Guid.NewGuid(),
             });
 
         public Task WriteAsync(NativeRecordBatch batch, CancellationToken cancellationToken)
@@ -807,6 +895,43 @@ public sealed class AgentNativeRecordPumpTests
         public override IReadOnlyList<AgentEvent> ParseEvents(string rawLine) => Array.Empty<AgentEvent>();
 
         public GroundedSessionFrame? ReadSessionFrame(string nativeFrame) => new() { SessionId = Guid.Empty };
+    }
+
+    /// <summary>
+    /// A harness that RECORDS one model call per response frame — the shape Claude Code's <c>assistant</c> envelope has,
+    /// whose nested message is the provider's own response object. Its reader answers only for that frame.
+    /// </summary>
+    private sealed class ModelCallingHarness : StubHarness, IAgentModelCallFrameReader
+    {
+        internal const string Model = "test-model";
+
+        internal static string Frame => FrameWith("msg_01");
+
+        /// <summary>A real provider-response envelope, so a wiring that consulted SOME OTHER harness's reader instead of this one would still find a call here — which is what makes the "a harness with no reader contributes nothing" test falsifiable.</summary>
+        internal static string FrameWith(string callId) =>
+            $"{{\"type\":\"assistant\",\"message\":{{\"id\":\"{callId}\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"{Model}\",\"usage\":{{\"input_tokens\":12,\"output_tokens\":3}}}}}}";
+
+        public override IReadOnlyList<AgentEvent> ParseEvents(string rawLine) =>
+            new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine } };
+
+        public GroundedModelCallFrame? ReadModelCallFrame(string nativeFrame) =>
+            nativeFrame.Contains("\"id\":\"msg_", StringComparison.Ordinal)
+                ? new GroundedModelCallFrame { CallId = nativeFrame, Model = Model, InputTokens = 12, OutputTokens = 3 }
+                : null;
+    }
+
+    /// <summary>A model-call reader that fails, on a frame whose SESSION the same harness does state — so the test can show one reader's failure does not cost the other's fact.</summary>
+    private sealed class ThrowingModelCallHarness : StubHarness, IAgentGroundedFrameReader, IAgentModelCallFrameReader
+    {
+        public override IReadOnlyList<AgentEvent> ParseEvents(string rawLine) =>
+            new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine } };
+
+        public GroundedSessionFrame? ReadSessionFrame(string nativeFrame) =>
+            nativeFrame.Contains($"\"session_id\":\"{SessionNamingHarness.Session:D}\"", StringComparison.Ordinal)
+                ? new GroundedSessionFrame { SessionId = SessionNamingHarness.Session }
+                : null;
+
+        public GroundedModelCallFrame? ReadModelCallFrame(string nativeFrame) => throw new InvalidOperationException("the model-call reader could not read this frame");
     }
 
     private sealed class KeyedHarness : StubHarness

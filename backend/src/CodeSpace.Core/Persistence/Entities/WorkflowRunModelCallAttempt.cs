@@ -91,6 +91,25 @@ public class WorkflowRunModelCallAttempt : IEntity<Guid>, IAuditable
 
     public string? PricingVersion { get; set; }
 
+    /// <summary>
+    /// Every figure this row's producer DECLARES it could not produce, named from <see cref="ModelCallFigures"/>. Each
+    /// named figure's own column is NULL rather than zero, which the database enforces — so a token class a harness never
+    /// reports, a provider request id its CLI never prints, and a cost for a model with no price entry are all readable
+    /// as unavailable instead of as measured.
+    ///
+    /// <para>Empty means the producer declares nothing, NOT that every figure on the row was measured — which is what
+    /// every row written before this column existed says.</para>
+    /// </summary>
+    public string[] UnavailableFigures { get; set; } = Array.Empty<string>();
+
+    /// <summary>
+    /// The captured native frame this attempt was read out of, for a row projected from a harness's own record. A soft
+    /// reference like the other cross-aggregate ids here — telemetry may outlive the frames — and unique per attempt, so
+    /// one frame can evidence at most one attempt. Null for a producer that did not read a frame, which is every
+    /// in-process call.
+    /// </summary>
+    public Guid? SourceNativeRecordId { get; set; }
+
     public DateTimeOffset StartedAt { get; set; }
 
     public DateTimeOffset? FirstTokenAt { get; set; }

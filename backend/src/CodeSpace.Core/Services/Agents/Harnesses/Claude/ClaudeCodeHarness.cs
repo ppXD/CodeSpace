@@ -21,7 +21,7 @@ namespace CodeSpace.Core.Services.Agents.Harnesses.Claude;
 /// (surfaced, never dropped) and pure setup lines return null — so a CLI version bump degrades gracefully; the
 /// normalization shape tested here is the stable contract, calibrated against real output when execution is wired.</para>
 /// </summary>
-public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, IAgentGroundedFrameReader, ISingletonDependency
+public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, IAgentGroundedFrameReader, IAgentModelCallFrameReader, ISingletonDependency
 {
     public const string HarnessKind = "claude-code";
 
@@ -298,6 +298,67 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
         return Guid.TryParseExact(ReadString(root, "session_id"), "D", out var sessionId) ? GroundedSessionFrame.For(sessionId) : null;
     }
 
+    /// <summary>The stream-json envelope whose <c>message</c> IS one Anthropic Messages response — the frame that records one model call the CLI made inside itself.</summary>
+    private const string AssistantResponseType = "assistant";
+
+    private const string ResponseMessageType = "message";
+
+    private const string ResponseMessageRole = "assistant";
+
+    /// <summary>
+    /// The ONE model call Claude Code recorded in this frame, read out of the <c>assistant</c> envelope whose
+    /// <c>message</c> is the provider's own response object — id, model, stop reason and a usage block, per response.
+    /// That is the whole reason a per-call row is possible for this harness at all: the CLI prints one such frame per
+    /// call it makes, including the ones its subagents make.
+    ///
+    /// <para><b>What is refused, and why each refusal matters.</b> The <c>system</c>/<c>init</c> line NAMES the
+    /// configured model and describes no call — projecting it would put a row with no usage in a cost report. An
+    /// assistant TEXT block that quotes a model name is prose. The terminal <c>result</c> line carries a usage block
+    /// too, but it is the run's TOTAL across every call, so a row built from it would claim one call burned the whole
+    /// run. Each of those is a frame this method answers null for, and the shape test is what makes the refusal
+    /// mechanical: the envelope must be <c>assistant</c>, the nested message must declare itself a
+    /// <c>message</c> with role <c>assistant</c>, and it must carry BOTH token figures in its own <c>usage</c> object.
+    /// A frame missing any of that records nothing rather than a partially invented call.</para>
+    ///
+    /// <para><b>What is read and what is left absent.</b> <c>message.id</c> is the harness's own identity for the
+    /// response, which is what makes the projection idempotent, and it is required here for that reason — as is the
+    /// model, because a call whose model is unknown is the row this plane exists to stop being the only one available.
+    /// Cache figures are read when the record states them and left null when it does not — the projection then declares
+    /// them unavailable rather than storing zero. The provider's REQUEST id is not here at all (the CLI never prints it)
+    /// and neither is any timing, so this method states neither.</para>
+    ///
+    /// <para>Verified against the <c>--output-format stream-json</c> envelope this harness drives, whose
+    /// <c>message</c> is the Anthropic Messages response verbatim. Tolerant like every other reader here: an envelope
+    /// that does not match this shape — an older CLI, a partial-message stream — yields null, never a reshaped guess.</para>
+    /// </summary>
+    public GroundedModelCallFrame? ReadModelCallFrame(string nativeFrame)
+    {
+        using var document = TryParse(nativeFrame.Trim());
+
+        if (document is null || document.RootElement.ValueKind != JsonValueKind.Object) return null;
+        if (ReadString(document.RootElement, "type") != AssistantResponseType) return null;
+
+        var message = ReadObject(document.RootElement, "message");
+
+        if (ReadString(message, "type") != ResponseMessageType || ReadString(message, "role") != ResponseMessageRole) return null;
+
+        var usage = ReadObject(message, "usage");
+
+        if (ReadCount(usage, "input_tokens") is not { } input || ReadCount(usage, "output_tokens") is not { } output) return null;
+        if (ReadString(message, "id") is not { Length: > 0 } callId || ReadString(message, "model") is not { Length: > 0 } model) return null;
+
+        return new GroundedModelCallFrame
+        {
+            CallId = callId,
+            Model = model,
+            InputTokens = input,
+            OutputTokens = output,
+            CacheReadTokens = ReadCount(usage, "cache_read_input_tokens"),
+            CacheWriteTokens = ReadCount(usage, "cache_creation_input_tokens"),
+            FinishReason = ReadString(message, "stop_reason") is { Length: > 0 } reason ? reason : null,
+        };
+    }
+
     public IAgentEventFolder CreateFolder() => new ClaudeCodeResultFolder();
 
     /// <summary>Direct Anthropic, or any Anthropic-compatible gateway/proxy via a base-URL + auth-token override ("Custom").</summary>
@@ -519,4 +580,13 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
 
     private static string ReadString(JsonElement obj, string key) =>
         obj.ValueKind == JsonValueKind.Object && obj.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
+
+    /// <summary>A nested object, or the <c>Undefined</c> element for a key that is absent or not an object — which every reader here then reads as stating nothing, so no caller needs its own shape guard.</summary>
+    private static JsonElement ReadObject(JsonElement obj, string key) =>
+        obj.ValueKind == JsonValueKind.Object && obj.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.Object ? v : default;
+
+    /// <summary>A non-negative 32-bit count, or null when the key is absent or is not one. Null means the record did not state the figure — never that it stated zero, which is the distinction a cost row is either honest or dishonest about.</summary>
+    private static int? ReadCount(JsonElement obj, string key) =>
+        obj.ValueKind == JsonValueKind.Object && obj.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.Number
+        && v.TryGetInt32(out var count) && count >= 0 ? count : null;
 }
