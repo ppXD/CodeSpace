@@ -196,6 +196,51 @@ public class AgentRunRecoveryFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task Durable_run_whose_handle_names_another_host_is_not_swept_as_dead()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The multi-worker live-run-loss case. Worker A launched the run and died; its setsid-detached supervisor is
+        // still working on host A. Worker B runs this sweep, and A's pid resolves to NOTHING in B's namespace — the
+        // pre-fix reconciler read that as Gone and abandoned a live run. B has no evidence of death here, so the run
+        // must survive the sweep and wait for one that lands on the host where its pid means something.
+        var teamId = await SeedTeamAsync();
+        var runId = await SeedDurableRunAsync(teamId, processId: DeadPid(), exitCode: null, launchHost: "some-other-worker-host");
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None);
+
+        using var verify = _fixture.BeginScope();
+        var run = await verify.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+
+        run.Status.ShouldBe(AgentRunStatus.Running,
+            "a pid this worker cannot resolve is not a dead run — abandoning on it destroys a live run on the host that minted it");
+        run.CompletedAt.ShouldBeNull("nothing terminal happened, so no completion stamp");
+    }
+
+    [Fact]
+    public async Task Foreign_host_run_past_its_wall_clock_deadline_is_abandoned()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The anti-stuck half of the same decision: deferring forever would leave a run Running for good whenever the
+        // minting host never comes back (a replaced pod). Past the handle's own Deadline no observer can still be
+        // completing it — a ground that needs no pid — so the deferral ends there.
+        var teamId = await SeedTeamAsync();
+        var runId = await SeedDurableRunAsync(teamId, processId: DeadPid(), exitCode: null,
+            launchHost: "a-host-that-never-came-back", deadline: DateTimeOffset.UtcNow.AddMinutes(-1));
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None);
+
+        using var verify = _fixture.BeginScope();
+        var run = await verify.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+
+        run.Status.ShouldBe(AgentRunStatus.Failed, "a foreign handle past its deadline must still reach a terminal state");
+        run.Error!.ShouldContain("abandoned");
+    }
+
+    [Fact]
     public async Task Durable_run_whose_process_is_still_alive_is_left_for_reattach()
     {
         if (OperatingSystem.IsWindows()) return;
@@ -287,8 +332,8 @@ public class AgentRunRecoveryFlowTests : IDisposable
         return id;
     }
 
-    /// <summary>Seed a stale (20-min) Running run carrying a durable handle that points at a spool dir with an optional exit marker — the post-crash state the reconciler probes.</summary>
-    private async Task<Guid> SeedDurableRunAsync(Guid teamId, int processId, int? exitCode)
+    /// <summary>Seed a stale (20-min) Running run carrying a durable handle that points at a spool dir with an optional exit marker — the post-crash state the reconciler probes. <paramref name="launchHost"/> stamps the handle as some OTHER host's (null ⇒ unstamped, the pre-stamp shape); <paramref name="deadline"/> overrides the run's wall clock (default: an hour out).</summary>
+    private async Task<Guid> SeedDurableRunAsync(Guid teamId, int processId, int? exitCode, string? launchHost = null, DateTimeOffset? deadline = null)
     {
         var spoolDir = Path.Combine(Path.GetTempPath(), "cs-recover-test-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(spoolDir);
@@ -296,7 +341,7 @@ public class AgentRunRecoveryFlowTests : IDisposable
 
         if (exitCode.HasValue) await File.WriteAllTextAsync(Path.Combine(spoolDir, "exit"), exitCode.Value.ToString());
 
-        var handle = new SandboxHandle { Kind = "local", ProcessId = processId, SpoolDirectory = spoolDir, Deadline = DateTimeOffset.UtcNow.AddHours(1) };
+        var handle = new SandboxHandle { Kind = "local", ProcessId = processId, LaunchHost = launchHost, SpoolDirectory = spoolDir, Deadline = deadline ?? DateTimeOffset.UtcNow.AddHours(1) };
 
         var runId = Guid.NewGuid();
         var stamp = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(20);

@@ -29,6 +29,14 @@ namespace CodeSpace.Core.Services.Agents;
 ///
 /// <para>Every transition is an atomic CAS (<c>WHERE status = Running</c>), so it's idempotent and safe
 /// to run from multiple replicas, and it never tramples a worker that's completing the run right now.</para>
+///
+/// <para>On a MULTI-HOST deployment the sweep also has to respect what it cannot see. A durable handle's liveness is
+/// a pid inside the launching host's process namespace, so a sweep landing on any other host gets
+/// <see cref="SandboxRunState.Indeterminate"/> and DEFERS instead of abandoning — the fleet-wide minutely cron makes a
+/// sweep on the owning host the thing that answers it. The no-stuck-run guarantee therefore has one honest
+/// qualification: a run whose host never returns is terminalized at its own wall-clock deadline
+/// (<see cref="DeferToTheMintingHostAsync"/>), and a run launched with no deadline at all waits for that host or an
+/// operator.</para>
 /// </summary>
 public interface IAgentRunReconcilerService
 {
@@ -267,7 +275,9 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     /// For each Running run whose LEASE has lapsed (the claiming worker stopped renewing it — it died/hung): if
     /// it carries a durable runner handle, PROBE it before abandoning — a run that finished while unobserved (its
     /// observer crashed mid-tail, or the backend restarted) is RECOVERED from its exit marker instead of being
-    /// lost; one still alive is left for a future re-attach; one truly gone is abandoned. A run with no handle
+    /// lost; one still alive is left for a future re-attach; one truly gone is abandoned; and one whose handle the
+    /// runner cannot answer for from THIS worker is deferred rather than judged — see
+    /// <see cref="DeferToTheMintingHostAsync"/>. A run with no handle
     /// (non-durable runner) keeps the blind-abandon behaviour. The lapsed lease is ground-truth liveness (a live
     /// worker keeps it fresh); the no-recent-events second signal still shields a streaming run whose lease lapsed
     /// from a stray timing edge. Every transition is the same status-guarded CAS, so a worker landing the run
@@ -303,7 +313,7 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         return (abandoned, recovered, reattached);
     }
 
-    /// <summary>Decide one stale run's fate: probe its durable handle (recover / leave-alone / abandon), or blind-abandon when there's no usable handle or the probe fails.</summary>
+    /// <summary>Decide one stale run's fate: probe its durable handle (recover / leave-alone / abandon / defer when the probe cannot be answered from this host), or blind-abandon when there's no usable handle or the probe fails.</summary>
     private async Task<StaleOutcome> ResolveStaleRunAsync(Guid runId, string? handleJson, int reattachAttempts, CancellationToken cancellationToken)
     {
         var durable = ResolveDurableRunner(handleJson, out var handle);
@@ -319,6 +329,9 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         if (probe.State == SandboxRunState.Exited)
             return await RecoverFromSpoolAsync(runId, probe.ExitCode ?? -1, cancellationToken).ConfigureAwait(false);
 
+        if (probe.State == SandboxRunState.Indeterminate)
+            return await DeferToTheMintingHostAsync(runId, handle, cancellationToken).ConfigureAwait(false);
+
         if (probe.State == SandboxRunState.Gone)
             return await AbandonAsync(runId, cancellationToken).ConfigureAwait(false);   // process already gone — nothing to kill
 
@@ -333,6 +346,34 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         }
 
         return await ReattachAsync(runId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The runner could not answer this handle's liveness FROM THIS WORKER (it was minted on another host, whose
+    /// process namespace owns the pid). An unanswerable probe is NOT evidence of death, so it deliberately does NOT
+    /// take the <see cref="AbandonAsync"/> path a confirmed <see cref="SandboxRunState.Gone"/> takes — that read is
+    /// exactly how a live detached run gets destroyed by a worker that never launched it. It is left alone: the sweep
+    /// runs every minute on whichever replica Hangfire hands it to, so one landing on the minting host answers the
+    /// same handle definitively (Running → re-attach, Exited → recover, Gone → abandon).
+    ///
+    /// <para>Deferring cannot be unconditional, or a run whose host never returns (a replaced pod) stays Running for
+    /// good — trading a rare live-run loss for a routine stuck run. The bound is the handle's OWN wall clock: past
+    /// <see cref="SandboxHandle.Deadline"/> no observer can still be legitimately completing the run (the observer
+    /// terminates at that instant), which is a ground that needs no pid, so the deferral ends there and the run is
+    /// abandoned WITHOUT a kill — this worker cannot reach that host's process. A run launched with NO wall clock
+    /// (<c>TimeoutSeconds</c> ≤ 0 ⇒ <see cref="DateTimeOffset.MaxValue"/>) therefore has no such bound and is
+    /// deferred until its host returns or an operator cancels it: the residual cost of never guessing.</para>
+    /// </summary>
+    private async Task<StaleOutcome> DeferToTheMintingHostAsync(Guid runId, SandboxHandle handle, CancellationToken cancellationToken)
+    {
+        if (DateTimeOffset.UtcNow < handle.Deadline)
+        {
+            _logger.LogInformation("AgentRunReconciler: leaving agent run {RunId} alone — its handle was minted on host {LaunchHost}, whose pid this worker cannot resolve; its deadline {Deadline} has not passed, so a sweep on that host decides", runId, handle.LaunchHost, handle.Deadline);
+            return StaleOutcome.LeftAlone;
+        }
+
+        _logger.LogWarning("AgentRunReconciler: abandoning agent run {RunId} — its handle's host {LaunchHost} never answered and its deadline {Deadline} has passed, so no observer can still be completing it; its process cannot be reaped from here", runId, handle.LaunchHost, handle.Deadline);
+        return await AbandonAsync(runId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

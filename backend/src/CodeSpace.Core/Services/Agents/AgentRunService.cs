@@ -571,7 +571,9 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         // Won the CAS → kill the sandbox process tree so the orphaned agent stops holding its workspace + burning
         // the injected model credential. Best-effort (mirrors AbandonAsync's TerminateQuietlyAsync): the cancel
         // stands even if the kill can't be issued. Only a durable runner with a parseable handle can be killed; a
-        // non-durable / handle-less run is already Cancelled and has no detached process to reap.
+        // non-durable / handle-less run is already Cancelled and has no detached process to reap. Nor can a handle
+        // another HOST minted be reaped from here (the runner withholds the signal rather than kill whatever local
+        // process wears that pid) — that agent stops at its own wall-clock deadline instead.
         var durable = ResolveDurableRunner(snapshot.RunnerHandleJson, out var handle);
         if (durable is not null && handle is not null)
             await TerminateQuietlyAsync(durable, handle, runId, cancellationToken).ConfigureAwait(false);
