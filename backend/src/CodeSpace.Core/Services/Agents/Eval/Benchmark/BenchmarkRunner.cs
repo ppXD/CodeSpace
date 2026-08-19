@@ -33,9 +33,6 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
     private readonly Sandbox.ISandboxRunnerRegistry _runners;
     private readonly IBenchmarkGraderRegistry _graders;
 
-    /// <summary>Runner used when the task pins none — the in-process local runner, matching the executor's own default.</summary>
-    private const string DefaultRunnerKind = "local";
-
     private readonly Workflows.Artifacts.IArtifactStore _artifacts;
     private readonly Microsoft.Extensions.Logging.ILogger<BenchmarkRunner> _logger;
 
@@ -98,7 +95,9 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
         {
             Goal = task.Goal,
             Harness = selection?.Harness ?? task.Harness,
-            RunnerKind = DefaultRunnerKind,
+            // EXPLICIT, never the deployment default: a corpus number is only comparable across runs and
+            // deployments if every benchmark executes on the same backend.
+            RunnerKind = Sandbox.SandboxKinds.Local,
             WorkspaceDirectory = workspaceDirectory,
             Model = selection?.Model,
             ModelCredentialId = selection?.ModelCredentialId,
@@ -170,7 +169,7 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
         {
             Task = task,
             WorkspaceDirectory = workspaceDirectory,
-            Runner = _runners.Resolve(DefaultRunnerKind),
+            Runner = _runners.Resolve(Sandbox.SandboxKinds.Local),
         };
 
         return await grader.GradeAsync(context, cancellationToken).ConfigureAwait(false);

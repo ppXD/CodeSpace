@@ -19,6 +19,7 @@ using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Tools;
 using CodeSpace.Core.Services.Agents.Workspace;
+using CodeSpace.Core.Settings;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Enums;
@@ -59,9 +60,6 @@ public interface IAgentRunExecutor
 
 public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 {
-    /// <summary>Runner used when the task doesn't pin one. v0 = the in-process local runner.</summary>
-    private const string DefaultRunnerKind = "local";
-
     /// <summary>Cap on the captured diff inlined into the persisted result row (~1 MB). A larger diff is truncated with a marker; the full diff belongs in the artifact layer (a later slice).</summary>
     private const int MaxPatchChars = 1_000_000;
 
@@ -149,9 +147,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     // The publish guard chain (Order ascending) — see EvaluatePublishGuardsAsync. Sorted once at construction so
     // production reads a stable sequence regardless of DI registration order.
     private readonly IReadOnlyList<IPublishGuard> _publishGuards;
+    // The runner kind a task that pins none executes on: the deployment default (AgentDefaultRunnerSetting), read
+    // once at construction. SandboxKinds.Local when no setting was supplied — a hand-built test double is not
+    // required to know about a configuration class, and that is the value this line hard-coded before the key existed.
+    private readonly string _defaultRunnerKind;
     private readonly ILogger<AgentRunExecutor> _logger;
 
-    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, Workflows.Artifacts.IArtifactStore artifacts, IPublishManifestStore manifests, IArtifactManifestStore artifactManifests, Capture.ICaptureIntentService captureIntents, IEnumerable<IPublishGuard> publishGuards, ILogger<AgentRunExecutor> logger, IAgentRunLogCaptureBridge? logCapture = null, INativeRecordPlane? nativeRecords = null)
+    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, Workflows.Artifacts.IArtifactStore artifacts, IPublishManifestStore manifests, IArtifactManifestStore artifactManifests, Capture.ICaptureIntentService captureIntents, IEnumerable<IPublishGuard> publishGuards, ILogger<AgentRunExecutor> logger, IAgentRunLogCaptureBridge? logCapture = null, INativeRecordPlane? nativeRecords = null, AgentDefaultRunnerSetting? defaultRunner = null)
     {
         _runs = runs;
         _harnesses = harnesses;
@@ -171,6 +173,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         _captureIntents = captureIntents;
         _logCapture = logCapture;
         _nativeRecords = nativeRecords;
+        _defaultRunnerKind = defaultRunner?.Value ?? SandboxKinds.Local;
         // Tolerate a null enumerable (a hand-built test double that never exercises the push path) — zero guards
         // registered is a legitimate state (every push clears), not a constructor-time crash.
         _publishGuards = (publishGuards ?? Enumerable.Empty<IPublishGuard>()).OrderBy(g => g.Order).ToList();
@@ -242,7 +245,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                     .ExecuteUpdateAsync(s => s.SetProperty(r => r.Harness, reconciliation.HarnessKind), cancellationToken).ConfigureAwait(false);
             }
 
-            var runnerKind = string.IsNullOrWhiteSpace(task.RunnerKind) ? DefaultRunnerKind : task.RunnerKind;
+            var runnerKind = string.IsNullOrWhiteSpace(task.RunnerKind) ? _defaultRunnerKind : task.RunnerKind;
             var runner = _runners.Resolve(runnerKind);
 
             // Materialise the workspace (clone the bound repo) before the harness runs. Null = no workspace

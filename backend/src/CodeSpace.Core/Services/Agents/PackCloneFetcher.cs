@@ -1,6 +1,5 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents.Sandbox;
-using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Messages.Agents;
 using Microsoft.Extensions.Logging;
@@ -56,7 +55,7 @@ public sealed class PackCloneFetcher : IPackSourceFetcher, IWorkspaceJanitor, IS
         SandboxResult result;
         try
         {
-            result = await _runners.Resolve(LocalProcessRunner.LocalKind)
+            result = await _runners.Resolve(SandboxKinds.Local)
                 .RunAsync(new SandboxSpec { Command = "git", Args = args, TimeoutSeconds = CloneTimeoutSeconds }, cancellationToken).ConfigureAwait(false);
         }
         catch
