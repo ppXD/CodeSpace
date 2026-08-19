@@ -315,9 +315,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // receives the governed tools the endpoint serves (today the harness projects ONLY task.Tools, so a restricted
             // run couldn't call them). Additive + tier-filtered; a no-op when the author named no tools (the CLI default
             // already reaches a declared MCP server's tools). Drives BuildInvocation off the augmented task.
-            var spec = ApplyEgressPolicy(
+            var spec = HardenSpec(
                 harness.BuildInvocation(AugmentToolsForMcp(effectiveTask, mcp, mcpWiring)) with { Mcp = mcpWiring },
-                effectiveTask.Permissions, modelBaseUrl, modelProvider, workspaceProvision);
+                effectiveTask, modelBaseUrl, modelProvider, workspaceProvision);
 
             // The MCP token rides the durable handle whenever the ENDPOINT opened (not only when a declaration was
             // written) so a re-attach re-binds the SAME socket+token — the detached agent's declaration file still
@@ -376,7 +376,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 await AppendReviseEventAsync(agentRunId, reason, round, reviseBudget, cancellationToken).ConfigureAwait(false);
 
                 var reviseTask = BuildReviseTask(effectiveTask, result, reason);
-                var reviseSpec = ApplyEgressPolicy(harness.BuildInvocation(AugmentToolsForMcp(reviseTask, mcp, mcpWiring)) with { Mcp = mcpWiring }, reviseTask.Permissions, modelBaseUrl, modelProvider, workspaceProvision);
+                var reviseSpec = HardenSpec(harness.BuildInvocation(AugmentToolsForMcp(reviseTask, mcp, mcpWiring)) with { Mcp = mcpWiring }, reviseTask, modelBaseUrl, modelProvider, workspaceProvision);
 
                 var priorUsage = result.TokenUsage;
 
@@ -622,11 +622,21 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     }
 
     /// <summary>
+    /// The <see cref="AgentRunResult.ExitReason"/> a cgroup resource-ceiling kill stamps — the machine-readable marker
+    /// the agent.run node's retry verdict keys on to tell "the ceiling killed it" (a respawn runs at the SAME committed
+    /// ceiling and dies identically) from a plain non-zero exit (a candidate transient worth one more agent). Pinned by
+    /// a unit test (Rule 8) so producer and consumer cannot drift into silently restoring the retry loop.
+    /// </summary>
+    public const string ResourceExhaustedExitReason = "resource-exhausted";
+
+    /// <summary>
     /// Map a terminal <see cref="SandboxResult"/> onto the agent-run result. A budget overrun is <see cref="AgentRunStatus.TimedOut"/>;
     /// a C3 STALL (no output for the idle window — likely a nested interactive prompt the agent can't answer) is surfaced
-    /// for a human as <see cref="AgentRunStatus.NeedsReview"/> / <see cref="CompletionDisposition.Blocked"/>; any other
-    /// terminal is folded by the harness from its events. Shared by the live + reattach paths so they can't drift.
-    /// Both forced-terminal branches also capture <see cref="AgentRunResult.SessionId"/> when the events carry one —
+    /// for a human as <see cref="AgentRunStatus.NeedsReview"/> / <see cref="CompletionDisposition.Blocked"/>; a run the
+    /// sandbox's memory ceiling OOM-killed is a <see cref="AgentRunStatus.Failed"/> that NAMES the ceiling instead of
+    /// letting the harness fold report the agent's last message as the cause; any other terminal is folded by the
+    /// harness from its events. Shared by the live + reattach paths so they can't drift.
+    /// All three forced-terminal branches also capture <see cref="AgentRunResult.SessionId"/> when the events carry one —
     /// the sole missing input a later RETRY needs to WARM-resume the killed agent's conversation instead of cold-starting.
     /// They read the executor's own <see cref="AgentRunFacts"/>, never the harness's folder: those three are
     /// harness-independent by construction, so making them depend on what a given folder chose to keep would let a
@@ -643,6 +653,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // FindResumableSubtaskAttemptAsync are already generic over every terminal status; this was the missing input.
         SandboxStatus.TimedOut => new AgentRunResult { Status = AgentRunStatus.TimedOut, ExitReason = "timed-out", Error = "The agent run exceeded its time budget and was terminated.", TokenUsage = facts.TokenUsage, SessionId = facts.SessionId, Model = facts.Model },
         SandboxStatus.Stalled => new AgentRunResult { Status = AgentRunStatus.NeedsReview, CompletionDisposition = CompletionDisposition.Blocked, ExitReason = AgentAcceptanceContract.StalledExitReason, Error = "The agent produced no output for the configured idle window and was terminated as stalled — it is likely blocked at an interactive prompt it cannot answer unattended; a human must take over.", TokenUsage = facts.TokenUsage, SessionId = facts.SessionId, Model = facts.Model },
+        // The third forced terminal, and the reason it cannot be left to the harness fold: the fold's error falls back
+        // to the agent's own last message, so an OOM-killed run reported whatever the CLI happened to be saying as its
+        // cause. Say what actually happened, and let the retry verdict see it (see ResourceExhaustedExitReason).
+        SandboxStatus.ResourceExhausted => new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = ResourceExhaustedExitReason, Error = $"The agent run exceeded its resource ceiling and its process tree was killed by the kernel (exit {SandboxExitCode.Describe(sandbox.ExitCode)}). This is the sandbox limit for the run's autonomy tier, not a fault in the agent's work — the fix is a higher ceiling (a less-narrow deployment memory budget, a higher autonomy tier, or a change to the committed per-tier table by PR), never another attempt under the same one.", TokenUsage = facts.TokenUsage, SessionId = facts.SessionId, Model = facts.Model },
         _ => folder.BuildResult(facts, sandbox.ExitCode),
     };
 
@@ -2121,6 +2135,30 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         return spec with { EgressAllowlist = hosts };
     }
+
+    /// <summary>
+    /// Stamp the run's autonomy tier onto the sandbox spec's memory + cpu ceilings, so the durable launch has something
+    /// to build this run's cgroup-v2 cap from. Applied HERE rather than inside each <c>IAgentHarness.BuildInvocation</c>
+    /// for the same reason the tier clamp is applied at one choke point: this is the single place every harness's
+    /// invocation passes through (the launch AND every revise round), so a harness added later is capped without
+    /// touching it, and no harness can forget. It is a pure <c>with</c> on the built spec, like
+    /// <see cref="ApplyEgressPolicy"/> above it.
+    ///
+    /// <para><paramref name="hostMemoryBudgetMb"/> is the operator's per-run host budget, which can only narrow the
+    /// tier's committed memory row. The two ceilings are enforced ONLY by a runner with cgroup-v2 delegation (the
+    /// durable local runner on an operator-delegated cgroup root); on any other runner or host they are carried and
+    /// ignored, exactly as <see cref="SandboxSpec.MaxMemoryMb"/> documents.</para>
+    /// </summary>
+    internal static SandboxSpec ApplyResourceCeilings(SandboxSpec spec, AgentAutonomyLevel autonomy, int? hostMemoryBudgetMb)
+    {
+        var ceilings = AgentAutonomyPolicy.Ceilings(autonomy, hostMemoryBudgetMb);
+
+        return spec with { MaxMemoryMb = ceilings.MemoryMb, MaxCpuPercent = ceilings.CpuPercent };
+    }
+
+    /// <summary>The harness invocation with BOTH of the executor's own spec post-processings applied — the egress posture and the tier's resource ceilings. One name so the launch and each revise round cannot drift apart on which hardening they got.</summary>
+    private static SandboxSpec HardenSpec(SandboxSpec spec, AgentTask task, string? modelBaseUrl, string? modelProvider, WorkspaceProvisionRequest? workspace) =>
+        ApplyResourceCeilings(ApplyEgressPolicy(spec, task.Permissions, modelBaseUrl, modelProvider, workspace), task.Autonomy, RuntimeSettings.Current.AgentMemoryCeilingMb);
 
     /// <summary>The git clone URLs of every repo in the run's workspace provision (empty for a no-repo run) — the source of the allowlist's git hosts.</summary>
     private static IReadOnlyList<string> CloneUrlsOf(WorkspaceProvisionRequest? workspace) =>

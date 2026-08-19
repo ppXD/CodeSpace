@@ -33,6 +33,16 @@ public sealed record RuntimeSettings
     /// <summary>The DELEGATED cgroup-v2 root the durable launch creates its per-run leaves under. Null (the default) ⇒ no resource cap is applied; an operator opts in by delegating a subtree and naming it here.</summary>
     public string? AgentCgroupRoot { get; init; }
 
+    /// <summary>
+    /// The operator's PER-RUN memory budget in MiB — this host's answer to "how much may one agent run take". It can
+    /// only NARROW the autonomy tier's committed ceiling (<c>AgentAutonomyPolicy.Ceilings</c>), never raise it, and a
+    /// value of zero or less is ignored rather than read as "unlimited", so this is a value for a smaller host and
+    /// never a switch that turns the ceilings off. Null (the default) ⇒ every tier keeps its committed row. There is
+    /// deliberately no cpu twin: a cpu-quota overrun throttles rather than kills, so overcommitting cpu degrades a
+    /// host instead of taking the worker down.
+    /// </summary>
+    public int? AgentMemoryCeilingMb { get; init; }
+
     /// <summary>Root directory for agent-run spool files (stdout/stderr capture, pid files). Null ⇒ a path under the system temp dir, which is fine for development but is NOT durable across a pod restart — a deployment that wants re-attach to survive one points this at a volume.</summary>
     public string? AgentRunSpoolDirectory { get; init; }
 
@@ -83,6 +93,7 @@ public sealed record RuntimeSettings
     {
         RequireSandboxConfinement = configuration.GetValue("Sandbox:RequireConfinement", false),
         AgentCgroupRoot = Trimmed(configuration["Sandbox:CgroupRoot"]),
+        AgentMemoryCeilingMb = PositiveOrNull(configuration["Sandbox:AgentMemoryCeilingMb"]),
         AgentRunSpoolDirectory = Trimmed(configuration["Agents:RunSpoolDirectory"]),
         ArtifactStoreDirectory = Trimmed(configuration["Artifacts:StoreDirectory"]),
         ArtifactLocalRwxShared = configuration.GetValue("Artifacts:LocalRwxShared", false),
@@ -115,6 +126,9 @@ public sealed record RuntimeSettings
     /// "kill in-flight work immediately", which nobody configures on purpose, so both land on the default too.
     /// </summary>
     private static int Positive(string? raw, int fallback) => int.TryParse(raw, out var value) && value > 0 ? value : fallback;
+
+    /// <summary>Same tolerant parse for a setting whose "not set" is null rather than a default. Zero / negative / unparseable all land on null, so a typo or a deliberate <c>0</c> falls back to the committed behaviour instead of being read as "no limit".</summary>
+    private static int? PositiveOrNull(string? raw) => int.TryParse(raw, out var value) && value > 0 ? value : null;
 
     private sealed class Scope : IDisposable
     {

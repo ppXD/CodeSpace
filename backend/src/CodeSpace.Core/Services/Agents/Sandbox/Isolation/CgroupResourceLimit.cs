@@ -83,6 +83,31 @@ public static class CgroupResourceLimit
         TeardownPathAsync(CgroupResourcePlan.PathFor(cgroupRoot, runId));
 
     /// <summary>
+    /// How many processes the kernel's OOM killer has reaped inside this run's cgroup — the <c>oom_kill</c> counter of
+    /// the leaf's <c>memory.events</c>. This is the ONLY sound evidence that a run hit its <c>memory.max</c>: the exit
+    /// code cannot tell a cgroup OOM from a host teardown or an operator's <c>kill -9</c> (all of them are
+    /// 128+SIGKILL), and our own <see cref="TeardownAsync"/> uses <c>cgroup.kill</c>, which does not touch this counter.
+    /// Must be read BEFORE teardown removes the leaf. <c>0</c> for a run with no cgroup, a leaf already gone, a kernel
+    /// without the file, or an unparseable line — never a guess, so an unreadable counter degrades to "no evidence of a
+    /// resource kill" rather than to a false one.
+    /// </summary>
+    public static int OomKillCount(string cgroupRoot, string runId)
+    {
+        try
+        {
+            foreach (var line in File.ReadAllLines(Path.Combine(CgroupResourcePlan.PathFor(cgroupRoot, runId), "memory.events")))
+            {
+                var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+                if (parts.Length == 2 && parts[0] == "oom_kill" && int.TryParse(parts[1], out var count)) return count;
+            }
+
+            return 0;
+        }
+        catch { return 0; }
+    }
+
+    /// <summary>
     /// Run <paramref name="command"/> inside a fresh cgroup capped by <paramref name="plan"/>. Sets up, runs behind the
     /// self-add prefix, and ALWAYS tears down — the SYNCHRONOUS path the B4 CI E2E drives. The durable launch uses
     /// <see cref="SetupAsync"/> + <see cref="TeardownAsync"/> directly instead.

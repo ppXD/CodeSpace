@@ -12,7 +12,8 @@ namespace CodeSpace.SandboxTests;
 /// is launched via <see cref="LocalProcessRunner.LaunchAsync"/> with an operator-configured cgroup root, which creates
 /// the per-run cgroup leaf and runs the WHOLE supervisor chain (cgroup self-add → [netns] → [prlimit] → [bwrap] → the
 /// command) inside it. Proves the durable-launch guarantees against a live kernel: (1) a process UNDER the cap runs to
-/// Success, (2) one OVER it is OOM-killed → the run completes Failed, (3) the handle carries the cgroup key, and (4) the
+/// Success, (2) one OVER it is OOM-killed → the run completes ResourceExhausted, classified from the leaf's own
+/// <c>memory.events oom_kill</c> counter, (3) the handle carries the cgroup key, and (4) the
 /// cgroup is REAPED on the terminal path (no leak), and an uncapped run sets up NO cgroup (byte-identical). Needs a
 /// delegated cgroup-v2 subtree, so it runs for real ONLY in the privileged sandbox-isolation CI job
 /// (<c>CODESPACE_REQUIRE_CGROUP=1</c> → an un-delegatable container HARD-fails, skip ≠ pass); elsewhere it degrade-skips.
@@ -46,10 +47,13 @@ public sealed class DurableLaunchCgroupE2ETests
             under.Result.Status.ShouldBe(SandboxStatus.Success, $"a 16 MiB alloc under a 256 MiB cap must succeed. Stderr: {under.Result.Stderr}");
             Directory.Exists(CgroupResourcePlan.PathFor(arena.Root, underKey)).ShouldBeFalse("the run's cgroup leaf must be reaped on completion — a leak would survive here");
 
-            // OVER the cap: a 256 MiB alloc inside a 64 MiB hard cap → the cgroup OOM killer kills it → run completes Failed.
+            // OVER the cap: a 256 MiB alloc inside a 64 MiB hard cap → the cgroup OOM killer kills it → the run
+            // completes ResourceExhausted, which is the assertion this test always MEANT: a plain Failed could not tell
+            // an enforced ceiling from the hog script dying of anything else, and the runner now reads the kernel's own
+            // memory.events oom_kill counter (before reap) to say which it was.
             var overKey = Guid.NewGuid().ToString("N");
             var over = await DurableAllocAsync(runner, overKey, maxMemoryMb: 64, allocMib: 256);
-            over.Result.Status.ShouldBe(SandboxStatus.Failed, $"a 256 MiB alloc under a 64 MiB hard cap must be OOM-killed by the cgroup the durable launch placed it in — the memory ceiling is the whole point. If this succeeds, the cap is not enforcing through the durable launch. Stderr: {over.Result.Stderr}");
+            over.Result.Status.ShouldBe(SandboxStatus.ResourceExhausted, $"a 256 MiB alloc under a 64 MiB hard cap must be OOM-killed by the cgroup the durable launch placed it in AND be reported as a resource kill — the memory ceiling is the whole point. A Success here means the cap is not enforcing through the durable launch; a plain Failed means the kill happened but the oom_kill read did not, so the retry path still cannot tell. Stderr: {over.Result.Stderr}");
             Directory.Exists(CgroupResourcePlan.PathFor(arena.Root, overKey)).ShouldBeFalse("the OOM'd run's cgroup leaf is reaped on the terminal path too");
         }
         finally

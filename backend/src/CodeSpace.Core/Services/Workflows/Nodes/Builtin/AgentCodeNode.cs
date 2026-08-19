@@ -284,10 +284,11 @@ public sealed class AgentCodeNode : INodeRuntime
         {
             var error = ReadString(payload, "error");
 
-            // NeedsReview parked human-owed work, Cancelled recorded the user's own stop, and a fail-closed
+            // NeedsReview parked human-owed work, Cancelled recorded the user's own stop, a fail-closed
             // acceptance re-grade is a VERDICT (same code + same check would fail again — in-run improvement is the
-            // revise loop's job, plan-level revision the supervisor's) — respawning the agent can change none of
-            // them, so all three fail non-retryable. Everything else (a crashed / timed-out / abandoned run) is a
+            // revise loop's job, plan-level revision the supervisor's), and a resource-ceiling kill (below) is a fact
+            // about the ceiling — respawning the agent can change none of them, so all four fail non-retryable.
+            // Everything else (a crashed / timed-out / abandoned run) is a
             // candidate transient death a fresh agent may survive; the node's retry policy decides whether one is bought.
             //
             // P3.1: an acceptance re-grade is deterministic ONLY when the check itself genuinely ran and failed —
@@ -308,7 +309,15 @@ public sealed class AgentCodeNode : INodeRuntime
             // Retries are still bounded by the node's own policy, so a genuinely stuck agent still lands here.
             var stalled = exitReason == AgentAcceptanceContract.StalledExitReason;
 
-            var deterministic = (status is nameof(AgentRunStatus.NeedsReview) or nameof(AgentRunStatus.Cancelled) || acceptanceFailed)
+            // The stall carve-out run the OTHER way, and for the opposite reason — the watchdogs retry because neither
+            // can see WHY a process went quiet, while this one does not retry because it knows exactly why it died:
+            // a cgroup memory ceiling killed this agent's process tree, and a fresh respawn runs at the SAME committed
+            // ceiling on the same task, so it dies identically. Retrying only re-bills the kill and buries the one fact
+            // the operator needs (raise the ceiling) under N identical deaths. Unlike the watchdogs, this is not a
+            // guess: the runner classified it from the cgroup's own oom_kill counter (SandboxStatus.ResourceExhausted).
+            var resourceExhausted = exitReason == AgentRunExecutor.ResourceExhaustedExitReason;
+
+            var deterministic = (status is nameof(AgentRunStatus.NeedsReview) or nameof(AgentRunStatus.Cancelled) || acceptanceFailed || resourceExhausted)
                                 && !acceptanceInfraFault
                                 && !stalled;
 
