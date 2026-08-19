@@ -91,7 +91,16 @@ public sealed record HarnessSettingDescriptor
 /// </summary>
 public sealed record HarnessDescriptor
 {
-    /// <summary>Stable type key, read <c>&lt;kind&gt;/v&lt;major&gt;</c> — e.g. <c>claude-code/v2</c>, <c>codex-cli/v2</c>. The major is the ADAPTER's contract generation, so a rewrite ships beside its predecessor instead of reinterpreting its records.</summary>
+    /// <summary>
+    /// Stable type key, read <c>&lt;kind&gt;/v&lt;major&gt;</c> — the keys the shipped adapters emit today are
+    /// <c>codex-cli/v1</c> and <c>claude-code/v2</c>. The major is the ADAPTER's record-contract generation, declared
+    /// by the adapter itself as <c>IAgentHarnessContractGeneration.ContractGeneration</c> and at least 1, so a rewrite
+    /// ships beside its predecessor instead of reinterpreting its records.
+    ///
+    /// <para>It is NOT the major of the native CLI version — that quantity lives in
+    /// <see cref="SupportedNativeVersions"/>, and a bump of it must leave this key alone or one unchanged adapter's
+    /// rows split across two keys.</para>
+    /// </summary>
     public required string TypeKey { get; init; }
 
     /// <summary>Full version of this adapter, for pinning the exact translation a run was recorded with.</summary>
@@ -121,7 +130,7 @@ public sealed record HarnessDescriptor
         var errors = new List<string>();
 
         if (!IsCanonicalTypeKey(TypeKey))
-            errors.Add($"typeKey '{TypeKey}' must read '<kind>/v<major>'");
+            errors.Add($"typeKey '{TypeKey}' must read '<kind>/v<major>' with a major of at least 1");
         if (string.IsNullOrWhiteSpace(AdapterVersion))
             errors.Add("adapterVersion must be non-empty");
         if (SupportedNativeVersions.Count == 0 || SupportedNativeVersions.Any(string.IsNullOrWhiteSpace))
@@ -174,7 +183,9 @@ public sealed record HarnessDescriptor
     {
         var parts = typeKey?.Split('/');
 
-        if (parts is not { Length: 2 } || string.IsNullOrWhiteSpace(parts[0]) || parts[1].Length < 2 || parts[1][0] != 'v') return false;
+        // '0' is refused as the FIRST digit, which rejects both v0 and a zero-padded v01: the generation floor is 1
+        // and the database's own key check is '/v[1-9][0-9]*', so anything else names an identity no row can carry.
+        if (parts is not { Length: 2 } || string.IsNullOrWhiteSpace(parts[0]) || parts[1].Length < 2 || parts[1][0] != 'v' || parts[1][1] == '0') return false;
 
         return parts[1].Skip(1).All(char.IsAsciiDigit);
     }

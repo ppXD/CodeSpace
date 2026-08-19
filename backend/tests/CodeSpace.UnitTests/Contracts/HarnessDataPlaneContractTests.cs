@@ -132,6 +132,25 @@ public sealed class HarnessDataPlaneContractTests
         errors.ShouldContain(error => error.Contains("never both", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// The generation FLOOR, on the side of the seam that validates a key rather than the one that builds it. The
+    /// database checks <c>harness_type_key</c> against <c>/v[1-9][0-9]*</c> (migration 0137), so a zero major and a
+    /// zero-padded one are not representable keys at all — a descriptor that accepted them would declare an adapter
+    /// identity no row could ever carry, and this type is what a snapshot will be validated through.
+    /// </summary>
+    [Theory]
+    [InlineData("codex-cli/v1", true)]
+    [InlineData("claude-code/v2", true)]
+    [InlineData("codex-cli/v0", false)]
+    [InlineData("codex-cli/v01", false)]
+    public void A_descriptor_identity_names_a_generation_the_database_can_actually_store(string typeKey, bool usable)
+    {
+        var errors = (ValidDescriptor() with { TypeKey = typeKey }).Validate();
+
+        errors.Any(error => error.Contains("typeKey", StringComparison.Ordinal)).ShouldBe(!usable,
+            customMessage: "the descriptor and the harness-execution key check must define ONE quantity, so a major below 1 — or one written with a leading zero — has to be refused here too");
+    }
+
     [Theory]
     [InlineData(true, true, "exactly one")]
     [InlineData(false, false, "exactly one")]

@@ -358,7 +358,7 @@ public sealed class WorkflowRunNativeRecordPersistenceTests
         var execution = new WorkflowRunHarnessExecution
         {
             Id = Guid.NewGuid(), TeamId = world.TeamId, AgentRunId = world.AgentRunId, Generation = generation,
-            HarnessTypeKey = "codex-cli/v2", RunnerKind = "local", RunnerLocatorSchemaVersion = 1,
+            HarnessTypeKey = "codex-cli/v1", RunnerKind = "local", RunnerLocatorSchemaVersion = 1,
             State = HarnessExecutionState.Pending, AttemptCount = 0, NextAttemptOrdinal = 1, LeaseFence = 0,
             Revision = 1, CreatedAt = now, LastModifiedAt = now,
         };

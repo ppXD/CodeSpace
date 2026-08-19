@@ -21,7 +21,7 @@ namespace CodeSpace.Core.Services.Agents.Harnesses.Claude;
 /// (surfaced, never dropped) and pure setup lines return null — so a CLI version bump degrades gracefully; the
 /// normalization shape tested here is the stable contract, calibrated against real output when execution is wired.</para>
 /// </summary>
-public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, IAgentGroundedFrameReader, IAgentModelCallFrameReader, ISingletonDependency
+public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessContractGeneration, IModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, IAgentGroundedFrameReader, IAgentModelCallFrameReader, ISingletonDependency
 {
     public const string HarnessKind = "claude-code";
 
@@ -88,6 +88,20 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
     public string Kind => HarnessKind;
 
     public string Version => System.Environment.GetEnvironmentVariable(VersionEnvVar) is { Length: > 0 } v ? v : DefaultVersion;
+
+    /// <summary>
+    /// This adapter's record-contract generation — the <c>v2</c> in the <c>claude-code/v2</c> every harness-execution
+    /// row it writes is keyed under. It is 2 rather than 1 for one reason, stated so nobody reads it as a claim that a
+    /// first generation of this adapter ever shipped: the derivation this replaced took the leading digits of
+    /// <see cref="Version"/>, so a run on the pinned <see cref="DefaultVersion"/> wrote <c>claude-code/v2</c>, and a
+    /// row's <c>harness_type_key</c> is immutable once written (0137's identity trigger refuses an update to it).
+    /// Emitting <c>v1</c> now would split one unchanged adapter's history across two keys with no way to repair it,
+    /// which is the exact harm this key exists to prevent. Deliberately independent of
+    /// <see cref="Version"/> from here on: a claude 3.x bump does not change how this adapter translates frames into
+    /// rows, so it must not re-key them. Pinned through the key it produces, by
+    /// <c>AgentNativeRecordPumpTests.Every_shipped_adapter_keys_its_rows_under_the_generation_it_declares</c>.
+    /// </summary>
+    public int ContractGeneration => 2;
 
     public IReadOnlyList<string> Models { get; } = new[] { "claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5" };
 

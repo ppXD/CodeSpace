@@ -76,6 +76,14 @@ internal sealed class AgentNativeRecordPump
     /// <summary>Reason code stamped on a record whose parse threw. Queryable through <c>ix_workflow_run_native_record_unprojected</c>, which is how "which frames can we no longer interpret" stops being unanswerable.</summary>
     internal const string NormalizationThrewErrorCode = "normalization.parser-threw";
 
+    /// <summary>
+    /// The FLOOR of a record-contract generation, and the generation an adapter that declares none is keyed under.
+    /// One rather than zero because <c>ck_workflow_run_harness_execution_identity</c> checks the key against
+    /// <c>/v[1-9][0-9]*</c> (migration 0137): <c>v0</c> is not a representable key, so a declaration below this is
+    /// clamped up here rather than allowed to make an adapter's capture unopenable.
+    /// </summary>
+    internal const int FirstContractGeneration = 1;
+
     private readonly INativeRecordPlane? _plane;
     private readonly SecretRedactor _redactor;
     private readonly HarnessReductionSink _reduction;
@@ -107,16 +115,23 @@ internal sealed class AgentNativeRecordPump
     internal bool IsReducing => _reduction.IsReducing;
 
     /// <summary>
-    /// The execution-identity key for a harness, as <c>&lt;kind&gt;/v&lt;major&gt;</c>: the adapter's stable tag plus the
-    /// major of the harness version it pins, so a row read a year later is interpretable against the adapter that wrote
-    /// it. A version that names no leading number (a test double, an unpinned adapter) is v1 rather than unrepresentable.
+    /// The execution-identity key for a harness, as <c>&lt;kind&gt;/v&lt;major&gt;</c>: the adapter's stable tag plus
+    /// the generation of the durable record contract IT declares through
+    /// <see cref="IAgentHarnessContractGeneration"/>, clamped up to <see cref="FirstContractGeneration"/> — so a row
+    /// read a year later is interpretable against the adapter that wrote it. An adapter that declares no generation
+    /// (a test double, a third-party adapter) is the first one rather than unrepresentable.
+    ///
+    /// <para>The adapter's pinned native version (<see cref="IAgentHarness.Version"/>) is deliberately NOT read here.
+    /// It is a different quantity: it moves on every CLI bump, so deriving the major from it re-keyed an adapter whose
+    /// translation had not changed, and its leading digits are not a generation at all — the pinned codex 0.142.x
+    /// yields 0, which <c>ck_workflow_run_harness_execution_identity</c> refuses, so it silently took the same
+    /// <c>codex-cli/v1</c> a future codex 1.x would have taken.</para>
     /// </summary>
     internal static string HarnessTypeKeyOf(IAgentHarness harness)
     {
-        var digits = new string((harness.Version ?? string.Empty).TrimStart().TakeWhile(char.IsAsciiDigit).ToArray());
-        var major = int.TryParse(digits, out var parsed) && parsed > 0 ? parsed : 1;
+        var declared = harness is IAgentHarnessContractGeneration adapter ? adapter.ContractGeneration : FirstContractGeneration;
 
-        return $"{harness.Kind.Trim().ToLowerInvariant()}/v{major}";
+        return $"{harness.Kind.Trim().ToLowerInvariant()}/v{Math.Max(declared, FirstContractGeneration)}";
     }
 
     /// <summary>
