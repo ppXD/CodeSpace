@@ -264,16 +264,18 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
         if (task.ResumeFromSessionId is { Length: > 0 } sessionId && task.RestoredTranscript is { Length: > 0 } transcript)
             files.Add(new ConfigHomeFile { RelativePath = $"{SessionsRoot}/rollout-{sessionId}.jsonl", Content = transcript });
 
-        // P3.3: the in-loop acceptance Stop hook — same generated script Claude Code wires, plus Codex's OWN
-        // hooks.json wrapper. BuildInvocation pairs this with --dangerously-bypass-hook-trust, since a freshly
-        // generated per-run hook has no persisted trust decision and Codex's default trust-review flow would
-        // otherwise block on an interactive prompt that never comes in a non-interactive `exec` run.
+        // P3.3: the in-loop acceptance Stop hook — the same GENERATOR Claude Code uses, told to resolve its config
+        // home from CODEX_HOME (this harness's own override, the one ConfigHomeEnvVars above has the runner export),
+        // so the two harnesses' script bodies differ in exactly that one line. Plus Codex's OWN hooks.json wrapper.
+        // BuildInvocation pairs this with --dangerously-bypass-hook-trust, since a freshly generated per-run hook has
+        // no persisted trust decision and Codex's default trust-review flow would otherwise block on an interactive
+        // prompt that never comes in a non-interactive `exec` run.
         if (InLoopAcceptanceHook.AppliesTo(task))
         {
             files.Add(new ConfigHomeFile
             {
                 RelativePath = InLoopAcceptanceHook.ScriptRelativePath,
-                Content = InLoopAcceptanceHook.BuildScript(task.Acceptance!.Command, InLoopAcceptanceHook.MaxBlocks),
+                Content = InLoopAcceptanceHook.BuildScript(task.Acceptance!.Command, InLoopAcceptanceHook.MaxBlocks, ConfigHomeEnvVar),
                 IsExecutable = true,
             });
             files.Add(new ConfigHomeFile { RelativePath = "hooks.json", Content = StopHookJson });

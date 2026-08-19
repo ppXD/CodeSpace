@@ -212,7 +212,7 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
             files.Add(new ConfigHomeFile
             {
                 RelativePath = InLoopAcceptanceHook.ScriptRelativePath,
-                Content = InLoopAcceptanceHook.BuildScript(task.Acceptance!.Command, InLoopAcceptanceHook.MaxBlocks),
+                Content = InLoopAcceptanceHook.BuildScript(task.Acceptance!.Command, InLoopAcceptanceHook.MaxBlocks, ConfigDirEnvVar),
                 IsExecutable = true,
             });
             files.Add(new ConfigHomeFile { RelativePath = "settings.json", Content = StopHookSettingsJson });
