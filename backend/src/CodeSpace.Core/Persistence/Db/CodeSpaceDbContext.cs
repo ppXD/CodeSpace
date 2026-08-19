@@ -96,6 +96,8 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork, IDataProtectionKeyCont
     public DbSet<CaptureIntent> CaptureIntent => Set<CaptureIntent>();
     public DbSet<ArtifactManifest> ArtifactManifest => Set<ArtifactManifest>();
     public DbSet<QualificationReceipt> QualificationReceipt => Set<QualificationReceipt>();
+
+    public DbSet<Lesson> Lesson => Set<Lesson>();
     public DbSet<SupervisorDecisionRecord> SupervisorDecisionRecord => Set<SupervisorDecisionRecord>();
     public DbSet<SupervisorTapeSummaryRecord> SupervisorTapeSummaryRecord => Set<SupervisorTapeSummaryRecord>();
     public DbSet<WorkSession> WorkSession => Set<WorkSession>();

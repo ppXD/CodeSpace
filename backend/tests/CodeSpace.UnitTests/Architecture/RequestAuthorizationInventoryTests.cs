@@ -61,6 +61,7 @@ public class RequestAuthorizationInventoryTests
         ["ReconcileAgentRunLogCapturesCommand"] = "reconciles exact durable AgentRun log-capture health in bounded lease/fence batches; it is dispatched only by the system recurring job and never acts for a user or changes an AgentRun outcome.",
         ["ReconcileStuckAgentRunsCommand"] = "sweep",
         ["ReconcileStuckRunsCommand"] = "sweep",
+        ["DistillLessonsCommand"] = "sweep",
         ["ReconcileStuckWebhookRegistrationsCommand"] = "sweep",
         ["SweepBudgetSettlementCommand"] = "sweep",
         ["SweepCompletionShadowCommand"] = "sweep",
