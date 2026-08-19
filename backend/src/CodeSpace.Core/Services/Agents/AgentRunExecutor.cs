@@ -553,17 +553,23 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var facts = new AgentRunFacts();   // driven alongside the folder, exactly as the live tail does, so both paths reach MapSandboxResult with the same inputs
         await using var transcript = new AgentTranscriptSpool(TranscriptSpillDirectory(context.RunId));   // D3/G0: the faithful raw stream of the RESUMED tail (the pre-crash prefix lived in the dead observer's run), bounded exactly as the live tail's is and spilled into the SAME run-owned, reaper-swept spool directory
         var writer = new BufferedEventWriter(_runs, context.RunId);   // same batched-append + flush-at-checkpoint path as the live tail
+        var native = await OpenResumedCaptureAsync(context, redactor, cancellationToken).ConfigureAwait(false);   // G1: the RESUMED frame stream of the same process, continuing its source cursor and the execution's reduction
 
         async Task PersistLineAsync(string line)
         {
-            await transcript.AppendLineAsync(redactor.Redact(line), cancellationToken).ConfigureAwait(false);
+            var redactedLine = redactor.Redact(line);
 
-            foreach (var normalized in context.Harness.ParseEvents(line))
+            await transcript.AppendLineAsync(redactedLine, cancellationToken).ConfigureAwait(false);
+
+            var frame = await native.CaptureAsync(line, redactedLine, context.Harness, cancellationToken).ConfigureAwait(false);
+
+            foreach (var normalized in frame.Events)
             {
                 var redacted = Redact(normalized, redactor);
 
                 await writer.BufferAsync(redacted, cancellationToken).ConfigureAwait(false);
 
+                native.Project(frame, redacted);
                 folder.Add(redacted);
                 facts.Add(redacted);
             }
@@ -575,13 +581,15 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var capture = await OpenLogCaptureAsync(new LogCaptureContext(context.TeamId, context.RunId, context.ActorId, context.WorkerFenceEpoch, redactor), context.Durable, handle, cancellationToken).ConfigureAwait(false);
         if (!ReferenceEquals(capture.Handle, handle) && capture.Handle != handle)
             await _runs.SetRunnerHandleAsync(context.RunId, JsonSerializer.Serialize(capture.Handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
-        // No frame capture on this path, stated rather than forgotten: a re-attach resumes mid-spool, so its stream's
-        // source geometry would have to start from the handle's committed offset instead of from zero, and a resumed
-        // opening's fence and ordinals belong with the re-attach slice rather than being guessed here.
-        var sandbox = await capture.ObserveAsync((capturedHandle, token) => context.Durable.AttachAsync(capturedHandle, (line, _) => PersistLineAsync(line), token, CheckpointHandleOffset(context.RunId, capturedHandle, new HarnessSinks(writer, AgentNativeRecordPump.Disabled(_logger)))), cancellationToken).ConfigureAwait(false);
+        var sandbox = await capture.ObserveAsync((capturedHandle, token) => context.Durable.AttachAsync(capturedHandle, (line, _) => PersistLineAsync(line), token, CheckpointHandleOffset(context.RunId, capturedHandle, new HarnessSinks(writer, native))), cancellationToken).ConfigureAwait(false);
 
         // Final flush for the terminal-drain lines (no trailing checkpoint), as in the live path.
         await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+
+        // Same terminal drain for the frame plane, then close the process this re-attach was observing — the SAME
+        // attempt the original launch appended, because a resumed opening records against it rather than inventing a
+        // second row for one process.
+        await native.CloseAsync(ObservedExitCode(sandbox), cancellationToken).ConfigureAwait(false);
 
         var result = await AttachTranscriptAsync(MapSandboxResult(sandbox, folder, facts), context.TeamId, transcript, cancellationToken).ConfigureAwait(false);
 
@@ -688,6 +696,38 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             {
                 _logger.LogWarning(exception, "Agent run {RunId} shadow log terminalization failed after task completion; durable log state remains independently recoverable", runId);
             }
+        }
+
+        await TerminalizeHarnessExecutionAsync(teamId, runId, expectedEpoch, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Close the run's live harness execution. This is the ONE place every executor terminal passes through — the
+    /// clean close, the executor-error catch, a parent that went terminal at the claim, the re-attach's own two exits,
+    /// and the forced terminals (a timeout or a stall reaches it through the same result) — so an execution is left
+    /// Running only where nobody with authority closed it. Leaving it Running is not untidy but blocking: 0137 refuses
+    /// to open a generation over a live predecessor, so the Agent Run's next execution would be unrepresentable.
+    ///
+    /// <para>The fence is passed on, and it is why this is safe to reach from the branch above that swallows
+    /// <see cref="AgentRunTransitionException"/>. That branch cannot tell "the reconciler landed the run first" from "a
+    /// reclaim took the run away", because a lost completion CAS raises the same exception. The first must terminalize
+    /// and the second must not — this worker's process is not the one still running — so the plane refuses the write
+    /// under a superseded fence rather than this caller guessing which case it is in.</para>
+    ///
+    /// <para>Best-effort and last, exactly like the shadow log's terminalization above: the run has already landed and
+    /// been notified, and no failure here may change what it resolved to.</para>
+    /// </summary>
+    private async Task TerminalizeHarnessExecutionAsync(Guid teamId, Guid runId, long expectedEpoch, CancellationToken cancellationToken)
+    {
+        if (_nativeRecords is not INativeRecordExecutionPlane executions) return;
+
+        try
+        {
+            await executions.TerminalizeAsync(teamId, runId, expectedEpoch, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(exception, "Agent run {RunId} harness execution could not be terminalized; the row stays live for a later sweep and the run completed unchanged", runId);
         }
     }
 
@@ -2189,6 +2229,28 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // separately, so labelling these frames anything else would be a claim the delivery cannot support.
             Channel = NativeRecordChannel.Stdout,
         }, context.Redactor, _logger, cancellationToken);
+
+    /// <summary>
+    /// Re-open this run's frame capture on the RESUMED stream of the process it is re-attaching to. The plane re-enters
+    /// the recorded process rather than appending a second one for it, and the cursor handed to it is the SAME
+    /// <see cref="SandboxHandle.StdoutOffset"/> the observation below is about to resume reading at — so a line this
+    /// re-attach is re-delivered is recorded at the position it already occupies, and the plane can tell it apart from
+    /// one the process has not produced before. The runner locator is this handle's own spool directory, which is the
+    /// address the resumed observation actually reads.
+    /// </summary>
+    private Task<AgentNativeRecordPump> OpenResumedCaptureAsync(ReattachFoldContext context, SecretRedactor redactor, CancellationToken cancellationToken) =>
+        AgentNativeRecordPump.OpenAsync(_nativeRecords, new NativeRecordCaptureRequest
+        {
+            TeamId = context.TeamId,
+            AgentRunId = context.RunId,
+            HarnessTypeKey = AgentNativeRecordPump.HarnessTypeKeyOf(context.Harness),
+            RunnerKind = context.Handle.Kind,
+            RunnerLocatorJson = JsonSerializer.Serialize(new { spoolDirectory = context.Handle.SpoolDirectory }, AgentJson.Options),
+            WorkerFenceEpoch = context.WorkerFenceEpoch,
+            Channel = NativeRecordChannel.Stdout,
+            Resume = true,
+            ResumeSourceOffset = context.Handle.StdoutOffset,
+        }, redactor, _logger, cancellationToken);
 
     /// <summary>
     /// The exit code the observer actually SAW, or null when nothing did. A timeout or a stall is a process this side

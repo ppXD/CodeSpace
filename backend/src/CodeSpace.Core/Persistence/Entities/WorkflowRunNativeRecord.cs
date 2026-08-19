@@ -52,7 +52,7 @@ public sealed class WorkflowRunNativeRecord : IEntity<Guid>
     /// <summary>When capture observed the frame — the only clock the capture side controls.</summary>
     public DateTimeOffset IngestedAt { get; set; }
 
-    /// <summary>Offset of the RAW frame within its stream. A per-stream cursor derived from the frames as delivered, NOT a byte-exact index into a spool file: a resume reads the log-capture plane's committed source head, never this.</summary>
+    /// <summary>Offset of the RAW frame within its stream. A per-stream cursor derived from the frames as delivered, each counted as its bytes plus one terminator — the source's own offsets for the newline-terminated stream a runner spools, and not otherwise a byte-exact index into one. Resuming the TAIL reads the log-capture plane's committed source head and never this, while a resumed CAPTURE starts its own stream at that same committed offset so both sides of a re-attach state their positions in one coordinate. Not a no-overlap guarantee — the re-attach is re-delivered every line recorded past that offset, and what keeps each source line recorded once is the writer refusing anything below the head its process already covers.</summary>
     public long SourceOffsetBytes { get; set; }
 
     /// <summary>Byte length of the RAW frame. It differs from <see cref="SizeBytes"/> exactly when redaction changed the bytes, which is how much redaction cost.</summary>

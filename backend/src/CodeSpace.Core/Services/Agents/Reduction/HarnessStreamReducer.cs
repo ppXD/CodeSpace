@@ -9,8 +9,12 @@ namespace CodeSpace.Core.Services.Agents.Reduction;
 ///
 /// <para>Stateless: everything about a pass lives in its <see cref="HarnessReductionRequest"/> and in the fold it
 /// creates, so two passes can run concurrently over different executions without sharing anything. Registered as a
-/// transient dependency, and nothing in production resolves it yet — the wiring into the executor is a separate slice,
-/// because the plane that will feed real frames is still being built beside this one.</para>
+/// transient dependency, and nothing in production resolves it yet: the executor drives the same
+/// <see cref="HarnessReductionFold"/> from the other direction, PUSHED by the live capture pump
+/// (<c>HarnessReductionSink</c>), because on that path the checkpoint has to commit inside the batch's own
+/// transaction and therefore cannot be an independent write through
+/// <see cref="HarnessReductionRequest.OnCheckpointAsync"/>. This driver is what a pass over an already-durable stream
+/// needs — a backfill, a re-reduction under a new reducer kind — and that caller does not exist yet.</para>
 ///
 /// <para>The cadence choice is CONSUME THEN CHECKPOINT, and <see cref="HarnessReductionRequest.OnCheckpointAsync"/>
 /// documents why: an offer can only carry a position already folded, so a crash re-consumes rather than skips. What

@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using CodeSpace.Core.Services.Agents.Reduction;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Contracts;
 using Microsoft.Extensions.Logging;
@@ -24,11 +25,26 @@ namespace CodeSpace.Core.Services.Agents.Capture;
 /// #1479 and #1489 removed are not to be replaced by a third. Per line the pump holds one record and its events, and
 /// nothing that survives a flush.</para>
 ///
-/// <para><b>It cannot change what the run resolves to.</b> A plane that will not open, or a write that will not land,
-/// disables capture for the round with a warning; the harness's own output path is untouched, and nothing reads these
-/// tables yet. Nor does capture SWALLOW anything: a parser that throws has its frame recorded with the reason and the
-/// throw then propagates exactly as it did before this plane existed. Containing it here would have made the run's
-/// outcome depend on whether a shadow plane happened to be deployed, which is the one thing a dual write may not do.</para>
+/// <para><b>The reduction rides the write, not beside it.</b> A batch is folded into
+/// <see cref="HarnessReductionSink"/> immediately BEFORE it is persisted, and the checkpoint that fold produces is
+/// written in the batch's OWN transaction. So the durable position can neither lead the frames it claims nor lag
+/// them, and a replaced worker resumes from exactly the prefix that is actually recorded — which is what a re-attach
+/// has until now had no way to recover.</para>
+///
+/// <para><b>The seam re-delivers, and the pump drops what it re-delivers.</b> A frame becomes durable at its batch
+/// write; the spool position a re-attach resumes from is persisted after that write, so the records legitimately run
+/// AHEAD of it and the span between the two is delivered a second time to the resumed observation. A resumed opening
+/// therefore starts its cursor where the observation actually resumes rather than at the recorded head, so a
+/// re-delivered line is described at the position its first record already used, and it records nothing below
+/// <see cref="NativeRecordCaptureOpening.RecordedHead"/> — the fold counts each record and chains its digest, so a
+/// second copy would not be a harmless duplicate but a stored state witnessing a prefix the process never produced.</para>
+///
+/// <para><b>It cannot change what the run resolves to.</b> A plane that will not open, a reduction that will not
+/// resume, and a write that will not land each disable their half for the round with a warning; the harness's own
+/// output path is untouched, and nothing reads the record and event tables yet. Nor does capture SWALLOW anything: a
+/// parser that throws has its frame recorded with the reason and the throw then propagates exactly as it did before
+/// this plane existed. Containing it here would have made the run's outcome depend on whether a shadow plane happened
+/// to be deployed, which is the one thing a dual write may not do.</para>
 /// </summary>
 internal sealed class AgentNativeRecordPump
 {
@@ -46,6 +62,7 @@ internal sealed class AgentNativeRecordPump
 
     private readonly INativeRecordPlane? _plane;
     private readonly SecretRedactor _redactor;
+    private readonly HarnessReductionSink _reduction;
     private readonly ILogger _logger;
     private readonly List<NativeRecordCapture> _records = new();
     private readonly List<AgentSemanticEventV1> _events = new();
@@ -53,20 +70,24 @@ internal sealed class AgentNativeRecordPump
     private NativeRecordCaptureHandle? _handle;
     private long _ordinal;
     private long _sourceOffset;
+    private readonly long _recordedHead;
 
-    private AgentNativeRecordPump(INativeRecordPlane? plane, NativeRecordCaptureHandle? handle, SecretRedactor redactor, ILogger logger)
+    private AgentNativeRecordPump(INativeRecordPlane? plane, NativeRecordCaptureOpening? opening, SecretRedactor redactor, HarnessReductionSink reduction, ILogger logger)
     {
         _plane = plane;
-        _handle = handle;
+        _handle = opening?.Handle;
+        _sourceOffset = opening?.SourceHead ?? 0;
+        _recordedHead = opening?.RecordedHead ?? 0;
         _redactor = redactor;
+        _reduction = reduction;
         _logger = logger;
     }
 
     /// <summary>Whether frames are actually being captured. False ⇒ the pump still parses exactly as before and records nothing.</summary>
     internal bool IsCapturing => _plane is not null && _handle is not null;
 
-    /// <summary>A pump that parses and records nothing — for a path where capture is deliberately not wired, so the absence is a named decision at the call site rather than a null nobody explains.</summary>
-    internal static AgentNativeRecordPump Disabled(ILogger logger) => new(null, null, SecretRedactor.None, logger);
+    /// <summary>Whether the captured frames are also being folded into a resumable reduction. False ⇒ frames are still captured and no checkpoint is written.</summary>
+    internal bool IsReducing => _reduction.IsReducing;
 
     /// <summary>
     /// The execution-identity key for a harness, as <c>&lt;kind&gt;/v&lt;major&gt;</c>: the adapter's stable tag plus the
@@ -81,24 +102,59 @@ internal sealed class AgentNativeRecordPump
         return $"{harness.Kind.Trim().ToLowerInvariant()}/v{major}";
     }
 
-    /// <summary>Opens a capture stream, degrading to a parse-only pump when the plane is absent or will not open — the same shape the shadow log capture already uses, for the same reason: a run must never depend on it. The redactor is the run's own, and the only thing that keeps a parser's exception message out of storage.</summary>
+    /// <summary>
+    /// Opens a capture stream — a new process's, or the RESUMED stream of one already recorded when
+    /// <see cref="NativeRecordCaptureRequest.Resume"/> is set — and resumes the execution's reduction behind it.
+    /// Degrades to a parse-only pump when the plane is absent, cannot open, or has no live process to resume: the same
+    /// shape the shadow log capture already uses, for the same reason, that a run must never depend on it. The
+    /// redactor is the run's own, and the only thing that keeps a parser's exception message out of storage.
+    /// </summary>
     internal static async Task<AgentNativeRecordPump> OpenAsync(INativeRecordPlane? plane, NativeRecordCaptureRequest request, SecretRedactor redactor, ILogger logger, CancellationToken cancellationToken)
     {
-        if (plane is null) return new AgentNativeRecordPump(null, null, redactor, logger);
+        if (plane is null) return Closed(redactor, logger);
 
         try
         {
-            var handle = await plane.OpenAsync(request, cancellationToken).ConfigureAwait(false);
+            var opening = await OpenedAsync(plane, request, cancellationToken).ConfigureAwait(false);
 
-            return new AgentNativeRecordPump(handle is null ? null : plane, handle, redactor, logger);
+            if (opening is null) return Closed(redactor, logger);
+
+            var reduction = await HarnessReductionSink.OpenAsync(plane, opening.Handle, logger, cancellationToken).ConfigureAwait(false);
+
+            return new AgentNativeRecordPump(plane, opening, redactor, reduction, logger);
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             logger.LogWarning(exception, "Native record capture could not open for agent run {RunId}; the run streams unchanged with no native records", request.AgentRunId);
 
-            return new AgentNativeRecordPump(null, null, redactor, logger);
+            return Closed(redactor, logger);
         }
     }
+
+    /// <summary>
+    /// A LAUNCH appends the next process of the execution and starts its stream's cursor at zero with nothing recorded
+    /// behind it; a RESUME re-enters the process already recorded, starts at the position the observation resumes
+    /// reading at, and learns how far that process's records already reach. A plane that cannot resume — it does not
+    /// implement the sibling capability, or the run has no live recorded process — yields no opening, and the
+    /// re-attach then streams with no native records rather than inventing a second process row for the one it is
+    /// observing.
+    /// </summary>
+    private static async Task<NativeRecordCaptureOpening?> OpenedAsync(INativeRecordPlane plane, NativeRecordCaptureRequest request, CancellationToken cancellationToken)
+    {
+        if (request.Resume)
+        {
+            return plane is INativeRecordExecutionPlane executions
+                ? await executions.ReopenAsync(request, cancellationToken).ConfigureAwait(false)
+                : null;
+        }
+
+        var handle = await plane.OpenAsync(request, cancellationToken).ConfigureAwait(false);
+
+        return handle is null ? null : new NativeRecordCaptureOpening { Handle = handle, SourceHead = 0 };
+    }
+
+    /// <summary>A pump that parses exactly as before and records nothing.</summary>
+    private static AgentNativeRecordPump Closed(SecretRedactor redactor, ILogger logger) => new(null, null, redactor, HarnessReductionSink.Disabled(logger), logger);
 
     /// <summary>
     /// Capture one frame and then ask the harness what it is. The record is built from the REDACTED line, so no secret
@@ -167,9 +223,14 @@ internal sealed class AgentNativeRecordPump
         _records.Clear();
         _events.Clear();
 
+        // Folded BEFORE the write, so a frame that becomes durable is already in the reduction, and the checkpoint it
+        // produces then commits with that very batch — the window in which a durable frame is missing from the stored
+        // prefix never opens.
+        var checkpoint = _reduction.Reduce(batch);
+
         try
         {
-            await _plane.WriteAsync(batch, cancellationToken).ConfigureAwait(false);
+            await PersistAsync(batch, checkpoint, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
@@ -177,6 +238,18 @@ internal sealed class AgentNativeRecordPump
 
             _handle = null;
         }
+    }
+
+    /// <summary>One write either way. A batch with a checkpoint goes through the sibling capability so the two share a transaction; a reduction that never opened, or has already stopped, leaves the plain write exactly as it was.</summary>
+    private async Task PersistAsync(NativeRecordBatch batch, HarnessReductionCheckpointV1? checkpoint, CancellationToken cancellationToken)
+    {
+        if (checkpoint is null || _plane is not INativeRecordReductionPlane reductions)
+        {
+            await _plane!.WriteAsync(batch, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await reductions.WriteReducedAsync(batch, checkpoint, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Flush, then record how this round's physical process ended. Best-effort on both halves — the Agent Run's own outcome is decided elsewhere and is not affected by either.</summary>
@@ -209,6 +282,8 @@ internal sealed class AgentNativeRecordPump
     /// the hole this plane exists to end. The reason is REDACTED first: it is the one string here not derived from the
     /// already-redacted bytes, and a parser that echoes the line it choked on would otherwise put a secret in a column.
     /// The flush's own failure is swallowed so what the run sees is the PARSER's exception, byte-for-byte as before.
+    /// <para>No frame ⇒ nothing to record: capture is off, or this line is one an earlier opening of the same process
+    /// already recorded — together with what its parser made of it, which was this same failure.</para>
     /// </summary>
     private async Task RecordUnreadableAsync(NativeRecordV1? frame, IAgentHarness harness, Exception exception, CancellationToken cancellationToken)
     {
@@ -229,12 +304,24 @@ internal sealed class AgentNativeRecordPump
     }
 
     /// <summary>
-    /// The frame as the contract states it. Pure and total: <see cref="NativeRecordV1.ByteOffset"/> and
-    /// <see cref="NativeRecordV1.ByteLength"/> describe the RAW line while <see cref="NativeRecordV1.Digest"/> and
-    /// <see cref="NativeRecordV1.SizeBytes"/> describe the captured (redacted) bytes, and <see cref="NativeRecordV1.Redaction"/>
-    /// says which of the two the payload is — so a masked frame can never be read back as verbatim.
+    /// The frame as the contract states it, or NULL for a line an earlier opening of this same process already
+    /// recorded. Total: <see cref="NativeRecordV1.ByteOffset"/> and <see cref="NativeRecordV1.ByteLength"/> describe
+    /// the RAW line while <see cref="NativeRecordV1.Digest"/> and <see cref="NativeRecordV1.SizeBytes"/> describe the
+    /// captured (redacted) bytes, and <see cref="NativeRecordV1.Redaction"/> says which of the two the payload is — so
+    /// a masked frame can never be read back as verbatim.
+    ///
+    /// <para>The cursor advances for EVERY line and the ordinal only for a recorded one: the cursor describes the
+    /// source, which the skipped line occupies whether or not this opening records it, while the ordinal counts this
+    /// stream's own frames and 0139 requires it contiguous.</para>
+    ///
+    /// <para>The cursor is reconstructed from the delivered lines plus one terminator byte each. For the
+    /// newline-terminated spool a runner writes that is the source's own byte offset, which is what lets the resume
+    /// position and the recorded head be compared at all. Where the reader cannot preserve the accounting — a CR it
+    /// trimmed from a CRLF ending, a partial it forced without a terminator — the two drift, and the seam then carries
+    /// a re-delivered line the head no longer covers. That is a duplicate the byte ranges show, not one they hide, and
+    /// closing it needs the reader to state each line's true offset rather than this side to guess better.</para>
     /// </summary>
-    private NativeRecordV1 BuildFrame(string rawLine, string redactedLine)
+    private NativeRecordV1? BuildFrame(string rawLine, string redactedLine)
     {
         var handle = _handle!;
         var captured = Encoding.UTF8.GetBytes(redactedLine);
@@ -242,8 +329,10 @@ internal sealed class AgentNativeRecordPump
         var offset = _sourceOffset;
 
         // The line terminator the stream carried but the delivered line does not. A final partial line without one
-        // leaves the cursor one byte long, which is why this is a per-stream cursor and never a resume offset.
+        // leaves the cursor one byte long.
         _sourceOffset += sourceLength + 1;
+
+        if (offset < _recordedHead) return null;
 
         return new NativeRecordV1
         {
