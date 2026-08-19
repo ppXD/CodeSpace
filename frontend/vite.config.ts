@@ -62,9 +62,10 @@ export default defineConfig({
     },
   },
   test: {
-    // happy-dom gives us window, document, localStorage — required by request.ts /
-    // client.ts which read localStorage directly, and by component tests using
-    // @testing-library/react. happy-dom is faster than jsdom and avoids a known
+    // happy-dom gives us window + document, required by component tests using
+    // @testing-library/react. It does NOT give us localStorage under vitest 4 —
+    // vitest.setup.ts installs that, because request.ts / client.ts read it
+    // directly. happy-dom is faster than jsdom and avoids a known
     // ESM-CJS interop issue between jsdom@29's html-encoding-sniffer and the
     // node@21 loader. Works fine for React 19 + base-ui in this codebase.
     environment: "happy-dom",
