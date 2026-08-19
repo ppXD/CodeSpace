@@ -28,7 +28,10 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
     /// </summary>
     public const string EvaluatorVersion = "supervisor-acceptance/v2";   // v2 (P5-2): evidence capture emits the inline EvidenceTail; multi-repo failure aggregates keep Class/EvidenceArtifactId (receipts gain EvidenceRef where v1 never bound one)
 
-    private const string DefaultRunnerKind = "local";
+    /// <summary>The grading clone + oracle commands run on the worker host's own local runner. NOT the deployment
+    /// default (<c>AgentDefaultRunnerSetting</c>): this funnel never reads a caller-supplied runner kind, and the
+    /// host-side git it drives goes through the same local runner <c>RemoteTipResolver</c> resolves.</summary>
+    private const string GradingRunnerKind = SandboxKinds.Local;
     private const int CloneTimeoutSeconds = 300;
 
     private readonly IAgentWorkspaceResolver _workspaceResolver;
@@ -69,7 +72,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
             if (spec.ProtectedPaths is { Count: > 0 } && !string.IsNullOrEmpty(oracleBaseSha))
                 clone = clone with { Depth = 0 };
 
-            await using var workspace = await _providers.Resolve(DefaultRunnerKind).PrepareAsync(WorkspaceProvisionRequest.FromSingle(clone), cancellationToken).ConfigureAwait(false);
+            await using var workspace = await _providers.Resolve(GradingRunnerKind).PrepareAsync(WorkspaceProvisionRequest.FromSingle(clone), cancellationToken).ConfigureAwait(false);
 
             var (restoreFailure, tamperNote) = await RestoreOracleAsync(workspace.Directory, spec, oracleBaseSha, timeoutSeconds, cancellationToken).ConfigureAwait(false);
 
@@ -192,7 +195,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
 
         var url = LocalGitWorkspaceProvider.BuildAuthenticatedUrl(clone.RepositoryUrl, clone.TokenUsername, clone.Token);
 
-        var cloneResult = await _runners.Resolve(DefaultRunnerKind).RunAsync(
+        var cloneResult = await _runners.Resolve(GradingRunnerKind).RunAsync(
             new SandboxSpec { Command = "git", Args = new[] { "clone", url, directory }, TimeoutSeconds = CloneTimeoutSeconds }, cancellationToken).ConfigureAwait(false);
 
         if (cloneResult.Status != SandboxStatus.Success)
@@ -205,9 +208,9 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         // never fails the grade. Guarded on a present token, mirroring MaterializeAsync's own call site exactly —
         // a public repo with no credential has nothing to strip.
         if (!string.IsNullOrEmpty(clone.Token))
-            await LocalGitWorkspaceProvider.StripTokenFromRemoteAsync(_runners.Resolve(DefaultRunnerKind), CloneTimeoutSeconds, _logger, clone.RepositoryUrl, directory, cancellationToken).ConfigureAwait(false);
+            await LocalGitWorkspaceProvider.StripTokenFromRemoteAsync(_runners.Resolve(GradingRunnerKind), CloneTimeoutSeconds, _logger, clone.RepositoryUrl, directory, cancellationToken).ConfigureAwait(false);
 
-        var checkoutResult = await _runners.Resolve(DefaultRunnerKind).RunAsync(
+        var checkoutResult = await _runners.Resolve(GradingRunnerKind).RunAsync(
             new SandboxSpec { Command = "git", Args = new[] { "-C", directory, "checkout", "--detach", baseSha }, WorkingDirectory = directory, TimeoutSeconds = CloneTimeoutSeconds }, cancellationToken).ConfigureAwait(false);
 
         if (checkoutResult.Status != SandboxStatus.Success)
@@ -222,7 +225,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
 
         try
         {
-            var result = await _runners.Resolve(DefaultRunnerKind).RunAsync(
+            var result = await _runners.Resolve(GradingRunnerKind).RunAsync(
                 new SandboxSpec { Command = "git", Args = new[] { "-C", directory, "apply", "--3way", patchFile }, WorkingDirectory = directory, TimeoutSeconds = 60 }, cancellationToken).ConfigureAwait(false);
 
             return result.Status == SandboxStatus.Success ? null : result.Stderr;
@@ -244,7 +247,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
     {
         if (spec.ProtectedPaths is not { Count: > 0 } paths || string.IsNullOrEmpty(oracleBaseSha)) return (null, null);
 
-        var runner = _runners.Resolve(DefaultRunnerKind);
+        var runner = _runners.Resolve(GradingRunnerKind);
 
         // Working-tree diff (no HEAD) so BOTH grade shapes see the candidate's changes: the branch clone's tree IS
         // the candidate commit, and the patch path's tree is base + an UNCOMMITTED apply (where base..HEAD is empty).
@@ -330,7 +333,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
             if (setupFailure is not null) return setupFailure;
         }
 
-        var context = BenchmarkGradingContext.ForAcceptance(spec, teamId, timeoutSeconds, directory, _runners.Resolve(DefaultRunnerKind));
+        var context = BenchmarkGradingContext.ForAcceptance(spec, teamId, timeoutSeconds, directory, _runners.Resolve(GradingRunnerKind));
 
         var grade = await _graders.Resolve(spec.Kind ?? BenchmarkGradingKind.TestsPass).GradeAsync(context, cancellationToken).ConfigureAwait(false);
 
@@ -392,7 +395,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
             TimeoutSeconds = timeoutSeconds,
         };
 
-        var result = await _runners.Resolve(DefaultRunnerKind).RunAsync(spec, cancellationToken).ConfigureAwait(false);
+        var result = await _runners.Resolve(GradingRunnerKind).RunAsync(spec, cancellationToken).ConfigureAwait(false);
 
         if (result.Status == SandboxStatus.Success) return null;
 

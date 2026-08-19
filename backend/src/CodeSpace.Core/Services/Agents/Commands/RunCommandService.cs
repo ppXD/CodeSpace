@@ -5,6 +5,7 @@ using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Core.Services.Providers;
 using CodeSpace.Core.Services.Providers.Auth;
+using CodeSpace.Core.Settings;
 using CodeSpace.Messages.Agents;
 using Microsoft.EntityFrameworkCore;
 
@@ -12,20 +13,19 @@ namespace CodeSpace.Core.Services.Agents.Commands;
 
 public sealed class RunCommandService : IRunCommandService, IScopedDependency
 {
-    /// <summary>Default runner/workspace backend when the request names none — matches <c>AgentRunExecutor.DefaultRunnerKind</c>.</summary>
-    private const string DefaultRunnerKind = "local";
-
     private readonly CodeSpaceDbContext _db;
     private readonly IProviderAuthResolver _auth;
     private readonly ISandboxRunnerRegistry _runners;
     private readonly IWorkspaceProviderRegistry _workspaces;
+    private readonly AgentDefaultRunnerSetting _defaultRunner;
 
-    public RunCommandService(CodeSpaceDbContext db, IProviderAuthResolver auth, ISandboxRunnerRegistry runners, IWorkspaceProviderRegistry workspaces)
+    public RunCommandService(CodeSpaceDbContext db, IProviderAuthResolver auth, ISandboxRunnerRegistry runners, IWorkspaceProviderRegistry workspaces, AgentDefaultRunnerSetting defaultRunner)
     {
         _db = db;
         _auth = auth;
         _runners = runners;
         _workspaces = workspaces;
+        _defaultRunner = defaultRunner;
     }
 
     public async Task<SandboxResult> RunAsync(RunCommandRequest request, CancellationToken cancellationToken)
@@ -33,7 +33,7 @@ public sealed class RunCommandService : IRunCommandService, IScopedDependency
         if (string.IsNullOrWhiteSpace(request.Command))
             throw new InvalidOperationException("A command is required.");
 
-        var runnerKind = string.IsNullOrWhiteSpace(request.RunnerKind) ? DefaultRunnerKind : request.RunnerKind;
+        var runnerKind = string.IsNullOrWhiteSpace(request.RunnerKind) ? _defaultRunner.Value : request.RunnerKind;
         var runner = _runners.Resolve(runnerKind);
 
         // Repo-scoped → clone into a fresh per-run workspace the command runs in; ephemeral → no checkout.

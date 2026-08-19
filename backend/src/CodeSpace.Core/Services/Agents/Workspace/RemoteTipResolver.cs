@@ -1,7 +1,6 @@
 using System.ComponentModel;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents.Sandbox;
-using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Workspace.Providers;
 using CodeSpace.Messages.Agents;
 
@@ -82,7 +81,7 @@ public sealed class RemoteTipResolver : IRemoteTipResolver, ISingletonDependency
         SandboxResult result;
         try
         {
-            result = await _runners.Resolve(LocalProcessRunner.LocalKind)
+            result = await _runners.Resolve(SandboxKinds.Local)
                 .RunAsync(new SandboxSpec { Command = "git", Args = args, TimeoutSeconds = LsRemoteTimeoutSeconds }, cancellationToken).ConfigureAwait(false);
         }
         catch (Win32Exception ex)

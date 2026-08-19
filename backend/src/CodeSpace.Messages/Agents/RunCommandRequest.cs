@@ -47,6 +47,6 @@ public sealed record RunCommandRequest
     /// <summary>Max size of any single file the command may write, in MiB (RLIMIT_FSIZE). <c>0</c> = unlimited.</summary>
     public int MaxFileSizeMb { get; init; } = 2048;
 
-    /// <summary>Sandbox runner + workspace backend to use — "local" (v0), later "docker" / "k8s". <c>null</c> → the deployment default ("local").</summary>
+    /// <summary>Sandbox runner + workspace backend to use — "local" (v0), later "docker" / "k8s". <c>null</c> → the deployment default (the <c>Agents:DefaultRunnerKind</c> configuration key, itself defaulting to "local").</summary>
     public string? RunnerKind { get; init; }
 }

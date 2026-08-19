@@ -24,7 +24,8 @@ namespace CodeSpace.Core.Services.Agents.Sandbox.Runners;
 /// </summary>
 public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamRunner, ISandboxDurableRunner, ISandboxDurableLogSource, ISandboxDurableDiagnosticSource, ISingletonDependency
 {
-    public const string LocalKind = "local";
+    /// <summary>This runner's registry key. The runner-local spelling of the shared <see cref="SandboxKinds.Local"/> — same constant, so there is one literal.</summary>
+    public const string LocalKind = SandboxKinds.Local;
 
     /// <summary>
     /// The child process ALWAYS starts from a SCRUBBED environment: the worker's inherited env (DB / Redis /

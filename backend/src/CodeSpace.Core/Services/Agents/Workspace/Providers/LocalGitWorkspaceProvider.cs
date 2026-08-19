@@ -1,6 +1,5 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents.Sandbox;
-using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Messages.Agents;
 using Microsoft.Extensions.Logging;
 
@@ -45,7 +44,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         _logger = logger;
     }
 
-    public string Kind => LocalProcessRunner.LocalKind;
+    public string Kind => SandboxKinds.Local;
 
     public async Task<IWorkspaceHandle> PrepareAsync(WorkspaceProvisionRequest request, CancellationToken cancellationToken)
     {

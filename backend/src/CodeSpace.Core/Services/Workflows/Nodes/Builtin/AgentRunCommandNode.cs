@@ -20,8 +20,10 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// so a workflow branches on the result (e.g. tests-passed? → open a PR). The node only FAILS on an
 /// infrastructure error (clone failure, runner crash) — composing with retry + the error branch.
 ///
-/// Generic across backends: the run executes on the sandbox runner named by <c>runnerKind</c> (default
-/// "local"); a future docker / k8s runner + workspace provider plug in behind the same registries unchanged.
+/// Generic across backends: the run executes on the sandbox runner named by <c>runnerKind</c>, or on the
+/// deployment default (<see cref="CodeSpace.Core.Settings.AgentDefaultRunnerSetting"/>, itself defaulting to
+/// "local") when the input names none; a future docker / k8s runner + workspace provider plug in behind the same
+/// registries unchanged.
 ///
 /// <para>ADMISSION SCOPE (D4a): this node runs the command SYNCHRONOUSLY via <see cref="IRunCommandService"/>
 /// with no durable <c>AgentRun</c> row, so it is intentionally NOT bounded by the per-team / global in-flight
@@ -75,7 +77,7 @@ public sealed class AgentRunCommandNode : INodeRuntime
                 "branch":         { "type": "string", "description": "Branch / tag / sha to check out (repo runs only). Empty → the repository's default branch." },
                 "network":        { "type": "boolean", "description": "Allow the command to reach the network. Off by default — the sandbox severs egress so the command can't call out or exfiltrate." },
                 "timeoutSeconds": { "type": "integer", "minimum": 1, "description": "Wall-clock cap. On expiry the command (and its children) are killed and status is TimedOut. Default 600.", "x-spotlight": 3 },
-                "runnerKind":     { "type": "string", "description": "Sandbox backend to run on (e.g. \"local\"). Empty → the deployment default." },
+                "runnerKind":     { "type": "string", "description": "Sandbox backend to run on (e.g. \"local\"). Empty → the deployment default, set by the Agents:DefaultRunnerKind configuration key (Agents__DefaultRunnerKind in the environment); \"local\" when that is unset." },
                 "maxOutputChars": { "type": "integer", "minimum": 1, "description": "Cap stdout/stderr to this many characters (a head+tail preview is kept, the rest dropped). Leave empty for the full output. Use it to keep a noisy build/test log from bloating the run — the exact byte size is always reported on stdoutBytes/stderrBytes." }
               },
               "required": ["command"]

@@ -1,6 +1,5 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents.Sandbox;
-using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Workspace.Providers;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
@@ -42,7 +41,7 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
         _logger = logger;
     }
 
-    public string Kind => LocalProcessRunner.LocalKind;
+    public string Kind => SandboxKinds.Local;
 
     public async Task<IntegrationResult> IntegrateAsync(IntegrationRequest request, CancellationToken cancellationToken)
     {
