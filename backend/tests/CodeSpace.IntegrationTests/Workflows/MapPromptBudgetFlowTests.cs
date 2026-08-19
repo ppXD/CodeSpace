@@ -27,6 +27,11 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// exact position the plan-map synthesizer occupies, which used to receive the whole array and build a request past
 /// the model's context window.</para>
 ///
+/// <para>And that the PARTIALITY survives the same wire as a fact. An excerpting reduce that recorded its
+/// incompleteness only inside the prompt left a run over 3 of 20 branches shaped exactly like a run over 20 of 20 —
+/// so these tests assert the persisted <c>resultsCoverage</c> (in the node bag AND, through a terminal binding, on
+/// the run row), never merely that some sentence appears in the prompt string.</para>
+///
 /// <para><b>Fidelity (Rule 12) — high on everything the bound touches; the model is deliberately absent.</b> The
 /// downstream consumer is <see cref="JsonEmitNode"/> rather than <c>llm.complete</c> because the bound lives
 /// entirely UPSTREAM of the model call: what is under test is what the engine puts in the prompt input, not what a
@@ -91,6 +96,52 @@ public class MapPromptBudgetFlowTests
             customMessage: "the prompt is the projection plus its short fixed preamble — nothing may reintroduce the unbounded array");
         Regex.Matches(prompt, @"…\[\d+ of \d+ chars of this subtask result omitted\]…").Count
             .ShouldBeGreaterThan(0, "every branch that had to be shortened says so inline, in the text the model reads");
+
+        // ── the partiality as a FACT, not as a sentence in the prompt ──
+        // Everything above could hold while the run remained indistinguishable in the data from a complete one: the
+        // notice is addressed to the model and its compliance is unverifiable. These are the assertions a downstream
+        // consumer, the phase projection, and an operator can actually make.
+        var coverage = mapOutputs.GetProperty(WorkflowOutputKeys.MapResultsCoverage);
+
+        coverage.GetProperty("complete").GetBoolean().ShouldBeFalse(
+            customMessage: "content was dropped, so the flag the run persists must say the reduce's input was not whole");
+        coverage.GetProperty("totalBranches").GetInt32().ShouldBe(6);
+        coverage.GetProperty("includedBranches").GetInt32().ShouldBeLessThan(6,
+            customMessage: "6 branches of 20K chars cannot fit a 2K budget — the shortfall is the number the ledger has to carry");
+        coverage.GetProperty("shortenedBranches").EnumerateArray().Count().ShouldBeGreaterThan(0,
+            customMessage: "the included branches were cut, so their indices must be named — a reader has to know WHICH subtasks are partial");
+
+        // The same fact on the RUN ROW, via the terminal binding the plan-map `done` node uses: anyone reading the
+        // run's outcome sees what the answer is based on without opening the map node's bag.
+        var runOutputs = JsonDocument.Parse((await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).OutputsJson).RootElement;
+
+        runOutputs.GetProperty(WorkflowOutputKeys.MapResultsCoverage).GetProperty("complete").GetBoolean().ShouldBeFalse(
+            customMessage: "a sole-placeholder terminal binding must land the whole recorded object on the run row — this is the surface an outcome reader has");
+        runOutputs.GetProperty(WorkflowOutputKeys.MapResultsCoverage).GetProperty("includedBranches").GetInt32()
+            .ShouldBe(coverage.GetProperty("includedBranches").GetInt32(),
+                customMessage: "the run row and the node bag must state the same number, or a reader cannot tell which to trust");
+    }
+
+    /// <summary>
+    /// THE blocker, stated as a comparison rather than as a property of one run: the same graph, the same shape of
+    /// input, differing only in size, must NOT produce the same persisted outcome. Before the coverage existed these
+    /// two runs' rows were identical except for the prose inside a prompt.
+    /// </summary>
+    [Fact]
+    public async Task An_excerpted_run_is_distinguishable_in_the_data_from_a_complete_one()
+    {
+        var excerpted = await CoverageOfRunAsync(BigElements(6, 20_000));
+        var complete = await CoverageOfRunAsync(BigElements(6, 40));
+
+        excerpted.GetProperty("complete").GetBoolean().ShouldBeFalse();
+        complete.GetProperty("complete").GetBoolean().ShouldBeTrue();
+
+        complete.GetProperty("includedBranches").GetInt32().ShouldBe(6,
+            customMessage: "the complete run read every branch, and says so");
+        complete.GetProperty("shortenedBranches").EnumerateArray().ShouldBeEmpty();
+
+        excerpted.GetRawText().ShouldNotBe(complete.GetRawText(),
+            customMessage: "two runs that read different amounts of their input must not persist the same outcome fact — that indistinguishability IS the defect");
     }
 
     [Fact]
@@ -115,6 +166,16 @@ public class MapPromptBudgetFlowTests
             customMessage: "within budget the projection is the array's own serialization, character for character");
         projection.ShouldNotContain("EXCERPT", customMessage: "nothing was dropped, so nothing may claim it was");
         projection.ShouldNotContain("omitted", customMessage: "an unshortened result must carry no truncation marker");
+
+        // The fact has to be affirmative in BOTH directions: a coverage that only ever appears when something broke
+        // would leave "no coverage" ambiguous between a complete run and a run predating the record.
+        var coverage = mapOutputs.GetProperty(WorkflowOutputKeys.MapResultsCoverage);
+
+        coverage.GetProperty("complete").GetBoolean().ShouldBeTrue(
+            customMessage: "an in-budget reduce read everything, and the persisted fact must positively say so");
+        coverage.GetProperty("includedBranches").GetInt32().ShouldBe(3);
+        coverage.GetProperty("totalBranches").GetInt32().ShouldBe(3);
+        coverage.GetProperty("shortenedBranches").EnumerateArray().ShouldBeEmpty();
     }
 
     [Fact]
@@ -133,6 +194,8 @@ public class MapPromptBudgetFlowTests
 
         mapOutputs.TryGetProperty(WorkflowOutputKeys.MapResultsPrompt, out _).ShouldBeFalse(
             "a map that declares no prompt budget must persist exactly the keys it always did — no new column of duplicated results for every existing workflow");
+        mapOutputs.TryGetProperty(WorkflowOutputKeys.MapResultsCoverage, out _).ShouldBeFalse(
+            "nothing was bounded, so there is no coverage claim to make — the coverage rides the projection, never a map without one");
         mapOutputs.EnumerateObject().Select(p => p.Name).OrderBy(n => n).ShouldBe(new[] { "count", "failed", "results" });
         mapOutputs.GetProperty("count").GetInt32().ShouldBe(3);
     }
@@ -142,6 +205,10 @@ public class MapPromptBudgetFlowTests
     /// <summary>The downstream step's inputs — the plan-map synth's own shape: a short preamble plus the map's bounded projection, composed from the key constant so the test and the reducer cannot drift.</summary>
     private const string SynthPromptInputsJson =
         "{ \"userPrompt\": \"Per-subtask results:\\n{{nodes.map.outputs." + WorkflowOutputKeys.MapResultsPrompt + "}}\" }";
+
+    /// <summary>The terminal's run-output mapping — the plan-map <c>done</c> node's own shape: the reduce's coverage beside the answer it qualifies.</summary>
+    private const string TerminalInputsJson =
+        "{ \"count\": \"{{nodes.map.outputs.count}}\", \"" + WorkflowOutputKeys.MapResultsCoverage + "\": \"{{nodes.map.outputs." + WorkflowOutputKeys.MapResultsCoverage + "}}\" }";
 
     /// <summary>A manual-trigger payload of <paramref name="count"/> strings of <paramref name="chars"/> characters each.</summary>
     private static string BigElements(int count, int chars) =>
@@ -166,8 +233,10 @@ public class MapPromptBudgetFlowTests
                     Inputs = WorkflowsTestSeed.Json("""{ "value": "{{item}}" }""") },
             new() { Id = "synth", TypeKey = JsonEmitNode.Key, Config = WorkflowsTestSeed.EmptyJson(),
                     Inputs = WorkflowsTestSeed.Json(SynthPromptInputsJson) },
+            // The terminal mirrors the plan-map `done` node: it binds the coverage as a SOLE placeholder, so the
+            // whole recorded object lands in the run's declared outputs rather than a stringified copy.
             new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(),
-                    Inputs = WorkflowsTestSeed.Json("""{ "count": "{{nodes.map.outputs.count}}" }""") },
+                    Inputs = WorkflowsTestSeed.Json(TerminalInputsJson) },
         },
         Edges = new List<EdgeDefinition>
         {
@@ -180,6 +249,22 @@ public class MapPromptBudgetFlowTests
 
     private static async Task<WorkflowRunNode> NodeAsync(CodeSpaceDbContext db, Guid runId, string nodeId) =>
         await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == nodeId && n.IterationKey == "");
+
+    /// <summary>Run the budgeted graph over <paramref name="payloadJson"/> and return the coverage its map persisted.</summary>
+    private async Task<JsonElement> CoverageOfRunAsync(string payloadJson)
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, BudgetedMapDefinition());
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: payloadJson);
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        return JsonDocument.Parse((await NodeAsync(db, runId, "map")).OutputsJson).RootElement
+            .GetProperty(WorkflowOutputKeys.MapResultsCoverage).Clone();
+    }
 
     private async Task<Guid> CreateWorkflowAsync(Guid teamId, Guid userId, WorkflowDefinition definition)
     {

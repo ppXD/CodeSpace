@@ -20,6 +20,12 @@ namespace CodeSpace.UnitTests.Workflows;
 /// verified through the REAL <see cref="VariableResolver"/>, against the exact template the builder used to emit,
 /// so "unchanged" is measured on the wire and not asserted about the helper.</para>
 ///
+/// <para>The "it must SAY so" invariant is asserted TWICE over, on two different carriers, and the second one is the
+/// load-bearing half: the notice inside the text is a request to a model, so the <see cref="MapResultsCoverage"/>
+/// section below pins the same partiality as DATA — the numbers, the shortened indices, and the single
+/// <c>Complete</c> flag — because that is the copy a downstream node, a projection, and this test can read without
+/// trusting a model to have obeyed a sentence.</para>
+///
 /// <para>Pure — no clock, no env, no database.</para>
 /// </summary>
 [Trait("Category", "Unit")]
@@ -32,7 +38,7 @@ public class MapResultsPromptTests
     {
         var results = Results("did the first thing", "did the second thing", "did the third thing");
 
-        var projected = MapResultsPrompt.Project(results, Budget);
+        var projected = MapResultsPrompt.Project(results, Budget).Text;
 
         // The ordinary fan-out: the model must see EXACTLY what the raw-array binding produced — the same call
         // VariableResolver's array arm makes on the same element. Not "equivalent JSON": the same characters.
@@ -45,7 +51,7 @@ public class MapResultsPromptTests
     {
         var results = Results(new string('x', 50_000));
 
-        MapResultsPrompt.Project(results, 0).ShouldBe(JsonSerializer.Serialize(results),
+        MapResultsPrompt.Project(results, 0).Text.ShouldBe(JsonSerializer.Serialize(results),
             customMessage: "budget <= 0 means no bound — every map that declares none keeps its pre-existing output");
     }
 
@@ -60,7 +66,7 @@ public class MapResultsPromptTests
     {
         var results = Results(Enumerable.Range(0, branches).Select(i => new string((char)('a' + i % 26), branchChars)).ToArray());
 
-        var projected = MapResultsPrompt.Project(results, budget);
+        var projected = MapResultsPrompt.Project(results, budget).Text;
 
         projected.Length.ShouldBeLessThanOrEqualTo(budget,
             customMessage: $"{branches} branches of {branchChars} chars projected to {projected.Length} chars against a {budget}-char budget — the synthesizer is handed more than its bound");
@@ -71,7 +77,7 @@ public class MapResultsPromptTests
     {
         var results = Results(Enumerable.Range(0, 40).Select(_ => new string('y', 4_000)).ToArray());
 
-        var projected = MapResultsPrompt.Project(results, Budget);
+        var projected = MapResultsPrompt.Project(results, Budget).Text;
 
         projected.ShouldStartWith("[EXCERPT — NOT the complete per-subtask results.",
             customMessage: "the caveat must lead the prompt — a model that reads the data first has already treated a part as the whole");
@@ -98,7 +104,7 @@ public class MapResultsPromptTests
             .ToArray();
         var results = Results(summaries);
 
-        var projected = MapResultsPrompt.Project(results, Budget);
+        var projected = MapResultsPrompt.Project(results, Budget).Text;
 
         foreach (var (element, i) in results.EnumerateArray().Select((e, i) => (e, i)).Where(x => x.i != pathologicalIndex))
             projected.ShouldContain(JsonSerializer.Serialize(element),
@@ -113,7 +119,7 @@ public class MapResultsPromptTests
     {
         var results = Results(new string('q', 100_000), new string('r', 100_000));
 
-        var projected = MapResultsPrompt.Project(results, Budget);
+        var projected = MapResultsPrompt.Project(results, Budget).Text;
 
         CountBranchMarkers(projected).ShouldBe(2,
             customMessage: "a shortened branch must say so WHERE it was shortened — an unmarked cut reads as the branch's whole output");
@@ -124,7 +130,7 @@ public class MapResultsPromptTests
     {
         var results = Results(Enumerable.Range(0, 200).Select(i => $"result {i} " + new string('w', 500)).ToArray());
 
-        var projected = MapResultsPrompt.Project(results, Budget);
+        var projected = MapResultsPrompt.Project(results, Budget).Text;
 
         // 200 equal slices of an 8K budget would be ~38 useless characters each. The floor shows a readable subset
         // and declares the remainder absent instead.
@@ -156,6 +162,126 @@ public class MapResultsPromptTests
 
         after.ShouldBe(before,
             customMessage: "the plan-map reduce prompt must be unchanged for an ordinary fan-out — this is the whole no-meaning-change guarantee");
+    }
+
+    // ── MapResultsCoverage: the partiality as DATA, not as a sentence to the model ──
+
+    /// <summary>
+    /// The blocker this section exists for. Excerpting used to leave "this is partial" ONLY inside the prompt text,
+    /// so a reduce that saw 3 of 20 branches produced the same shaped data as one that saw 20 of 20 and the
+    /// difference was unverifiable. The coverage must state the real numbers — and it must be the code that DID the
+    /// cutting that states them, which is what asserting them against the text's own notice proves.
+    /// </summary>
+    [Fact]
+    public void Over_budget_the_coverage_names_how_many_branches_were_included_out_of_how_many_exist()
+    {
+        var results = Results(Enumerable.Range(0, 20).Select(_ => new string('y', 4_000)).ToArray());
+
+        var projection = MapResultsPrompt.Project(results, Budget);
+
+        projection.Coverage.Complete.ShouldBeFalse(
+            customMessage: "branches were dropped — the flag a downstream consumer gates on must say the input was not whole");
+        projection.Coverage.TotalBranches.ShouldBe(20);
+        projection.Coverage.IncludedBranches.ShouldBeInRange(1, 19,
+            customMessage: "the 8K budget holds some but not all of 20 four-thousand-char branches; that count is the fact the run must record");
+
+        // Same fact, both carriers: the number the model is TOLD and the number the data RECORDS cannot disagree,
+        // or a reader auditing one against the other would be misled about which to trust.
+        projection.Text.ShouldStartWith($"[EXCERPT — NOT the complete per-subtask results. {projection.Coverage.IncludedBranches} of 20 subtask results appear below;",
+            customMessage: "the recorded IncludedBranches must be the same number the notice states");
+    }
+
+    /// <summary>
+    /// The case that separates a REAL flag from one derived by comparing counts: two branches, both included, both
+    /// cut. IncludedBranches == TotalBranches here, so a <c>Complete</c> computed as "included == total" would read
+    /// TRUE over a projection that dropped most of both branches' text — the exact untruth this record exists to
+    /// prevent. The cut branches must also be NAMED, so a reader can tell which subtasks are only partly represented.
+    /// </summary>
+    [Fact]
+    public void Every_branch_included_but_shortened_still_reads_incomplete_and_names_which_ones_were_cut()
+    {
+        var results = Results(new string('q', 100_000), new string('r', 100_000));
+
+        var coverage = MapResultsPrompt.Project(results, Budget).Coverage;
+
+        coverage.IncludedBranches.ShouldBe(2, customMessage: "both branches are present in the excerpt");
+        coverage.TotalBranches.ShouldBe(2);
+        coverage.Complete.ShouldBeFalse(
+            customMessage: "every branch appearing is NOT the same as every branch appearing in full — a flag that cannot see truncation is the defect");
+        coverage.ShortenedBranches.ShouldBe(new[] { 0, 1 },
+            customMessage: "both branches were cut, so both indices must be named — a reader has to know WHICH subtasks are partial");
+    }
+
+    [Fact]
+    public void Within_budget_the_coverage_says_the_reduce_read_every_branch_in_full()
+    {
+        var results = Results("did the first thing", "did the second thing", "did the third thing");
+
+        var coverage = MapResultsPrompt.Project(results, Budget).Coverage;
+
+        coverage.Complete.ShouldBeTrue(customMessage: "nothing was dropped, so nothing may be recorded as dropped either");
+        coverage.IncludedBranches.ShouldBe(3);
+        coverage.TotalBranches.ShouldBe(3);
+        coverage.ShortenedBranches.ShouldBeEmpty();
+    }
+
+    /// <summary>
+    /// The invariant that ties the two carriers together at EVERY shape the projection can take, including the
+    /// degenerate ones (a budget too narrow for a single readable slice, a non-array binding): the recorded
+    /// <c>Complete</c> is true exactly when the text IS the whole serialization. Nothing can be dropped without the
+    /// flag falling, and the flag cannot fall while everything is present.
+    /// </summary>
+    [Theory]
+    [InlineData(3, 40, 2_000)]              // under budget
+    [InlineData(1, 1_000_000, 2_000)]       // one branch far larger than the budget
+    [InlineData(10, 200_000, 8_000)]
+    [InlineData(10_000, 100, 2_000)]        // the branch ceiling at the plan's smallest budget
+    [InlineData(2, 300, 2_000)]
+    [InlineData(4, 5_000, 40)]              // narrower than the notice itself — the degenerate cut
+    [InlineData(3, 100, 0)]                 // bound disabled entirely
+    public void Complete_is_recorded_true_exactly_when_nothing_was_dropped(int branches, int branchChars, int budget)
+    {
+        var results = Results(Enumerable.Range(0, branches).Select(i => new string((char)('a' + i % 26), branchChars)).ToArray());
+
+        var projection = MapResultsPrompt.Project(results, budget);
+
+        projection.Coverage.Complete.ShouldBe(projection.Text == JsonSerializer.Serialize(results),
+            customMessage: $"{branches} branches of {branchChars} chars at a {budget}-char budget recorded Complete={projection.Coverage.Complete} over a text that is {(projection.Text == JsonSerializer.Serialize(results) ? "" : "NOT ")}the whole serialization");
+    }
+
+    /// <summary>
+    /// The reducer's end of the same fact: a map that declares a budget PERSISTS the coverage beside the text, and an
+    /// excerpted map's output bag is therefore NOT the shape a complete one produces. Asserted on the bag rather than
+    /// on the prompt string, because the bag is what the ledger stores and what every downstream reader binds.
+    /// </summary>
+    [Fact]
+    public void The_reducer_persists_the_coverage_so_an_excerpted_map_is_distinguishable_from_a_complete_one()
+    {
+        var big = Enumerable.Range(0, 30).Select(_ => Obj($$"""{"summary":"{{new string('z', 4_000)}}"}""")).ToList();
+        var small = new List<JsonElement> { Obj("""{"summary":"did it"}""") };
+
+        var excerpted = Coverage(WorkflowEngine.BuildMapOutputs("results", big, failed: 0, promptBudgetChars: Budget));
+        var whole = Coverage(WorkflowEngine.BuildMapOutputs("results", small, failed: 0, promptBudgetChars: Budget));
+
+        excerpted.GetProperty("complete").GetBoolean().ShouldBeFalse();
+        excerpted.GetProperty("totalBranches").GetInt32().ShouldBe(30);
+        excerpted.GetProperty("includedBranches").GetInt32().ShouldBeLessThan(30,
+            customMessage: "the persisted bag must carry the shortfall, not merely a prompt that mentions it");
+
+        whole.GetProperty("complete").GetBoolean().ShouldBeTrue();
+        whole.GetProperty("includedBranches").GetInt32().ShouldBe(1);
+
+        excerpted.GetRawText().ShouldNotBe(whole.GetRawText(),
+            customMessage: "THE blocker: a run over a partial view must not be byte-indistinguishable from one over the whole view");
+    }
+
+    [Fact]
+    public void A_map_that_declares_no_budget_persists_no_coverage_either()
+    {
+        var outputs = WorkflowEngine.BuildMapOutputs("results", new List<JsonElement>(), failed: 0);
+
+        outputs.ContainsKey(WorkflowOutputKeys.MapResultsCoverage).ShouldBeFalse(
+            "no projection means nothing was bounded, so there is no coverage claim to make — every pre-existing map keeps its exact output bag");
     }
 
     // ── MapPlan: the budget that switches the projection on ──
@@ -193,6 +319,9 @@ public class MapResultsPromptTests
         JsonSerializer.SerializeToElement(summaries.Select(s => new { status = "Succeeded", summary = s }).ToArray());
 
     private static JsonElement Obj(string json) => JsonDocument.Parse(json).RootElement.Clone();
+
+    /// <summary>The coverage the real reducer persisted into a map's output bag.</summary>
+    private static JsonElement Coverage(IReadOnlyDictionary<string, JsonElement> outputs) => outputs[WorkflowOutputKeys.MapResultsCoverage];
 
     private static string Resolve(string template, NodeRunScope scope) =>
         VariableResolver.Resolve(JsonSerializer.SerializeToElement(template), scope).GetString()!;

@@ -234,12 +234,27 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
     /// <summary>The reduce's results binding, composed from <see cref="WorkflowOutputKeys.MapResultsPrompt"/> so the prompt and the key the reducer writes cannot drift apart.</summary>
     private const string SynthResultsRef = "{{nodes.map.outputs." + WorkflowOutputKeys.MapResultsPrompt + "}}";
 
-    /// <summary>The done terminal Inputs — bind the synth's reduced <c>text</c> output into the run's <c>combined</c> output (the llm.complete node's output key is <c>text</c>). A repo-bound graph also surfaces the integrated candidate (branch + whole-set status) as run outputs, so the reviewable head is readable off the run row, not just the node ledger.</summary>
+    /// <summary>The coverage of the results the reduce actually read, composed from <see cref="WorkflowOutputKeys.MapResultsCoverage"/> the same way. A sole-placeholder binding resolves to the WHOLE object, so the run output carries the fact intact rather than a stringified copy.</summary>
+    private const string SynthResultsCoverageRef = "{{nodes.map.outputs." + WorkflowOutputKeys.MapResultsCoverage + "}}";
+
+    /// <summary>
+    /// The done terminal Inputs — bind the synth's reduced <c>text</c> output into the run's <c>combined</c> output
+    /// (the llm.complete node's output key is <c>text</c>). A repo-bound graph also surfaces the integrated candidate
+    /// (branch + whole-set status) as run outputs, so the reviewable head is readable off the run row, not just the
+    /// node ledger.
+    ///
+    /// <para><c>resultsCoverage</c> rides the same reasoning one step further: <c>combined</c> is a single prose
+    /// answer that reads as though it addressed every subtask, and when the reduce's input was excerpted it did not.
+    /// The coverage the map recorded travels onto the RUN ROW beside the answer it qualifies, so anyone reading the
+    /// run's outcome — not only someone who opens the map node's bag — sees the number of subtasks the answer is
+    /// actually based on. It is bound on every plan-map graph because the map declares the budget on every one.</para>
+    /// </summary>
     private static JsonElement DoneInputs(TaskBuildContext context)
     {
         var inputs = new Dictionary<string, object?>
         {
             ["combined"] = "{{nodes.synth.outputs.text}}",
+            [WorkflowOutputKeys.MapResultsCoverage] = SynthResultsCoverageRef,
         };
 
         if (context.AgentProfile?.RepositoryId is not null)

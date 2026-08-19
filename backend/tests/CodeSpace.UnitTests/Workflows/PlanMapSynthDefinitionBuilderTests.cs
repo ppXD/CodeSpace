@@ -341,6 +341,22 @@ public class PlanMapSynthDefinitionBuilderTests
                 customMessage: "the budget is resolved at BUILD time and recorded in the definition, so a replay projects against its own snapshot's number");
     }
 
+    /// <summary>
+    /// The reduce's input coverage reaches the RUN ROW, not just the map node's bag. <c>combined</c> is one prose
+    /// answer that reads as though it addressed every subtask; when the reduce was handed an excerpt it did not, and
+    /// the only in-band signal of that was a sentence in the prompt. Binding the coverage the map recorded into a run
+    /// output puts the fact beside the answer it qualifies, where anyone reading the run's outcome sees it.
+    /// </summary>
+    [Fact]
+    public void The_done_terminal_surfaces_the_reduce_input_coverage_beside_the_combined_answer()
+    {
+        var done = Builder.Build(Context()).Nodes.Single(n => n.Id == "done");
+
+        done.Inputs.GetProperty(WorkflowOutputKeys.MapResultsCoverage).GetString()
+            .ShouldBe($"{{{{nodes.map.outputs.{WorkflowOutputKeys.MapResultsCoverage}}}}}",
+                customMessage: "a sole-placeholder binding resolves to the whole recorded object, so the run output carries the fact intact");
+    }
+
     /// <summary>Rule 8 pin: an operator whose pool serves a narrower-context model pins the reduce's input budget by env. A rename would silently restore the unbounded-in-practice behaviour for them, so the literal is pinned here.</summary>
     [Fact]
     public void SynthPromptBudgetCharsEnvVar_constant_name_pinned()

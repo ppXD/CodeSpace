@@ -59,6 +59,7 @@ internal static class RunDetailFixtures
         RerunnableFromHere = false,
     };
 
-    public static JsonElement MapOutputs(int count, int failed) =>
-        JsonDocument.Parse($"{{\"count\":{count},\"failed\":{failed}}}").RootElement;
+    /// <summary>A map node's reduced output bag. <paramref name="resultsCoverageJson"/> adds the reduce-input coverage a budget-declaring map records; omitting it is the bag every other map writes.</summary>
+    public static JsonElement MapOutputs(int count, int failed, string? resultsCoverageJson = null) =>
+        JsonDocument.Parse($"{{\"count\":{count},\"failed\":{failed}{(resultsCoverageJson is null ? "" : $",\"resultsCoverage\":{resultsCoverageJson}")}}}").RootElement;
 }

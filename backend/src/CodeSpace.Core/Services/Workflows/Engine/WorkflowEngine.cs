@@ -2254,11 +2254,14 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// reserved-set drift pin (<c>ReducerEmittedKeysPinTests</c>) asserts over the keys this actually emits, catching
     /// a new key the author forgets to add to <c>WorkflowOutputKeys.Map</c>.
     ///
-    /// <para>A map that declares a <paramref name="promptBudgetChars"/> ALSO gets
-    /// <c>WorkflowOutputKeys.MapResultsPrompt</c> — the same results rendered by <see cref="MapResultsPrompt"/> as a
+    /// <para>A map that declares a <paramref name="promptBudgetChars"/> ALSO gets TWO keys from
+    /// <see cref="MapResultsPrompt"/>: <c>WorkflowOutputKeys.MapResultsPrompt</c>, the same results rendered as a
     /// string that fits the budget, which a downstream reduce prompt binds instead of the raw array so it cannot
-    /// outgrow the model's context window. Null (every map that declares no budget) emits the same three-key bag as
-    /// before, byte-for-byte.</para>
+    /// outgrow the model's context window — and <c>WorkflowOutputKeys.MapResultsCoverage</c>, how much of the
+    /// results that string carries. The coverage is written HERE, by the reducer that did the bounding, so
+    /// partiality is a persisted fact rather than only a sentence addressed to the model inside the prompt: a run
+    /// whose reduce saw 3 of 20 branches is distinguishable from one that saw 20 of 20 by reading the map's own
+    /// output bag. Null (every map that declares no budget) emits the same three-key bag as before, byte-for-byte.</para>
     /// </summary>
     internal static IReadOnlyDictionary<string, JsonElement> BuildMapOutputs(string resultKey, IReadOnlyList<JsonElement> results, int failed, int? promptBudgetChars = null)
     {
@@ -2272,7 +2275,12 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         };
 
         if (promptBudgetChars is { } budget)
-            outputs[WorkflowOutputKeys.MapResultsPrompt] = JsonSerializer.SerializeToElement(MapResultsPrompt.Project(array, budget));
+        {
+            var projection = MapResultsPrompt.Project(array, budget);
+
+            outputs[WorkflowOutputKeys.MapResultsPrompt] = JsonSerializer.SerializeToElement(projection.Text);
+            outputs[WorkflowOutputKeys.MapResultsCoverage] = JsonSerializer.SerializeToElement(projection.Coverage);
+        }
 
         return outputs;
     }

@@ -25,8 +25,19 @@ public static class WorkflowOutputKeys
     /// <summary>The prompt-ready, budget-bounded projection of a <c>flow.map</c>'s reduced array — emitted ONLY when the map's config sets a <c>promptBudgetChars</c>, so an ordinary map's output bag is unchanged.</summary>
     public const string MapResultsPrompt = "resultsPrompt";
 
-    /// <summary>The keys <c>BuildMapOutputs</c> may write besides the configurable <c>resultKey</c> — <see cref="MapCount"/>/<see cref="MapFailed"/> on every map, <see cref="MapResultsPrompt"/> only on a map that declares a prompt budget. A map <c>resultKey</c> equal to any of them is rejected at save time: reserving the conditional one unconditionally is what keeps an author's key safe from a map that later opts in.</summary>
-    public static readonly IReadOnlyList<string> Map = new[] { MapCount, MapFailed, MapResultsPrompt };
+    /// <summary>
+    /// How much of the results <see cref="MapResultsPrompt"/> actually carries (a <c>MapResultsCoverage</c> object:
+    /// <c>complete</c>, <c>totalBranches</c>, <c>includedBranches</c>, <c>shortenedBranches</c>) — written by the
+    /// reducer that did the bounding, beside the text it bounded, and emitted on exactly the same condition.
+    ///
+    /// <para>It exists because the projection's own excerpt notice is addressed to a MODEL: a run whose reduce saw 3
+    /// of 20 branches would otherwise look, in the data, exactly like one that saw 20 of 20. This is the same fact as
+    /// a VALUE — bindable by a downstream node, readable by the phase projection, assertable by a test.</para>
+    /// </summary>
+    public const string MapResultsCoverage = "resultsCoverage";
+
+    /// <summary>The keys <c>BuildMapOutputs</c> may write besides the configurable <c>resultKey</c> — <see cref="MapCount"/>/<see cref="MapFailed"/> on every map, <see cref="MapResultsPrompt"/> and <see cref="MapResultsCoverage"/> only on a map that declares a prompt budget. A map <c>resultKey</c> equal to any of them is rejected at save time: reserving the conditional ones unconditionally is what keeps an author's key safe from a map that later opts in.</summary>
+    public static readonly IReadOnlyList<string> Map = new[] { MapCount, MapFailed, MapResultsPrompt, MapResultsCoverage };
 
     /// <summary>Iteration count a completed <c>flow.loop</c> emits (written after the loop-var spread).</summary>
     public const string LoopIterations = "iterations";

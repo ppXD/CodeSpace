@@ -52,6 +52,43 @@ public class WorkflowNodePhaseSourceTests
         map.Metrics.FailedCount.ShouldBe(0);
     }
 
+    /// <summary>
+    /// A map that BOUNDED its results for a downstream reduce records how much of them the reduce actually read; the
+    /// phase board is the surface an operator watches, so that fact has to reach it. Carried verbatim through
+    /// <see cref="PhaseMetrics.Extra"/> — the source-specific hatch — so the fan-out card can say "the answer is based
+    /// on 4 of 20 subtasks" instead of looking identical to a fan-out whose reduce read everything.
+    /// </summary>
+    [Fact]
+    public void A_map_that_bounded_its_reduce_input_forwards_that_coverage_to_the_phase_board()
+    {
+        var coverage = """{"complete":false,"totalBranches":20,"includedBranches":4,"shortenedBranches":[0,1]}""";
+        var nodes = new[] { RunDetailFixtures.TopLevelNode("map", NodeStatus.Success, outputs: RunDetailFixtures.MapOutputs(count: 20, failed: 0, resultsCoverageJson: coverage), startedAt: DateTimeOffset.UtcNow),
+                            RunDetailFixtures.MapBranch("map", 0, "agent", NodeStatus.Success, Guid.NewGuid().ToString()) };
+
+        var map = WorkflowNodePhaseSource.ProjectNodes(nodes, new Dictionary<Guid, AgentRunStatus>()).ShouldHaveSingleItem();
+
+        var forwarded = map.Metrics.Extra["resultsCoverage"];
+
+        forwarded.GetProperty("complete").GetBoolean().ShouldBeFalse(
+            customMessage: "the phase board must be able to tell a partial-input reduce from a whole-input one");
+        forwarded.GetProperty("includedBranches").GetInt32().ShouldBe(4);
+        forwarded.GetProperty("totalBranches").GetInt32().ShouldBe(20);
+        forwarded.GetProperty("shortenedBranches").EnumerateArray().Count().ShouldBe(2,
+            customMessage: "forwarded verbatim, so a reader that wants to name the partial subtasks still can");
+    }
+
+    [Fact]
+    public void A_map_that_bounded_nothing_contributes_no_coverage_leaving_its_phase_metrics_as_they_were()
+    {
+        var nodes = new[] { RunDetailFixtures.TopLevelNode("map", NodeStatus.Success, outputs: RunDetailFixtures.MapOutputs(count: 2, failed: 0), startedAt: DateTimeOffset.UtcNow),
+                            RunDetailFixtures.MapBranch("map", 0, "agent", NodeStatus.Success, Guid.NewGuid().ToString()) };
+
+        var map = WorkflowNodePhaseSource.ProjectNodes(nodes, new Dictionary<Guid, AgentRunStatus>()).ShouldHaveSingleItem();
+
+        map.Metrics.Extra.ShouldBeEmpty(
+            "a map with no bounded reduce makes no coverage claim — every existing phase stays exactly as it projected before");
+    }
+
     [Fact]
     public void A_plain_agent_node_becomes_a_one_agent_phase_carrying_the_real_agent_status()
     {

@@ -38,9 +38,9 @@ public class ReducerEmittedKeysPinTests
     }
 
     /// <summary>
-    /// The same drift pin for the OPTED-IN reducer: a map that declares a prompt budget writes ONE more key, and
-    /// that key must be in the reserved set too. Without this the conditional key could be added to the reducer,
-    /// left out of <see cref="WorkflowOutputKeys.Map"/>, and re-open the silent-overwrite bug for any author whose
+    /// The same drift pin for the OPTED-IN reducer: a map that declares a prompt budget writes TWO more keys, and
+    /// both must be in the reserved set too. Without this a conditional key could be added to the reducer, left out
+    /// of <see cref="WorkflowOutputKeys.Map"/>, and re-open the silent-overwrite bug for any author whose
     /// <c>resultKey</c> happened to be named the same — while the always-written pin above still passed.
     /// </summary>
     [Fact]
@@ -51,6 +51,7 @@ public class ReducerEmittedKeysPinTests
         var emitted = WorkflowEngine.BuildMapOutputs(resultKey, new List<JsonElement>(), failed: 0, promptBudgetChars: 2_000).Keys.ToHashSet();
 
         emitted.ShouldContain(WorkflowOutputKeys.MapResultsPrompt, "a declared prompt budget must actually produce the projection");
+        emitted.ShouldContain(WorkflowOutputKeys.MapResultsCoverage, "the projection must never be persisted without the coverage that says how much of the input it carries");
 
         emitted.Remove(resultKey).ShouldBeTrue("the reducer must write the array under the configured resultKey");
         emitted.ShouldBe(WorkflowOutputKeys.Map, ignoreOrder: true);   // every OTHER key the reducer writes is reserved
