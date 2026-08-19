@@ -5,11 +5,13 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Eval;
 using CodeSpace.Core.Services.Agents.Publish;
+using CodeSpace.Core.Services.Completion;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Authorization;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Queries.Agents;
@@ -238,9 +240,9 @@ public class UnattendedDeliveryScorecardFlowTests
         var unswept = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
         foreach (var runId in new[] { metricSolved, retrySolved, preProjection, unswept })
             await SeedManifestAsync(teamId, runId, PublishAcceptanceState.Passed, PublishState.Pushed);
-        await SeedAssessmentAsync(teamId, metricSolved, outcome: "Solved", wouldBe: "CleanSuccess", metricOutcome: "Solved");
-        await SeedAssessmentAsync(teamId, retrySolved, outcome: "Solved", wouldBe: "CleanSuccess", metricOutcome: "Unknown");
-        await SeedAssessmentAsync(teamId, preProjection, outcome: "Solved", wouldBe: "CleanSuccess", metricOutcome: null);
+        await SeedAssessmentAsync(teamId, metricSolved, new SeededAssessment("Solved", "CleanSuccess", MetricOutcome: "Solved"));
+        await SeedAssessmentAsync(teamId, retrySolved, new SeededAssessment("Solved", "CleanSuccess", MetricOutcome: "Unknown"));
+        await SeedAssessmentAsync(teamId, preProjection, new SeededAssessment("Solved", "CleanSuccess", MetricOutcome: null));
 
         var card = await ComputeAsync(teamId);
 
@@ -249,27 +251,53 @@ public class UnattendedDeliveryScorecardFlowTests
         card.Rollup.LegacySolvedRuns.ShouldBe(4, "the ladder's reading survives as the parity column");
         card.Rollup.AssessedRuns.ShouldBe(3, "runs with a durable shadow row");
         card.Rollup.AssessmentSolvedRuns.ShouldBe(3, "the OPERATIONAL projection credits the retry — the @1 delta is the retry-credit story");
-        card.Rollup.WouldBeCleanSuccessRuns.ShouldBe(3);
+        card.Rollup.EvidenceEligibleCleanSuccessRuns.ShouldBe(3);
+        card.Rollup.CohortEligibleCleanSuccessRuns.ShouldBe(0, "these rows record no mode and no capability key — a pre-slice row cannot clear a structural gate, and reading one as cleared is exactly the overstatement the split exists to prevent");
         card.Rollup.UnassessedRuns.ShouldBe(2, "no row at all, or a pre-projection row with no metric verdict — both read unassessed, in the denominator, never solved");
     }
 
-    private async Task SeedAssessmentAsync(Guid teamId, Guid runId, string outcome, string wouldBe, string? metricOutcome = null)
+    [Fact]
+    public async Task A_would_be_clean_success_from_a_non_enforceable_mode_is_outside_the_cohort_count()
+    {
+        // Two contract-era runs whose recorded would-be terminal reads CleanSuccess, differing ONLY in operating
+        // mode. The supervisor lane holds ProtocolReadiness.Enforceable, so a CleanSuccess there is a terminal the
+        // authority WOULD actually stamp. Plan-map holds Open: the authority's readiness gate parks EVERY
+        // plan-map run Unsupported before it ever reaches the decider, so its recorded CleanSuccess is a claim
+        // about a rule that does not exist for that mode. Both belong in the evidence-eligible count (the
+        // cohort-graduation signal); only the supervisor one belongs in the count the Enforced flip is argued from.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var supervisorRun = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
+        var planMapRun = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
+        await SeedAssessmentAsync(teamId, supervisorRun, new SeededAssessment("Solved", "CleanSuccess", MetricOutcome: "Solved", RunMode: RunModeKeys.Supervisor));
+        await SeedAssessmentAsync(teamId, planMapRun, new SeededAssessment("Solved", "CleanSuccess", MetricOutcome: "Solved", RunMode: RunModeKeys.PlanMap));
+
+        var card = await ComputeAsync(teamId);
+
+        card.Rollup.EvidenceEligibleCleanSuccessRuns.ShouldBe(2, "both rows cleared the two evidence gates — that is the evidence a mode accumulates while it argues for graduation, and it must not shrink when a mode is outside the cohort");
+        card.Rollup.CohortEligibleCleanSuccessRuns.ShouldBe(1, "only the supervisor lane holds Enforceable standing — a plan-map CleanSuccess can never be terminalized, so it must not inflate the number the Enforced flip is argued from");
+    }
+
+    /// <summary>One seeded shadow assessment row's variable fields. A null <paramref name="RunMode"/> mirrors a PRE-SLICE row — written before the structural columns existed — and suppresses the capability key with it, because the shadow writes the two together or not at all.</summary>
+    private sealed record SeededAssessment(string Outcome, string WouldBe, string? MetricOutcome = null, string? RunMode = null, string CapabilityKey = CapabilityKeys.GitBranch);
+
+    private async Task SeedAssessmentAsync(Guid teamId, Guid runId, SeededAssessment row)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         db.CompletionAssessmentRecord.Add(new CodeSpace.Core.Persistence.Entities.CompletionAssessmentRecord
         {
             Id = Guid.NewGuid(), TeamId = teamId, WorkflowRunId = runId,
-            EnforcementMode = "Shadow", Basis = "ContractDerived", Outcome = outcome, Verification = "Passed",
-            AssessmentJson = "{}", LegacyIsSolved = true, WouldBeTerminalDecision = wouldBe,
-            MetricOutcome = metricOutcome, MetricJson = metricOutcome is null ? null : "{}",
+            EnforcementMode = "Shadow", Basis = "ContractDerived", Outcome = row.Outcome, Verification = "Passed",
+            AssessmentJson = "{}", LegacyIsSolved = true, WouldBeTerminalDecision = row.WouldBe,
+            MetricOutcome = row.MetricOutcome, MetricJson = row.MetricOutcome is null ? null : "{}",
+            RunMode = row.RunMode, CapabilityKey = row.RunMode is null ? null : row.CapabilityKey,
         });
         await db.SaveChangesAsync();
     }
 
     /// <summary>The run's latest metric@1 verdict — the primary solve bit's ONLY source since the P0-A consumer switch.</summary>
     private Task SeedMetricAssessmentAsync(Guid teamId, Guid runId, string metricOutcome) =>
-        SeedAssessmentAsync(teamId, runId, outcome: metricOutcome, wouldBe: "CleanSuccess", metricOutcome: metricOutcome);
+        SeedAssessmentAsync(teamId, runId, new SeededAssessment(metricOutcome, "CleanSuccess", MetricOutcome: metricOutcome));
 
     [Fact]
     public async Task The_parked_population_is_surfaced_beside_the_terminal_denominator()

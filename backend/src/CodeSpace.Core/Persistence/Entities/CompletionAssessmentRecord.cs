@@ -23,9 +23,10 @@ public class CompletionAssessmentRecord : IEntity<Guid>, IAuditable
     ///
     /// <para>An UPPER BOUND on the authority's verdict, not a copy of it: the shadow mirrors only the two
     /// EVIDENCE-dependent refusals (integrity violations, missing Required stages). The three STRUCTURAL refusals —
-    /// capability registered, mode registered, mode holding <c>ProtocolReadiness.Enforceable</c> — are neither
-    /// applied nor re-derivable here: this row records no mode and no capability key. Every consumer of this column
-    /// therefore counts runs the authority would in fact park.</para>
+    /// capability registered, mode registered, mode holding <c>ProtocolReadiness.Enforceable</c> — are not applied
+    /// here; a reader that needs the narrower number re-derives them from <see cref="RunMode"/> and
+    /// <see cref="CapabilityKey"/> on this same row. A consumer that does not is counting runs the authority would
+    /// in fact park.</para>
     /// </summary>
     public string? WouldBeTerminalDecision { get; set; }
 
@@ -47,6 +48,19 @@ public class CompletionAssessmentRecord : IEntity<Guid>, IAuditable
 
     /// <summary>The full <c>MetricAt1Projection</c> this compose produced — outcome plus its bindings (@1 attempt refs, obligation set, unit, versions), self-describing per row.</summary>
     public string? MetricJson { get; set; }
+
+    /// <summary>The operating mode <c>RunModeClassifier</c> derived for this run — resolving it in the mode registry IS the mode-registration gate the shadow does not apply (<c>"generic"</c> is deliberately unregistered). Null on pre-slice rows.</summary>
+    public string? RunMode { get; set; }
+
+    /// <summary>WHAT this run was asked for, derived from its staked obligation set — resolving it in the capability registry IS the capability-registration gate the shadow does not apply. Null on pre-slice rows.</summary>
+    public string? CapabilityKey { get; set; }
+
+    /// <summary>The <c>ProtocolReadiness</c> name <see cref="RunMode"/>'s profile HELD when this row was written; null when the mode had no registered profile, and on pre-slice rows. Historical on purpose — a later registry edit shows up as drift against the registry's current standing instead of silently rewriting what a past run would have got.</summary>
+    public string? ReadinessAtCompose { get; set; }
+
+    /// <summary>Whether the reduce this run's answer was synthesized over read ALL of its branches — the run row's own <c>resultsCoverage.complete</c> fact, copied here so a partial-input answer is distinguishable per assessment. Null when the run recorded no such fact (every run but a budget-declaring plan-map). Recorded evidence only: nothing gates on it.</summary>
+    public bool? ResultsCoverageComplete { get; set; }
+
     public int RejectionCount { get; set; }
     public int ContractErrorCount { get; set; }
     public DateTimeOffset CreatedDate { get; set; }

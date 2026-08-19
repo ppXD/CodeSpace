@@ -32,13 +32,15 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
     private readonly IPublishManifestStore _manifests;
     private readonly IHumanTouchReader _humanTouches;
     private readonly ITeamCostService _cost;
+    private readonly Completion.ICompletionCohortEligibility _cohort;
 
-    public UnattendedDeliveryScorecardService(CodeSpaceDbContext db, IPublishManifestStore manifests, IHumanTouchReader humanTouches, ITeamCostService cost)
+    public UnattendedDeliveryScorecardService(CodeSpaceDbContext db, IPublishManifestStore manifests, IHumanTouchReader humanTouches, ITeamCostService cost, Completion.ICompletionCohortEligibility cohort)
     {
         _db = db;
         _manifests = manifests;
         _humanTouches = humanTouches;
         _cost = cost;
+        _cohort = cohort;
     }
 
     public async Task<UnattendedDeliveryScorecard> ComputeAsync(Guid teamId, DateTimeOffset? since, CancellationToken cancellationToken)
@@ -76,6 +78,12 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
         var legacySolvedRuns = runs.Count(r => IsSolved(manifestsByRun.GetValueOrDefault(r.Id, EmptyManifests), r.Status, degradedStopRuns.Contains(r.Id)));
         var unassessedRuns = runs.Count(r => !latestAssessments.TryGetValue(r.Id, out var latest) || latest.MetricOutcome is null);
 
+        // The would-be CleanSuccess population, split by the gates the SHADOW does not apply: every one of these
+        // rows cleared the two evidence gates, and only some are in a cohort the authority could terminalize at all.
+        var wouldBeCleanSuccess = latestAssessments.Values
+            .Where(a => a.WouldBeTerminalDecision == nameof(Messages.Contracts.TerminalDecision.CleanSuccess))
+            .ToList();
+
         return card with
         {
             Rollup = card.Rollup with
@@ -84,7 +92,8 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
                 SuspendedRuns = suspendedRuns,
                 AssessedRuns = latestAssessments.Count,
                 AssessmentSolvedRuns = latestAssessments.Count(kv => kv.Value.Outcome == nameof(Messages.Contracts.OutcomeDisposition.Solved)),
-                WouldBeCleanSuccessRuns = latestAssessments.Count(kv => kv.Value.WouldBeTerminalDecision == nameof(Messages.Contracts.TerminalDecision.CleanSuccess)),
+                EvidenceEligibleCleanSuccessRuns = wouldBeCleanSuccess.Count,
+                CohortEligibleCleanSuccessRuns = wouldBeCleanSuccess.Count(a => _cohort.IsCohortEligible(a.RunMode, a.CapabilityKey)),
                 LegacySolvedRuns = legacySolvedRuns,
                 UnassessedRuns = unassessedRuns,
             },
@@ -93,24 +102,26 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
 
     /// <summary>
     /// Each windowed run's LATEST shadow assessment row — the metric@1 verdict (the primary solve bit since the
-    /// P0-A consumer switch), the operational Outcome, and the would-be terminal (the parity columns). A run
-    /// missing here has not been swept yet; it reads unassessed and never solved until its row lands.
+    /// P0-A consumer switch), the operational Outcome, the would-be terminal (the parity columns), and the run's
+    /// recorded mode + capability key, which are what the would-be terminal's three unapplied structural gates
+    /// re-derive from. A run missing here has not been swept yet; it reads unassessed and never solved until its
+    /// row lands.
     /// </summary>
     private async Task<IReadOnlyDictionary<Guid, LatestAssessment>> LatestAssessmentsAsync(Guid teamId, IReadOnlyList<Guid> runIds, CancellationToken cancellationToken)
     {
         var rows = await _db.CompletionAssessmentRecord.AsNoTracking()
             .Where(a => a.TeamId == teamId && runIds.Contains(a.WorkflowRunId))
             .OrderBy(a => a.CreatedDate)
-            .Select(a => new { a.WorkflowRunId, a.Outcome, a.WouldBeTerminalDecision, a.MetricOutcome, a.CreatedDate })
+            .Select(a => new { a.WorkflowRunId, a.Outcome, a.WouldBeTerminalDecision, a.MetricOutcome, a.RunMode, a.CapabilityKey, a.CreatedDate })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         return rows
             .GroupBy(a => a.WorkflowRunId)
             .Select(g => g.Last())
-            .ToDictionary(a => a.WorkflowRunId, a => new LatestAssessment(a.Outcome, a.WouldBeTerminalDecision, a.MetricOutcome));
+            .ToDictionary(a => a.WorkflowRunId, a => new LatestAssessment(a.Outcome, a.WouldBeTerminalDecision, a.MetricOutcome, a.RunMode, a.CapabilityKey));
     }
 
-    private readonly record struct LatestAssessment(string Outcome, string? WouldBeTerminalDecision, string? MetricOutcome);
+    private readonly record struct LatestAssessment(string Outcome, string? WouldBeTerminalDecision, string? MetricOutcome, string? RunMode, string? CapabilityKey);
 
     /// <summary>
     /// The team's recent TERMINAL runs (most-recent first by CreatedDate), capped at <see cref="RecentRunCap"/> and

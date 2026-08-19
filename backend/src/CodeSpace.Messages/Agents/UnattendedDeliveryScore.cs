@@ -86,8 +86,25 @@ public sealed record UnattendedDeliveryRollup
     /// <summary>Assessed runs whose LATEST assessment reads OPERATIONAL Outcome=Solved — the retry-crediting projection beside the primary metric@1 rates. Since the P0-A consumer switch the primary <see cref="SolvedRuns"/> reads the metric@1 verdict; the operational-vs-@1 delta is the retry-credit story.</summary>
     public int AssessmentSolvedRuns { get; init; }
 
-    /// <summary>Assessed runs whose recorded would-be terminal decision is CleanSuccess — the ONLY VDS-eligible state (Lock Clause 5). An UPPER BOUND on what an Enforced cohort would stamp, not the Enforced-era numerator: the recorded decision mirrors only the shadow's two evidence gates (integrity, stages), so this count ignores the three structural gates the terminal authority also applies — capability registered, mode registered, and the mode holding <c>ProtocolReadiness.Enforceable</c>. Only the supervisor mode holds Enforceable standing today, so every plan-map and single-agent CleanSuccess in here is a run the authority would park Unsupported.</summary>
-    public int WouldBeCleanSuccessRuns { get; init; }
+    /// <summary>
+    /// Assessed runs whose recorded would-be terminal decision is CleanSuccess — the ONLY VDS-eligible state (Lock
+    /// Clause 5) — counted over EVERY mode, whether or not its mode could be enforced. The shadow's recorded
+    /// decision applies just the two EVIDENCE-dependent gates (integrity violations, Required-but-unevidenced
+    /// stages), so this is the evidence a mode accumulates while it argues for graduation, and an UPPER BOUND on
+    /// what an Enforced cohort would stamp. Use <see cref="CohortEligibleCleanSuccessRuns"/> for the narrower one.
+    /// </summary>
+    public int EvidenceEligibleCleanSuccessRuns { get; init; }
+
+    /// <summary>
+    /// The subset of <see cref="EvidenceEligibleCleanSuccessRuns"/> that ALSO clears the three structural gates the
+    /// terminal authority applies before it composes — capability registered, mode registered, and the mode holding
+    /// <c>ProtocolReadiness.Enforceable</c> — re-derived from each row's recorded mode and capability key. THIS is
+    /// the Enforced-era north-star numerator: the runs an Enforced cohort would actually terminalize Success today.
+    ///
+    /// <para>Zero for a window of pre-slice rows (they record no mode or capability) and for any window whose runs
+    /// are all outside the graduated cohort — only the supervisor mode holds Enforceable standing today.</para>
+    /// </summary>
+    public int CohortEligibleCleanSuccessRuns { get; init; }
 
     /// <summary>Runs the LEGACY manifest ladder (oracle-graded manifests, else engine Success minus degraded stops) would call solved — the status-fallback inference the metric plane removed, kept visible so the legacy-vs-metric delta stays a live query.</summary>
     public int LegacySolvedRuns { get; init; }
