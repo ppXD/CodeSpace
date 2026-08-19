@@ -634,6 +634,49 @@ public sealed class CompletionComposerFlowTests
 
     // ── Seeds ──
 
+    [Fact]
+    public async Task The_shadow_records_the_structural_inputs_the_authority_gates_on()
+    {
+        // The recorded would-be terminal decision applies only the two EVIDENCE-dependent refusals; the authority
+        // also refuses on three STRUCTURAL ones (capability registered, mode registered, mode Enforceable). This
+        // pins the inputs those three are functions of onto the row, so a reader can re-derive them instead of
+        // reading a CleanSuccess as a terminal the authority would stamp. A plan-map run is the case that matters:
+        // its mode holds ProtocolReadiness.Open, so the readiness gate parks EVERY one of its runs Unsupported.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedTerminalRunAsync(teamId, userId, stampPolicy: true, WorkflowRunStatus.Success);
+
+        await SeedDecisionAsync(runId, teamId, 1, SupervisorDecisionKinds.Plan,
+            """{"goal":"g","subtasks":[{"id":"s1","title":"T","instruction":"i"}]}""", """{"planned":["s1"],"count":1,"workPlanId":"2b5b1a41-5f0c-4b1e-8a35-9d3e5c6f7a80","workPlanVersion":1}""");
+        await SeedDecisionAsync(runId, teamId, 2, SupervisorDecisionKinds.Stop, "{}", "{}");
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        // The tasks lane stamps the projection kind at launch, and a budgeted map lands its reduce-coverage fact on
+        // the run row's own outputs (the terminal binding the plan-map `done` node carries) — both arranged here.
+        var run = await db.WorkflowRun.SingleAsync(r => r.Id == runId);
+        run.ProjectionKind = CodeSpace.Messages.Tasks.TaskProjectionKinds.PlanMapSynth;
+        run.OutputsJson = """{"resultsCoverage":{"complete":false,"totalBranches":6,"includedBranches":4,"shortenedBranches":[0,1]}}""";
+        await db.SaveChangesAsync();
+
+        await scope.Resolve<ICompletionContractStore>().UpsertRequirementsAsync(runId, teamId, new[]
+        {
+            new RequirementEnvelope { RequirementRef = "delivery:run", Kind = ContractKinds.Delivery, Requiredness = Requiredness.Required, Authority = ContractAuthority.Operator, ContractSchemaVersion = "1" },
+        }, CancellationToken.None);
+
+        await scope.Resolve<ICompletionShadowService>().SweepAsync(batchSize: 50, CancellationToken.None);
+
+        var record = await db.CompletionAssessmentRecord.AsNoTracking().SingleAsync(a => a.WorkflowRunId == runId);
+
+        record.RunMode.ShouldBe(RunModeKeys.PlanMap, "the launch-stamped projection kind is the run's operating mode — resolving it in the mode registry IS the mode-registration gate");
+        record.ReadinessAtCompose.ShouldBe(nameof(ProtocolReadiness.Open), "plan-map's committed standing when this row was written — below the Enforceable the Enforced cohort requires");
+        record.CapabilityKey.ShouldBe(CapabilityKeys.GitBranch, "a Required delivery stake selects the branch surface — resolving it in the capability registry IS the capability-registration gate");
+        record.ResultsCoverageComplete.ShouldBe(false, "the run's own resultsCoverage.complete fact — the reduce this answer was synthesized over did not read every branch");
+
+        scope.Resolve<ICompletionCohortEligibility>().IsCohortEligible(record.RunMode, record.CapabilityKey)
+            .ShouldBeFalse("re-derived from THIS row: whatever would-be decision it carries, an Enforced cohort could not have terminalized this run");
+    }
+
     private async Task<Guid> SeedTerminalRunAsync(Guid teamId, Guid userId, bool stampPolicy, WorkflowRunStatus status)
     {
         var workflowId = await CreateWorkflowAsync(teamId, userId);

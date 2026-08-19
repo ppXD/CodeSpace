@@ -4,7 +4,9 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Eval;
 using CodeSpace.Core.Services.Agents.Publish;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Contracts;
+using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -156,22 +158,21 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
         var receipts = await _contracts.ListReceiptsAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
         var handoffReachable = await _handoff.IsHandoffReachableAsync(runId, teamId, receipts, cancellationToken).ConfigureAwait(false);
         var wouldBe = TerminalDecider.Decide(composed.Assessment, handoffReachable);
+        var structural = await ReadStructuralInputsAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
 
-        // P1 (fail-close mirror): the authority refuses a CleanSuccess built over integrity violations, so the
-        // recorded would-be decision must apply the SAME predicate — parity evidence that says "would have been
-        // CleanSuccess" for a run Enforced would in fact park is evidence about a rule that doesn't exist.
-        if (wouldBe == TerminalDecision.CleanSuccess)
-        {
-            var requirements = await _contracts.ListRequirementsAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
-
-            if (CompletionIntegrity.Violations(composed.Rejections, composed.ContractErrors, requirements) is { Count: > 0 }) wouldBe = TerminalDecision.Park;
-
-            // P4 (stage-gate mirror): the authority also refuses a CleanSuccess missing a Required upstream stage,
-            // so the would-be must too. Only the EVIDENCE-dependent gates are baked in (integrity, stages) — the
-            // structural registration gates (capability, mode) re-derive at query time from the rows themselves.
-            else if (_modes.Resolve(await RunModeReader.DeriveAsync(_db, runId, teamId, cancellationToken).ConfigureAwait(false)) is { } profile
-                && UpstreamStageTrace.MissingRequired(profile, composed.ExercisedUpstreamStages).Count > 0) wouldBe = TerminalDecision.Park;
-        }
+        // P1 + P4 (fail-close mirror): the authority refuses a CleanSuccess built over integrity violations, and
+        // one missing a Required upstream stage, so the recorded would-be applies the SAME two predicates — parity
+        // evidence that says "would have been CleanSuccess" for a run Enforced would in fact park is evidence
+        // about a rule that doesn't exist.
+        //
+        // These two are ALL that is mirrored, on purpose. The authority's three STRUCTURAL gates — capability
+        // registered, mode registered, mode holding Enforceable standing — stay OFF the recorded decision: baking
+        // them in would stamp Unsupported on every non-supervisor run and erase the cohort-graduation signal this
+        // column exists to produce. What makes their absence checkable rather than a silent overstatement is the
+        // structural triple recorded beside it (mode, capability, readiness-at-compose): a reader re-derives all
+        // three gates from those columns — see CompletionCohortEligibility, which is what the scorecard's
+        // cohort-eligible count is.
+        if (wouldBe == TerminalDecision.CleanSuccess && !EvidenceGatesPass(composed, structural)) wouldBe = TerminalDecision.Park;
 
         // Captured AFTER composing, on purpose (the A2 discipline): ComposeAsync write-throughs receipts, so a
         // pre-compose snapshot would leave every later sweep seeing a difference that was its own doing.
@@ -194,6 +195,10 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
             LedgerVersion = after.LedgerVersion,
             MetricOutcome = composed.MetricAt1.Outcome.ToString(),
             MetricJson = metricJson,
+            RunMode = structural.Mode,
+            CapabilityKey = structural.CapabilityKey,
+            ReadinessAtCompose = structural.Profile?.Readiness.ToString(),
+            ResultsCoverageComplete = structural.ResultsCoverageComplete,
             RejectionCount = composed.Rejections.Count,
             ContractErrorCount = composed.ContractErrors.Count,
         });
@@ -201,4 +206,46 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         return true;
     }
+
+    /// <summary>The two EVIDENCE-dependent refusals the authority applies to a CleanSuccess, in its order: integrity violations first, then the mode profile's Required-but-unevidenced upstream stages. False ⇒ the recorded would-be parks.</summary>
+    private static bool EvidenceGatesPass(ComposedAssessment composed, StructuralInputs structural)
+    {
+        if (CompletionIntegrity.Violations(composed.Rejections, composed.ContractErrors, structural.Requirements) is { Count: > 0 }) return false;
+
+        return structural.Profile is not { } profile || UpstreamStageTrace.MissingRequired(profile, composed.ExercisedUpstreamStages).Count == 0;
+    }
+
+    /// <summary>
+    /// Everything the row records BESIDE the composed projections, read once per appended row. Three are the inputs
+    /// the authority's gates are functions of: the run's operating mode, the profile that mode resolves to (null ⇒
+    /// UNREGISTERED — the authority parks such a run Unsupported), and the capability its staked obligations select.
+    /// The fourth, the reduce-coverage fact the run's own outputs carry, gates nothing — it is recorded evidence.
+    /// </summary>
+    private async Task<StructuralInputs> ReadStructuralInputsAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var requirements = await _contracts.ListRequirementsAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+        var mode = await RunModeReader.DeriveAsync(_db, runId, teamId, cancellationToken).ConfigureAwait(false);
+        var outputsJson = await _db.WorkflowRun.AsNoTracking().Where(r => r.Id == runId && r.TeamId == teamId).Select(r => r.OutputsJson).SingleAsync(cancellationToken).ConfigureAwait(false);
+
+        return new StructuralInputs(mode, _modes.Resolve(mode), CompletionCapability.Derive(requirements), requirements, ReadResultsCoverageComplete(outputsJson));
+    }
+
+    /// <summary>The run row's own <c>resultsCoverage.complete</c> fact — whether the reduce its answer was synthesized over read ALL of its branches. Null when the run carries no such output (every run but a budget-declaring plan-map) or when the object cannot be read as a coverage record. Deserialized through the record itself so the wire names can never drift from a hand-read string.</summary>
+    private static bool? ReadResultsCoverageComplete(string outputsJson)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(outputsJson);
+
+            if (doc.RootElement.ValueKind != JsonValueKind.Object || !doc.RootElement.TryGetProperty(WorkflowOutputKeys.MapResultsCoverage, out var coverage)) return null;
+
+            return coverage.Deserialize<MapResultsCoverage>(Workflows.WorkflowJson.Options)?.Complete;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private sealed record StructuralInputs(string Mode, ModeProfile? Profile, string CapabilityKey, IReadOnlyList<RequirementEnvelope> Requirements, bool? ResultsCoverageComplete);
 }
