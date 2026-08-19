@@ -203,9 +203,12 @@ public sealed record AgentRunLogProblem(AgentRunLogProblemCode Code, bool IsRetr
     /// leaves the stream Open, where terminal reconciliation attributes it to the agent's log source instead.
     ///
     /// <para><see cref="AgentRunLogProblemCode.ProviderTimeout"/> and
-    /// <see cref="AgentRunLogProblemCode.ConcurrentMutation"/> are transient by CODE as well: both name a race or a
-    /// deadline rather than a verdict about the request, and callers that construct them (including this service's own
-    /// contended-append arm) do not all pass the flag.</para>
+    /// <see cref="AgentRunLogProblemCode.ConcurrentMutation"/> are transient by CODE as well, which today changes no
+    /// outcome: every production construction of them already passes the flag (each <c>ConcurrentMutation</c> arm in
+    /// <c>AgentRunLogService</c> passes true, and its <c>ProviderTimeout</c> arm carries the CAS layer's own true, set
+    /// on every timeout the runtime raises). They are kept because both name a deadline or a lost race rather than a
+    /// verdict about the request, so a caller that omits the flag on one must not terminalize a stream that the very
+    /// next attempt would have committed.</para>
     /// </summary>
     public bool IsTransient => IsRetryable || Code is AgentRunLogProblemCode.ProviderTimeout or AgentRunLogProblemCode.ConcurrentMutation;
 }

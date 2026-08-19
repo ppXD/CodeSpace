@@ -52,8 +52,9 @@ public sealed class AgentRunLogStorageProblemMappingTests
     public void Transience_follows_the_retryable_flag_except_for_the_two_race_codes(AgentRunLogProblemCode code, bool isRetryable, bool expectedTransient)
     {
         // BackendUnavailable used to be transient by code alone, which discarded the flag the mapper had just set from
-        // the storage layer's own verdict. ProviderTimeout and ConcurrentMutation stay code-transient because they
-        // name a deadline or a race, and not every caller that constructs them passes the flag.
+        // the storage layer's own verdict. ProviderTimeout and ConcurrentMutation stay code-transient — redundantly
+        // today, since every production construction of them passes the flag — because they name a deadline or a lost
+        // race, where a caller that omits the flag must not terminalize a stream the next attempt would commit.
         new AgentRunLogProblem(code, isRetryable).IsTransient.ShouldBe(expectedTransient);
     }
 }
