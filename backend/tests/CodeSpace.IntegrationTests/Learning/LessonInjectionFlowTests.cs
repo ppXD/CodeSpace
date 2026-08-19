@@ -123,7 +123,7 @@ public sealed class LessonInjectionFlowTests
             LastUserPrompt = request.UserPrompt;
             return Task.FromResult(new StructuredLLMCompletion
             {
-                Json = JsonSerializer.SerializeToElement(new { title = "t", subtasks = new[] { new { id = "s1", title = "T", instruction = "do it" } } }),
+                Json = JsonSerializer.SerializeToElement(new { goal = "fix it", subtasks = new[] { new { id = "s1", title = "T", instruction = "do it" } } }),
                 Model = request.Model,
             });
         }
