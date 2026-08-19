@@ -17,9 +17,9 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// <para>The pin runs the fake's three documented event lines (the SAME types the canonical
 /// <c>RealHarnessExecutionTests.CodexFixture</c> mirror uses) through the REAL
 /// <see cref="CodexHarness.ParseEvents"/> + <see cref="CodexHarness.BuildResult"/> and asserts they normalize to
-/// the kinds + summary the E2E relies on. If the production codex contract changes such that these shapes no
-/// longer parse the way the fake assumes, this test breaks — exactly the "mirror diverged from prod" signal
-/// Rule 12.5 mandates. It is a pure check (no DB), but it's tagged Integration so it runs in the SAME CI gate
+/// the kinds + summary the E2E relies on. It catches drift in ONE direction: a production harness change that stops
+/// accepting these shapes. It cannot catch the fake moving — the event lines are duplicated here as literals rather
+/// than read out of <c>ScriptBody</c>, so a fake that changes its lines leaves this test green. It is a pure check (no DB), but it's tagged Integration so it runs in the SAME CI gate
 /// that builds the integration project it lives in — the Unit gate scans only CodeSpace.UnitTests, so a
 /// Category=Unit trait here would run in NEITHER gate.</para>
 /// </summary>

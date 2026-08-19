@@ -48,10 +48,16 @@ public enum SemanticEventNecessity
 }
 
 /// <summary>
-/// The PROJECTION of one or more native records into the normalized vocabulary the rest of the system reads.
-/// Persisted as <c>workflow_run_semantic_event</c>. It never replaces its sources: <see cref="SourceNativeRecordIds"/>
-/// keeps the exact frames it was folded from, and <see cref="ProjectionQuality"/> keeps how faithfully — so a later
-/// reader can always ask "did the harness say this, or did we work it out?" and get a truthful answer.
+/// The PROJECTION of one or more native records into a normalized vocabulary, persisted as
+/// <c>workflow_run_semantic_event</c>. It never replaces its sources: <see cref="SourceNativeRecordIds"/> keeps the
+/// exact frames it was folded from, and <see cref="ProjectionQuality"/> keeps how faithfully — so a later reader can
+/// always ask "did the harness say this, or did we work it out?" and get a truthful answer.
+///
+/// <para><b>Nothing reads this plane yet.</b> It is written, not consumed: the normalized <c>agent_run_event</c> log
+/// remains the authority the UI, audit and HITL surfaces read, which is exactly why EVERY projector that emits an
+/// exactly-grounded event marks it <see cref="SemanticEventNecessity.Ignorable"/> — a reader that cannot route it loses
+/// no fact it is accountable for. Treat this as the vocabulary those readers are INTENDED to move onto; a claim that
+/// depends on someone consuming it is not true today.</para>
 /// </summary>
 public sealed record AgentSemanticEventV1
 {

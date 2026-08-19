@@ -38,7 +38,7 @@ public sealed partial class LocalProcessRunner
     /// <summary>The RUN-scoped progress-lease directory (never round-scoped — a revise round shares the run's lease, exactly as it shares the run's MCP socket). Single source of truth so the launch's stamp on the handle and every host-side renewer resolve the same path, exactly as <see cref="McpSocketPathFor"/> does for the socket.</summary>
     internal static string ProgressLeaseDirectoryFor(Guid runId) => Path.Combine(SpoolDirectoryFor(runId.ToString("N")), ProgressLeaseDir);
 
-    /// <summary>The RUN-scoped progress lease a host-side renewer writes. The layout OWNER hands it out — <see cref="AgentProgressLease"/> itself stays layout-free (Rule 18.3: the concern root must not reach into an implementation under <c>Runners/</c>), so a second durable runner can host the same lease type over its own spool. One expression over <see cref="ProgressLeaseDirectoryFor"/>, so a renewer and the observer cannot resolve different directories.</summary>
+    /// <summary>The RUN-scoped progress lease a host-side renewer writes. The layout OWNER hands it out, so <see cref="AgentProgressLease"/> itself stays layout-free and a second durable runner can host the same lease type over its own spool. One expression over <see cref="ProgressLeaseDirectoryFor"/>, so a renewer and the observer cannot resolve different directories. Note that <c>AgentMcpEndpoint</c> and <c>AgentRunExecutor</c> — both at the concern root — call these two statics DIRECTLY, so Rule 18.3's boundary is not held today (see the <see cref="AgentProgressLease"/> remarks).</summary>
     internal static AgentProgressLease ProgressLeaseFor(Guid runId) => new(ProgressLeaseDirectoryFor(runId));
 
     /// <summary>

@@ -210,8 +210,14 @@ public sealed class HarnessDataPlaneContractTests
         errors.ShouldContain(error => error.Contains("eventSchemaVersion", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// The DECLARED envelope's own shape, which is all this can pin: <see cref="RunnerHandleEnvelope"/> has no
+    /// production reader or writer yet, and the handle production actually persists — <c>SandboxHandle</c> — hoists both
+    /// a <c>required</c> pid and a <c>required</c> spool path. So this asserts the target shape is still the target, NOT
+    /// that any persisted handle keeps backend detail out of shared fields; nothing today does.
+    /// </summary>
     [Fact]
-    public void A_runner_handle_keeps_every_backend_detail_inside_its_opaque_locator()
+    public void The_declared_envelope_shape_hoists_no_pid_even_though_todays_persisted_handle_does()
     {
         var handle = ValidHandle();
 

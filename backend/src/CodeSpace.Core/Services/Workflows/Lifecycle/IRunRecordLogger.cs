@@ -85,15 +85,15 @@ public interface IRunRecordLogger
     /// <summary>Emit <c>node.skipped</c>. <paramref name="reason"/> documents why (e.g. "all-incoming-edges-dead").</summary>
     Task NodeSkippedAsync(Guid runId, string nodeId, string iterationKey, string reason, CancellationToken cancellationToken);
 
+    /// <summary>Record that a settled node's outputs could not reach the configured destination and were written inline instead — the only place a green run over an empty destination becomes visible.</summary>
+    Task NodeStorageUnavailableAsync(Guid runId, string nodeId, string iterationKey, string reason, string code, CancellationToken cancellationToken);
+
     /// <summary>
     /// Emit <c>node.suspended</c> — the immutable audit copy of a node parking the run. The
     /// <c>workflow_run_node</c> view projects this to <c>NodeStatus.Suspended</c>; the mutable
     /// wait state lives in <c>workflow_run_wait</c>. <paramref name="waitKind"/> is one of
     /// <c>WorkflowWaitKinds</c>; <paramref name="wakeAt"/> is set for Timer waits.
     /// </summary>
-    /// <summary>Record that a settled node's outputs could not reach the configured destination and were written inline instead — the only place a green run over an empty destination becomes visible.</summary>
-    Task NodeStorageUnavailableAsync(Guid runId, string nodeId, string iterationKey, string reason, string code, CancellationToken cancellationToken);
-
     Task NodeSuspendedAsync(Guid runId, string nodeId, string iterationKey, string waitKind, DateTimeOffset? wakeAt, CancellationToken cancellationToken);
 
     /// <summary>Emit <c>iteration.started</c> for flow.iterate boundary.</summary>

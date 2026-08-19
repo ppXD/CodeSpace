@@ -15,7 +15,14 @@ namespace CodeSpace.Core.Services.Agents.Sandbox;
 /// while a run is parked on a human approval would hand the fresh observer an empty lease and it would kill a run whose
 /// decision was still coming. WHERE the directory sits is not this type's business: it is handed one, so the runner that
 /// owns a spool layout hands out its own (<c>LocalProcessRunner.ProgressLeaseFor</c>) and this type stays reusable by a
-/// second durable runner (Rule 18.3 — the concern root never reaches into an implementation under <c>Runners/</c>).</para>
+/// second durable runner.</para>
+///
+/// <para><b>THIS type is layout-free; the concern root is not runner-free.</b> The reusability above is a property of
+/// this class only. Two callers at the concern root resolve their lease by calling the local runner's static directly —
+/// <c>AgentRunExecutor.RunDurableAsync</c> (<c>LocalProcessRunner.ProgressLeaseDirectoryFor</c>) and
+/// <c>AgentMcpEndpoint</c> (<c>LocalProcessRunner.ProgressLeaseFor</c>) — so a second durable runner's lease would not
+/// be reached by either until those two resolve the directory through the runner that actually launched the run. Rule
+/// 18.3's boundary is the goal here, not a property the code currently has.</para>
 ///
 /// <para>Renewal is BEST-EFFORT by construction: a lease write that fails (a full or read-only spool) is swallowed, so
 /// the lease can never fail a run. The cost of a missed renewal is bounded — it can only bring the stall decision

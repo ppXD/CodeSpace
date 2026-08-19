@@ -22,6 +22,17 @@ namespace CodeSpace.Core.Services.Agents.Sandbox;
 /// then throws <see cref="OperationCanceledException"/>. It is NOT a kill. The only thing that terminates
 /// the process is the handle's <see cref="SandboxHandle.Deadline"/> (the wall-clock timeout), enforced by
 /// whichever observer is attached when it elapses.</para>
+///
+/// <para><b>Read this first if you are writing the SECOND implementation.</b> There is exactly one today
+/// (<c>LocalProcessRunner</c>), so every sentence above is a contract only it has ever been held to, and the callers
+/// have accreted assumptions this interface does not state: <see cref="SandboxHandle"/> requires an OS pid and an
+/// on-disk spool path (see its remarks), <see cref="LaunchAsync"/> is never handed the run id so it cannot resolve a
+/// run-scoped lease directory of its own, and <c>AgentRunExecutor</c> / <c>AgentMcpEndpoint</c> call
+/// <c>LocalProcessRunner</c> statics directly for the lease. The FIRST thing to build on that day is an ABSTRACT
+/// CONTRACT SUITE over this interface — one set of tests both runners are run against, pinning at minimum the
+/// cancellation contract above, the checkpoint ordering in <see cref="AttachAsync"/>, and each
+/// <see cref="SandboxRunState"/> <see cref="ProbeAsync"/> must distinguish — before either implementation is trusted.
+/// Discovering these one bug at a time is the expensive path, and this note exists so it is not taken.</para>
 /// </summary>
 public interface ISandboxDurableRunner
 {

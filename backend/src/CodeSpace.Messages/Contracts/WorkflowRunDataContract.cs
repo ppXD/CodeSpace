@@ -15,9 +15,15 @@ public static class WorkflowRunDataContract
 }
 
 /// <summary>
-/// Physical tables whose aggregate root is a Workflow Run. The prefix is an ownership boundary, not merely a
-/// naming preference: storage-plane aggregates such as <c>artifact_object</c> remain global even when one of their
-/// references points at a run. Existing legacy tables are migrated separately; they are never renamed as a rider.
+/// The REGISTERED table names whose aggregate root is a Workflow Run. Registration is the reservation of a name, not
+/// evidence of a table: several of these are still FORWARD DECLARATIONS with no EF entity behind them.
+/// <c>WorkflowRunDataNamesReachabilityTests</c> resolves every name in <see cref="All"/> against
+/// <c>CodeSpaceDbContext</c> and lists the unbacked ones explicitly, so which are real and which are promises is a
+/// checked fact rather than a claim in this comment — and shipping one moves its name off that list.
+///
+/// <para>The prefix is an ownership boundary, not merely a naming preference: storage-plane aggregates such as
+/// <c>artifact_object</c> remain global even when one of their references points at a run. Existing legacy tables are
+/// migrated separately; they are never renamed as a rider.</para>
 /// </summary>
 public static class WorkflowRunDataNames
 {
