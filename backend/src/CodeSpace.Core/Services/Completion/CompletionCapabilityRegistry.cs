@@ -7,6 +7,9 @@ public interface ICompletionCapabilityRegistry
 {
     /// <summary>The descriptor for a capability key, or null for an UNKNOWN capability — the caller must read null as Unsupported, never as a license to attempt (Lock Clause 4).</summary>
     CapabilityDescriptor? Resolve(string capabilityKey);
+
+    /// <summary>Every registered capability key — the claim board iterates the closed vocabulary.</summary>
+    IReadOnlyCollection<string> RegisteredKeys { get; }
 }
 
 /// <summary>
@@ -15,18 +18,22 @@ public interface ICompletionCapabilityRegistry
 /// shadow evidence; the inline answer is still open development (its verifier — "the answer itself is the
 /// deliverable" — has no oracle floor yet). A key outside this table resolves null → the terminal authority
 /// reads Unsupported, so a novel ask (image, spreadsheet, external effect) parks honestly instead of
-/// terminalizing a fake Success. Both axes are pinned by test; Sealed performance is unreachable until the hidden qualification runner mints receipts.
+/// terminalizing a fake Success. Readiness is pinned by test; measured performance is deliberately NOT a column
+/// here — it resolves from the qualification-receipt ledger at read time (Q4's claim gate), so a Sealed statement
+/// is impossible without a current sealed receipt.
 /// </summary>
 public sealed class CompletionCapabilityRegistry : ICompletionCapabilityRegistry, ISingletonDependency
 {
     private static readonly IReadOnlyDictionary<string, CapabilityDescriptor> Registered = new[]
     {
-        new CapabilityDescriptor { Key = CapabilityKeys.GitBranch, Readiness = ProtocolReadiness.Shadow, Performance = PerformanceQualification.Shadow },
-        new CapabilityDescriptor { Key = CapabilityKeys.GitPatch, Readiness = ProtocolReadiness.Shadow, Performance = PerformanceQualification.Shadow },
-        new CapabilityDescriptor { Key = CapabilityKeys.InlineAnswer, Readiness = ProtocolReadiness.Open, Performance = PerformanceQualification.Unmeasured },
+        new CapabilityDescriptor { Key = CapabilityKeys.GitBranch, Readiness = ProtocolReadiness.Shadow },
+        new CapabilityDescriptor { Key = CapabilityKeys.GitPatch, Readiness = ProtocolReadiness.Shadow },
+        new CapabilityDescriptor { Key = CapabilityKeys.InlineAnswer, Readiness = ProtocolReadiness.Open },
     }.ToDictionary(d => d.Key, StringComparer.Ordinal);
 
     public CapabilityDescriptor? Resolve(string capabilityKey) => Registered.GetValueOrDefault(capabilityKey);
+
+    public IReadOnlyCollection<string> RegisteredKeys => Registered.Keys.ToArray();
 }
 
 /// <summary>The v1 derivation of WHAT a run was asked for, read off its own staked obligation set — a pure function so the mapping pins without a database.</summary>

@@ -149,6 +149,14 @@ public class AgentsController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>Q4 (SOTA-claim gate): the qualification claim board — every registered (mode × capability) pair's measured performance standing, resolved from the immutable qualification-receipt ledger at read time. Sealed appears only while a current sealed receipt backs it (receipt id + suite digest + expiry on the row); expiry or revocation downgrades the board with no code change. Platform-level; any team member may read.</summary>
+    [HttpGet("qualification-claims")]
+    public async Task<IActionResult> GetQualificationClaims(CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetQualificationClaimsQuery(), cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     /// <summary>The team's premature-stop-rate report (P4) — the stability north-star: of the task runs it started (single-agent, plan-map, or supervisor alike), what fraction died prematurely rather than reaching a genuine conclusion. DELIBERATELY includes runs that haven't finished yet (never silently excluded); a run stuck for too long is surfaced as a loud, separate figure. Optional since filter windows the trend. Team-scoped (the team is the X-Team-Id header, never the query string).</summary>
     [HttpGet("premature-stop-rate")]
     public async Task<IActionResult> GetPrematureStopRate([FromQuery] GetPrematureStopRateQuery query, CancellationToken cancellationToken)

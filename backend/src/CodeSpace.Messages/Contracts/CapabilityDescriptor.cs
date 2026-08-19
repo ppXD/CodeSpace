@@ -37,14 +37,12 @@ public enum PerformanceQualification
     Sealed,
 }
 
-/// <summary>One registered capability: WHAT kind of deliverable the system can be asked for, and where BOTH its qualification axes stand. The registry of these is the closed vocabulary — an ask outside it is honestly <c>Unsupported</c>, never a silent attempt (Lock Clause 4).</summary>
+/// <summary>One registered capability: WHAT kind of deliverable the system can be asked for, and where its PROTOCOL readiness stands. The registry of these is the closed vocabulary — an ask outside it is honestly <c>Unsupported</c>, never a silent attempt (Lock Clause 4). Deliberately no performance column: measured standing resolves from the qualification-receipt ledger (Q4's claim gate), never from a committed constant.</summary>
 public sealed record CapabilityDescriptor
 {
     public required string Key { get; init; }
 
     public required ProtocolReadiness Readiness { get; init; }
-
-    public required PerformanceQualification Performance { get; init; }
 }
 
 /// <summary>The registered capability KEYS — the wire vocabulary (a new capability = a new const + a registry row + its verifier, per the Rule-8 ritual).</summary>

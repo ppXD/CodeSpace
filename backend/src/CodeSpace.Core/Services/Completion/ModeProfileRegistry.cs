@@ -9,6 +9,9 @@ public interface IModeProfileRegistry
 {
     /// <summary>The mode's declared profile, or null when the mode has no conformance story — the terminal authority fails CLOSED on null.</summary>
     ModeProfile? Resolve(string mode);
+
+    /// <summary>Every registered mode key — the claim board iterates the closed vocabulary (the generic mode is deliberately absent).</summary>
+    IReadOnlyCollection<string> RegisteredModes { get; }
 }
 
 /// <summary>The mode keys the classifier derives and the registry declares. Wire-stable (they will land on receipts and qualification records); renaming one is a data migration.</summary>
@@ -41,7 +44,7 @@ public sealed class ModeProfileRegistry : IModeProfileRegistry, ISingletonDepend
         // park→Continue re-arbitration, and the whole-loop Enforced E2E proving both the unbacked park and the
         // fully-evidenced Success. Demotion is the same one-line reviewed edit — the authority's readiness gate
         // then re-parks the cohort's in-flight Enforced rows immediately.
-        Profile(RunModeKeys.Supervisor, ProtocolReadiness.Enforceable, PerformanceQualification.Shadow, required: new[]
+        Profile(RunModeKeys.Supervisor, ProtocolReadiness.Enforceable, required: new[]
         {
             CompletionStage.Contract, CompletionStage.Plan, CompletionStage.Execute, CompletionStage.Integrate,
             CompletionStage.Verify, CompletionStage.Capture, CompletionStage.Deliver, CompletionStage.Handoff,
@@ -50,14 +53,14 @@ public sealed class ModeProfileRegistry : IModeProfileRegistry, ISingletonDepend
         // Plan-map fans out per item and synthesizes — no in-run integration of branches yet (the P4 PlanMap
         // integrated-candidate arc adds it); the stage is authorized off by SERVER POLICY until that lands,
         // never silently absent.
-        Profile(RunModeKeys.PlanMap, ProtocolReadiness.Open, PerformanceQualification.Unmeasured, required: new[]
+        Profile(RunModeKeys.PlanMap, ProtocolReadiness.Open, required: new[]
         {
             CompletionStage.Contract, CompletionStage.Plan, CompletionStage.Execute,
             CompletionStage.Verify, CompletionStage.Capture, CompletionStage.Deliver, CompletionStage.Handoff,
             CompletionStage.Assess, CompletionStage.Terminal,
         }),
         // Single-agent has no plan and nothing to integrate — one unit, its own branch.
-        Profile(RunModeKeys.SingleAgent, ProtocolReadiness.Shadow, PerformanceQualification.Shadow, required: new[]
+        Profile(RunModeKeys.SingleAgent, ProtocolReadiness.Shadow, required: new[]
         {
             CompletionStage.Contract, CompletionStage.Execute,
             CompletionStage.Verify, CompletionStage.Capture, CompletionStage.Deliver, CompletionStage.Handoff,
@@ -67,13 +70,15 @@ public sealed class ModeProfileRegistry : IModeProfileRegistry, ISingletonDepend
 
     public ModeProfile? Resolve(string mode) => Registered.GetValueOrDefault(mode);
 
-    private static ModeProfile Profile(string mode, ProtocolReadiness readiness, PerformanceQualification performance, CompletionStage[] required)
+    public IReadOnlyCollection<string> RegisteredModes => Registered.Keys.ToArray();
+
+    private static ModeProfile Profile(string mode, ProtocolReadiness readiness, CompletionStage[] required)
     {
         var stages = Enum.GetValues<CompletionStage>().ToDictionary(
             s => s,
             s => required.Contains(s) ? StageRequiredness.Required : StageRequiredness.ServerPolicyAuthorizedNotApplicable);
 
-        return new ModeProfile { Mode = mode, Stages = stages, Readiness = readiness, Performance = performance };
+        return new ModeProfile { Mode = mode, Stages = stages, Readiness = readiness };
     }
 }
 
