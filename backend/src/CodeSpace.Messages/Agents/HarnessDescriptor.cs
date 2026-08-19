@@ -82,9 +82,12 @@ public sealed record HarnessSettingDescriptor
 
 /// <summary>
 /// The immutable IDENTITY of one harness adapter: which harness it drives, at which adapter revision, over which
-/// native protocol, against which native versions, and what it can be trusted to report. It is a data noun so it can
-/// be SNAPSHOTTED onto a run (<c>workflow_run_harness_descriptor</c>): a record read a year later must be
-/// interpretable against the adapter that actually produced it, not against whatever the adapter has since become.
+/// native protocol, against which native versions, and what it can be trusted to report. It is a data noun so that it
+/// WILL BE snapshottable onto a run once <c>workflow_run_harness_descriptor</c> exists — that name is registered but
+/// backs no table yet (see the forward-declaration list in <c>WorkflowRunDataNamesReachabilityTests</c>), and no
+/// adapter populates a descriptor today. The shape is here first because the requirement is: a record read a year later
+/// must be interpretable against the adapter that actually produced it, not against whatever the adapter has since
+/// become.
 /// </summary>
 public sealed record HarnessDescriptor
 {

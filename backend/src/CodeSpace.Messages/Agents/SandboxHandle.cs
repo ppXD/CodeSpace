@@ -6,10 +6,13 @@ namespace CodeSpace.Messages.Agents;
 /// (<c>agent_run.runner_handle</c>) the instant a run is launched, so a backend that restarts mid-run can
 /// re-attach to (or recover) the run by reading the handle rather than abandoning it.
 ///
-/// <para>It is deliberately backend-neutral: the local runner records an OS pid + an on-disk spool, a
-/// future container runner would record a container id + log stream — both fit the same envelope. The
-/// fields here are the local runner's; richer backends add their own via the jsonb column without a
-/// migration.</para>
+/// <para><b>It is LOCAL-PROCESS-SHAPED, not backend-neutral.</b> <see cref="ProcessId"/> and
+/// <see cref="SpoolDirectory"/> are <c>required</c>, so a container or remote backend cannot construct a valid handle
+/// without inventing an OS pid and an on-disk path it does not have — the very hoisting
+/// <see cref="RunnerHandleEnvelope"/> was declared to undo by putting all backend material inside an opaque locator.
+/// A second backend therefore needs a shape change here (or that envelope actually adopted), not merely extra fields:
+/// the jsonb column will accept anything, but every reader of this record already assumes a local line-oriented
+/// process.</para>
 ///
 /// <para><see cref="ProcessId"/> is the SUPERVISOR process (the <c>/bin/sh</c> wrapper that owns the spool
 /// redirection + writes the exit marker), not necessarily the harness CLI itself — probing it tells us
@@ -19,6 +22,14 @@ namespace CodeSpace.Messages.Agents;
 /// <c>out.log</c> / <c>err.log</c> / <c>exit</c>. <see cref="Deadline"/> is the absolute wall-clock cap
 /// (launch time + the spec timeout); the observer terminates the process once it passes, so the timeout
 /// survives a re-attach by a different observer.</para>
+///
+/// <para><b>SAME HOST, any process — the boundary the pid draws.</b> "Without the launching process still being alive"
+/// means a different process, not a different machine. Every liveness and teardown answer the local runner gives is
+/// host-local: <c>ProbeAsync</c> resolves <see cref="ProcessId"/> through <c>Process.GetProcessById</c>, the spool and
+/// the lease are local paths, and the netns / cgroup teardowns run local tools. This record carries no host identity
+/// and the runner path has no host-affinity check, so a worker on a DIFFERENT host reading this handle sees its pid as
+/// absent — a live run reads as <c>Gone</c> and a terminate is a no-op. Single-host deployment is the standing
+/// assumption; making it multi-host is a runner change, not a field on this record.</para>
 /// </summary>
 public sealed record SandboxHandle
 {
@@ -88,8 +99,9 @@ public sealed record SandboxHandle
     /// <summary>
     /// The key of the filtered-egress network namespace this run was launched inside (B3.2b) — non-null ONLY when a
     /// deny-by-default allowlist was enforceable and a netns was set up. It is the teardown handle: the netns / veth /
-    /// nft-table names are derived purely from it, so a reap (or a re-attach after a restart, on a DIFFERENT worker)
-    /// tears the namespace down with no setup-time state. Null when the run had no allowlist or the runner couldn't
+    /// nft-table names are derived purely from it, so a reap (or a re-attach after a restart, from a DIFFERENT worker
+    /// process on the same host) tears the namespace down with no setup-time state — the tools it drives are local, so
+    /// the same-host boundary in the type remarks applies. Null when the run had no allowlist or the runner couldn't
     /// enforce one (degraded to None) — and the value an older handle deserializes to, so a pre-existing run is never
     /// mistaken for having a netns to reap.
     /// </summary>
@@ -99,7 +111,8 @@ public sealed record SandboxHandle
     /// The key of the cgroup-v2 resource-cap leaf this run was launched inside (B4) — non-null ONLY when a memory/cpu
     /// cap was requested AND the runner could enforce it (an operator-delegated cgroup root + cgroup-v2 support). It is
     /// the teardown handle: the leaf path is derived purely from it + the operator's configured root, so a reap (or a
-    /// re-attach after a restart, on a DIFFERENT worker) tears the cgroup down with no setup-time state. Null when the
+    /// re-attach after a restart, from a DIFFERENT worker process on the same host) tears the cgroup down with no
+    /// setup-time state — a cgroupfs path is local, so the same-host boundary in the type remarks applies. Null when the
     /// run had no cap or the runner couldn't enforce one — and the value an older handle deserializes to, so a
     /// pre-existing run is never mistaken for having a cgroup to reap.
     /// </summary>

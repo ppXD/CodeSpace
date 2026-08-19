@@ -2339,8 +2339,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // The progress-lease directory is RUN-scoped (not round-scoped, like the spool key): it is the same path the
         // run's platform endpoint renews from LocalProcessRunner.ProgressLeaseFor, so the observer's no-progress
         // watchdog reads exactly the lease the endpoint writes — including across a worker restart, which re-attaches to
-        // this handle. Resolved from the layout owner here for the same reason the MCP socket path is (MintMcpConnect);
-        // a durable runner with its own spool layout would supply its own, and a null directory means "no lease".
+        // this handle. Resolved from the layout owner here for the same reason the MCP socket path is (MintMcpConnect).
+        // This hard-codes the LOCAL runner's layout: ISandboxDurableRunner.LaunchAsync is never handed the run id, so a
+        // second durable runner cannot resolve a run-scoped lease of its own — adopting one means giving the interface
+        // the run id (or the lease directory) first. A null directory means "no lease".
         var handle = (await durable.LaunchAsync(context.Spec, context.SpoolKey, cancellationToken).ConfigureAwait(false)) with
         {
             InjectedKeyFingerprint = context.Redactor.Fingerprint, McpRunToken = context.McpToken,

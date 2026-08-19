@@ -6,11 +6,16 @@ using Shouldly;
 namespace CodeSpace.UnitTests.Workflows;
 
 /// <summary>
-/// 🟢 Unit: the generic, tolerant <see cref="AgentModelReader"/> — the harness-agnostic primitive that surfaces the
-/// model a run ACTUALLY ran from its normalized events (Claude names it on its <c>init</c> line, Codex on
-/// <c>thread.started</c> / <c>turn.started</c>), so an UNPINNED run still reports what it used instead of a blank cell.
-/// Pure + stateless, mirroring <see cref="AgentSessionIdReader"/>: scan the events' structured payload for a model key
-/// (also under the <c>msg</c> envelope) and return null (never a fabricated value) when none is present.
+/// 🟢 Unit: the generic, tolerant <see cref="AgentModelReader"/> — the primitive that surfaces the model a run ACTUALLY
+/// ran from its normalized events, so an UNPINNED run still reports what it used instead of a blank cell. Pure +
+/// stateless, mirroring <see cref="AgentSessionIdReader"/>: scan the events' structured payload for a model key (also
+/// under the <c>msg</c> envelope) and return null (never a fabricated value) when none is present.
+///
+/// <para>Only the Claude case below is grounded in a real stream: Claude Code names the model on its <c>init</c> line.
+/// The other payloads are CONSTRUCTED to exercise the reader's tolerance — the event type in them is decoration, since
+/// the reader keys on the <c>model</c>/<c>model_name</c> key and never on a type. In particular Codex's
+/// <c>exec --json</c> stream names no model at all (<c>CodexHarness.ReadSessionFrame</c>), so no test here may be read
+/// as pinning a Codex behaviour.</para>
 /// </summary>
 [Trait("Category", "Unit")]
 public class AgentModelReaderTests
@@ -33,8 +38,10 @@ public class AgentModelReaderTests
     }
 
     [Fact]
-    public void Reads_the_codex_model_off_thread_started()
+    public void Reads_a_model_key_off_an_event_type_it_knows_nothing_about()
     {
+        // A CONSTRUCTED payload, not a captured one: the reader has no type table, so an arbitrary type carrying a
+        // model key must still yield it. Codex prints no model, so this pins the reader's tolerance, not a harness.
         var events = new[] { Event("""{"type":"thread.started","thread_id":"thr-xyz","model":"gpt-5-codex"}""") };
 
         AgentModelReader.TryRead(events).ShouldBe("gpt-5-codex");
@@ -43,8 +50,8 @@ public class AgentModelReaderTests
     [Fact]
     public void Reads_a_model_nested_under_the_msg_envelope()
     {
-        // Codex has used both a top-level shape and a {msg:{…}} envelope — the reader tolerates the nesting exactly
-        // as the session-id + token-usage readers do.
+        // Codex has used both a top-level shape and a {msg:{…}} envelope for its events, so the reader tolerates the
+        // nesting exactly as the session-id + token-usage readers do. Constructed: no Codex frame carries a model.
         var events = new[] { Event("""{"msg":{"type":"turn.started","model":"gpt-5-codex-nested"}}""") };
 
         AgentModelReader.TryRead(events).ShouldBe("gpt-5-codex-nested");

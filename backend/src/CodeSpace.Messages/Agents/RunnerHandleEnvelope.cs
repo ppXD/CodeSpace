@@ -5,7 +5,10 @@ namespace CodeSpace.Messages.Agents;
 
 /// <summary>
 /// A BACKEND-NEUTRAL durable reference to a launched execution — enough for a process that did not launch it to
-/// re-find, observe, and reclaim it. Persisted as <c>workflow_run_runner_handle</c>.
+/// re-find, observe, and reclaim it. DECLARED, not yet in service: <c>workflow_run_runner_handle</c> is a registered
+/// name with no table behind it (see the forward-declaration allow-list in
+/// <c>WorkflowRunDataNamesReachabilityTests</c>), and nothing in production reads or writes this record — the handle
+/// runs persist today is <c>SandboxHandle</c>.
 ///
 /// <para>Everything backend-specific lives inside <see cref="Locator"/> and nowhere else: the local runner puts its
 /// pid, process start time and spool directory there; a container runner puts a container id and log cursor; a
