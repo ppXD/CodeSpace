@@ -43,6 +43,12 @@ public sealed record PlannedWorkflow
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? AuthoredByModel { get; init; }
 
+    /// <summary>D2 (cross-run learning): which experiment arm this plan was authored under — <c>injected</c> (lessons in the prompt, ids in <see cref="InjectedLessonIds"/>), <c>withheld</c> (lessons existed, deterministically held back — the control), or <c>none</c> (no current lesson existed). Stamped server-side like <see cref="AuthoredByModel"/>.</summary>
+    public string? LessonArm { get; init; }
+
+    /// <summary>The lessons the prompt actually carried — null unless <see cref="LessonArm"/> is <c>injected</c>.</summary>
+    public IReadOnlyList<Guid>? InjectedLessonIds { get; init; }
+
     /// <summary>
     /// The execution shape the planner recommends for each subtask branch. <c>"coding"</c> projects each
     /// branch onto an <c>agent.run</c> body node; anything else (the default) projects onto a plain

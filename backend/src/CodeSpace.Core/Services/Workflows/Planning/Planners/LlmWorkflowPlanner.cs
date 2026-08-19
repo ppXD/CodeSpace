@@ -23,12 +23,17 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
     private readonly ILLMClientRegistry _clientRegistry;
     private readonly IModelPoolSelector _modelSelector;
     private readonly IAgentHarnessRegistry _harnesses;
+    private readonly Learning.ILessonReader _lessons;
 
-    public LlmWorkflowPlanner(ILLMClientRegistry clientRegistry, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses)
+    /// <summary>Lessons shown per plan — the freshest few beat an exhaustive dump (prompt budget + recency bias are both deliberate).</summary>
+    public const int LessonTopK = 5;
+
+    public LlmWorkflowPlanner(ILLMClientRegistry clientRegistry, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses, Learning.ILessonReader lessons)
     {
         _clientRegistry = clientRegistry;
         _modelSelector = modelSelector;
         _harnesses = harnesses;
+        _lessons = lessons;
     }
 
     public async Task<PlannedWorkflow> PlanAsync(WorkflowPlanRequest request, CancellationToken cancellationToken)
@@ -54,27 +59,38 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         var pool = await _modelSelector.ListPoolAsync(request.TeamId, allowedRowIds: null, cancellationToken).ConfigureAwait(false);
         var catalog = CapabilityCatalog.Render(_harnesses.All, pool);
 
-        var completion = await structured.CompleteStructuredAsync(BuildRequest(request, pick, catalog), cancellationToken).ConfigureAwait(false);
+        // D2 (cross-run learning): the distilled lessons ride the plan prompt — under a deterministic, toggle-free
+        // A/B arm (hash of team + task text) so the north-star referee can slice injected vs withheld afterwards.
+        var current = await _lessons.ListCurrentAsync(request.TeamId, request.RepositoryId, LessonTopK, cancellationToken).ConfigureAwait(false);
+        var arm = current.Count == 0 ? Learning.LessonArms.None : Learning.LessonArms.Assign(request.TeamId, request.TaskText);
+        var injected = arm == Learning.LessonArms.Injected ? current : Array.Empty<Persistence.Entities.Lesson>();
+
+        var completion = await structured.CompleteStructuredAsync(BuildRequest(request, pick, catalog, injected), cancellationToken).ConfigureAwait(false);
 
         // Stamped from the pick this call actually dispatched on, so the plan carries its own provenance.
-        return Deserialize(completion.Json) with { AuthoredByModel = pick.ModelId };
+        return Deserialize(completion.Json) with
+        {
+            AuthoredByModel = pick.ModelId,
+            LessonArm = arm,
+            InjectedLessonIds = injected.Count > 0 ? injected.Select(l => l.Id).ToList() : null,
+        };
     }
 
-    private static StructuredLLMCompletionRequest BuildRequest(WorkflowPlanRequest request, ModelPoolPick pick, string catalog) => new()
+    private static StructuredLLMCompletionRequest BuildRequest(WorkflowPlanRequest request, ModelPoolPick pick, string catalog, IReadOnlyList<Persistence.Entities.Lesson> lessons) => new()
     {
         Model = pick.ModelId,
         Credential = pick.Credential,
         SystemPrompt = SystemPrompt,
-        UserPrompt = BuildUserPrompt(request, catalog),
+        UserPrompt = BuildUserPrompt(request, catalog, lessons),
         JsonSchema = PlannerSchema.ResponseSchema,
         MaxOutputTokens = 4096,
         Temperature = 0.2,
     };
 
     /// <summary>Internal test accessor (InternalsVisibleTo) — pins the prompt framing + over-claim guard directly, without a real LLM round-trip.</summary>
-    internal static string BuildUserPromptForTest(WorkflowPlanRequest request, string catalog = "") => BuildUserPrompt(request, catalog);
+    internal static string BuildUserPromptForTest(WorkflowPlanRequest request, string catalog = "", IReadOnlyList<Persistence.Entities.Lesson>? lessons = null) => BuildUserPrompt(request, catalog, lessons ?? Array.Empty<Persistence.Entities.Lesson>());
 
-    private static string BuildUserPrompt(WorkflowPlanRequest request, string catalog)
+    private static string BuildUserPrompt(WorkflowPlanRequest request, string catalog, IReadOnlyList<Persistence.Entities.Lesson> lessons)
     {
         var builder = new StringBuilder();
 
@@ -92,6 +108,14 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         {
             builder.AppendLine();
             builder.AppendLine(catalog.TrimEnd());
+        }
+
+        if (lessons.Count > 0)
+        {
+            builder.AppendLine();
+            builder.AppendLine("Lessons distilled from this team's prior failed runs (real post-mortems — apply them where they fit the task):");
+            foreach (var lesson in lessons)
+                builder.AppendLine($"- [{lesson.FailureClass}] {lesson.WhatFailed} → {lesson.HowToApply}");
         }
 
         // IMPROVE: an independent reviewer critiqued a prior draft of this plan — revise to address it (set by the

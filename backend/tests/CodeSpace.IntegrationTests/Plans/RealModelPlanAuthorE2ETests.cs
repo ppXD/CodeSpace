@@ -58,7 +58,8 @@ public sealed class RealModelPlanAuthorE2ETests
             var planner = new LlmWorkflowPlanner(
                 RealModelLiveWire.Registry(),
                 RealModelLiveWire.Selector(model, RealModelLiveWire.Credential(Custom, baseUrl, apiKey)),
-                scope.Resolve<IAgentHarnessRegistry>());
+                scope.Resolve<IAgentHarnessRegistry>(),
+                scope.Resolve<CodeSpace.Core.Services.Learning.ILessonReader>());
 
             PlannedWorkflow plan;
             try

@@ -706,4 +706,30 @@ public class WorkflowPlannerTests
 
         LlmWorkflowPlanner.Deserialize(ok).Subtasks.Single().Id.ShouldBe("s1");
     }
+
+    [Fact]
+    public void The_prompt_carries_injected_lessons_and_omits_the_section_when_none()
+    {
+        var lesson = new CodeSpace.Core.Persistence.Entities.Lesson { Id = Guid.NewGuid(), FailureClass = "broken-acceptance-command", WhatFailed = "check.sh exits 2 on a clean tree", HowToApply = "run restore before check.sh" };
+
+        var prompt = LlmWorkflowPlanner.BuildUserPromptForTest(new WorkflowPlanRequest { TaskText = "fix it", TeamId = Guid.NewGuid() }, lessons: new[] { lesson });
+        prompt.ShouldContain("[broken-acceptance-command] check.sh exits 2 on a clean tree → run restore before check.sh", customMessage: "the lesson rides the plan prompt verbatim — the learning loop's read side");
+        prompt.ShouldContain("prior failed runs");
+
+        LlmWorkflowPlanner.BuildUserPromptForTest(new WorkflowPlanRequest { TaskText = "fix it", TeamId = Guid.NewGuid() })
+            .ShouldNotContain("prior failed runs", customMessage: "no lessons, no section — never an empty header pretending knowledge exists");
+    }
+
+    [Fact]
+    public void The_lesson_arm_is_deterministic_and_both_arms_are_reachable()
+    {
+        var teamId = Guid.NewGuid();
+
+        CodeSpace.Core.Services.Learning.LessonArms.Assign(teamId, "task-a").ShouldBe(CodeSpace.Core.Services.Learning.LessonArms.Assign(teamId, "task-a"),
+            "a retry of the same task must plan under the same arm — the experiment is deterministic, never a coin flip per attempt");
+
+        var arms = Enumerable.Range(0, 64).Select(i => CodeSpace.Core.Services.Learning.LessonArms.Assign(teamId, $"task-{i}")).ToHashSet();
+        arms.ShouldBe(new[] { CodeSpace.Core.Services.Learning.LessonArms.Injected, CodeSpace.Core.Services.Learning.LessonArms.Withheld }, ignoreOrder: true,
+            customMessage: "the hash must actually split — a one-armed experiment referees nothing");
+    }
 }
