@@ -1,5 +1,6 @@
-import { keepPreviousData, useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { sessionsApi, type JournalView, type RoomView, type SessionDetail } from "@/api/sessions";
+import { mergeJournalDelta } from "@/lib/journalDelta";
 import { isRunActive } from "@/hooks/use-workflows";
 
 /// True while ANY turn's run is still progressing — gates the live-poll on the detail/by-run views.
@@ -64,12 +65,32 @@ export function useRunRoom(runId: string | null | undefined) {
 }
 
 /// The backend-authored Session Journal for the session a run belongs to (null when the run has no session) — the
-/// chronological work transcript. Same 2s conditional live cadence as the room: full refetch while any turn is still
-/// running, then stops. The frontend renders the returned steps by kind and owns no copy / order / status.
+/// chronological work transcript. Polls every 2s while any turn is still running, then stops. The frontend renders the
+/// returned steps by kind and owns no copy / order / status.
+///
+/// The live poll is INCREMENTAL: once a snapshot is held, each tick echoes its cursor back as `?since=` and the server
+/// omits the steps that cursor proves we already have (see `mergeJournalDelta`). Without this a session's poll cost grows
+/// with its whole history rather than with what changed — a long thread re-shipped every 2s to every viewer. The merge
+/// reports divergence rather than guessing, and divergence falls back to one authoritative full fetch, so the worst case
+/// is the unconditional poll this replaced.
 export function useRunJournal(runId: string | null | undefined) {
+  const queryClient = useQueryClient();
+  const queryKey = ["run-journal", runId];
+
   return useQuery({
-    queryKey: ["run-journal", runId],
-    queryFn: () => sessionsApi.getRunJournal(runId!),
+    queryKey,
+    queryFn: async () => {
+      const prior = queryClient.getQueryData<JournalView | null>(queryKey);
+
+      if (!prior?.cursor) return sessionsApi.getRunJournal(runId!);
+
+      const delta = await sessionsApi.getRunJournal(runId!, prior.cursor);
+
+      // A 404 now means the session went away, not that the delta failed — pass it through as the absence it is.
+      if (delta == null) return null;
+
+      return mergeJournalDelta(prior, delta) ?? (await sessionsApi.getRunJournal(runId!));
+    },
     enabled: runId != null,
     refetchInterval: (q) => (hasActiveJournalTurn(q.state.data) ? 2000 : false),
   });

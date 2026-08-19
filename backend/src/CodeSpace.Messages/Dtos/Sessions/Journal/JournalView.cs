@@ -66,7 +66,7 @@ public sealed record JournalTurn
     /// </summary>
     public IReadOnlyList<JournalAttempt> Attempts { get; init; } = Array.Empty<JournalAttempt>();
 
-    /// <summary>The turn's chronological journal steps (the walk) — populated ONLY for the focused turn; empty for a collapsed card. In a <c>?since=</c> DELTA response this is TRIMMED to the steps after the cursor; the full total is <see cref="StepCount"/>.</summary>
+    /// <summary>The turn's chronological journal steps (the walk) — populated for EVERY turn on a full fetch, so a collapsed card expands without another round-trip. In a <c>?since=</c> DELTA response this is TRIMMED per turn (focused: only steps after the cursor; non-focused and terminal: none) and the full total stays on <see cref="StepCount"/>, which the client uses to detect that its accumulation diverged.</summary>
     public required IReadOnlyList<JournalStep> Steps { get; init; }
 
     /// <summary>
