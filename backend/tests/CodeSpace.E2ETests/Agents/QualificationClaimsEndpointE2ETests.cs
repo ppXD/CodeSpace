@@ -42,6 +42,8 @@ public sealed class QualificationClaimsEndpointE2ETests : IClassFixture<TaskLaun
         sealedRow.GetProperty("performance").GetString().ShouldBe("Sealed", "a current sealed receipt exists for exactly this pair");
         sealedRow.GetProperty("receiptId").GetGuid().ShouldBe(receiptId, "the wire row must carry the round that earned the standing");
         sealedRow.GetProperty("suiteDigest").GetString().ShouldBe(digest);
+        sealedRow.GetProperty("seal").GetProperty("verifierBundle").GetProperty("harness").GetString().ShouldBe("codex-cli", "the wire says WHO earned the standing — the audit trail reaches the UI");
+        sealedRow.GetProperty("cohort").GetProperty("tier").GetString().ShouldBe("internal-qualification");
 
         var unminted = rows.Single(r => r.GetProperty("mode").GetString() == RunModeKeys.PlanMap && r.GetProperty("capabilityKey").GetString() == CapabilityKeys.InlineAnswer);
         unminted.GetProperty("performance").GetString().ShouldBe("Unmeasured", "no receipt was ever minted for this pair — the board must say so, never inherit a neighbour's standing");
@@ -85,6 +87,8 @@ public sealed class QualificationClaimsEndpointE2ETests : IClassFixture<TaskLaun
             Mode = mode,
             CapabilityKey = capabilityKey,
             SuiteDigest = digest,
+            VerifierBundleJson = """{"harness":"codex-cli","model":"test-model","modelCredentialId":null}""",
+            CohortJson = $$"""{"teamId":"{{Guid.NewGuid()}}","mode":"{{mode}}","tier":"internal-qualification","completionPolicyVersion":2}""",
             GrantedPerformance = PerformanceQualification.Sealed,
             EffectiveFrom = DateTimeOffset.UtcNow,
             ExpiresAt = DateTimeOffset.UtcNow.AddDays(30),

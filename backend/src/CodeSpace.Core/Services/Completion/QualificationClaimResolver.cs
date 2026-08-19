@@ -1,6 +1,7 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Contracts;
+using System.Text.Json;
 
 namespace CodeSpace.Core.Services.Completion;
 
@@ -60,6 +61,22 @@ public sealed class QualificationClaimResolver : IQualificationClaimResolver, IS
             ReceiptId = backing?.Id,
             SuiteDigest = backing?.SuiteDigest,
             ExpiresAt = backing?.ExpiresAt,
+            Cohort = backing is null ? null : Parse<LaunchCohortDescriptor>(backing.CohortJson),
+            Seal = backing is null ? null : new ContractSeal
+            {
+                CapabilityKey = backing.CapabilityKey,
+                SuiteDigest = backing.SuiteDigest,
+                VerifierBundle = Parse<VerifierBundle>(backing.VerifierBundleJson),
+            },
         };
+    }
+
+    /// <summary>Legacy ad-hoc json (or a shape missing the noun's required keys) reads NULL — a partial identity is no identity, never a half-filled record.</summary>
+    private static T? Parse<T>(string? json) where T : class
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+
+        try { return JsonSerializer.Deserialize<T>(json, Agents.AgentJson.Options); }
+        catch (JsonException) { return null; }
     }
 }
