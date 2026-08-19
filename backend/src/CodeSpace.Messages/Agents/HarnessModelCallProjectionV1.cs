@@ -13,10 +13,12 @@ namespace CodeSpace.Messages.Agents;
 /// fiction. Two responses the CLI did print are two logical calls, each with its own attempt, because nothing in the
 /// frames says they were tries of the same request.</para>
 ///
-/// <para><b>Idempotence is carried, not hoped for.</b> <see cref="SourceCorrelationId"/> is derived from the harness's
-/// own identity for the response, so re-projecting the same frames yields the same key and
-/// <c>ux_workflow_run_model_call_source_identity</c> admits it once. The writer skips a key already admitted; the unique
-/// index is the backstop under any writer.</para>
+/// <para><b>Idempotence is carried, not hoped for.</b> BOTH <see cref="SourceCorrelationId"/> and
+/// <see cref="ModelCallId"/> are derived from the harness's own identity for the response, so re-projecting the same
+/// frames yields the same key AND the same row id: <c>ux_workflow_run_model_call_source_identity</c> admits the call
+/// once, the writer skips a call it already holds, and the semantic event beside a skipped re-projection still cites a
+/// row that exists. A freshly minted row id would make that event name a row the skip decided not to write, which is
+/// worse than naming none — a reader joins on it and reads the miss as a data gap.</para>
 ///
 /// <para><b>What it deliberately leaves NULL.</b> The requested route (<c>requested_provider</c> /
 /// <c>requested_model</c> / <c>selection_policy</c>) — a response record states what was SERVED, never what was asked
@@ -27,7 +29,7 @@ public sealed record HarnessModelCallProjectionV1
 {
     public required int ContractVersion { get; init; }
 
-    /// <summary>Identity of the logical call row, minted here so the semantic event projected from the same frame can cite it.</summary>
+    /// <summary>Identity of the logical call row, DERIVED from the response the frame states — not minted fresh — so the semantic event projected from the same frame cites an id the writer will hold a row for even when it skips the insert.</summary>
     public required Guid ModelCallId { get; init; }
 
     /// <summary>Identity of the one physical attempt row.</summary>

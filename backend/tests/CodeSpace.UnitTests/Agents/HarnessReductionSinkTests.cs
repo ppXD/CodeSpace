@@ -181,6 +181,7 @@ public sealed class HarnessReductionSinkTests
         AttemptId = Guid.NewGuid(),
         StreamId = HarnessReductionStream.PrimaryStreamId,
         Channel = NativeRecordChannel.Stdout,
+        WorkflowRunId = Guid.NewGuid(),
     };
 
     private static NativeRecordBatch Batch(IEnumerable<HarnessReductionFrame> frames)

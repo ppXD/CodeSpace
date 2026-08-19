@@ -27,8 +27,10 @@ namespace CodeSpace.IntegrationTests.Agents;
 /// <para><b>What only this tier can execute</b>, named so its absence from a local unit run is not mistaken for
 /// coverage: that 0145's declared-unavailable CHECK admits the sets this projector writes; that 0130's attempt guard
 /// accepts an attempt whose source kind is not <c>workflow-run-record/v1</c> and which therefore names no run record;
-/// that a harness call row satisfies the composite parent FK and the workflow-run FK; and that the re-delivered frame
-/// of one provider response lands one call and one attempt rather than two.</para>
+/// that a harness call row satisfies the composite parent FK and the workflow-run FK; that the re-delivered frame
+/// of one provider response lands one call and one attempt rather than two; and that no semantic event ever names a
+/// model-call row the write did not leave behind — the one defect a unit tier cannot see at all, because it only exists
+/// once the writer has decided what to skip.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -121,6 +123,17 @@ public sealed class HarnessModelCallProjectionFlowTests
         (await db.WorkflowRunModelCall.CountAsync(candidate => candidate.WorkflowRunId == run.WorkflowRunId)).ShouldBe(1,
             "one provider response is one call however many frames carried it");
         (await db.WorkflowRunModelCallAttempt.CountAsync(candidate => candidate.WorkflowRunId == run.WorkflowRunId)).ShouldBe(1);
+
+        var called = await db.WorkflowRunModelCall.AsNoTracking().Where(candidate => candidate.WorkflowRunId == run.WorkflowRunId)
+            .Select(candidate => candidate.Id).SingleAsync();
+
+        var cited = await db.WorkflowRunSemanticEvent.AsNoTracking()
+            .Where(candidate => candidate.AgentRunId == run.AgentRunId && candidate.ModelCallId != null)
+            .Select(candidate => candidate.ModelCallId!.Value).ToListAsync();
+
+        cited.Count.ShouldBe(2, "both frames were projected, so both carry an event that names the call");
+        cited.Distinct().ShouldHaveSingleItem().ShouldBe(called,
+            customMessage: "the re-delivered frame's event must cite the row the write KEPT; a freshly minted id would leave it naming a row the dedupe declined to write");
     }
 
     /// <summary>Two different responses of one execution are two calls — collapsing them would under-report cost as badly as duplicating one over-reports it.</summary>
@@ -170,25 +183,96 @@ public sealed class HarnessModelCallProjectionFlowTests
     }
 
     /// <summary>
-    /// A standalone agent run has no workflow run, and the model-call plane is keyed to one. Its frames are still
-    /// recorded; no call row is invented a parent for.
+    /// The invariant the whole join rests on, over a stream that exercises every arm of the writer's decision: a new
+    /// response, a second one, and a re-delivery of that second. Every event that NAMES a model call must resolve to a
+    /// row. An id pointing at nothing is worse than no id — a reader joins on it and reads the miss as a data gap rather
+    /// than as an absence — and only this tier can see it, because the id dangles exactly when the writer decided to
+    /// skip an insert.
     /// </summary>
     [Fact]
-    public async Task A_run_that_belongs_to_no_workflow_run_records_its_frames_and_no_call()
+    public async Task No_semantic_event_names_a_model_call_row_the_write_did_not_leave_behind()
+    {
+        var run = await SeedWorkflowBoundRunAsync();
+        using var planeScope = _fixture.BeginScope();
+        var plane = planeScope.Resolve<INativeRecordPlane>();
+        var handle = await OpenAsync(plane, run);
+
+        handle.WorkflowRunId.ShouldBe(run.WorkflowRunId, customMessage: "the opening reads its scope off the Agent Run, and the projector reads it off the opening");
+
+        await WriteAsync(plane, handle, Frame(handle, ResponseFrame(callId: "msg_01FIRST"), ordinal: 0));
+        await WriteAsync(plane, handle, Frame(handle, ResponseFrame(callId: "msg_01SECOND"), ordinal: 1));
+        await WriteAsync(plane, handle, Frame(handle, ResponseFrame(callId: "msg_01SECOND"), ordinal: 2));
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var named = await db.WorkflowRunSemanticEvent.AsNoTracking()
+            .Where(candidate => candidate.AgentRunId == run.AgentRunId && candidate.ModelCallId != null)
+            .Select(candidate => candidate.ModelCallId!.Value).ToListAsync();
+        var written = await db.WorkflowRunModelCall.AsNoTracking()
+            .Where(candidate => candidate.WorkflowRunId == run.WorkflowRunId)
+            .Select(candidate => candidate.Id).ToListAsync();
+
+        named.Count.ShouldBe(3, "all three frames are the harness's own record of a call, so all three events name one");
+        written.Count.ShouldBe(2, "the third frame re-delivers the second response, which is one call however many frames carried it");
+        named.Except(written).ShouldBeEmpty(
+            "an event naming a model_call row that does not exist is a silent gap every downstream join inherits, and it is worse than an event naming none");
+    }
+
+    /// <summary>
+    /// The resumed opening carries the same workflow-run scope the launch did, so a re-attach keeps projecting calls
+    /// instead of silently stopping. That scope is what decides whether a call may be minted at all, so a resume that
+    /// answered null there would turn a worker replacement into a hole in the cost record with nothing saying so.
+    /// </summary>
+    [Fact]
+    public async Task A_resumed_opening_carries_the_same_workflow_run_as_the_launch()
+    {
+        var run = await SeedWorkflowBoundRunAsync();
+        using var planeScope = _fixture.BeginScope();
+        var plane = planeScope.Resolve<INativeRecordPlane>();
+        var launched = await OpenAsync(plane, run);
+
+        var reopened = await ((INativeRecordExecutionPlane)plane).ReopenAsync(Request(run) with { Resume = true }, CancellationToken.None);
+        var resumed = reopened.ShouldNotBeNull("the launch left a Running process, which is exactly what a re-attach resumes").Handle;
+
+        resumed.ExecutionId.ShouldBe(launched.ExecutionId, customMessage: "a re-attach observes the process the replaced worker left running");
+        resumed.WorkflowRunId.ShouldBe(run.WorkflowRunId,
+            customMessage: "the scope a call may be minted against has to survive the worker replacement, or the resumed round records the frames and loses the calls");
+        GroundedModelCallProjector.Project(Claude, resumed, Frame(resumed, ResponseFrame(), ordinal: 0)).ShouldNotBeNull();
+    }
+
+    /// <summary>
+    /// A standalone agent run has no workflow run, and the model-call plane is keyed to one. Its frames are still
+    /// recorded — and NOTHING is projected from them, not even the event that would cite a call, because an event naming
+    /// a row nothing can write is worse than one naming none.
+    /// </summary>
+    [Fact]
+    public async Task A_run_that_belongs_to_no_workflow_run_records_its_frames_and_names_no_call()
     {
         var run = await SeedStandaloneRunAsync();
         using var planeScope = _fixture.BeginScope();
         var plane = planeScope.Resolve<INativeRecordPlane>();
         var handle = await OpenAsync(plane, run);
+        var frame = Frame(handle, ResponseFrame(), ordinal: 0);
 
-        await WriteAsync(plane, handle, Frame(handle, ResponseFrame(), ordinal: 0));
+        handle.WorkflowRunId.ShouldBeNull("the premise: the opening reads its scope off the Agent Run, and this run belongs to no workflow run");
+        GroundedModelCallProjector.Project(Claude, handle, frame).ShouldBeNull(
+            "the frame IS the harness's own record of a call; what it cannot be is a row of a run-keyed plane, so no identity is minted for one");
+
+        await plane.WriteAsync(new NativeRecordBatch
+        {
+            Handle = handle,
+            Records = new[] { new NativeRecordCapture { Frame = frame, Normalization = NativeRecordNormalization.Projected } },
+            Events = Array.Empty<AgentSemanticEventV1>(),
+        }, CancellationToken.None);
 
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
 
-        (await db.WorkflowRunNativeRecord.CountAsync(candidate => candidate.AgentRunId == run.AgentRunId)).ShouldBe(1);
-        (await db.WorkflowRunSemanticEvent.CountAsync(candidate => candidate.AgentRunId == run.AgentRunId)).ShouldBe(1,
-            "the grounded event is about the harness execution, which exists whether or not a workflow run does");
+        (await db.WorkflowRunNativeRecord.CountAsync(candidate => candidate.AgentRunId == run.AgentRunId)).ShouldBe(1,
+            "the capture floor is untouched: the frame is recorded whether or not a workflow run exists to key a call to");
+        (await db.WorkflowRunSemanticEvent.CountAsync(candidate => candidate.AgentRunId == run.AgentRunId && candidate.ModelCallId != null)).ShouldBe(0,
+            "an event that named a call here could never resolve, since the plane has no row for a run-less call to be");
         (await db.WorkflowRunModelCallAttempt.CountAsync(candidate => candidate.TeamId == run.TeamId)).ShouldBe(0,
             "the plane is keyed to a workflow run, so a standalone run's calls are not projected rather than attached to an invented parent");
     }
@@ -214,19 +298,21 @@ public sealed class HarnessModelCallProjectionFlowTests
 
     private static async Task<NativeRecordCaptureHandle> OpenAsync(INativeRecordPlane plane, SeededRun run)
     {
-        var opened = await plane.OpenAsync(new NativeRecordCaptureRequest
-        {
-            TeamId = run.TeamId,
-            AgentRunId = run.AgentRunId,
-            HarnessTypeKey = "claude-code/v2",
-            RunnerKind = "local",
-            RunnerLocatorJson = "{\"spoolKey\":\"round-0\"}",
-            WorkerFenceEpoch = run.FenceEpoch,
-            Channel = NativeRecordChannel.Stdout,
-        }, CancellationToken.None);
+        var opened = await plane.OpenAsync(Request(run), CancellationToken.None);
 
         return opened.ShouldNotBeNull("the plane must open against the seeded run, or the test is asserting nothing");
     }
+
+    private static NativeRecordCaptureRequest Request(SeededRun run) => new()
+    {
+        TeamId = run.TeamId,
+        AgentRunId = run.AgentRunId,
+        HarnessTypeKey = "claude-code/v2",
+        RunnerKind = "local",
+        RunnerLocatorJson = "{\"spoolKey\":\"round-0\"}",
+        WorkerFenceEpoch = run.FenceEpoch,
+        Channel = NativeRecordChannel.Stdout,
+    };
 
     private static NativeRecordV1 Frame(NativeRecordCaptureHandle handle, string payload, long ordinal) => new()
     {
@@ -270,13 +356,16 @@ public sealed class HarnessModelCallProjectionFlowTests
     private async Task<SeededRun> CreateAgentRunAsync(Guid teamId, Guid? workflowRunId)
     {
         using var scope = _fixture.BeginScope();
-        var created = await scope.Resolve<IAgentRunService>().CreateAsync(
+        var runs = scope.Resolve<IAgentRunService>();
+        var created = await runs.CreateAsync(
             new AgentTask { Goal = "record its own model calls", Harness = ClaudeCodeHarness.HarnessKind, Model = PricedModel, TimeoutSeconds = 1800 },
             teamId, workflowRunId, workflowRunId is null ? null : NodeId,
             workflowRunId is null ? "" : IterationKey, CancellationToken.None);
 
-        var db = scope.Resolve<CodeSpaceDbContext>();
-        var fenceEpoch = await db.AgentRun.AsNoTracking().Where(run => run.Id == created.Id).Select(run => run.FenceEpoch).SingleAsync();
+        // The run must be CLAIMED before capture may open against it: a capture opening carries the claim epoch, and
+        // 0137 refuses epoch 0 outright, so a run left Queued cannot have a process attempt at all. This is the epoch
+        // the executor opens under.
+        var fenceEpoch = await runs.MarkRunningAsync(created.Id, CancellationToken.None);
 
         return new SeededRun(teamId, created.Id, workflowRunId ?? Guid.Empty, fenceEpoch);
     }

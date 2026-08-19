@@ -18,12 +18,15 @@ namespace CodeSpace.Core.Services.Agents.Capture;
 ///
 /// <para><b>Two queries per batch, and only for a batch that carries calls.</b> A harness that prints no per-call record
 /// contributes none, so the cost of this path for Codex is one integer comparison. There is no per-frame round trip: the
-/// scope and the already-admitted keys are read once for the whole batch, which is the same reason the batch exists.</para>
+/// scope and the calls already held are read once for the whole batch, which is the same reason the batch exists.</para>
 ///
-/// <para><b>What it will not write.</b> Nothing at all when the Agent Run belongs to no workflow run — the model-call
-/// plane is keyed to a workflow run and refuses a row that names none, so a standalone agent run's internal calls are
-/// simply not projected rather than attached to an invented parent. And nothing for a key the plane has already admitted,
-/// which is what makes re-projecting the same frames a no-op.</para>
+/// <para><b>What it will not write.</b> Nothing for a call the plane has already admitted, which is what makes
+/// re-projecting the same frames a no-op — and the event beside such a call still resolves, because
+/// <see cref="GroundedModelCallProjector"/> DERIVES the row id from the response the frame states rather than minting a
+/// fresh one, so the id a skipped re-projection cites is the id the admitted row already carries. And nothing at all
+/// when the Agent Run belongs to no workflow run: the plane is keyed to one, so that case is refused UPSTREAM at
+/// projection time — which is where it has to be refused, because an event minted for a row this half then declines to
+/// write would name a row nothing holds. The scope read below is that refusal's backstop, not its gate.</para>
 /// </summary>
 public sealed partial class NativeRecordPlane
 {
@@ -31,9 +34,9 @@ public sealed partial class NativeRecordPlane
     private const string ObservedAttemptStatus = "Succeeded";
 
     /// <summary>
-    /// Stage the batch's model calls onto the batch's own unit of work. Skips a projection whose source identity the
-    /// plane has already admitted, and collapses two frames of one response inside a single batch, so the unique source
-    /// identity is the backstop under any writer rather than the thing this path relies on to be correct.
+    /// Stage the batch's model calls onto the batch's own unit of work. Skips a call the plane already holds, and
+    /// collapses two frames of one response inside a single batch, so <c>ux_workflow_run_model_call_source_identity</c>
+    /// is the backstop under any writer rather than the thing this path relies on to be correct.
     /// </summary>
     private async Task StageModelCallsAsync(CodeSpaceDbContext db, NativeRecordBatch batch, CancellationToken cancellationToken)
     {
@@ -41,10 +44,10 @@ public sealed partial class NativeRecordPlane
 
         if (await ModelCallScopeAsync(db, batch.Handle, cancellationToken).ConfigureAwait(false) is not { } scope) return;
 
-        var projections = batch.ModelCalls.DistinctBy(projection => projection.SourceCorrelationId).ToList();
-        var admitted = await AdmittedCorrelationsAsync(db, scope, projections, cancellationToken).ConfigureAwait(false);
+        var projections = batch.ModelCalls.DistinctBy(projection => projection.ModelCallId).ToList();
+        var held = await HeldCallIdsAsync(db, scope, projections, cancellationToken).ConfigureAwait(false);
 
-        foreach (var projection in projections.Where(candidate => !admitted.Contains(candidate.SourceCorrelationId)))
+        foreach (var projection in projections.Where(candidate => !held.Contains(candidate.ModelCallId)))
         {
             db.WorkflowRunModelCall.Add(CallRow(scope, projection));
             db.WorkflowRunModelCallAttempt.Add(AttemptRow(scope, projection));
@@ -53,8 +56,10 @@ public sealed partial class NativeRecordPlane
 
     /// <summary>
     /// The workflow-run scope a harness's calls belong to, read off the Agent Run itself — the authority on which
-    /// workflow run, node and cell it is executing for. Null when the run names no workflow run, which is not a failure:
-    /// a standalone agent run's calls have no place in a run-keyed plane, and the log says so once per batch rather than
+    /// workflow run, node and cell it is executing for. Null when the run names no workflow run, which is not a failure
+    /// and, on the deployed path, not reachable either: the projector already declined to mint a call for an opening with
+    /// no workflow run, so a batch that gets here carrying calls came from a writer that decided otherwise. Refusing it
+    /// again here is what keeps that decision from reaching the tables, and the log says so once per batch rather than
     /// once per call.
     /// </summary>
     private async Task<ModelCallScope?> ModelCallScopeAsync(CodeSpaceDbContext db, NativeRecordCaptureHandle handle, CancellationToken cancellationToken)
@@ -70,18 +75,22 @@ public sealed partial class NativeRecordPlane
         return scope;
     }
 
-    /// <summary>The source identities this run has already admitted, among the ones this batch carries — one query for the batch, so a re-projected frame costs no more than a new one.</summary>
-    private static async Task<HashSet<Guid>> AdmittedCorrelationsAsync(CodeSpaceDbContext db, ModelCallScope scope, IReadOnlyList<HarnessModelCallProjectionV1> projections, CancellationToken cancellationToken)
+    /// <summary>
+    /// Which of the call identities this batch names the run ALREADY has a row for — one query for the batch, so a
+    /// re-projected frame costs no more than a new one. Asked of the row ID rather than of the source identity because
+    /// the id is what the semantic event beside the call cites, so this answers the question that actually decides
+    /// whether skipping the insert leaves that event pointing at nothing.
+    /// </summary>
+    private static async Task<HashSet<Guid>> HeldCallIdsAsync(CodeSpaceDbContext db, ModelCallScope scope, IReadOnlyList<HarnessModelCallProjectionV1> projections, CancellationToken cancellationToken)
     {
-        var correlations = projections.Select(projection => projection.SourceCorrelationId).ToArray();
+        var ids = projections.Select(projection => projection.ModelCallId).ToArray();
 
-        var admitted = await db.WorkflowRunModelCall.AsNoTracking()
-            .Where(call => call.TeamId == scope.TeamId && call.WorkflowRunId == scope.WorkflowRunId
-                && call.SourceCorrelationId != null && correlations.Contains(call.SourceCorrelationId.Value))
-            .Select(call => call.SourceCorrelationId!.Value)
+        var held = await db.WorkflowRunModelCall.AsNoTracking()
+            .Where(call => call.TeamId == scope.TeamId && call.WorkflowRunId == scope.WorkflowRunId && ids.Contains(call.Id))
+            .Select(call => call.Id)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        return admitted.ToHashSet();
+        return held.ToHashSet();
     }
 
     /// <summary>

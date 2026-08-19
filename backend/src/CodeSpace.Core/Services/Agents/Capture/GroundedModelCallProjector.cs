@@ -29,10 +29,21 @@ namespace CodeSpace.Core.Services.Agents.Capture;
 /// carried through rather than coalesced. And a retry: the record describes a response, so one attempt is projected per
 /// stated response and never a second the frames do not evidence.</para>
 ///
-/// <para><b>Idempotence.</b> <see cref="Correlation"/> derives the admission key from the harness's own id for the
-/// response, so re-projecting the same frames produces the same key and the plane's unique source identity admits it
-/// once. It is deliberately NOT derived from a delivery position: the capture seam re-delivers frames across a
-/// re-attach, and a position-derived key would make the same response look like two calls.</para>
+/// <para><b>Idempotence, and why the ROW ID is derived too.</b> Both the admission key
+/// (<see cref="HarnessModelCallProjectionV1.SourceCorrelationId"/>) and the logical call's own identity
+/// (<see cref="HarnessModelCallProjectionV1.ModelCallId"/>) come from <see cref="Derived"/> over the harness's own id
+/// for the response, never from a delivery position: the capture seam re-delivers frames across a re-attach, and a
+/// position-derived value would make one response look like two calls. The row id matters as much as the key, because
+/// the plane SKIPS a call it has already admitted while <see cref="NamedEvent"/> cites the id regardless — a freshly
+/// minted id would leave that event pointing at a row the skip decided not to write, and a reader joining on it would
+/// read the miss as a data gap rather than as the no-op it is. Derived, the id a re-projection cites is the id the
+/// existing row already carries.</para>
+///
+/// <para><b>Why nothing is projected without a workflow run.</b> The model-call plane is keyed to one, so a standalone
+/// Agent Run's internal calls can have no row there at all. Projecting them anyway would mint exactly the dangling id
+/// above, permanently rather than transiently, so an opening that names no workflow run
+/// (<see cref="NativeRecordCaptureHandle.WorkflowRunId"/>) yields nothing here — no row, no cited id, and no named fact
+/// in the reduction that folds these events.</para>
 /// </summary>
 internal static class GroundedModelCallProjector
 {
@@ -68,9 +79,10 @@ internal static class GroundedModelCallProjector
     internal const int ModelCalledEventSchemaVersion = 1;
 
     /// <summary>
-    /// The model call this captured frame records, or null when it records none — the answer for a harness with no
-    /// model-call reader at all, for every frame that is not one of its response records, and for a frame whose captured
-    /// bytes could not support a fidelity claim.
+    /// The model call this captured frame records, or null when none may be projected from it — the answer for a
+    /// harness with no model-call reader at all, for an opening that belongs to no workflow run and therefore to no
+    /// row of the run-keyed plane, for every frame that is not one of its response records, and for a frame whose
+    /// captured bytes could not support a fidelity claim.
     ///
     /// <para>The harness's stated id and model are re-checked HERE and not only in the reader, because this is the one
     /// gate every projected call passes through and a harness is free to build the record directly. An unnamed call
@@ -80,6 +92,7 @@ internal static class GroundedModelCallProjector
     internal static HarnessModelCallProjectionV1? Project(IAgentHarness harness, NativeRecordCaptureHandle handle, NativeRecordV1 record)
     {
         if (harness is not IAgentModelCallFrameReader reader) return null;
+        if (handle.WorkflowRunId is null) return null;
         if (record.InlinePayload is not { } captured) return null;
         if (ClaimableOver(record) is not { } fidelity) return null;
         if (reader.ReadModelCallFrame(captured) is not { } stated) return null;
@@ -127,7 +140,7 @@ internal static class GroundedModelCallProjector
         return new HarnessModelCallProjectionV1
         {
             ContractVersion = WorkflowRunDataContract.CurrentVersion,
-            ModelCallId = Guid.NewGuid(),
+            ModelCallId = CallIdentity(handle.ExecutionId, stated.CallId),
             AttemptId = Guid.NewGuid(),
             SourceNativeRecordId = record.RecordId,
             SourceKind = SourceKind,
@@ -178,12 +191,25 @@ internal static class GroundedModelCallProjector
     }
 
     /// <summary>
-    /// The projection's admission key: a digest of the source kind, the harness execution and the harness's OWN id for
-    /// the response. Two frames stating the same id are the same response — which is what a re-delivered frame is — so
-    /// the plane's unique source identity collapses them instead of billing the call twice. The execution is in the
-    /// digest because a response id is the harness's, not this platform's, and two executions must not be able to
-    /// collide on one.
+    /// The projection's admission key. Two frames stating the same response id are the same response — which is what a
+    /// re-delivered frame is — so the plane's unique source identity collapses them instead of billing the call twice.
     /// </summary>
-    private static Guid Correlation(Guid executionId, string callId) =>
-        new(SHA256.HashData(Encoding.UTF8.GetBytes($"{SourceKind}|{executionId:D}|{callId}")).AsSpan(0, 16));
+    private static Guid Correlation(Guid executionId, string callId) => Derived("source-identity", executionId, callId);
+
+    /// <summary>
+    /// The logical call ROW's identity, derived from the same response so the id <see cref="NamedEvent"/> cites is the
+    /// id the row already has when the plane skips an admitted call. A separate facet from
+    /// <see cref="Correlation"/> rather than the same value reused, because a row's primary key and a producer's
+    /// idempotence key are different columns with different owners, and collapsing them would make any future change to
+    /// one silently a change to the other.
+    /// </summary>
+    private static Guid CallIdentity(Guid executionId, string callId) => Derived("model-call", executionId, callId);
+
+    /// <summary>
+    /// One identity derived from what the harness stated: a digest of the source kind, the facet being named, the
+    /// harness execution and the harness's OWN id for the response. The execution is in the digest because a response
+    /// id is the harness's, not this platform's, and two executions must not be able to collide on one.
+    /// </summary>
+    private static Guid Derived(string facet, Guid executionId, string callId) =>
+        new(SHA256.HashData(Encoding.UTF8.GetBytes($"{SourceKind}|{facet}|{executionId:D}|{callId}")).AsSpan(0, 16));
 }

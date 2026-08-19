@@ -201,13 +201,15 @@ public sealed class HarnessModelCallProjectionTests
     }
 
     /// <summary>
-    /// Idempotence, at the level it has to hold: the admission key is a function of the harness's OWN id for the response
+    /// Idempotence, at the level it has to hold: BOTH identities are functions of the harness's OWN id for the response
     /// and the execution, so re-reading the same response — a frame the capture seam re-delivered across a re-attach, at
-    /// a different position and with a fresh record id — yields the SAME key and the plane's unique source identity
-    /// admits it once. A key derived from the delivery position would make that one response two calls.
+    /// a different position and with a fresh record id — yields the same admission key AND the same row id. The key is
+    /// what stops a second billed call. The ROW ID is what stops the second, quieter defect: the plane skips a call it
+    /// already holds, and the event projected beside the skipped one cites the row id regardless — freshly minted, that
+    /// event would name a row nothing ever wrote.
     /// </summary>
     [Fact]
-    public void Re_reading_the_same_response_yields_the_same_admission_key()
+    public void Re_reading_the_same_response_yields_the_same_call_and_admission_identities()
     {
         var handle = Handle();
         var first = GroundedModelCallProjector.Project(Claude, handle, Frame(ResponseFrame()))!;
@@ -218,7 +220,20 @@ public sealed class HarnessModelCallProjectionTests
 
         redelivered.SourceCorrelationId.ShouldBe(first.SourceCorrelationId,
             "the same provider response re-delivered must not become a second billed call");
-        redelivered.ModelCallId.ShouldNotBe(first.ModelCallId, customMessage: "the row ids are fresh; it is the SOURCE identity that dedups, which is what the plane's unique index keys on");
+        redelivered.ModelCallId.ShouldBe(first.ModelCallId,
+            "the writer skips the call it already holds, so a re-delivered frame's event must cite THAT row rather than an id nothing will write");
+        GroundedModelCallProjector.NamedEvent(handle, redelivered).ModelCallId.ShouldBe(first.ModelCallId);
+    }
+
+    /// <summary>The row id and the admission key are derived from the same response but are NOT the same value: a primary key and a producer's idempotence key are different columns, and one changing must not silently change the other.</summary>
+    [Fact]
+    public void The_call_row_id_and_the_admission_key_are_separate_derived_identities()
+    {
+        var projection = Projection();
+
+        projection.ModelCallId.ShouldNotBe(projection.SourceCorrelationId);
+        projection.ModelCallId.ShouldNotBe(Guid.Empty);
+        projection.Validate().ShouldBeEmpty();
     }
 
     [Fact]
@@ -230,6 +245,7 @@ public sealed class HarnessModelCallProjectionTests
 
         second.SourceCorrelationId.ShouldNotBe(first.SourceCorrelationId,
             "collapsing two calls into one would under-report cost as badly as fabricating one over-reports it");
+        second.ModelCallId.ShouldNotBe(first.ModelCallId);
     }
 
     [Fact]
@@ -241,6 +257,24 @@ public sealed class HarnessModelCallProjectionTests
 
         second.SourceCorrelationId.ShouldNotBe(first.SourceCorrelationId,
             "a response id belongs to the harness, not to this platform, so two executions must not be able to collide on one");
+        second.ModelCallId.ShouldNotBe(first.ModelCallId);
+    }
+
+    /// <summary>
+    /// The other half of "the row it names exists": a run bound to no workflow run can have no row in a run-keyed plane,
+    /// so no call is projected from its frames at all — and therefore no event cites an id, and the reduction that folds
+    /// those events names none either. Projecting the call and letting the writer decline it would leave an id pointing
+    /// at nothing permanently, which a reader joins on and reads as a data gap.
+    /// </summary>
+    [Fact]
+    public void An_opening_that_belongs_to_no_workflow_run_projects_no_call()
+    {
+        var standalone = Handle() with { WorkflowRunId = null };
+
+        GroundedModelCallProjector.Project(Claude, standalone, Frame(ResponseFrame())).ShouldBeNull(
+            "the model-call plane is keyed to a workflow run, so a standalone run's frames may mint no call identity");
+        GroundedModelCallProjector.Project(Claude, Handle(), Frame(ResponseFrame())).ShouldNotBeNull(
+            "the premise of this test: the very same frame IS projected once an opening names a workflow run");
     }
 
     /// <summary>A record whose id or model the harness did not state is refused by the projector even if a harness hands it in directly — this is the one gate every projected call passes through.</summary>
@@ -316,10 +350,12 @@ public sealed class HarnessModelCallProjectionTests
 
     private static CodexHarness Codex() => new();
 
+    /// <summary>An opening of a workflow-bound run — the only kind a model call may be projected from, so it is what every test that expects a projection uses.</summary>
     private static NativeRecordCaptureHandle Handle() => new()
     {
         TeamId = Guid.NewGuid(), AgentRunId = Guid.NewGuid(), ExecutionId = Guid.NewGuid(),
         AttemptId = Guid.NewGuid(), StreamId = Guid.NewGuid(), Channel = NativeRecordChannel.Stdout,
+        WorkflowRunId = Guid.NewGuid(),
     };
 
     private static NativeRecordV1 Frame(string payload) => new()

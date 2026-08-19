@@ -118,6 +118,7 @@ public sealed partial class NativeRecordPlane : INativeRecordPlane, IScopedDepen
         {
             TeamId = request.TeamId, AgentRunId = request.AgentRunId, ExecutionId = execution.Id,
             AttemptId = attempt.Id, StreamId = Guid.NewGuid(), Channel = request.Channel,
+            WorkflowRunId = run.WorkflowRunId,
         };
     }
 

@@ -106,6 +106,19 @@ public sealed record NativeRecordCaptureHandle
     public required Guid AttemptId { get; init; }
     public required Guid StreamId { get; init; }
     public required NativeRecordChannel Channel { get; init; }
+
+    /// <summary>
+    /// The workflow run this opening's Agent Run executes for, or NULL for a standalone run. Soft link, exactly as
+    /// <c>AgentRun.WorkflowRunId</c> is, and read off the run rather than accepted from a caller that could disagree.
+    ///
+    /// <para><b>Why it rides the handle at all, and why it is <c>required</c> rather than defaulted.</b> A projection
+    /// that names a row of a RUN-KEYED plane may only be minted where a workflow run exists to key it to — a
+    /// standalone run's calls have no such row, and an id nothing holds a row for is worse than no id, because a reader
+    /// joins on it and reads the miss as a data gap rather than as an absence. Every opening therefore has to STATE
+    /// this, so a writer that forgot it is a compile error instead of a silent null that quietly disables the
+    /// projection.</para>
+    /// </summary>
+    public required Guid? WorkflowRunId { get; init; }
 }
 
 /// <summary>

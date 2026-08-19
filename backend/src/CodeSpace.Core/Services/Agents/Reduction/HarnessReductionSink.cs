@@ -16,16 +16,23 @@ namespace CodeSpace.Core.Services.Agents.Reduction;
 ///
 /// <para><b>What it recovers TODAY, stated because the shape of <see cref="HarnessReducedStateV1"/> invites the wider
 /// reading.</b> The counts, the channel set and the prefix digest of the whole recorded prefix — everything
-/// <see cref="HarnessReductionFold"/> takes from a RECORD — plus ONE named fact:
-/// <see cref="HarnessReducedStateV1.FirstSessionId"/>, which <see cref="GroundedFrameProjector"/> fills from the
-/// harness's own structured session record for a harness that implements
-/// <see cref="IAgentGroundedFrameReader"/> (Claude Code and Codex do). The OTHER named fields — the model-call ids and
-/// the last required event type — are still null on every run: nothing mints a model-call identity yet, and every
-/// projection this plane writes is <see cref="SemanticEventNecessity.Ignorable"/>. They will start flowing from an
-/// exact-telemetry projector reading ModelWire/ToolWire frames, and NOT by relaxing the grounding rule, which is the
-/// thing keeping a guess out of a field a warm resume reads as an established fact. The MODEL a run chose has no field
-/// here at all: adding one changes the state SHAPE, which this reducer kind's own contract makes a new kind rather
-/// than a rewrite.</para>
+/// <see cref="HarnessReductionFold"/> takes from a RECORD — plus the named facts an exactly grounded projection
+/// actually carries. <see cref="HarnessReducedStateV1.FirstSessionId"/> comes from
+/// <see cref="GroundedFrameProjector"/>, which reads the harness's own structured session record for a harness that
+/// implements <see cref="IAgentGroundedFrameReader"/> (Claude Code and Codex do).
+/// <see cref="HarnessReducedStateV1.FirstModelCallId"/> and <see cref="HarnessReducedStateV1.LastModelCallId"/> come
+/// from <see cref="GroundedModelCallProjector"/>, which reads the harness's own record of ONE model call — so they are
+/// filled only for a harness that implements <see cref="IAgentModelCallFrameReader"/> (Claude Code does; Codex prints
+/// no per-call record) and only for a run bound to a workflow run, because those ids name rows in a run-keyed plane and
+/// nothing mints one where no row can exist. They arrived by an exactly grounded READING of the harness's own frames
+/// and NOT by relaxing the grounding rule, which is the thing keeping a guess out of a field a warm resume reads as an
+/// established fact.</para>
+///
+/// <para><see cref="HarnessReducedStateV1.LastRequiredEventType"/> is still null on every run, for the one stated
+/// reason: every projection this plane writes is <see cref="SemanticEventNecessity.Ignorable"/>. And the MODEL a run
+/// chose has no field here at all — it is a column of the model-call rows those ids point at, not of this state, and
+/// adding one would change the state SHAPE, which this reducer kind's own contract makes a new kind rather than a
+/// rewrite.</para>
 ///
 /// <para><b>Ordering, stated because it is the whole correctness argument.</b> The batch is folded BEFORE it is
 /// written, and the checkpoint rides the write's own transaction

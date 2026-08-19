@@ -81,6 +81,7 @@ public sealed partial class NativeRecordPlane : INativeRecordExecutionPlane
             {
                 TeamId = request.TeamId, AgentRunId = request.AgentRunId, ExecutionId = live.ExecutionId,
                 AttemptId = live.AttemptId, StreamId = Guid.NewGuid(), Channel = request.Channel,
+                WorkflowRunId = live.WorkflowRunId,
             },
             SourceHead = request.ResumeSourceOffset,
             RecordedHead = await RecordedHeadAsync(db, request, live.AttemptId, cancellationToken).ConfigureAwait(false),
@@ -118,12 +119,18 @@ public sealed partial class NativeRecordPlane : INativeRecordExecutionPlane
     /// tear-down leaves the process alive and its row open — which is exactly the state a resume expects to find. An
     /// attempt that is Running implies its execution is too: 0137's head arm forces Running on append, and its
     /// terminal arm refuses to close an execution over a live attempt.
+    ///
+    /// <para>The execution is joined for its workflow run, which the resumed handle has to STATE and the attempt row
+    /// does not carry. Taking it from the execution rather than re-reading the Agent Run is what keeps a re-attached
+    /// opening's scope identical to the launch opening's — the execution snapshotted that value at mint time, so the
+    /// two cannot answer the same question differently.</para>
     /// </summary>
     private static async Task<LiveProcess?> LiveProcessAsync(CodeSpaceDbContext db, Guid teamId, Guid agentRunId, CancellationToken cancellationToken) =>
-        await db.WorkflowRunHarnessProcessAttempt.AsNoTracking()
-            .Where(attempt => attempt.TeamId == teamId && attempt.AgentRunId == agentRunId && attempt.State == HarnessProcessAttemptState.Running)
-            .OrderByDescending(attempt => attempt.AttemptOrdinal)
-            .Select(attempt => new LiveProcess(attempt.ExecutionId, attempt.Id))
+        await (from attempt in db.WorkflowRunHarnessProcessAttempt.AsNoTracking()
+               join execution in db.WorkflowRunHarnessExecution.AsNoTracking() on attempt.ExecutionId equals execution.Id
+               where attempt.TeamId == teamId && attempt.AgentRunId == agentRunId && attempt.State == HarnessProcessAttemptState.Running
+               orderby attempt.AttemptOrdinal descending
+               select new LiveProcess(attempt.ExecutionId, attempt.Id, execution.WorkflowRunId))
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
     /// <summary>
@@ -220,7 +227,7 @@ public sealed partial class NativeRecordPlane : INativeRecordExecutionPlane
             .ConfigureAwait(false);
     }
 
-    private sealed record LiveProcess(Guid ExecutionId, Guid AttemptId);
+    private sealed record LiveProcess(Guid ExecutionId, Guid AttemptId, Guid? WorkflowRunId);
 
     private sealed record LiveExecution(Guid ExecutionId, int AttemptCount);
 

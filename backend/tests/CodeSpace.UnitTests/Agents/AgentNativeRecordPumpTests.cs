@@ -680,6 +680,7 @@ public sealed class AgentNativeRecordPumpTests
     private sealed class RecordingPlane : INativeRecordPlane, INativeRecordExecutionPlane, INativeRecordReductionPlane
     {
         private readonly Guid _executionId = Guid.NewGuid();
+        private readonly Guid _workflowRunId = Guid.NewGuid();
 
         public List<NativeRecordCapture> Records { get; } = new();
         public List<AgentSemanticEventV1> Events { get; } = new();
@@ -749,6 +750,7 @@ public sealed class AgentNativeRecordPumpTests
         {
             TeamId = teamId, AgentRunId = agentRunId, ExecutionId = _executionId,
             AttemptId = Guid.NewGuid(), StreamId = Guid.NewGuid(), Channel = channel,
+            WorkflowRunId = _workflowRunId,
         };
 
         private Task Accept(NativeRecordBatch batch)
@@ -775,6 +777,7 @@ public sealed class AgentNativeRecordPumpTests
             {
                 TeamId = request.TeamId, AgentRunId = request.AgentRunId, ExecutionId = Guid.NewGuid(),
                 AttemptId = Guid.NewGuid(), StreamId = Guid.NewGuid(), Channel = request.Channel,
+                WorkflowRunId = Guid.NewGuid(),
             });
 
         public Task WriteAsync(NativeRecordBatch batch, CancellationToken cancellationToken)
@@ -806,6 +809,7 @@ public sealed class AgentNativeRecordPumpTests
             {
                 TeamId = request.TeamId, AgentRunId = request.AgentRunId, ExecutionId = Guid.NewGuid(),
                 AttemptId = Guid.NewGuid(), StreamId = Guid.NewGuid(), Channel = request.Channel,
+                WorkflowRunId = Guid.NewGuid(),
             });
 
         public Task WriteAsync(NativeRecordBatch batch, CancellationToken cancellationToken)
