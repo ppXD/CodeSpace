@@ -5,7 +5,8 @@ namespace CodeSpace.Messages.Constants;
 /// keys an author MUST NOT collide with via a configurable name (a map <c>resultKey</c>, a loop
 /// variable name). A collision is silent-wrong-data: the reducer's indexer write either overwrites
 /// the author's value (<c>flow.map</c>: the result array lands under <c>resultKey</c> FIRST, then
-/// <c>count</c>/<c>failed</c> are written) or clobbers it (<c>flow.loop</c>: <c>iterations</c> etc.
+/// <c>count</c>/<c>failed</c> — and <c>resultsPrompt</c> on a map that declares a prompt budget —
+/// are written) or clobbers it (<c>flow.loop</c>: <c>iterations</c> etc.
 /// are written AFTER the loop-var spread).
 ///
 /// <para>Rule 8 contract-pin: BOTH the engine's reducers (<c>BuildMapOutputs</c> / <c>BuildLoopOutputs</c>)
@@ -21,8 +22,22 @@ public static class WorkflowOutputKeys
     /// <summary>Failed-branch count of a completed <c>flow.map</c> (0 under terminate; the continue-mode failure tally).</summary>
     public const string MapFailed = "failed";
 
-    /// <summary>The keys <c>BuildMapOutputs</c> always writes besides the configurable <c>resultKey</c>. A map <c>resultKey</c> equal to one is rejected at save time.</summary>
-    public static readonly IReadOnlyList<string> Map = new[] { MapCount, MapFailed };
+    /// <summary>The prompt-ready, budget-bounded projection of a <c>flow.map</c>'s reduced array — emitted ONLY when the map's config sets a <c>promptBudgetChars</c>, so an ordinary map's output bag is unchanged.</summary>
+    public const string MapResultsPrompt = "resultsPrompt";
+
+    /// <summary>
+    /// How much of the results <see cref="MapResultsPrompt"/> actually carries (a <c>MapResultsCoverage</c> object:
+    /// <c>complete</c>, <c>totalBranches</c>, <c>includedBranches</c>, <c>shortenedBranches</c>) — written by the
+    /// reducer that did the bounding, beside the text it bounded, and emitted on exactly the same condition.
+    ///
+    /// <para>It exists because the projection's own excerpt notice is addressed to a MODEL: a run whose reduce saw 3
+    /// of 20 branches would otherwise look, in the data, exactly like one that saw 20 of 20. This is the same fact as
+    /// a VALUE — bindable by a downstream node, readable by the phase projection, assertable by a test.</para>
+    /// </summary>
+    public const string MapResultsCoverage = "resultsCoverage";
+
+    /// <summary>The keys <c>BuildMapOutputs</c> may write besides the configurable <c>resultKey</c> — <see cref="MapCount"/>/<see cref="MapFailed"/> on every map, <see cref="MapResultsPrompt"/> and <see cref="MapResultsCoverage"/> only on a map that declares a prompt budget. A map <c>resultKey</c> equal to any of them is rejected at save time: reserving the conditional ones unconditionally is what keeps an author's key safe from a map that later opts in.</summary>
+    public static readonly IReadOnlyList<string> Map = new[] { MapCount, MapFailed, MapResultsPrompt, MapResultsCoverage };
 
     /// <summary>Iteration count a completed <c>flow.loop</c> emits (written after the loop-var spread).</summary>
     public const string LoopIterations = "iterations";

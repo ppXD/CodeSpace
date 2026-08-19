@@ -1,6 +1,8 @@
 using System.Text.Json;
+using CodeSpace.Core.Services.Tasks.Projection.Builders.PlanMap;
 using CodeSpace.Core.Services.Tasks.Projection.Builders.PlanMapSynth;
 using CodeSpace.Core.Services.Workflows.Engine;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
@@ -264,17 +266,21 @@ public class PlanMapSynthDefinitionBuilderTests
     }
 
     [Fact]
-    public void Map_config_is_empty_when_no_parallelism_cap_so_an_absent_cap_stays_unbounded()
+    public void Map_config_writes_no_cap_keys_when_the_route_sets_none_so_an_absent_cap_stays_unbounded()
     {
         var map = Builder.Build(Context(caps: new RouteCaps())).Nodes.Single(n => n.Id == "map");
 
-        // Absent cap ⇒ the prior behaviour: no key, the map inherits the engine-wide default (no config/hash change).
+        // Absent cap ⇒ the prior behaviour: no key, the map inherits the engine-wide default.
         map.Config.TryGetProperty("maxParallelism", out _).ShouldBeFalse(
             "no cap set must leave the map unbounded — only write the key when the route actually caps parallelism");
         map.Config.TryGetProperty("maxCostUsd", out _).ShouldBeFalse(
-            "same for the budget: an absent cap must not write the key, or every stored definition's config hash moves");
-        map.Config.ValueKind.ShouldBe(JsonValueKind.Object);
-        map.Config.EnumerateObject().ShouldBeEmpty("a capless map Config stays an empty object, byte-identical to the prior Empty()");
+            "same for the budget: an absent cap must not write the key");
+
+        // The Config is no longer the empty object it was before the reduce gained an input bound: promptBudgetChars
+        // rides on EVERY plan-map graph, because a capless route is exactly the common case whose reduce prompt used
+        // to grow without limit. It is the ONLY unconditional key — a cap the route did not set still writes nothing.
+        map.Config.EnumerateObject().Select(p => p.Name).ShouldBe(new[] { "promptBudgetChars" },
+            customMessage: "a capless map Config carries the reduce's input budget and nothing else");
     }
 
     [Fact]
@@ -287,7 +293,7 @@ public class PlanMapSynthDefinitionBuilderTests
     }
 
     [Fact]
-    public void Synth_is_a_real_llm_reduce_over_the_whole_results_array_generic_over_subtask_count()
+    public void Synth_is_a_real_llm_reduce_over_the_bounded_results_projection_generic_over_subtask_count()
     {
         var def = Builder.Build(Context());
         var synth = def.Nodes.Single(n => n.Id == "synth");
@@ -296,11 +302,12 @@ public class PlanMapSynthDefinitionBuilderTests
         synth.TypeKey.ShouldBe("llm.complete");
         synth.Config.GetProperty("provider").GetString().ShouldBe("Anthropic");
 
-        // The userPrompt embeds the seed goal AND the WHOLE results array — generic over ANY subtask count, NOT a
-        // fixed element-indexed width — so the reduce sees every fanned-out branch regardless of subtask count.
+        // The userPrompt embeds the seed goal AND the map's results — generic over ANY subtask count, NOT a fixed
+        // element-indexed width — through the map's BUDGET-BOUNDED projection, so the reduce sees every fanned-out
+        // branch at a small count and a bounded, self-declared excerpt of them at a large one.
         var userPrompt = synth.Inputs.GetProperty("userPrompt").GetString()!;
-        userPrompt.ShouldContain("{{nodes.map.outputs.results}}",
-            customMessage: "the synth reduce binds the whole map results array (generic over any subtask count)");
+        userPrompt.ShouldContain($"{{{{nodes.map.outputs.{WorkflowOutputKeys.MapResultsPrompt}}}}}",
+            customMessage: "the synth reduce binds the map's bounded results projection (generic over any subtask count)");
         userPrompt.ShouldContain("Improve the onboarding module",
             customMessage: "the reduce prompt embeds the seed goal so the synthesis addresses the goal, not just the branch results");
 
@@ -309,6 +316,52 @@ public class PlanMapSynthDefinitionBuilderTests
         done.TypeKey.ShouldBe("builtin.terminal");
         done.Inputs.GetProperty("combined").GetString().ShouldBe("{{nodes.synth.outputs.text}}",
             "the done node surfaces the synth's reduced text as the run's combined output");
+    }
+
+    /// <summary>
+    /// The reduce's input bound, pinned at both ends: the prompt must NOT bind the raw array (that binding is what
+    /// let a wide fan-out build a request past the model's context window and kill the run at its last node), and the
+    /// map must declare the budget that makes the bounded projection exist at all. Either half alone is inert — a
+    /// prompt bound to a key no map emits resolves to empty, and a budget nothing binds is dead weight.
+    /// </summary>
+    [Fact]
+    public void The_reduce_binds_the_bounded_projection_and_the_map_declares_the_budget_that_produces_it()
+    {
+        var def = Builder.Build(Context());
+
+        var userPrompt = def.Nodes.Single(n => n.Id == "synth").Inputs.GetProperty("userPrompt").GetString()!;
+
+        userPrompt.ShouldNotContain("{{nodes.map.outputs.results}}",
+            customMessage: "binding the raw array is the defect — the prompt would grow without limit with branch count and branch size");
+
+        var mapConfig = def.Nodes.Single(n => n.Id == "map").Config;
+
+        mapConfig.GetProperty("promptBudgetChars").GetInt32()
+            .ShouldBe(PlanMapBuilderBase.SynthPromptBudgetChars,
+                customMessage: "the budget is resolved at BUILD time and recorded in the definition, so a replay projects against its own snapshot's number");
+    }
+
+    /// <summary>
+    /// The reduce's input coverage reaches the RUN ROW, not just the map node's bag. <c>combined</c> is one prose
+    /// answer that reads as though it addressed every subtask; when the reduce was handed an excerpt it did not, and
+    /// the only in-band signal of that was a sentence in the prompt. Binding the coverage the map recorded into a run
+    /// output puts the fact beside the answer it qualifies, where anyone reading the run's outcome sees it.
+    /// </summary>
+    [Fact]
+    public void The_done_terminal_surfaces_the_reduce_input_coverage_beside_the_combined_answer()
+    {
+        var done = Builder.Build(Context()).Nodes.Single(n => n.Id == "done");
+
+        done.Inputs.GetProperty(WorkflowOutputKeys.MapResultsCoverage).GetString()
+            .ShouldBe($"{{{{nodes.map.outputs.{WorkflowOutputKeys.MapResultsCoverage}}}}}",
+                customMessage: "a sole-placeholder binding resolves to the whole recorded object, so the run output carries the fact intact");
+    }
+
+    /// <summary>Rule 8 pin: an operator whose pool serves a narrower-context model pins the reduce's input budget by env. A rename would silently restore the unbounded-in-practice behaviour for them, so the literal is pinned here.</summary>
+    [Fact]
+    public void SynthPromptBudgetCharsEnvVar_constant_name_pinned()
+    {
+        PlanMapBuilderBase.SynthPromptBudgetCharsEnvVar.ShouldBe("CODESPACE_PLAN_MAP_SYNTH_PROMPT_BUDGET_CHARS");
     }
 
     [Fact]

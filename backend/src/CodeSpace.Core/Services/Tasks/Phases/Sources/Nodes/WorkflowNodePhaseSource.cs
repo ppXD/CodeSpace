@@ -147,16 +147,35 @@ public sealed class WorkflowNodePhaseSource : IRunPhaseSource, IScopedDependency
         };
     }
 
-    /// <summary>Map metrics: agent count + the engine's own count/failed roll-up off the map node's OutputsJson (best-effort — absent keys read 0).</summary>
+    /// <summary>Map metrics: agent count + the engine's own count/failed roll-up off the map node's OutputsJson (best-effort — absent keys read 0), plus the reduce-input coverage the map recorded when it bounded its results.</summary>
     private static PhaseMetrics MapMetrics(WorkflowRunNodeSummary node, IReadOnlyList<PhaseAgentRef> agents) => new()
     {
         AgentCount = agents.Count,
         FailedCount = ReadIntOutput(node.Outputs, WorkflowOutputKeys.MapFailed),
         SucceededCount = Math.Max(0, ReadIntOutput(node.Outputs, WorkflowOutputKeys.MapCount) - ReadIntOutput(node.Outputs, WorkflowOutputKeys.MapFailed)),
+        Extra = ResultsCoverageOf(node.Outputs),
     };
+
+    /// <summary>
+    /// The map's recorded reduce-input coverage, forwarded verbatim through <see cref="PhaseMetrics.Extra"/> — the
+    /// source-specific escape hatch, so the fact reaches the phase board without widening the shared metrics
+    /// contract. Absent (every map that declares no prompt budget, and every run that predates the bound) contributes
+    /// nothing, leaving those phases byte-identical.
+    ///
+    /// <para>Forwarded rather than reduced to a number on purpose: a downstream reader that only wants "was the
+    /// reduce's input complete?" reads <c>complete</c>, and one that wants to name the missing subtasks still has
+    /// <c>includedBranches</c>/<c>totalBranches</c>/<c>shortenedBranches</c> — a count computed here would have
+    /// thrown that away.</para>
+    /// </summary>
+    private static IReadOnlyDictionary<string, JsonElement> ResultsCoverageOf(JsonElement outputs) =>
+        outputs.ValueKind == JsonValueKind.Object && outputs.TryGetProperty(WorkflowOutputKeys.MapResultsCoverage, out var coverage)
+            ? new Dictionary<string, JsonElement> { [WorkflowOutputKeys.MapResultsCoverage] = coverage.Clone() }
+            : EmptyExtra;
 
     private static int ReadIntOutput(JsonElement outputs, string key) =>
         outputs.ValueKind == JsonValueKind.Object && outputs.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n) ? n : 0;
 
     private static readonly IReadOnlyDictionary<Guid, AgentRunMetrics> EmptyMetrics = new Dictionary<Guid, AgentRunMetrics>();
+
+    private static readonly IReadOnlyDictionary<string, JsonElement> EmptyExtra = new Dictionary<string, JsonElement>();
 }

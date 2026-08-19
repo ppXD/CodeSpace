@@ -1584,7 +1584,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             if (suspended > 0)
                 throw new RunSuspendedException(mapNode.Id);
 
-            var outputs = BuildMapOutputs(plan.ResultKey, results, failed);
+            var outputs = BuildMapOutputs(plan.ResultKey, results, failed, plan.PromptBudgetChars);
             scope.Nodes[mapNode.Id] = outputs;
             await CompleteNodeWithOffloadAsync(run.Id, run.TeamId, mapNode.Id, nodeIterationKey, outputs, null, DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
             return NodeStatus.Success;
@@ -2248,14 +2248,42 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         return scope;
     }
 
-    /// <summary>The reduced map output: the ordered per-element results under the configured key, the element count, and the failed-branch count (always 0 under terminate, since a failure throws instead). internal (not private) so the reserved-set drift pin (<c>ReducerEmittedKeysPinTests</c>) asserts over the keys this actually emits, catching a new key the author forgets to add to <c>WorkflowOutputKeys.Map</c>.</summary>
-    internal static IReadOnlyDictionary<string, JsonElement> BuildMapOutputs(string resultKey, IReadOnlyList<JsonElement> results, int failed) =>
-        new Dictionary<string, JsonElement>
+    /// <summary>
+    /// The reduced map output: the ordered per-element results under the configured key, the element count, and the
+    /// failed-branch count (always 0 under terminate, since a failure throws instead). internal (not private) so the
+    /// reserved-set drift pin (<c>ReducerEmittedKeysPinTests</c>) asserts over the keys this actually emits, catching
+    /// a new key the author forgets to add to <c>WorkflowOutputKeys.Map</c>.
+    ///
+    /// <para>A map that declares a <paramref name="promptBudgetChars"/> ALSO gets TWO keys from
+    /// <see cref="MapResultsPrompt"/>: <c>WorkflowOutputKeys.MapResultsPrompt</c>, the same results rendered as a
+    /// string that fits the budget, which a downstream reduce prompt binds instead of the raw array so it cannot
+    /// outgrow the model's context window — and <c>WorkflowOutputKeys.MapResultsCoverage</c>, how much of the
+    /// results that string carries. The coverage is written HERE, by the reducer that did the bounding, so
+    /// partiality is a persisted fact rather than only a sentence addressed to the model inside the prompt: a run
+    /// whose reduce saw 3 of 20 branches is distinguishable from one that saw 20 of 20 by reading the map's own
+    /// output bag. Null (every map that declares no budget) emits the same three-key bag as before, byte-for-byte.</para>
+    /// </summary>
+    internal static IReadOnlyDictionary<string, JsonElement> BuildMapOutputs(string resultKey, IReadOnlyList<JsonElement> results, int failed, int? promptBudgetChars = null)
+    {
+        var array = JsonSerializer.SerializeToElement(results);
+
+        var outputs = new Dictionary<string, JsonElement>
         {
-            [resultKey] = JsonSerializer.SerializeToElement(results),
+            [resultKey] = array,
             [WorkflowOutputKeys.MapCount] = JsonSerializer.SerializeToElement(results.Count),
             [WorkflowOutputKeys.MapFailed] = JsonSerializer.SerializeToElement(failed),
         };
+
+        if (promptBudgetChars is { } budget)
+        {
+            var projection = MapResultsPrompt.Project(array, budget);
+
+            outputs[WorkflowOutputKeys.MapResultsPrompt] = JsonSerializer.SerializeToElement(projection.Text);
+            outputs[WorkflowOutputKeys.MapResultsCoverage] = JsonSerializer.SerializeToElement(projection.Coverage);
+        }
+
+        return outputs;
+    }
 
     /// <summary>A continue-on-error element's placeholder result — <c>{ "error": { "message": ..., "node": ... } }</c> — mirroring the node error-output shape so a synthesizer can spot a failed element in <c>results[i].error</c>.</summary>
     /// <summary>

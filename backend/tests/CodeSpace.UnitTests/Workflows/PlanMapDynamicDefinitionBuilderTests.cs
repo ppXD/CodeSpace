@@ -1,6 +1,8 @@
 using System.Text.Json;
+using CodeSpace.Core.Services.Tasks.Projection.Builders.PlanMap;
 using CodeSpace.Core.Services.Tasks.Projection.Builders.PlanMapDynamic;
 using CodeSpace.Core.Services.Workflows.Engine;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
@@ -142,7 +144,7 @@ public class PlanMapDynamicDefinitionBuilderTests
     }
 
     [Fact]
-    public void Synth_is_a_real_llm_reduce_over_the_whole_results_array_generic_over_subtask_count()
+    public void Synth_is_a_real_llm_reduce_over_the_bounded_results_projection_generic_over_subtask_count()
     {
         var def = Builder.Build(Context());
         var synth = def.Nodes.Single(n => n.Id == "synth");
@@ -150,9 +152,15 @@ public class PlanMapDynamicDefinitionBuilderTests
         synth.TypeKey.ShouldBe("llm.complete");
         synth.Config.GetProperty("provider").GetString().ShouldBe("Anthropic");
 
+        // The dynamic variant shares the base's reduce, so it inherits the SAME input bound: the prompt binds the
+        // map's budget-bounded projection, never the raw array whose size no one capped.
         var userPrompt = synth.Inputs.GetProperty("userPrompt").GetString()!;
-        userPrompt.ShouldContain("{{nodes.map.outputs.results}}", customMessage: "the synth reduce binds the whole map results array (generic over any subtask count)");
+        userPrompt.ShouldContain($"{{{{nodes.map.outputs.{WorkflowOutputKeys.MapResultsPrompt}}}}}", customMessage: "the synth reduce binds the map's bounded results projection (generic over any subtask count)");
+        userPrompt.ShouldNotContain("{{nodes.map.outputs.results}}", customMessage: "the raw-array binding is the defect this variant must not keep");
         userPrompt.ShouldContain("Improve the onboarding module", customMessage: "the reduce prompt embeds the seed goal so the synthesis addresses the goal");
+
+        def.Nodes.Single(n => n.Id == "map").Config.GetProperty("promptBudgetChars").GetInt32().ShouldBe(PlanMapBuilderBase.SynthPromptBudgetChars,
+            customMessage: "the bound is inert unless the map declares the budget that produces the projection");
 
         var done = def.Nodes.Single(n => n.Id == "done");
         done.TypeKey.ShouldBe("builtin.terminal");
