@@ -19,7 +19,8 @@ public sealed class StorageRouteSnapshotProjectionTests
 
         var resolutionNames = typeof(StorageRouteSnapshotResolution).GetNestedTypes().Select(type => type.Name).OrderBy(name => name).ToArray();
         resolutionNames.ShouldBe([
-            "Cancelled", "Invalid", "Missing", "ProfileMissing", "ProfileNotActive", "ProfileRevisionMissing", "Ready", "RouteNotActive", "RouteRevisionMissing",
+            "Cancelled", "Invalid", "Missing", "ProfileMissing", "ProfileNotActive", "ProfileRevisionMissing", "Ready",
+            "RouteNotActivated", "RouteNotActive", "RouteRevisionMissing",
         ]);
         typeof(StorageRouteSnapshot).GetProperties().Select(property => property.Name).ShouldNotContain(name =>
             name.Contains("Config", StringComparison.OrdinalIgnoreCase) || name.Contains("Credential", StringComparison.OrdinalIgnoreCase) || name.Contains("Secret", StringComparison.OrdinalIgnoreCase));
@@ -55,6 +56,7 @@ public sealed class StorageRouteSnapshotProjectionTests
     {
         StorageRouteSnapshotProjection.Resolve(null).ShouldBeOfType<StorageRouteSnapshotResolution.Missing>();
         StorageRouteSnapshotProjection.Resolve(ReadyRow() with { RouteIsActive = false }).ShouldBeOfType<StorageRouteSnapshotResolution.RouteNotActive>();
+        StorageRouteSnapshotProjection.Resolve(ReadyRow() with { RouteIsActive = false, RouteIsDraft = true }).ShouldBeOfType<StorageRouteSnapshotResolution.RouteNotActivated>();
         StorageRouteSnapshotProjection.Resolve(ReadyRow() with { RouteRevisionExists = false }).ShouldBeOfType<StorageRouteSnapshotResolution.RouteRevisionMissing>();
         StorageRouteSnapshotProjection.Resolve(ReadyRow() with { ProfileExists = false }).ShouldBeOfType<StorageRouteSnapshotResolution.ProfileMissing>();
         StorageRouteSnapshotProjection.Resolve(ReadyRow() with { ProfileIsActive = false }).ShouldBeOfType<StorageRouteSnapshotResolution.ProfileNotActive>();
@@ -108,6 +110,7 @@ public sealed class StorageRouteSnapshotProjectionTests
         RouteRevision = 3,
         DataClassTypeKey = "agent-run-log/v1",
         RouteStateIsKnown = true,
+        RouteIsDraft = false,
         RouteIsActive = true,
         RouteRevisionExists = true,
         StorageProfileId = profileId ?? Guid.NewGuid(),

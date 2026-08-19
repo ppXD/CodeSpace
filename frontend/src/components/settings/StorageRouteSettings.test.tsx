@@ -100,6 +100,10 @@ afterEach(() => { localStorage.clear(); vi.unstubAllGlobals(); });
 describe("storage data routing settings", () => {
   it("loads bounded keyset pages, de-duplicates identities, and creates a Draft only against an Active profile", async () => {
     const secondRoute = { ...route, id: "route-2", dataClassTypeKey: "workflow-run-model-call/v1" };
+    const routableDataClasses = [
+      { typeKey: "agent-run-log/v1", displayName: "Agent run logs" },
+      { typeKey: "workflow-artifact/v1", displayName: "Workflow artifacts" },
+    ];
     const requests: Array<{ url: URL; init: RequestInit }> = [];
     let listReads = 0;
     let createBody: Record<string, unknown> | undefined;
@@ -112,9 +116,10 @@ describe("storage data routing settings", () => {
           ? { items: [route], nextCursor: "route-cursor" }
           : { items: [route, secondRoute], nextCursor: null });
       }
+      if (url.pathname === "/api/storage/data-classes") return json(routableDataClasses);
       if (url.pathname === "/api/storage/routes" && method === "POST") {
         createBody = JSON.parse(String(init.body)) as Record<string, unknown>;
-        return json(detail({ id: "route-3", dataClassTypeKey: "agent-run-log/v2", currentRevision: 1, currentTarget: revision(1), revisionPage: { items: [revision(1)], nextCursor: null } }));
+        return json(detail({ id: "route-3", dataClassTypeKey: "workflow-artifact/v1", currentRevision: 1, currentTarget: revision(1), revisionPage: { items: [revision(1)], nextCursor: null } }));
       }
       return json({ message: `Unexpected request ${method} ${url.pathname}` }, 500);
     });
@@ -132,12 +137,19 @@ describe("storage data routing settings", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create data route" }));
     const dialog = await screen.findByRole("dialog", { name: "Create data route" });
     expect(within(dialog).queryByRole("option", { name: /disabled-store/i })).not.toBeInTheDocument();
-    fireEvent.change(within(dialog).getByLabelText("Data class type key"), { target: { value: " Agent-Run-Log/v2 " } });
+
+    // The data class is chosen from what this deployment reads. A free-text key let an operator create a route for a
+    // class nothing asks for — an Active-looking row that routes nothing.
+    const dataClassSelect = await within(dialog).findByLabelText("Data class");
+    await waitFor(() => expect(within(dataClassSelect).getAllByRole("option").map((option) => option.getAttribute("value"))).toEqual([
+      "agent-run-log/v1", "workflow-artifact/v1",
+    ]));
+    fireEvent.change(dataClassSelect, { target: { value: "workflow-artifact/v1" } });
     fireEvent.change(within(dialog).getByLabelText("Storage profile"), { target: { value: archiveProfile.id } });
     fireEvent.click(within(dialog).getByRole("button", { name: "Create Draft" }));
 
     await waitFor(() => expect(createBody).toEqual({
-      dataClassTypeKey: "agent-run-log/v2",
+      dataClassTypeKey: "workflow-artifact/v1",
       storageProfileId: archiveProfile.id,
       profileRevisionMode: "CurrentAtWrite",
       pinnedProfileRevision: null,

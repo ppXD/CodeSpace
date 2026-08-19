@@ -1,11 +1,21 @@
-import { useInfiniteQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 
 import { STORAGE_ROUTE_PAGE_SIZE, STORAGE_ROUTE_REVISION_PAGE_SIZE, storageRouteApi } from "@/api/storageRoutes";
 import type { AppendStorageRouteRevisionInput, CreateStorageRouteInput, SetStorageRouteStateInput, StorageRouteDetail, StorageRouteRevisionDetail } from "@/api/storageRoutes";
 
 export const STORAGE_ROUTES_KEY = ["storage", "routes", "list"] as const;
+export const STORAGE_DATA_CLASSES_KEY = ["storage", "routes", "data-classes"] as const;
 export const STORAGE_ROUTE_DETAILS_KEY = ["storage", "routes", "detail"] as const;
 export const storageRouteKey = (routeId: string) => [...STORAGE_ROUTE_DETAILS_KEY, routeId] as const;
+
+/** The routable data classes are build metadata, so they stay fresh until this deployment changes. */
+export function useRoutedDataClasses() {
+  return useQuery({
+    queryKey: STORAGE_DATA_CLASSES_KEY,
+    queryFn: ({ signal }) => storageRouteApi.listDataClasses(signal),
+    staleTime: Infinity,
+  });
+}
 
 export function useStorageRoutes() {
   return useInfiniteQuery({

@@ -10,8 +10,8 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts;
 /// Where an offloaded artifact's bytes GO, and how they come back. The route is consulted exactly once per write and
 /// the profile revision it names is stamped onto the durable <c>artifact_location</c> the CAS runtime writes; a read
 /// resolves through the recorded locations of that object and never through today's routing policy, so repointing,
-/// disabling or retiring a route can never change where existing bytes are looked for. A team with no route keeps the
-/// local backend verbatim.
+/// disabling or retiring a route can never change where existing bytes are looked for. A team with no route — or with
+/// one it created and never activated — keeps the local backend verbatim.
 /// </summary>
 public sealed partial class ArtifactStore
 {

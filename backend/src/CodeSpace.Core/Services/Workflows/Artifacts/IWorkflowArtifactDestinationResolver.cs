@@ -19,8 +19,10 @@ public abstract record WorkflowArtifactDestination
     private WorkflowArtifactDestination() { }
 
     /// <summary>
-    /// The team has configured no route for this data class — the shipped state of every existing team. The local
-    /// blob backend keeps every byte of today's behaviour, including the <c>storage_url</c> shape.
+    /// The team has no route for this data class, or has one it never activated. No route at all is the shipped state
+    /// of every existing team; a Draft route is the state every route is born in and cannot return to, so both mean
+    /// "this class was never cut over". The local blob backend keeps every byte of today's behaviour, including the
+    /// <c>storage_url</c> shape.
     /// </summary>
     public sealed record Local : WorkflowArtifactDestination;
 
@@ -36,7 +38,7 @@ public abstract record WorkflowArtifactDestination
 
 public enum WorkflowArtifactDestinationProblem
 {
-    /// <summary>The route exists in Draft, Disabled or Retired — an operator decision that new writes must not bypass.</summary>
+    /// <summary>The route was activated and is now Disabled or Retired — a stop that new writes must not bypass.</summary>
     RouteNotActive,
 
     /// <summary>The routed profile is not Active. Its own history stays readable; new bytes are refused.</summary>

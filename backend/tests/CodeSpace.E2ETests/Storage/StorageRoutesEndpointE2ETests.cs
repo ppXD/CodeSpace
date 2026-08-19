@@ -77,11 +77,38 @@ public sealed class StorageRoutesEndpointE2ETests : IClassFixture<TaskLaunchApiF
     }
 
     [Fact]
+    public async Task A_route_can_only_name_a_data_class_this_build_actually_reads()
+    {
+        var world = await SeedWorldAsync(TeamRole.Admin);
+        var profileId = await SeedProfileAsync(world.TeamId, world.UserId, "known-class-store");
+
+        var discovery = await SendAsync(world, HttpMethod.Get, "/api/storage/data-classes");
+        discovery.StatusCode.ShouldBe(HttpStatusCode.OK, await DescribeAsync(discovery));
+        Json(await discovery.Content.ReadAsStringAsync()).EnumerateArray().Select(value => value.GetProperty("typeKey").GetString())
+            .ShouldBe(["agent-run-log/v1", "workflow-artifact/v1"], "Settings can only offer classes some runtime consumer reads");
+
+        // The plural an operator types by hand. It satisfies the open key pattern, so it used to create a listable
+        // route that no consumer ever asks for — storage the operator believes is configured and that routes nothing.
+        var typo = await SendAsync(world, HttpMethod.Post, "/api/storage/routes", new { dataClassTypeKey = "workflow-artifacts/v1", storageProfileId = profileId });
+        typo.StatusCode.ShouldBe(HttpStatusCode.BadRequest, await DescribeAsync(typo));
+        (await typo.Content.ReadAsStringAsync()).ShouldContain("workflow-artifact/v1", Case.Sensitive,
+            "the refusal must name the keys the operator can actually choose");
+
+        var known = await SendAsync(world, HttpMethod.Post, "/api/storage/routes", new { dataClassTypeKey = " Workflow-Artifact/v1 ", storageProfileId = profileId });
+        known.StatusCode.ShouldBe(HttpStatusCode.OK, await DescribeAsync(known));
+
+        using var scope = _factory.Services.CreateScope();
+        var stored = await scope.ServiceProvider.GetRequiredService<CodeSpaceDbContext>().StorageRoute.AsNoTracking()
+            .Where(route => route.TeamId == world.TeamId).Select(route => route.DataClassTypeKey).ToListAsync();
+        stored.ShouldBe(["workflow-artifact/v1"]);
+    }
+
+    [Fact]
     public async Task Authentication_storage_admin_permission_and_team_scope_fail_closed()
     {
         var member = await SeedWorldAsync(TeamRole.Member);
         var profileId = await SeedProfileAsync(member.TeamId, member.UserId, "member-store");
-        var body = new { dataClassTypeKey = "artifact-cas/v1", storageProfileId = profileId };
+        var body = new { dataClassTypeKey = "workflow-artifact/v1", storageProfileId = profileId };
 
         var anonymous = await SendAsync(member, HttpMethod.Post, "/api/storage/routes", body, authenticated: false);
         anonymous.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
@@ -101,17 +128,18 @@ public sealed class StorageRoutesEndpointE2ETests : IClassFixture<TaskLaunchApiF
 
         foreach (var item in new[]
         {
-            new { Key = "disabled/v1", ProfileId = disabled, Revision = (int?)null },
-            new { Key = "foreign/v1", ProfileId = foreign, Revision = (int?)null },
-            new { Key = "missing-revision/v1", ProfileId = active, Revision = (int?)99 },
+            new { Case = "a disabled profile", ProfileId = disabled, Revision = (int?)null },
+            new { Case = "another team's profile", ProfileId = foreign, Revision = (int?)null },
+            new { Case = "a pinned revision that does not exist", ProfileId = active, Revision = (int?)99 },
         })
         {
+            // A data class this build routes, so the PROFILE rule is what refuses each case rather than the class gate.
             var response = await SendAsync(world, HttpMethod.Post, "/api/storage/routes", new
             {
-                dataClassTypeKey = item.Key, storageProfileId = item.ProfileId,
+                dataClassTypeKey = "workflow-artifact/v1", storageProfileId = item.ProfileId,
                 profileRevisionMode = item.Revision.HasValue ? "Pinned" : "CurrentAtWrite", pinnedProfileRevision = item.Revision,
             });
-            response.StatusCode.ShouldBe(HttpStatusCode.BadRequest, $"{item.Key}: {await DescribeAsync(response)}");
+            response.StatusCode.ShouldBe(HttpStatusCode.BadRequest, $"{item.Case}: {await DescribeAsync(response)}");
         }
 
         using var scope = _factory.Services.CreateScope();
@@ -123,22 +151,24 @@ public sealed class StorageRoutesEndpointE2ETests : IClassFixture<TaskLaunchApiF
     {
         var world = await SeedWorldAsync(TeamRole.Admin);
         var profileId = await SeedProfileAsync(world.TeamId, world.UserId, "page-store");
-        foreach (var key in new[] { "workflow-run-model-call/v1", "agent-run-log/v1", "artifact-cas/v1" })
+        // A team can hold at most one route per data class, and this build routes two — so two rows and a page size of
+        // one is the whole keyset surface there is to page.
+        foreach (var key in new[] { "workflow-artifact/v1", "agent-run-log/v1" })
         {
             var created = await SendAsync(world, HttpMethod.Post, "/api/storage/routes", new { dataClassTypeKey = key, storageProfileId = profileId });
             created.StatusCode.ShouldBe(HttpStatusCode.OK, await DescribeAsync(created));
         }
 
-        var firstResponse = await SendAsync(world, HttpMethod.Get, "/api/storage/routes/page?limit=2");
+        var firstResponse = await SendAsync(world, HttpMethod.Get, "/api/storage/routes/page?limit=1");
         var first = Json(await firstResponse.Content.ReadAsStringAsync());
         first.GetProperty("items").EnumerateArray().Select(value => value.GetProperty("dataClassTypeKey").GetString()).ShouldBe([
-            "agent-run-log/v1", "artifact-cas/v1",
+            "agent-run-log/v1",
         ]);
         var cursor = Uri.EscapeDataString(first.GetProperty("nextCursor").GetString()!);
-        var secondResponse = await SendAsync(world, HttpMethod.Get, $"/api/storage/routes/page?limit=2&cursor={cursor}");
+        var secondResponse = await SendAsync(world, HttpMethod.Get, $"/api/storage/routes/page?limit=1&cursor={cursor}");
         var second = Json(await secondResponse.Content.ReadAsStringAsync());
         second.GetProperty("items").EnumerateArray().Select(value => value.GetProperty("dataClassTypeKey").GetString()).ShouldBe([
-            "workflow-run-model-call/v1",
+            "workflow-artifact/v1",
         ]);
         second.GetProperty("nextCursor").ValueKind.ShouldBe(JsonValueKind.Null);
     }
@@ -148,7 +178,7 @@ public sealed class StorageRoutesEndpointE2ETests : IClassFixture<TaskLaunchApiF
     {
         var world = await SeedWorldAsync(TeamRole.Admin);
         var profileId = await SeedProfileAsync(world.TeamId, world.UserId, "history-store");
-        var create = await SendAsync(world, HttpMethod.Post, "/api/storage/routes", new { dataClassTypeKey = "artifact-cas/v1", storageProfileId = profileId });
+        var create = await SendAsync(world, HttpMethod.Post, "/api/storage/routes", new { dataClassTypeKey = "workflow-artifact/v1", storageProfileId = profileId });
         var current = Json(await create.Content.ReadAsStringAsync());
         var routeId = current.GetProperty("id").GetGuid();
 
@@ -224,7 +254,7 @@ public sealed class StorageRoutesEndpointE2ETests : IClassFixture<TaskLaunchApiF
     {
         var world = await SeedWorldAsync(TeamRole.Admin);
         var profileId = await SeedProfileAsync(world.TeamId, world.UserId, "concurrent-store");
-        var createdResponse = await SendAsync(world, HttpMethod.Post, "/api/storage/routes", new { dataClassTypeKey = "artifact-cas/v1", storageProfileId = profileId });
+        var createdResponse = await SendAsync(world, HttpMethod.Post, "/api/storage/routes", new { dataClassTypeKey = "workflow-artifact/v1", storageProfileId = profileId });
         var created = Json(await createdResponse.Content.ReadAsStringAsync());
         var routeId = created.GetProperty("id").GetGuid();
 
@@ -254,7 +284,7 @@ public sealed class StorageRoutesEndpointE2ETests : IClassFixture<TaskLaunchApiF
         var db = scope.ServiceProvider.GetRequiredService<CodeSpaceDbContext>();
         (await db.StorageRouteRevision.CountAsync(value => value.StorageRouteId == routeId)).ShouldBe(1);
         var stored = await db.StorageRoute.AsNoTracking().SingleAsync(value => value.Id == routeId);
-        stored.DataClassTypeKey.ShouldBe("artifact-cas/v1");
+        stored.DataClassTypeKey.ShouldBe("workflow-artifact/v1");
         stored.State.ShouldBe(StorageRouteState.Retired);
     }
 

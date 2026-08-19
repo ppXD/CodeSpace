@@ -7,11 +7,14 @@ using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
 using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers.Local;
+using CodeSpace.Core.Services.Workflows.Artifacts.Routing;
 using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using CodeSpace.Core.Settings;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
+using CodeSpace.Messages.Commands.Storage;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Dtos.Storage;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
@@ -122,6 +125,33 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
         fetched!.Bytes.ShouldBe(content, "the read must follow the artifact's own recorded location, not current policy");
         Directory.Exists(Path.Combine(replacementRoot, "objects")).ShouldBeFalse(
             "if the read had consulted the CURRENT route it would have looked here — and these bytes were never written here");
+    }
+
+    [Fact]
+    public async Task A_route_created_but_never_activated_leaves_every_offloaded_write_on_local_disk()
+    {
+        // The regression this test exists to prevent: Settings creates every route in Draft, the snapshot resolver
+        // reported it as simply non-Active, the destination resolver refused it, and PlaceOffloadedAsync threw — so
+        // pressing "Create data route" stopped every offloaded write for the team until someone also activated it.
+        // Draft means "not cut over yet", so it has to be as inert as having no route at all.
+        var (teamId, actorId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var profileId = await SeedProfileAsync(teamId, NewRoot());
+        var route = await CreateDraftRouteAsync(teamId, actorId, profileId);
+        route.State.ShouldBe(StorageRouteStateValue.Draft, "precondition: the real create path is what puts a route in Draft");
+        var content = Encoding.UTF8.GetBytes(new string('n', 20_000));
+        var sha = ArtifactStore.ComputeSha256Hex(content);
+
+        var artifactId = await PutAsync(teamId, content);
+
+        var row = await RowAsync(artifactId);
+        row.InlineBytes.ShouldBeNull($"{content.Length} bytes is over the {ArtifactStoreConfig.InlineThresholdBytes}-byte inline threshold, so this write must be offloaded");
+        row.CasArtifactObjectId.ShouldBeNull("a route nobody activated must not route bytes");
+        row.StorageUrl.ShouldBe(LocalUrlFor(sha), "an un-activated route keeps the local backend's exact locator shape");
+        File.Exists(new Uri(row.StorageUrl!).LocalPath).ShouldBeTrue();
+
+        using var scope = _fixture.BeginScope();
+        (await scope.Resolve<CodeSpaceDbContext>().ArtifactTransferIntent.CountAsync(i => i.TeamId == teamId)).ShouldBe(0);
+        (await scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, artifactId, CancellationToken.None))!.Bytes.ShouldBe(content);
     }
 
     [Theory]
@@ -547,6 +577,20 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
 
         route.State = StorageRouteState.Active;
         await db.SaveChangesAsync();
+    }
+
+    /// <summary>
+    /// Creates the route the way an operator's "Create data route" request does — through the real service, which is
+    /// the only place that decides a new route's starting state. Hand-writing the row would step around exactly the
+    /// decision under test.
+    /// </summary>
+    private async Task<StorageRouteDetail> CreateDraftRouteAsync(Guid teamId, Guid actorId, Guid profileId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IStorageRouteService>().CreateAsync(teamId, actorId, new CreateStorageRouteCommand
+        {
+            DataClassTypeKey = WorkflowArtifactDestinationResolver.DataClassTypeKey, StorageProfileId = profileId,
+        }, CancellationToken.None);
     }
 
     private async Task RepointRouteAsync(Guid teamId, Guid profileId)
