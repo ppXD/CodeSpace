@@ -71,7 +71,9 @@ public sealed class WorkflowRunDataManifest : IEntity<Guid>
     /// <summary>
     /// How many spans of this facet are known-missing. It may not sit BELOW the open gaps already rowed for the facet;
     /// above is admitted, because a producer that knows of more missing than it has rowed is erring toward incomplete.
-    /// The database advances it itself when a gap for this facet is recorded.
+    /// When a gap for this facet is recorded the database RECONCILES this to the open spans the plane holds rather than
+    /// incrementing it — an increment lands one under a floor that already counts the whole statement, and the refusal
+    /// that follows destroys every gap in an honest multi-row admission.
     /// </summary>
     public long KnownMissingCount { get; set; }
 

@@ -176,7 +176,154 @@ public sealed class WorkflowRunDataCompletenessPersistenceTests
         using (var scope = _fixture.BeginScope())
         {
             (await Manifests(scope).SingleAsync(candidate => candidate.Id == honest.Id)).Verdict.ShouldBe(WorkflowRunCaptureCompleteness.Partial);
+
+            // The DIRECTION of every refusal above: the claim was the thing rejected, and the span it contradicted is
+            // still on record. A guard that took the gap down with the claim would leave the plane looking clean while
+            // having erased the evidence, which is worse than not guarding at all.
+            (await Gaps(scope).CountAsync(candidate => candidate.Id == gap.Id)).ShouldBe(1,
+                customMessage: "refusing a complete claim must never cost the gap that refused it — bad news has to stay writable");
         }
+    }
+
+    /// <summary>
+    /// A producer that noticed three missing spans and says so in ONE statement is being honest in the most useful way
+    /// available to it, and every one of those admissions has to land. Per row the downgrade added one while the floor
+    /// check already counted all three, so the first row landed under the floor, the floor check raised, and the whole
+    /// statement went — three gaps erased and the complete manifest they contradicted still standing. That net result
+    /// is strictly worse than having no guard, which is why the reconciliation happens once per STATEMENT.
+    /// </summary>
+    [Fact]
+    public async Task An_honest_multi_row_gap_statement_lands_whole_and_the_claim_it_contradicts_is_what_moves()
+    {
+        var world = await SeedRunAsync();
+        var gapped = await SeedManifestAsync(world, WorkflowRunDataOwnerKinds.NativeRecord);
+        var neighbour = await SeedManifestAsync(world, WorkflowRunDataOwnerKinds.ToolCall);
+
+        await RecordGapsInOneStatementAsync(world, WorkflowRunDataOwnerKinds.NativeRecord, spans: 3);
+
+        using var scope = _fixture.BeginScope();
+        (await Gaps(scope).CountAsync(candidate => candidate.WorkflowRunId == world.RunId)).ShouldBe(3,
+            customMessage: "every span admitted in one statement must land — a guard that rejects the batch erases the very absences it exists to surface");
+
+        var stored = await Manifests(scope).SingleAsync(candidate => candidate.Id == gapped.Id);
+        stored.Verdict.ShouldBe(WorkflowRunCaptureCompleteness.Partial,
+            customMessage: "the claim is what yields to the gaps, never the other way round");
+        stored.KnownMissingCount.ShouldBe(3,
+            customMessage: "the count reconciles to the open spans the plane actually holds, so it is right for a batch of one and a batch of three alike");
+        stored.Revision.ShouldBe(2,
+            customMessage: "one statement is one downgrade — a per-row advance is what put the count under its own floor");
+
+        var other = await Manifests(scope).SingleAsync(candidate => candidate.Id == neighbour.Id);
+        other.Verdict.ShouldBe(WorkflowRunCaptureCompleteness.Partial,
+            customMessage: "a gap anywhere in the run un-completes every facet's claim — the conservative arm");
+        other.KnownMissingCount.ShouldBe(0,
+            customMessage: "three missing native records are not three missing tool calls; the count belongs to the facet it happened in");
+    }
+
+    /// <summary>
+    /// The invariant is that no manifest reads as complete beside an open gap, and it has to hold when the two facts
+    /// are written by DIFFERENT transactions that cannot see each other — the case no CHECK reaches and the one where a
+    /// row lock is not enough: the downgrade only matches manifest rows its own snapshot shows as complete or
+    /// same-facet, so a row being raised to complete for another facet is never matched, never locked, and both writers
+    /// commit blind. Both interleavings are pinned, because closing one direction leaves the other wide open.
+    ///
+    /// <para>The claim is raised across TWO facets in one statement on purpose. That is the shape a rendezvous lock can
+    /// deadlock on if it is acquired after a row lock rather than before it, so this also pins that adding the lock to
+    /// the manifest UPDATE path did not buy a deadlock for the race it settles.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(true, "the verdict is raised first and the gap arrives beside it — the downgrade has to reach the committed claim")]
+    [InlineData(false, "the gap is recorded first and the verdict is raised beside it — the probe has to see the committed span")]
+    public async Task Neither_arrival_order_can_leave_a_complete_verdict_beside_an_open_gap(bool verdictRaisedFirst, string interleaving)
+    {
+        var world = await SeedRunAsync();
+        await SeedManifestAsync(world, WorkflowRunDataOwnerKinds.ModelCall, claim => claim.Verdict = WorkflowRunCaptureCompleteness.Partial);
+        await SeedManifestAsync(world, WorkflowRunDataOwnerKinds.ToolCall, claim => claim.Verdict = WorkflowRunCaptureCompleteness.Partial);
+
+        await using var claiming = new NpgsqlConnection(_fixture.ConnectionString);
+        await using var observing = new NpgsqlConnection(_fixture.ConnectionString);
+        await claiming.OpenAsync();
+        await observing.OpenAsync();
+        await using var claimant = await claiming.BeginTransactionAsync();
+        await using var observer = await observing.BeginTransactionAsync();
+
+        bool parked;
+        PostgresException? refusal = null;
+
+        if (verdictRaisedFirst)
+        {
+            await RaiseToCompleteAsync(claimant, world);
+            var recording = RecordGapsInOneStatementAsync(observer, world, WorkflowRunDataOwnerKinds.NativeRecord, spans: 1);
+            parked = await ParkedOnTheRunLockAsync();
+            await claimant.CommitAsync();
+            await recording;
+            await observer.CommitAsync();
+        }
+        else
+        {
+            await RecordGapsInOneStatementAsync(observer, world, WorkflowRunDataOwnerKinds.NativeRecord, spans: 1);
+            var raising = RaiseToCompleteAsync(claimant, world);
+            parked = await ParkedOnTheRunLockAsync();
+            await observer.CommitAsync();
+
+            // COMMITTED rather than rolled back when the database let the claim through, so a missing refusal surfaces
+            // as a surviving complete verdict below instead of as an exception this test quietly swallowed.
+            refusal = await RefusalOfAsync(raising);
+            if (refusal == null) await claimant.CommitAsync();
+            else await claimant.RollbackAsync();
+        }
+
+        using var scope = _fixture.BeginScope();
+        var statements = await Manifests(scope).Where(candidate => candidate.WorkflowRunId == world.RunId).ToListAsync();
+        statements.Count.ShouldBe(2,
+            customMessage: "the claim has to span two facets in one statement, or the lock-ordering shape this test also exists to exercise never happens");
+        statements.Any(candidate => candidate.Verdict.IsStrictlyReadable()).ShouldBeFalse(
+            customMessage: $"a complete verdict survived beside an open gap ({interleaving}) — the invariant held only while the two writers happened to arrive in a convenient order");
+        (await Gaps(scope).CountAsync(candidate => candidate.WorkflowRunId == world.RunId && candidate.Resolution == CaptureGapResolution.Open))
+            .ShouldBe(1, customMessage: $"the gap must survive whichever order it arrived in ({interleaving}) — it is the half that is never allowed to lose");
+        refusal?.Message.ShouldContain("cannot claim a complete record while a known-missing span of the run is still open",
+            customMessage: "a refused claim must name the span it lost to, or an operator cannot go and look at it");
+        parked.ShouldBeTrue(
+            customMessage: $"neither writer ever parked on the run's completeness lock, so '{interleaving}' never happened and the invariant above held by luck rather than by rendezvous. "
+                + "Diagnose with: psql -c \"SELECT l.granted, a.state, a.query FROM pg_locks l JOIN pg_stat_activity a USING (pid) WHERE l.locktype = 'advisory'\".");
+    }
+
+    /// <summary>
+    /// The NULL and empty boundaries, because a guard that evaluates to NULL is a guard that ADMITS. An empty statement
+    /// fires the statement-level downgrade over an empty transition table; a run may hold an open gap and no manifest
+    /// row at all; and the open-gap floor over a facet nobody gapped has to be zero rather than null, or the comparison
+    /// against it goes null and waves the understated claim straight through.
+    /// </summary>
+    [Fact]
+    public async Task An_empty_or_absent_span_set_never_lets_a_claim_through_on_a_null()
+    {
+        var world = await SeedRunAsync();
+
+        await RecordGapsInOneStatementAsync(world, WorkflowRunDataOwnerKinds.NativeRecord, spans: 0);
+
+        (await OpenGapFloorAsync(world, WorkflowRunDataOwnerKinds.NativeRecord)).ShouldBe(0,
+            customMessage: "the floor over a facet with no gaps must be 0, never null — a null floor makes every understated count pass silently");
+
+        // The gap is recorded for a run holding no manifest row at all, so the downgrade has nothing to match and the
+        // refusal has to come from the claim that arrives later.
+        await RecordGapsInOneStatementAsync(world, WorkflowRunDataOwnerKinds.NativeRecord, spans: 1);
+        (await OpenGapFloorAsync(world, WorkflowRunDataOwnerKinds.NativeRecord)).ShouldBe(1);
+        (await OpenGapFloorAsync(world, WorkflowRunDataOwnerKinds.ToolCall)).ShouldBe(0,
+            customMessage: "the floor is per facet, so an ungapped facet reads zero rather than inheriting the run's gaps");
+
+        using (var scope = _fixture.BeginScope())
+        {
+            (await Gaps(scope).CountAsync(candidate => candidate.WorkflowRunId == world.RunId)).ShouldBe(1,
+                customMessage: "a statement that inserted nothing must not disturb the spans already recorded");
+        }
+
+        await RejectsManifestAsync(world, "cannot claim a complete record while a known-missing span of the run is still open",
+            statement => statement.Facet = WorkflowRunDataOwnerKinds.NativeRecord);
+        await RejectsManifestAsync(world, "known-missing count may not be below the open gaps recorded for this facet", statement =>
+        {
+            statement.Facet = WorkflowRunDataOwnerKinds.NativeRecord;
+            statement.Verdict = WorkflowRunCaptureCompleteness.Partial;
+        });
     }
 
     /// <summary>
@@ -462,7 +609,9 @@ public sealed class WorkflowRunDataCompletenessPersistenceTests
     /// </summary>
     [Theory]
     [InlineData("ux_workflow_run_data_manifest_facet", "workflow_run_data_manifest", "(team_id, workflow_run_id, facet)", true, "")]
-    [InlineData("ix_workflow_run_capture_gap_open", "workflow_run_capture_gap", "(team_id, workflow_run_id, subject_kind)", false, "WHERE (resolution")]
+    // pg_get_indexdef renders a varchar predicate through its text cast — "WHERE ((resolution)::text = 'Open'::text)" —
+    // so the expected literal has to be the rendering Postgres actually emits, not the one the migration was written in.
+    [InlineData("ix_workflow_run_capture_gap_open", "workflow_run_capture_gap", "(team_id, workflow_run_id, subject_kind)", false, "WHERE ((resolution)::text = 'Open'")]
     [InlineData("ix_workflow_run_data_manifest_incomplete", "workflow_run_data_manifest", "(team_id, last_modified_at, id)", false, "WHERE (")]
     public async Task The_indexes_the_plane_depends_on_are_installed(string indexName, string tableName, string expectedColumns, bool unique, string expectedFilter)
     {
@@ -511,6 +660,123 @@ public sealed class WorkflowRunDataCompletenessPersistenceTests
         gap.RangeStart = null;
         gap.RangeEnd = null;
         gap.StreamId = null;
+    }
+
+    /// <summary>
+    /// Records <paramref name="spans"/> gaps in ONE statement — the shape a producer reaches for when it noticed
+    /// several absences at once, and the one a per-row reconciliation cannot survive. Raw SQL rather than EF, because
+    /// what is under test is the single multi-row statement itself, not however many commands a batcher chooses to emit.
+    /// </summary>
+    private static async Task RecordGapsInOneStatementAsync(NpgsqlTransaction transaction, RunWorld world, string subjectKind, int spans)
+    {
+        await using var command = new NpgsqlCommand(GapStatement(spans), transaction.Connection!, transaction);
+        command.Parameters.AddWithValue("team", world.TeamId);
+        command.Parameters.AddWithValue("run", world.RunId);
+        command.Parameters.AddWithValue("subject", subjectKind);
+        command.Parameters.AddWithValue("source", "harness-native");
+        command.Parameters.AddWithValue("now", DateTimeOffset.UtcNow);
+        command.Parameters.AddWithValue("schema", WorkflowRunDataContract.CurrentVersion);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    private async Task RecordGapsInOneStatementAsync(RunWorld world, string subjectKind, int spans)
+    {
+        await using var connection = new NpgsqlConnection(_fixture.ConnectionString);
+        await connection.OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await RecordGapsInOneStatementAsync(transaction, world, subjectKind, spans);
+        await transaction.CommitAsync();
+    }
+
+    /// <summary>Zero spans is the EMPTY-statement boundary: the statement-level reconciliation still fires, over a transition table holding nothing.</summary>
+    private static string GapStatement(int spans)
+    {
+        const string row = "gen_random_uuid(), @team, @run, @subject, 'Unbounded', 'BoundExceeded', @source, @now, 'Open', @schema, @now";
+        var rows = spans == 0
+            ? $"SELECT {row} WHERE false"
+            : "VALUES " + string.Join(", ", Enumerable.Repeat($"({row})", spans));
+
+        return $"""
+            INSERT INTO workflow_run_capture_gap (
+                id, team_id, workflow_run_id, subject_kind, range_kind, reason, capture_source,
+                noticed_at, resolution, schema_version, created_at)
+            {rows}
+            """;
+    }
+
+    /// <summary>Raises EVERY facet of the run to complete in ONE statement — a multi-row manifest UPDATE, the shape that would deadlock if the rendezvous lock were acquired after a row lock instead of before one.</summary>
+    private static async Task RaiseToCompleteAsync(NpgsqlTransaction transaction, RunWorld world)
+    {
+        await using var command = new NpgsqlCommand(
+            "UPDATE workflow_run_data_manifest SET verdict = 'Exact', revision = revision + 1, last_modified_at = @now WHERE team_id = @team AND workflow_run_id = @run",
+            transaction.Connection!, transaction);
+        command.Parameters.AddWithValue("now", DateTimeOffset.UtcNow);
+        command.Parameters.AddWithValue("team", world.TeamId);
+        command.Parameters.AddWithValue("run", world.RunId);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// Waits until the other writer is genuinely PARKED on the run's rendezvous lock, so the interleaving under test is
+    /// the one that actually happened. Reports rather than throws, so that a run where the two never overlapped still
+    /// checks the invariant before failing on the interleaving — a test that only ever reported "they did not overlap"
+    /// would hide whether the outcome was also wrong.
+    /// </summary>
+    private async Task<bool> ParkedOnTheRunLockAsync()
+    {
+        const int pollMilliseconds = 25;
+        const int attempts = 400;
+
+        for (var attempt = 0; attempt < attempts; attempt++)
+        {
+            if (await WaitingRunLocksAsync() > 0) return true;
+
+            await Task.Delay(pollMilliseconds);
+        }
+
+        return false;
+    }
+
+    /// <summary>Runs a write that the database is EXPECTED to refuse and hands back the refusal, so the caller can decide what an absent refusal means rather than having it asserted away here.</summary>
+    private static async Task<PostgresException?> RefusalOfAsync(Task write)
+    {
+        try
+        {
+            await write;
+            return null;
+        }
+        catch (PostgresException refused)
+        {
+            return refused;
+        }
+    }
+
+    private async Task<long> WaitingRunLocksAsync()
+    {
+        await using var connection = new NpgsqlConnection(_fixture.ConnectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand("""
+            SELECT count(*) FROM pg_locks
+            WHERE locktype = 'advisory' AND NOT granted
+              AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+            """, connection);
+        return (long)(await command.ExecuteScalarAsync())!;
+    }
+
+    /// <summary>Reads the shared open-gap floor directly, so its NULL behaviour is asserted rather than assumed: a NULL floor makes every understated count pass silently.</summary>
+    private async Task<long> OpenGapFloorAsync(RunWorld world, string facet)
+    {
+        await using var connection = new NpgsqlConnection(_fixture.ConnectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand("SELECT workflow_run_capture_gap_open_count(@team, @run, @facet)", connection);
+        command.Parameters.AddWithValue("team", world.TeamId);
+        command.Parameters.AddWithValue("run", world.RunId);
+        command.Parameters.AddWithValue("facet", facet);
+
+        var floor = await command.ExecuteScalarAsync();
+
+        floor.ShouldNotBeOfType<DBNull>(customMessage: "the open-gap floor came back NULL, and every comparison against a NULL floor admits the row it exists to refuse");
+        return (long)floor!;
     }
 
     private static IQueryable<WorkflowRunCaptureGap> Gaps(ILifetimeScope scope) => scope.Resolve<CodeSpaceDbContext>().WorkflowRunCaptureGap.AsNoTracking();

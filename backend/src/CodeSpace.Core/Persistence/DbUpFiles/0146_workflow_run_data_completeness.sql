@@ -51,10 +51,19 @@
 -- manifest already claims the run is complete — refusing the honest observation to protect the claim is the exact
 -- inversion this plane exists to prevent. Instead workflow_run_capture_gap_mark_manifest downgrades every strictly
 -- readable manifest row of that run to Partial, so the ORDER the two writers arrive in cannot decide the outcome.
--- Concurrently, a manifest UPDATE needs nothing extra: it already holds the row's own lock and the downgrade must pass
--- through that same row, so whichever commits first the other sees it. A manifest INSERT has no such row yet, and a
--- probe cannot see an uncommitted gap — so the gap insert and the manifest insert take one per-run advisory
--- transaction lock, without which a manifest could commit Exact beside a gap it never saw.
+-- Neither writer can see the other's uncommitted row, so EVERY write on either side takes one per-run advisory
+-- transaction lock: gap INSERT, manifest INSERT, and manifest UPDATE alike. A manifest UPDATE is not exempt because it
+-- holds its own row's lock — the downgrade only matches manifest rows its own snapshot shows as complete or
+-- same-facet, so a row being raised to complete for a DIFFERENT facet is never matched, never locked, and the two
+-- writers commit blind to each other: the run ends up Exact beside an open gap with neither of them at fault.
+--
+-- AND THE DOWNGRADE RECONCILES RATHER THAN INCREMENTS, which is why it is the one FOR EACH STATEMENT trigger here. A
+-- producer that records three gaps in a single INSERT is being honest in the most useful way available to it, and a
+-- per-row downgrade adds one while the manifest's own floor check already counts all three — so the first row's
+-- downgrade lands below the floor, the floor check raises, and the WHOLE statement is lost: three gaps gone, and the
+-- complete manifest they contradicted still standing. Losing the bad news to protect the claim is strictly worse than
+-- having no guard, so the downgrade reconciles each facet's count to the open gaps the plane actually holds, which is
+-- correct at any batch size and can never land under the floor.
 --
 -- A GAP IS NEVER UNNOTICED. No UPDATE except one fill of the resolution axis, and no DELETE at all. That refusal is
 -- load-bearing rather than austere: a deletable gap makes a complete manifest reachable by deleting the evidence.
@@ -214,17 +223,27 @@ CREATE INDEX ix_workflow_run_data_manifest_run ON workflow_run_data_manifest (wo
 -- "Whose record is not complete" is the audit's question, and it must not grow with the runs that are fine.
 CREATE INDEX ix_workflow_run_data_manifest_incomplete ON workflow_run_data_manifest (team_id, last_modified_at, id) WHERE verdict NOT IN ('Exact', 'RedactedExact');
 
--- One lock per run, taken by the two INSERT paths — a gap being recorded and a manifest statement being created — so
--- that pair cannot interleave. A probe cannot see an uncommitted gap, so without this a fresh manifest and a fresh gap
--- each pass against their own snapshot and the run ends up with a complete manifest over an open gap. Every other
--- write on either table rendezvouses on a row lock instead and does NOT take this, which is what keeps the two
--- acquisition orders from inverting. Collisions are harmless: the worst one buys is two unrelated writers serializing
--- behind each other. The idiom is BudgetLedger's, which already serializes admissions per run this way.
+-- One lock per run, taken by EVERY write that either records a gap or states a completeness verdict — gap INSERT,
+-- manifest INSERT and manifest UPDATE alike — so no two of them interleave. A probe cannot see an uncommitted gap and
+-- a downgrade cannot see an uncommitted verdict, so without this the two pass against their own snapshots and the run
+-- ends up with a complete manifest over an open gap. Both paths acquire it in a BEFORE ROW trigger, which runs before
+-- the row it guards is locked, so neither side can be holding a row of one table while waiting for this lock on
+-- behalf of the other. Collisions are harmless: the worst one buys is two unrelated writers serializing behind each
+-- other. The idiom is BudgetLedger's, which already serializes admissions per run this way.
 CREATE OR REPLACE FUNCTION workflow_run_data_completeness_lock(team UUID, run UUID) RETURNS void AS $$
 BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended(team::text || ':' || run::text, 0));
 END;
 $$ LANGUAGE plpgsql;
+
+-- The open-gap floor for ONE facet of one run, in one place, because the downgrade and the manifest's own floor check
+-- must agree on it by construction: if the downgrade computed a smaller number than the check, the check would refuse
+-- the downgrade and take every gap in the statement down with it. count(*) over an absent facet is 0, never NULL,
+-- which is what keeps the floor comparison from evaluating to NULL and admitting the row it exists to refuse.
+CREATE OR REPLACE FUNCTION workflow_run_capture_gap_open_count(team UUID, run UUID, subject VARCHAR) RETURNS BIGINT AS $$
+    SELECT count(*) FROM workflow_run_capture_gap
+    WHERE team_id = team AND workflow_run_id = run AND subject_kind = subject AND resolution = 'Open';
+$$ LANGUAGE sql STABLE;
 
 CREATE OR REPLACE FUNCTION workflow_run_capture_gap_guard() RETURNS trigger AS $$
 BEGIN
@@ -270,6 +289,12 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- FOR EACH ROW, because every check above is a fact about ONE row's own columns — its birth state, and the diff
+-- between its OLD and NEW — which a statement-level trigger has no OLD/NEW to read. A malformed row does take its
+-- whole statement down with it, and that is the right trade here in a way it is NOT for the downgrade below: the only
+-- alternative a BEFORE ROW trigger has is RETURN NULL, which would drop the offending gap in silence, and a silently
+-- dropped gap is precisely the silence this table exists to break. Refusing loudly leaves the producer able to retry;
+-- dropping quietly does not.
 CREATE TRIGGER workflow_run_capture_gap_enforce_invariants
     BEFORE INSERT OR UPDATE OR DELETE ON workflow_run_capture_gap
     FOR EACH ROW EXECUTE FUNCTION workflow_run_capture_gap_guard();
@@ -280,37 +305,55 @@ CREATE TRIGGER workflow_run_capture_gap_enforce_invariants
 -- known-missing count is advanced only on the row whose facet the gap belongs to, so a gap is counted where it
 -- happened instead of merely suppressing every verdict in the run.
 --
--- AFTER INSERT, deliberately: the guard's floor check counts open gaps, and it must be able to see this one.
+-- AFTER INSERT, deliberately: the floor this reconciles to counts open gaps, and it must be able to see the ones the
+-- statement just wrote. RECONCILES rather than increments, for the reason spelled out in the header — a per-row
+-- increment lands one below a floor that already counts the whole statement, and the resulting refusal destroys every
+-- gap in an honest multi-row INSERT while leaving the complete manifest that contradicted them standing. GREATEST
+-- never lowers a count a producer stated above the floor: knowing of more missing than has been rowed errs toward
+-- incomplete, which is the safe direction.
 CREATE OR REPLACE FUNCTION workflow_run_capture_gap_mark_manifest() RETURNS trigger AS $$
 BEGIN
-    UPDATE workflow_run_data_manifest SET
-        verdict = CASE WHEN verdict IN ('Exact', 'RedactedExact') THEN 'Partial' ELSE verdict END,
-        known_missing_count = known_missing_count + CASE WHEN facet = NEW.subject_kind THEN 1 ELSE 0 END,
-        revision = revision + 1,
-        last_modified_at = GREATEST(last_modified_at, NEW.noticed_at)
-    WHERE team_id = NEW.team_id AND workflow_run_id = NEW.workflow_run_id
-      AND (facet = NEW.subject_kind OR verdict IN ('Exact', 'RedactedExact'));
+    UPDATE workflow_run_data_manifest AS statement SET
+        verdict = CASE WHEN statement.verdict IN ('Exact', 'RedactedExact') THEN 'Partial' ELSE statement.verdict END,
+        known_missing_count = GREATEST(statement.known_missing_count,
+            workflow_run_capture_gap_open_count(statement.team_id, statement.workflow_run_id, statement.facet)),
+        revision = statement.revision + 1,
+        last_modified_at = GREATEST(statement.last_modified_at, noticed.latest_at)
+    -- GROUP BY, so a statement that inserted NOTHING contributes no row and joins to no manifest. A bare aggregate
+    -- would hand back one all-NULL row instead, and a join on a NULL run id matching nothing by accident is not the
+    -- same thing as not being asked to match.
+    FROM (SELECT team_id, workflow_run_id, max(noticed_at) AS latest_at FROM new_gaps GROUP BY team_id, workflow_run_id) AS noticed
+    WHERE statement.team_id = noticed.team_id AND statement.workflow_run_id = noticed.workflow_run_id
+      AND (statement.verdict IN ('Exact', 'RedactedExact')
+           OR statement.known_missing_count
+              < workflow_run_capture_gap_open_count(statement.team_id, statement.workflow_run_id, statement.facet));
     RETURN NULL;
 END;
 $$ LANGUAGE plpgsql;
 
+-- FOR EACH STATEMENT with a transition table, and the choice is load-bearing rather than stylistic: the manifest's
+-- known-missing count has to reconcile with the whole statement's gaps AT ONCE. Per row it cannot — row one's
+-- downgrade sees a floor that already counts rows two and three, lands under it, and is refused, which aborts the
+-- statement and erases all three admissions. Reconciling once, after every row is visible, is the only shape that is
+-- right for a batch of one and a batch of three alike.
 CREATE TRIGGER workflow_run_capture_gap_downgrades_its_manifest
     AFTER INSERT ON workflow_run_capture_gap
-    FOR EACH ROW EXECUTE FUNCTION workflow_run_capture_gap_mark_manifest();
+    REFERENCING NEW TABLE AS new_gaps
+    FOR EACH STATEMENT EXECUTE FUNCTION workflow_run_capture_gap_mark_manifest();
 
 CREATE OR REPLACE FUNCTION workflow_run_data_manifest_guard() RETURNS trigger AS $$
 DECLARE
     open_gap_id UUID;
     open_facet_gaps BIGINT;
 BEGIN
-    IF TG_OP = 'INSERT' THEN
-        -- Taken on INSERT and deliberately NOT on UPDATE. On INSERT there is no row yet for a gap's downgrade to block
-        -- on, so this lock is the only rendezvous the two writers have. An UPDATE already holds this row's own lock
-        -- before the trigger runs, and a gap's downgrade has to pass through that same row — so whichever commits
-        -- first, the other sees it. Taking the advisory lock here too would acquire the pair in the opposite order to
-        -- the gap path (which takes the lock, then the rows) and buy a deadlock for a race the row lock already settles.
-        PERFORM workflow_run_data_completeness_lock(NEW.team_id, NEW.workflow_run_id);
+    -- Taken on INSERT *and* UPDATE, and before the open-gap probe below, because that probe is exactly what cannot see
+    -- a concurrent uncommitted gap. An UPDATE is not exempt on the grounds that it already holds this row's lock: the
+    -- gap's downgrade only matches manifest rows its own snapshot shows as complete or same-facet, so a row being
+    -- raised to complete for ANOTHER facet is never matched, never locked, and both writers commit blind — leaving the
+    -- run Exact beside an open gap with neither of them at fault. This is the rendezvous both directions need.
+    PERFORM workflow_run_data_completeness_lock(NEW.team_id, NEW.workflow_run_id);
 
+    IF TG_OP = 'INSERT' THEN
         IF NEW.revision <> 1 OR NEW.last_modified_at IS DISTINCT FROM NEW.created_at THEN
             RAISE EXCEPTION 'workflow_run_data_manifest must start as a revision-one statement (id=%).', NEW.id;
         END IF;
@@ -342,10 +385,10 @@ BEGIN
 
     -- ...and the count may not sit BELOW the gaps already rowed for this facet, or the manifest reports less missing
     -- than the plane can already show. Above is admitted: a producer that knows of more missing than it has rowed is
-    -- erring toward incomplete, which is the safe direction.
-    SELECT count(*) INTO open_facet_gaps FROM workflow_run_capture_gap
-    WHERE team_id = NEW.team_id AND workflow_run_id = NEW.workflow_run_id
-      AND subject_kind = NEW.facet AND resolution = 'Open';
+    -- erring toward incomplete, which is the safe direction. This floor is the ONE claim a manifest write may be
+    -- refused over, and it shares its definition with the downgrade so the downgrade can never trip it — otherwise
+    -- this refusal would kill the gap statement that provoked it, and the gaps are the half that must survive.
+    open_facet_gaps := workflow_run_capture_gap_open_count(NEW.team_id, NEW.workflow_run_id, NEW.facet);
     IF NEW.known_missing_count < open_facet_gaps THEN
         RAISE EXCEPTION 'workflow_run_data_manifest known-missing count may not be below the open gaps recorded for this facet (id=%, facet=%, stated=%, open=%).', NEW.id, NEW.facet, NEW.known_missing_count, open_facet_gaps;
     END IF;
@@ -354,6 +397,10 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- FOR EACH ROW: every check here reads one statement's own OLD/NEW — its identity, its revision step, its verdict
+-- against the run's gaps — and the rendezvous lock has to be held before that row's verdict is probed, which only a
+-- BEFORE ROW trigger can do. Refusing the statement is also the right direction here, unlike on the gap path: what is
+-- being refused is a CLAIM about the record, and a claim is always safe to lose.
 CREATE TRIGGER workflow_run_data_manifest_enforce_invariants
     BEFORE INSERT OR UPDATE ON workflow_run_data_manifest
     FOR EACH ROW EXECUTE FUNCTION workflow_run_data_manifest_guard();
