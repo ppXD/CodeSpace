@@ -692,7 +692,7 @@ public sealed class AgentRunLogRuntimeTests
             await _gate.WaitAsync(cancellationToken);
             try
             {
-                if (_idempotency.TryGetValue(request.IdempotencyKey, out var prior))
+                if (_idempotency.TryGetValue(request.IdempotencyScope, out var prior))
                     return prior.Sha256 == request.ExpectedSha256
                         ? new ArtifactCasTransferResult.Committed(prior.IntentId, prior.ObjectId, prior.LocationId, true)
                         : new ArtifactCasTransferResult.Rejected(prior.IntentId, new ArtifactCasProblem(ArtifactCasProblemCode.IdempotencyConflict, false));
@@ -723,7 +723,7 @@ public sealed class AgentRunLogRuntimeTests
                 db.ArtifactLocation.Add(location);
                 await db.SaveChangesAsync(cancellationToken);
                 _bytes[objectId] = bytes;
-                _idempotency[request.IdempotencyKey] = new Stored(intentId, objectId, locationId, request.ExpectedSha256);
+                _idempotency[request.IdempotencyScope] = new Stored(intentId, objectId, locationId, request.ExpectedSha256);
                 return new ArtifactCasTransferResult.Committed(intentId, objectId, locationId, false);
             }
             finally { _gate.Release(); }

@@ -40,7 +40,7 @@ public sealed class RoutedArtifactPlaneWiringTests
         // artifact_cas_transfer_guard refuses every route out of Failed — a fence claim raises 'terminal rows cannot
         // be claimed', and a plain transition first demands an unexpired worker lease that a terminal row is
         // forbidden to hold. A port that promised a reopen could only ever raise PostgresException out of PutAsync,
-        // so recovery is a FRESH intent (ArtifactStore.IdempotencyKeyFor) rather than a backwards move.
+        // so recovery is a FRESH intent (ArtifactCasRuntimeCoordinator.IdempotencyKeyFor) rather than a backwards move.
         var members = typeof(IArtifactCasRuntimeCoordinator).GetMethods()
             .Concat(typeof(IArtifactCasRangeReader).GetMethods())
             .Select(method => method.Name).ToArray();

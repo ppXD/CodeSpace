@@ -4,6 +4,8 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.AgentRunLogging;
 using CodeSpace.Core.Services.Agents.Sandbox;
+using CodeSpace.Core.Services.Credentials;
+using CodeSpace.Core.Services.Workflows.Artifacts.Credentials;
 using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers.Local;
 using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
@@ -22,8 +24,9 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// revision whose credential reference dangles — so the classification under test is the one a deployment produces,
 /// not one a fake asserts.
 ///
-/// <para>The property this suite exists to protect: a permanent storage fault terminalizes the stream with a
-/// storage-shaped cause instead of being retried until the capture budget expires.</para>
+/// <para>Two properties, both of which a mis-classification silently breaks: a permanent storage fault terminalizes
+/// the stream with a storage-shaped cause instead of being retried until the capture budget expires, and the
+/// idempotency key that fault burned does not make that segment ordinal unwritable once the credential is repaired.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -59,8 +62,75 @@ public sealed class AgentRunLogStorageFaultFlowTests : IDisposable
             "the durable cause has to name the team's storage, or the operator is sent to look at the agent's log source");
     }
 
+    [Fact]
+    public async Task A_repaired_credential_lets_the_same_segment_ordinal_commit_under_the_next_generation()
+    {
+        // The permanent-wedge half. A non-retryable transfer records Failed against the intent for this exact
+        // (stream, ordinal) key, and 0131_artifact_transfer_fence_claim.sql offers no route back out of Failed:
+        // a fence claim raises 'terminal rows cannot be claimed' and a plain transition needs a lease a terminal row
+        // may not hold. Creating the missing credential leaves storage_profile_revision untouched — that is what
+        // makes this the poisoning case — so unless the repaired attempt claims a FRESH key, those bytes can never
+        // be written under this stream again and the retry the append seam promises is a permanent rejection.
+        var world = await SeedWorldAsync();
+        var bytes = "log-bytes-that-must-survive-a-credential-repair"u8.ToArray();
+        Guid streamId;
+        var session = Guid.NewGuid();
+
+        using (var brokenScope = _fixture.BeginScope())
+        {
+            var logs = LogService(brokenScope);
+            streamId = (await logs.OpenAsync(Open(world, session), CancellationToken.None)).ShouldBeOfType<AgentRunLogOpenResult.Opened>().Metadata.StreamId;
+            var rejected = (await logs.AppendAsync(Append(world, streamId, session, bytes), CancellationToken.None)).ShouldBeOfType<AgentRunLogAppendResult.Rejected>();
+
+            rejected.Problem.IsRetryable.ShouldBeFalse("an unresolvable credential is not a retryable fault");
+            await AssertIntentsAsync(world.TeamId, [($"agent-run-log/{streamId:N}/1", ArtifactTransferState.Failed)]);
+        }
+
+        await RepairCredentialAsync(world);
+
+        using (var repairedScope = _fixture.BeginScope())
+        {
+            var logs = LogService(repairedScope);
+            var appended = (await logs.AppendAsync(Append(world, streamId, session, bytes), CancellationToken.None)).ShouldBeOfType<AgentRunLogAppendResult.Appended>();
+            appended.Metadata.TotalBytes.ShouldBe(bytes.Length);
+
+            var read = (await logs.ReadRangeAsync(new AgentRunLogRangeRequest(world.TeamId, streamId, 0, bytes.Length), CancellationToken.None)).ShouldBeOfType<AgentRunLogRangeResult.Available>();
+            read.Bytes.ShouldBe(bytes);
+        }
+
+        await AssertIntentsAsync(world.TeamId, [
+            ($"agent-run-log/{streamId:N}/1", ArtifactTransferState.Failed),
+            ($"agent-run-log/{streamId:N}/1/g1", ArtifactTransferState.Committed),
+        ]);
+    }
+
     private static AgentRunLogService LogService(ILifetimeScope scope) =>
         new(scope.Resolve<DbContextOptions<CodeSpaceDbContext>>(), scope.Resolve<IArtifactCasRuntimeCoordinator>(), TimeProvider.System);
+
+    /// <summary>Every intent this team owns, in key order, as (idempotency key, state) — so a test names the exact generations it expects and nothing else.</summary>
+    private async Task AssertIntentsAsync(Guid teamId, (string Key, ArtifactTransferState State)[] expected)
+    {
+        using var scope = _fixture.BeginScope();
+        var intents = await scope.Resolve<CodeSpaceDbContext>().ArtifactTransferIntent.AsNoTracking()
+            .Where(value => value.TeamId == teamId).OrderBy(value => value.IdempotencyKey)
+            .Select(value => new { value.IdempotencyKey, value.State }).ToListAsync();
+
+        intents.Select(value => (value.IdempotencyKey, value.State)).ShouldBe(expected);
+    }
+
+    private static AgentRunLogOpenRequest Open(World world, Guid session) => new()
+    {
+        TeamId = world.TeamId, AgentRunId = world.AgentRunId, WorkerFenceEpoch = 7, CaptureSessionId = session,
+        StreamKind = AgentRunLogKinds.StandardOutput, ContentType = "text/plain", ContentEncoding = "utf-8", CaptureSource = "test-capture/v1",
+    };
+
+    private static AgentRunLogAppendRequest Append(World world, Guid streamId, Guid session, byte[] bytes) => new()
+    {
+        TeamId = world.TeamId, AgentRunId = world.AgentRunId, StreamId = streamId, WorkerFenceEpoch = 7,
+        CaptureSessionId = session, ExpectedSegmentOrdinal = 1, ExpectedOffsetBytes = 0, ExpectedSourceOffsetBytes = 0,
+        SourceLengthBytes = bytes.Length, StorageProfileId = world.StorageProfileId, StorageProfileRevision = 1,
+        ActorId = world.ActorId, Bytes = bytes,
+    };
 
     private static AgentRunLogCaptureOpenRequest OpenCapture(World world, StubLogSource source) => new()
     {
@@ -111,6 +181,30 @@ public sealed class AgentRunLogStorageFaultFlowTests : IDisposable
         });
         await db.SaveChangesAsync();
         return new World(teamId, actorId, profileId, credentialId, runId);
+    }
+
+    /// <summary>
+    /// The repair: the credential the profile revision always pointed at now exists and is Active. The profile
+    /// revision is not touched — which is exactly why the burned intent key cannot be escaped by a revision bump.
+    /// </summary>
+    private async Task RepairCredentialAsync(World world)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var credential = new StorageCredential
+        {
+            Id = world.CredentialId, TeamId = world.TeamId, StableName = $"agent-log-fault-{world.CredentialId:N}",
+            CurrentRevision = 1, State = StorageCredentialState.Active, CreatedDate = now, CreatedBy = world.ActorId,
+        };
+        credential.Revisions.Add(new StorageCredentialRevision
+        {
+            Id = Guid.NewGuid(), TeamId = world.TeamId, StorageCredentialId = world.CredentialId, Revision = 1,
+            ProviderTypeKey = LocalRwxArtifactStorageDriverFactory.TypeKey, EncryptedPayload = scope.Resolve<IPayloadEncryptor>().Encrypt("{}"),
+            SafeHint = "safe", EnvelopeFingerprint = $"sha256:{new string('b', 64)}", CreatedDate = now, CreatedBy = world.ActorId,
+        });
+        db.StorageCredential.Add(credential);
+        await db.SaveChangesAsync();
     }
 
     private string NewRoot()

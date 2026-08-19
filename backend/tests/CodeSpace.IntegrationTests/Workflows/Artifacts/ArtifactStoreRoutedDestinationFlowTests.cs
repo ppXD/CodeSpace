@@ -291,7 +291,7 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
         PlaceForeignObject(root, sha);
 
         await Should.ThrowAsync<ArtifactStorageDestinationUnavailableException>(() => PutAsync(teamId, content));
-        await AssertIntentsAsync(teamId, [(ArtifactStore.IdempotencyKeyFor(sha, 0), ArtifactTransferState.Failed)]);
+        await AssertIntentsAsync(teamId, [(IntentKeyFor(sha, 0), ArtifactTransferState.Failed)]);
 
         File.Delete(ObjectPath(root, sha));
         var artifactId = await PutAsync(teamId, content);
@@ -300,8 +300,8 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
             "a repaired destination must be able to store content an earlier misconfiguration failed on");
         (await File.ReadAllBytesAsync(ObjectPath(root, sha))).ShouldBe(content);
         await AssertIntentsAsync(teamId, [
-            (ArtifactStore.IdempotencyKeyFor(sha, 0), ArtifactTransferState.Failed),
-            (ArtifactStore.IdempotencyKeyFor(sha, 1), ArtifactTransferState.Committed),
+            (IntentKeyFor(sha, 0), ArtifactTransferState.Failed),
+            (IntentKeyFor(sha, 1), ArtifactTransferState.Committed),
         ]);
     }
 
@@ -326,8 +326,8 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
         second.TransferProblem.ShouldBe(ArtifactCasProblemCode.TargetCorrupt,
             "the second call ran a REAL attempt of its own rather than replaying the first one's stored verdict");
         await AssertIntentsAsync(teamId, [
-            (ArtifactStore.IdempotencyKeyFor(sha, 0), ArtifactTransferState.Failed),
-            (ArtifactStore.IdempotencyKeyFor(sha, 1), ArtifactTransferState.Failed),
+            (IntentKeyFor(sha, 0), ArtifactTransferState.Failed),
+            (IntentKeyFor(sha, 1), ArtifactTransferState.Failed),
         ]);
 
         using var scope = _fixture.BeginScope();
@@ -421,7 +421,7 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
         db.ArtifactTransferIntent.Add(new ArtifactTransferIntent
         {
             Id = intentId, TeamId = teamId, StorageProfileRevisionId = revision.Id,
-            IdempotencyKey = ArtifactStore.IdempotencyKeyFor(sha, 0),
+            IdempotencyKey = IntentKeyFor(sha, 0),
             ExpectedDigestAlgorithm = ArtifactDigestAlgorithm.Sha256, ExpectedDigest = Convert.FromHexString(sha),
             ExpectedSizeBytes = content.Length, TargetLocator = objectKey, TargetObjectKey = objectKey,
             State = ArtifactTransferState.Intended, Revision = 1, RetryCount = 0,
@@ -468,6 +468,9 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
 
         intents.Select(i => (i.IdempotencyKey, i.State)).ShouldBe(expected);
     }
+
+    /// <summary>The intent key one generation of one payload claims, composed exactly the way the write path composes it: the store owns the scope, the CAS runtime owns the generation.</summary>
+    private static string IntentKeyFor(string sha, int generation) => ArtifactCasRuntimeCoordinator.IdempotencyKeyFor(ArtifactStore.IdempotencyScopeFor(sha), generation);
 
     /// <summary>The object key the routed write targets. Content-addressed and generation-INVARIANT, so every attempt at the same bytes dedups on the provider.</summary>
     private static string ObjectKeyFor(string sha) => $"workflow-artifacts/{sha[..2]}/{sha.Substring(2, 2)}/{sha}";

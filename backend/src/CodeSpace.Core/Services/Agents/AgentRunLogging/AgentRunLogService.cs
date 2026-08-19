@@ -100,7 +100,7 @@ public sealed partial class AgentRunLogService : IAgentRunLogService
         var transfer = await _artifacts.PutAsync(new ArtifactCasTransferRequest
         {
             TeamId = request.TeamId, StorageProfileId = request.StorageProfileId, StorageProfileRevision = request.StorageProfileRevision,
-            IdempotencyKey = $"agent-run-log/{request.StreamId:N}/{request.ExpectedSegmentOrdinal}",
+            IdempotencyScope = $"agent-run-log/{request.StreamId:N}/{request.ExpectedSegmentOrdinal}",
             TargetObjectKey = $"agent-runs/{request.AgentRunId:N}/logs/{request.StreamId:N}/{request.ExpectedSegmentOrdinal:D20}-{Convert.ToHexStringLower(digest)}",
             Content = content, ExpectedSizeBytes = request.Bytes.Length, ExpectedSha256 = Convert.ToHexStringLower(digest),
             ContentType = before.Stream!.ContentType, ActorId = request.ActorId, OperationTimeout = request.OperationTimeout,
