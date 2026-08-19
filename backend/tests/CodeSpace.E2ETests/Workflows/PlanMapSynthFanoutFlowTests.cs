@@ -9,6 +9,7 @@ using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Plans;
@@ -251,6 +252,31 @@ public class PlanMapSynthFanoutFlowTests
         var mapOut = JsonDocument.Parse(mapNode.OutputsJson!).RootElement;
         mapOut.GetProperty("count").GetInt32().ShouldBe(DeterministicWorkPlanLlmClient.DefaultInstructions.Count);
         mapOut.GetProperty("failed").GetInt32().ShouldBe(0);
+
+        AssertTheReduceReadTheBoundedProjectionUnchanged(mapOut);
+    }
+
+    /// <summary>
+    /// The reduce's input BOUND on the real wire: the real builder projected the graph, the real engine reduced real
+    /// agent branches, and the map persisted the budget-bounded projection the synth prompt binds. At this ordinary
+    /// branch count the bound must be INERT — no excerpt notice, no truncation marker — which is what the assertions
+    /// above then confirm from the other side, having found every branch's real summary inside the reduced output.
+    ///
+    /// <para>Byte-identity against the raw array is asserted at the unit tier (through the real
+    /// <c>VariableResolver</c>) and the integration tier, where the result sizes are controlled; here the ledger copy
+    /// of <c>results</c> may be an artifact ref rather than the array, so this tier pins what it can actually see.</para>
+    /// </summary>
+    private static void AssertTheReduceReadTheBoundedProjectionUnchanged(JsonElement mapOut)
+    {
+        var projection = mapOut.GetProperty(WorkflowOutputKeys.MapResultsPrompt);
+
+        projection.ValueKind.ShouldBe(JsonValueKind.String,
+            customMessage: "the real builder's map must declare the prompt budget, so the real engine emits the projection the synth binds");
+
+        projection.GetString()!.ShouldNotContain("EXCERPT",
+            customMessage: "nothing was dropped at this branch count, so the prompt must not tell the model that anything was");
+        projection.GetString()!.ShouldNotContain("omitted",
+            customMessage: "an ordinary fan-out carries no truncation marker — the bound is inert until it binds");
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────

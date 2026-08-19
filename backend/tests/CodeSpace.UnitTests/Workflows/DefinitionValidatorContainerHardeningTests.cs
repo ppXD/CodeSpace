@@ -410,9 +410,12 @@ public class DefinitionValidatorContainerHardeningTests
     [Fact]
     public void Map_reserved_set_is_pinned_to_the_engine_reducer_keys()
     {
-        // BuildMapOutputs writes the result array under resultKey, then count + failed. If a future key is
-        // added to the reducer but not here, this fails — forcing the validator's reserved set to follow.
-        WorkflowOutputKeys.Map.ShouldBe(new[] { "count", "failed" });
+        // BuildMapOutputs writes the result array under resultKey, then count + failed — and, on a map that
+        // declares a promptBudgetChars, resultsPrompt (the budget-bounded projection a reduce prompt binds).
+        // resultsPrompt is reserved UNCONDITIONALLY even though it is written conditionally: an author whose
+        // resultKey was named that would otherwise be silently overwritten the moment a map opted in.
+        // If a future key is added to the reducer but not here, this fails — forcing the validator's set to follow.
+        WorkflowOutputKeys.Map.ShouldBe(new[] { "count", "failed", "resultsPrompt" });
     }
 
     [Fact]

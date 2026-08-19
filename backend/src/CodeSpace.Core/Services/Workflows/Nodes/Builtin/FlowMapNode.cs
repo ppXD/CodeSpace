@@ -10,7 +10,10 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// <c>flow.iterate</c> sets). Each branch's TERMINAL body node output becomes that element's result,
 /// and the per-element results reduce into a keyed array — <c>scope.Nodes[mapId] = { &lt;resultKey&gt;:
 /// [...ordered by element index...], count, failed }</c> — that a downstream synthesizer reads as
-/// <c>{{nodes.&lt;map&gt;.outputs.results}}</c> / <c>results[0]</c> / <c>results.length</c>.
+/// <c>{{nodes.&lt;map&gt;.outputs.results}}</c> / <c>results[0]</c> / <c>results.length</c>. A map that
+/// declares a <c>promptBudgetChars</c> adds one more key, <c>resultsPrompt</c> (see the output schema):
+/// the SAME results as a budget-bounded, excerpt-annotated string for a model prompt to bind, so a large
+/// fan-out cannot build a prompt past the model's context window.
 ///
 /// <para><b>Engine-driven.</b> Like <c>flow.loop</c>, a map is NOT executed through <c>RunAsync</c> —
 /// the engine dispatches on <see cref="NodeKind.Map"/> and runs the per-element body sub-walks itself
@@ -75,7 +78,7 @@ public sealed class FlowMapNode : INodeRuntime
             {
               "type": "object",
               "additionalProperties": true,
-              "description": "The reduced array under the configured resultKey (default 'results'), plus 'count' (elements fanned out) and 'failed' (branches that failed under continue-on-error)."
+              "description": "The reduced array under the configured resultKey (default 'results'), plus 'count' (elements fanned out) and 'failed' (branches that failed under continue-on-error). A map whose config sets 'promptBudgetChars' also emits 'resultsPrompt' — the results rendered as a string within that character budget, carrying an excerpt notice when content had to be dropped, for a downstream model prompt to bind instead of the unbounded array."
             }
             """)
     };

@@ -24,11 +24,33 @@ namespace CodeSpace.UnitTests.Workflows;
 public class ReducerEmittedKeysPinTests
 {
     [Fact]
-    public void BuildMapOutputs_emits_exactly_the_resultKey_plus_the_reserved_map_keys()
+    public void BuildMapOutputs_emits_exactly_the_resultKey_plus_the_always_written_reserved_map_keys()
     {
         const string resultKey = "results";   // the author-configurable key (not reserved)
 
         var emitted = WorkflowEngine.BuildMapOutputs(resultKey, new List<JsonElement>(), failed: 0).Keys.ToHashSet();
+
+        emitted.Remove(resultKey).ShouldBeTrue("the reducer must write the array under the configured resultKey");
+
+        // A map that declares no prompt budget — every map before that budget existed — writes count/failed and
+        // NOTHING else. Reserving the conditional key does not license emitting it unasked.
+        emitted.ShouldBe(new[] { WorkflowOutputKeys.MapCount, WorkflowOutputKeys.MapFailed }, ignoreOrder: true);
+    }
+
+    /// <summary>
+    /// The same drift pin for the OPTED-IN reducer: a map that declares a prompt budget writes ONE more key, and
+    /// that key must be in the reserved set too. Without this the conditional key could be added to the reducer,
+    /// left out of <see cref="WorkflowOutputKeys.Map"/>, and re-open the silent-overwrite bug for any author whose
+    /// <c>resultKey</c> happened to be named the same — while the always-written pin above still passed.
+    /// </summary>
+    [Fact]
+    public void BuildMapOutputs_with_a_prompt_budget_emits_only_reserved_keys_beyond_the_resultKey()
+    {
+        const string resultKey = "results";
+
+        var emitted = WorkflowEngine.BuildMapOutputs(resultKey, new List<JsonElement>(), failed: 0, promptBudgetChars: 2_000).Keys.ToHashSet();
+
+        emitted.ShouldContain(WorkflowOutputKeys.MapResultsPrompt, "a declared prompt budget must actually produce the projection");
 
         emitted.Remove(resultKey).ShouldBeTrue("the reducer must write the array under the configured resultKey");
         emitted.ShouldBe(WorkflowOutputKeys.Map, ignoreOrder: true);   // every OTHER key the reducer writes is reserved

@@ -1,5 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using CodeSpace.Core.Services.Workflows.Llm;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks;
@@ -156,7 +158,7 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
         items = context.RequirePlanConfirmation ? "{{nodes.confirm.outputs.json.subtasks}}" : "{{nodes.planner.outputs.json.subtasks}}",
     });
 
-    /// <summary>The map Config — carries the route's <see cref="RouteCaps.MaxParallelism"/> cap so the fan-out is bounded (the engine reads the <c>maxParallelism</c> key into the branch SemaphoreSlim via <c>MapConfig</c>). Only the one key is written, and only when the cap is set — an absent cap leaves the map unbounded.</summary>
+    /// <summary>The map Config — the route's <see cref="RouteCaps.MaxParallelism"/> cap so the fan-out is bounded (the engine reads the <c>maxParallelism</c> key into the branch SemaphoreSlim via <c>MapConfig</c>), the route's spend ceiling, both written only when the route sets them, and always the reduce's input budget (<see cref="SynthPromptBudgetChars"/>) that <see cref="SynthInputs"/>'s bounded binding depends on.</summary>
     private static JsonElement MapConfigJson(TaskBuildContext context)
     {
         var config = new JsonObject();
@@ -169,8 +171,12 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
         // cap while the map lane fanned out until the model plane or the wall clock stopped it.
         if (context.Route.Caps.MaxCostUsd is { } costCap) config["maxCostUsd"] = costCap;
 
-        // Byte-identical to the old empty case when neither cap is set, so no stored definition changes hash.
-        return config.Count == 0 ? Empty() : JsonSerializer.SerializeToElement(config);
+        // The reduce's INPUT bound. The synth prompt below binds the map's bounded projection rather than the raw
+        // array, so this key is what makes that projection exist. Resolved HERE, at build time, and recorded in the
+        // definition: a replayed run then projects against the number its own snapshot froze, never a later host's.
+        config["promptBudgetChars"] = SynthPromptBudgetChars;
+
+        return JsonSerializer.SerializeToElement(config);
     }
 
     /// <summary>The synth Config — the LLM the reduce runs on. Provider defaults to Anthropic (the same default the planner node + <c>WorkflowPlanProjector</c>'s synth use); the profile's model maps on via AddIfPresent. A test retargets the provider at the ILLMClient seam, never the builder.</summary>
@@ -186,12 +192,47 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
         return JsonSerializer.SerializeToElement(config);
     }
 
-    /// <summary>The synth Inputs — a REAL reduce prompt: combine ALL per-branch results into one coherent answer that addresses the seed goal. The userPrompt embeds the goal AND the WHOLE map results array (<c>{{nodes.map.outputs.results}}</c>), so the reduce is generic over ANY subtask count.</summary>
+    /// <summary>
+    /// Env var (a positive integer) overriding the reduce's input character budget, for an operator whose pool
+    /// serves a narrower-context model than the default assumes. Rule 8; the literal is pinned by test.
+    /// </summary>
+    public const string SynthPromptBudgetCharsEnvVar = "CODESPACE_PLAN_MAP_SYNTH_PROMPT_BUDGET_CHARS";
+
+    /// <summary>
+    /// The reduce's input character budget. 120K characters is roughly 40K tokens on this repo's own chars/3 estimate
+    /// (<c>LlmBudgetGuard.EstimateUsd</c>): well inside the 200K-token window of the Anthropic models this synth
+    /// defaults to, and far above any ordinary fan-out, so the common case never reaches the bound and its prompt
+    /// stays byte-identical. It does NOT fit a narrow-context model — an operator whose pool serves one lowers it
+    /// through <see cref="SynthPromptBudgetCharsEnvVar"/>; that is what the override is for.
+    /// </summary>
+    public const int SynthPromptBudgetCharsDefault = 120_000;
+
+    /// <summary>The resolved budget: the env override when a positive integer, else <see cref="SynthPromptBudgetCharsDefault"/>. Read at BUILD time so the number lands in the definition snapshot and a replay cannot drift.</summary>
+    public static int SynthPromptBudgetChars => LlmModelCapabilities.ResolvePositive(Environment.GetEnvironmentVariable(SynthPromptBudgetCharsEnvVar), SynthPromptBudgetCharsDefault);
+
+    /// <summary>
+    /// The synth Inputs — a REAL reduce prompt: combine ALL per-branch results into one coherent answer that
+    /// addresses the seed goal. The userPrompt embeds the goal AND the map's results, bound through the map's
+    /// BUDGET-BOUNDED projection (<c>{{nodes.map.outputs.resultsPrompt}}</c>, see
+    /// <see cref="MapConfigJson"/>'s <c>promptBudgetChars</c>) rather than the raw array.
+    ///
+    /// <para>Binding the raw array made the reduce generic over any subtask count in the sense that it never
+    /// mentioned one — but nothing capped the prompt, so a wide fan-out, or a few branches with large outputs,
+    /// built a request past the model's context window. That 400 is not parkable, so the reduce died at the LAST
+    /// node, after every branch had already run, billed, and (on a repo-bound graph) integrated. Bound to the
+    /// projection, the reduce is generic over any subtask count AND any branch size: within budget the projection
+    /// is the identical serialization of the identical array, so an ordinary run's prompt does not change by a
+    /// character; over budget the model is handed a fair share of every included branch and TOLD, in the prompt's
+    /// first sentence, that it is reading an excerpt.</para>
+    /// </summary>
     private static JsonElement SynthInputs(TaskBuildContext context) => JsonSerializer.SerializeToElement(new
     {
         systemPrompt = "Combine the per-subtask results into one coherent answer that addresses the goal.",
-        userPrompt = $"Goal: {context.Seed.Goal}\n\nPer-subtask results:\n{{{{nodes.map.outputs.results}}}}",
+        userPrompt = $"Goal: {context.Seed.Goal}\n\nPer-subtask results:\n" + SynthResultsRef,
     });
+
+    /// <summary>The reduce's results binding, composed from <see cref="WorkflowOutputKeys.MapResultsPrompt"/> so the prompt and the key the reducer writes cannot drift apart.</summary>
+    private const string SynthResultsRef = "{{nodes.map.outputs." + WorkflowOutputKeys.MapResultsPrompt + "}}";
 
     /// <summary>The done terminal Inputs — bind the synth's reduced <c>text</c> output into the run's <c>combined</c> output (the llm.complete node's output key is <c>text</c>). A repo-bound graph also surfaces the integrated candidate (branch + whole-set status) as run outputs, so the reviewable head is readable off the run row, not just the node ledger.</summary>
     private static JsonElement DoneInputs(TaskBuildContext context)

@@ -45,6 +45,19 @@ public sealed record MapConfig
     /// it and refuses the branches that would cross the ceiling.
     /// </summary>
     public decimal? MaxCostUsd { get; init; }
+
+    /// <summary>
+    /// Optional CHARACTER budget for a prompt-ready projection of the reduced array. Null (default) — every map
+    /// before this existed, and every map that does not feed a model — emits no projection at all, leaving the
+    /// output bag byte-identical. Set, the map ALSO emits
+    /// <c>WorkflowOutputKeys.MapResultsPrompt</c>: the results rendered as a string that fits the budget, with an
+    /// excerpt notice and per-branch markers whenever content had to be dropped (<c>MapResultsPrompt</c>). A reduce
+    /// prompt binds THAT instead of the raw array so it cannot outgrow the model's context window; the raw array
+    /// under <see cref="ResultKey"/> is untouched and stays the structured view for everything else.
+    /// The engine raises a set-but-tiny value to <c>MapPlan.MinPromptBudgetChars</c> so a projection always has room
+    /// for its notice plus at least one readable branch slice.
+    /// </summary>
+    public int? PromptBudgetChars { get; init; }
 }
 
 /// <summary>
