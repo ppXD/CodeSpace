@@ -1,5 +1,6 @@
 using CodeSpace.Core.Services.Agents.AgentRunLogging;
 using CodeSpace.Core.Services.Workflows.Artifacts.Routing;
+using CodeSpace.Core.Services.Workflows.Artifacts.Routing.DataClasses;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents;
@@ -20,7 +21,7 @@ public sealed class AgentRunLogStorageResolverTests
         var route = new StubRouteResolver(new StorageRouteSnapshotResolution.Ready(snapshot));
         var readiness = new StubReadiness();
 
-        var result = await new AgentRunLogStorageResolver(route, readiness).ResolveAsync(teamId, CancellationToken.None);
+        var result = await Resolver(route, readiness).ResolveAsync(teamId, CancellationToken.None);
 
         result.ShouldBe(new AgentRunLogStorageResolution.Ready(profileId, 11));
         route.Requests.ShouldBe([new StorageRouteSnapshotRequest(teamId, "agent-run-log/v1")]);
@@ -42,7 +43,7 @@ public sealed class AgentRunLogStorageResolverTests
             }));
         var readiness = new StubReadiness();
 
-        var result = await new AgentRunLogStorageResolver(route, readiness).ResolveAsync(teamId, CancellationToken.None);
+        var result = await Resolver(route, readiness).ResolveAsync(teamId, CancellationToken.None);
 
         result.ShouldBe(new AgentRunLogStorageResolution.Ready(profileId, 1));
         readiness.TeamIds.ShouldBe([teamId]);
@@ -73,7 +74,7 @@ public sealed class AgentRunLogStorageResolverTests
         {
             var route = new StubRouteResolver(resolution);
             var readiness = new StubReadiness();
-            var result = await new AgentRunLogStorageResolver(route, readiness).ResolveAsync(Guid.NewGuid(), CancellationToken.None);
+            var result = await Resolver(route, readiness).ResolveAsync(Guid.NewGuid(), CancellationToken.None);
             result.ShouldBe(new AgentRunLogStorageResolution.Unavailable(expected));
             route.Requests.Count.ShouldBe(1);
             readiness.TeamIds.ShouldBeEmpty();
@@ -86,7 +87,7 @@ public sealed class AgentRunLogStorageResolverTests
         var route = new StubRouteResolver(new StorageRouteSnapshotResolution.Missing(), new StorageRouteSnapshotResolution.Missing());
         var readiness = new StubReadiness();
 
-        var result = await new AgentRunLogStorageResolver(route, readiness).ResolveAsync(Guid.NewGuid(), CancellationToken.None);
+        var result = await Resolver(route, readiness).ResolveAsync(Guid.NewGuid(), CancellationToken.None);
 
         result.ShouldBe(new AgentRunLogStorageResolution.Unavailable(AgentRunLogStorageProblemCode.Missing));
         readiness.TeamIds.Count.ShouldBe(1);
@@ -100,8 +101,11 @@ public sealed class AgentRunLogStorageResolverTests
         cancellation.Cancel();
         var route = new StubRouteResolver(new StorageRouteSnapshotResolution.Cancelled());
 
-        await Should.ThrowAsync<OperationCanceledException>(() => new AgentRunLogStorageResolver(route, new StubReadiness()).ResolveAsync(Guid.NewGuid(), cancellation.Token));
+        await Should.ThrowAsync<OperationCanceledException>(() => Resolver(route, new StubReadiness()).ResolveAsync(Guid.NewGuid(), cancellation.Token));
     }
+
+    /// <summary>The capture plane's adapter over the shared destination policy, with the stub still standing in for the routing plane itself.</summary>
+    private static AgentRunLogStorageResolver Resolver(IStorageRouteSnapshotResolver routes, IAgentRunLogStorageReadiness readiness) => new(new RoutedDestinationResolver(routes), readiness, new AgentRunLogDataClass());
 
     private sealed class StubRouteResolver(params StorageRouteSnapshotResolution[] results) : IStorageRouteSnapshotResolver
     {
