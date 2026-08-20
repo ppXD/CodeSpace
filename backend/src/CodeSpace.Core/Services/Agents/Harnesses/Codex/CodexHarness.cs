@@ -27,7 +27,7 @@ namespace CodeSpace.Core.Services.Agents.Harnesses.Codex;
 /// harness contributes NO model-call rows and the per-run aggregate stays the only figure it has. Recording nothing is
 /// the honest outcome; the fix is a Codex that prints per-call records, not a reader that invents them.</para>
 /// </summary>
-public sealed class CodexHarness : IAgentHarness, IAgentHarnessContractGeneration, IModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, IAgentTranscriptModelSource, IAgentGroundedFrameReader, ISingletonDependency
+public sealed class CodexHarness : IAgentHarness, IAgentHarnessContractGeneration, IAgentHarnessRunFactKeys, IModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, IAgentTranscriptModelSource, IAgentGroundedFrameReader, ISingletonDependency
 {
     public const string HarnessKind = "codex-cli";
 
@@ -101,6 +101,33 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessContractGeneratio
     /// <c>AgentNativeRecordPumpTests.Every_shipped_adapter_keys_its_rows_under_the_generation_it_declares</c>.
     /// </summary>
     public int ContractGeneration => 1;
+
+    /// <summary>
+    /// Where Codex's <c>exec --json</c> stream spells the three run facts: <c>thread_id</c> on <c>thread.started</c>
+    /// (which is why <see cref="ParseEvents"/> keeps that line), and the turn's cumulative token total on
+    /// <c>turn.completed</c> — at <c>usage</c> (the shape <c>CodexHarnessTests</c> pins against 0.142.x) or under
+    /// <c>info.total_token_usage</c> (the shape this class's own summary records), plus the <c>msg</c> envelope an
+    /// older payload wraps itself in. Every location the shared table held for this adapter, in the SAME order:
+    /// transcribed rather than re-reasoned, because the order decides which figure wins on a line carrying two, so
+    /// re-ordering it would change what a run is billed.
+    ///
+    /// <para><see cref="AgentRunFactKeys.ModelKeys"/> is declared even though this stream names NO model (it is chosen
+    /// server-side — see <see cref="TryReadModelFromTranscript"/>, which recovers it from the session rollout
+    /// instead). It is the same list <see cref="TryReadTurnContextModel"/> reads a rollout's <c>turn_context</c> with,
+    /// so the two are one table rather than two a comment asks a reader to keep aligned; declaring it also means a
+    /// Codex build that starts naming the model in-stream is read without an edit here.</para>
+    /// </summary>
+    public AgentRunFactKeys RunFactKeys => FactKeys;
+
+    private static readonly AgentRunFactKeys FactKeys = new()
+    {
+        SessionIdKeys = new[] { "thread_id" },
+        ModelKeys = new[] { "model", "model_name" },
+        InputTokenKeys = new[] { "input_tokens" },
+        OutputTokenKeys = new[] { "output_tokens" },
+        Envelopes = new[] { "msg" },
+        UsageContainers = new[] { "usage", "info.total_token_usage", "info", "total_token_usage", "msg.usage", "msg" },
+    };
 
     public IReadOnlyList<string> Models { get; } = new[] { "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-codex" };
 
@@ -201,9 +228,6 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessContractGeneratio
     /// </summary>
     public string? TryReadModelFromTranscript(string transcript) => TryReadModelFromRollout(transcript);
 
-    /// <summary>Model keys a Codex rollout <c>turn_context</c> payload may carry (<c>model</c>; <c>model_name</c> tolerated for a version bump), kept aligned with <see cref="AgentModelReader"/>'s stream keys.</summary>
-    private static readonly string[] RolloutModelKeys = { "model", "model_name" };
-
     /// <summary>
     /// Read the model off a Codex session rollout JSONL. Codex records the model ONLY on <c>turn_context</c> records at
     /// <c>payload.model</c> (never <c>session_meta</c>, which carries only <c>model_provider</c>). A resumed/continued thread
@@ -245,15 +269,11 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessContractGeneratio
 
     private static bool TryReadModelKey(JsonElement obj, out string model)
     {
-        foreach (var key in RolloutModelKeys)
-            if (obj.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String && v.GetString() is { Length: > 0 } s)
-            {
-                model = s;
-                return true;
-            }
+        // The SAME keys this adapter declares for its stream (see FactKeys) — a rollout's turn_context and a stream
+        // frame spell the model identically, so there is one table for both rather than two kept aligned by comment.
+        model = AgentRunFactScan.ReadString(obj, FactKeys.ModelKeys) ?? "";
 
-        model = "";
-        return false;
+        return model.Length > 0;
     }
 
     /// <summary>

@@ -13,6 +13,12 @@ namespace CodeSpace.UnitTests.Workflows;
 /// <c>info.total_token_usage</c>, Claude <c>usage</c>, an OpenAI-compatible gateway's <c>prompt/completion_tokens</c>),
 /// prefer the cumulative total, take the LAST-emitted count, and return null (never a misleading half-count)
 /// when usage is absent or partial.
+///
+/// <para><b>Which key table these exercise.</b> The list overload used throughout reads under
+/// <see cref="AgentRunFactKeys.Fallback"/> — the union the reader itself used to hold, now kept only for a harness that
+/// declares no spellings of its own. A shipped adapter's extraction runs on its OWN declaration
+/// (<see cref="IAgentHarnessRunFactKeys"/>) and is pinned by <c>AgentRunFactKeysTests</c>, so a case here is a
+/// statement about the fallback's tolerance, never about what a particular harness does.</para>
 /// </summary>
 [Trait("Category", "Unit")]
 public class AgentTokenUsageReaderTests

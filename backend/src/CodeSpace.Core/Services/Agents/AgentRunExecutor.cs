@@ -568,7 +568,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
 
         var folder = context.Harness.CreateFolder();   // BOUNDED, exactly as the live tail folds — a re-attached run must not be able to exhaust the heap either
-        var facts = new AgentRunFacts();   // driven alongside the folder, exactly as the live tail does, so both paths reach MapSandboxResult with the same inputs
+        var facts = AgentRunFacts.For(context.Harness);   // driven alongside the folder, exactly as the live tail does, so both paths reach MapSandboxResult with the same inputs
         await using var transcript = new AgentTranscriptSpool(TranscriptSpillDirectory(context.RunId));   // D3/G0: the faithful raw stream of the RESUMED tail (the pre-crash prefix lived in the dead observer's run), bounded exactly as the live tail's is and spilled into the SAME run-owned, reaper-swept spool directory
         var writer = new BufferedEventWriter(_runs, context.RunId);   // same batched-append + flush-at-checkpoint path as the live tail
         var native = await OpenResumedCaptureAsync(context, redactor, cancellationToken).ConfigureAwait(false);   // G1: the RESUMED frame stream of the same process, continuing its source cursor and the execution's reduction
@@ -613,6 +613,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // attempt the original launch appended, because a resumed opening records against it rather than inventing a
         // second row for one process.
         await native.CloseAsync(ObservedExitCode(sandbox), cancellationToken).ConfigureAwait(false);
+
+        ReportUnestablishedFacts(context.Harness, facts, context.RunId);
 
         var result = await AttachTranscriptAsync(MapSandboxResult(sandbox, folder, facts), context.TeamId, transcript, cancellationToken).ConfigureAwait(false);
 
@@ -2219,7 +2221,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private async Task<AgentRunResult> RunHarnessAsync(HarnessRunContext context, CancellationToken cancellationToken)
     {
         var folder = context.Harness.CreateFolder();   // BOUNDED: the harness's OWN reductions, not the run's events — a long run must not be able to exhaust the heap here
-        var facts = new AgentRunFacts();   // the three harness-independent facts a forced terminal reports without ever consulting the harness
+        var facts = AgentRunFacts.For(context.Harness);   // the three facts a forced terminal reports without folding, read with THIS harness's declared spellings (or the fallback union when it declares none)
         var writer = new BufferedEventWriter(_runs, context.RunId);   // batches the DB inserts; flushed at each spool checkpoint + once at the end
         var native = await OpenNativeCaptureAsync(context, cancellationToken).ConfigureAwait(false);   // G1: the lossless frame plane, dual-written beside the log; a plane that won't open leaves this path unchanged
 
@@ -2270,10 +2272,27 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // rather than as an exit nobody saw. Both halves are best-effort: neither can change the run's own outcome.
         await native.CloseAsync(ObservedExitCode(sandbox), cancellationToken).ConfigureAwait(false);
 
+        ReportUnestablishedFacts(context.Harness, facts, context.RunId);
+
         // Events are already redacted, so a result the harness folds from them (summary / error) is redacted too. The
         // faithful raw transcript is NOT attached here: it belongs to the whole run (every revise round streams into
         // the same spool) and is materialized once, at the end, by AttachTranscriptAsync.
         return MapSandboxResult(sandbox, folder, facts);
+    }
+
+    /// <summary>
+    /// Say it when a run's shared facts came back null from a harness that never declared where they live — the one
+    /// failure mode this whole seam exists for, and the one nothing downstream rejects: <see cref="BuildReviseTask"/>
+    /// reads a null session id as "cold" and silently restarts the conversation on every warm retry, and a null token
+    /// usage leaves the run priced at nothing. A harness that DID declare stays quiet even when a fact is null, because
+    /// then the null is what its own table says the stream carried (Codex names no model in-stream and recovers it via
+    /// <see cref="IAgentTranscriptModelSource"/>) — see <see cref="AgentRunFacts.UnestablishedFacts"/>.
+    /// </summary>
+    private void ReportUnestablishedFacts(IAgentHarness harness, AgentRunFacts facts, Guid runId)
+    {
+        if (facts.UnestablishedFacts.Count == 0) return;
+
+        _logger.LogWarning("Agent run {RunId}: harness {Harness} declares no run-fact keys (IAgentHarnessRunFactKeys) and the fallback key table found no {UnestablishedFacts} in its stream; a missing session id makes every warm retry cold-start and a missing token usage prices the run at nothing", runId, harness.Kind, string.Join(", ", facts.UnestablishedFacts));
     }
 
     /// <summary>

@@ -16,6 +16,12 @@ namespace CodeSpace.UnitTests.Workflows;
 /// the reader keys on the <c>model</c>/<c>model_name</c> key and never on a type. In particular Codex's
 /// <c>exec --json</c> stream names no model at all (<c>CodexHarness.ReadSessionFrame</c>), so no test here may be read
 /// as pinning a Codex behaviour.</para>
+///
+/// <para><b>Which key table these exercise.</b> The list overload used throughout reads under
+/// <see cref="AgentRunFactKeys.Fallback"/> — the union the reader itself used to hold, now kept only for a harness that
+/// declares no spellings of its own. A shipped adapter's extraction runs on its OWN declaration
+/// (<see cref="IAgentHarnessRunFactKeys"/>) and is pinned by <c>AgentRunFactKeysTests</c>, so a case here is a
+/// statement about the fallback's tolerance, never about what a particular harness does.</para>
 /// </summary>
 [Trait("Category", "Unit")]
 public class AgentModelReaderTests

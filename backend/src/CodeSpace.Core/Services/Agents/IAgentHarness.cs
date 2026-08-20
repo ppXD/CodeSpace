@@ -31,6 +31,13 @@ public interface IAgentHarness
     /// ONE native line can carry several content blocks (e.g. a Claude assistant turn with reasoning + a tool_use +
     /// text) — each becomes its own event, in stream order, so the durable log is FAITHFUL rather than first-block-only.
     /// Returns an empty list for lines that carry no event (blank / setup / unparseable noise) — never null.
+    ///
+    /// <para><b>The retention obligation the shared run facts rest on.</b> The session id, token usage, and model are
+    /// read off <see cref="AgentEvent.Data"/> only (see <see cref="AgentRunFacts"/>), so a line carrying one of the
+    /// three must surface at least one event holding that line's structured root — or a sub-object containing the
+    /// fact — as its <c>Data</c>. This is why both shipped adapters keep an otherwise-suppressible lifecycle line
+    /// (Claude's <c>system</c>/<c>init</c>, Codex's <c>thread.started</c>). An adapter that keeps only the human text
+    /// contributes no facts, however carefully <see cref="IAgentHarnessRunFactKeys"/> declares their spellings.</para>
     /// </summary>
     IReadOnlyList<AgentEvent> ParseEvents(string rawLine);
 
@@ -55,7 +62,7 @@ public interface IAgentHarness
 /// </summary>
 internal static class AgentHarnessFoldExtensions
 {
-    internal static AgentRunResult BuildResult(this IAgentHarness harness, IReadOnlyList<AgentEvent> events, int exitCode) => harness.Folded(events).BuildResult(AgentRunFacts.From(events), exitCode);
+    internal static AgentRunResult BuildResult(this IAgentHarness harness, IReadOnlyList<AgentEvent> events, int exitCode) => harness.Folded(events).BuildResult(AgentRunFacts.From(events, harness), exitCode);
 
     /// <summary>The folder this harness would have accumulated over the whole stream — for the callers that need the FOLDER rather than the result (the executor's own mapping, driven with a finished stream).</summary>
     internal static IAgentEventFolder Folded(this IAgentHarness harness, IReadOnlyList<AgentEvent> events)
