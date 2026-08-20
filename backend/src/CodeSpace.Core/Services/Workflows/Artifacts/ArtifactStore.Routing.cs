@@ -1,5 +1,6 @@
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
+using CodeSpace.Core.Services.Workflows.Artifacts.Routing;
 using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using CodeSpace.Messages.Constants;
 using Microsoft.EntityFrameworkCore;
@@ -192,20 +193,18 @@ public sealed partial class ArtifactStore
     }
 
     /// <summary>
-    /// Every profile revision this object is durably recorded under, freshest observation first. The row itself stores
-    /// only the object id, so this is "any Available location for these bytes", NOT "the one location the write
-    /// stamped" — if a future replication or backfill adds a second location for the same object, this read follows
-    /// the freshest of them. What routing state says TODAY is never consulted either way.
+    /// Every profile revision this object is durably recorded under, freshest observation first, through the seam every
+    /// routed data class shares. The row itself stores only the object id, so this is "any Available location for these
+    /// bytes", NOT "the one location the write stamped" — if a future replication or backfill adds a second location
+    /// for the same object, this read follows the freshest of them. What routing state says TODAY is never consulted
+    /// either way.
     /// </summary>
     private async Task<IReadOnlyList<RecordedStamp>> RecordedStampsAsync(RoutedRead read, CancellationToken cancellationToken)
     {
-        var stamps = await (from location in _db.ArtifactLocation.AsNoTracking()
-                            join revision in _db.StorageProfileRevision.AsNoTracking()
-                                on new { location.TeamId, Id = location.StorageProfileRevisionId } equals new { revision.TeamId, revision.Id }
-                            where location.TeamId == read.TeamId && location.ArtifactObjectId == read.ArtifactObjectId
-                                && location.State == ArtifactLocationState.Available
-                            orderby location.VerifiedAt descending, location.Id
-                            select new RecordedStamp(revision.StorageProfileId, revision.Revision))
+        var stamps = await RecordedArtifactLocations.AvailableFor(_db, read.TeamId)
+            .Where(location => location.ArtifactObjectId == read.ArtifactObjectId)
+            .OrderByDescending(location => location.VerifiedAt).ThenBy(location => location.LocationId)
+            .Select(location => new RecordedStamp(location.StorageProfileId, location.StorageProfileRevision))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         return stamps.Distinct().ToArray();

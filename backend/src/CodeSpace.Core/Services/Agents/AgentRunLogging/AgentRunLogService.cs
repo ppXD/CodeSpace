@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Workflows.Artifacts.Routing;
 using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
@@ -355,17 +356,17 @@ public sealed partial class AgentRunLogService : IAgentRunLogService
         await using var db = CreateDb();
         var stream = await db.AgentRunLogStream.AsNoTracking().SingleOrDefaultAsync(value => value.TeamId == teamId && value.Id == streamId, cancellationToken).ConfigureAwait(false);
         if (stream == null) return null;
+        // Each segment opens through the profile revision its OWN location ledger recorded, via the seam every routed
+        // data class shares. The join loses the shared query's order, so freshest-observation-first is re-applied here.
         var segments = await (from segment in db.AgentRunLogSegment.AsNoTracking()
                               join artifact in db.ArtifactObject.AsNoTracking()
                                   on new { segment.TeamId, Id = segment.ArtifactObjectId } equals new { artifact.TeamId, artifact.Id }
-                              join location in db.ArtifactLocation.AsNoTracking().Where(value => value.State == ArtifactLocationState.Available)
-                                  on new { segment.TeamId, segment.ArtifactObjectId } equals new { location.TeamId, location.ArtifactObjectId }
-                              join revision in db.StorageProfileRevision.AsNoTracking()
-                                  on new { location.TeamId, Id = location.StorageProfileRevisionId } equals new { revision.TeamId, revision.Id }
+                              join location in RecordedArtifactLocations.AvailableFor(db, teamId)
+                                  on segment.ArtifactObjectId equals location.ArtifactObjectId
                               where segment.TeamId == teamId && segment.StreamId == streamId
                                   && (rangeStart == null || (segment.StartOffsetBytes < rangeEnd!.Value && segment.StartOffsetBytes + segment.LengthBytes > rangeStart.Value))
-                              orderby segment.SegmentOrdinal, location.VerifiedAt descending, location.Id
-                              select new SegmentLocationRow(segment.SegmentOrdinal, segment.StartOffsetBytes, segment.LengthBytes, segment.ArtifactObjectId, artifact.Digest, revision.StorageProfileId, revision.Revision))
+                              orderby segment.SegmentOrdinal, location.VerifiedAt descending, location.LocationId
+                              select new SegmentLocationRow(segment.SegmentOrdinal, segment.StartOffsetBytes, segment.LengthBytes, segment.ArtifactObjectId, artifact.Digest, location.StorageProfileId, location.StorageProfileRevision))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         var selected = segments.GroupBy(value => value.Ordinal).Select(group =>
         {

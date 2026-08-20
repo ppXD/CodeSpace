@@ -1,42 +1,55 @@
 using CodeSpace.Core.Services.Workflows.Artifacts.Routing;
+using CodeSpace.Core.Services.Workflows.Artifacts.Routing.DataClasses;
 
 namespace CodeSpace.Core.Services.Workflows.Artifacts;
 
 /// <summary>
-/// Resolves the main artifact plane's versioned data class through the team storage routing control plane. Unlike the
-/// Agent Run log class this one has NO bootstrap: a team with no route keeps the local backend verbatim, so adopting
-/// routing is an explicit operator act rather than something a first write invents.
+/// Translates the shared routed destination into the main artifact plane's own vocabulary. The POLICY lives in
+/// <see cref="IRoutedDestinationResolver"/>; what is left here is a total mapping between two closed vocabularies plus
+/// the versioned key this plane reads.
 ///
-/// <para>A route the operator created but never activated keeps the local backend too. Creating a route is one half of
-/// the cutover, and the half that changes nothing: only activating it moves bytes. A route that WAS activated and is
-/// now Disabled or Retired is the opposite — an explicit stop, refused rather than quietly sent back to local disk.
-/// <c>StorageRouteRules.EnsureTransition</c> forbids every transition back to Draft, which is what makes those two
-/// cases distinguishable from the route's state alone.</para>
+/// <para>Unlike the Agent Run log class this one has NO bootstrap: a team with no route keeps the local backend
+/// verbatim, so adopting routing is an explicit operator act rather than something a first write invents. That
+/// difference is now declared, not written twice — <see cref="WorkflowArtifactDataClass"/> implements
+/// <see cref="IRoutedDataClassLocalFallback"/>, which is what turns "no route" and "route never activated" into
+/// <c>RoutedDestination.Local</c> here. Remove the declaration and both would fail closed instead; they would never
+/// reach local disk by accident.</para>
 /// </summary>
 public sealed class WorkflowArtifactDestinationResolver : IWorkflowArtifactDestinationResolver
 {
     public const string DataClassTypeKey = "workflow-artifact/v1";
-    private readonly IStorageRouteSnapshotResolver _routes;
+    private readonly IRoutedDestinationResolver _destinations;
+    private readonly WorkflowArtifactDataClass _dataClass;
 
-    public WorkflowArtifactDestinationResolver(IStorageRouteSnapshotResolver routes) => _routes = routes;
+    public WorkflowArtifactDestinationResolver(IRoutedDestinationResolver destinations, WorkflowArtifactDataClass dataClass)
+    {
+        _destinations = destinations;
+        _dataClass = dataClass;
+    }
 
     public async Task<WorkflowArtifactDestination> ResolveAsync(Guid teamId, CancellationToken cancellationToken)
     {
-        var resolution = await _routes.ResolveAsync(new StorageRouteSnapshotRequest(teamId, DataClassTypeKey), cancellationToken).ConfigureAwait(false);
-        if (resolution is StorageRouteSnapshotResolution.Cancelled && cancellationToken.IsCancellationRequested)
-            throw new OperationCanceledException(cancellationToken);
+        var destination = await _destinations.ResolveAsync(_dataClass, teamId, cancellationToken).ConfigureAwait(false);
 
-        return resolution switch
+        return destination switch
         {
-            StorageRouteSnapshotResolution.Ready ready => new WorkflowArtifactDestination.Routed(ready.Snapshot.StorageProfileId, ready.Snapshot.StorageProfileRevision),
-            StorageRouteSnapshotResolution.Missing or StorageRouteSnapshotResolution.RouteNotActivated => new WorkflowArtifactDestination.Local(),
-            StorageRouteSnapshotResolution.RouteNotActive => Unusable(WorkflowArtifactDestinationProblem.RouteNotActive),
-            StorageRouteSnapshotResolution.ProfileNotActive => Unusable(WorkflowArtifactDestinationProblem.ProfileNotActive),
-            StorageRouteSnapshotResolution.RouteRevisionMissing or StorageRouteSnapshotResolution.ProfileMissing
-                or StorageRouteSnapshotResolution.ProfileRevisionMissing or StorageRouteSnapshotResolution.Invalid => Unusable(WorkflowArtifactDestinationProblem.Invalid),
-            _ => Unusable(WorkflowArtifactDestinationProblem.ResolutionFailed),
+            RoutedDestination.Routed routed => new WorkflowArtifactDestination.Routed(routed.StorageProfileId, routed.StorageProfileRevision),
+            RoutedDestination.Local => new WorkflowArtifactDestination.Local(),
+            RoutedDestination.Unusable unusable => new WorkflowArtifactDestination.Unusable(Problem(unusable.Disposition)),
+            _ => new WorkflowArtifactDestination.Unusable(WorkflowArtifactDestinationProblem.ResolutionFailed),
         };
     }
 
-    private static WorkflowArtifactDestination Unusable(WorkflowArtifactDestinationProblem problem) => new WorkflowArtifactDestination.Unusable(problem);
+    /// <summary>
+    /// Total over the shared vocabulary. The two pre-cutover dispositions arrive as <c>Local</c> for this class, so
+    /// they are not enumerated here; were the local-home declaration dropped they would fall through to
+    /// <see cref="WorkflowArtifactDestinationProblem.ResolutionFailed"/> — a refusal, never a silent local write.
+    /// </summary>
+    private static WorkflowArtifactDestinationProblem Problem(RoutedDestinationDisposition disposition) => disposition switch
+    {
+        RoutedDestinationDisposition.RouteNotActive => WorkflowArtifactDestinationProblem.RouteNotActive,
+        RoutedDestinationDisposition.ProfileNotActive => WorkflowArtifactDestinationProblem.ProfileNotActive,
+        RoutedDestinationDisposition.Invalid => WorkflowArtifactDestinationProblem.Invalid,
+        _ => WorkflowArtifactDestinationProblem.ResolutionFailed,
+    };
 }
