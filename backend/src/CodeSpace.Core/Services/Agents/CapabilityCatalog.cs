@@ -50,13 +50,21 @@ public static class CapabilityCatalog
             builder.AppendLine("No credentialed models are listed for this run — omit per-agent model/harness and let the run defaults apply.");
         }
 
-        // The persona pool (supervisor only — the planner passes none). The brain authors a per-agent persona by its
-        // slug; the section is omitted entirely when no personas exist so the planner's two-arg render is byte-identical.
+        // The persona pool (supervisor only — the planner passes NULL, and a null render stays byte-identical). An EMPTY
+        // list is a different thing from null and now says so: the standing rail and the decision schema both advertise
+        // agentDefinition with an example slug, so on an empty library the model was handed a field, an example, and no
+        // statement that there was nothing to pick — and it authored a plausible-sounding slug ('metis-coder') that killed
+        // four real-model runs. The model pool immediately above has always emitted its negative in the same situation;
+        // this is the persona half of that, and it is the prompt-side companion to ExecuteSpawnAsync's slug pre-flight.
         if (personas is { Count: > 0 })
         {
             builder.AppendLine("Agent personas in this team's library (slug — name — description). Author a per-agent persona by its SLUG to give that agent a specialist role/prompt:");
             foreach (var persona in personas.OrderBy(p => p.Slug, StringComparer.Ordinal))
                 builder.AppendLine($"  - {persona.Slug} — {persona.Name}{(string.IsNullOrWhiteSpace(persona.Description) ? "" : $" — {persona.Description}")}");
+        }
+        else if (personas is not null)
+        {
+            builder.AppendLine("This team's persona library is EMPTY — there is no slug to pick, so OMIT agentDefinition entirely and let the run's own persona stand.");
         }
 
         return builder.ToString();

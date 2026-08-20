@@ -1106,9 +1106,19 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
 
     /// <summary>
     /// Map a live whole-loop run to the THREE-WAY gate outcome so the blessed wire reds ONLY on a code regression. A
-    /// FAULTED run (<see cref="WorkflowRunStatus.Failure"/>) is a <see cref="RealModelOutcome.CodeFault"/> — the engine
-    /// could not execute the brain's decisions, a real substrate bug — because every MODEL-side miss now fails closed to
-    /// a clean stop (the decider never crashes the run on a non-conformant reply), so a Failure is never a model miss. A
+    /// FAULTED run (<see cref="WorkflowRunStatus.Failure"/>) is reported as <see cref="RealModelOutcome.CodeFault"/> — the
+    /// engine could not execute the brain's decisions.
+    ///
+    /// <para>NOTE ON WHAT THAT LABEL DOES AND DOES NOT PROVE. This classifier keys on <c>status == Failure</c> and the
+    /// gateway-category regex, and nothing else — so it cannot distinguish "a code change broke the engine" from "the
+    /// engine refuses a shape the model authored". It once claimed it could, on the premise that every model-side miss
+    /// fails closed to a clean stop; that premise was FALSE and this label is how it was found. A model-authored persona
+    /// slug the team library did not hold threw out of the spawn executor and failed four real runs (2026-08-19 10:16 to
+    /// 2026-08-20 01:12), each reported here as a CodeFault with no code change behind it. That specific hole is closed —
+    /// the slug is now pre-resolved and the spawn rejected re-authorably — but the label remains a CLASSIFICATION, not
+    /// evidence: read the run's exception before believing it names a regression.</para>
+    ///
+    /// <para>A
     /// run that drove the arc → <see cref="RealModelOutcome.Drove"/>; any other clean terminal (the brain stopped or
     /// parked short of the arc — a capability shortfall, not a code bug) → <see cref="RealModelOutcome.CapabilityMiss"/>,
     /// which is reported but never gates.

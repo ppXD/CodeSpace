@@ -117,6 +117,59 @@ public sealed class SupervisorActionRejectionFlowTests
         execution.ParkedAgentWaitCount.ShouldBe(0, "zero agents staged — including for the ids that WERE valid");
     }
 
+    // ── A model-authored persona slug the library does not hold is a MODEL miss, so it must be re-authorable ──
+
+    [Fact]
+    public async Task A_spawn_authoring_a_persona_slug_the_library_lacks_rejects_the_spawn_instead_of_failing_the_run()
+    {
+        // The live defect this closes: four real-model runs (2026-08-19 10:16 → 2026-08-20 01:12) died byte-identically
+        // on the slug 'metis-coder' with agents=0 and trajectory=plan→spawn, because ApplyDispatchPersonaAsync THREW and
+        // the exception propagated out of the node. The plan and the dependency staging had both already succeeded, so
+        // the run had done real work before being killed for a name the model made up.
+        using var scope = _fixture.BeginScope();
+
+        var spawn = new SupervisorDecision
+        {
+            Kind = SupervisorDecisionKinds.Spawn,
+            PayloadJson = JsonSerializer.Serialize(new SupervisorSpawnPayload
+            {
+                SubtaskIds = new[] { "auth" },
+                Agents = new[] { new SupervisorAgentDispatch { SubtaskId = "auth", AgentDefinition = "metis-coder" } },
+            }, AgentJson.Options),
+        };
+
+        var execution = await scope.Resolve<ISupervisorActionExecutor>()
+            .ExecuteAsync(spawn, ContextWithPlan("auth", "ui"), CancellationToken.None);
+
+        execution.OutcomeJson.ShouldBe(JsonSerializer.Serialize(RealSupervisorActionExecutor.BuildUnknownPersonaSpawnOutcome(new[] { "metis-coder" }), AgentJson.Options),
+            "the reason must name the slug and tell the brain it may simply omit the field — that is what makes the next turn recoverable");
+        execution.ParkedAgentWaitCount.ShouldBe(0, "nothing is staged");
+    }
+
+    [Fact]
+    public async Task A_spawn_whose_second_dispatch_names_a_bad_slug_stages_no_agent_at_all()
+    {
+        // The other half of why the check moved up front: resolving personas inside the staging loop meant a spawn could
+        // create the first agent and then throw on the second one's slug, leaving a partial fan-out behind a failed run.
+        using var scope = _fixture.BeginScope();
+
+        var spawn = new SupervisorDecision
+        {
+            Kind = SupervisorDecisionKinds.Spawn,
+            PayloadJson = JsonSerializer.Serialize(new SupervisorSpawnPayload
+            {
+                SubtaskIds = new[] { "auth", "ui" },
+                Agents = new[] { new SupervisorAgentDispatch { SubtaskId = "ui", AgentDefinition = "no-such-persona" } },
+            }, AgentJson.Options),
+        };
+
+        var execution = await scope.Resolve<ISupervisorActionExecutor>()
+            .ExecuteAsync(spawn, ContextWithPlan("auth", "ui"), CancellationToken.None);
+
+        execution.OutcomeJson.ShouldBe(JsonSerializer.Serialize(RealSupervisorActionExecutor.BuildUnknownPersonaSpawnOutcome(new[] { "no-such-persona" }), AgentJson.Options));
+        execution.ParkedAgentWaitCount.ShouldBe(0, "including for 'auth', whose own dispatch was fine — a partial fan-out would desync the positional join");
+    }
+
     // ── B4 (MAJOR-3): the amend card clears the hard infra precondition before it is even posted ──────
 
     [Fact]

@@ -61,6 +61,23 @@ public sealed partial class RealSupervisorActionExecutor
             return SupervisorExecution.Synchronous(JsonSerializer.Serialize(BuildUnknownSubtaskSpawnOutcome(unknown, subtasks.Keys), AgentJson.Options));
         }
 
+        // A model-authored persona SLUG that resolves to nothing is a MODEL MISS, not an invariant breach: the capability
+        // catalog advertises the field, the schema carries an example, and the model can misname it. So reject the WHOLE
+        // spawn with a re-authorable reason — the same shape as an unknown subtask id above — instead of letting
+        // ApplyDispatchPersonaAsync throw mid-stage. That throw terminalized the run: live-observed on four real-model
+        // runs (2026-08-19 10:16 through 2026-08-20 01:12) dying byte-identically on the slug 'metis-coder' with
+        // agents=0, AFTER the plan lookup and the dependency staging had both already succeeded.
+        //
+        // Checked UP FRONT, before any agent is staged, for the second reason the throw was wrong: a multi-agent spawn
+        // whose second dispatch named a bad slug would stage the first agent and then die, leaving a partial fan-out
+        // behind a failed run. IAgentDefinitionResolver.ResolveSlugAsync documents that a null "the caller decides
+        // whether that is fail-closed or a fallback" — this is that decision, for the one caller a model can steer.
+        if (await UnresolvablePersonaSlugsAsync(spawn, context, cancellationToken).ConfigureAwait(false) is { Count: > 0 } unknownPersonas)
+        {
+            _logger.LogWarning("Supervisor REJECTED the spawn at turn {Turn} on node {NodeId} — it authored persona slug(s) [{Slugs}] that resolve to no active persona in this team's library", context.TurnNumber, context.NodeId, string.Join(", ", unknownPersonas));
+            return SupervisorExecution.Synchronous(JsonSerializer.Serialize(BuildUnknownPersonaSpawnOutcome(unknownPersonas), AgentJson.Options));
+        }
+
         // Fan out over the subtask ids (already clamped to the dependency-ready frontier when the decision was formed —
         // see SupervisorTurnService.ClampSpawnToDependencyFrontier — so the persisted payload's subtaskIds match the
         // staged agents one-for-one). For each, apply the model-authored per-agent dispatch override (L4 arc B) when the
@@ -156,6 +173,20 @@ public sealed partial class RealSupervisorActionExecutor
     }
 
     /// <summary>The model-authored per-agent dispatch for a subtask id (the FIRST matching <c>agents[]</c> entry — lenient on duplicates), or null. A spawn with no <c>agents[]</c> returns null for every id → byte-identical homogeneous fan-out.</summary>
+    /// <summary>Every DISTINCT model-authored persona slug in this spawn that resolves to no active persona in the team. Empty when the spawn authored none (the run's own persona stands) or when every slug resolves.</summary>
+    private async Task<IReadOnlyList<string>> UnresolvablePersonaSlugsAsync(SupervisorSpawnPayload spawn, SupervisorTurnContext context, CancellationToken cancellationToken)
+    {
+        var authored = spawn.SubtaskIds.Select(id => NullIfBlank(DispatchFor(spawn, id)?.AgentDefinition)).OfType<string>().Distinct(StringComparer.Ordinal).ToList();
+        var unresolvable = new List<string>();
+
+        foreach (var slug in authored)
+        {
+            if (await _agentDefinitionResolver.ResolveSlugAsync(slug, context.TeamId, cancellationToken).ConfigureAwait(false) is null) unresolvable.Add(slug);
+        }
+
+        return unresolvable;
+    }
+
     private static SupervisorAgentDispatch? DispatchFor(SupervisorSpawnPayload spawn, string subtaskId) =>
         spawn.Agents?.FirstOrDefault(a => a.SubtaskId == subtaskId);
 
@@ -201,6 +232,15 @@ public sealed partial class RealSupervisorActionExecutor
         agentCount = 0,
         spawn = "rejected",
         reason = $"the spawn named subtask id(s) the current plan never declared: [{string.Join(", ", unknown)}] — the plan's units are [{string.Join(", ", declared)}]; re-author the spawn against those ids (or re-plan first)",
+    };
+
+    /// <summary>The rejection outcome for a spawn authoring a persona slug this team's library does not hold — re-authorable, unlike the throw it replaced, which killed the run after the plan and the dependency staging had both already succeeded.</summary>
+    internal static object BuildUnknownPersonaSpawnOutcome(IReadOnlyList<string> unknown) => new
+    {
+        agentRunIds = Array.Empty<Guid>(),
+        agentCount = 0,
+        spawn = "rejected",
+        reason = $"the spawn authored persona slug(s) that no active persona in this team's library has: [{string.Join(", ", unknown)}] — re-author with a slug the capability catalog lists, or OMIT agentDefinition entirely to let the run's own persona stand",
     };
 
     /// <summary>H2: the rejection outcome for a retry naming an id the current plan never declared — without this the instruction chain fell through to the WHOLE GOAL (a ghost re-run of the entire task under a stale or typo'd id).</summary>
@@ -712,9 +752,11 @@ public sealed partial class RealSupervisorActionExecutor
     /// <c>AgentDefinitionId</c> and stamp it, OVERRIDING the run-level profile persona <see cref="BuildTaskWithGoal"/>
     /// seeded — so each agent can embody a DISTINCT persona the brain picked from the catalog (its system prompt /
     /// model / tools then merge in the <c>ResolveAsync</c> step that follows). FAIL-CLOSED on an unknown / foreign /
-    /// deleted slug (a clean terminal, mirroring <see cref="ApplyDispatchModelAsync"/>'s out-of-pool throw) — the brain
-    /// only authors slugs the catalog lists. No slug → unchanged (the profile persona stands; byte-identical to a
-    /// homogeneous spawn).
+    /// deleted slug — but this is NO LONGER the path a model-authored slug takes: ExecuteSpawnAsync now pre-resolves every
+    /// authored slug and rejects the spawn re-authorably before staging, because reaching here terminalized the run. The
+    /// throw stays as a defence-in-depth invariant guard for a caller that skipped that pre-flight, and it is NOT a clean
+    /// terminal — it propagates as an unhandled node exception and fails the whole run. No slug → unchanged (the profile
+    /// persona stands; byte-identical to a homogeneous spawn).
     /// </summary>
     private async Task<AgentTask> ApplyDispatchPersonaAsync(AgentTask task, SupervisorAgentDispatch? spec, SupervisorTurnContext context, CancellationToken cancellationToken)
     {
