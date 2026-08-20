@@ -67,7 +67,7 @@ public sealed class NativeRecordCompletenessFlowTests
         var db = scope.Resolve<CodeSpaceDbContext>();
 
         var statement = await db.WorkflowRunDataManifest.AsNoTracking()
-            .SingleOrDefaultAsync(candidate => candidate.WorkflowRunId == run.WorkflowRunId);
+            .SingleOrDefaultAsync(candidate => candidate.WorkflowRunId == run.WorkflowRunId && candidate.Facet == WorkflowRunDataOwnerKinds.NativeRecord);
 
         statement.ShouldNotBeNull(
             customMessage: "a run that captured frames must leave a completeness statement — a manifest nothing produces is a table whose only writers are its tests");
@@ -117,7 +117,7 @@ public sealed class NativeRecordCompletenessFlowTests
         gap.Resolution.ShouldBe(CaptureGapResolution.Open);
         gap.ReasonDetail.ShouldNotBeNullOrWhiteSpace(customMessage: "a gap with no reason detail is a hole with a label on it");
 
-        var statement = await db.WorkflowRunDataManifest.AsNoTracking().SingleAsync(candidate => candidate.WorkflowRunId == run.WorkflowRunId);
+        var statement = await db.WorkflowRunDataManifest.AsNoTracking().SingleAsync(candidate => candidate.WorkflowRunId == run.WorkflowRunId && candidate.Facet == WorkflowRunDataOwnerKinds.NativeRecord);
         statement.Verdict.IsStrictlyReadable().ShouldBeFalse(
             customMessage: "a known-missing span un-completes the statement; a verdict that read complete beside it would be the false assurance this plane exists to refuse");
         statement.KnownMissingCount.ShouldBe(1);
@@ -158,7 +158,7 @@ public sealed class NativeRecordCompletenessFlowTests
 
             var open = await db.WorkflowRunCaptureGap.CountAsync(candidate => candidate.WorkflowRunId == run.WorkflowRunId && candidate.Resolution == CaptureGapResolution.Open);
             var statement = (await db.WorkflowRunDataManifest.AsNoTracking()
-                    .SingleOrDefaultAsync(candidate => candidate.WorkflowRunId == run.WorkflowRunId))
+                    .SingleOrDefaultAsync(candidate => candidate.WorkflowRunId == run.WorkflowRunId && candidate.Facet == WorkflowRunDataOwnerKinds.NativeRecord))
                 .ShouldNotBeNull(customMessage: $"attempt {attempt}: the race cost the run its statement entirely — the guard refused a claim computed outside the rendezvous, and the delta it carried is gone");
 
             open.ShouldBe(1, customMessage: "the gap must be admitted whatever the statement claims — refusing the honest observation to protect the claim is the exact inversion this plane exists to prevent");
@@ -242,7 +242,7 @@ public sealed class NativeRecordCompletenessFlowTests
             customMessage: "the premise: the frames are durable and only the claim about them was lost, or this test is asserting nothing about the fail direction");
 
         var statement = (await db.WorkflowRunDataManifest.AsNoTracking()
-                .SingleOrDefaultAsync(candidate => candidate.WorkflowRunId == run.WorkflowRunId))
+                .SingleOrDefaultAsync(candidate => candidate.WorkflowRunId == run.WorkflowRunId && candidate.Facet == WorkflowRunDataOwnerKinds.NativeRecord))
             .ShouldNotBeNull(customMessage: "the expectation is declared BEFORE the frames, so losing the accounting that follows them must still leave a statement — a facet with no row at all is only not-complete by a convention nothing enforces yet");
 
         statement.ExpectedRecordCount.ShouldBe(2, customMessage: "the declaration stated what the batch undertook, and nothing lowered it");
@@ -284,7 +284,7 @@ public sealed class NativeRecordCompletenessFlowTests
         using var scope = _fixture.BeginScope();
 
         return await scope.Resolve<CodeSpaceDbContext>().WorkflowRunDataManifest.AsNoTracking()
-            .SingleAsync(candidate => candidate.WorkflowRunId == run.WorkflowRunId);
+            .SingleAsync(candidate => candidate.WorkflowRunId == run.WorkflowRunId && candidate.Facet == WorkflowRunDataOwnerKinds.NativeRecord);
     }
 
     private async Task SeedGapAsync(SeededRun run)

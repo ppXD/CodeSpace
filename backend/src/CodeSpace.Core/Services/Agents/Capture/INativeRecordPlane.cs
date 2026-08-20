@@ -83,10 +83,13 @@ public sealed class NativeRecordContractException : Exception, IFailure
 /// bearing, because the refusals are reachable BY DESIGN: 0137 rejects a superseded worker's fence on exactly the
 /// reclaim-for-reattach case, which is the outcome that case is supposed to have.
 ///
-/// <para>It also ACCOUNTS for what it wrote: every batch advances the run's completeness statement for the
-/// <see cref="WorkflowRunDataOwnerKinds.NativeRecord"/> facet, and a batch the database refuses becomes a known-missing
-/// span. That half lives in this class's completeness partial, which states plainly what a complete verdict there does
-/// and does not mean, and that nothing reads either table yet.</para>
+/// <para>It also ACCOUNTS for what it wrote, for TWO facets of the run's record. Every batch advances the completeness
+/// statement for the <see cref="WorkflowRunDataOwnerKinds.NativeRecord"/> facet, and a batch the database refuses
+/// becomes a known-missing span; every LAUNCH does the same for
+/// <see cref="WorkflowRunDataOwnerKinds.HarnessProcessAttempt"/>, whose expectation — one process record per launch — is
+/// the first in this plane that is declared rather than discovered. Each half lives in its own completeness partial,
+/// which states plainly what a complete verdict there does and does not mean, and that nothing reads either table
+/// yet.</para>
 /// </summary>
 public sealed partial class NativeRecordPlane : INativeRecordPlane, IScopedDependency
 {
@@ -120,7 +123,7 @@ public sealed partial class NativeRecordPlane : INativeRecordPlane, IScopedDepen
         var attempt = AppendedAttempt(request, execution);
 
         db.WorkflowRunHarnessProcessAttempt.Add(attempt);
-        await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        await AppendAttemptAsync(db, request, run.WorkflowRunId, attempt.Id, cancellationToken).ConfigureAwait(false);
 
         return new NativeRecordCaptureHandle
         {
