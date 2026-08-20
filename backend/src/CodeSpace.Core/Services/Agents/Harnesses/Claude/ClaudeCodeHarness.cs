@@ -21,7 +21,7 @@ namespace CodeSpace.Core.Services.Agents.Harnesses.Claude;
 /// (surfaced, never dropped) and pure setup lines return null — so a CLI version bump degrades gracefully; the
 /// normalization shape tested here is the stable contract, calibrated against real output when execution is wired.</para>
 /// </summary>
-public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessContractGeneration, IModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, IAgentGroundedFrameReader, IAgentModelCallFrameReader, ISingletonDependency
+public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessContractGeneration, IAgentHarnessRunFactKeys, IModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, IAgentGroundedFrameReader, IAgentModelCallFrameReader, ISingletonDependency
 {
     public const string HarnessKind = "claude-code";
 
@@ -102,6 +102,27 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessContractGene
     /// <c>AgentNativeRecordPumpTests.Every_shipped_adapter_keys_its_rows_under_the_generation_it_declares</c>.
     /// </summary>
     public int ContractGeneration => 2;
+
+    /// <summary>
+    /// Where Claude Code's <c>stream-json</c> output spells the three run facts, confirmed against real claude v2.1.x
+    /// output: <c>session_id</c> at the root of every line (the <c>init</c> line is the first carrier, which is why
+    /// <see cref="ParseEvents"/> keeps it), <c>model</c> at the root of that same <c>init</c> line, and
+    /// <c>usage.{input,output}_tokens</c> on the terminal <c>result</c> line. No envelope is declared: all three sit at
+    /// the root of the line that carries them. The one nesting this stream does have — an assistant turn's
+    /// <c>message</c>, which repeats a per-turn <c>usage</c> and <c>model</c> — is deliberately absent:
+    /// <see cref="ParseEvents"/> retains the content BLOCK for those events rather than the line root, so that payload
+    /// never reaches a reader here and declaring a container for it would describe a shape this adapter does not carry.
+    /// </summary>
+    public AgentRunFactKeys RunFactKeys => FactKeys;
+
+    private static readonly AgentRunFactKeys FactKeys = new()
+    {
+        SessionIdKeys = new[] { "session_id" },
+        ModelKeys = new[] { "model" },
+        InputTokenKeys = new[] { "input_tokens" },
+        OutputTokenKeys = new[] { "output_tokens" },
+        UsageContainers = new[] { "usage" },
+    };
 
     public IReadOnlyList<string> Models { get; } = new[] { "claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5" };
 

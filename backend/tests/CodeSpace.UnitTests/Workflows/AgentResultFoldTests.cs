@@ -37,6 +37,9 @@ namespace CodeSpace.UnitTests.Workflows;
 [Trait("Category", "Unit")]
 public class AgentResultFoldTests
 {
+    /// <summary>The session-id key Codex's stream states, and the one its adapter declares — see <c>CodexHarness.RunFactKeys</c>.</summary>
+    private const string CodexSessionIdKey = "thread_id";
+
     // ── Differential: the fold vs the frozen pre-change list reduction ───────────────────────────────
 
     [Theory]
@@ -56,7 +59,7 @@ public class AgentResultFoldTests
     [InlineData(137)]
     public void The_codex_fold_matches_the_frozen_list_reduction_over_a_representative_stream(int exitCode)
     {
-        var events = RepresentativeStream();
+        var events = RepresentativeStream(CodexSessionIdKey);
 
         new CodexHarness().BuildResult(events, exitCode).ShouldMatch(LegacyCodexBuildResult(events, exitCode));
     }
@@ -67,11 +70,13 @@ public class AgentResultFoldTests
     public void Both_folds_match_the_frozen_list_reduction_when_the_harness_itself_reported_failure(int exitCode)
     {
         // exit 0 + a trailing Error is the "harness-reported-failure" branch AgentTerminalOutcomeReader decides —
-        // the branch a last-terminal-kind accumulator gets wrong if it tracks the wrong kinds.
-        var events = RepresentativeStream().Append(Event(AgentEventKind.Error, "gateway 429 mid-turn")).ToList();
+        // the branch a last-terminal-kind accumulator gets wrong if it tracks the wrong kinds. Each harness gets the
+        // stream spelled its own way (see RepresentativeStream); the trailing Error is identical in both.
+        var claudeEvents = RepresentativeStream().Append(Event(AgentEventKind.Error, "gateway 429 mid-turn")).ToList();
+        var codexEvents = RepresentativeStream(CodexSessionIdKey).Append(Event(AgentEventKind.Error, "gateway 429 mid-turn")).ToList();
 
-        new ClaudeCodeHarness().BuildResult(events, exitCode).ShouldMatch(LegacyClaudeBuildResult(events, exitCode));
-        new CodexHarness().BuildResult(events, exitCode).ShouldMatch(LegacyCodexBuildResult(events, exitCode));
+        new ClaudeCodeHarness().BuildResult(claudeEvents, exitCode).ShouldMatch(LegacyClaudeBuildResult(claudeEvents, exitCode));
+        new CodexHarness().BuildResult(codexEvents, exitCode).ShouldMatch(LegacyCodexBuildResult(codexEvents, exitCode));
     }
 
     [Theory]
@@ -109,13 +114,13 @@ public class AgentResultFoldTests
         var harness = new ClaudeCodeHarness();
 
         var streamed = harness.CreateFolder();
-        var streamedFacts = new AgentRunFacts();
+        var streamedFacts = AgentRunFacts.For(harness);   // both production paths open the accumulator this way, so the parity check must too
         foreach (var e in events) { streamed.Add(e); streamedFacts.Add(e); }
 
         var sandbox = new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "", Stderr = "" };
 
         AgentRunExecutor.MapSandboxResult(sandbox, streamed, streamedFacts)
-            .ShouldMatch(AgentRunExecutor.MapSandboxResult(sandbox, harness.Folded(events), AgentRunFacts.From(events)));
+            .ShouldMatch(AgentRunExecutor.MapSandboxResult(sandbox, harness.Folded(events), AgentRunFacts.From(events, harness)));
     }
 
     [Theory]
@@ -355,10 +360,19 @@ public class AgentResultFoldTests
 
     // ── Fixtures ────────────────────────────────────────────────────────────────────────────────────
 
-    /// <summary>A multi-round stream carrying every fact the fold reduces: model + session id up front, two cumulative usage reports, duplicate + blank FileChanged texts, an Error that is later superseded, and a trailing FinalSummary.</summary>
-    private static IReadOnlyList<AgentEvent> RepresentativeStream() => new[]
+    /// <summary>
+    /// A multi-round stream carrying every fact the fold reduces: model + session id up front, two cumulative usage
+    /// reports, duplicate + blank FileChanged texts, an Error that is later superseded, and a trailing FinalSummary.
+    ///
+    /// <para>The session id is spelled with the key of the harness under test, because extraction is now the harness's
+    /// own (<c>IAgentHarnessRunFactKeys</c>): Claude states <c>session_id</c>, Codex states <c>thread_id</c>, and a
+    /// single stream cannot be both adapters' native output. The frozen mirror below is untouched by that — it still
+    /// reduces through the readers' fallback list overloads, which recognize either spelling, so it remains the
+    /// pre-change reduction this differential is against.</para>
+    /// </summary>
+    private static IReadOnlyList<AgentEvent> RepresentativeStream(string sessionIdKey = "session_id") => new[]
     {
-        Json(AgentEventKind.Started, "Session started", """{"session_id":"sess-diff-001","model":"claude-opus-4"}"""),
+        Json(AgentEventKind.Started, "Session started", $"{{\"{sessionIdKey}\":\"sess-diff-001\",\"model\":\"claude-opus-4\"}}"),
         Event(AgentEventKind.AssistantMessage, "round 1: reading the repo"),
         Event(AgentEventKind.FileChanged, "src/Foo.cs"),
         Event(AgentEventKind.FileChanged, ""),
@@ -367,7 +381,7 @@ public class AgentResultFoldTests
         Event(AgentEventKind.AssistantMessage, "round 2: applying the fix"),
         Event(AgentEventKind.FileChanged, "src/Foo.cs"),
         Event(AgentEventKind.FileChanged, "src/Bar.cs"),
-        Json(AgentEventKind.Started, "Session started", """{"session_id":"sess-diff-LATER","model":"claude-haiku-4"}"""),
+        Json(AgentEventKind.Started, "Session started", $"{{\"{sessionIdKey}\":\"sess-diff-LATER\",\"model\":\"claude-haiku-4\"}}"),
         Json(AgentEventKind.Completed, "Turn complete", """{"usage":{"input_tokens":4800,"output_tokens":990}}"""),
         Event(AgentEventKind.FinalSummary, "fixed the parser and added a regression test"),
     };
