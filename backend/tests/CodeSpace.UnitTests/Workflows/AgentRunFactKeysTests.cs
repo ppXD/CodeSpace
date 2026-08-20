@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Harnesses.Claude;
@@ -164,6 +165,62 @@ public class AgentRunFactKeysTests
         var facts = AgentRunFacts.From(events, harness);
 
         string.Join(", ", facts.UnestablishedFacts).ShouldBe(expected);
+    }
+
+    /// <summary>
+    /// The fallback union's own claim, enforced instead of remembered. <see cref="AgentRunFactKeys.Fallback"/>
+    /// documents itself as the spellings the two shipped adapters use, and <c>CodexHarness</c>'s declaration documents
+    /// itself as that same table "in the SAME order" — so one ordered list lives as two literals in two files, and one
+    /// of them is a BILLING order: the first usage container holding both counts is the figure the run is priced by.
+    /// The no-regression differential above only sees a divergence its corpus can distinguish, so a container declared
+    /// on one side only, or a swap among the positions no fixture line reaches, passes it (verified: it did). This
+    /// compares the lists themselves — every declared key must appear in the fallback, in the same relative order —
+    /// across EVERY key list on the record, found by reflection so a seventh list added later is covered without an
+    /// edit here.
+    /// </summary>
+    [Theory]
+    [InlineData("claude")]
+    [InlineData("codex")]
+    public void The_fallback_union_holds_every_shipped_adapters_keys_in_the_same_order(string kind)
+    {
+        var harness = kind == "claude" ? new ClaudeCodeHarness() : (IAgentHarness)new CodexHarness();
+        var declared = harness.ShouldBeAssignableTo<IAgentHarnessRunFactKeys>()!.RunFactKeys;
+
+        foreach (var list in KeyListProperties())
+        {
+            var mine = (IReadOnlyList<string>)list.GetValue(declared)!;
+            var union = (IReadOnlyList<string>)list.GetValue(AgentRunFactKeys.Fallback)!;
+
+            IsSubsequence(mine, union).ShouldBeTrue(WhyTheyMustAgree(harness.Kind, list.Name, mine, union));
+        }
+    }
+
+    /// <summary>Why a failure of the pin above matters, and which direction to fix it in — never by relaxing the pin.</summary>
+    private static string WhyTheyMustAgree(string kind, string listName, IReadOnlyList<string> mine, IReadOnlyList<string> union) =>
+        $"{kind} declares {listName} = [{string.Join(", ", mine)}], which is not [{string.Join(", ", union)}] (AgentRunFactKeys.Fallback) read in order. "
+        + "The fallback documents itself as the union of the shipped adapters' spellings, so a key one of them declares and it lacks makes that doc false and leaves an undeclared third harness a narrower floor than the readers used to give it. "
+        + $"For {nameof(AgentRunFactKeys.UsageContainers)} the ORDER is what a run is billed by — the first container holding both counts wins — so a swap here re-prices every line carrying two usage objects. "
+        + "Fix by making the two literals agree (add to the fallback, or restore the order), not by loosening this assertion.";
+
+    /// <summary>Every ordered key list on the record — by reflection, so a list added to <see cref="AgentRunFactKeys"/> later is pinned the day it appears rather than the day someone remembers.</summary>
+    private static IEnumerable<PropertyInfo> KeyListProperties() =>
+        typeof(AgentRunFactKeys).GetProperties(BindingFlags.Public | BindingFlags.Instance).Where(p => p.PropertyType == typeof(IReadOnlyList<string>));
+
+    /// <summary>True when every element of <paramref name="inner"/> appears in <paramref name="outer"/> in the same relative order (a supersequence test, not a set test — the order is the part that decides billing).</summary>
+    private static bool IsSubsequence(IReadOnlyList<string> inner, IReadOnlyList<string> outer)
+    {
+        var next = 0;
+
+        foreach (var key in inner)
+        {
+            while (next < outer.Count && outer[next] != key) next++;
+
+            if (next == outer.Count) return false;
+
+            next++;
+        }
+
+        return true;
     }
 
     private static string Describe(AgentRunFacts facts) =>

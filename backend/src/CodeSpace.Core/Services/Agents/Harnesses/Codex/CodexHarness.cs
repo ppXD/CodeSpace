@@ -109,7 +109,9 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessContractGeneratio
     /// <c>info.total_token_usage</c> (the shape this class's own summary records), plus the <c>msg</c> envelope an
     /// older payload wraps itself in. Every location the shared table held for this adapter, in the SAME order:
     /// transcribed rather than re-reasoned, because the order decides which figure wins on a line carrying two, so
-    /// re-ordering it would change what a run is billed.
+    /// re-ordering it would change what a run is billed. That agreement is asserted, not remembered:
+    /// <c>AgentRunFactKeysTests.The_fallback_union_holds_every_shipped_adapters_keys_in_the_same_order</c> fails if any
+    /// list here stops appearing in <see cref="AgentRunFactKeys.Fallback"/> in this order.
     ///
     /// <para><see cref="AgentRunFactKeys.ModelKeys"/> is declared even though this stream names NO model (it is chosen
     /// server-side — see <see cref="TryReadModelFromTranscript"/>, which recovers it from the session rollout
