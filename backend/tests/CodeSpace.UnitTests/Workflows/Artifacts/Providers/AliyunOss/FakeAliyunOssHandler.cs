@@ -60,6 +60,13 @@ internal sealed class FakeAliyunOssHandler : HttpMessageHandler
         var key = Uri.UnescapeDataString(uri.AbsolutePath.TrimStart('/'));
         lock (_gate) Calls.Add($"{request.Method.Method} /{key}{uri.Query}");
 
+        var response = await RouteAsync(request, uri, key, cancellationToken).ConfigureAwait(false);
+
+        return request.Method == HttpMethod.Head ? Bodiless(response) : response;
+    }
+
+    private async Task<HttpResponseMessage> RouteAsync(HttpRequestMessage request, Uri uri, string key, CancellationToken cancellationToken)
+    {
         var rejection = Authorize(request);
         if (rejection != null) return rejection;
         if (!string.Equals(uri.Host, $"{Bucket}.{Host}", StringComparison.Ordinal)) return Error(HttpStatusCode.NotFound, "NoSuchBucket");
@@ -71,6 +78,24 @@ internal sealed class FakeAliyunOssHandler : HttpMessageHandler
         if (request.Method == HttpMethod.Get) return Get(key, request);
         if (request.Method == HttpMethod.Delete) return Delete(key);
         return Error(HttpStatusCode.MethodNotAllowed, "MethodNotAllowed");
+    }
+
+    /// <summary>
+    /// Strips the body from a HEAD response while keeping every header a GET would carry, Content-Length included -
+    /// which is what HTTP requires and therefore what the real service does, on the success path AND on every error
+    /// path. It matters because OSS puts its <c>&lt;Code&gt;</c> token in the body ONLY: a fixture that answers a HEAD
+    /// with an XML error envelope hands the driver a discriminator no real HEAD can ever supply, and every
+    /// classification branch that reads one then passes here and is unreachable in production.
+    /// </summary>
+    private static HttpResponseMessage Bodiless(HttpResponseMessage response)
+    {
+        var length = response.Content.Headers.ContentLength;
+        var bodiless = new ByteArrayContent([]);
+        foreach (var header in response.Content.Headers) bodiless.Headers.TryAddWithoutValidation(header.Key, header.Value);
+
+        bodiless.Headers.ContentLength = length;
+        response.Content = bodiless;
+        return response;
     }
 
     private HttpResponseMessage? Authorize(HttpRequestMessage request)

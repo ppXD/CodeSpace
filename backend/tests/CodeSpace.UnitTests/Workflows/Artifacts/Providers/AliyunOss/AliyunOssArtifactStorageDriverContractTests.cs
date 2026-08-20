@@ -185,6 +185,42 @@ public sealed class AliyunOssArtifactStorageDriverContractTests : ArtifactStorag
         _oss.SecurityTokens.ShouldAllBe(token => token == FakeAliyunOssHandler.SecurityToken, "the endpoint accepts a request without an STS token, so the token must be asserted here rather than assumed from a 403");
     }
 
+    /// <summary>
+    /// Pins the exact code and the exact wire cost of what the kit only states as an invariant. A bucket-level 404 and
+    /// an object-level 404 are the same bare status on a HEAD, so the driver must re-ask with a request whose failure
+    /// carries a body - and the call log is asserted, because a verdict reached without that second request would be a
+    /// guess that happened to be right against this fixture.
+    /// </summary>
+    [Fact]
+    public async Task A_head_against_a_bucket_that_does_not_exist_reports_the_bucket_not_the_object()
+    {
+        await using var driver = await CreateDriverOverAbsentDestinationAsync();
+        _oss.Calls.Clear();
+
+        var head = await driver!.HeadAsync(new ArtifactStorageHeadRequest("absent/value"), CancellationToken.None);
+
+        head.Error!.Code.ShouldBe(ArtifactStorageErrorCode.Unavailable, "a bucket that is not there is a profile an operator must fix, not an object the plane may treat as not yet written");
+        head.Error.ProviderCode.ShouldBe("NoSuchBucket");
+        head.Error.IsRetryable.ShouldBeTrue();
+        _oss.Calls.ShouldBe(["HEAD /codespace/objects/absent/value", "GET /?list-type=2&max-keys=0"], "the HEAD carries no body to classify, so exactly one bucket-scoped re-ask must supply the token");
+    }
+
+    /// <summary>
+    /// A HEAD miss on a bucket that IS there stays Missing, and the re-ask cannot promote a listing denial into the
+    /// object's own verdict. A credential without <c>oss:ListObjects</c> would otherwise turn every dedup miss into a
+    /// permissions failure and stall every first upload of a new artifact.
+    /// </summary>
+    [Fact]
+    public async Task A_head_miss_on_a_bucket_that_exists_stays_missing()
+    {
+        await using var driver = await CreateDriverAsync();
+
+        var head = await driver.HeadAsync(new ArtifactStorageHeadRequest("missing/value"), CancellationToken.None);
+
+        head.Error!.Code.ShouldBe(ArtifactStorageErrorCode.Missing);
+        head.Error.ProviderCode.ShouldBeNull("a HEAD carries no body, so the driver has no token of its own to report and must not borrow one that does not change the verdict");
+    }
+
     public void Dispose() => _oss.Dispose();
 
     protected override async ValueTask<IArtifactStorageDriver> CreateDriverAsync()
@@ -192,6 +228,22 @@ public sealed class AliyunOssArtifactStorageDriverContractTests : ArtifactStorag
         var factory = new AliyunOssArtifactStorageDriverFactory(_oss, TimeProvider.System);
         using var credential = AliyunOssTestProfile.Credential();
         return await factory.CreateAsync(new ArtifactStorageDriverCreateRequest(AliyunOssTestProfile.Snapshot()) { CredentialHandle = credential }, CancellationToken.None);
+    }
+
+    /// <summary>A profile naming a bucket the endpoint does not host - exactly what a mistyped <c>BucketName</c> produces.</summary>
+    protected override async ValueTask<IArtifactStorageDriver?> CreateDriverOverAbsentDestinationAsync()
+    {
+        var factory = new AliyunOssArtifactStorageDriverFactory(_oss, TimeProvider.System);
+        using var credential = AliyunOssTestProfile.Credential();
+        var snapshot = AliyunOssTestProfile.Snapshot(new
+        {
+            endpoint = FakeAliyunOssHandler.Host,
+            region = FakeAliyunOssHandler.Region,
+            bucket = FakeAliyunOssHandler.Bucket + "-typo",
+            keyPrefix = "codespace/"
+        });
+
+        return await factory.CreateAsync(new ArtifactStorageDriverCreateRequest(snapshot) { CredentialHandle = credential }, CancellationToken.None);
     }
 
     private static async Task StoreAsync(IArtifactStorageDriver driver, string key, byte[] payload)

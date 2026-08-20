@@ -64,6 +64,28 @@ public sealed class AliyunOssRealBucketConformanceTests : ArtifactStorageDriverC
 
     protected override async ValueTask<IArtifactStorageDriver> CreateDriverAsync() => new RecordingDriver(await OpenAsync().ConfigureAwait(false), _written);
 
+    /// <summary>
+    /// The one case here that points at a bucket OTHER than the operator's, and the only thing in this lane the fake
+    /// cannot stand in for: whether a real OSS HEAD really does answer a 404 with no body, which is what makes a
+    /// bucket-level and an object-level 404 indistinguishable and is the whole reason the driver re-asks. The fake
+    /// models that from Aliyun's documentation; only the real service settles it.
+    ///
+    /// The name is a fresh GUID rather than the operator's bucket with a suffix, so it is a bucket that exists in no
+    /// Aliyun account and cannot collide with one, and stays inside the 3-63 character bucket-name limit whatever the
+    /// operator's own name is. Nothing is written through it - the kit's case only HEADs - so it is deliberately NOT
+    /// wrapped in <c>RecordingDriver</c>: there is no key for the sweep to chase and no bucket to chase it in.
+    /// </summary>
+    protected override async ValueTask<IArtifactStorageDriver?> CreateDriverOverAbsentDestinationAsync()
+    {
+        if (_settings == null) return null;
+
+        var absent = _settings with { BucketName = $"codespace-absent-{Guid.NewGuid():N}" };
+        using var credential = AliyunOssRealBucket.Credential(absent);
+        var request = new ArtifactStorageDriverCreateRequest(AliyunOssRealBucket.Profile(absent, RunPrefix)) { CredentialHandle = credential };
+
+        return await new AliyunOssArtifactStorageDriverFactory().CreateAsync(request, CancellationToken.None).ConfigureAwait(false);
+    }
+
     private async ValueTask<IArtifactStorageDriver> OpenAsync()
     {
         var settings = _settings ?? throw new InvalidOperationException($"The real-bucket lane must be SKIPPED, not opened, without {string.Join(", ", AliyunOssRealBucket.EnvVars)}.");

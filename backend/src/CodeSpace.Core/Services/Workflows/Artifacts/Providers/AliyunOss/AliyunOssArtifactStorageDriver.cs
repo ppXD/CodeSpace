@@ -85,7 +85,7 @@ internal sealed partial class AliyunOssArtifactStorageDriver : IArtifactStorageD
         if (sent.Error != null) return ArtifactStorageHeadResult.Failed(sent.Error);
 
         using var response = sent.Response!;
-        if (!response.IsSuccessStatusCode) return ArtifactStorageHeadResult.Failed(await AliyunOssErrors.FromResponseAsync(response, request.ObjectKey, cancellationToken).ConfigureAwait(false));
+        if (!response.IsSuccessStatusCode) return ArtifactStorageHeadResult.Failed(await AttributeHeadFailureAsync(response, request.ObjectKey, cancellationToken).ConfigureAwait(false));
 
         return ArtifactStorageHeadResult.Found(Describe(response, request.ObjectKey, ContentLengthOf(response)));
     }
@@ -228,6 +228,33 @@ internal sealed partial class AliyunOssArtifactStorageDriver : IArtifactStorageD
             return ArtifactStorageReadResult.Failed(Failure(ArtifactStorageErrorCode.InvalidRequest, $"Byte range starts beyond object '{request.ObjectKey}'."));
 
         return ArtifactStorageReadResult.Opened(Stream.Null, 0, head.Metadata.Length, head.Metadata);
+    }
+
+    /// <summary>
+    /// Attributes a failed HEAD, which cannot attribute itself. OSS carries its <c>&lt;Code&gt;</c> token in the
+    /// response BODY only, and HTTP forbids a body on a HEAD response, so a failed HEAD reaches the classifier as a
+    /// bare status: a 404 is NoSuchKey or NoSuchBucket indistinguishably, and a 403 is a rejected credential or a
+    /// policy denial indistinguishably. Aliyun's <c>x-oss-ec</c> header is documented as diagnostic only - "do not
+    /// build application logic that depends on specific EC values" - so it is not a discriminator either.
+    ///
+    /// Left as a bare status, a 404 becomes Missing: a mistyped bucket name would report the OBJECT as absent, which
+    /// the plane treats as an ordinary answer, rather than the PROFILE as unusable, which an operator must fix. So the
+    /// question is re-asked with a request that can answer it - the same bucket-scoped ListObjects the health probe
+    /// issues, whose failures do carry a body - and its token re-runs the HEAD's own status through the classifier.
+    ///
+    /// COSTS one extra small request per FAILED head, the dedup miss on a fresh upload included. It can only sharpen
+    /// the answer: a bucket request that succeeds, faults, or is itself unattributable leaves the HEAD's own verdict
+    /// exactly as it was. It therefore does NOT cover a credential without <c>oss:ListObjects</c> on the bucket, which
+    /// answers AccessDenied to the re-ask and so still cannot tell an absent bucket from an absent object.
+    /// </summary>
+    private async Task<ArtifactStorageError> AttributeHeadFailureAsync(HttpResponseMessage response, string objectKey, CancellationToken cancellationToken)
+    {
+        var error = await AliyunOssErrors.FromResponseAsync(response, objectKey, cancellationToken).ConfigureAwait(false);
+        if (error.ProviderCode != null) return error;
+
+        var bucket = await ProbeReadAsync(cancellationToken).ConfigureAwait(false);
+
+        return AliyunOssErrors.Reclassify(error, response.StatusCode, objectKey, bucket?.ProviderCode);
     }
 
     private async Task<ArtifactStorageError?> ProbeReadAsync(CancellationToken cancellationToken)

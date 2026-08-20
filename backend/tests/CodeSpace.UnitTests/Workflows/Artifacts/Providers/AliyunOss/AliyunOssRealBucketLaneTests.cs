@@ -111,6 +111,25 @@ public sealed class AliyunOssRealBucketLaneTests
         profile.Configuration.ToString().ShouldNotContain(KeyId, Case.Sensitive, "the profile's configuration is the half that gets persisted and surfaced; only the credential handle may carry AccessKey material");
     }
 
+    /// <summary>
+    /// The absent-destination seam defaults to null, which makes its case a green no-op, so it would go dead in total
+    /// silence if the overrides were ever dropped. Both are pinned: the fake-backed OSS lane, which proves the driver
+    /// re-asks, and the real-bucket lane, which is the only thing that can prove a real OSS HEAD carries no body to
+    /// re-ask about. The local RWX driver is deliberately absent from this list - it creates its own root, so it has no
+    /// absent destination to answer for.
+    /// </summary>
+    [Fact]
+    public void Both_lanes_that_can_reach_an_absent_destination_supply_one()
+    {
+        var suites = typeof(ArtifactStorageDriverConformanceTests).Assembly.GetTypes()
+            .Where(type => type is { IsAbstract: false } && typeof(ArtifactStorageDriverConformanceTests).IsAssignableFrom(type))
+            .ToList();
+
+        var supplying = suites.Where(type => AbsentDestination(type).DeclaringType != typeof(ArtifactStorageDriverConformanceTests)).ToList();
+
+        supplying.ShouldBe(new[] { typeof(AliyunOssArtifactStorageDriverContractTests), typeof(AliyunOssRealBucketConformanceTests) }, ignoreOrder: true);
+    }
+
     /// <summary>A distinct value per variable, so an assertion that one did not leak cannot pass on another's value.</summary>
     private static string Distinct(string name) => name switch
     {
@@ -122,4 +141,7 @@ public sealed class AliyunOssRealBucketLaneTests
 
     private static MethodInfo Reachability(Type suite) =>
         suite.GetProperty("StoreIsReachable", BindingFlags.Instance | BindingFlags.NonPublic)!.GetGetMethod(nonPublic: true)!;
+
+    private static MethodInfo AbsentDestination(Type suite) =>
+        suite.GetMethod("CreateDriverOverAbsentDestinationAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
 }

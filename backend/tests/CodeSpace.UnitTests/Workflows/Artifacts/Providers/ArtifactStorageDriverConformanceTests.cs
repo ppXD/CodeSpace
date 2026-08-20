@@ -22,6 +22,41 @@ public abstract class ArtifactStorageDriverConformanceTests
     /// </summary>
     protected virtual bool StoreIsReachable => true;
 
+    /// <summary>
+    /// A driver whose DESTINATION does not exist - a bucket name nobody ever created, a root that is not there - or
+    /// null when the subclass cannot build one. Null makes the case below a green no-op, because a provider that
+    /// cannot express an absent destination has nothing to answer for; it is NOT a claim that the provider conforms.
+    ///
+    /// The seam exists because every other case here shares one fixture, a driver over a destination that IS there,
+    /// and that fixture structurally cannot see a misconfigured one.
+    /// </summary>
+    protected virtual ValueTask<IArtifactStorageDriver?> CreateDriverOverAbsentDestinationAsync() => ValueTask.FromResult<IArtifactStorageDriver?>(null);
+
+    /// <summary>
+    /// The operator-facing distinction the whole error contract turns on: "your object is not here" is an ordinary
+    /// answer the plane acts on, and "your destination is not here" is a configuration fault only a human can clear.
+    /// A provider that cannot tell them apart reports a mistyped bucket or root as an EMPTY one, so a typo reads as a
+    /// store that simply has nothing in it yet.
+    ///
+    /// It asserts only that the answer is not <c>Missing</c>, which is the invariant itself, rather than pinning one
+    /// code: Unavailable, Forbidden and Unauthorized are all honest answers here, depending on whether the service
+    /// will admit that the destination is absent or only that it will not say. The exact code is a provider's own
+    /// business and belongs in its own suite.
+    /// </summary>
+    [Fact]
+    public async Task A_destination_that_does_not_exist_never_reads_as_an_empty_one()
+    {
+        if (!StoreIsReachable) return;
+
+        await using var driver = await CreateDriverOverAbsentDestinationAsync();
+        if (driver == null) return;
+
+        var head = await driver.HeadAsync(new ArtifactStorageHeadRequest("absent/value"), CancellationToken.None);
+
+        head.IsSuccess.ShouldBeFalse("nothing was ever written to a destination that does not exist");
+        head.Error!.Code.ShouldNotBe(ArtifactStorageErrorCode.Missing, "a destination that is not there must not answer as one that is there and empty: Missing is what the plane treats as benign, so a mistyped bucket or root would be indistinguishable from a store with nothing in it");
+    }
+
     [Fact]
     public async Task Conforms_for_zero_and_large_streams_without_byte_array_contracts()
     {
