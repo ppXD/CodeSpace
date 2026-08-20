@@ -197,7 +197,8 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
     }
 
     /// <summary>
-    /// The one producer's own vocabulary, hard-pinned. <c>capture_source</c> is how an auditor asks "which producer
+    /// The capture plane's own vocabulary, hard-pinned and shared by both of its facets' gaps — the plane is the
+    /// producer that noticed, whichever facet the span belongs to. <c>capture_source</c> is how an auditor asks "which producer
     /// noticed this", so renaming this constant silently retires every filter written against the rows already stored
     /// under the old value — a rename that looks harmless is exactly the kind this pin makes a visible decision.
     /// </summary>
@@ -208,17 +209,21 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
     }
 
     /// <summary>
-    /// The isolation that still holds, checked rather than asserted in prose: ONE production producer and zero
-    /// production readers. The only files in <c>backend/src</c> that may mention either table are the two entities,
-    /// their two configurations, the DbContext that registers them, the shared completeness WRITER every facet's
-    /// producer states through, and the native-record capture plane's completeness partial — which states its own
-    /// facet and records a gap for its own refused batches, and reads neither table for any decision. In particular
-    /// nothing in completion, terminal decision, planner, oracle, critic or routing may read the manifest: making
-    /// terminal authority answer to it is a separate, later, deliberate cutover, and this test is what turns that step
-    /// into a visible red rather than a quiet import.
+    /// The isolation that still holds, checked rather than asserted in prose: TWO production producers, both in the
+    /// capture plane, and STILL zero production readers. The only files in <c>backend/src</c> that may mention either
+    /// table are the two entities, their two configurations, the DbContext that registers them, the shared completeness
+    /// WRITER every facet's producer states through, and the capture plane's two completeness partials — the
+    /// native-record facet and the harness-process-attempt facet, each of which states its own facet, records a gap for
+    /// its own refused write, and reads neither table for any decision. In particular nothing in completion, terminal
+    /// decision, planner, oracle, critic or routing may read the manifest: making terminal authority answer to it is a
+    /// separate, later, deliberate cutover, and this test is what turns that step into a visible red rather than a quiet
+    /// import.
+    ///
+    /// <para>Adding the second producer turned this list red, which is the list working: the count of producers in the
+    /// message below is the number a reader can trust without grepping.</para>
     /// </summary>
     [Fact]
-    public void Only_the_native_record_capture_plane_touches_either_table()
+    public void Only_the_capture_planes_two_producers_touch_either_table()
     {
         var sourceRoot = ProductionSourceRoot();
 
@@ -233,16 +238,18 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
             "CodeSpaceDbContext.cs",
             "IRunDataCompletenessWriter.cs",
             "NativeRecordPlane.Completeness.cs",
+            "NativeRecordPlane.ProcessCompleteness.cs",
             "RunDataFacetAdvance.cs",
             "WorkflowRunCaptureGap.cs",
             "WorkflowRunCaptureGapConfiguration.cs",
             "WorkflowRunDataManifest.cs",
             "WorkflowRunDataManifestConfiguration.cs",
-        }, customMessage: "a production file other than the shared completeness writer and the native-record capture " +
-                          "plane now reads or writes the capture-gap / data-manifest plane. Exactly one producer exists " +
-                          "— the native-record facet — and nothing reads either table: no reducer folds a gap and " +
-                          "terminal authority does not consult the manifest. If a second producer or the first reader is " +
-                          "genuinely being added, it is a deliberate step that updates this list — not a silent one.");
+        }, customMessage: "a production file other than the shared completeness writer and the capture plane's two " +
+                          "completeness partials now reads or writes the capture-gap / data-manifest plane. Exactly two " +
+                          "producers exist — the native-record facet and the harness-process-attempt facet — and nothing " +
+                          "reads either table: no reducer folds a gap and terminal authority does not consult the " +
+                          "manifest. If a third producer or the FIRST READER is genuinely being added, it is a deliberate " +
+                          "step that updates this list — not a silent one.");
     }
 
     /// <summary>
