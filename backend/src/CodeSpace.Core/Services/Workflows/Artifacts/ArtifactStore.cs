@@ -99,10 +99,11 @@ public sealed partial class ArtifactStore : IArtifactStore, IArtifactRangeReader
 
         _db.WorkflowArtifact.Add(artifact);
 
-        // Only an INLINE insert may be declared: collecting an offloaded row would delete the metadata row and strand
-        // its bytes, because neither the blob backend nor the routed storage plane has a purge path (see
-        // IArtifactBlobBackend, which is deliberately read/write only).
-        var declared = declaration is not null && !offload ? DeclarationFor(declaration, artifact) : null;
+        // An INLINE or LOCAL-BLOB insert may be declared; a ROUTED one may not. The reaper can remove inline bytes with
+        // the row and local-backend bytes through IArtifactBlobPurge, but routed bytes stay reachable through their
+        // committed transfer intent after any delete (ArtifactRetentionDecision.RefuseUnpurgeable states the chain), so
+        // declaring one would only mint a row that always settles as a terminal keep.
+        var declared = declaration is not null && placement.CasArtifactObjectId is null ? DeclarationFor(declaration, artifact) : null;
         if (declared is not null) _db.WorkflowArtifactRetention.Add(declared);
 
         try

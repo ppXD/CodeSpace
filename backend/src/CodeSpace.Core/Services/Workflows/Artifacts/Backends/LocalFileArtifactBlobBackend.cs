@@ -14,7 +14,7 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts.Backends;
 /// no-op. Reads validate the url resolves to a path UNDER the configured root (defence-in-depth against a tampered
 /// <c>storage_url</c>) before touching the filesystem.</para>
 /// </summary>
-public sealed class LocalFileArtifactBlobBackend : IArtifactBlobBackend, ISingletonDependency
+public sealed class LocalFileArtifactBlobBackend : IArtifactBlobBackend, IArtifactBlobPurge, ISingletonDependency
 {
     private readonly string _root;
 
@@ -92,6 +92,43 @@ public sealed class LocalFileArtifactBlobBackend : IArtifactBlobBackend, ISingle
         }
 
         return new ArtifactBlobRange(bytes, stream.Length);
+    }
+
+    /// <summary>
+    /// Unlinks the file <paramref name="storageUrl"/> resolves to. Content-addressed ⇒ this path is named by the SHA
+    /// alone and NOT by a tenant, so every row holding these bytes — in any team — loses them; deciding that no other
+    /// row names them is the CALLER's job, and <c>ArtifactRetentionReaper</c> is the only caller that makes it.
+    ///
+    /// <para>The two shard directories are deliberately left in place even when this empties them. Removing one would
+    /// race a concurrent <see cref="WriteAsync"/> between its <c>CreateDirectory</c> and its move, turning a byte
+    /// reclamation into a failed artifact write; an empty directory costs an inode.</para>
+    /// </summary>
+    public Task<ArtifactBlobPurgeOutcome> DeleteAsync(string storageUrl, CancellationToken cancellationToken)
+    {
+        string path;
+        try
+        {
+            path = ResolveUnderRoot(storageUrl);
+        }
+        catch (InvalidOperationException)
+        {
+            // A url this backend cannot vouch for. Refusing beats unlinking whatever it happens to point at.
+            return Task.FromResult(ArtifactBlobPurgeOutcome.Refused);
+        }
+
+        // File.Delete no-ops on an absent path rather than throwing, so the distinction has to be probed for: without
+        // this the method would report Deleted about bytes it never saw, and the outcome would be a lie the caller logs.
+        if (!File.Exists(path)) return Task.FromResult(ArtifactBlobPurgeOutcome.AlreadyGone);
+
+        try
+        {
+            File.Delete(path);
+
+            return Task.FromResult(ArtifactBlobPurgeOutcome.Deleted);
+        }
+        catch (DirectoryNotFoundException) { return Task.FromResult(ArtifactBlobPurgeOutcome.AlreadyGone); }
+        catch (UnauthorizedAccessException) { return Task.FromResult(ArtifactBlobPurgeOutcome.Refused); }
+        catch (IOException) { return Task.FromResult(ArtifactBlobPurgeOutcome.Refused); }
     }
 
     // <root>/<sha[0:2]>/<sha[2:4]>/<sha> — two levels of fan-out keep any single directory small.

@@ -51,13 +51,35 @@ public sealed class ArtifactRetentionDecisionTests
         decision.ErrorCode.ShouldBe("retention-class-unregistered");
     }
 
-    [Fact]
-    public void An_artifact_whose_bytes_live_outside_the_row_is_kept_because_nothing_can_purge_them()
+    [Theory]
+    [InlineData(ArtifactPurgePath.LocalBlobShared, "artifact-blob-shared")]              // another row names the same physical file
+    [InlineData(ArtifactPurgePath.Routed, "artifact-routed-storage")]                    // a committed transfer intent can hand the object to a later writer
+    [InlineData(ArtifactPurgePath.BackendCannotPurge, "artifact-blob-backend-cannot-purge")]   // the transport offers no removal at all
+    public void An_artifact_whose_bytes_have_no_purge_path_is_kept_and_says_which_one_is_missing(ArtifactPurgePath purge, string expectedCode)
     {
-        var decision = ArtifactRetentionDecision.Decide(Rule, Collectable() with { Inline = false });
+        var decision = ArtifactRetentionDecision.Decide(Rule, Collectable() with { Purge = purge });
 
-        decision.Action.ShouldBe(ArtifactRetentionAction.Indeterminate);
-        decision.ErrorCode.ShouldBe("artifact-not-inline");
+        decision.Action.ShouldBe(ArtifactRetentionAction.Indeterminate, "no purge path is a terminal keep, not a retry that eventually deletes");
+        decision.ErrorCode.ShouldBe(expectedCode);
+    }
+
+    [Fact]
+    public void An_artifact_whose_placement_could_not_be_read_is_kept_without_becoming_terminal()
+    {
+        // Distinct from the three above: not knowing WHERE the bytes are is transient, so it must stay retryable rather
+        // than settle as a permanent keep on one unreadable read.
+        var decision = ArtifactRetentionDecision.Decide(Rule, Collectable() with { Purge = ArtifactPurgePath.Unknown });
+
+        decision.Action.ShouldBe(ArtifactRetentionAction.Retry);
+        decision.ErrorCode.ShouldBe("artifact-placement-indeterminate");
+    }
+
+    [Fact]
+    public void An_offloaded_artifact_whose_blob_no_other_row_names_is_collectable_exactly_like_an_inline_one()
+    {
+        // The lane's whole point: bytes outside the row are not automatically unreapable — only unreapable bytes are.
+        ArtifactRetentionDecision.Decide(Rule, Collectable() with { Purge = ArtifactPurgePath.LocalBlobExclusive })
+            .Action.ShouldBe(ArtifactRetentionAction.Collect);
     }
 
     [Theory]
@@ -100,7 +122,7 @@ public sealed class ArtifactRetentionDecisionTests
         decision.NextSweepAt.ShouldBe(quarantinedAt.Add(Rule.QuarantineWindow));
     }
 
-    /// <summary>The one collectable input: old enough, inline, proven unreferenced, and quarantined longer than the window.</summary>
+    /// <summary>The one collectable input: old enough, bytes removable, proven unreferenced, and quarantined longer than the window.</summary>
     private static ArtifactRetentionObservation Collectable() => new(
-        ArtifactRetentionState.Quarantined, Now.AddDays(-30), true, Now.Add(-Rule.QuarantineWindow), ArtifactReferenceVerdict.Unreferenced, Now);
+        ArtifactRetentionState.Quarantined, Now.AddDays(-30), ArtifactPurgePath.Inline, Now.Add(-Rule.QuarantineWindow), ArtifactReferenceVerdict.Unreferenced, Now);
 }

@@ -17,9 +17,23 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts.Retention;
 /// object is neither claimed nor collectable.
 /// (3) Collection additionally requires the quarantine window to have elapsed since the FIRST observation of
 /// "unreferenced", which is a second, independent wait. (4) Every answer that is not a definite "no reference exists"
-/// keeps the artifact — an unregistered class, an unreadable reference site, an exhausted retry budget and a
-/// non-inline row all settle as <see cref="ArtifactRetentionState.Indeterminate"/>, which is terminal and means keep.
+/// keeps the artifact — an unregistered class, an unreadable reference site, an exhausted retry budget and bytes with
+/// no purge path all settle as <see cref="ArtifactRetentionState.Indeterminate"/>, which is terminal and means keep.
 /// </para>
+///
+/// <para><b>Offloaded bytes.</b> An artifact past the inline threshold is collected too, but only on the local blob
+/// backend and only when no other <c>workflow_artifact</c> row points at the same physical file — that path is addressed
+/// by SHA alone and is NOT tenant-scoped, so one file can be shared by rows in different teams. Routed bytes are
+/// refused; <see cref="ArtifactRetentionDecision.RefuseUnpurgeable"/> states why.</para>
+///
+/// <para><b>Order across the two media, and what a crash leaves.</b> The bytes go first and the row's DELETE commits
+/// last, both inside one transaction. A crash before the commit therefore leaves bytes gone and the row plus its
+/// declaration intact — which the NEXT sweep finishes, because an absent blob is reported as success. The opposite
+/// order would leak bytes no surviving row remembers, so nothing could ever finish it. Nothing can legitimately read
+/// the artifact during that window: it is collectable precisely because the oracle found no reference to it, twice,
+/// the second time inside this transaction. What this does NOT provide is a phase in which the bytes are unreachable
+/// but still recoverable — <c>workflow_artifact</c> rejects UPDATE outright (migration 0016), so a purge-phase marker
+/// on the row is not representable, and the quarantine window is spent with the artifact fully intact.</para>
 /// </summary>
 public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
 {
@@ -28,18 +42,23 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
 
     private readonly DbContextOptions<CodeSpaceDbContext> _dbOptions;
     private readonly IArtifactReferenceOracle _oracle;
+
+    /// <summary>The blob backend's optional removal capability, feature-detected once (Rule 7). Null is a supported state: every offloaded declaration the sweep claims then settles as a terminal keep instead.</summary>
+    private readonly IArtifactBlobPurge? _purge;
+
     private readonly ILogger<ArtifactRetentionReaper> _logger;
     private readonly ArtifactRetentionReaperOptions _options;
 
-    public ArtifactRetentionReaper(DbContextOptions<CodeSpaceDbContext> dbOptions, IArtifactReferenceOracle oracle, ILogger<ArtifactRetentionReaper> logger) : this(dbOptions, oracle, logger, Defaults) { }
+    public ArtifactRetentionReaper(DbContextOptions<CodeSpaceDbContext> dbOptions, IArtifactReferenceOracle oracle, IArtifactBlobBackend blobs, ILogger<ArtifactRetentionReaper> logger) : this(dbOptions, oracle, blobs, logger, Defaults) { }
 
-    internal ArtifactRetentionReaper(DbContextOptions<CodeSpaceDbContext> dbOptions, IArtifactReferenceOracle oracle, ILogger<ArtifactRetentionReaper> logger, ArtifactRetentionReaperOptions options)
+    internal ArtifactRetentionReaper(DbContextOptions<CodeSpaceDbContext> dbOptions, IArtifactReferenceOracle oracle, IArtifactBlobBackend blobs, ILogger<ArtifactRetentionReaper> logger, ArtifactRetentionReaperOptions options)
     {
         if (options.BatchSize is <= 0 or > 2000 || options.ClaimSize is <= 0 || options.ClaimSize > options.BatchSize || options.MaxAttempts <= 0
             || options.LeaseDuration <= options.OperationTimeout || options.OperationTimeout <= TimeSpan.Zero || options.RetryDelay <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(options));
         _dbOptions = dbOptions;
         _oracle = oracle;
+        _purge = blobs as IArtifactBlobPurge;
         _logger = logger;
         _options = options;
     }
@@ -73,8 +92,10 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
     /// tenants, and <c>cutoff</c> frozen at sweep start so a settled row cannot be re-read within the same sweep.
     ///
     /// <para>Two of the safety properties are enforced HERE, in SQL, not downstream: <c>created_at</c> below the policy's
-    /// smallest age floor is never claimed (the exact per-class floor is re-checked per row), and a row whose artifact is
-    /// not inline is never claimed at all, because no purge path exists for offloaded bytes.</para>
+    /// smallest age floor is never claimed (the exact per-class floor is re-checked per row), and a ROUTED artifact is
+    /// never claimed at all. Excluding routed rows here rather than settling them downstream is deliberate: a settled
+    /// refusal is terminal, so it would foreclose a later build that CAN purge routed bytes, while an unclaimed row
+    /// stays live with its revision untouched.</para>
     /// </summary>
     private async Task<IReadOnlyList<SweepClaim>> ClaimBatchAsync(Guid ownerId, DateTimeOffset cutoff, int limit, CancellationToken cancellationToken)
     {
@@ -87,7 +108,8 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
         // this sweep saw as Declared but a concurrent transaction settled terminally before the lock was granted
         // comes back anyway — and the claim then writes an owner and a lease onto a terminal row, which the state
         // CHECK refuses, killing the whole sweep rather than skipping one row. The artifact-side guards are not
-        // repeated because neither created_at nor inline_bytes can change under this row.
+        // repeated because neither created_at nor cas_artifact_object_id can change under this row: workflow_artifact
+        // rejects UPDATE outright (migration 0016).
         var rows = await db.WorkflowArtifactRetention.FromSqlInterpolated($$"""
             WITH fair AS MATERIALIZED (
                 SELECT DISTINCT ON (retention.team_id) retention.artifact_id, retention.team_id, retention.next_sweep_at
@@ -97,7 +119,7 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
                   AND retention.next_sweep_at <= {{cutoff}}
                   AND (retention.lease_expires_at IS NULL OR retention.lease_expires_at <= clock_timestamp())
                   AND artifact.created_at <= {{ageCeiling}}
-                  AND artifact.inline_bytes IS NOT NULL
+                  AND artifact.cas_artifact_object_id IS NULL
                 ORDER BY retention.team_id, retention.next_sweep_at, retention.artifact_id
             )
             SELECT retention.*, retention.xmin FROM workflow_artifact_retention retention
@@ -164,18 +186,55 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
     private async Task<ArtifactRetentionDecision> EvaluateAsync(SweepClaim claim, CancellationToken cancellationToken)
     {
         await using var db = CreateDb();
-        var artifact = await db.WorkflowArtifact.AsNoTracking()
-            .Where(row => row.Id == claim.ArtifactId && row.TeamId == claim.TeamId)
-            .Select(row => new { row.CreatedAt, Inline = row.InlineBytes != null })
-            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        var placement = await PlacementAsync(db, claim, cancellationToken).ConfigureAwait(false);
 
-        if (artifact is null) return ArtifactRetentionDecision.Retry("artifact-vanished", "The declared artifact was not readable at evaluation time.");
+        if (placement is null) return ArtifactRetentionDecision.Retry("artifact-vanished", "The declared artifact was not readable at evaluation time.");
 
         var now = await DatabaseClockAsync(db, cancellationToken).ConfigureAwait(false);
         var verdict = await _oracle.ClassifyAsync(db, claim.ArtifactId, cancellationToken).ConfigureAwait(false);
-        var observation = new ArtifactRetentionObservation(claim.State, artifact.CreatedAt, artifact.Inline, claim.QuarantinedAt, verdict, now);
+        var observation = new ArtifactRetentionObservation(claim.State, placement.CreatedAt, placement.Purge, claim.QuarantinedAt, verdict, now);
 
         return ArtifactRetentionDecision.Decide(ArtifactRetentionPolicy.For(claim.RetentionClass), observation);
+    }
+
+    /// <summary>
+    /// Where the artifact's bytes are and whether they can be removed, read through <paramref name="db"/> so the
+    /// collector asks inside its own transaction. Null means the row is gone.
+    ///
+    /// <para>The sharing probe is the one that keeps a tenant's bytes safe: <c>LocalFileArtifactBlobBackend</c> addresses
+    /// a blob by SHA with no team in the path, so a row in ANOTHER team holding identical content points at the same
+    /// file. The probe is deliberately not team-scoped, and it compares the <c>storage_url</c> rather than the digest
+    /// because the url IS the pointer at the file — migration 0148 indexes it for exactly this.</para>
+    ///
+    /// <para>The window this probe does NOT close: a concurrent first write of identical content in another team can
+    /// insert its row after this read and before the collector commits, and that row is then left naming a file the
+    /// collector removed. Ordering the two would need the artifact write path to hold a lock across its blob write and
+    /// its row insert, which this lane does not change. The affected read fails loudly rather than returning wrong
+    /// bytes, and the next write of that content by that team restores the blob through the dedup-hit self-heal in
+    /// <c>ArtifactStore.WriteAsync</c>.</para>
+    /// </summary>
+    private async Task<ArtifactPlacement?> PlacementAsync(CodeSpaceDbContext db, SweepClaim claim, CancellationToken cancellationToken)
+    {
+        var artifact = await db.WorkflowArtifact.AsNoTracking()
+            .Where(row => row.Id == claim.ArtifactId && row.TeamId == claim.TeamId)
+            .Select(row => new { row.CreatedAt, row.StorageUrl, Routed = row.CasArtifactObjectId != null })
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (artifact is null) return null;
+        if (artifact.Routed) return new ArtifactPlacement(artifact.CreatedAt, ArtifactPurgePath.Routed, null);
+
+        // Neither routed nor a storage_url means the bytes are in the row: 0016's storage xor was validated when it
+        // required exactly one of inline_bytes/storage_url, so a row with no destination at all cannot exist.
+        if (artifact.StorageUrl is not { } storageUrl) return new ArtifactPlacement(artifact.CreatedAt, ArtifactPurgePath.Inline, null);
+
+        if (_purge is null) return new ArtifactPlacement(artifact.CreatedAt, ArtifactPurgePath.BackendCannotPurge, null);
+
+        var shared = await db.WorkflowArtifact.AsNoTracking()
+            .AnyAsync(other => other.StorageUrl == storageUrl && other.Id != claim.ArtifactId, cancellationToken).ConfigureAwait(false);
+
+        return shared
+            ? new ArtifactPlacement(artifact.CreatedAt, ArtifactPurgePath.LocalBlobShared, null)
+            : new ArtifactPlacement(artifact.CreatedAt, ArtifactPurgePath.LocalBlobExclusive, storageUrl);
     }
 
     /// <summary>
@@ -202,7 +261,7 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
         if (!StillOwned(row, claim, now)) return SweepSettlement.Lost;
 
         var settled = outcome.Action == ArtifactRetentionAction.Collect
-            ? await ReverifyAsync(db, claim, cancellationToken).ConfigureAwait(false)
+            ? await CollectAsync(db, claim, cancellationToken).ConfigureAwait(false)
             : outcome;
 
         if (settled.Action == ArtifactRetentionAction.Collect && !await DeleteArtifactAsync(db, claim, cancellationToken).ConfigureAwait(false))
@@ -218,6 +277,48 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
             return new SweepSettlement(settled.Action, false);
         }
         catch (DbUpdateConcurrencyException) { return SweepSettlement.Lost; }
+    }
+
+    /// <summary>
+    /// Everything the deletion depends on, re-established inside the deleting transaction, and then the byte removal
+    /// that the row's DELETE must not outrun. Three gates in order, each of which abandons the deletion: the reference
+    /// question, the placement question, and the backend's own answer.
+    /// </summary>
+    private async Task<ArtifactRetentionDecision> CollectAsync(CodeSpaceDbContext db, SweepClaim claim, CancellationToken cancellationToken)
+    {
+        var reference = await ReverifyAsync(db, claim, cancellationToken).ConfigureAwait(false);
+
+        if (reference.Action != ArtifactRetentionAction.Collect) return reference;
+
+        var placement = await PlacementAsync(db, claim, cancellationToken).ConfigureAwait(false);
+
+        if (placement is null)
+            return ArtifactRetentionDecision.Retry("artifact-vanished-at-collection", "The declared artifact was not readable inside the collecting transaction.");
+
+        if (ArtifactRetentionDecision.RefuseUnpurgeable(placement.Purge) is { } unpurgeable) return unpurgeable;
+
+        return placement.StorageUrl is { } storageUrl
+            ? await PurgeBytesAsync(claim, storageUrl, cancellationToken).ConfigureAwait(false)
+            : ArtifactRetentionDecision.Collect();
+    }
+
+    /// <summary>
+    /// Removes the offloaded bytes before the row that names them. A refusal is a budgeted
+    /// <see cref="ArtifactRetentionAction.Retry"/>, which rolls the whole transaction back — so a backend that will not
+    /// delete leaves the bytes, the row and a live declaration exactly as they were.
+    /// </summary>
+    private async Task<ArtifactRetentionDecision> PurgeBytesAsync(SweepClaim claim, string storageUrl, CancellationToken cancellationToken)
+    {
+        // Non-null by construction: a non-null StorageUrl is only ever produced on the LocalBlobExclusive line of
+        // PlacementAsync, which the null check immediately above it guards.
+        var outcome = await _purge!.DeleteAsync(storageUrl, cancellationToken).ConfigureAwait(false);
+
+        if (outcome == ArtifactBlobPurgeOutcome.Refused)
+            return ArtifactRetentionDecision.Retry("artifact-blob-delete-refused", "The blob backend refused to remove the artifact's bytes, so neither the bytes nor the row were removed.");
+
+        _logger.LogInformation("Artifact {ArtifactId}: offloaded bytes for team {TeamId} settled as {PurgeOutcome} before the row delete", claim.ArtifactId, claim.TeamId, outcome);
+
+        return ArtifactRetentionDecision.Collect();
     }
 
     /// <summary>The fail-closed second look, inside the deleting transaction. Anything other than a definite "unreferenced" abandons the deletion.</summary>
@@ -290,6 +391,14 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
     {
         public static SweepSettlement Lost { get; } = new(ArtifactRetentionAction.Retry, true);
     }
+
+    /// <summary>
+    /// One artifact's storage facts as one read saw them. <c>StorageUrl</c> is non-null for
+    /// <see cref="ArtifactPurgePath.LocalBlobExclusive"/> and nothing else, which is what makes it safe to read as
+    /// "there are bytes here to delete, and a backend that will delete them" — every other placement carries null
+    /// however its bytes are actually stored.
+    /// </summary>
+    private sealed record ArtifactPlacement(DateTimeOffset CreatedAt, ArtifactPurgePath Purge, string? StorageUrl);
 
     /// <summary>
     /// The claimed row AS CLAIMED — an in-memory snapshot, never re-read. Settlement compares a freshly loaded row
