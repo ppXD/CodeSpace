@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.RunData;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Failures;
@@ -96,11 +97,13 @@ public sealed partial class NativeRecordPlane : INativeRecordPlane, IScopedDepen
     private const int ReportedContractErrors = 5;
 
     private readonly IServiceScopeFactory _scopeFactory;
+    private readonly IRunDataCompletenessWriter _completeness;
     private readonly ILogger<NativeRecordPlane> _logger;
 
-    public NativeRecordPlane(IServiceScopeFactory scopeFactory, ILogger<NativeRecordPlane> logger)
+    public NativeRecordPlane(IServiceScopeFactory scopeFactory, IRunDataCompletenessWriter completeness, ILogger<NativeRecordPlane> logger)
     {
         _scopeFactory = scopeFactory;
+        _completeness = completeness;
         _logger = logger;
     }
 

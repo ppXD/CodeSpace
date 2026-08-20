@@ -6,6 +6,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Capture;
 using CodeSpace.Core.Services.Agents.Harnesses.Claude;
+using CodeSpace.Core.Services.RunData;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
@@ -14,6 +15,8 @@ using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Dtos.Workflows;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Agents;
@@ -27,9 +30,9 @@ namespace CodeSpace.IntegrationTests.Agents;
 /// <para><b>What only this tier can execute</b>, named so its absence from a local unit run is not mistaken for
 /// coverage: that the rows this producer writes are ones 0146 ACCEPTS (a complete verdict is refused over an
 /// indeterminate expectation, a shortfall, or an open gap, and this producer must never propose one); that a refused
-/// batch's gap and the manifest advance that accompanies it commit together; that a gap and a completeness statement
-/// racing each other cannot leave the run complete beside an open gap, which is a claim about two triggers and a lock
-/// and about nothing in C#.</para>
+/// batch's gap is committed on its OWN, so no claim about the record can take the bad news down with it; and that a
+/// gap and a completeness statement racing each other cannot leave the run complete beside an open gap, which is a
+/// claim about two triggers and a lock and about nothing in C#.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -127,11 +130,13 @@ public sealed class NativeRecordCompletenessFlowTests
     /// connections at once, many times: whichever wins, the run must never end up with a strictly readable statement
     /// beside an open gap, AND the statement must still be there.
     ///
-    /// <para>Both halves have teeth, and the second is the one that is easy to miss. The producer takes 0146's per-run
-    /// rendezvous lock EXPLICITLY, before it probes the run's open gaps, precisely because the manifest guard re-probes
-    /// them under that lock inside the trigger. Removing the explicit lock makes this test fail with no statement at all
-    /// — the guard refuses the claim, the containment swallows it, and the counts it carried are a DELTA, so a lost one
-    /// understates the run's expectation for good.</para>
+    /// <para>Both halves have teeth, and the second is the one that is easy to miss. The plane holds no lock and opens
+    /// no transaction of its own here: the rendezvous is the FIRST statement of
+    /// <c>workflow_run_data_manifest_advance</c> (0148), which is what makes the gap probe and the write it feeds see
+    /// one set even though 0146's guard re-probes them under the same lock inside the trigger. Move the probe back
+    /// outside that function and this test fails with no statement at all — the guard refuses the claim, the
+    /// containment swallows it, and the counts it carried are a DELTA, so a lost one understates the run's expectation
+    /// for good. <c>RunDataCompletenessRendezvousTests</c> pins the same property directly on the function.</para>
     /// </summary>
     [Fact]
     public async Task A_statement_and_a_gap_racing_each_other_never_leave_a_complete_manifest_beside_an_open_gap()
@@ -197,6 +202,53 @@ public sealed class NativeRecordCompletenessFlowTests
             customMessage: "a later batch cannot restore a total nobody ever knew — counting back up to complete here would convert the unknown into the assurance 0146 refuses");
         after.PresentRecordCount.ShouldBe(2);
         after.Verdict.IsStrictlyReadable().ShouldBeFalse();
+    }
+
+    /// <summary>
+    /// WHICH DIRECTION A LOST ACCOUNTING ERRS IN, which is the whole reason the expectation is declared before the
+    /// frames rather than counted with them. Both counts are DELTAS and neither is retryable — re-applying one whose
+    /// COMMIT was acknowledged nowhere would double it, and a double-counted expectation reads present &lt; expected for
+    /// good, turning a healthy run permanently not-complete. So the residue is not removed, it is POINTED: the frames
+    /// land, the accounting that follows them is lost, and what remains is a visible shortfall.
+    ///
+    /// <para>0146 assumed exactly this shape — "a producer that wrote the record but not the counter leaves present
+    /// below expected" — and a single advance carrying both counts does not have it: losing that one leaves the two
+    /// equally short and the facet reads Exact over frames nobody counted. This test is what makes the assumption true
+    /// of this producer, by dropping precisely the second of its two advances.</para>
+    ///
+    /// <para>An ABSENT row would also be not-complete by the convention the manifest entity states, and that is not
+    /// good enough: no reader implements the convention yet, while <c>ck_workflow_run_data_manifest_completeness</c>
+    /// refuses a complete verdict over a shortfall in the database itself. A row that shows the shortfall is enforced;
+    /// an absent one is merely intended.</para>
+    /// </summary>
+    [Fact]
+    public async Task Frames_that_landed_with_their_presence_unaccounted_leave_a_visible_shortfall()
+    {
+        var run = await SeedWorkflowBoundRunAsync();
+
+        using var planeScope = _fixture.BeginScope(builder => builder.Register<IRunDataCompletenessWriter>(context =>
+                new PresenceLosingWriter(new RunDataCompletenessWriter(context.Resolve<IServiceScopeFactory>(), NullLogger<RunDataCompletenessWriter>.Instance)))
+            .InstancePerLifetimeScope());
+
+        var plane = planeScope.Resolve<INativeRecordPlane>();
+        var handle = await OpenAsync(plane, run);
+
+        await plane.WriteAsync(Batch(handle, Frame(handle, 0), Frame(handle, 1)), CancellationToken.None);
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        (await db.WorkflowRunNativeRecord.CountAsync(candidate => candidate.StreamId == handle.StreamId)).ShouldBe(2,
+            customMessage: "the premise: the frames are durable and only the claim about them was lost, or this test is asserting nothing about the fail direction");
+
+        var statement = (await db.WorkflowRunDataManifest.AsNoTracking()
+                .SingleOrDefaultAsync(candidate => candidate.WorkflowRunId == run.WorkflowRunId))
+            .ShouldNotBeNull(customMessage: "the expectation is declared BEFORE the frames, so losing the accounting that follows them must still leave a statement — a facet with no row at all is only not-complete by a convention nothing enforces yet");
+
+        statement.ExpectedRecordCount.ShouldBe(2, customMessage: "the declaration stated what the batch undertook, and nothing lowered it");
+        statement.PresentRecordCount.ShouldBe(0, customMessage: "the presence advance is the one that was lost");
+        statement.Verdict.IsStrictlyReadable().ShouldBeFalse(
+            customMessage: "a shortfall must not read complete. If this fails, the two counts are advancing together again and a lost accounting reads Exact over frames nobody counted.");
     }
 
     /// <summary>
@@ -339,4 +391,24 @@ public sealed class NativeRecordCompletenessFlowTests
     }
 
     private sealed record SeededRun(Guid TeamId, Guid AgentRunId, Guid WorkflowRunId, long FenceEpoch);
+
+    /// <summary>
+    /// The real writer with exactly ONE of the producer's two advances dropped: the one that states presence. That is
+    /// the survivable failure the containment already produces in production — a lost claim is reported, not thrown —
+    /// so this substitutes the failure rather than a different code path.
+    /// </summary>
+    private sealed class PresenceLosingWriter : IRunDataCompletenessWriter
+    {
+        private readonly IRunDataCompletenessWriter _real;
+
+        public PresenceLosingWriter(IRunDataCompletenessWriter real) => _real = real;
+
+        public Task<bool> AdvanceAsync(RunDataFacetAdvance advance, CancellationToken cancellationToken) =>
+            advance.Present > 0 ? Task.FromResult(false) : _real.AdvanceAsync(advance, cancellationToken);
+
+        public Task<bool> NoticeAsync(WorkflowRunCaptureGap gap, CancellationToken cancellationToken) => _real.NoticeAsync(gap, cancellationToken);
+
+        public Task<bool> UnstateExpectationAsync(Guid teamId, Guid workflowRunId, string facet, CancellationToken cancellationToken) =>
+            _real.UnstateExpectationAsync(teamId, workflowRunId, facet, cancellationToken);
+    }
 }
