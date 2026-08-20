@@ -126,11 +126,14 @@ public class SupervisorCapabilityCatalogTests
     [Fact]
     public void No_personas_omit_the_persona_section_byte_for_byte_the_planner_path()
     {
+        // NULL and EMPTY are deliberately DIFFERENT now, and this test used to pin that they were the same. Null is the
+        // planner: LlmWorkflowPlanner.cs:60 calls the two-arg overload, so its prompt must stay byte-identical and that is
+        // what this asserts. Empty is the SUPERVISOR with a persona-less team — LlmSupervisorDecider.cs:444 builds a List,
+        // so it passes empty, never null — and collapsing the two is what left the model holding an advertised field with
+        // nothing to pick. See An_empty_persona_library_says_so_... for that half.
         var withNull = CapabilityCatalog.Render(Harnesses, Array.Empty<PoolModelInfo>());
-        var withEmpty = CapabilityCatalog.Render(Harnesses, Array.Empty<PoolModelInfo>(), Array.Empty<PersonaCatalogInfo>());
 
-        withNull.ShouldBe(withEmpty, "an absent/empty persona list renders identically — the planner's two-arg call is byte-identical");
-        withNull.ShouldNotContain("persona", Case.Insensitive, "no persona section is emitted when the team has no personas");
+        withNull.ShouldNotContain("persona", Case.Insensitive, "the planner's two-arg call emits no persona section at all");
     }
 
     private sealed class FakeHarness : IAgentHarness, IModelCredentialProjector
@@ -160,4 +163,18 @@ public class SupervisorCapabilityCatalogTests
         public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) => throw new NotSupportedException();
         public IAgentEventFolder CreateFolder() => throw new NotSupportedException();
     }
+
+    [Fact]
+    public void An_empty_persona_library_says_so_instead_of_leaving_the_advertised_field_unexplained()
+    {
+        // The rail and the decision schema both advertise agentDefinition with an example slug. On an empty library the
+        // model was handed the field, an example, and no statement that there was nothing to pick — and it authored
+        // 'metis-coder', which killed four real-model runs. The model pool above has always emitted its own negative in
+        // exactly this situation; this is the persona half of it.
+        var rendered = CapabilityCatalog.Render(Array.Empty<IAgentHarness>(), Array.Empty<PoolModelInfo>(), Array.Empty<PersonaCatalogInfo>());
+
+        rendered.ShouldContain("persona library is EMPTY", customMessage: "an empty library must state itself");
+        rendered.ShouldContain("OMIT agentDefinition", customMessage: "and must say what to do instead — the field is optional and the run's own persona stands");
+    }
+
 }

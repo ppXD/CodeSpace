@@ -260,10 +260,22 @@ public class SupervisorRichSpawnFlowTests : IDisposable
     }
 
     [Fact]
-    public async Task A_spawn_authoring_an_unknown_persona_slug_fails_closed_without_stranding_the_decision()
+    public async Task A_spawn_authoring_an_unknown_persona_slug_is_rejected_re_authorably_and_the_run_survives()
     {
-        // P3 — the brain only authors slugs the catalog lists; a slug NO active team persona has must fail closed (a
-        // clean terminal, like an out-of-pool model), NOT silently fall back to the profile persona.
+        // This test previously pinned the OPPOSITE: an unknown slug threw and terminalized the run, aligned by intent with
+        // the out-of-pool MODEL case. That alignment was wrong, and it cost four real-model runs — 2026-08-19 10:16 through
+        // 2026-08-20 01:12 all died byte-identically on the invented slug 'metis-coder', with agents=0 after the plan and
+        // the dependency staging had already succeeded, and the whole-loop gate reported each as a CODE regression.
+        //
+        // The two cases are genuinely different. An out-of-pool persona is GOVERNANCE — the operator forbade it, so it must
+        // fail closed and stay non-bypassable (ApplyDispatchAgentPool still throws; the test below still pins it). A slug
+        // that resolves to NOTHING carries no governance content at all: it is a model naming something that does not
+        // exist, exactly like an unknown subtask id, which this repo already rejects re-authorably. So persona now sits
+        // with that sibling.
+        //
+        // The properties the old test protected all survive: no agent is staged, the decision is not left stranded Running,
+        // and the slug is NOT silently swapped for the profile persona. What changes is that the brain gets told what it
+        // got wrong and can re-author, instead of the run dying for a typo.
         using (var s = _fixture.BeginScope()) s.Resolve<SupervisorDecisionScript>().PlanSpawnBadPersonaStop();
 
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -276,17 +288,19 @@ public class SupervisorRichSpawnFlowTests : IDisposable
 
         await RunEngineAsync(runId);
         await ResolveSelfAdvanceAsync(runId);
-        try { await RunEngineAsync(runId); } catch { /* the clamp failure surfaces through the node; asserted below */ }
+        await RunEngineAsync(runId);
 
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
 
         var spawn = await db.SupervisorDecisionRecord.AsNoTracking().SingleAsync(d => d.SupervisorRunId == runId && d.DecisionKind == SupervisorDecisionKinds.Spawn);
-        spawn.Status.ShouldBe(SupervisorDecisionStatus.Failed, "an unknown per-agent persona slug terminalized the spawn — a clean Failed, not a stranded Running");
-        spawn.Error.ShouldNotBeNull();
-        spawn.Error!.ShouldContain(ScriptedSupervisorDecider.MissingPersonaSlug, Case.Insensitive);
+        spawn.Status.ShouldNotBe(SupervisorDecisionStatus.Running, "the decision must never be left stranded — that property is unchanged");
+        spawn.Status.ShouldNotBe(SupervisorDecisionStatus.Failed, "an invented slug is a model miss, and a model miss must not terminalize a decision the brain can simply re-author");
 
-        (await db.AgentRun.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId)).ShouldBe(0, "no agent staged — the persona clamp rejected the unknown slug");
+        (await db.AgentRun.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId)).ShouldBe(0, "no agent staged — the whole spawn is rejected, never a partial fan-out under the profile persona");
+
+        var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+        run.Status.ShouldNotBe(WorkflowRunStatus.Failure, "the run survives a slug the model made up — this is the regression the four live runs exposed");
     }
 
     [Fact]
