@@ -27,6 +27,9 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
 {
     private const string UnreachableDatabase = "Host=127.0.0.1;Port=1;Database=unused;Username=unused;Password=unused";
 
+    /// <summary>The migration that moved the per-run rendezvous inside the two functions a producer calls.</summary>
+    private const string RendezvousMigration = "0148_workflow_run_data_manifest_advance.sql";
+
     [Fact]
     public void A_gap_is_one_known_missing_span_with_a_subject_a_coordinate_a_typed_reason_and_a_notice_time()
     {
@@ -207,11 +210,12 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
     /// <summary>
     /// The isolation that still holds, checked rather than asserted in prose: ONE production producer and zero
     /// production readers. The only files in <c>backend/src</c> that may mention either table are the two entities,
-    /// their two configurations, the DbContext that registers them, and the native-record capture plane's completeness
-    /// partial — which WRITES a statement for its own facet and a gap for its own refused batches, and reads neither
-    /// table for any decision. In particular nothing in completion, terminal decision, planner, oracle, critic or
-    /// routing may read the manifest: making terminal authority answer to it is a separate, later, deliberate cutover,
-    /// and this test is what turns that step into a visible red rather than a quiet import.
+    /// their two configurations, the DbContext that registers them, the shared completeness WRITER every facet's
+    /// producer states through, and the native-record capture plane's completeness partial — which states its own
+    /// facet and records a gap for its own refused batches, and reads neither table for any decision. In particular
+    /// nothing in completion, terminal decision, planner, oracle, critic or routing may read the manifest: making
+    /// terminal authority answer to it is a separate, later, deliberate cutover, and this test is what turns that step
+    /// into a visible red rather than a quiet import.
     /// </summary>
     [Fact]
     public void Only_the_native_record_capture_plane_touches_either_table()
@@ -227,16 +231,18 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
         mentions.ShouldBe(new[]
         {
             "CodeSpaceDbContext.cs",
+            "IRunDataCompletenessWriter.cs",
             "NativeRecordPlane.Completeness.cs",
+            "RunDataFacetAdvance.cs",
             "WorkflowRunCaptureGap.cs",
             "WorkflowRunCaptureGapConfiguration.cs",
             "WorkflowRunDataManifest.cs",
             "WorkflowRunDataManifestConfiguration.cs",
-        }, customMessage: "a production file other than the native-record capture plane now reads or writes the " +
-                          "capture-gap / data-manifest plane. Exactly one producer exists — the native-record facet — " +
-                          "and nothing reads either table: no reducer folds a gap and terminal authority does not " +
-                          "consult the manifest. If a second producer or the first reader is genuinely being added, it " +
-                          "is a deliberate step that updates this list — not a silent one.");
+        }, customMessage: "a production file other than the shared completeness writer and the native-record capture " +
+                          "plane now reads or writes the capture-gap / data-manifest plane. Exactly one producer exists " +
+                          "— the native-record facet — and nothing reads either table: no reducer folds a gap and " +
+                          "terminal authority does not consult the manifest. If a second producer or the first reader is " +
+                          "genuinely being added, it is a deliberate step that updates this list — not a silent one.");
     }
 
     /// <summary>
@@ -279,6 +285,72 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
                                "constraint production does not have. Reconcile the two spellings, not the test.");
         }
     }
+
+    /// <summary>
+    /// The LOCK DISCIPLINE, as a shape rather than a sentence. 0146's guards take the per-run rendezvous lock in a
+    /// BEFORE ROW trigger, which fires after an INSERT's value expressions were already evaluated on the statement
+    /// snapshot — so a producer that probes the run's open gaps and THEN writes has its whole statement refused when a
+    /// gap commits in between, and the counts it carried are deltas, so a refused statement is a delta lost for good.
+    ///
+    /// <para>0148 removes the choice instead of documenting it: the lock, the gap probe and the manifest write are one
+    /// function whose FIRST statement is the lock, so a caller with no transaction and no lock of its own is correct.
+    /// This test is what keeps that true — no C# may take the lock, probe the gap count, or issue DML against the
+    /// manifest table, because doing any of the three from C# is how the order becomes choosable again.</para>
+    ///
+    /// <para>It is a PIN, not a constraint: nothing in the database refuses a hand-written probing INSERT, so this
+    /// assertion is the whole enforcement and its failure message has to say what to do instead.</para>
+    /// </summary>
+    [Fact]
+    public void No_production_C_sharp_probes_the_gap_plane_takes_the_rendezvous_or_writes_the_manifest_table()
+    {
+        var offenders = Directory.EnumerateFiles(ProductionSourceRoot(), "*.cs", SearchOption.AllDirectories)
+            .Select(path => (Name: Path.GetFileName(path)!, Tokens: RendezvousTokensIn(File.ReadAllText(path))))
+            .Where(candidate => candidate.Tokens.Count > 0)
+            .Select(candidate => $"{candidate.Name}: {string.Join(", ", candidate.Tokens)}")
+            .Order(StringComparer.Ordinal)
+            .ToList();
+
+        offenders.ShouldBeEmpty(
+            customMessage: "a production C# file takes the completeness rendezvous lock, probes the open-gap count, or " +
+                           "writes the manifest table directly. All three belong inside workflow_run_data_manifest_advance " +
+                           "/ workflow_run_data_manifest_unstate_expectation (0148), which take the lock as their own first " +
+                           "statement — that is what makes a probe-then-write race unreachable rather than merely " +
+                           "documented. Call the function through IRunDataCompletenessWriter instead of restating its SQL.");
+    }
+
+    /// <summary>
+    /// The DRIFT DETECTOR for the seam above. Moving the lock discipline into the database means the only thing holding
+    /// the producer to it is a function NAME resolved at runtime — rename it in 0148 and the C# still compiles, still
+    /// deploys, and fails at the first batch with <c>42883 function does not exist</c>, where the plane's containment
+    /// turns it into a log line and a silently unstated run. Both names are therefore pinned on both sides.
+    /// </summary>
+    [Theory]
+    [InlineData("workflow_run_data_manifest_advance")]
+    [InlineData("workflow_run_data_manifest_unstate_expectation")]
+    public void The_rendezvous_taking_functions_are_named_identically_in_0148_and_in_the_writer(string function)
+    {
+        var migration = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Persistence", "DbUpFiles", RendezvousMigration));
+
+        DbUpRunner.DiscoverScriptNames().ShouldContain(name => name.EndsWith(RendezvousMigration, StringComparison.OrdinalIgnoreCase),
+            customMessage: $"{RendezvousMigration} must be discoverable by DbUp, or a deployed image has neither function and the producer's every batch is a contained 42883.");
+        migration.ShouldContain($"CREATE OR REPLACE FUNCTION {function}",
+            customMessage: $"'{function}' is not defined by {RendezvousMigration}, so nothing creates the entry point the writer calls");
+
+        File.ReadAllText(Path.Combine(ProductionSourceRoot(), "CodeSpace.Core", "Services", "RunData", "IRunDataCompletenessWriter.cs"))
+            .ShouldContain(function,
+                customMessage: $"the completeness writer no longer calls '{function}'. The lock discipline lives inside that " +
+                               "function, so a producer reaching the manifest by any other route is back to choosing an order " +
+                               "it can get wrong.");
+    }
+
+    /// <summary>The three things a producer must not be able to spell in C#: the rendezvous, the probe the rendezvous protects, and direct DML against the statement it produces.</summary>
+    private static IReadOnlyList<string> RendezvousTokensIn(string source) => new[]
+        {
+            "workflow_run_data_completeness_lock", "workflow_run_capture_gap_open_count",
+            $"INSERT INTO {WorkflowRunDataNames.DataManifest}", $"UPDATE {WorkflowRunDataNames.DataManifest}",
+        }
+        .Where(token => source.Contains(token, StringComparison.OrdinalIgnoreCase))
+        .ToList();
 
     private static bool Mentions(string source) =>
         source.Contains(nameof(WorkflowRunCaptureGap), StringComparison.Ordinal)

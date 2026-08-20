@@ -1,5 +1,6 @@
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Artifacts.Routing;
+using CodeSpace.Core.Services.Workflows.Artifacts.Routing.DataClasses;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Workflows.Artifacts.Routing;
@@ -27,7 +28,7 @@ public sealed class WorkflowArtifactDestinationResolverTests
     {
         var routes = new StubRouteResolver(resolution);
 
-        var destination = await new WorkflowArtifactDestinationResolver(routes).ResolveAsync(Guid.NewGuid(), CancellationToken.None);
+        var destination = await Resolver(routes).ResolveAsync(Guid.NewGuid(), CancellationToken.None);
 
         destination.ShouldBeOfType<WorkflowArtifactDestination.Local>();
         routes.Requests.Count.ShouldBe(1, "neither outcome is something to repair on the write path");
@@ -55,7 +56,7 @@ public sealed class WorkflowArtifactDestinationResolverTests
             NamespaceFingerprint = $"sha256:{new string('a', 64)}",
         }));
 
-        var destination = await new WorkflowArtifactDestinationResolver(routes).ResolveAsync(teamId, CancellationToken.None);
+        var destination = await Resolver(routes).ResolveAsync(teamId, CancellationToken.None);
 
         destination.ShouldBe(new WorkflowArtifactDestination.Routed(profileId, 9));
         routes.Requests.ShouldBe([new StorageRouteSnapshotRequest(teamId, "workflow-artifact/v1")]);
@@ -67,7 +68,7 @@ public sealed class WorkflowArtifactDestinationResolverTests
     {
         var routes = new StubRouteResolver(resolution);
 
-        var destination = await new WorkflowArtifactDestinationResolver(routes).ResolveAsync(Guid.NewGuid(), CancellationToken.None);
+        var destination = await Resolver(routes).ResolveAsync(Guid.NewGuid(), CancellationToken.None);
 
         destination.ShouldBe(new WorkflowArtifactDestination.Unusable(expected));
     }
@@ -91,8 +92,11 @@ public sealed class WorkflowArtifactDestinationResolverTests
         var routes = new StubRouteResolver(new StorageRouteSnapshotResolution.Cancelled());
 
         await Should.ThrowAsync<OperationCanceledException>(
-            () => new WorkflowArtifactDestinationResolver(routes).ResolveAsync(Guid.NewGuid(), cancellation.Token));
+            () => Resolver(routes).ResolveAsync(Guid.NewGuid(), cancellation.Token));
     }
+
+    /// <summary>The plane's adapter over the shared destination policy, with the stub still standing in for the routing plane itself.</summary>
+    private static WorkflowArtifactDestinationResolver Resolver(IStorageRouteSnapshotResolver routes) => new(new RoutedDestinationResolver(routes), new WorkflowArtifactDataClass());
 
     private sealed class StubRouteResolver(params StorageRouteSnapshotResolution[] results) : IStorageRouteSnapshotResolver
     {

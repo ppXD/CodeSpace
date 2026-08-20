@@ -1,51 +1,62 @@
 using CodeSpace.Core.Services.Workflows.Artifacts.Routing;
+using CodeSpace.Core.Services.Workflows.Artifacts.Routing.DataClasses;
 
 namespace CodeSpace.Core.Services.Agents.AgentRunLogging;
 
 /// <summary>
-/// Resolves the versioned Agent Run log data class through the team storage routing control plane. The returned
-/// profile coordinates are frozen for the write and no profile-name or single-candidate fallback is permitted.
+/// Translates the shared routed destination into the Agent Run log capture vocabulary, and owns the one step that is
+/// this class's own: a team that has never configured log storage gets its explicit default route established once,
+/// then the same exact route is resolved again. The returned coordinates are frozen for the write and no profile-name
+/// or single-candidate fallback is permitted.
+///
+/// <para>Deliberately asymmetric with the main artifact plane, which sends an un-activated (Draft) route to its local
+/// blob backend: this data class HAS no local backend, so there is nothing to degrade to and an un-activated route
+/// stays a typed refusal rather than becoming silently-dropped capture. That is declared by
+/// <see cref="AgentRunLogDataClass"/> NOT implementing <see cref="IRoutedDataClassLocalFallback"/> — the absence is
+/// the policy, and <c>RoutedDestination.Local</c> is consequently unreachable here.</para>
 /// </summary>
 public sealed class AgentRunLogStorageResolver : IAgentRunLogStorageResolver
 {
     public const string DataClassTypeKey = "agent-run-log/v1";
-    private readonly IStorageRouteSnapshotResolver _routes;
+    private readonly IRoutedDestinationResolver _destinations;
     private readonly IAgentRunLogStorageReadiness _readiness;
+    private readonly AgentRunLogDataClass _dataClass;
 
-    public AgentRunLogStorageResolver(IStorageRouteSnapshotResolver routes, IAgentRunLogStorageReadiness readiness)
+    public AgentRunLogStorageResolver(IRoutedDestinationResolver destinations, IAgentRunLogStorageReadiness readiness, AgentRunLogDataClass dataClass)
     {
-        _routes = routes;
+        _destinations = destinations;
         _readiness = readiness;
+        _dataClass = dataClass;
     }
 
     public async Task<AgentRunLogStorageResolution> ResolveAsync(Guid teamId, CancellationToken cancellationToken)
     {
-        var request = new StorageRouteSnapshotRequest(teamId, DataClassTypeKey);
-        var resolution = await _routes.ResolveAsync(request, cancellationToken).ConfigureAwait(false);
-        if (resolution is StorageRouteSnapshotResolution.Cancelled && cancellationToken.IsCancellationRequested)
-            throw new OperationCanceledException(cancellationToken);
-        if (resolution is StorageRouteSnapshotResolution.Missing)
+        var destination = await _destinations.ResolveAsync(_dataClass, teamId, cancellationToken).ConfigureAwait(false);
+        if (destination is RoutedDestination.Unusable { Disposition: RoutedDestinationDisposition.NoRoute })
         {
             await _readiness.EnsureDefaultRouteAsync(teamId, cancellationToken).ConfigureAwait(false);
-            resolution = await _routes.ResolveAsync(request, cancellationToken).ConfigureAwait(false);
-            if (resolution is StorageRouteSnapshotResolution.Cancelled && cancellationToken.IsCancellationRequested)
-                throw new OperationCanceledException(cancellationToken);
+            destination = await _destinations.ResolveAsync(_dataClass, teamId, cancellationToken).ConfigureAwait(false);
         }
 
-        return resolution switch
+        return destination switch
         {
-            StorageRouteSnapshotResolution.Ready ready => new AgentRunLogStorageResolution.Ready(ready.Snapshot.StorageProfileId, ready.Snapshot.StorageProfileRevision),
-            StorageRouteSnapshotResolution.Missing => Unavailable(AgentRunLogStorageProblemCode.Missing),
-            // Deliberately asymmetric with the main artifact plane, which sends an un-activated (Draft) route to its
-            // local blob backend: this data class HAS no local backend, so there is nothing to degrade to and an
-            // un-activated route stays a typed refusal rather than becoming silently-dropped capture.
-            StorageRouteSnapshotResolution.RouteNotActivated or StorageRouteSnapshotResolution.RouteNotActive
-                or StorageRouteSnapshotResolution.ProfileNotActive => Unavailable(AgentRunLogStorageProblemCode.Inactive),
-            StorageRouteSnapshotResolution.RouteRevisionMissing or StorageRouteSnapshotResolution.ProfileMissing
-                or StorageRouteSnapshotResolution.ProfileRevisionMissing or StorageRouteSnapshotResolution.Invalid => Unavailable(AgentRunLogStorageProblemCode.Invalid),
-            _ => Unavailable(AgentRunLogStorageProblemCode.ResolutionFailed),
+            RoutedDestination.Routed routed => new AgentRunLogStorageResolution.Ready(routed.StorageProfileId, routed.StorageProfileRevision),
+            RoutedDestination.Unusable unusable => new AgentRunLogStorageResolution.Unavailable(Problem(unusable.Disposition)),
+            _ => throw new InvalidOperationException($"Data class '{_dataClass.TypeKey}' resolved to a local destination it has no backend for. Only a class with somewhere to put the bytes may declare {nameof(IRoutedDataClassLocalFallback)}."),
         };
     }
 
-    private static AgentRunLogStorageResolution Unavailable(AgentRunLogStorageProblemCode code) => new AgentRunLogStorageResolution.Unavailable(code);
+    /// <summary>
+    /// Total over the shared vocabulary. This plane's codes are coarser on purpose — every "a route or profile is not
+    /// taking bytes" state is one operator-facing <c>Inactive</c> — while the shared disposition keeps them distinct
+    /// for consumers that report them separately.
+    /// </summary>
+    private static AgentRunLogStorageProblemCode Problem(RoutedDestinationDisposition disposition) => disposition switch
+    {
+        RoutedDestinationDisposition.NoRoute => AgentRunLogStorageProblemCode.Missing,
+        RoutedDestinationDisposition.RouteNotActivated or RoutedDestinationDisposition.RouteNotActive
+            or RoutedDestinationDisposition.ProfileNotActive => AgentRunLogStorageProblemCode.Inactive,
+        RoutedDestinationDisposition.Invalid => AgentRunLogStorageProblemCode.Invalid,
+        _ => AgentRunLogStorageProblemCode.ResolutionFailed,
+    };
 }
