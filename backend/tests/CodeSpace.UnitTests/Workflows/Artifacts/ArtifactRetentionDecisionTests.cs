@@ -53,7 +53,7 @@ public sealed class ArtifactRetentionDecisionTests
 
     [Theory]
     [InlineData(ArtifactPurgePath.LocalBlobShared, "artifact-blob-shared")]              // another row names the same physical file
-    [InlineData(ArtifactPurgePath.Routed, "artifact-routed-storage")]                    // a committed transfer intent can hand the object to a later writer
+    [InlineData(ArtifactPurgePath.Routed, "artifact-routed-storage")]                    // no repair path yet: a purged location can never be re-written
     [InlineData(ArtifactPurgePath.BackendCannotPurge, "artifact-blob-backend-cannot-purge")]   // the transport offers no removal at all
     public void An_artifact_whose_bytes_have_no_purge_path_is_kept_and_says_which_one_is_missing(ArtifactPurgePath purge, string expectedCode)
     {

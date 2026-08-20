@@ -100,6 +100,81 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         storage.PutCalls.ShouldBe(1);
     }
 
+    /// <summary>
+    /// The dedup short-circuit is the whole cost case for content-addressed storage AND the one place a purge can hand
+    /// a writer an object whose bytes are gone. <c>Available</c> is the only location state that means "these bytes
+    /// were verified present here", so it is the only one that may satisfy a write without provider I/O.
+    /// </summary>
+    [Theory]
+    [InlineData(ArtifactLocationState.Available, null)]
+    [InlineData(ArtifactLocationState.Deleting, ArtifactCasProblemCode.TargetMissing)]
+    [InlineData(ArtifactLocationState.Deleted, ArtifactCasProblemCode.TargetMissing)]
+    [InlineData(ArtifactLocationState.Missing, ArtifactCasProblemCode.TargetMissing)]
+    [InlineData(ArtifactLocationState.Corrupt, ArtifactCasProblemCode.TargetMissing)]
+    public async Task Dedup_hit_satisfies_a_write_only_while_the_committed_location_is_still_available(ArtifactLocationState state, ArtifactCasProblemCode? expected)
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState();
+        var bytes = RandomNumberGenerator.GetBytes(4096);
+
+        var committed = (await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "dedup-location"))).ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        if (state != ArtifactLocationState.Available) await MoveLocationAsync(committed.ArtifactLocationId, state);
+
+        var second = await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "dedup-location"));
+
+        if (expected == null)
+        {
+            var hit = second.ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+            hit.WasAlreadyCommitted.ShouldBeTrue();
+            hit.IntentId.ShouldBe(committed.IntentId);
+            hit.ArtifactObjectId.ShouldBe(committed.ArtifactObjectId);
+            hit.ArtifactLocationId.ShouldBe(committed.ArtifactLocationId);
+        }
+        else
+        {
+            var rejected = second.ShouldBeOfType<ArtifactCasTransferResult.Rejected>();
+            rejected.Problem.Code.ShouldBe(expected.Value);
+            rejected.IntentId.ShouldBe(committed.IntentId);
+        }
+
+        // Either way the dedup decision costs no provider I/O: one driver and one upload for the whole test.
+        storage.FactoryCreateCalls.ShouldBe(1);
+        storage.PutCalls.ShouldBe(1);
+    }
+
+    /// <summary>
+    /// The purge claims the location between a writer's upload and that writer's commit. The commit must not revive
+    /// the claimed location, because the bytes it verified are exactly the ones the purge is removing.
+    /// </summary>
+    [Fact]
+    public async Task Location_claimed_for_purge_between_upload_and_commit_admits_no_committed_artifact()
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState();
+        var bytes = RandomNumberGenerator.GetBytes(4096);
+        var seed = Request(world, new MemoryStream(bytes), bytes, "purge-race-seed") with { TargetObjectKey = "cas/purge-race.bin" };
+        var seeded = (await PutAsync(world, storage, seed)).ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+
+        storage.Objects.TryRemove(seed.TargetObjectKey, out _).ShouldBeTrue();
+        storage.BlockAfterNextPut = true;
+        using var writerScope = Scope(storage);
+        var writer = writerScope.Resolve<IArtifactCasRuntimeCoordinator>().PutAsync(Request(world, new MemoryStream(bytes), bytes, "purge-race-writer") with { TargetObjectKey = seed.TargetObjectKey }, CancellationToken.None);
+        await storage.BlockedAfterPutEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var claimedRevision = await MoveLocationAsync(seeded.ArtifactLocationId, ArtifactLocationState.Deleting);
+        storage.ReleaseBlockedAfterPut.TrySetResult();
+
+        var result = await writer;
+
+        result.ShouldBeOfType<ArtifactCasTransferResult.Rejected>().Problem.Code.ShouldBe(ArtifactCasProblemCode.IdempotencyConflict);
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var location = await db.ArtifactLocation.SingleAsync(value => value.Id == seeded.ArtifactLocationId);
+        location.State.ShouldBe(ArtifactLocationState.Deleting);
+        location.Revision.ShouldBe(claimedRevision);
+        (await db.ArtifactLocation.CountAsync(value => value.TeamId == world.TeamId)).ShouldBe(1);
+        (await db.ArtifactTransferIntent.CountAsync(value => value.TeamId == world.TeamId && value.State == ArtifactTransferState.Committed)).ShouldBe(1);
+    }
+
     [Fact]
     public async Task Throttle_schedules_durable_retry_and_late_retry_reclaims_then_commits()
     {
@@ -645,6 +720,32 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         db.StorageProfile.Add(profile);
         await db.SaveChangesAsync();
         return new World(teamId, actorId, profileId, profileRevisionId);
+    }
+
+    /// <summary>
+    /// Stands in for the routed purge this lane does not build: one observation moving the location off
+    /// <c>Available</c>, appended exactly the way the schema requires. Returns the revision it wrote.
+    /// </summary>
+    private async Task<long> MoveLocationAsync(Guid locationId, ArtifactLocationState state)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var location = await db.ArtifactLocation.SingleAsync(value => value.Id == locationId);
+        location.State = state;
+        location.Revision++;
+        location.LastModifiedDate = DateTimeOffset.UtcNow;
+        db.ArtifactLocationEvent.Add(new ArtifactLocationEvent
+        {
+            Id = Guid.NewGuid(), TeamId = location.TeamId, ArtifactLocationId = location.Id, Revision = location.Revision,
+            EventType = ArtifactLocationEventType.StateChanged, State = state, ObservedAt = location.LastModifiedDate,
+            ProviderObjectVersion = location.ProviderObjectVersion, ProviderETag = location.ProviderETag,
+            ProviderChecksumAlgorithm = location.ProviderChecksumAlgorithm, ProviderChecksum = location.ProviderChecksum,
+            ObservedSizeBytes = location.ObservedSizeBytes, VerifiedAt = location.VerifiedAt,
+            ContentEncoding = location.ContentEncoding, EncryptionKeyVersion = location.EncryptionKeyVersion,
+            ErrorCode = location.LastErrorCode, ErrorMessage = location.LastErrorMessage, DetailsJson = "{}", CreatedBy = location.CreatedBy,
+        });
+        await db.SaveChangesAsync();
+        return location.Revision;
     }
 
     private async Task SetProfileStateAsync(World world, StorageProfileState state)
