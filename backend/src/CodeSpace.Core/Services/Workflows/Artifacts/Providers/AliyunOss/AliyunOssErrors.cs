@@ -26,6 +26,21 @@ internal static class AliyunOssErrors
         return new ArtifactStorageError(code, Message(code, objectKey, status, providerCode), IsRetryable(code), providerCode);
     }
 
+    /// <summary>
+    /// Re-runs the classification for a response that carried no <c>&lt;Code&gt;</c> of its own, using the token one
+    /// body-carrying request against the SAME bucket and credential could read. Returns the original error untouched
+    /// whenever that read yielded nothing, or yielded nothing that changes the verdict, so this only ever narrows an
+    /// unattributed status into an attributed one - it can never coarsen or contradict what the response did say.
+    /// </summary>
+    public static ArtifactStorageError Reclassify(ArtifactStorageError error, HttpStatusCode status, string objectKey, string? providerCode)
+    {
+        if (providerCode == null) return error;
+
+        var code = Classify(status, providerCode);
+
+        return code == error.Code ? error : new ArtifactStorageError(code, Message(code, objectKey, (int)status, providerCode), IsRetryable(code), providerCode);
+    }
+
     public static ArtifactStorageError Transport(Exception exception, string objectKey) =>
         new(ArtifactStorageErrorCode.Unavailable, $"Aliyun OSS was unreachable for object '{objectKey}': {exception.GetType().Name}.", IsRetryable: true);
 
