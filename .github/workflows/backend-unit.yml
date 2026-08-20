@@ -3,6 +3,10 @@ name: Backend · Unit
 # Pure, infra-free backend logic (the Category=Unit tests). No database, no network.
 # Real-kernel bubblewrap/prlimit confinement tests live in their own CodeSpace.SandboxTests project
 # (Category=Sandbox) and run in the dedicated sandbox-isolation workflow — never here.
+#
+# Category=RealBucket is excluded so this lane stays infra-free: those cases live in this project only
+# because they inherit the shared artifact-storage driver conformance kit, and they drive a REAL object
+# store over the network. They run only from the real-bucket workflow, on demand — never on a PR.
 
 on:
   push:
@@ -55,6 +59,7 @@ jobs:
         run: >
           dotnet test backend/tests/CodeSpace.UnitTests/CodeSpace.UnitTests.csproj
           --no-restore
+          --filter "Category!=RealBucket"
           --logger "console;verbosity=normal"
           --logger "trx;LogFileName=unit.trx"
           --results-directory backend/TestResults

@@ -1,0 +1,73 @@
+name: Backend · Real bucket
+
+# Holds the shared artifact-storage driver conformance kit — the SAME cases the in-memory fakes run — against a REAL
+# Aliyun OSS bucket. A fake cannot catch a signature Aliyun rejects, a header it requires, or an error shape we
+# guessed wrong; this lane can. It asserts no list of its own, so any divergence between the real service and the
+# fake IS the finding.
+#
+# ON DEMAND ONLY. Unlike the other backend lanes this one is not on push:main either: every run WRITES to a real
+# bucket the owner pays for, and there is no benefit to re-proving one bucket on every merge. Run it after touching
+# the OSS driver, the V4 signer, or the storage-profile schema.
+#
+# The four variables come from repository secrets (bucket and endpoint are secrets too — they identify the owner's
+# deployment). With any of them unconfigured the cases self-skip GREEN and print a "NOT VERIFIED … skip is NOT a
+# pass" line per case, so a fork stays green at zero cost and a missing secret is never mistaken for a pass.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: real-bucket-${{ github.ref }}
+  cancel-in-progress: false   # a cancelled run mid-write is the one way this lane leaves objects behind
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
+
+jobs:
+  real-bucket:
+    name: Aliyun OSS driver conformance (real bucket)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore backend/tests/CodeSpace.UnitTests/CodeSpace.UnitTests.csproj
+
+      - name: Conformance against the real bucket
+        env:
+          CODESPACE_OSS_BUCKET_NAME: ${{ secrets.CODESPACE_OSS_BUCKET_NAME }}
+          CODESPACE_OSS_ENDPOINT: ${{ secrets.CODESPACE_OSS_ENDPOINT }}
+          CODESPACE_OSS_ACCESS_KEY_ID: ${{ secrets.CODESPACE_OSS_ACCESS_KEY_ID }}
+          CODESPACE_OSS_ACCESS_KEY_SECRET: ${{ secrets.CODESPACE_OSS_ACCESS_KEY_SECRET }}
+        run: >
+          dotnet test backend/tests/CodeSpace.UnitTests/CodeSpace.UnitTests.csproj
+          --no-restore
+          --filter "FullyQualifiedName~AliyunOssRealBucketConformanceTests"
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=real-bucket.trx"
+          --results-directory backend/TestResults
+
+      # `dotnet test --filter` exits 0 when the filter matches ZERO tests, so a renamed or retagged class would leave
+      # this lane green over nothing at all — the exact failure the real-model lanes were bitten by twice.
+      - name: Assert the lane actually selected its class
+        if: always()
+        run: bash .github/scripts/assert-every-filter-clause-ran.sh backend/TestResults/real-bucket.trx AliyunOssRealBucketConformanceTests
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-real-bucket-trx
+          path: backend/TestResults/*.trx
+          if-no-files-found: ignore
