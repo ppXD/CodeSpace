@@ -26,8 +26,11 @@ namespace CodeSpace.Core.Persistence.Entities;
 /// stated at all, and one partial-index probe for an open <see cref="WorkflowRunCaptureGap"/>. A scan-based definition
 /// would cost a COUNT per plane per run and be unevaluatable exactly where it matters — the native-record and
 /// log-segment planes grow with harness traffic. What counters cannot establish is whether a producer died between
-/// writing a record and advancing the counter; both halves of that window fail closed, leaving present below expected
-/// or the expectation unstated, and neither can read as complete.</para>
+/// writing a record and advancing the counter; that window fails closed only for a producer that DECLARES its
+/// expectation before the records land, because then a lost accounting leaves present below expected. A producer that
+/// advanced both counts in one statement would leave them equally short and read complete over records nobody counted,
+/// so the fail-closed direction here is a property of HOW a producer advances rather than of this schema — which is
+/// why <c>RunDataFacetAdvance</c> carries the two counts separately and each producer's own tests pin the order.</para>
 ///
 /// <para><b>And the residue that choice accepts.</b> Both counts are the PRODUCER'S declarations, and nothing compares
 /// them to the planes they describe — a writer that declares nothing expected, nothing present and states Exact over a
@@ -44,10 +47,19 @@ namespace CodeSpace.Core.Persistence.Entities;
 ///
 /// <para><b>Who writes one, and who does not read it.</b> Exactly one producer exists: the native-record capture plane
 /// (<c>NativeRecordPlane</c>) states the <see cref="WorkflowRunDataOwnerKinds.NativeRecord"/> facet of a run bound to a
-/// workflow run, advancing both counts as its batches commit and unstating the expectation when an observer dies inside
-/// the capture window. Every other facet has no producer, so its absent row is the indeterminate answer above. NOTHING
-/// reads this table: no completion, terminal decision, planner, oracle, critic or router consults it, because a reader
-/// wired before the producers exist would park every run whose facets nobody states.</para>
+/// workflow run — declaring each batch's expectation before it writes the frames, stating their presence once they are
+/// durable, and unstating the expectation when an observer dies inside the capture window. Every other facet has no
+/// producer, so its absent row is the indeterminate answer above. NOTHING reads this table: no completion, terminal
+/// decision, planner, oracle, critic or router consults it, because a reader wired before the producers exist would
+/// park every run whose facets nobody states.</para>
+///
+/// <para><b>And every writer arrives the same way.</b> No producer writes this table directly:
+/// <c>workflow_run_data_manifest_advance</c> / <c>workflow_run_data_manifest_unstate_expectation</c> (migration 0148)
+/// take the per-run rendezvous lock as their own FIRST statement and probe the gap plane underneath it, because the
+/// guard that re-probes does so in a BEFORE ROW trigger — after an INSERT's values were already evaluated on the
+/// statement snapshot. A producer that probed outside that lock lost its whole statement to any gap committing in
+/// between, and a lost delta understates the run permanently. <c>IRunDataCompletenessWriter</c> is how C# reaches those
+/// functions, and a unit-suite pin keeps their SQL from being restated anywhere else.</para>
 /// </summary>
 public sealed class WorkflowRunDataManifest : IEntity<Guid>
 {

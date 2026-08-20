@@ -34,9 +34,12 @@ namespace CodeSpace.Core.Persistence.Entities;
 ///
 /// <para><b>Who records one.</b> Exactly one producer exists: the native-record capture plane
 /// (<c>NativeRecordPlane</c>) records a <see cref="CaptureGapReason.WriteRefused"/> span when a batch of captured frames
-/// is refused durable storage. The other three reasons are representable and unproduced — no plane yet notices its own
-/// bound, its own torn re-attach or its own unreadable frame — and nothing READS or folds a gap: no completion,
-/// terminal decision, planner, oracle or router is aware of one.</para>
+/// is refused durable storage. It is recorded through <c>IRunDataCompletenessWriter</c> on a commit of its OWN, never
+/// together with a claim about the record: the bad news has to survive whatever happens to the claim it contradicts,
+/// and a shared transaction would let a refused statement take the gap down with it. The other three reasons are
+/// representable and unproduced — no plane yet notices its own bound, its own torn re-attach or its own unreadable
+/// frame — and nothing READS or folds a gap: no completion, terminal decision, planner, oracle or router is aware of
+/// one.</para>
 /// </summary>
 public sealed class WorkflowRunCaptureGap : IEntity<Guid>
 {

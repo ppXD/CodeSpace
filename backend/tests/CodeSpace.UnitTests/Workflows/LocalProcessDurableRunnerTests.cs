@@ -1456,6 +1456,44 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         end.ShouldBe(7);
     }
 
+    /// <summary>
+    /// The KNOWN BOUND behind the one gap the native-record completeness producer deliberately does not detect, pinned
+    /// as arithmetic instead of left as a doc-comment. A <c>ReattachTorn</c> gap — a re-attach whose observation resumes
+    /// AHEAD of the plane's recorded head, so the bytes in between are never recorded — would be located by comparing
+    /// two quantities: this reader's offset, which is a true file position, and the cursor
+    /// <c>AgentNativeRecordPump.BuildFrame</c> reconstructs as each delivered line's UTF-8 byte count plus one
+    /// terminator byte for a terminated line.
+    ///
+    /// <para>They are NOT comparable to the byte. <see cref="LocalProcessRunner.SplitLines"/> trims the CR of a CRLF
+    /// ending, so the reconstruction is short by one byte for every such line and the shortfall accumulates; and a
+    /// final drain delivers an unterminated remainder as a whole line, which the reconstruction then credits with a
+    /// terminator the file never held, drifting the other way. A gap derived from their difference would manufacture a
+    /// missing span on every CRLF re-attach and a healthy run could never read complete — fail-closed would have become
+    /// fail-always, which is why an approximate comparison is worse than a named bound. Closing it needs the reader to
+    /// state each line's own byte extent, the same prerequisite the pump's cursor doc already names.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("a\r\n", 3, 2)]          // CRLF: the file holds 3 bytes; the reconstruction credits "a" + one terminator
+    [InlineData("a\r\nbb\r\n", 7, 5)]    // ...and the shortfall accumulates per line rather than cancelling
+    public void The_readers_offset_and_the_pumps_reconstructed_cursor_are_not_comparable_to_the_byte(string spool, long expectedReaderOffset, long expectedReconstruction)
+    {
+        var path = Path.Combine(TempDir(), "crlf.log");
+        File.WriteAllText(path, spool);
+
+        var (lines, readerOffset) = LocalProcessRunner.ReadNewLines(path, 0, drainPartial: false);
+
+        readerOffset.ShouldBe(expectedReaderOffset, "the reader answers a true file position");
+
+        // Exactly what AgentNativeRecordPump.BuildFrame does: byteCount(rawLine) + (isFinal ? 1 : 0) per delivered line.
+        var reconstructed = lines.Sum(line => (long)Encoding.UTF8.GetByteCount(line) + 1);
+
+        reconstructed.ShouldBe(expectedReconstruction);
+        reconstructed.ShouldNotBe(readerOffset,
+            customMessage: "if these two ever agree to the byte, a ReattachTorn gap becomes producible and the native-record "
+                         + "facet's last known false-complete path can be closed — update NativeRecordPlane.Completeness's "
+                         + "doc and this test together rather than leaving the bound named after it stopped being one");
+    }
+
     [Theory]
     [InlineData("0", true, 0)]
     [InlineData("127", true, 127)]
