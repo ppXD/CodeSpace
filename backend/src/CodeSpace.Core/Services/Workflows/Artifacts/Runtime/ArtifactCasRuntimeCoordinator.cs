@@ -129,6 +129,7 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
     private async Task<ArtifactCasTransferResult> DriveTransferAsync(ArtifactCasTransferRequest request, ValidTransfer input, IntentSnapshot claim, StorageRuntimeDriverLease driverLease, CancellationToken cancellationToken)
     {
         var driver = driverLease.Driver;
+        var fence = await LocationFenceAsync(claim, cancellationToken).ConfigureAwait(false);
         var current = claim;
         if (current.State is ArtifactTransferState.Intended or ArtifactTransferState.RetryScheduled)
         {
@@ -182,7 +183,28 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
 
         var verification = await VerifyAsync(driverLease, request.TargetObjectKey, input, new LeaseRenewal(current, request.ActorId), cancellationToken).ConfigureAwait(false);
         if (verification.Problem != null) return await HandleProblemAsync(current, request.ActorId, verification.Problem, cancellationToken).ConfigureAwait(false);
-        return await CommitAsync(current, request.ActorId, verification.Metadata!, cancellationToken).ConfigureAwait(false);
+        return await CommitAsync(current, request.ActorId, verification.Metadata!, fence, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// What the location row for this transfer's target looked like BEFORE this attempt touched the provider, or null
+    /// when no row existed. It is the only thing that makes reviving a purged location safe: the writer verifies bytes
+    /// it just uploaded, and between that readback and its commit a purge could remove exactly those bytes. A purge
+    /// must claim the row with <c>Deleting</c> before it deletes anything (0150 admits <c>Purged</c> from no other
+    /// state), and every location write advances <c>revision</c> by exactly one, so "still Purged at the revision I
+    /// read before uploading" means no purge ran in that whole window. A purge that removed bytes without advancing
+    /// the row is outside what this can see, and outside what the reaper is allowed to do.
+    ///
+    /// <para>Costs one indexed read on <c>ux_artifact_location_profile_object_key</c>, and only on an attempt that is
+    /// about to do provider I/O — a dedup hit returns long before this.</para>
+    /// </summary>
+    private async Task<LocationFence?> LocationFenceAsync(IntentSnapshot claim, CancellationToken cancellationToken)
+    {
+        await using var db = CreateDb();
+        return await db.ArtifactLocation.AsNoTracking()
+            .Where(value => value.TeamId == claim.TeamId && value.StorageProfileRevisionId == claim.ProfileRevisionId && value.ObjectKey == claim.ObjectKey)
+            .Select(value => new LocationFence(value.State, value.Revision))
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<Verification> VerifyAsync(StorageRuntimeDriverLease driverLease, string objectKey, ValidTransfer input, LeaseRenewal renewal, CancellationToken cancellationToken)
@@ -224,7 +246,7 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
         return new Verification(head.Value.Metadata, null);
     }
 
-    private async Task<ArtifactCasTransferResult> CommitAsync(IntentSnapshot claim, Guid actorId, ArtifactStorageObjectMetadata metadata, CancellationToken cancellationToken)
+    private async Task<ArtifactCasTransferResult> CommitAsync(IntentSnapshot claim, Guid actorId, ArtifactStorageObjectMetadata metadata, LocationFence? fence, CancellationToken cancellationToken)
     {
         const int maximumCommitAttempts = 5;
         for (var attempt = 0; attempt < maximumCommitAttempts; attempt++)
@@ -254,7 +276,7 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
                 }
 
                 var location = await db.ArtifactLocation.SingleOrDefaultAsync(value => value.TeamId == claim.TeamId && value.StorageProfileRevisionId == claim.ProfileRevisionId && value.ObjectKey == claim.ObjectKey, cancellationToken).ConfigureAwait(false);
-                if (location != null && !Reusable(location, artifact, claim))
+                if (location != null && !Reusable(location, artifact, claim, fence))
                     return await RollbackAndRejectAsync(transaction, claim, actorId, ArtifactCasProblemCode.IdempotencyConflict, cancellationToken).ConfigureAwait(false);
                 if (location == null)
                 {
@@ -438,9 +460,11 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
     ///
     /// <para><b>No production writer moves a committed location off <c>Available</c> yet.</b> Nothing purges routed
     /// bytes in this build, so on every reachable path this returns exactly what the content-identity check alone
-    /// returned before. It is the precondition a routed purge needs, landed ahead of it. What it does NOT give that
-    /// purge: a way to store the content again afterwards — <c>Reusable</c> refuses to revive a non-<c>Available</c>
-    /// location, so the object key stays unwritable until a repair path exists.</para>
+    /// returned before. It is the precondition a routed purge needs, landed ahead of it.</para>
+    ///
+    /// <para>A refusal here is not a dead end for <c>Purged</c>: <see cref="IdempotencyKeyAsync"/> spends that
+    /// generation and the next attempt arrives on a fresh intent that can re-upload and revive the row. For every
+    /// other non-<c>Available</c> state the refusal IS the answer, and this key keeps returning it.</para>
     /// </summary>
     private async Task<ArtifactCasProblem?> ReusableProblemAsync(ArtifactTransferIntent intent, ArtifactCasTransferRequest request, byte[] digest, CancellationToken cancellationToken)
     {
@@ -457,8 +481,19 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
     }
 
     /// <summary>
-    /// The intent key for THIS attempt: the caller's scope, plus a generation that steps over every intent a
-    /// non-retryable problem already drove to <c>Failed</c> under that scope for this exact profile revision.
+    /// The intent key for THIS attempt: the caller's scope, plus the generation of the newest intent minted under it
+    /// for this exact profile revision — stepped by one when that intent can no longer satisfy a write of its content.
+    ///
+    /// <para>Two things spend a generation. A <c>Failed</c> intent, which a non-retryable problem drove there. And a
+    /// <c>Committed</c> intent whose location has been <c>Purged</c>: its record that the bytes were verified is
+    /// permanent and true, but they were intentionally removed since, and re-uploading them is the repair. Every OTHER
+    /// non-<c>Available</c> location keeps this key, so a location that is Missing or Corrupt or mid-purge still costs
+    /// a dedup-hit refusal and no provider I/O rather than a doomed upload per attempt.</para>
+    ///
+    /// <para>Newest-generation-and-step, rather than counting the spent ones, because the count is not monotonic: a
+    /// purged location that gets written again is <c>Available</c> once more, which UN-spends its generation. A count
+    /// would then fall back onto a key it had already burned and hand every later writer that dead intent's verdict.
+    /// The newest generation only ever grows.</para>
     ///
     /// <para>The generation exists because <c>Failed</c> is a one-way door in the database, not merely in the code.
     /// <c>artifact_cas_transfer_guard</c> (0131_artifact_transfer_fence_claim.sql) refuses every route back out of it:
@@ -475,9 +510,9 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
     /// <c>TargetObjectKey</c> is deliberately NOT generation-aware: every generation targets the same object, so a
     /// retry that finds it already there is provider-side dedup, not a duplicate upload.</para>
     ///
-    /// <para>The count matches the scope's own key or a <c>/g</c>-suffixed one rather than any prefix of the scope, so
+    /// <para>The match is the scope's own key or a <c>/g</c>-suffixed one rather than any prefix of the scope, so
     /// scopes that end in a number — a log stream's segment ordinal, say — cannot step each other's generations:
-    /// <c>…/1</c> never counts <c>…/10</c>.</para>
+    /// <c>…/1</c> never reads <c>…/10</c>.</para>
     ///
     /// <para><c>Cancelled</c> is deliberately not stepped over: it is an explicit stop rather than a fault, and
     /// nothing in this codebase produces it today.</para>
@@ -486,12 +521,29 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
     {
         var generationPrefix = $"{request.IdempotencyScope}/g";
         await using var db = CreateDb();
-        var burned = await db.ArtifactTransferIntent.AsNoTracking()
-            .CountAsync(value => value.TeamId == request.TeamId && value.StorageProfileRevisionId == profileRevisionId && value.State == ArtifactTransferState.Failed
-                && (value.IdempotencyKey == request.IdempotencyScope || value.IdempotencyKey.StartsWith(generationPrefix)), cancellationToken).ConfigureAwait(false);
+        var minted = await db.ArtifactTransferIntent.AsNoTracking()
+            .Where(value => value.TeamId == request.TeamId && value.StorageProfileRevisionId == profileRevisionId
+                && (value.IdempotencyKey == request.IdempotencyScope || value.IdempotencyKey.StartsWith(generationPrefix)))
+            .Select(value => new MintedIntent(value.IdempotencyKey, value.State, db.ArtifactLocation
+                .Where(location => location.TeamId == value.TeamId && location.Id == value.ArtifactLocationId)
+                .Select(location => (ArtifactLocationState?)location.State).FirstOrDefault()))
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        return IdempotencyKeyFor(request.IdempotencyScope, burned);
+        var newest = minted.MaxBy(value => GenerationOf(value.Key, generationPrefix));
+        if (newest == null) return request.IdempotencyScope;
+
+        var generation = GenerationOf(newest.Key, generationPrefix);
+        return Spent(newest) ? IdempotencyKeyFor(request.IdempotencyScope, generation + 1) : newest.Key;
     }
+
+    /// <summary>Which generation a minted key names: the bare scope is 0, and a <c>/g</c>-suffixed key carries its own.</summary>
+    private static int GenerationOf(string key, string generationPrefix) =>
+        key.StartsWith(generationPrefix, StringComparison.Ordinal) && int.TryParse(key.AsSpan(generationPrefix.Length), out var generation) ? generation : 0;
+
+    /// <summary>Whether this generation's intent can no longer satisfy a write of its content, so the next attempt needs a fresh one.</summary>
+    private static bool Spent(MintedIntent intent) =>
+        intent.State == ArtifactTransferState.Failed
+        || (intent.State == ArtifactTransferState.Committed && intent.LocationState == ArtifactLocationState.Purged);
 
     /// <summary>
     /// One attempt generation's intent key. Generation 0 is the bare scope, so the shared-intent behaviour every
@@ -853,10 +905,30 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
         && intent.ExecutionAttemptId == request.ExecutionIdentity?.AttemptId && intent.ExecutionAttemptOrdinal == request.ExecutionIdentity?.AttemptOrdinal
         && intent.ExecutionGeneration == request.ExecutionIdentity?.Generation;
 
-    private static bool Reusable(ArtifactLocation location, ArtifactObject artifact, IntentSnapshot claim) =>
-        location.ArtifactObjectId == artifact.Id && location.State == ArtifactLocationState.Available
-        && string.Equals(location.Locator, claim.Locator, StringComparison.Ordinal) && location.ObservedSizeBytes == claim.Size
+    /// <summary>
+    /// Whether the location row already at this object key is the one this verified transfer may write its observation
+    /// onto. Identity comes first and is never waived: the row must bind the same object and the same locator, both of
+    /// which 0127's trigger holds immutable for the row's whole life.
+    /// </summary>
+    private static bool Reusable(ArtifactLocation location, ArtifactObject artifact, IntentSnapshot claim, LocationFence? fence) =>
+        location.ArtifactObjectId == artifact.Id && string.Equals(location.Locator, claim.Locator, StringComparison.Ordinal)
+        && (Verified(location, claim) || Revivable(location, fence));
+
+    /// <summary>The row already carries a verified observation of exactly this content, so re-verifying it is a refresh.</summary>
+    private static bool Verified(ArtifactLocation location, IntentSnapshot claim) =>
+        location.State == ArtifactLocationState.Available && location.ObservedSizeBytes == claim.Size
         && string.Equals(location.ProviderChecksumAlgorithm, "Sha256", StringComparison.Ordinal) && location.ProviderChecksum.AsSpan().SequenceEqual(claim.Digest);
+
+    /// <summary>
+    /// The row's bytes were purged and nothing has touched it since this attempt read it, so this transfer's readback
+    /// is what it now records. The provider observation fields are NOT compared: the purge may legitimately have
+    /// cleared the ETag and version it invalidated, and the commit overwrites all of them from THIS readback anyway —
+    /// the object binding above is what proves the row is about this content. A purged row whose revision moved is
+    /// refused, which also covers the purge that claimed it while this attempt was mid-flight.
+    /// </summary>
+    private static bool Revivable(ArtifactLocation location, LocationFence? fence) =>
+        location.State == ArtifactLocationState.Purged && fence is { State: ArtifactLocationState.Purged }
+        && fence.Revision == location.Revision;
 
     private static bool HeadCanMatch(string objectKey, ValidTransfer input, ArtifactStorageObjectMetadata metadata) =>
         string.Equals(metadata.ObjectKey, objectKey, StringComparison.Ordinal) && metadata.Length == input.Size
@@ -1056,6 +1128,8 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
     private sealed record Invocation<T>(T? Value, bool Timeout, ArtifactCasProblem? Problem);
     private sealed record HashObservation(byte[]? Digest, long Size, bool Timeout, ArtifactCasProblem? Problem);
     private sealed record ReadLocation(string ObjectKey, string? ProviderETag, string? ProviderObjectVersion, long Size, byte[] Digest);
+    private sealed record LocationFence(ArtifactLocationState State, long Revision);
+    private sealed record MintedIntent(string Key, ArtifactTransferState State, ArtifactLocationState? LocationState);
     private sealed record IntentSnapshot
     {
         public required Guid Id { get; init; }

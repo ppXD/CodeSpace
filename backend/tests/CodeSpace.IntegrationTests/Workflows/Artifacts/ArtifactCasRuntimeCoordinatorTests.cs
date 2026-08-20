@@ -143,11 +143,117 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
     }
 
     /// <summary>
-    /// The purge claims the location between a writer's upload and that writer's commit. The commit must not revive
-    /// the claimed location, because the bytes it verified are exactly the ones the purge is removing.
+    /// The write-back half of a purge. A purged location is the only non-<c>Available</c> state a write may revive,
+    /// and reviving it is what stops a purge from being data loss: the object key cannot take a second location row
+    /// (<c>ux_artifact_location_profile_object_key</c>) and the commit only ever re-verifies the row that is there.
+    ///
+    /// <para>The re-put also has to get PAST the intent ledger to reach that commit. The first write's intent is
+    /// <c>Committed</c> for good (0131 whitelists no transition out), so the repair is a fresh generation — the same
+    /// mechanism a terminal transfer failure already uses.</para>
     /// </summary>
     [Fact]
-    public async Task Location_claimed_for_purge_between_upload_and_commit_admits_no_committed_artifact()
+    public async Task Purged_location_takes_the_same_content_again_under_a_fresh_generation()
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState();
+        var bytes = RandomNumberGenerator.GetBytes(4096);
+        var request = Request(world, new MemoryStream(bytes), bytes, "purge-rewrite");
+
+        var first = (await PutAsync(world, storage, request)).ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        var purgedRevision = await PurgeLocationAsync(first.ArtifactLocationId, storage, request.TargetObjectKey);
+
+        var again = await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "purge-rewrite"));
+
+        var rewritten = again.ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        rewritten.WasAlreadyCommitted.ShouldBeFalse("the bytes were gone, so this had to be a real transfer");
+        rewritten.IntentId.ShouldNotBe(first.IntentId, "Committed is a one-way door; the repair is a new intent");
+        rewritten.ArtifactObjectId.ShouldBe(first.ArtifactObjectId, "artifact_object rows are permanent tombstones — same content, same object");
+        rewritten.ArtifactLocationId.ShouldBe(first.ArtifactLocationId, "the unique index forbids a second row for this key, so the purged row is what got revived");
+        storage.PutCalls.ShouldBe(2);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var location = await db.ArtifactLocation.SingleAsync(value => value.Id == first.ArtifactLocationId);
+            location.State.ShouldBe(ArtifactLocationState.Available);
+            location.Revision.ShouldBe(purgedRevision + 1);
+            location.LastErrorCode.ShouldBeNull();
+            (await db.ArtifactLocation.CountAsync(value => value.TeamId == world.TeamId)).ShouldBe(1);
+            (await db.ArtifactObject.CountAsync(value => value.TeamId == world.TeamId)).ShouldBe(1);
+            var keys = await db.ArtifactTransferIntent.Where(value => value.TeamId == world.TeamId).OrderBy(value => value.IdempotencyKey).Select(value => value.IdempotencyKey).ToListAsync();
+            keys.ShouldBe(new[] { "purge-rewrite", "purge-rewrite/g1" });
+        }
+
+        using var readScope = Scope(storage);
+        var read = await readScope.Resolve<IArtifactCasRuntimeCoordinator>().OpenReadAsync(new ArtifactCasReadRequest
+        {
+            TeamId = world.TeamId, ArtifactObjectId = rewritten.ArtifactObjectId,
+            StorageProfileId = world.ProfileId, StorageProfileRevision = 1,
+        }, CancellationToken.None);
+        await using var content = read.ShouldBeOfType<ArtifactCasReadResult.Opened>().Content;
+        using var received = new MemoryStream();
+        await content.CopyToAsync(received);
+        received.ToArray().ShouldBe(bytes);
+    }
+
+    /// <summary>
+    /// A generation, once spent, must stay spent. Reviving a purged location makes its generation usable again —
+    /// <c>Available</c> content is exactly what a dedup hit wants — so a key derived by COUNTING the spent generations
+    /// would drop back onto one it had already burned, and every later writer of this content would be handed that
+    /// dead intent's stored verdict instead of a transfer. The newest generation is what the key follows.
+    /// </summary>
+    [Fact]
+    public async Task A_revived_location_never_sends_the_next_writer_back_to_a_burned_generation()
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState();
+        var bytes = RandomNumberGenerator.GetBytes(4096);
+        var request = Request(world, new MemoryStream(bytes), bytes, "purge-generations");
+
+        var first = (await PutAsync(world, storage, request)).ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        await PurgeLocationAsync(first.ArtifactLocationId, storage, request.TargetObjectKey);
+
+        // A foreign object of the wrong length at the target key is a non-retryable TargetCorrupt, which burns g1.
+        storage.Objects[request.TargetObjectKey] = RandomNumberGenerator.GetBytes(64);
+        var burned = await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "purge-generations"));
+        burned.ShouldBeOfType<ArtifactCasTransferResult.Rejected>().Problem.Code.ShouldBe(ArtifactCasProblemCode.TargetCorrupt);
+        storage.Objects.TryRemove(request.TargetObjectKey, out _).ShouldBeTrue();
+
+        var revived = (await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "purge-generations"))).ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        var afterRevival = await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "purge-generations"));
+
+        var hit = afterRevival.ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        hit.WasAlreadyCommitted.ShouldBeTrue("the revived location is Available again, so this is an ordinary dedup hit");
+        hit.IntentId.ShouldBe(revived.IntentId, "a burned generation must never be handed back to a writer");
+
+        using var scope = _fixture.BeginScope();
+        var intents = await scope.Resolve<CodeSpaceDbContext>().ArtifactTransferIntent
+            .Where(value => value.TeamId == world.TeamId).OrderBy(value => value.IdempotencyKey)
+            .Select(value => new { value.IdempotencyKey, value.State }).ToListAsync();
+        intents.Select(value => (value.IdempotencyKey, value.State)).ShouldBe(new[]
+        {
+            ("purge-generations", ArtifactTransferState.Committed),
+            ("purge-generations/g1", ArtifactTransferState.Failed),
+            ("purge-generations/g2", ArtifactTransferState.Committed),
+        });
+    }
+
+    /// <summary>
+    /// A purge moves the location between a writer's upload and that writer's commit. The commit must not write its
+    /// observation onto the row, because the bytes it verified are exactly the ones that purge is entitled to remove.
+    ///
+    /// <para>Two shapes, from both pre-upload states. A purge still HOLDING the row is refused on the state — that is
+    /// the <c>Deleting</c> claim #1532 already pinned. A purge that COMPLETED leaves the row back in the one state a
+    /// write may revive, and then the only thing between this writer and a location claiming bytes nobody has is the
+    /// revision it fenced on before uploading. This staging deliberately leaves the bytes in place for that case: the
+    /// writer's readback succeeds and the row alone says a purge ran, which is all a writer can ever know.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(ArtifactLocationState.Available, ArtifactLocationState.Deleting)]
+    [InlineData(ArtifactLocationState.Available, ArtifactLocationState.Purged)]
+    [InlineData(ArtifactLocationState.Purged, ArtifactLocationState.Deleting)]
+    [InlineData(ArtifactLocationState.Purged, ArtifactLocationState.Purged)]
+    public async Task Purge_that_moves_the_location_between_upload_and_commit_admits_no_committed_artifact(ArtifactLocationState beforeUpload, ArtifactLocationState afterUpload)
     {
         var world = await SeedWorldAsync();
         var storage = new FakeStorageState();
@@ -155,12 +261,13 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         var seed = Request(world, new MemoryStream(bytes), bytes, "purge-race-seed") with { TargetObjectKey = "cas/purge-race.bin" };
         var seeded = (await PutAsync(world, storage, seed)).ShouldBeOfType<ArtifactCasTransferResult.Committed>();
 
-        storage.Objects.TryRemove(seed.TargetObjectKey, out _).ShouldBeTrue();
+        if (beforeUpload == ArtifactLocationState.Purged) await PurgeLocationAsync(seeded.ArtifactLocationId, storage, seed.TargetObjectKey);
+        else storage.Objects.TryRemove(seed.TargetObjectKey, out _).ShouldBeTrue();
         storage.BlockAfterNextPut = true;
         using var writerScope = Scope(storage);
         var writer = writerScope.Resolve<IArtifactCasRuntimeCoordinator>().PutAsync(Request(world, new MemoryStream(bytes), bytes, "purge-race-writer") with { TargetObjectKey = seed.TargetObjectKey }, CancellationToken.None);
         await storage.BlockedAfterPutEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        var claimedRevision = await MoveLocationAsync(seeded.ArtifactLocationId, ArtifactLocationState.Deleting);
+        var claimedRevision = await ObservePurgeAsync(seeded.ArtifactLocationId, afterUpload);
         storage.ReleaseBlockedAfterPut.TrySetResult();
 
         var result = await writer;
@@ -169,7 +276,7 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         var location = await db.ArtifactLocation.SingleAsync(value => value.Id == seeded.ArtifactLocationId);
-        location.State.ShouldBe(ArtifactLocationState.Deleting);
+        location.State.ShouldBe(afterUpload);
         location.Revision.ShouldBe(claimedRevision);
         (await db.ArtifactLocation.CountAsync(value => value.TeamId == world.TeamId)).ShouldBe(1);
         (await db.ArtifactTransferIntent.CountAsync(value => value.TeamId == world.TeamId && value.State == ArtifactTransferState.Committed)).ShouldBe(1);
@@ -720,6 +827,30 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         db.StorageProfile.Add(profile);
         await db.SaveChangesAsync();
         return new World(teamId, actorId, profileId, profileRevisionId);
+    }
+
+    /// <summary>
+    /// Stands in for the whole routed purge this lane does not build, in the order the reaper has to use it: claim the
+    /// location with <c>Deleting</c> FIRST, then remove the bytes, then record <c>Purged</c>. Returns the purged
+    /// revision, which is the fence a writer of this content is entitled to see unchanged.
+    /// </summary>
+    private async Task<long> PurgeLocationAsync(Guid locationId, FakeStorageState storage, string objectKey)
+    {
+        await MoveLocationAsync(locationId, ArtifactLocationState.Deleting);
+        storage.Objects.TryRemove(objectKey, out _).ShouldBeTrue();
+        return await MoveLocationAsync(locationId, ArtifactLocationState.Purged);
+    }
+
+    /// <summary>
+    /// A purge's ROW observations without touching the bytes, ending in the given state — <c>Purged</c> goes through
+    /// the claim the schema requires. Stages what a mid-flight writer can actually see, which is the row moving and
+    /// never whether the bytes moved with it.
+    /// </summary>
+    private async Task<long> ObservePurgeAsync(Guid locationId, ArtifactLocationState state)
+    {
+        if (state == ArtifactLocationState.Purged) await MoveLocationAsync(locationId, ArtifactLocationState.Deleting);
+
+        return await MoveLocationAsync(locationId, state);
     }
 
     /// <summary>

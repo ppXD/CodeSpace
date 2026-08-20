@@ -244,6 +244,68 @@ public sealed class ArtifactCasV2PersistenceTests
         }
     }
 
+    /// <summary>
+    /// Purged is the one non-terminal state a purge may leave behind, and the CAS commit treats "still Purged at the
+    /// revision I read before uploading" as proof that no purge touched the bytes it verified. That proof is only worth
+    /// something if reaching Purged always costs a revision the writer can see, so the database admits it from the
+    /// Deleting claim and from nowhere else — not on insert, and not as a shortcut from Available.
+    /// </summary>
+    [Fact]
+    public async Task Purged_is_reachable_only_from_the_deleting_claim_and_is_not_terminal()
+    {
+        var world = await SeedWorldAsync();
+        var artifact = Object(world.TeamId, 41, 0x55);
+        var born = AvailableLocation(world, artifact, "objects/55/born-purged.bin");
+        born.State = ArtifactLocationState.Purged;
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.ArtifactObject.Add(artifact);
+            await db.SaveChangesAsync();
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.ArtifactLocation.Add(born);
+            db.ArtifactLocationEvent.Add(Event(born, 1, ArtifactLocationEventType.Created, ArtifactLocationState.Purged));
+            var insert = await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
+            insert.InnerException?.Message.ShouldContain("cannot be created Purged");
+        }
+
+        var location = AvailableLocation(world, artifact, "objects/55/purge-cycle.bin");
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.ArtifactLocation.Add(location);
+            db.ArtifactLocationEvent.Add(Event(location, 1, ArtifactLocationEventType.Verified, ArtifactLocationState.Available));
+            await db.SaveChangesAsync();
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var stored = await db.ArtifactLocation.SingleAsync(l => l.Id == location.Id);
+            stored.State = ArtifactLocationState.Purged;
+            stored.Revision = 2;
+            db.ArtifactLocationEvent.Add(Event(stored, 2, ArtifactLocationEventType.StateChanged, ArtifactLocationState.Purged));
+            var shortcut = await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
+            shortcut.InnerException?.Message.ShouldContain("only reachable from the Deleting claim");
+        }
+
+        await MoveLocationAsync(location.Id, 2, ArtifactLocationState.Deleting);
+        await MoveLocationAsync(location.Id, 3, ArtifactLocationState.Purged);
+        await MoveLocationAsync(location.Id, 4, ArtifactLocationState.Available);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var stored = await scope.Resolve<CodeSpaceDbContext>().ArtifactLocation.AsNoTracking().SingleAsync(l => l.Id == location.Id);
+            stored.State.ShouldBe(ArtifactLocationState.Available, "a purged location must be writable again — that is the whole point of it not being Deleted");
+            stored.Revision.ShouldBe(4);
+        }
+    }
+
     [Fact]
     public async Task Transfer_and_reference_state_machines_reject_ghost_identity_illegal_transition_and_rewrite()
     {
@@ -833,6 +895,18 @@ public sealed class ArtifactCasV2PersistenceTests
         location.ObservedSizeBytes = artifact.SizeBytes;
         location.VerifiedAt = DateTimeOffset.UtcNow;
         return location;
+    }
+
+    /// <summary>One legal location observation: the state changes, the revision advances exactly once, and the append-only event that revision requires goes with it.</summary>
+    private async Task MoveLocationAsync(Guid locationId, long revision, ArtifactLocationState state)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var stored = await db.ArtifactLocation.SingleAsync(l => l.Id == locationId);
+        stored.State = state;
+        stored.Revision = revision;
+        db.ArtifactLocationEvent.Add(Event(stored, revision, ArtifactLocationEventType.StateChanged, state));
+        await db.SaveChangesAsync();
     }
 
     private static ArtifactLocationEvent Event(ArtifactLocation location, long revision, ArtifactLocationEventType eventType, ArtifactLocationState state) => new()

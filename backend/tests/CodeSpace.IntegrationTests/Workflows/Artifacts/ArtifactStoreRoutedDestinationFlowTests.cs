@@ -235,6 +235,40 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task A_purged_routed_object_can_be_stored_again_and_read_through_its_recorded_revision()
+    {
+        // The end-to-end a routed purge needs to exist at all. Reclaiming the bytes without this is data loss with
+        // extra steps: the object key can hold no second location row (ux_artifact_location_profile_object_key) and
+        // the first write's intent is Committed forever (0131), so unless the purged row is revivable under a fresh
+        // generation, that content is unstorable for this team under this profile revision for good.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var root = NewRoot();
+        await SeedRouteAsync(teamId, await SeedProfileAsync(teamId, root));
+        var content = Encoding.UTF8.GetBytes(new string('p', 20_000));
+        var sha = ArtifactStore.ComputeSha256Hex(content);
+        var first = await PutAsync(teamId, content);
+
+        await PurgeRoutedObjectAsync(teamId, first, root, sha);
+
+        var again = await PutAsync(teamId, content);
+
+        again.ShouldNotBe(first, "the purge took the pointing row with the bytes, so this write owns a new one");
+        (await File.ReadAllBytesAsync(ObjectPath(root, sha))).ShouldBe(content, "the bytes are back on the operator's configured storage");
+        await AssertIntentsAsync(teamId, [
+            (IntentKeyFor(sha, 0), ArtifactTransferState.Committed),
+            (IntentKeyFor(sha, 1), ArtifactTransferState.Committed),
+        ]);
+
+        using var scope = _fixture.BeginScope();
+        var fetched = await scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, again, CancellationToken.None);
+        fetched!.Bytes.ShouldBe(content, "the read resolves the revision the revived location records");
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var location = await db.ArtifactLocation.AsNoTracking().SingleAsync(l => l.TeamId == teamId);
+        location.State.ShouldBe(ArtifactLocationState.Available, "the purged row was revived; a second row for this key is not allowed");
+        (await db.ArtifactObject.CountAsync(o => o.TeamId == teamId)).ShouldBe(1, "artifact_object rows can never be deleted, so the same content keeps the same object");
+    }
+
+    [Fact]
     public async Task A_bounded_range_read_works_through_the_routed_destination()
     {
         // The model-call viewer reads bodies this way; a routed team must not lose it.
@@ -470,6 +504,54 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
             """);
         claimed.ShouldBe(1, "the staged claim must be a legal fence advance; the guard rejects anything else");
         return intentId;
+    }
+
+    /// <summary>
+    /// Stands in for the routed purge, which this lane does not build, doing every part of it this suite can observe:
+    /// the location is CLAIMED before anything is removed, then the bytes go, then the pointing row goes, then the
+    /// location records Purged with the append-only event each revision requires.
+    ///
+    /// <para>The row deletion is not optional. <see cref="Routed_dedup_returns_the_same_id_and_never_restores_the_object_onto_local_disk"/>
+    /// pins that a routed dedup hit returns the existing row's id with no liveness check, so a purge that reclaims the
+    /// bytes and leaves the row behind hands every later writer an id whose read is doomed — the write-back below
+    /// would never even be reached.</para>
+    /// </summary>
+    private async Task PurgeRoutedObjectAsync(Guid teamId, Guid artifactId, string root, string sha)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var location = await db.ArtifactLocation.SingleAsync(l => l.TeamId == teamId);
+        await RecordLocationStateAsync(db, location, ArtifactLocationState.Deleting);
+
+        File.Delete(ObjectPath(root, sha));
+        await using (var transaction = await db.Database.BeginTransactionAsync())
+        {
+            // 0016's DELETE trigger rejects a purge that has not said so in its own session, exactly as the reaper does it.
+            await db.Database.ExecuteSqlRawAsync("SET LOCAL codespace.artifact_purge_allowed = on");
+            await db.WorkflowArtifact.Where(a => a.TeamId == teamId && a.Id == artifactId).ExecuteDeleteAsync();
+            await transaction.CommitAsync();
+        }
+
+        await RecordLocationStateAsync(db, location, ArtifactLocationState.Purged);
+    }
+
+    /// <summary>One location observation, as the schema demands it: revision advances exactly once and carries a matching append-only event.</summary>
+    private static async Task RecordLocationStateAsync(CodeSpaceDbContext db, ArtifactLocation location, ArtifactLocationState state)
+    {
+        location.State = state;
+        location.Revision++;
+        location.LastModifiedDate = DateTimeOffset.UtcNow;
+        db.ArtifactLocationEvent.Add(new ArtifactLocationEvent
+        {
+            Id = Guid.NewGuid(), TeamId = location.TeamId, ArtifactLocationId = location.Id, Revision = location.Revision,
+            EventType = ArtifactLocationEventType.StateChanged, State = state, ObservedAt = location.LastModifiedDate,
+            ProviderObjectVersion = location.ProviderObjectVersion, ProviderETag = location.ProviderETag,
+            ProviderChecksumAlgorithm = location.ProviderChecksumAlgorithm, ProviderChecksum = location.ProviderChecksum,
+            ObservedSizeBytes = location.ObservedSizeBytes, VerifiedAt = location.VerifiedAt,
+            ContentEncoding = location.ContentEncoding, EncryptionKeyVersion = location.EncryptionKeyVersion,
+            ErrorCode = location.LastErrorCode, ErrorMessage = location.LastErrorMessage, DetailsJson = "{}", CreatedBy = location.LastModifiedBy,
+        });
+        await db.SaveChangesAsync();
     }
 
     /// <summary>

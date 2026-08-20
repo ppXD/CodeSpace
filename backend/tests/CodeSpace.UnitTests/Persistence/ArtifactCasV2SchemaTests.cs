@@ -60,6 +60,8 @@ public sealed class ArtifactCasV2SchemaTests
         entity.FindProperty(nameof(ArtifactLocation.Xmin))!.IsConcurrencyToken.ShouldBeTrue();
         CheckConstraint(entity, "ck_artifact_location_checksum").Sql.ShouldContain("(provider_checksum_algorithm IS NULL) = (provider_checksum IS NULL)");
         CheckConstraint(entity, "ck_artifact_location_observation").Sql.ShouldContain("provider_checksum_algorithm = 'Sha256'");
+        CheckConstraint(entity, "ck_artifact_location_state").Sql.ShouldContain("'Purged'",
+            customMessage: "a purge needs a non-terminal state to leave behind; 'Deleted' is terminal by trigger and makes its content unstorable");
         AlternateKey(entity, "ak_artifact_location_team_id").Properties.Select(p => p.Name).ShouldBe(new[] { "TeamId", "Id" });
 
         ForeignKey(entity, typeof(ArtifactObject)).Properties.Select(p => p.Name).ShouldBe(new[] { "TeamId", "ArtifactObjectId" });
@@ -92,6 +94,7 @@ public sealed class ArtifactCasV2SchemaTests
         entity.FindProperty(nameof(ArtifactLocationEvent.DetailsJson))!.GetColumnType().ShouldBe("jsonb");
         ForeignKey(entity, typeof(ArtifactLocation)).Properties.Select(p => p.Name).ShouldBe(new[] { "TeamId", "ArtifactLocationId" });
         CheckConstraint(entity, "ck_artifact_location_event_checksum").Sql.ShouldContain("(provider_checksum_algorithm IS NULL) = (provider_checksum IS NULL)");
+        CheckConstraint(entity, "ck_artifact_location_event_state").Sql.ShouldContain("'Purged'", customMessage: "the append-only history has to be able to record the state the location can reach");
 
         var revision = Index(entity, "ux_artifact_location_event_revision");
         revision.IsUnique.ShouldBeTrue();
