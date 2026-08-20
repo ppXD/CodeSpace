@@ -10,9 +10,23 @@ public abstract class ArtifactStorageDriverConformanceTests
 {
     protected abstract ValueTask<IArtifactStorageDriver> CreateDriverAsync();
 
+    /// <summary>
+    /// Whether the store this run is held against is actually there. Every case below returns as a green no-op when it
+    /// is not - the one seam a subclass backed by a REAL service needs, so an absent credential is a skip rather than a
+    /// red (xUnit v2 has no dynamic skip: <c>SkipException</c> exists in the assert package but this version's runner
+    /// reports the dynamic-skip token as a FAILURE, so an early return is the only green-skip available).
+    ///
+    /// The in-memory subclasses never override it - their store is always reachable - and a test pins that this
+    /// declaration is the only <c>true</c> one, so a real-service lane can never silence a fake-backed one. A green
+    /// no-op is NOT a pass: a subclass that returns false must say so where the operator will see it.
+    /// </summary>
+    protected virtual bool StoreIsReachable => true;
+
     [Fact]
     public async Task Conforms_for_zero_and_large_streams_without_byte_array_contracts()
     {
+        if (!StoreIsReachable) return;
+
         await using var driver = await CreateDriverAsync();
 
         foreach (var bytes in new[] { Array.Empty<byte>(), RandomNumberGenerator.GetBytes(5 * 1024 * 1024 + 17) })
@@ -57,6 +71,8 @@ public abstract class ArtifactStorageDriverConformanceTests
     [Fact]
     public async Task Supports_bounded_range_reads()
     {
+        if (!StoreIsReachable) return;
+
         await using var driver = await CreateDriverAsync();
         await PutUtf8Async(driver, "range/value", "0123456789");
 
@@ -73,6 +89,8 @@ public abstract class ArtifactStorageDriverConformanceTests
     [Fact]
     public async Task Conditional_create_is_atomic_and_does_not_replace_existing_bytes()
     {
+        if (!StoreIsReachable) return;
+
         await using var driver = await CreateDriverAsync();
         await PutUtf8Async(driver, "conditional/value", "first");
         await using var replacement = new MemoryStream(Encoding.UTF8.GetBytes("second"));
@@ -87,6 +105,8 @@ public abstract class ArtifactStorageDriverConformanceTests
     [Fact]
     public async Task Concurrent_conditional_creates_publish_exactly_one_complete_object()
     {
+        if (!StoreIsReachable) return;
+
         await using var driver = await CreateDriverAsync();
         await using var first = new MemoryStream(Encoding.UTF8.GetBytes("first"));
         await using var second = new MemoryStream(Encoding.UTF8.GetBytes("second"));
@@ -103,6 +123,8 @@ public abstract class ArtifactStorageDriverConformanceTests
     [Fact]
     public async Task Rejects_checksum_mismatch_without_publishing_bytes()
     {
+        if (!StoreIsReachable) return;
+
         await using var driver = await CreateDriverAsync();
         await using var input = new MemoryStream(Encoding.UTF8.GetBytes("actual"));
 
@@ -120,6 +142,8 @@ public abstract class ArtifactStorageDriverConformanceTests
     [Fact]
     public async Task Missing_objects_are_typed_and_probe_reports_a_usable_profile()
     {
+        if (!StoreIsReachable) return;
+
         await using var driver = await CreateDriverAsync();
 
         var head = await driver.HeadAsync(new ArtifactStorageHeadRequest("missing/value"), CancellationToken.None);
@@ -136,6 +160,8 @@ public abstract class ArtifactStorageDriverConformanceTests
     [Fact]
     public async Task Delete_removes_an_object_and_missing_delete_is_typed()
     {
+        if (!StoreIsReachable) return;
+
         await using var driver = await CreateDriverAsync();
         await PutUtf8Async(driver, "delete/value", "delete me");
 
@@ -146,6 +172,8 @@ public abstract class ArtifactStorageDriverConformanceTests
     [Fact]
     public async Task Cancellation_is_observed_before_a_write_can_publish()
     {
+        if (!StoreIsReachable) return;
+
         await using var driver = await CreateDriverAsync();
         await using var input = new MemoryStream(RandomNumberGenerator.GetBytes(1024));
         using var cancellation = new CancellationTokenSource();
