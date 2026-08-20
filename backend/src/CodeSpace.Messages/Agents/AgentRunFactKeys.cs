@@ -47,6 +47,12 @@ public sealed record AgentRunFactKeys
     /// exactly what it extracted before. It is NOT a discovery mechanism — a stream that spells any of the three some
     /// other way yields null here, which is why an undeclared harness's missing fact is reported as unestablished
     /// rather than as an absence the stream stated.
+    ///
+    /// <para>The word UNION above is enforced, not asserted:
+    /// <c>AgentRunFactKeysTests.The_fallback_union_holds_every_shipped_adapters_keys_in_the_same_order</c> fails when a
+    /// shipped adapter declares a key this table lacks, or in a different relative order. Order matters most for
+    /// <see cref="UsageContainers"/>, where it decides which of two usage objects on one line a run is billed for, so a
+    /// key added here goes at the END unless a re-price is the deliberate point of the change.</para>
     /// </summary>
     public static readonly AgentRunFactKeys Fallback = new()
     {
