@@ -6,9 +6,10 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts;
 /// size, content type, tenant) in Postgres; THIS backend owns only the opaque bytes, addressed by their SHA-256,
 /// and returns a <c>storage_url</c> the metadata row records. A read resolves that url back to bytes.
 ///
-/// <para>Kept deliberately narrow (Rule 7): two methods, no tenancy (the store already enforces it on the
-/// metadata row), no listing/deletion (the metadata row + its immutability trigger are the source of truth; the
-/// reaper purges via the store). A new transport — S3, a custom mirror — is a SIBLING impl behind this seam
+/// <para>Kept deliberately narrow (Rule 7): read/write only, no tenancy (the store already enforces it on the
+/// metadata row), no listing, and no deletion — byte removal is the separate optional
+/// <see cref="IArtifactBlobPurge"/>, so a write-once transport stays a valid backend instead of acquiring a method
+/// it would have to throw from. A new transport — S3, a custom mirror — is a SIBLING impl behind this seam
 /// (Rule 18), never a widening of <see cref="IArtifactStore"/>.</para>
 /// </summary>
 public interface IArtifactBlobBackend

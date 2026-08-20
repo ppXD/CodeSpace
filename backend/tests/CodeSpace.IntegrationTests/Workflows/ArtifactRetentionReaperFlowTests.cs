@@ -9,6 +9,7 @@ using CodeSpace.Messages.Artifacts;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows;
@@ -162,17 +163,138 @@ public sealed class ArtifactRetentionReaperFlowTests
     }
 
     [Fact]
-    public async Task An_offloaded_artifact_is_never_collected_because_nothing_can_purge_its_bytes()
+    public async Task An_offloaded_artifact_on_the_local_backend_is_purged_with_its_bytes()
     {
-        // A declaration is only minted for an INLINE insert; this test plants one on an offloaded row directly to prove
-        // the claim query refuses it even if a future producer got that wrong.
+        // The lane's positive control: bytes past the inline threshold went to the local blob backend and used to be
+        // permanently unreapable. Both waits elapse, then the file and the row go together.
         var world = await SeedWorldAsync();
-        var artifactId = await DeclareOffloadedAsync(world);
+        var artifactId = await DeclareLocalOffloadedAsync(world, "orphaned oversize deliverable");
+        var blob = await BlobPathAsync(artifactId);
+        File.Exists(blob).ShouldBeTrue("the declaring write must have offloaded the bytes to the local backend");
+
+        await AgeDeclarationAsync(artifactId, TimeSpan.FromDays(30));
+        var first = await SweepAsync();
+
+        first.Quarantined.ShouldBeGreaterThanOrEqualTo(1, "the first observation of an unreferenced offloaded artifact only starts the quarantine clock");
+        File.Exists(blob).ShouldBeTrue("the sweep that first noticed the artifact must not touch its bytes");
+
+        await AgeQuarantineAsync(artifactId, TimeSpan.FromDays(2));
+        var second = await SweepAsync();
+
+        second.Collected.ShouldBeGreaterThanOrEqualTo(1);
+        File.Exists(blob).ShouldBeFalse("the offloaded bytes are what this lane exists to reclaim");
+        (await ArtifactExistsAsync(artifactId)).ShouldBeFalse();
+        (await DeclarationAsync(artifactId)).ShouldBeNull("the ledger row goes with its artifact through the cascade");
+    }
+
+    [Fact]
+    public async Task An_offloaded_artifact_whose_blob_another_team_also_names_is_kept_and_says_so()
+    {
+        // The local blob path is content-addressed but NOT team-scoped: <root>/ab/cd/<sha> is one file however many
+        // rows name it. A second namer the reaper cannot collect makes the bytes unpurgeable, and the row must stay.
+        var world = await SeedWorldAsync();
+        var neighbour = await SeedWorldAsync();
+        const string content = "oversize bytes two tenants both produced";
+        var artifactId = await DeclareLocalOffloadedAsync(world, content);
+        var blob = await BlobPathAsync(artifactId);
+        var neighbourId = await PutLocalOffloadedAsync(neighbour, content);
+
+        neighbourId.ShouldNotBe(artifactId, "artifacts do not dedup across teams, so this is a genuine second namer of one file");
+        (await BlobPathAsync(neighbourId)).ShouldBe(blob, "both rows must resolve to the same physical blob for this test to mean anything");
+
+        await AgeDeclarationAsync(artifactId, TimeSpan.FromDays(30));
+        await SweepAsync();
+        await AgeQuarantineAsync(artifactId, TimeSpan.FromDays(2));
+        await SweepAsync();
+
+        var declaration = (await DeclarationAsync(artifactId)).ShouldNotBeNull();
+        declaration.LastErrorCode.ShouldBe("artifact-blob-shared", "the kept row must say WHY, not merely survive");
+        declaration.State.ShouldBe(ArtifactRetentionState.Indeterminate, "an undeclared second namer is an unknown, and unknown means keep");
+        File.Exists(blob).ShouldBeTrue("deleting a shared blob would break the neighbour's artifact");
+        (await ArtifactExistsAsync(artifactId)).ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task The_sharing_probe_has_its_own_index_so_it_is_not_a_scan_of_the_whole_table()
+    {
+        // The probe cannot be team-scoped (that is the hazard it exists to see), so no pre-existing index on the table
+        // serves it. Pinned because losing the index turns a per-candidate probe into a sequential scan of the
+        // platform's largest artifact table, and nothing else in the suite would notice.
+        using var scope = _fixture.BeginScope();
+        var indexes = await scope.Resolve<CodeSpaceDbContext>().Database
+            .SqlQueryRaw<string>("SELECT indexdef AS \"Value\" FROM pg_indexes WHERE tablename = 'workflow_artifact'").ToListAsync();
+
+        indexes.ShouldContain(definition => definition.Contains("ix_workflow_artifact_storage_url") && definition.Contains("(storage_url)"));
+    }
+
+    [Fact]
+    public async Task A_sweep_after_the_bytes_are_already_gone_finishes_the_row_instead_of_stalling()
+    {
+        // The crash state: the byte delete happened, the row delete did not. The next sweep must complete it, which is
+        // only true if the backend reports an absent blob as success rather than as a failure.
+        var world = await SeedWorldAsync();
+        var artifactId = await DeclareLocalOffloadedAsync(world, "bytes a crashed sweep already removed");
+        var blob = await BlobPathAsync(artifactId);
+        await AgeDeclarationAsync(artifactId, TimeSpan.FromDays(30));
+        await SweepAsync();
+        await AgeQuarantineAsync(artifactId, TimeSpan.FromDays(2));
+
+        File.Delete(blob);
+
+        var resumed = await SweepAsync();
+
+        resumed.Collected.ShouldBeGreaterThanOrEqualTo(1, "'already gone' is success — otherwise a crashed purge strands its row forever");
+        (await ArtifactExistsAsync(artifactId)).ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task A_refused_byte_delete_leaves_the_bytes_the_row_and_a_retryable_declaration()
+    {
+        // Rule 12 tier: medium-mock. Real reaper, real database, real declaration — only the backend's DeleteAsync is
+        // substituted, because provoking a genuine unlink failure means chmod'ing a directory of the shared fixture's
+        // blob root, which is both platform-dependent and leaks if the test dies mid-way.
+        var world = await SeedWorldAsync();
+        var artifactId = await DeclareLocalOffloadedAsync(world, "bytes a broken backend will not release");
+        var blob = await BlobPathAsync(artifactId);
+        await AgeDeclarationAsync(artifactId, TimeSpan.FromDays(30));
+        await SweepAsync();
+        await AgeQuarantineAsync(artifactId, TimeSpan.FromDays(2));
+
+        var summary = await SweepWithRefusedPurgeAsync();
+
+        summary.Collected.ShouldBe(0, "a backend that will not remove the bytes must not let the row go either");
+        File.Exists(blob).ShouldBeTrue();
+        (await ArtifactExistsAsync(artifactId)).ShouldBeTrue("deleting the row here would strand bytes nothing remembers");
+
+        var declaration = (await DeclarationAsync(artifactId)).ShouldNotBeNull();
+        declaration.State.ShouldBe(ArtifactRetentionState.Quarantined, "the declaration stays LIVE so the next sweep retries");
+        declaration.LastErrorCode.ShouldBe("artifact-blob-delete-refused");
+        declaration.AttemptCount.ShouldBe(1, "a provider failure spends exactly one of the budgeted attempts");
+
+        // And the retry is real: the same declaration collects once a working backend gets to it.
+        await AgeQuarantineAsync(artifactId, TimeSpan.FromDays(2));
+        var recovered = await SweepAsync();
+
+        recovered.Collected.ShouldBeGreaterThanOrEqualTo(1, "the refusal must have been a pause, not a one-way door");
+        File.Exists(blob).ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task A_routed_artifact_is_left_declared_rather_than_settled_terminally()
+    {
+        // Routed bytes are refused by this lane, and the refusal must not be a ONE-WAY door: the declaration stays
+        // live so a later lane that can purge them still finds the row. A guard, not a red-first case — today's claim
+        // query already excludes the row, for a different reason.
+        var world = await SeedWorldAsync();
+        var artifactId = await DeclareRoutedAsync(world);
+        var before = (await DeclarationAsync(artifactId)).ShouldNotBeNull();
         await AgeDeclarationAsync(artifactId, TimeSpan.FromDays(30));
 
         await SweepAsync();
 
-        (await DeclarationAsync(artifactId))!.State.ShouldBe(ArtifactRetentionState.Declared, "the claim query filters offloaded rows out entirely");
+        var after = (await DeclarationAsync(artifactId)).ShouldNotBeNull();
+        after.State.ShouldBe(ArtifactRetentionState.Declared, "a routed row must not be claimed at all");
+        after.Revision.ShouldBe(before.Revision, "an unclaimed row's revision is untouched, which is what keeps a future lane able to reach it");
         (await ArtifactExistsAsync(artifactId)).ShouldBeTrue();
     }
 
@@ -229,6 +351,30 @@ public sealed class ArtifactRetentionReaperFlowTests
         return await scope.Resolve<IArtifactRetentionReaper>().SweepAsync(CancellationToken.None);
     }
 
+    /// <summary>The same sweep, driven by a reaper whose blob backend refuses every removal. Everything else — the oracle, the database, the policy — is production.</summary>
+    private async Task<ArtifactRetentionSweepSummary> SweepWithRefusedPurgeAsync()
+    {
+        using var scope = _fixture.BeginScope();
+        var reaper = new ArtifactRetentionReaper(scope.Resolve<DbContextOptions<CodeSpaceDbContext>>(), scope.Resolve<IArtifactReferenceOracle>(),
+            new RefusingPurgeBackend(scope.Resolve<IArtifactBlobBackend>()), NullLogger<ArtifactRetentionReaper>.Instance);
+
+        return await reaper.SweepAsync(CancellationToken.None);
+    }
+
+    /// <summary>The real backend for every operation except removal, which always refuses — the shape of a provider outage or a read-only mount.</summary>
+    private sealed class RefusingPurgeBackend : IArtifactBlobBackend, IArtifactBlobPurge
+    {
+        private readonly IArtifactBlobBackend _inner;
+
+        public RefusingPurgeBackend(IArtifactBlobBackend inner) => _inner = inner;
+
+        public Task<ArtifactBlobPurgeOutcome> DeleteAsync(string storageUrl, CancellationToken cancellationToken) => Task.FromResult(ArtifactBlobPurgeOutcome.Refused);
+        public Task<string> WriteAsync(string sha256, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken) => _inner.WriteAsync(sha256, bytes, cancellationToken);
+        public Task<bool> ExistsAsync(string storageUrl, CancellationToken cancellationToken) => _inner.ExistsAsync(storageUrl, cancellationToken);
+        public Task<byte[]> ReadAsync(string storageUrl, CancellationToken cancellationToken) => _inner.ReadAsync(storageUrl, cancellationToken);
+        public Task<ArtifactBlobRange> ReadRangeAsync(string storageUrl, long offset, int length, CancellationToken cancellationToken) => _inner.ReadRangeAsync(storageUrl, offset, length, cancellationToken);
+    }
+
     /// <summary>A declaring write through the production seam — the same call <c>ArtifactManifestStore</c> makes.</summary>
     private async Task<Guid> DeclareAsync(World world, string content)
     {
@@ -243,25 +389,69 @@ public sealed class ArtifactRetentionReaperFlowTests
         return write.ArtifactId;
     }
 
-    /// <summary>An OFFLOADED artifact plus a hand-planted declaration — a shape the production seam refuses to mint, asserted separately here.</summary>
-    private async Task<Guid> DeclareOffloadedAsync(World world)
+    /// <summary>Bytes past the inline threshold, deterministic from <paramref name="content"/> so two teams can write the identical payload.</summary>
+    private static byte[] OffloadedBytes(string content)
+    {
+        var unit = System.Text.Encoding.UTF8.GetBytes(content + "\n");
+        var repeats = (ArtifactStoreConfig.InlineThresholdBytes / unit.Length) + 2;
+
+        return Enumerable.Range(0, repeats).SelectMany(_ => unit).ToArray();
+    }
+
+    /// <summary>A declaring write whose bytes are OFFLOADED to the local blob backend — the shape this lane exists for.</summary>
+    private async Task<Guid> DeclareLocalOffloadedAsync(World world, string content)
     {
         using var scope = _fixture.BeginScope();
-        var bytes = new byte[ArtifactStoreConfig.InlineThresholdBytes + 1];
-        Random.Shared.NextBytes(bytes);
-        var writer = scope.Resolve<IArtifactRetentionWriter>();
-        var write = await writer.PutDeclaredAsync(new ArtifactRetentionWriteRequest(world.TeamId, bytes, "application/octet-stream",
-            ArtifactRetentionClass.ArtifactManifestContent, "artifact_manifest", world.AgentRunId), CancellationToken.None);
+        var request = new ArtifactRetentionWriteRequest(world.TeamId, OffloadedBytes(content), "application/octet-stream",
+            ArtifactRetentionClass.ArtifactManifestContent, "artifact_manifest", world.AgentRunId);
 
-        write.Declared.ShouldBeFalse("an offloaded write must not declare — its bytes have no purge path");
+        var write = await scope.Resolve<IArtifactRetentionWriter>().PutDeclaredAsync(request, CancellationToken.None);
 
-        var db = scope.Resolve<CodeSpaceDbContext>();
-        await db.Database.ExecuteSqlInterpolatedAsync($"""
-            INSERT INTO workflow_artifact_retention (artifact_id, team_id, retention_class, holder_kind, holder_id, state, declared_at, next_sweep_at, revision, last_modified_at)
-            VALUES ({write.ArtifactId}, {world.TeamId}, 'ArtifactManifestContent', 'artifact_manifest', {world.AgentRunId}, 'Declared', clock_timestamp(), clock_timestamp(), 1, clock_timestamp())
-            """);
+        write.Declared.ShouldBeTrue("an offloaded write on the local backend must declare — its bytes now have a purge path");
 
         return write.ArtifactId;
+    }
+
+    /// <summary>A plain undeclared offloaded write — the second namer of one physical blob.</summary>
+    private async Task<Guid> PutLocalOffloadedAsync(World world, string content)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<IArtifactStore>().PutAsync(world.TeamId, OffloadedBytes(content), "application/octet-stream", CancellationToken.None);
+    }
+
+    /// <summary>The local file the row's <c>storage_url</c> resolves to. Read from the row, so the test never needs to know the configured root.</summary>
+    private async Task<string> BlobPathAsync(Guid artifactId)
+    {
+        using var scope = _fixture.BeginScope();
+        var url = await scope.Resolve<CodeSpaceDbContext>().WorkflowArtifact.AsNoTracking()
+            .Where(row => row.Id == artifactId).Select(row => row.StorageUrl).SingleAsync();
+
+        return new Uri(url.ShouldNotBeNull("the row must be offloaded for this helper to mean anything")).LocalPath;
+    }
+
+    /// <summary>A ROUTED artifact plus a hand-planted declaration — a shape the production seam refuses to mint, asserted separately here.</summary>
+    private async Task<Guid> DeclareRoutedAsync(World world)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var objectId = Guid.NewGuid();
+        var artifactId = Guid.NewGuid();
+        var digest = System.Security.Cryptography.SHA256.HashData(OffloadedBytes($"routed {artifactId:N}"));
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO artifact_object (id, team_id, digest_algorithm, digest, size_bytes, created_date, created_by)
+            VALUES ({objectId}, {world.TeamId}, 'Sha256', {digest}, 1024, clock_timestamp(), {world.ActorId})
+            """);
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO workflow_artifact (id, team_id, sha256, content_type, size_bytes, cas_artifact_object_id, created_at)
+            VALUES ({artifactId}, {world.TeamId}, {Convert.ToHexStringLower(digest)}, 'application/octet-stream', 1024, {objectId}, clock_timestamp())
+            """);
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO workflow_artifact_retention (artifact_id, team_id, retention_class, holder_kind, holder_id, state, declared_at, next_sweep_at, revision, last_modified_at)
+            VALUES ({artifactId}, {world.TeamId}, 'ArtifactManifestContent', 'artifact_manifest', {world.AgentRunId}, 'Declared', clock_timestamp(), clock_timestamp(), 1, clock_timestamp())
+            """);
+
+        return artifactId;
     }
 
     private async Task ReferenceFromManifestAsync(World world, Guid artifactId)

@@ -2,6 +2,7 @@ using CodeSpace.Core.Jobs;
 using CodeSpace.Core.Jobs.RecurringJobs;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Workflows.Artifacts;
+using CodeSpace.Core.Services.Workflows.Artifacts.Backends;
 using CodeSpace.Core.Services.Workflows.Artifacts.Retention;
 using CodeSpace.Messages.Artifacts;
 using CodeSpace.Messages.Commands.Workflows;
@@ -56,13 +57,13 @@ public sealed class ArtifactRetentionPolicyTests
     {
         var options = new ArtifactRetentionReaperOptions(batch, claim, attempts, TimeSpan.FromSeconds(leaseSeconds), TimeSpan.FromSeconds(operationSeconds), TimeSpan.FromMinutes(retryMinutes));
 
-        Should.Throw<ArgumentOutOfRangeException>(() => new ArtifactRetentionReaper(DbOptions(), Oracle(), NullLogger<ArtifactRetentionReaper>.Instance, options));
+        Should.Throw<ArgumentOutOfRangeException>(() => new ArtifactRetentionReaper(DbOptions(), Oracle(), Blobs(), NullLogger<ArtifactRetentionReaper>.Instance, options));
     }
 
     [Fact]
     public void The_shipped_reaper_configuration_is_accepted()
     {
-        Should.NotThrow(() => new ArtifactRetentionReaper(DbOptions(), Oracle(), NullLogger<ArtifactRetentionReaper>.Instance));
+        Should.NotThrow(() => new ArtifactRetentionReaper(DbOptions(), Oracle(), Blobs(), NullLogger<ArtifactRetentionReaper>.Instance));
     }
 
     [Fact]
@@ -89,10 +90,24 @@ public sealed class ArtifactRetentionPolicyTests
         typeof(IArtifactStore).GetMethods().Select(method => method.Name).ShouldNotContain(nameof(IArtifactRetentionWriter.PutDeclaredAsync));
     }
 
+    [Fact]
+    public void The_shipped_blob_backend_can_purge_so_offloaded_bytes_are_reclaimable_at_all()
+    {
+        // The reaper feature-detects IArtifactBlobPurge off the injected backend and keeps every offloaded artifact
+        // forever when it is absent. Dropping the interface from the shipped backend would therefore silently turn the
+        // offloaded purge back off with no other test noticing.
+        typeof(LocalFileArtifactBlobBackend).GetInterfaces().ShouldContain(typeof(IArtifactBlobPurge));
+
+        // Rule 7: removal is a SIBLING face, never a widening — a write-once transport stays a valid backend.
+        typeof(IArtifactBlobBackend).GetMethods().Select(method => method.Name).ShouldNotContain(nameof(IArtifactBlobPurge.DeleteAsync));
+    }
+
     private static DbContextOptions<CodeSpaceDbContext> DbOptions() =>
         new DbContextOptionsBuilder<CodeSpaceDbContext>().UseNpgsql(UnreachableDatabase).UseSnakeCaseNamingConvention().Options;
 
     private static IArtifactReferenceOracle Oracle() => new ArtifactReferenceOracle(NullLogger<ArtifactReferenceOracle>.Instance);
+
+    private static IArtifactBlobBackend Blobs() => new LocalFileArtifactBlobBackend(Path.Combine(Path.GetTempPath(), $"artifact-retention-{Guid.NewGuid():N}"));
 
     private sealed class RecordingMediator : IMediator
     {

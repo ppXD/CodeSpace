@@ -7,8 +7,9 @@ namespace CodeSpace.Core.Persistence.Entities;
 ///
 /// Never updated: the trigger from migration 0016 rejects UPDATE outright, since the sha IS the identity. A row can be
 /// DELETED only by a purge that asked for the permission in its own session, which today means exactly one caller —
-/// <see cref="Services.Workflows.Artifacts.Retention.IArtifactRetentionReaper"/>, and only for an artifact carrying a
-/// retention declaration that no reference site points at.
+/// <see cref="Services.Workflows.Artifacts.Retention.IArtifactRetentionReaper"/>, and then only for an artifact that
+/// carries a retention declaration, that no reference site points at, AND whose bytes that same transaction can remove
+/// (see <see cref="Services.Workflows.Artifacts.Retention.ArtifactPurgePath"/>).
 ///
 /// Per-team dedup by (team_id, sha256) so storing identical bytes twice from the same team returns the existing row.
 /// Exactly one of <see cref="InlineBytes"/> / <see cref="StorageUrl"/> / <see cref="CasArtifactObjectId"/> is set — the

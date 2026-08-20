@@ -12,7 +12,8 @@ public interface IArtifactRetentionWriter : IScopedDependency
 {
     /// <summary>
     /// Store <paramref name="request"/>'s bytes exactly as <c>IArtifactStore.PutAsync</c> would, and — only when this
-    /// call is the write that INSERTED the artifact row, and only when the bytes stayed inline — mint the retention
+    /// call is the write that INSERTED the artifact row, and only when the bytes went somewhere the reaper can remove
+    /// them from (inline in the row, or the local blob backend, but never a routed storage profile) — mint the retention
     /// declaration in the same transaction as that insert.
     ///
     /// <para>Atomic-with-the-insert is what makes the declaration sound: nothing can dedup against a row that has not
@@ -32,6 +33,6 @@ public sealed record ArtifactRetentionWriteRequest(Guid TeamId, ReadOnlyMemory<b
 
 /// <summary>
 /// The stored artifact plus whether a declaration was actually minted. <paramref name="Declared"/> false is the normal,
-/// safe outcome for a dedup hit or an offloaded write — the bytes are simply never reapable.
+/// safe outcome for a dedup hit or a routed write — the bytes are simply never reapable.
 /// </summary>
 public sealed record ArtifactRetentionWrite(Guid ArtifactId, bool Declared);
