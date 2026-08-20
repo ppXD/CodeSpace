@@ -35,7 +35,7 @@ public sealed class ArtifactLocationConfiguration : IEntityTypeConfiguration<Art
             table.HasCheckConstraint("ck_artifact_location_identity", "btrim(locator) <> '' AND btrim(object_key) <> ''");
             table.HasCheckConstraint("ck_artifact_location_observation", "(observed_size_bytes IS NULL OR observed_size_bytes >= 0) AND (verified_at IS NULL OR verified_at >= created_date) AND (state <> 'Available' OR (verified_at IS NOT NULL AND observed_size_bytes IS NOT NULL AND provider_checksum_algorithm = 'Sha256' AND provider_checksum IS NOT NULL AND octet_length(provider_checksum) = 32 AND last_error_code IS NULL))");
             table.HasCheckConstraint("ck_artifact_location_revision", "revision > 0");
-            table.HasCheckConstraint("ck_artifact_location_state", "state IN ('Pending', 'Available', 'Missing', 'Corrupt', 'Deleting', 'Deleted', 'Failed')");
+            table.HasCheckConstraint("ck_artifact_location_state", "state IN ('Pending', 'Available', 'Missing', 'Corrupt', 'Deleting', 'Deleted', 'Failed', 'Purged')");
         });
         builder.HasKey(l => l.Id);
         builder.HasAlternateKey(l => new { l.TeamId, l.Id }).HasName("ak_artifact_location_team_id");
@@ -78,7 +78,7 @@ public sealed class ArtifactLocationEventConfiguration : IEntityTypeConfiguratio
             table.HasCheckConstraint("ck_artifact_location_event_error", "(error_code IS NULL AND error_message IS NULL) OR (error_code IS NOT NULL AND btrim(error_code) <> '')");
             table.HasCheckConstraint("ck_artifact_location_event_revision", "revision > 0 AND (observed_size_bytes IS NULL OR observed_size_bytes >= 0)");
             table.HasCheckConstraint("ck_artifact_location_event_type", "event_type IN ('Created', 'Observed', 'Verified', 'StateChanged', 'Failed')");
-            table.HasCheckConstraint("ck_artifact_location_event_state", "state IN ('Pending', 'Available', 'Missing', 'Corrupt', 'Deleting', 'Deleted', 'Failed')");
+            table.HasCheckConstraint("ck_artifact_location_event_state", "state IN ('Pending', 'Available', 'Missing', 'Corrupt', 'Deleting', 'Deleted', 'Failed', 'Purged')");
         });
         builder.HasKey(e => e.Id);
         builder.Property(e => e.EventType).HasConversion<string>().HasMaxLength(24);

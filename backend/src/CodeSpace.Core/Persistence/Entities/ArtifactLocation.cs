@@ -50,4 +50,12 @@ public enum ArtifactLocationState
     Deleting,
     Deleted,
     Failed,
+
+    /// <summary>
+    /// The bytes were intentionally removed and this row records that. Distinct from <see cref="Deleted"/>, which
+    /// 0127's trigger makes terminal: a Purged location may be written again, and a re-verified write moves it back to
+    /// <see cref="Available"/>. Reachable only from <see cref="Deleting"/> (0150), so a purge that removes bytes
+    /// advances the revision a mid-flight writer fenced on before anything is gone.
+    /// </summary>
+    Purged,
 }
