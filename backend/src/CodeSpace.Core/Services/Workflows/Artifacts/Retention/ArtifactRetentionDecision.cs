@@ -106,13 +106,15 @@ internal sealed record ArtifactRetentionDecision(ArtifactRetentionAction Action,
     /// disagree.
     ///
     /// <para><c>Routed</c> is refused for a reason outside this file, and it is a correctness reason rather than an
-    /// unfinished one. A routed object's bytes are reachable by a SECOND route that the retention ledger does not
-    /// govern: <c>ArtifactCasRuntimeCoordinator.PutAsync</c> short-circuits on a <c>Committed</c>
-    /// <c>artifact_transfer_intent</c> for the content's idempotency scope and returns that intent's object id with no
-    /// provider check, and <c>Committed</c> is terminal in SQL (0131's transfer guard whitelists no transition out of
-    /// it) while the key generation steps only over <c>Failed</c> intents. So purging the bytes would hand the next
-    /// writer of the same content an object whose bytes are gone, and its fresh artifact row could never be read.
-    /// Fixing that is a change to the CAS write path's idempotency, not to retention.</para>
+    /// unfinished one. The dedup hit itself is now safe: <c>ArtifactCasRuntimeCoordinator</c>'s
+    /// <c>ReusableProblemAsync</c> refuses to satisfy a write from a <c>Committed</c>
+    /// <c>artifact_transfer_intent</c> whose <c>artifact_location</c> is no longer <c>Available</c>, so purged bytes
+    /// can no longer be handed to a later writer as a readable object. What is still missing is the other half — a
+    /// way to store that content AGAIN. <c>Reusable</c> requires <c>Available</c> before it will re-verify an existing
+    /// location row, <c>ux_artifact_location_profile_object_key</c> forbids a second row for the same object key, and
+    /// <c>artifact_cas_location_guard</c> makes <c>Deleted</c> terminal. So a purge today would leave that content
+    /// permanently unwritable under the profile revision. Fixing that is a change to the CAS write path, not to
+    /// retention.</para>
     /// </summary>
     public static ArtifactRetentionDecision? RefuseUnpurgeable(ArtifactPurgePath purge) => purge switch
     {
@@ -120,7 +122,7 @@ internal sealed record ArtifactRetentionDecision(ArtifactRetentionAction Action,
         ArtifactPurgePath.LocalBlobShared => Indeterminate("artifact-blob-shared",
             "Another artifact row points at the same physical blob, so removing the bytes would take that row's content too and they are kept."),
         ArtifactPurgePath.Routed => Indeterminate("artifact-routed-storage",
-            "The artifact's bytes were placed through a configured storage profile, whose committed transfer intent can hand the same object to a later writer, so this build does not purge them."),
+            "The artifact's bytes were placed through a configured storage profile, and removing them would leave that content unwritable there, so this build does not purge them."),
         ArtifactPurgePath.BackendCannotPurge => Indeterminate("artifact-blob-backend-cannot-purge",
             "The blob backend holding the artifact's bytes offers no removal, so the row is kept with them."),
         _ => Retry("artifact-placement-indeterminate", "Where the artifact's bytes live could not be established, so the artifact is kept for now."),

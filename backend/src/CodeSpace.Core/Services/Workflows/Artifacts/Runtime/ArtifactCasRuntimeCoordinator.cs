@@ -387,7 +387,7 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
         {
             await using var db = CreateDb();
             var existing = await db.ArtifactTransferIntent.AsNoTracking().SingleOrDefaultAsync(value => value.TeamId == request.TeamId && value.StorageProfileRevisionId == profileRevisionId && value.IdempotencyKey == key, cancellationToken).ConfigureAwait(false);
-            if (existing != null) return Snapshot(existing, Matches(existing, request, digest) ? null : Problem(ArtifactCasProblemCode.IdempotencyConflict));
+            if (existing != null) return Snapshot(existing, await ReusableProblemAsync(existing, request, digest, cancellationToken).ConfigureAwait(false));
 
             var now = _clock.GetUtcNow();
             var intent = new ArtifactTransferIntent
@@ -414,7 +414,46 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
 
         await using var finalDb = CreateDb();
         var winner = await finalDb.ArtifactTransferIntent.AsNoTracking().SingleAsync(value => value.TeamId == request.TeamId && value.StorageProfileRevisionId == profileRevisionId && value.IdempotencyKey == key, cancellationToken).ConfigureAwait(false);
-        return Snapshot(winner, Matches(winner, request, digest) ? null : Problem(ArtifactCasProblemCode.IdempotencyConflict));
+        return Snapshot(winner, await ReusableProblemAsync(winner, request, digest, cancellationToken).ConfigureAwait(false));
+    }
+
+    /// <summary>
+    /// Whether the intent this key already names may satisfy the request, and if not, why. Content identity is the
+    /// first question. The second exists only for an already-<c>Committed</c> intent, and that is the dedup hit: the
+    /// short-circuit that satisfies a write from a stored object without touching the provider.
+    ///
+    /// <para>A <c>Committed</c> intent is a permanent record that the bytes were once verified at its
+    /// <c>artifact_location_id</c>. It is NOT a claim that they are still there and can never become one, because
+    /// <c>Committed</c> is a one-way door: <c>artifact_cas_transfer_guard</c> (0131) whitelists no transition out of
+    /// it and <c>ck_artifact_transfer_intent_outcome</c> (0127) pins it to that object and location. So liveness is
+    /// asked of the location, where it is answerable — <c>Available</c> is the only state whose own
+    /// <c>ck_artifact_location_observation</c> demands a verified size and a matching Sha256, which is exactly "these
+    /// bytes were observed present here". Every other state, including the <c>Deleting</c> a purge claims a location
+    /// with before it removes anything, means not proven present, so the write is refused instead of being satisfied
+    /// with an object whose reads would fail.</para>
+    ///
+    /// <para>Cost: one indexed point read, only on a dedup hit. A first write of new content pays nothing and no path
+    /// gains a provider round-trip. Deliberately not a provider head: the answer has to be right for a purge that is
+    /// still mid-flight, and only the database knows that.</para>
+    ///
+    /// <para><b>No production writer moves a committed location off <c>Available</c> yet.</b> Nothing purges routed
+    /// bytes in this build, so on every reachable path this returns exactly what the content-identity check alone
+    /// returned before. It is the precondition a routed purge needs, landed ahead of it. What it does NOT give that
+    /// purge: a way to store the content again afterwards — <c>Reusable</c> refuses to revive a non-<c>Available</c>
+    /// location, so the object key stays unwritable until a repair path exists.</para>
+    /// </summary>
+    private async Task<ArtifactCasProblem?> ReusableProblemAsync(ArtifactTransferIntent intent, ArtifactCasTransferRequest request, byte[] digest, CancellationToken cancellationToken)
+    {
+        if (!Matches(intent, request, digest)) return Problem(ArtifactCasProblemCode.IdempotencyConflict);
+        if (intent.State != ArtifactTransferState.Committed) return null;
+
+        await using var db = CreateDb();
+        var state = await db.ArtifactLocation.AsNoTracking()
+            .Where(value => value.TeamId == intent.TeamId && value.Id == intent.ArtifactLocationId)
+            .Select(value => (ArtifactLocationState?)value.State)
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        return state == ArtifactLocationState.Available ? null : Problem(ArtifactCasProblemCode.TargetMissing);
     }
 
     /// <summary>
