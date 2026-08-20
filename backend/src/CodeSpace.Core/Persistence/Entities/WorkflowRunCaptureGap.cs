@@ -32,8 +32,11 @@ namespace CodeSpace.Core.Persistence.Entities;
 /// name arrive through bounded sweepers, and refusing a gap because its subject is not projected yet would be the one
 /// answer this table must never give.</para>
 ///
-/// <para>Schema-only in this slice: nothing produces, reads or folds a row, and no completion, terminal decision,
-/// planner, oracle or router is aware of it.</para>
+/// <para><b>Who records one.</b> Exactly one producer exists: the native-record capture plane
+/// (<c>NativeRecordPlane</c>) records a <see cref="CaptureGapReason.WriteRefused"/> span when a batch of captured frames
+/// is refused durable storage. The other three reasons are representable and unproduced — no plane yet notices its own
+/// bound, its own torn re-attach or its own unreadable frame — and nothing READS or folds a gap: no completion,
+/// terminal decision, planner, oracle or router is aware of one.</para>
 /// </summary>
 public sealed class WorkflowRunCaptureGap : IEntity<Guid>
 {

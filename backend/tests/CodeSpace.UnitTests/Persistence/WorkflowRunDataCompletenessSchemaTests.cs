@@ -1,5 +1,6 @@
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents.Capture;
 using CodeSpace.Messages.Contracts;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
@@ -193,15 +194,27 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
     }
 
     /// <summary>
-    /// The isolation this slice PROMISES, checked rather than asserted in prose. Zero production writers and zero
-    /// production readers: the only files in <c>backend/src</c> that may mention either table are the two entities,
-    /// their two configurations, and the DbContext that registers them. In particular nothing in completion, terminal
-    /// decision, planner, oracle, critic or routing may read the manifest — making terminal authority answer to it is a
-    /// separate, later, deliberate cutover, and this test is what turns that step into a visible red rather than a
-    /// quiet import.
+    /// The one producer's own vocabulary, hard-pinned. <c>capture_source</c> is how an auditor asks "which producer
+    /// noticed this", so renaming this constant silently retires every filter written against the rows already stored
+    /// under the old value — a rename that looks harmless is exactly the kind this pin makes a visible decision.
     /// </summary>
     [Fact]
-    public void No_production_file_outside_the_persistence_registration_touches_either_table()
+    public void The_native_record_producers_capture_source_is_pinned()
+    {
+        NativeRecordPlane.CompletenessCaptureSource.ShouldBe("native-record-plane/v1");
+    }
+
+    /// <summary>
+    /// The isolation that still holds, checked rather than asserted in prose: ONE production producer and zero
+    /// production readers. The only files in <c>backend/src</c> that may mention either table are the two entities,
+    /// their two configurations, the DbContext that registers them, and the native-record capture plane's completeness
+    /// partial — which WRITES a statement for its own facet and a gap for its own refused batches, and reads neither
+    /// table for any decision. In particular nothing in completion, terminal decision, planner, oracle, critic or
+    /// routing may read the manifest: making terminal authority answer to it is a separate, later, deliberate cutover,
+    /// and this test is what turns that step into a visible red rather than a quiet import.
+    /// </summary>
+    [Fact]
+    public void Only_the_native_record_capture_plane_touches_either_table()
     {
         var sourceRoot = ProductionSourceRoot();
 
@@ -214,14 +227,16 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
         mentions.ShouldBe(new[]
         {
             "CodeSpaceDbContext.cs",
+            "NativeRecordPlane.Completeness.cs",
             "WorkflowRunCaptureGap.cs",
             "WorkflowRunCaptureGapConfiguration.cs",
             "WorkflowRunDataManifest.cs",
             "WorkflowRunDataManifestConfiguration.cs",
-        }, customMessage: "a production file now reads or writes the capture-gap / data-manifest plane. This slice ships " +
-                          "the schema ONLY: no capture plane produces a gap, no reducer folds one, and terminal authority " +
-                          "does not consult the manifest. If that cutover is genuinely being made, it is a deliberate step " +
-                          "that updates this list — not a silent one.");
+        }, customMessage: "a production file other than the native-record capture plane now reads or writes the " +
+                          "capture-gap / data-manifest plane. Exactly one producer exists — the native-record facet — " +
+                          "and nothing reads either table: no reducer folds a gap and terminal authority does not " +
+                          "consult the manifest. If a second producer or the first reader is genuinely being added, it " +
+                          "is a deliberate step that updates this list — not a silent one.");
     }
 
     /// <summary>

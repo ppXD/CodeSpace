@@ -40,6 +40,10 @@ public interface INativeRecordExecutionPlane
     /// terminal, including the forced-terminal ones, and a no-op when the run has no live execution or when this
     /// worker no longer speaks for it, so re-running it is safe.
     ///
+    /// <para>An attempt it finds still Running is an observer that died inside the capture window, so closing that one
+    /// also UN-STATES the run's frame expectation: nobody knows how many frames it had read and not yet made durable,
+    /// and an expectation nobody could establish must not read as complete.</para>
+    ///
     /// <para>The fence is not optional bookkeeping. This is reached from the completion path's
     /// already-terminal branch, and a LOST completion CAS — the reclaim-for-reattach outcome — raises the very same
     /// exception that branch swallows. Unfenced, a superseded worker would close a live execution and stamp a live
@@ -107,7 +111,13 @@ public sealed partial class NativeRecordPlane : INativeRecordExecutionPlane
 
         // Attempts first, in their own statement: 0137 refuses to terminalize an execution while any attempt is still
         // Running, and the guard reads the attempt rows rather than this statement's intent.
-        await CloseRunningAttemptsAsync(db, live, fence, cancellationToken).ConfigureAwait(false);
+        var unobserved = await CloseRunningAttemptsAsync(db, live, fence, cancellationToken).ConfigureAwait(false);
+
+        // An attempt still Running here is an observer that died inside the capture window: it read an unknown number
+        // of frames it never made durable, so what this run's record SHOULD contain stops being knowable and its
+        // completeness statement must say so rather than read as satisfied over the frames that did land.
+        if (unobserved > 0 && live.WorkflowRunId is { } workflowRunId)
+            await MarkIndeterminateAsync(teamId, workflowRunId, cancellationToken).ConfigureAwait(false);
 
         if (await CloseExecutionAsync(db, live, fence, cancellationToken).ConfigureAwait(false) > 0) return;
 
@@ -171,7 +181,7 @@ public sealed partial class NativeRecordPlane : INativeRecordExecutionPlane
             .Where(execution => execution.TeamId == teamId && execution.AgentRunId == agentRunId
                 && (execution.State == HarnessExecutionState.Pending || execution.State == HarnessExecutionState.Running))
             .OrderByDescending(execution => execution.Generation)
-            .Select(execution => new LiveExecution(execution.Id, execution.AttemptCount))
+            .Select(execution => new LiveExecution(execution.Id, execution.AttemptCount, execution.WorkflowRunId))
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
     /// <summary>
@@ -229,7 +239,7 @@ public sealed partial class NativeRecordPlane : INativeRecordExecutionPlane
 
     private sealed record LiveProcess(Guid ExecutionId, Guid AttemptId, Guid? WorkflowRunId);
 
-    private sealed record LiveExecution(Guid ExecutionId, int AttemptCount);
+    private sealed record LiveExecution(Guid ExecutionId, int AttemptCount, Guid? WorkflowRunId);
 
     /// <summary>The claim a terminalizing worker makes about itself — "this run is still mine at this fence" — carried as a predicate on every statement rather than read once and trusted.</summary>
     private sealed record WorkerFence(Guid TeamId, Guid AgentRunId, long Epoch);
