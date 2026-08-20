@@ -62,7 +62,7 @@ public sealed partial class NativeRecordPlane : INativeRecordReductionPlane
 
         await StageCheckpointAsync(db, batch.Handle, checkpoint, cancellationToken).ConfigureAwait(false);
 
-        await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        await CommitAsync(db, batch, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>The same contract check the batch gets, for the same reason: a checkpoint the database would refuse must be caught here, where the pump contains it, rather than at commit where it would take the batch down as an opaque constraint violation.</summary>

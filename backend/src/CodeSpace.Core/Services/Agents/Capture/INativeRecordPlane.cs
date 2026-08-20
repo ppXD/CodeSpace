@@ -81,6 +81,11 @@ public sealed class NativeRecordContractException : Exception, IFailure
 /// here may change what an Agent Run resolves to" a property of the wiring rather than a promise — and it is load
 /// bearing, because the refusals are reachable BY DESIGN: 0137 rejects a superseded worker's fence on exactly the
 /// reclaim-for-reattach case, which is the outcome that case is supposed to have.
+///
+/// <para>It also ACCOUNTS for what it wrote: every batch advances the run's completeness statement for the
+/// <see cref="WorkflowRunDataOwnerKinds.NativeRecord"/> facet, and a batch the database refuses becomes a known-missing
+/// span. That half lives in this class's completeness partial, which states plainly what a complete verdict there does
+/// and does not mean, and that nothing reads either table yet.</para>
 /// </summary>
 public sealed partial class NativeRecordPlane : INativeRecordPlane, IScopedDependency
 {
@@ -136,7 +141,7 @@ public sealed partial class NativeRecordPlane : INativeRecordPlane, IScopedDepen
 
         await StageModelCallsAsync(db, batch, cancellationToken).ConfigureAwait(false);
 
-        await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        await CommitAsync(db, batch, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, CancellationToken cancellationToken)
