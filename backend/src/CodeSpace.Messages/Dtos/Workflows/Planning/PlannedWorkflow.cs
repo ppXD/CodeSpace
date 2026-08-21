@@ -12,9 +12,11 @@ namespace CodeSpace.Messages.Dtos.Workflows.Planning;
 /// or wiring directly. Until a human saves+runs the projected definition through the existing pipeline,
 /// nothing here can execute.
 ///
-/// <para>The schema this round-trips from lives next to the planner as <c>PlannerSchema.ResponseSchema</c>
-/// (the commit-contract, pinned by a unit test). Field names here MUST match that schema's property names
-/// so a schema-valid object deserializes cleanly.</para>
+/// <para>The model-authored projection this round-trips from lives next to the planner as
+/// <c>PlannerSchema.ResponseSchema</c>. <c>PlanningJsonContractTests</c> compares that schema with the actual
+/// <c>AgentJson.Options</c> output at every bound nested object. Server-stamped provenance fields on this record,
+/// and server/runtime-only fields on shared nested records, are deliberately outside the model schema and pinned as
+/// exact exclusions rather than being misreported as 1:1 schema fields.</para>
 /// </summary>
 public sealed record PlannedWorkflow
 {
