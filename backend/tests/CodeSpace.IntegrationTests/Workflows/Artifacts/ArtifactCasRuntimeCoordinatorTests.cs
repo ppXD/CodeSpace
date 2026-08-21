@@ -101,6 +101,35 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
     }
 
     [Fact]
+    public async Task A_provider_timeout_is_reported_as_an_uncertain_effect_and_keeps_the_durable_deleting_claim()
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState
+        {
+            Capabilities = StorageProviderCapabilities.StreamingWrite | StorageProviderCapabilities.StreamingRead
+                | StorageProviderCapabilities.ConditionalCreate | StorageProviderCapabilities.Delete,
+            BlockNextDelete = true,
+        };
+        var bytes = "provider timeout may have removed bytes"u8.ToArray();
+        var committed = (await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "purge-timeout")))
+            .ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+
+        using var purgeScope = Scope(storage);
+        var result = await purgeScope.Resolve<IArtifactCasPurgeCoordinator>().PurgeAsync(new ArtifactCasPurgeRequest
+        {
+            TeamId = world.TeamId, ArtifactObjectId = committed.ArtifactObjectId, ActorId = world.ActorId,
+            OperationTimeout = TimeSpan.FromMilliseconds(50),
+        }, CancellationToken.None);
+
+        var rejected = result.ShouldBeOfType<ArtifactCasPurgeResult.Rejected>();
+        rejected.Problem.Code.ShouldBe(ArtifactCasProblemCode.ProviderTimeout);
+        rejected.EffectMayHaveOccurred.ShouldBeTrue("the caller must reconcile instead of releasing a claim after an ambiguous provider timeout");
+        using var verify = _fixture.BeginScope();
+        (await verify.Resolve<CodeSpaceDbContext>().ArtifactLocation.AsNoTracking().SingleAsync(value => value.Id == committed.ArtifactLocationId))
+            .State.ShouldBe(ArtifactLocationState.Deleting);
+    }
+
+    [Fact]
     public async Task Every_recovery_attempt_advances_the_deleting_claim_before_it_can_repeat_provider_io()
     {
         var world = await SeedWorldAsync();

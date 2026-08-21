@@ -7,15 +7,19 @@ using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
 using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers.Local;
+using CodeSpace.Core.Services.Workflows.Artifacts.Retention;
 using CodeSpace.Core.Services.Workflows.Artifacts.Routing;
 using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using CodeSpace.Core.Settings;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
+using CodeSpace.Messages.Artifacts;
 using CodeSpace.Messages.Commands.Storage;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Storage;
+using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows.Artifacts;
@@ -256,6 +260,51 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task A_post_claim_manifest_recapture_cannot_obtain_the_candidate_id_without_passing_location_admission()
+    {
+        var (teamId, actorId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        await SeedRouteAsync(teamId, await SeedProfileAsync(teamId, NewRoot()));
+        var content = Encoding.UTF8.GetBytes(new string('g', 20_000));
+        Guid artifactId;
+        Guid objectId;
+        using (var firstScope = _fixture.BeginScope())
+        {
+            var write = await firstScope.Resolve<IArtifactRetentionWriter>().PutDeclaredAsync(new ArtifactRetentionWriteRequest(
+                teamId, content, "application/octet-stream", ArtifactRetentionClass.ArtifactManifestContent, "artifact_manifest", actorId), CancellationToken.None);
+            write.Declared.ShouldBeTrue();
+            artifactId = write.ArtifactId;
+            objectId = (await firstScope.Resolve<CodeSpaceDbContext>().WorkflowArtifact.AsNoTracking().SingleAsync(value => value.Id == artifactId)).CasArtifactObjectId!.Value;
+        }
+
+        ArtifactCasPurgeClaim physical;
+        using (var claimScope = _fixture.BeginScope())
+        {
+            physical = (await claimScope.Resolve<IArtifactCasPurgeCoordinator>().ClaimAsync(new ArtifactCasPurgeRequest
+            {
+                TeamId = teamId, ArtifactObjectId = objectId, ActorId = actorId,
+            }, CancellationToken.None)).ShouldBeOfType<ArtifactCasPurgeClaimResult.Claimed>().Claim;
+        }
+
+        using (var recaptureScope = _fixture.BeginScope())
+        {
+            var failure = await Should.ThrowAsync<ArtifactStorageDestinationUnavailableException>(() =>
+                recaptureScope.Resolve<IArtifactRetentionWriter>().PutDeclaredAsync(new ArtifactRetentionWriteRequest(
+                    teamId, content, "application/octet-stream", ArtifactRetentionClass.ArtifactManifestContent, "artifact_manifest", actorId), CancellationToken.None));
+            failure.TransferProblem.ShouldNotBeNull("the sole production holder writer must reacquire through Put/dedup, and Deleting is not an admissible id");
+        }
+
+        using (var verifyScope = _fixture.BeginScope())
+        {
+            var db = verifyScope.Resolve<CodeSpaceDbContext>();
+            (await db.WorkflowArtifact.AsNoTracking().SingleAsync(value => value.TeamId == teamId)).Id.ShouldBe(artifactId);
+            (await db.WorkflowArtifactRetention.AsNoTracking().SingleAsync(value => value.ArtifactId == artifactId)).State.ShouldBe(ArtifactRetentionState.Declared);
+            (await db.ArtifactLocation.AsNoTracking().SingleAsync(value => value.TeamId == teamId)).State.ShouldBe(ArtifactLocationState.Deleting);
+        }
+        using var releaseScope = _fixture.BeginScope();
+        (await releaseScope.Resolve<IArtifactCasPurgeCoordinator>().ReleaseAsync(physical, CancellationToken.None)).ShouldBeTrue();
+    }
+
+    [Fact]
     public async Task A_purged_routed_object_can_be_stored_again_and_read_through_its_recorded_revision()
     {
         // The end-to-end a routed purge needs to exist at all. Reclaiming the bytes without this is data loss with
@@ -287,6 +336,192 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
         var location = await db.ArtifactLocation.AsNoTracking().SingleAsync(l => l.TeamId == teamId);
         location.State.ShouldBe(ArtifactLocationState.Available, "the purged row was revived; a second row for this key is not allowed");
         (await db.ArtifactObject.CountAsync(o => o.TeamId == teamId)).ShouldBe(1, "artifact_object rows can never be deleted, so the same content keeps the same object");
+    }
+
+    [Fact]
+    public async Task Retention_reaps_routed_bytes_and_the_pointing_row_then_the_same_content_can_be_stored_again()
+    {
+        var (teamId, actorId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var root = NewRoot();
+        await SeedRouteAsync(teamId, await SeedProfileAsync(teamId, root));
+        var content = Encoding.UTF8.GetBytes(new string('z', 20_000));
+        var sha = ArtifactStore.ComputeSha256Hex(content);
+        Guid artifactId;
+        using (var writeScope = _fixture.BeginScope())
+        {
+            var write = await writeScope.Resolve<IArtifactRetentionWriter>().PutDeclaredAsync(new ArtifactRetentionWriteRequest(
+                teamId, content, "application/octet-stream", ArtifactRetentionClass.ArtifactManifestContent, "artifact_manifest", actorId), CancellationToken.None);
+            write.Declared.ShouldBeTrue("a routed declared write has a physical purge path now and must enter the positive retention ledger");
+            artifactId = write.ArtifactId;
+        }
+        await AgeRoutedDeclarationAsync(artifactId);
+
+        using (var firstScope = _fixture.BeginScope())
+            (await firstScope.Resolve<IArtifactRetentionReaper>().SweepAsync(CancellationToken.None)).Quarantined.ShouldBeGreaterThanOrEqualTo(1);
+        File.Exists(ObjectPath(root, sha)).ShouldBeTrue("the first unreferenced observation only opens quarantine");
+        await AgeRoutedQuarantineAsync(artifactId);
+        using (var secondScope = _fixture.BeginScope())
+            (await secondScope.Resolve<IArtifactRetentionReaper>().SweepAsync(CancellationToken.None)).Collected.ShouldBeGreaterThanOrEqualTo(1);
+
+        File.Exists(ObjectPath(root, sha)).ShouldBeFalse();
+        using (var verifyScope = _fixture.BeginScope())
+        {
+            var db = verifyScope.Resolve<CodeSpaceDbContext>();
+            (await db.WorkflowArtifact.AnyAsync(value => value.TeamId == teamId && value.Id == artifactId)).ShouldBeFalse(
+                "leaving the pointing row would make dedup return an id whose bytes were purged");
+            (await db.WorkflowArtifactRetention.AnyAsync(value => value.TeamId == teamId && value.ArtifactId == artifactId)).ShouldBeFalse();
+            var location = await db.ArtifactLocation.AsNoTracking().SingleAsync(value => value.TeamId == teamId);
+            location.State.ShouldBe(ArtifactLocationState.Purged);
+            location.Revision.ShouldBe(3);
+            (await db.ArtifactObject.CountAsync(value => value.TeamId == teamId)).ShouldBe(1, "the CAS object is the permanent content tombstone");
+        }
+
+        var rewrittenId = await PutAsync(teamId, content);
+
+        rewrittenId.ShouldNotBe(artifactId);
+        (await File.ReadAllBytesAsync(ObjectPath(root, sha))).ShouldBe(content);
+        using var readScope = _fixture.BeginScope();
+        (await readScope.Resolve<IArtifactStore>().GetBytesAsync(teamId, rewrittenId, CancellationToken.None))!.Bytes.ShouldBe(content);
+        var revived = await readScope.Resolve<CodeSpaceDbContext>().ArtifactLocation.AsNoTracking().SingleAsync(value => value.TeamId == teamId);
+        revived.State.ShouldBe(ArtifactLocationState.Available);
+        revived.Revision.ShouldBe(4, "the rewrite revives the one durable location identity rather than leaking another row");
+    }
+
+    [Fact]
+    public async Task A_reference_committed_after_the_location_claim_is_seen_before_provider_delete_and_releases_the_location()
+    {
+        var (teamId, actorId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var agentRunId = await SeedAgentRunAsync(teamId, actorId);
+        var root = NewRoot();
+        await SeedRouteAsync(teamId, await SeedProfileAsync(teamId, root));
+        var content = Encoding.UTF8.GetBytes(new string('y', 20_000));
+        var sha = ArtifactStore.ComputeSha256Hex(content);
+        Guid artifactId;
+        using (var writeScope = _fixture.BeginScope())
+        {
+            var write = await writeScope.Resolve<IArtifactRetentionWriter>().PutDeclaredAsync(new ArtifactRetentionWriteRequest(
+                teamId, content, "application/octet-stream", ArtifactRetentionClass.ArtifactManifestContent, "artifact_manifest", agentRunId), CancellationToken.None);
+            write.Declared.ShouldBeTrue();
+            artifactId = write.ArtifactId;
+        }
+        await AgeRoutedDeclarationAsync(artifactId);
+        using (var quarantineScope = _fixture.BeginScope())
+            await quarantineScope.Resolve<IArtifactRetentionReaper>().SweepAsync(CancellationToken.None);
+        await AgeRoutedQuarantineAsync(artifactId);
+
+        ArtifactRetentionSweepSummary summary;
+        using (var sweepScope = _fixture.BeginScope())
+        {
+            var routed = new ReferenceAfterClaimPurgeCoordinator(sweepScope.Resolve<IArtifactCasPurgeCoordinator>(),
+                token => ReferenceFromAgentRunAsync(agentRunId, artifactId, token));
+            var reaper = new ArtifactRetentionReaper(sweepScope.Resolve<DbContextOptions<CodeSpaceDbContext>>(), sweepScope.Resolve<IArtifactReferenceOracle>(),
+                sweepScope.Resolve<IArtifactBlobBackend>(), routed, NullLogger<ArtifactRetentionReaper>.Instance);
+            summary = await reaper.SweepAsync(CancellationToken.None);
+        }
+
+        summary.Referenced.ShouldBeGreaterThanOrEqualTo(1);
+        File.Exists(ObjectPath(root, sha)).ShouldBeTrue("the post-claim reference must stop deletion before provider I/O");
+        using var verifyScope = _fixture.BeginScope();
+        var db = verifyScope.Resolve<CodeSpaceDbContext>();
+        (await db.WorkflowArtifact.AnyAsync(value => value.Id == artifactId)).ShouldBeTrue();
+        (await db.WorkflowArtifactRetention.SingleAsync(value => value.ArtifactId == artifactId)).State.ShouldBe(ArtifactRetentionState.Referenced);
+        var location = await db.ArtifactLocation.AsNoTracking().SingleAsync(value => value.TeamId == teamId);
+        location.State.ShouldBe(ArtifactLocationState.Available, "a stopped delete must release its physical claim");
+        location.Revision.ShouldBe(3, "Available -> Deleting -> Available are two durable, event-backed transitions");
+    }
+
+    [Fact]
+    public async Task A_sweep_recovers_when_routed_bytes_were_purged_before_the_pointing_row_commit()
+    {
+        var (teamId, actorId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var root = NewRoot();
+        await SeedRouteAsync(teamId, await SeedProfileAsync(teamId, root));
+        var content = Encoding.UTF8.GetBytes(new string('c', 20_000));
+        var sha = ArtifactStore.ComputeSha256Hex(content);
+        Guid artifactId;
+        Guid objectId;
+        using (var writeScope = _fixture.BeginScope())
+        {
+            var write = await writeScope.Resolve<IArtifactRetentionWriter>().PutDeclaredAsync(new ArtifactRetentionWriteRequest(
+                teamId, content, "application/octet-stream", ArtifactRetentionClass.ArtifactManifestContent, "artifact_manifest", actorId), CancellationToken.None);
+            write.Declared.ShouldBeTrue();
+            artifactId = write.ArtifactId;
+            objectId = (await writeScope.Resolve<CodeSpaceDbContext>().WorkflowArtifact.AsNoTracking().SingleAsync(value => value.Id == artifactId)).CasArtifactObjectId!.Value;
+        }
+        await AgeRoutedDeclarationAsync(artifactId);
+        using (var quarantineScope = _fixture.BeginScope())
+            await quarantineScope.Resolve<IArtifactRetentionReaper>().SweepAsync(CancellationToken.None);
+        await AgeRoutedQuarantineAsync(artifactId);
+
+        using (var purgeScope = _fixture.BeginScope())
+        {
+            var purge = purgeScope.Resolve<IArtifactCasPurgeCoordinator>();
+            var claimed = (await purge.ClaimAsync(new ArtifactCasPurgeRequest
+            {
+                TeamId = teamId, ArtifactObjectId = objectId, ActorId = actorId,
+            }, CancellationToken.None)).ShouldBeOfType<ArtifactCasPurgeClaimResult.Claimed>();
+            (await purge.DeleteAsync(claimed.Claim, CancellationToken.None)).ShouldBeOfType<ArtifactCasPurgeResult.Purged>();
+        }
+        File.Exists(ObjectPath(root, sha)).ShouldBeFalse("precondition: the provider effect and Purged observation committed");
+        (await RowAsync(artifactId)).Id.ShouldBe(artifactId, "precondition: the metadata transaction was the crashed phase");
+
+        using (var recoveryScope = _fixture.BeginScope())
+            (await recoveryScope.Resolve<IArtifactRetentionReaper>().SweepAsync(CancellationToken.None)).Collected.ShouldBeGreaterThanOrEqualTo(1);
+
+        using var verifyScope = _fixture.BeginScope();
+        var db = verifyScope.Resolve<CodeSpaceDbContext>();
+        (await db.WorkflowArtifact.AnyAsync(value => value.Id == artifactId)).ShouldBeFalse();
+        (await db.WorkflowArtifactRetention.AnyAsync(value => value.ArtifactId == artifactId)).ShouldBeFalse();
+        (await db.ArtifactLocation.AsNoTracking().SingleAsync(value => value.TeamId == teamId)).State.ShouldBe(ArtifactLocationState.Purged);
+    }
+
+    [Fact]
+    public async Task An_uncertain_provider_delete_stays_live_and_the_next_sweep_reconciles_its_deleting_claim()
+    {
+        var (teamId, actorId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var root = NewRoot();
+        await SeedRouteAsync(teamId, await SeedProfileAsync(teamId, root));
+        var content = Encoding.UTF8.GetBytes(new string('v', 20_000));
+        var sha = ArtifactStore.ComputeSha256Hex(content);
+        Guid artifactId;
+        using (var writeScope = _fixture.BeginScope())
+        {
+            var write = await writeScope.Resolve<IArtifactRetentionWriter>().PutDeclaredAsync(new ArtifactRetentionWriteRequest(
+                teamId, content, "application/octet-stream", ArtifactRetentionClass.ArtifactManifestContent, "artifact_manifest", actorId), CancellationToken.None);
+            write.Declared.ShouldBeTrue();
+            artifactId = write.ArtifactId;
+        }
+        await AgeRoutedDeclarationAsync(artifactId);
+        using (var quarantineScope = _fixture.BeginScope())
+            await quarantineScope.Resolve<IArtifactRetentionReaper>().SweepAsync(CancellationToken.None);
+        await AgeRoutedQuarantineAsync(artifactId);
+
+        using (var uncertainScope = _fixture.BeginScope())
+        {
+            var routed = new UncertainDeletePurgeCoordinator(uncertainScope.Resolve<IArtifactCasPurgeCoordinator>());
+            var reaper = new ArtifactRetentionReaper(uncertainScope.Resolve<DbContextOptions<CodeSpaceDbContext>>(), uncertainScope.Resolve<IArtifactReferenceOracle>(),
+                uncertainScope.Resolve<IArtifactBlobBackend>(), routed, NullLogger<ArtifactRetentionReaper>.Instance);
+            (await reaper.SweepAsync(CancellationToken.None)).Retried.ShouldBeGreaterThanOrEqualTo(1);
+            routed.ReleaseCalls.ShouldBe(0, "an effect-uncertain result must never be relabeled Available");
+        }
+
+        File.Exists(ObjectPath(root, sha)).ShouldBeTrue("the fake timeout happened before an effect, but the caller cannot assume that");
+        using (var observeScope = _fixture.BeginScope())
+        {
+            var db = observeScope.Resolve<CodeSpaceDbContext>();
+            (await db.ArtifactLocation.AsNoTracking().SingleAsync(value => value.TeamId == teamId)).State.ShouldBe(ArtifactLocationState.Deleting);
+            var retention = await db.WorkflowArtifactRetention.AsNoTracking().SingleAsync(value => value.ArtifactId == artifactId);
+            retention.State.ShouldBe(ArtifactRetentionState.Quarantined, "the physical recovery still needs a live queue entry");
+            retention.AttemptCount.ShouldBe(0, "uncertain effects cannot exhaust into a terminal keep with Deleting stranded");
+        }
+        await AgeRoutedQuarantineAsync(artifactId);
+
+        using (var recoveryScope = _fixture.BeginScope())
+            (await recoveryScope.Resolve<IArtifactRetentionReaper>().SweepAsync(CancellationToken.None)).Collected.ShouldBeGreaterThanOrEqualTo(1);
+
+        File.Exists(ObjectPath(root, sha)).ShouldBeFalse();
+        using var verifyScope = _fixture.BeginScope();
+        (await verifyScope.Resolve<CodeSpaceDbContext>().WorkflowArtifact.AnyAsync(value => value.Id == artifactId)).ShouldBeFalse();
     }
 
     [Fact]
@@ -615,6 +850,56 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
     private static string ObjectPath(string root, string sha) =>
         Path.Combine(root, "objects", Path.Combine(ObjectKeyFor(sha).Split('/')));
 
+    private async Task AgeRoutedDeclarationAsync(Guid artifactId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        await using var transaction = await db.Database.BeginTransactionAsync();
+        await db.Database.ExecuteSqlRawAsync("ALTER TABLE workflow_artifact DISABLE TRIGGER workflow_artifact_enforce_immutability");
+        await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE workflow_artifact SET created_at = clock_timestamp() - INTERVAL '30 days' WHERE id = {artifactId}");
+        await db.Database.ExecuteSqlRawAsync("ALTER TABLE workflow_artifact ENABLE TRIGGER workflow_artifact_enforce_immutability");
+        await db.Database.ExecuteSqlInterpolatedAsync($$"""
+            UPDATE workflow_artifact_retention
+            SET declared_at = clock_timestamp() - INTERVAL '30 days', next_sweep_at = clock_timestamp() - INTERVAL '30 days', last_modified_at = clock_timestamp()
+            WHERE artifact_id = {{artifactId}}
+            """);
+        await transaction.CommitAsync();
+    }
+
+    private async Task AgeRoutedQuarantineAsync(Guid artifactId)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($$"""
+            UPDATE workflow_artifact_retention
+            SET quarantined_at = clock_timestamp() - INTERVAL '2 days', next_sweep_at = clock_timestamp() - INTERVAL '2 days', last_modified_at = clock_timestamp()
+            WHERE artifact_id = {{artifactId}} AND state = 'Quarantined'
+            """);
+    }
+
+    private async Task<Guid> SeedAgentRunAsync(Guid teamId, Guid actorId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var agentRunId = Guid.NewGuid();
+        db.AgentRun.Add(new AgentRun
+        {
+            Id = agentRunId, TeamId = teamId, Harness = "retention-reference-test", Status = AgentRunStatus.Succeeded,
+            TaskJson = "{}", FenceEpoch = 1, CreatedDate = now, CreatedBy = actorId, LastModifiedDate = now, LastModifiedBy = actorId,
+        });
+        await db.SaveChangesAsync();
+        return agentRunId;
+    }
+
+    private async Task ReferenceFromAgentRunAsync(Guid agentRunId, Guid artifactId, CancellationToken cancellationToken)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($$"""
+            INSERT INTO agent_run_event (id, agent_run_id, kind, text, data_artifact_id)
+            VALUES ({{Guid.NewGuid()}}, {{agentRunId}}, 'Info', 'committed after routed purge claim', {{artifactId}})
+            """, cancellationToken);
+    }
+
     private async Task<WorkflowArtifact> RowAsync(Guid artifactId)
     {
         using var scope = _fixture.BeginScope();
@@ -730,6 +1015,53 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
         await scope.Resolve<CodeSpaceDbContext>().StorageProfile
             .Where(p => p.TeamId == teamId && p.Id == profileId)
             .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.State, state));
+    }
+
+    private sealed class ReferenceAfterClaimPurgeCoordinator : IArtifactCasPurgeCoordinator
+    {
+        private readonly IArtifactCasPurgeCoordinator _inner;
+        private readonly Func<CancellationToken, Task> _reference;
+        private int _inserted;
+
+        public ReferenceAfterClaimPurgeCoordinator(IArtifactCasPurgeCoordinator inner, Func<CancellationToken, Task> reference)
+        {
+            _inner = inner;
+            _reference = reference;
+        }
+
+        public async Task<ArtifactCasPurgeClaimResult> ClaimAsync(ArtifactCasPurgeRequest request, CancellationToken cancellationToken)
+        {
+            var result = await _inner.ClaimAsync(request, cancellationToken);
+            if (result is ArtifactCasPurgeClaimResult.Claimed && Interlocked.Exchange(ref _inserted, 1) == 0)
+                await _reference(cancellationToken);
+            return result;
+        }
+
+        public Task<ArtifactCasPurgeResult> DeleteAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken) => _inner.DeleteAsync(claim, cancellationToken);
+        public Task<bool> ReleaseAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken) => _inner.ReleaseAsync(claim, cancellationToken);
+        public Task<ArtifactCasPurgeResult> PurgeAsync(ArtifactCasPurgeRequest request, CancellationToken cancellationToken) => _inner.PurgeAsync(request, cancellationToken);
+    }
+
+    private sealed class UncertainDeletePurgeCoordinator : IArtifactCasPurgeCoordinator
+    {
+        private readonly IArtifactCasPurgeCoordinator _inner;
+
+        public UncertainDeletePurgeCoordinator(IArtifactCasPurgeCoordinator inner) => _inner = inner;
+
+        public int ReleaseCalls { get; private set; }
+
+        public Task<ArtifactCasPurgeClaimResult> ClaimAsync(ArtifactCasPurgeRequest request, CancellationToken cancellationToken) => _inner.ClaimAsync(request, cancellationToken);
+
+        public Task<ArtifactCasPurgeResult> DeleteAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken) =>
+            Task.FromResult<ArtifactCasPurgeResult>(new ArtifactCasPurgeResult.Rejected(new ArtifactCasProblem(ArtifactCasProblemCode.ProviderTimeout, true), EffectMayHaveOccurred: true));
+
+        public Task<bool> ReleaseAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken)
+        {
+            ReleaseCalls++;
+            return _inner.ReleaseAsync(claim, cancellationToken);
+        }
+
+        public Task<ArtifactCasPurgeResult> PurgeAsync(ArtifactCasPurgeRequest request, CancellationToken cancellationToken) => _inner.PurgeAsync(request, cancellationToken);
     }
 
     public void Dispose()

@@ -31,7 +31,7 @@ public abstract record ArtifactCasPurgeResult
     private ArtifactCasPurgeResult() { }
 
     public sealed record Purged(Guid LocationId, long LocationRevision, bool WasAlreadyPurged) : ArtifactCasPurgeResult;
-    public sealed record Rejected(ArtifactCasProblem Problem) : ArtifactCasPurgeResult;
+    public sealed record Rejected(ArtifactCasProblem Problem, bool EffectMayHaveOccurred = false) : ArtifactCasPurgeResult;
 }
 
 public abstract record ArtifactCasPurgeClaimResult

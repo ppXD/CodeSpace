@@ -1,9 +1,11 @@
 using CodeSpace.Core.Jobs;
 using CodeSpace.Core.Jobs.RecurringJobs;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Artifacts.Backends;
 using CodeSpace.Core.Services.Workflows.Artifacts.Retention;
+using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using CodeSpace.Messages.Artifacts;
 using CodeSpace.Messages.Commands.Workflows;
 using MediatR;
@@ -57,13 +59,14 @@ public sealed class ArtifactRetentionPolicyTests
     {
         var options = new ArtifactRetentionReaperOptions(batch, claim, attempts, TimeSpan.FromSeconds(leaseSeconds), TimeSpan.FromSeconds(operationSeconds), TimeSpan.FromMinutes(retryMinutes));
 
-        Should.Throw<ArgumentOutOfRangeException>(() => new ArtifactRetentionReaper(DbOptions(), Oracle(), Blobs(), NullLogger<ArtifactRetentionReaper>.Instance, options));
+        Should.Throw<ArgumentOutOfRangeException>(() => new ArtifactRetentionReaper(new ArtifactRetentionReaperServices(
+            DbOptions(), Oracle(), Blobs(), Purge(), NullLogger<ArtifactRetentionReaper>.Instance), options));
     }
 
     [Fact]
     public void The_shipped_reaper_configuration_is_accepted()
     {
-        Should.NotThrow(() => new ArtifactRetentionReaper(DbOptions(), Oracle(), Blobs(), NullLogger<ArtifactRetentionReaper>.Instance));
+        Should.NotThrow(() => new ArtifactRetentionReaper(DbOptions(), Oracle(), Blobs(), Purge(), NullLogger<ArtifactRetentionReaper>.Instance));
     }
 
     [Fact]
@@ -91,6 +94,23 @@ public sealed class ArtifactRetentionPolicyTests
     }
 
     [Fact]
+    public void The_manifest_capture_is_the_only_production_caller_that_can_mint_a_retention_candidate()
+    {
+        var sourceRoot = Path.Combine(FindRepoRoot(), "backend", "src", "CodeSpace.Core");
+        var callers = Directory.EnumerateFiles(sourceRoot, "*.cs", SearchOption.AllDirectories)
+            .Where(path => File.ReadAllText(path).Contains(".PutDeclaredAsync(", StringComparison.Ordinal))
+            .Select(path => Path.GetRelativePath(sourceRoot, path).Replace(Path.DirectorySeparatorChar, '/'))
+            .OrderBy(path => path, StringComparer.Ordinal).ToArray();
+
+        callers.ShouldBe(["Services/Agents/Publish/ArtifactManifestStore.cs"],
+            "the routed reaper relies on every retention-candidate id being freshly obtained through PutDeclaredAsync before its one holder write; a second production caller must prove the same admission invariant");
+        typeof(IArtifactManifestStore).GetMethod(nameof(IArtifactManifestStore.CaptureDeclaredAsync))!.ReturnType.ShouldBe(typeof(Task<int>),
+            "manifest capture must not return the candidate artifact id for a later writer to reuse without passing the store's availability/dedup fence again");
+        File.ReadAllText(Path.Combine(sourceRoot, callers.Single())).ShouldContain("ContentArtifactId = artifactId",
+            customMessage: "the sole production caller must consume the freshly admitted id as the oracle-visible manifest reference");
+    }
+
+    [Fact]
     public void The_shipped_blob_backend_can_purge_so_offloaded_bytes_are_reclaimable_at_all()
     {
         // The reaper feature-detects IArtifactBlobPurge off the injected backend and keeps every offloaded artifact
@@ -108,6 +128,30 @@ public sealed class ArtifactRetentionPolicyTests
     private static IArtifactReferenceOracle Oracle() => new ArtifactReferenceOracle(NullLogger<ArtifactReferenceOracle>.Instance);
 
     private static IArtifactBlobBackend Blobs() => new LocalFileArtifactBlobBackend(Path.Combine(Path.GetTempPath(), $"artifact-retention-{Guid.NewGuid():N}"));
+
+    private static IArtifactCasPurgeCoordinator Purge() => new RefusingCasPurgeCoordinator();
+
+    private static string FindRepoRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !Directory.Exists(Path.Combine(directory.FullName, "backend"))) directory = directory.Parent;
+        return directory?.FullName ?? throw new InvalidOperationException("repo root not found");
+    }
+
+    private sealed class RefusingCasPurgeCoordinator : IArtifactCasPurgeCoordinator
+    {
+        private static readonly ArtifactCasProblem Unsupported = new(ArtifactCasProblemCode.Unsupported, false);
+
+        public Task<ArtifactCasPurgeClaimResult> ClaimAsync(ArtifactCasPurgeRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult<ArtifactCasPurgeClaimResult>(new ArtifactCasPurgeClaimResult.Rejected(Unsupported));
+
+        public Task<ArtifactCasPurgeResult> DeleteAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken) =>
+            Task.FromResult<ArtifactCasPurgeResult>(new ArtifactCasPurgeResult.Rejected(Unsupported));
+
+        public Task<bool> ReleaseAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken) => Task.FromResult(false);
+        public Task<ArtifactCasPurgeResult> PurgeAsync(ArtifactCasPurgeRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult<ArtifactCasPurgeResult>(new ArtifactCasPurgeResult.Rejected(Unsupported));
+    }
 
     private sealed class RecordingMediator : IMediator
     {

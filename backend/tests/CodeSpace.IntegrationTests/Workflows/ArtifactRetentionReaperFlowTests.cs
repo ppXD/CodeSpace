@@ -3,6 +3,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Artifacts.Retention;
+using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Artifacts;
@@ -280,11 +281,10 @@ public sealed class ArtifactRetentionReaperFlowTests
     }
 
     [Fact]
-    public async Task A_routed_artifact_is_left_declared_rather_than_settled_terminally()
+    public async Task A_routed_artifact_is_quarantined_now_that_it_has_a_positive_purge_path()
     {
-        // Routed bytes are refused by this lane, and the refusal must not be a ONE-WAY door: the declaration stays
-        // live so a later lane that can purge them still finds the row. A guard, not a red-first case — today's claim
-        // query already excludes the row, for a different reason.
+        // This hand-planted row has no location and cannot reach provider deletion, but the first observation proves
+        // routed placement is no longer filtered out of the fair queue or rejected by the pure decision.
         var world = await SeedWorldAsync();
         var artifactId = await DeclareRoutedAsync(world);
         var before = (await DeclarationAsync(artifactId)).ShouldNotBeNull();
@@ -293,8 +293,8 @@ public sealed class ArtifactRetentionReaperFlowTests
         await SweepAsync();
 
         var after = (await DeclarationAsync(artifactId)).ShouldNotBeNull();
-        after.State.ShouldBe(ArtifactRetentionState.Declared, "a routed row must not be claimed at all");
-        after.Revision.ShouldBe(before.Revision, "an unclaimed row's revision is untouched, which is what keeps a future lane able to reach it");
+        after.State.ShouldBe(ArtifactRetentionState.Quarantined);
+        after.Revision.ShouldBeGreaterThan(before.Revision, "the routed declaration passed through a real claim and settlement");
         (await ArtifactExistsAsync(artifactId)).ShouldBeTrue();
     }
 
@@ -356,7 +356,7 @@ public sealed class ArtifactRetentionReaperFlowTests
     {
         using var scope = _fixture.BeginScope();
         var reaper = new ArtifactRetentionReaper(scope.Resolve<DbContextOptions<CodeSpaceDbContext>>(), scope.Resolve<IArtifactReferenceOracle>(),
-            new RefusingPurgeBackend(scope.Resolve<IArtifactBlobBackend>()), NullLogger<ArtifactRetentionReaper>.Instance);
+            new RefusingPurgeBackend(scope.Resolve<IArtifactBlobBackend>()), scope.Resolve<IArtifactCasPurgeCoordinator>(), NullLogger<ArtifactRetentionReaper>.Instance);
 
         return await reaper.SweepAsync(CancellationToken.None);
     }
@@ -430,7 +430,7 @@ public sealed class ArtifactRetentionReaperFlowTests
         return new Uri(url.ShouldNotBeNull("the row must be offloaded for this helper to mean anything")).LocalPath;
     }
 
-    /// <summary>A ROUTED artifact plus a hand-planted declaration — a shape the production seam refuses to mint, asserted separately here.</summary>
+    /// <summary>A ROUTED artifact plus a hand-planted declaration but no location, isolating queue admission from provider behavior.</summary>
     private async Task<Guid> DeclareRoutedAsync(World world)
     {
         using var scope = _fixture.BeginScope();

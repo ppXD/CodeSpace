@@ -82,8 +82,8 @@ public sealed partial class ArtifactCasRuntimeCoordinator
             {
                 ExpectedETag = claim.ProviderETag, ExpectedVersion = claim.ProviderObjectVersion,
             }, token), claim.OperationTimeout, cancellationToken, lease).ConfigureAwait(false);
-            if (deletion.Problem != null) return new ArtifactCasPurgeResult.Rejected(deletion.Problem);
-            if (deletion.Timeout) return new ArtifactCasPurgeResult.Rejected(Problem(ArtifactCasProblemCode.ProviderTimeout, true));
+            if (deletion.Problem != null) return new ArtifactCasPurgeResult.Rejected(deletion.Problem, EffectMayHaveOccurred: true);
+            if (deletion.Timeout) return new ArtifactCasPurgeResult.Rejected(Problem(ArtifactCasProblemCode.ProviderTimeout, true), EffectMayHaveOccurred: true);
             if (deletion.Value?.Error is { Code: not ArtifactStorageErrorCode.Missing } error)
                 return new ArtifactCasPurgeResult.Rejected(Map(error, readMissing: true));
 
@@ -142,11 +142,11 @@ public sealed partial class ArtifactCasRuntimeCoordinator
             && value.Id == claim.LocationId && value.ArtifactObjectId == claim.ArtifactObjectId
             && value.ObjectKey == claim.ObjectKey && value.ProviderETag == claim.ProviderETag
             && value.ProviderObjectVersion == claim.ProviderObjectVersion, cancellationToken).ConfigureAwait(false);
-        if (location == null) return new ArtifactCasPurgeResult.Rejected(Problem(ArtifactCasProblemCode.ArtifactMissing));
+        if (location == null) return new ArtifactCasPurgeResult.Rejected(Problem(ArtifactCasProblemCode.ArtifactMissing), EffectMayHaveOccurred: true);
         if (location.State == ArtifactLocationState.Purged)
             return new ArtifactCasPurgeResult.Purged(location.Id, location.Revision, true);
         if (location.State != ArtifactLocationState.Deleting || location.Revision != claim.LocationRevision)
-            return new ArtifactCasPurgeResult.Rejected(Problem(ArtifactCasProblemCode.StaleWorker, true));
+            return new ArtifactCasPurgeResult.Rejected(Problem(ArtifactCasProblemCode.StaleWorker, true), EffectMayHaveOccurred: true);
 
         var now = await DatabaseClockAsync(db, cancellationToken).ConfigureAwait(false);
         location.State = ArtifactLocationState.Purged;
@@ -169,7 +169,7 @@ public sealed partial class ArtifactCasRuntimeCoordinator
         }
         catch (DbUpdateConcurrencyException)
         {
-            return new ArtifactCasPurgeResult.Rejected(Problem(ArtifactCasProblemCode.StaleWorker, true));
+            return new ArtifactCasPurgeResult.Rejected(Problem(ArtifactCasProblemCode.StaleWorker, true), EffectMayHaveOccurred: true);
         }
     }
 

@@ -99,11 +99,10 @@ public sealed partial class ArtifactStore : IArtifactStore, IArtifactRangeReader
 
         _db.WorkflowArtifact.Add(artifact);
 
-        // An INLINE or LOCAL-BLOB insert may be declared; a ROUTED one may not. The reaper can remove inline bytes with
-        // the row and local-backend bytes through IArtifactBlobPurge, but nothing in this build removes routed bytes at
-        // all (ArtifactRetentionDecision.RefuseUnpurgeable states what is still missing), so declaring one would only
-        // mint a row that always settles as a terminal keep.
-        var declared = declaration is not null && placement.CasArtifactObjectId is null ? DeclarationFor(declaration, artifact) : null;
+        // Every newly inserted placement has a positive purge path: inline bytes leave with the row, local bytes use
+        // IArtifactBlobPurge, and routed bytes use their recorded CAS location lifecycle. A dedup hit still declares
+        // nothing, because that id already escaped to another producer before this call.
+        var declared = declaration is not null ? DeclarationFor(declaration, artifact) : null;
         if (declared is not null) _db.WorkflowArtifactRetention.Add(declared);
 
         try
