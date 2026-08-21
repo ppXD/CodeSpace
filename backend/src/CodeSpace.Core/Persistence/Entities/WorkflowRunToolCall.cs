@@ -25,8 +25,9 @@ namespace CodeSpace.Core.Persistence.Entities;
 /// yet — a named gap, not an oversight: that case belongs to the Agent-Run-keyed harness execution plane, and giving
 /// it a home here would mean a second nullable identity axis the attempt's composite scope proof could not use.</para>
 ///
-/// <para>Schema-only in this slice: no producer, reader, fold or bill touches it, and <see cref="State"/> describes
-/// the INVOCATION lifecycle only — never a task verdict, a completion, or a terminal decision.</para>
+/// <para>The governed-ledger projector is an observation-only producer for workflow-bound side effects. No reader,
+/// fold or bill is switched by that projection, and <see cref="State"/> describes the INVOCATION lifecycle only —
+/// never a task verdict, completion, approval or terminal decision.</para>
 /// </summary>
 public sealed class WorkflowRunToolCall : IEntity<Guid>
 {
@@ -63,7 +64,10 @@ public sealed class WorkflowRunToolCall : IEntity<Guid>
     /// <summary>The generation the execution attempt was authorized under; null when genuinely unavailable.</summary>
     public int? ExecutionGeneration { get; set; }
 
-    /// <summary>One-based order of this logical tool call within its execution scope.</summary>
+    /// <summary>
+    /// One-based source order within the execution scope. A tool-call-ledger/v1 projection copies the database-owned
+    /// AgentRun admission ordinal exactly; excluded decisions and legacy unordered rows leave honest gaps.
+    /// </summary>
     public long CallOrdinal { get; set; } = 1;
 
     /// <summary>
