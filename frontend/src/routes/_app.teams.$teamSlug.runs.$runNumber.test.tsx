@@ -84,6 +84,7 @@ describe("run-detail trace deep-link", () => {
   describe("validateRunDetailSearch whitelist", () => {
     it("keeps a valid view and a non-empty trace", () => {
       expect(validateRunDetailSearch({ view: "canvas", trace: "run-1" })).toEqual({ trace: "run-1", view: "canvas" });
+      expect(validateRunDetailSearch({ view: "governed-tools" })).toEqual({ view: "governed-tools" });
     });
 
     it("drops an unknown view and an empty trace", () => {

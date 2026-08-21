@@ -3631,6 +3631,49 @@ textarea:-webkit-autofill {
 .acs-root .wf-run-views button > svg { color: var(--muted-2); }
 .acs-root .wf-run-views button[data-active="true"] > svg { color: var(--accent); }
 
+/* Workflow Run governed-tool observation plane. Deliberately separate from Agent terminal/native events and the
+ * Session Room model-call fold; list/detail stay bounded in React-local state. */
+.acs-root .gt-panel { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.acs-root .gt-scope { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); }
+.acs-root .gt-scope p { margin: 5px 0 0; max-width: 760px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.acs-root .gt-scope-tag { color: var(--ink); font-size: 12px; font-weight: 650; }
+.acs-root .gt-live { flex: 0 0 auto; color: var(--muted-2); font-size: 11px; white-space: nowrap; }
+.acs-root .gt-error, .acs-root .gt-paging { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 11.5px; color: var(--muted); }
+.acs-root .gt-error { justify-content: space-between; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--danger, #b94a48) 28%, var(--line)); border-radius: 8px; color: var(--danger, #9f3f3d); background: color-mix(in srgb, var(--danger, #b94a48) 6%, var(--panel)); }
+.acs-root .gt-error button, .acs-root .gt-paging button, .acs-root .gt-detail button { appearance: none; border: 1px solid var(--line); border-radius: 7px; padding: 4px 8px; background: var(--panel); color: var(--ink-2); font: inherit; font-size: 11.5px; cursor: pointer; }
+.acs-root .gt-error button:hover, .acs-root .gt-paging button:hover, .acs-root .gt-detail button:hover { border-color: var(--accent); color: var(--accent); }
+.acs-root .gt-layout { display: grid; grid-template-columns: minmax(300px, .85fr) minmax(360px, 1.15fr); gap: 12px; align-items: start; min-width: 0; }
+.acs-root .gt-list-wrap, .acs-root .gt-detail { min-width: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.acs-root .gt-list { list-style: none; margin: 0; padding: 0; max-height: 620px; overflow: auto; }
+.acs-root .gt-list li + li { border-top: 1px solid var(--line); }
+.acs-root .gt-call { appearance: none; width: 100%; border: 0; padding: 10px 12px; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.acs-root .gt-call:hover, .acs-root .gt-call[data-selected="true"] { background: var(--panel-2); }
+.acs-root .gt-call[data-selected="true"] { box-shadow: inset 2px 0 var(--accent); }
+.acs-root .gt-call-main, .acs-root .gt-call-meta, .acs-root .gt-attempt-head, .acs-root .gt-detail-head { display: flex; align-items: center; gap: 8px; }
+.acs-root .gt-call-main { justify-content: space-between; min-width: 0; }
+.acs-root .gt-call-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; }
+.acs-root .gt-adapter { overflow: hidden; color: var(--muted-2); font-family: var(--font-mono, ui-monospace, monospace); font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .gt-call-meta { margin-top: 6px; flex-wrap: wrap; color: var(--muted); font-size: 10.5px; }
+.acs-root .gt-state { display: inline-flex; padding: 2px 6px; border-radius: 999px; background: var(--panel-2); color: var(--ink-2); font-size: 10px; font-weight: 650; }
+.acs-root .gt-state[data-state="Completed"], .acs-root .gt-state[data-state="Succeeded"] { background: var(--ok-soft, #eaf4ea); color: var(--ok, #39733d); }
+.acs-root .gt-state[data-state="Abandoned"], .acs-root .gt-state[data-state="Indeterminate"], .acs-root .gt-state[data-state="Corrupt"] { background: var(--warn-soft, #f7eddd); color: var(--warn, #8b5b1c); }
+.acs-root .gt-paging { padding: 9px 10px; border-top: 1px solid var(--line); }
+.acs-root .gt-detail { padding: 14px; }
+.acs-root .gt-detail-head { justify-content: space-between; align-items: flex-start; }
+.acs-root .gt-detail h3 { margin: 3px 0 0; font-family: var(--font-mono, ui-monospace, monospace); font-size: 14px; }
+.acs-root .gt-eyebrow, .acs-root .gt-field-label { display: block; color: var(--muted-2); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+.acs-root .gt-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 14px; margin-top: 12px; }
+.acs-root .gt-field { min-width: 0; }
+.acs-root .gt-field-value { display: block; margin-top: 2px; overflow-wrap: anywhere; color: var(--ink-2); font-size: 11.5px; }
+.acs-root .gt-mono { font-family: var(--font-mono, ui-monospace, monospace); font-size: 10.5px; }
+.acs-root .gt-attempt-note, .acs-root .gt-omitted { margin-top: 13px; padding: 7px 9px; border-radius: 7px; background: var(--panel-2); color: var(--muted); font-size: 10.5px; }
+.acs-root .gt-attempt-title { margin: 14px 0 7px; font-size: 12px; }
+.acs-root .gt-attempts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
+.acs-root .gt-attempt { padding: 9px; border: 1px solid var(--line); border-radius: 8px; }
+.acs-root .gt-attempt-head { justify-content: space-between; font-size: 11.5px; }
+.acs-root .gt-empty { padding: 28px 16px; color: var(--muted); font-size: 12px; text-align: center; }
+@media (max-width: 840px) { .acs-root .gt-layout { grid-template-columns: 1fr; } .acs-root .gt-fields { grid-template-columns: 1fr; } .acs-root .gt-scope { flex-direction: column; } }
+
 /* flow.loop container — a sized box whose body subgraph (child nodes) renders inside it. Only the
    frame + header are drawn here; React Flow positions the children over the interior. */
 .acs-root .wf-rf-loop {

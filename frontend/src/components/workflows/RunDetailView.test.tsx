@@ -11,10 +11,11 @@ import { RunDetailView } from "./RunDetailView";
  *   2. the child run-detail embeds inline, but only once expanded (no eager polling for N steps);
  *   3. with no navigation handler the id is plain text; a non-subworkflow node shows neither.
  */
-const { useWorkflowRunMock, useAgentRunMock, useRunPhasesMock } = vi.hoisted(() => ({
+const { useWorkflowRunMock, useAgentRunMock, useRunPhasesMock, governedToolsPanelMock } = vi.hoisted(() => ({
   useWorkflowRunMock: vi.fn(),
   useAgentRunMock: vi.fn<(id?: string) => { data: { status: string } | undefined }>(() => ({ data: undefined })),
   useRunPhasesMock: vi.fn<() => { data: { phases: unknown[] } | undefined; isLoading?: boolean }>(() => ({ data: undefined })),
+  governedToolsPanelMock: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-workflows", () => ({
@@ -45,6 +46,13 @@ vi.mock("@/hooks/use-team-members", () => ({
   useTeamMemberIdentityMap: () => new Map(),
 }));
 
+vi.mock("./GovernedToolsPanel", () => ({
+  GovernedToolsPanel: ({ runId, active }: { runId: string; active: boolean }) => {
+    governedToolsPanelMock({ runId, active });
+    return <div data-testid="governed-tools-panel" data-run-id={runId} data-active={active} />;
+  },
+}));
+
 function node(over: Partial<WorkflowRunNodeSummary> & { nodeId: string }): WorkflowRunNodeSummary {
   return { iterationKey: "", containerKind: null, status: "Success", inputs: {}, outputs: {}, error: null, startedAt: null, completedAt: null, childRunId: null, ...over };
 }
@@ -66,6 +74,7 @@ beforeEach(() => {
   useAgentRunMock.mockImplementation(() => ({ data: undefined }));
   useRunPhasesMock.mockReset();
   useRunPhasesMock.mockReturnValue({ data: undefined });   // no phases → no Live-work, node trace stays primary
+  governedToolsPanelMock.mockReset();
 });
 
 const phasesWithAgent = { data: { phases: [{ id: "p", label: "Implement", kind: "agent", status: "Active", order: 0, agents: [{ agentRunId: "ar1", status: "Running", label: "backend-fix" }], metrics: { agentCount: 1, succeededCount: 0, failedCount: 0 }, sourceKey: "supervisor-ledger" }] } };
@@ -268,12 +277,23 @@ describe("RunDetailView — map-branch observability", () => {
 describe("RunDetailView — run-view tabs", () => {
   beforeEach(() => useWorkflowRunMock.mockImplementation(() => ok(detail({ nodes: [node({ nodeId: "a" })] }))));
 
-  it("offers the four run views, Activity first", () => {
+  it("offers the five run views, Activity first", () => {
     render(<RunDetailView runId="parent-1" />);
-    for (const t of ["Activity", "Canvas", "Changes", "Trace"]) {
+    for (const t of ["Activity", "Canvas", "Changes", "Governed tools", "Trace"]) {
       expect(screen.getByRole("tab", { name: t })).toBeInTheDocument();
     }
     expect(screen.getByRole("tab", { name: "Activity" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("mounts the independent governed-tools consumer only in its non-nested tab and passes active status", () => {
+    useWorkflowRunMock.mockImplementation(() => ok(detail({ status: "Running" })));
+    render(<RunDetailView runId="parent-1" />);
+
+    expect(screen.queryByTestId("governed-tools-panel")).toBeNull();
+    expect(governedToolsPanelMock).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("tab", { name: "Governed tools" }));
+    expect(screen.getByTestId("governed-tools-panel")).toHaveAttribute("data-run-id", "parent-1");
+    expect(screen.getByTestId("governed-tools-panel")).toHaveAttribute("data-active", "true");
   });
 
   it("defaults to the Activity narrative (the node trace), not a backend-blocked tab", () => {
@@ -297,6 +317,8 @@ describe("RunDetailView — run-view tabs", () => {
   it("hides the tab bar when embedded (nested), so the editor dialog's child runs stay plain", () => {
     render(<RunDetailView runId="parent-1" nested />);
     expect(screen.queryByRole("tab", { name: "Activity" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("governed-tools-panel")).toBeNull();
+    expect(governedToolsPanelMock).not.toHaveBeenCalled();
   });
 
   it("drops the redundant summary line in the framed panel (tab strip is the head, aligning with the rails)", () => {
