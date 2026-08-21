@@ -8,6 +8,7 @@ import { useAgentRun, useAgentRunEvents } from "@/hooks/use-agents";
 import { useCellAttempts } from "@/hooks/use-workflows";
 
 import { AgentToolCalls } from "./AgentToolCalls";
+import { AgentRunEventPayload } from "./AgentRunEventPayload";
 import { AgentRunLogs } from "./AgentRunLogs";
 import { RunActionsContext } from "./runActionsContext";
 import { isAgentBusy } from "./runPhases";
@@ -121,7 +122,7 @@ export function AgentTerminal({ agent, onClose, rerun, onOpenFile }: { agent: Ph
 
       <div className="agent-terminal-body">
         {tab === "output"
-          ? <Scrollback events={evts} loading={events.isLoading && evts.length === 0} error={tileState(status) === "failed" ? run.data?.error ?? null : null} />
+          ? <Scrollback agentRunId={activeAgentRunId} events={evts} loading={events.isLoading && evts.length === 0} error={tileState(status) === "failed" ? run.data?.error ?? null : null} />
           : tab === "logs" ? <AgentRunLogs key={activeAgentRunId} agentRunId={activeAgentRunId} />
           : tab === "tools" ? <AgentToolCalls agentRunId={activeAgentRunId} hideHeader />
           : <AgentFiles files={files} onOpenFile={onOpenFile} />}
@@ -169,7 +170,7 @@ function captureGapFact(observation?: AgentRunCaptureGapObservation | null): str
   return `${count} ${noun} · ${humanize(observation.items[0].reason)}`;
 }
 
-function Scrollback({ events, loading, error }: { events: AgentRunEventDto[]; loading: boolean; error: string | null }) {
+function Scrollback({ agentRunId, events, loading, error }: { agentRunId: string; events: AgentRunEventDto[]; loading: boolean; error: string | null }) {
   if (events.length === 0) {
     // A run that failed BEFORE emitting any event (a dispatch / harness error) carries its reason on the run's `error`,
     // not in the empty stream — surface it as an error line so a failed terminal always says WHY, never "No output yet.".
@@ -185,10 +186,28 @@ function Scrollback({ events, loading, error }: { events: AgentRunEventDto[]; lo
         return (
           <li key={e.sequence} className="agent-terminal-row" data-kind={lineKind(e.kind)}>
             {isCommand(e.kind) && <span className="agent-terminal-prompt">❯ </span>}{line}
+            {e.kind !== "ToolCall" && e.dataArtifactId && <OffloadedEventData agentRunId={agentRunId} eventSequence={e.sequence} dataArtifactId={e.dataArtifactId} kind={e.kind} />}
           </li>
         );
       })}
     </ol>
+  );
+}
+
+/**
+ * Exact offloaded data for one non-tool event. The dedicated Tool calls tab owns ToolCall payloads; every other
+ * harness-neutral event can expose its already-redacted structured data here without silently downloading it with
+ * the scrollback. Mounting only while open gives the shared range reader its existing abort/window guarantees.
+ */
+function OffloadedEventData({ agentRunId, eventSequence, dataArtifactId, kind }: { agentRunId: string; eventSequence: number; dataArtifactId: string; kind: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const label = humanize(kind);
+
+  return (
+    <details className="tc-argbox tc-payload-disclosure agent-terminal-event-data" onToggle={(toggle) => setExpanded(toggle.currentTarget.open)}>
+      <summary role="button" className="tc-args" aria-label={`${expanded ? "Collapse" : "Expand"} offloaded event data for ${label}`}>Event data</summary>
+      {expanded && <AgentRunEventPayload agentRunId={agentRunId} eventSequence={eventSequence} dataArtifactId={dataArtifactId} />}
+    </details>
   );
 }
 
