@@ -70,6 +70,69 @@ public sealed class LocalFileArtifactBlobBackendTests : IDisposable
     }
 
     [Fact]
+    public async Task Streaming_write_copies_in_bounded_chunks_and_round_trips_without_a_whole_payload_request()
+    {
+        var backend = new LocalFileArtifactBlobBackend(_root);
+        var bytes = Encoding.UTF8.GetBytes(new string('s', 600_000));
+        var sha = ArtifactStore.ComputeSha256Hex(bytes);
+        await using var content = new MaximumReadRequestStream(bytes, 128 * 1024);
+
+        var url = await ((IArtifactBlobStreamWriter)backend).WriteStreamAsync(sha, content, bytes.LongLength, CancellationToken.None);
+
+        content.LargestReadRequest.ShouldBeLessThanOrEqualTo(128 * 1024,
+            "the local compatibility path must copy through a bounded buffer rather than ask its source for one payload-sized array");
+        (await backend.ReadAsync(url, CancellationToken.None)).ShouldBe(bytes);
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(1)]
+    public async Task Streaming_write_refuses_a_declared_length_mismatch_and_leaves_no_object_or_temp_file(int lengthDelta)
+    {
+        var backend = new LocalFileArtifactBlobBackend(_root);
+        var bytes = Encoding.UTF8.GetBytes(new string('m', 300_000));
+        var sha = ArtifactStore.ComputeSha256Hex(bytes);
+        await using var content = new MaximumReadRequestStream(bytes, 128 * 1024);
+
+        await Should.ThrowAsync<InvalidDataException>(() =>
+            ((IArtifactBlobStreamWriter)backend).WriteStreamAsync(sha, content, bytes.LongLength + lengthDelta, CancellationToken.None));
+
+        Directory.EnumerateFiles(_root, "*", SearchOption.AllDirectories).ShouldBeEmpty(
+            "a rejected stream may leave empty shard directories, but neither canonical bytes nor an upload temp may survive");
+    }
+
+    [Fact]
+    public async Task Streaming_write_refuses_a_digest_mismatch_and_leaves_no_object_or_temp_file()
+    {
+        var backend = new LocalFileArtifactBlobBackend(_root);
+        var bytes = Encoding.UTF8.GetBytes(new string('d', 300_000));
+        var wrongSha = ArtifactStore.ComputeSha256Hex(Encoding.UTF8.GetBytes("different"));
+        await using var content = new MaximumReadRequestStream(bytes, 128 * 1024);
+
+        await Should.ThrowAsync<InvalidDataException>(() =>
+            ((IArtifactBlobStreamWriter)backend).WriteStreamAsync(wrongSha, content, bytes.LongLength, CancellationToken.None));
+
+        Directory.EnumerateFiles(_root, "*", SearchOption.AllDirectories).ShouldBeEmpty(
+            "digest admission happens before atomic placement, so corrupt identity cannot escape at the canonical path");
+    }
+
+    [Fact]
+    public async Task Streaming_write_cancellation_removes_its_partial_temp_file()
+    {
+        var backend = new LocalFileArtifactBlobBackend(_root);
+        var bytes = Encoding.UTF8.GetBytes(new string('c', 600_000));
+        var sha = ArtifactStore.ComputeSha256Hex(bytes);
+        using var cancellation = new CancellationTokenSource();
+        await using var content = new CancelAfterFirstReadStream(bytes, cancellation);
+
+        await Should.ThrowAsync<OperationCanceledException>(() =>
+            ((IArtifactBlobStreamWriter)backend).WriteStreamAsync(sha, content, bytes.LongLength, cancellation.Token));
+
+        Directory.EnumerateFiles(_root, "*", SearchOption.AllDirectories).ShouldBeEmpty(
+            "cancellation before atomic placement must remove the partially copied temp file");
+    }
+
+    [Fact]
     public async Task Write_rejects_a_non_hex_sha()
     {
         var backend = new LocalFileArtifactBlobBackend();
@@ -116,5 +179,90 @@ public sealed class LocalFileArtifactBlobBackendTests : IDisposable
 
         (await backend.ReadRangeAsync(url, bytes.Length, 64, CancellationToken.None)).Bytes.ShouldBeEmpty();
         await Should.ThrowAsync<ArgumentOutOfRangeException>(() => backend.ReadRangeAsync(url, bytes.Length + 1, 64, CancellationToken.None));
+    }
+
+    private sealed class MaximumReadRequestStream : Stream
+    {
+        private readonly MemoryStream _inner;
+        private readonly int _maximumReadRequest;
+
+        public MaximumReadRequestStream(byte[] bytes, int maximumReadRequest)
+        {
+            _inner = new MemoryStream(bytes, writable: false);
+            _maximumReadRequest = maximumReadRequest;
+        }
+
+        public int LargestReadRequest { get; private set; }
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+        public override int Read(Span<byte> buffer)
+        {
+            Observe(buffer.Length);
+            return _inner.Read(buffer);
+        }
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            Observe(buffer.Length);
+            return _inner.ReadAsync(buffer, cancellationToken);
+        }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) _inner.Dispose();
+            base.Dispose(disposing);
+        }
+
+        private void Observe(int requested)
+        {
+            LargestReadRequest = Math.Max(LargestReadRequest, requested);
+            if (requested > _maximumReadRequest)
+                throw new InvalidOperationException($"A read requested {requested} bytes; the bounded maximum is {_maximumReadRequest}.");
+        }
+    }
+
+    private sealed class CancelAfterFirstReadStream : Stream
+    {
+        private readonly MemoryStream _inner;
+        private readonly CancellationTokenSource _cancellation;
+        private bool _read;
+
+        public CancelAfterFirstReadStream(byte[] bytes, CancellationTokenSource cancellation)
+        {
+            _inner = new MemoryStream(bytes, writable: false);
+            _cancellation = cancellation;
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            var read = await _inner.ReadAsync(buffer, cancellationToken);
+            if (!_read && read > 0)
+            {
+                _read = true;
+                _cancellation.Cancel();
+            }
+            return read;
+        }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) _inner.Dispose();
+            base.Dispose(disposing);
+        }
     }
 }

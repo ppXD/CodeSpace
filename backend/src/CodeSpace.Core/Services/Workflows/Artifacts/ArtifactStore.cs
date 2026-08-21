@@ -24,7 +24,7 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts;
 /// unchanged. The threshold decision itself is untouched by routing: routing changes WHERE an offloaded blob goes,
 /// never WHETHER it is offloaded.</para>
 /// </summary>
-public sealed partial class ArtifactStore : IArtifactStore, IArtifactRangeReader, IScopedDependency
+public sealed partial class ArtifactStore : IArtifactStore, IArtifactStreamStore, IArtifactRangeReader, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
     private readonly IArtifactBlobBackend _blobs;
