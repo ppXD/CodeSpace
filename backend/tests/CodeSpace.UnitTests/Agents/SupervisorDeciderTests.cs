@@ -910,10 +910,51 @@ public class SupervisorDeciderTests
     [Fact]
     public void A_clean_merge_does_NOT_render_the_conflict_block()
     {
-        // Behavior-preserving: only a CONFLICTED integration gets the legible block; a clean merge keeps the compact line.
+        // Only a CONFLICTED integration gets the conflict block; a clean merge gets the bounded completed block.
         var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 3, MergeDecision("""{"integration":{"status":"Clean","integratedBranch":"b","outcomes":[]}}""")));
 
         prompt.ShouldNotContain("INTEGRATION CONFLICTED");
+    }
+
+    [Fact]
+    public void A_clean_merge_renders_bounded_operational_facts_without_reinjecting_its_patch()
+    {
+        var agentRunId = Guid.NewGuid();
+        var outcome = JsonSerializer.Serialize(new
+        {
+            merged = new[] { new { agentRunId, status = "Succeeded", producedBranch = "codespace/agent/a", patch = new string('P', 200_000) + "UNBOUNDED_PATCH_MARKER" } },
+            count = 1,
+            synthesis = new { text = "combined" },
+            integration = new { status = "Clean", integratedBranch = "codespace/integration/run/turn2", outcomes = Array.Empty<object>() },
+        }, AgentJson.Options);
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 3, MergeDecision(outcome)));
+
+        prompt.ShouldContain("merge: COMPLETED", Case.Insensitive);
+        prompt.ShouldContain(agentRunId.ToString(), customMessage: "the exact durable contributors remain visible to the next decision");
+        prompt.ShouldContain("codespace/integration/run/turn2", customMessage: "the reviewable integration head remains visible");
+        prompt.ShouldNotContain("UNBOUNDED_PATCH_MARKER", customMessage: "a persisted full patch is execution evidence, not next-turn prompt input");
+        prompt.Length.ShouldBeLessThan(20_000, "one large merge outcome must not dominate the supervisor context window");
+    }
+
+    [Fact]
+    public void A_gate_off_merge_still_renders_a_bounded_fold_without_raw_outcome_json()
+    {
+        var agentRunId = Guid.NewGuid();
+        var outcome = JsonSerializer.Serialize(new
+        {
+            merged = new[] { new { agentRunId, status = "Succeeded", patch = "RAW_PATCH_MUST_NOT_RENDER" } },
+            count = 1,
+            synthesisInstruction = "finalize",
+        }, AgentJson.Options);
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 3, MergeDecision(outcome)));
+
+        prompt.ShouldContain("merge: COMPLETED", Case.Insensitive);
+        prompt.ShouldContain(agentRunId.ToString());
+        prompt.ShouldContain("integration not requested", Case.Insensitive);
+        prompt.ShouldNotContain("RAW_PATCH_MUST_NOT_RENDER");
+        prompt.ShouldNotContain("synthesisInstruction", customMessage: "the raw persistence schema never leaks into the model prompt");
     }
 
     // ── DC-2d: a prior `publish` decision (server-authored only) renders legibly, not as raw jsonb ──
@@ -1912,13 +1953,13 @@ public class SupervisorDeciderTests
         client.LastUserPrompt.ShouldContain("marker-5-seq", customMessage: "rows after the digest boundary render verbatim");
     }
 
-    /// <summary>A tape of <paramref name="count"/> merged decisions, Sequence 1..count, each payload carrying a distinct marker.</summary>
+    /// <summary>A tape of <paramref name="count"/> generic prior decisions, Sequence 1..count, each payload carrying a distinct marker.</summary>
     private static SupervisorPriorDecision[] Tape(int count) =>
         Enumerable.Range(1, count).Select(i => new SupervisorPriorDecision
         {
             Id = Guid.NewGuid(),
             Sequence = i,
-            DecisionKind = SupervisorDecisionKinds.Merge,
+            DecisionKind = SupervisorDecisionKinds.AskHuman,
             Status = SupervisorDecisionStatus.Succeeded,
             PayloadJson = $$"""{"note":"marker-{{i}}-seq"}""",
             OutcomeJson = "{}",
