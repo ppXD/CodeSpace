@@ -96,13 +96,16 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
 
             // Project EVERY turn richly so each one's full execution UI is available on expand. The focused turn honours
             // the requested attempt (anchorRunId); every other turn focuses its own latest run (anchor null → the latest).
-            // A non-focused TERMINAL turn's flow never changes (a rerun mints a new run id), so serve it from the cache —
-            // this is what keeps a multi-turn room from re-reading every past turn on each 2s poll. The focused turn (often
-            // the live one, or a chosen attempt) is always projected fresh.
+            // A non-focused TERMINAL turn's heavy flow never changes (a rerun mints a new run id), so serve it from the
+            // cache — this is what keeps a multi-turn room from re-reading every past turn on each 2s poll. Its cheap
+            // attempt ladder may still grow without changing the effective run/cache key, so overlay that from the fresh
+            // SessionTurn. The focused turn (often the live one, or a chosen attempt) is always projected fresh.
             var isFocused = focused != null && turn.TurnIndex == focused.TurnIndex;
             var assistant = !isFocused && WorkflowRunState.IsTerminal(turn.RunStatus)
                 ? await _cache.GetOrAddRoomAsync(turn.RunId, () => BuildTurnAsync(turn, null, teamId, cancellationToken)).ConfigureAwait(false)
                 : await BuildTurnAsync(turn, isFocused ? anchorRunId : null, teamId, cancellationToken).ConfigureAwait(false);
+            if (!isFocused && WorkflowRunState.IsTerminal(turn.RunStatus))
+                assistant = assistant with { Attempts = AttemptsOf(turn, assistant.RunId) };
 
             cursor = Math.Max(cursor, assistant.Seq);
             blocks.Add(assistant);
