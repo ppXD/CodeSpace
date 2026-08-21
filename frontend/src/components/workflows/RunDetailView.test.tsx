@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { WorkflowRunDetail, WorkflowRunNodeSummary } from "@/api/workflows";
+import type { WorkflowRunViewMetadata } from "@/api/workflowRunViewMetadataApi";
 import { RunDetailView } from "./RunDetailView";
 
 /**
@@ -11,24 +12,33 @@ import { RunDetailView } from "./RunDetailView";
  *   2. the child run-detail embeds inline, but only once expanded (no eager polling for N steps);
  *   3. with no navigation handler the id is plain text; a non-subworkflow node shows neither.
  */
-const { useWorkflowRunMock, useAgentRunMock, useRunPhasesMock, governedToolsPanelMock } = vi.hoisted(() => ({
+const { useWorkflowRunMock, useWorkflowRunIdentityMock, useWorkflowRunViewMetadataMock, useNodeManifestsMock, useAgentRunMock, useRunPhasesMock, governedToolsPanelMock, runCanvasMock } = vi.hoisted(() => ({
   useWorkflowRunMock: vi.fn(),
+  useWorkflowRunIdentityMock: vi.fn(),
+  useWorkflowRunViewMetadataMock: vi.fn(),
+  useNodeManifestsMock: vi.fn(),
   useAgentRunMock: vi.fn<(id?: string) => { data: { status: string } | undefined }>(() => ({ data: undefined })),
   useRunPhasesMock: vi.fn<() => { data: { phases: unknown[] } | undefined; isLoading?: boolean }>(() => ({ data: undefined })),
   governedToolsPanelMock: vi.fn(),
+  runCanvasMock: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-workflows", () => ({
   useResumeRun: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
   isRunActive: (s: string) => !["Success", "Failure", "Cancelled"].includes(s),
   useWorkflowRun: (runId: string) => useWorkflowRunMock(runId),
+  useWorkflowRunIdentity: (runId: string, enabled = true) => useWorkflowRunIdentityMock(runId, enabled),
   useWorkflow: () => ({ data: undefined, isLoading: false }),
-  useNodeManifests: () => ({ data: [] }),
+  useNodeManifests: () => useNodeManifestsMock(),
   useRunPhases: () => useRunPhasesMock(),
   useRunTimeline: () => ({ data: undefined }),   // the narrative band stays empty in these node-trace tests
   useRunRecordWindow: () => ({ records: [], isLoading: false, isLoadingOlder: false, error: null, hasOlder: false, olderRecordsOmitted: false, newerRecordsOmitted: false, atLatest: true, loadOlder: vi.fn(), returnToLatest: vi.fn() }),   // the Trace tab isn't the active view here
   useRunDataCompleteness: () => ({ data: { runId: "parent-1", scope: "RecordedFacetsOnly", facets: [], hasStatements: false, runWideVerdict: null, truncated: false }, isLoading: false, error: null }),
   useCellAttempts: () => ({ data: { attempts: [] } }),   // a terminal's per-cell history — empty (no rerun) here
+}));
+
+vi.mock("@/hooks/use-workflow-run-view-metadata", () => ({
+  useWorkflowRunViewMetadata: (runId: string, enabled = true) => useWorkflowRunViewMetadataMock(runId, enabled),
 }));
 
 // RunNodeRow reads the agent run's live status for its badge (and AgentRunTimeline streams it); mock the
@@ -53,6 +63,14 @@ vi.mock("./GovernedToolsPanel", () => ({
   },
 }));
 
+vi.mock("./RunCanvas", () => ({
+  RunCanvas: (props: { runNodes: WorkflowRunNodeSummary[]; runStatus: string; onOpenRun?: (runId: string) => void }) => {
+    runCanvasMock(props);
+    const childRunId = props.runNodes.find((row) => row.childRunId)?.childRunId;
+    return <button type="button" data-testid="bounded-run-canvas" data-status={props.runStatus} onClick={() => childRunId && props.onOpenRun?.(childRunId)}>Canvas</button>;
+  },
+}));
+
 function node(over: Partial<WorkflowRunNodeSummary> & { nodeId: string }): WorkflowRunNodeSummary {
   return { iterationKey: "", containerKind: null, status: "Success", inputs: {}, outputs: {}, error: null, startedAt: null, completedAt: null, childRunId: null, ...over };
 }
@@ -65,16 +83,32 @@ function detail(over: Partial<WorkflowRunDetail>): WorkflowRunDetail {
   };
 }
 
+function viewMetadata(over: Partial<WorkflowRunViewMetadata> = {}): WorkflowRunViewMetadata {
+  return {
+    runId: "parent-1", runNumber: 1, workflowId: null, workflowVersion: 1, sourceType: "manual", parentRunId: null,
+    status: "Success", hasError: false, startedAt: null, completedAt: null, createdDate: "2026-06-22T00:00:00Z",
+    scope: "LineageMerged", cellsAvailability: "Available", linksAvailability: "Available", cells: [],
+    topologyAvailability: "Available", topology: { nodes: [], edges: [] }, ...over,
+  };
+}
+
 const ok = (data: WorkflowRunDetail) => ({ isLoading: false, error: null, data });
 const missing = { isLoading: false, error: null, data: null };
 
 beforeEach(() => {
   useWorkflowRunMock.mockReset();
+  useWorkflowRunIdentityMock.mockReset();
+  useWorkflowRunIdentityMock.mockReturnValue({ isLoading: false, error: null, data: { id: "parent-1", runNumber: 1, status: "Success" } });
+  useWorkflowRunViewMetadataMock.mockReset();
+  useWorkflowRunViewMetadataMock.mockReturnValue({ isLoading: false, error: null, data: viewMetadata() });
+  useNodeManifestsMock.mockReset();
+  useNodeManifestsMock.mockReturnValue({ data: [] });
   useAgentRunMock.mockReset();
   useAgentRunMock.mockImplementation(() => ({ data: undefined }));
   useRunPhasesMock.mockReset();
   useRunPhasesMock.mockReturnValue({ data: undefined });   // no phases → no Live-work, node trace stays primary
   governedToolsPanelMock.mockReset();
+  runCanvasMock.mockReset();
 });
 
 const phasesWithAgent = { data: { phases: [{ id: "p", label: "Implement", kind: "agent", status: "Active", order: 0, agents: [{ agentRunId: "ar1", status: "Running", label: "backend-fix" }], metrics: { agentCount: 1, succeededCount: 0, failedCount: 0 }, sourceKey: "supervisor-ledger" }] } };
@@ -287,6 +321,7 @@ describe("RunDetailView — run-view tabs", () => {
 
   it("mounts the independent governed-tools consumer only in its non-nested tab and passes active status", () => {
     useWorkflowRunMock.mockImplementation(() => ok(detail({ status: "Running" })));
+    useWorkflowRunIdentityMock.mockReturnValue({ isLoading: false, error: null, data: { id: "parent-1", runNumber: 1, status: "Running" } });
     render(<RunDetailView runId="parent-1" />);
 
     expect(screen.queryByTestId("governed-tools-panel")).toBeNull();
@@ -294,6 +329,90 @@ describe("RunDetailView — run-view tabs", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Governed tools" }));
     expect(screen.getByTestId("governed-tools-panel")).toHaveAttribute("data-run-id", "parent-1");
     expect(screen.getByTestId("governed-tools-panel")).toHaveAttribute("data-active", "true");
+  });
+
+  it.each(["canvas", "changes", "governed-tools", "trace"] as const)("does not enable the legacy full-detail reader for standalone %s", (activeView) => {
+    render(<RunDetailView runId="parent-1" defaultView={activeView} />);
+
+    expect(useWorkflowRunMock).not.toHaveBeenCalled();
+    expect(useWorkflowRunViewMetadataMock).toHaveBeenCalledTimes(activeView === "canvas" ? 1 : 0);
+    expect(useWorkflowRunIdentityMock).toHaveBeenCalledTimes(activeView === "canvas" ? 0 : 1);
+    expect(useNodeManifestsMock).toHaveBeenCalledTimes(activeView === "canvas" ? 1 : 0);
+    expect(useRunPhasesMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps Activity and recursively nested details on the legacy authority reader", () => {
+    const activity = render(<RunDetailView runId="parent-1" defaultView="activity" />);
+    expect(useWorkflowRunMock).toHaveBeenLastCalledWith("parent-1");
+    expect(useWorkflowRunIdentityMock).not.toHaveBeenCalled();
+    expect(useWorkflowRunViewMetadataMock).not.toHaveBeenCalled();
+    activity.unmount();
+
+    render(<RunDetailView runId="parent-1" nested />);
+    expect(useWorkflowRunMock).toHaveBeenLastCalledWith("parent-1");
+    expect(useWorkflowRunIdentityMock).not.toHaveBeenCalled();
+    expect(useWorkflowRunViewMetadataMock).not.toHaveBeenCalled();
+  });
+
+  it("switches polling ownership between Activity, Canvas and Trace without leaving the old reader enabled", () => {
+    render(<RunDetailView runId="parent-1" />);
+    expect(useWorkflowRunMock).toHaveBeenLastCalledWith("parent-1");
+    expect(useWorkflowRunMock).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("tab", { name: "Canvas" }));
+    expect(useWorkflowRunMock).toHaveBeenCalledTimes(1);
+    expect(useWorkflowRunViewMetadataMock).toHaveBeenLastCalledWith("parent-1", true);
+    expect(useWorkflowRunIdentityMock).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Trace" }));
+    expect(useWorkflowRunMock).toHaveBeenCalledTimes(1);
+    expect(useWorkflowRunViewMetadataMock).toHaveBeenCalledTimes(1);
+    expect(useWorkflowRunIdentityMock).toHaveBeenLastCalledWith("parent-1", true);
+  });
+
+  it("keeps the tab escape hatch and reports a missing bounded Canvas run instead of treating it as empty", () => {
+    useWorkflowRunViewMetadataMock.mockReturnValue({ isLoading: false, error: null, data: null });
+    render(<RunDetailView runId="parent-1" defaultView="canvas" />);
+
+    expect(screen.getByRole("tab", { name: "Activity" })).toBeInTheDocument();
+    expect(screen.getByText("Run not found")).toBeInTheDocument();
+    expect(screen.queryByText("No nodes executed yet")).toBeNull();
+  });
+
+  it("surfaces corrupt bounded topology as typed unavailable metadata, never an exact empty graph", () => {
+    useWorkflowRunViewMetadataMock.mockReturnValue({ isLoading: false, error: null,
+      data: viewMetadata({ topologyAvailability: "Corrupt", topology: null }) });
+    render(<RunDetailView runId="parent-1" defaultView="canvas" />);
+
+    expect(screen.getByText("Execution graph is malformed and was not treated as empty.")).toBeInTheDocument();
+    expect(screen.queryByText("No nodes executed yet")).toBeNull();
+  });
+
+  it("preserves bounded Canvas status, rerun admission and child-open coordinates", () => {
+    const onOpenRun = vi.fn();
+    useWorkflowRunViewMetadataMock.mockReturnValue({ isLoading: false, error: null, data: viewMetadata({
+      status: "Running",
+      topology: { nodes: [{ id: "sub", typeKey: "flow.subworkflow", label: "Child", parentId: null, position: null, width: null, height: null }], edges: [] },
+      cells: [{ sourceRunId: "source-1", nodeId: "sub", iterationKey: "", containerKind: null, status: "Suspended",
+        startedAt: null, completedAt: null, childRunId: "child-1", agentRunId: null, rerunnableFromHere: true }],
+    }) });
+    render(<RunDetailView runId="parent-1" defaultView="canvas" onOpenRun={onOpenRun} />);
+
+    expect(runCanvasMock).toHaveBeenCalledWith(expect.objectContaining({ runStatus: "Running", runNodes: [expect.objectContaining({
+      nodeId: "sub", inputs: null, outputs: null, childRunId: "child-1", rerunnableFromHere: true,
+    })] }));
+    fireEvent.click(screen.getByTestId("bounded-run-canvas"));
+    expect(onOpenRun).toHaveBeenCalledExactlyOnceWith("child-1");
+  });
+
+  it("keeps suspended pending-wait authority in Activity while bounded tabs show an explicit handoff", () => {
+    useWorkflowRunIdentityMock.mockReturnValue({ isLoading: false, error: null,
+      data: { id: "parent-1", runNumber: 1, status: "Suspended" } });
+    render(<RunDetailView runId="parent-1" defaultView="trace" />);
+
+    expect(screen.getByText("Run suspended")).toBeInTheDocument();
+    expect(screen.getByText("Open Activity to inspect the authoritative suspension state and any pending action.")).toBeInTheDocument();
+    expect(useWorkflowRunMock).not.toHaveBeenCalled();
   });
 
   it("defaults to the Activity narrative (the node trace), not a backend-blocked tab", () => {

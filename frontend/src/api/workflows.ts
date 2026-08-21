@@ -1328,7 +1328,7 @@ export const workflowsApi = {
     fetchJson<RunSummary>(`/api/workflows/runs/summary?${buildRunListParams(filter, 1)}&today=${encodeURIComponent(todayStartIso)}`),
 
   /** Resolve one run by ref — its team-scoped run number (clean URL) or GUID (legacy link). */
-  getRun: (ref: string) => fetchJson<WorkflowRunDetail>(`/api/workflows/runs/${encodeURIComponent(ref)}`),
+  getRun: (ref: string, signal?: AbortSignal) => fetchJson<WorkflowRunDetail>(`/api/workflows/runs/${encodeURIComponent(ref)}`, { signal }),
 
   /** Resolve only the canonical identity needed by the run route; never loads execution detail or artifact bytes. */
   getRunIdentity: async (ref: string, signal?: AbortSignal) => decodeWorkflowRunIdentity(await fetchJson<unknown>(`/api/workflows/runs/${encodeURIComponent(ref)}/identity`, { signal })),

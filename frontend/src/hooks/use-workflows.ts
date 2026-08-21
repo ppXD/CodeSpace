@@ -177,7 +177,7 @@ export function useLiveRunsPhases(runIds: string[]) {
 export function useWorkflowRun(runId: string | null) {
   return useQuery({
     queryKey: ["workflow-run", runId],
-    queryFn: () => workflowsApi.getRun(runId!),
+    queryFn: ({ signal }) => workflowsApi.getRun(runId!, signal),
     enabled: runId != null,
     refetchInterval: (q) => {
       const data = q.state.data;
