@@ -52,6 +52,47 @@ public class AgentsController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>One bounded byte range from an exact Agent Run event's offloaded structured payload.</summary>
+    [HttpGet("runs/{agentRunId:guid}/events/{eventSequence:long}/data")]
+    public async Task<IActionResult> ReadRunEventData([FromRoute] Guid agentRunId, [FromRoute] long eventSequence,
+        [FromQuery] ReadAgentRunEventDataRangeQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query with { AgentRunId = agentRunId, EventSequence = eventSequence }, cancellationToken).ConfigureAwait(false);
+        if (result == null) return NotFound();
+        if (result.Availability != AgentRunEventDataReadAvailability.Available)
+        {
+            var problem = new AgentRunEventDataReadProblem
+            {
+                AgentRunId = result.AgentRunId, EventSequence = result.EventSequence, DataArtifactId = result.DataArtifactId,
+                Availability = result.Availability, Code = result.ProblemCode ?? result.Availability.ToString(), IsRetryable = result.IsRetryable,
+            };
+            return StatusCode(EventDataProblemStatus(result.Availability), problem);
+        }
+
+        Response.Headers.Append(AgentRunEventDataHttpHeaders.AgentRunId, result.AgentRunId.ToString());
+        Response.Headers.Append(AgentRunEventDataHttpHeaders.EventSequence, result.EventSequence.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Response.Headers.Append(AgentRunEventDataHttpHeaders.ArtifactId, result.DataArtifactId!.Value.ToString());
+        Response.Headers.Append(AgentRunEventDataHttpHeaders.Offset, result.OffsetBytes.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        if (result.NextOffsetBytes is { } next) Response.Headers.Append(AgentRunEventDataHttpHeaders.NextOffset, next.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Response.Headers.Append(AgentRunEventDataHttpHeaders.TotalBytes, result.TotalBytes!.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Response.Headers.Append(AgentRunEventDataHttpHeaders.Sha256, result.Sha256!);
+        Response.Headers.Append(AgentRunEventDataHttpHeaders.ContentType, result.ContentType!);
+        Response.Headers.Append(AgentRunEventDataHttpHeaders.IntegrityVerified, result.IntegrityVerified ? "true" : "false");
+        Response.Headers.Append("Cache-Control", "private, no-store");
+        Response.Headers.Append("X-Content-Type-Options", "nosniff");
+        return File(result.Content, "application/octet-stream");
+    }
+
+    private static int EventDataProblemStatus(AgentRunEventDataReadAvailability availability) => availability switch
+    {
+        AgentRunEventDataReadAvailability.InvalidRange => StatusCodes.Status400BadRequest,
+        AgentRunEventDataReadAvailability.AccessDenied => StatusCodes.Status424FailedDependency,
+        AgentRunEventDataReadAvailability.BackendUnavailable => StatusCodes.Status503ServiceUnavailable,
+        AgentRunEventDataReadAvailability.MetadataMissing or AgentRunEventDataReadAvailability.PhysicalObjectMissing
+            or AgentRunEventDataReadAvailability.IntegrityFailure => StatusCodes.Status410Gone,
+        _ => StatusCodes.Status422UnprocessableEntity,
+    };
+
     /// <summary>Metadata-only, keyset-paged durable stdout/stderr/transcript/debug streams for one Agent Run.</summary>
     [HttpGet("runs/{agentRunId:guid}/logs")]
     public async Task<IActionResult> ListRunLogs([FromRoute] Guid agentRunId, [FromQuery] ListAgentRunLogsQuery query, CancellationToken cancellationToken)
