@@ -1,6 +1,5 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
-using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Tasks.Timeline;
 using Microsoft.EntityFrameworkCore;
@@ -30,27 +29,57 @@ public sealed class ToolCallTimelineSource : IRunTimelineSource, IScopedDependen
 
     public async Task<IReadOnlyList<RunTimelineEvent>> ContributeAsync(RunTimelineContext context, CancellationToken cancellationToken)
     {
-        var nodeByAgent = await LoadRunAgentsAsync(context, cancellationToken).ConfigureAwait(false);
+        var calls = await ToolCallRowsQuery(_db, context.TeamId, context.RunId).ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        if (nodeByAgent.Count == 0) return Array.Empty<RunTimelineEvent>();
-
-        var calls = await LoadToolCallsAsync(context.TeamId, nodeByAgent.Keys.ToList(), cancellationToken).ConfigureAwait(false);
-
-        return calls.Select(c => ToolCallTimelineMap.ToEvent(c, nodeByAgent)).ToList();
+        return calls.Select(ToolCallTimelineMap.ToEvent).ToList();
     }
 
-    /// <summary>The run's agent runs (id → its node), read team-scoped. The run is already team-checked by the projector; the extra TeamId filter is defense in depth, matching the phase + agent-event sources.</summary>
-    private async Task<Dictionary<Guid, string?>> LoadRunAgentsAsync(RunTimelineContext context, CancellationToken cancellationToken) =>
-        (await _db.AgentRun.AsNoTracking()
-            .Where(r => r.TeamId == context.TeamId && r.WorkflowRunId == context.RunId)
-            .Select(r => new { r.Id, r.NodeId })
-            .ToListAsync(cancellationToken).ConfigureAwait(false))
-        .ToDictionary(r => r.Id, r => r.NodeId);
+    /// <summary>
+    /// The run's SIDE-EFFECTING tool calls, team-scoped and chronological. The exactly-once receipt can be arbitrarily
+    /// large and is load-bearing for replay, while the timeline displays only one best-effort human detail. PostgreSQL
+    /// therefore extracts the small ordered field set and bounds it before bytes cross the process boundary. The raw
+    /// result, decision envelope, approval bearer and idempotency authority never enter this observation projection.
+    /// Internal so the translated SQL—not merely the result type—is test-pinned.
+    /// </summary>
+    internal static IQueryable<ToolCallTimelineRow> ToolCallRowsQuery(CodeSpaceDbContext db, Guid teamId, Guid workflowRunId) =>
+        db.Database.SqlQuery<ToolCallTimelineRow>($$"""
+            SELECT t.id AS id,
+                   t.agent_run_id AS agent_run_id,
+                   a.node_id AS node_id,
+                   t.tool_kind AS tool_kind,
+                   t.status AS status,
+                   CASE WHEN char_length(t.error) > 512 THEN left(t.error, 512) || '…' ELSE t.error END AS error,
+                   t.created_date AS created_date,
+                   CASE WHEN char_length(detail.value) > 512 THEN left(detail.value, 512) || '…' ELSE detail.value END AS result_detail
+            FROM tool_call_ledger AS t
+            INNER JOIN agent_run AS a ON a.id = t.agent_run_id AND a.team_id = t.team_id
+            LEFT JOIN LATERAL (
+                SELECT CASE WHEN t.status = 'Succeeded' AND jsonb_typeof(t.result_jsonb) = 'object' THEN COALESCE(
+                    CASE WHEN jsonb_typeof(t.result_jsonb -> 'summary') IN ('string', 'number') THEN nullif(btrim(t.result_jsonb ->> 'summary'), '') END,
+                    CASE WHEN jsonb_typeof(t.result_jsonb -> 'message') IN ('string', 'number') THEN nullif(btrim(t.result_jsonb ->> 'message'), '') END,
+                    CASE WHEN jsonb_typeof(t.result_jsonb -> 'html_url') IN ('string', 'number') THEN nullif(btrim(t.result_jsonb ->> 'html_url'), '') END,
+                    CASE WHEN jsonb_typeof(t.result_jsonb -> 'url') IN ('string', 'number') THEN nullif(btrim(t.result_jsonb ->> 'url'), '') END,
+                    CASE WHEN jsonb_typeof(t.result_jsonb -> 'number') IN ('string', 'number') AND nullif(btrim(t.result_jsonb ->> 'number'), '') IS NOT NULL THEN '#' || btrim(t.result_jsonb ->> 'number') END,
+                    CASE WHEN jsonb_typeof(t.result_jsonb -> 'ref') IN ('string', 'number') THEN nullif(btrim(t.result_jsonb ->> 'ref'), '') END,
+                    CASE WHEN jsonb_typeof(t.result_jsonb -> 'sha') IN ('string', 'number') THEN nullif(btrim(t.result_jsonb ->> 'sha'), '') END
+                ) END AS value
+            ) AS detail ON TRUE
+            WHERE t.team_id = {{teamId}}
+              AND a.workflow_run_id = {{workflowRunId}}
+              AND t.tool_kind <> {{DecisionToolKinds.DecisionRequest}}
+            ORDER BY t.created_date, t.id
+            """);
+}
 
-    /// <summary>The run's SIDE-EFFECTING tool calls (a <c>decision.request</c> row is a cross-grain decision, not a tool execution — excluded by ToolKind, the discriminator every other ledger consumer uses), team-scoped, in chronological (CreatedDate) order.</summary>
-    private async Task<List<ToolCallLedger>> LoadToolCallsAsync(Guid teamId, List<Guid> agentRunIds, CancellationToken cancellationToken) =>
-        await _db.ToolCallLedger.AsNoTracking()
-            .Where(t => t.TeamId == teamId && agentRunIds.Contains(t.AgentRunId) && t.ToolKind != DecisionToolKinds.DecisionRequest)
-            .OrderBy(t => t.CreatedDate)
-            .ToListAsync(cancellationToken).ConfigureAwait(false);
+/// <summary>Bounded, observation-only row used by the Workflow Run timeline; never an execution/replay carrier.</summary>
+internal sealed class ToolCallTimelineRow
+{
+    public Guid Id { get; set; }
+    public Guid AgentRunId { get; set; }
+    public string? NodeId { get; set; }
+    public string ToolKind { get; set; } = default!;
+    public string Status { get; set; } = default!;
+    public string? Error { get; set; }
+    public string? ResultDetail { get; set; }
+    public DateTimeOffset CreatedDate { get; set; }
 }

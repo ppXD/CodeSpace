@@ -10,6 +10,7 @@ using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks.Timeline;
+using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows;
@@ -281,6 +282,36 @@ public sealed class RunTimelineProjectionFlowTests
         failed.Severity.ShouldBe(TimelineSeverity.Error);
         failed.Level.ShouldBe(TimelineLevel.Milestone, "a failed side effect is a milestone the operator must see");
         failed.Summary.ShouldBe("remote rejected: protected branch");
+    }
+
+    [Fact]
+    public async Task A_multi_megabyte_tool_receipt_projects_only_a_bounded_human_detail()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId);
+        var agentId = Guid.NewGuid();
+        await SeedAgentRunAsync(runId, teamId, agentId, "code");
+        var at = DateTimeOffset.UtcNow;
+        await SeedToolCallsAsync(teamId, agentId,
+            (ToolCallLedgerStatus.Succeeded, "git.open_pr", null, null, at),
+            (ToolCallLedgerStatus.Failed, "git.commit", new string('e', 600), null, at.AddSeconds(1)));
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var largeReceipt = JsonSerializer.Serialize(new { summary = new string('s', 600), payload = new string('x', 2 * 1024 * 1024) });
+            await db.ToolCallLedger.Where(row => row.TeamId == teamId && row.AgentRunId == agentId)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(row => row.ResultJson, largeReceipt));
+        }
+
+        var events = await ProjectAsync(userId, teamId, runId);
+
+        events.ShouldNotBeNull();
+        var tools = events!.Where(e => e.SourceKey == "tool-calls").ToList();
+        tools.Single(e => e.Title == "Opened a pull request").Summary.ShouldBe(new string('s', 512) + "…",
+            "the timeline receives only a bounded human detail even when both the receipt and its preferred summary are large");
+        tools.Single(e => e.Title == "Committing the changes failed").Summary.ShouldBe(new string('e', 512) + "…",
+            "the durable error remains on the ledger while its narrative projection stays bounded");
     }
 
     [Fact]
