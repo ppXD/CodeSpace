@@ -8,9 +8,9 @@ using Microsoft.EntityFrameworkCore;
 namespace CodeSpace.Core.Services.Tasks.Trace;
 
 /// <summary>
-/// Keyset reader over idx_wrr_run_sequence. Every body-bearing query takes at most MaxLimit+1 rows and never counts or
-/// offsets the ledger. The separate team-scoped status projection preserves 404 conflation even for a run with no
-/// records, without loading the WorkflowRun entity or its JSON bodies.
+/// Keyset reader over idx_wrr_run_sequence. Every page query is metadata-only, takes at most MaxLimit+1 rows, and never
+/// counts, offsets, or selects/detoasts PayloadJson. The separate team-scoped status projection preserves 404
+/// conflation even for a run with no records, without loading the WorkflowRun entity or its JSON bodies.
 /// </summary>
 public sealed class RunRecordPageReader : IRunRecordPageReader, IScopedDependency
 {
@@ -52,23 +52,25 @@ public sealed class RunRecordPageReader : IRunRecordPageReader, IScopedDependenc
     internal static IQueryable<WorkflowRunStatus?> RunStatusQuery(CodeSpaceDbContext db, Guid runId, Guid teamId) =>
         db.WorkflowRun.AsNoTracking().Where(run => run.Id == runId && run.TeamId == teamId).Select(run => (WorkflowRunStatus?)run.Status);
 
-    internal static IQueryable<RunRecordView> TailRowsQuery(CodeSpaceDbContext db, Guid runId, int take) =>
+    internal static IQueryable<RunRecordPageItem> TailRowsQuery(CodeSpaceDbContext db, Guid runId, int take) =>
         Project(db.WorkflowRunRecord.AsNoTracking().Where(row => row.RunId == runId).OrderByDescending(row => row.Sequence).Take(take));
 
-    internal static IQueryable<RunRecordView> OlderRowsQuery(CodeSpaceDbContext db, Guid runId, long beforeSequence, int take) =>
+    internal static IQueryable<RunRecordPageItem> OlderRowsQuery(CodeSpaceDbContext db, Guid runId, long beforeSequence, int take) =>
         Project(db.WorkflowRunRecord.AsNoTracking().Where(row => row.RunId == runId && row.Sequence < beforeSequence).OrderByDescending(row => row.Sequence).Take(take));
 
-    internal static IQueryable<RunRecordView> NewerRowsQuery(CodeSpaceDbContext db, Guid runId, long afterSequence, int take) =>
+    internal static IQueryable<RunRecordPageItem> NewerRowsQuery(CodeSpaceDbContext db, Guid runId, long afterSequence, int take) =>
         Project(db.WorkflowRunRecord.AsNoTracking().Where(row => row.RunId == runId && row.Sequence > afterSequence).OrderBy(row => row.Sequence).Take(take));
 
-    private static IQueryable<RunRecordView> Project(IQueryable<WorkflowRunRecord> query) => query.Select(row => new RunRecordView
+    private static IQueryable<RunRecordPageItem> Project(IQueryable<WorkflowRunRecord> query) => query.Select(row => new RunRecordPageItem
     {
+        RecordId = row.Id,
         Sequence = row.Sequence,
         RecordType = row.RecordType,
         NodeId = row.NodeId,
         IterationKey = row.IterationKey,
         OccurredAt = row.OccurredAt,
-        PayloadJson = row.PayloadJson,
+        PayloadState = RunRecordPagePayloadStates.Deferred,
+        PayloadContentType = "application/json",
         CorrelationId = row.CorrelationId,
         ParentRecordId = row.ParentRecordId,
     });

@@ -10,8 +10,8 @@ function page(over: Partial<RunRecordPageResponse> = {}): RunRecordPageResponse 
     runStatus: "Running",
     mode: "Tail",
     records: [
-      { sequence: 8, recordType: "log", nodeId: null, iterationKey: "", occurredAt: "2026-08-21T00:00:00Z", payloadJson: " {\"raw\":true} ", correlationId: null, parentRecordId: null },
-      { sequence: 9, recordType: "run.started", nodeId: "node-1", iterationKey: "i", occurredAt: "2026-08-21T00:00:01Z", payloadJson: "{}", correlationId: "c", parentRecordId: "p" },
+      { recordId: "88888888-8888-4888-8888-888888888888", sequence: 8, recordType: "log", nodeId: null, iterationKey: "", occurredAt: "2026-08-21T00:00:00Z", payloadState: "Deferred", payloadContentType: "application/json", correlationId: null, parentRecordId: null },
+      { recordId: "99999999-9999-4999-8999-999999999999", sequence: 9, recordType: "run.started", nodeId: "node-1", iterationKey: "i", occurredAt: "2026-08-21T00:00:01Z", payloadState: "Deferred", payloadContentType: "application/json", correlationId: "c", parentRecordId: "p" },
     ],
     nextBeforeSequence: 8,
     nextAfterSequence: null,
@@ -26,7 +26,7 @@ function json(body: unknown) {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("Workflow Run record page API", () => {
-  it("requests an exact bounded mode, propagates AbortSignal, and preserves raw payloadJson bytes", async () => {
+  it("requests an exact bounded mode, propagates AbortSignal, and returns metadata without payload bytes", async () => {
     const requests: Array<{ url: URL; signal?: AbortSignal }> = [];
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init: RequestInit = {}) => {
       const url = new URL(String(input), "http://test.local");
@@ -47,7 +47,8 @@ describe("Workflow Run record page API", () => {
       `/api/workflows/runs/${runId}/records/page?limit=128&afterSequence=9`,
     ]);
     expect(requests.every(({ signal }) => signal === controller.signal)).toBe(true);
-    expect(tail.records[0].payloadJson).toBe(" {\"raw\":true} ");
+    expect(tail.records[0]).toMatchObject({ recordId: "88888888-8888-4888-8888-888888888888", payloadState: "Deferred", payloadContentType: "application/json" });
+    expect(tail.records[0]).not.toHaveProperty("payloadJson");
   });
 
   it("fails closed on foreign identity, unknown/wrong mode, contradictory continuation, and cursor violations", async () => {
@@ -70,14 +71,16 @@ describe("Workflow Run record page API", () => {
   it("fails closed before rendering descending/duplicate/unsafe sequences or malformed record fields", async () => {
     const missingNodeId: Record<string, unknown> = { ...page().records[0] };
     delete missingNodeId.nodeId;
+    const legacyInline = { ...page().records[0], payloadJson: "{}" };
     vi.stubGlobal("fetch", vi.fn()
       .mockResolvedValueOnce(json(page({ records: [{ ...page().records[0], sequence: 9 }, { ...page().records[1], sequence: 8 }], nextBeforeSequence: null })))
       .mockResolvedValueOnce(json(page({ records: [{ ...page().records[0], sequence: 8 }, { ...page().records[1], sequence: 8 }], nextBeforeSequence: null })))
       .mockResolvedValueOnce(json(page({ records: [{ ...page().records[0], sequence: Number.MAX_SAFE_INTEGER + 1 }], nextBeforeSequence: null })))
-      .mockResolvedValueOnce(json(page({ records: [{ ...page().records[0], payloadJson: 42 as unknown as string }], nextBeforeSequence: null })))
-      .mockResolvedValueOnce(json(page({ records: [missingNodeId as unknown as RunRecordPageResponse["records"][number]], nextBeforeSequence: null }))));
+      .mockResolvedValueOnce(json(page({ records: [{ ...page().records[0], payloadState: "Future" as "Deferred" }], nextBeforeSequence: null })))
+      .mockResolvedValueOnce(json(page({ records: [missingNodeId as unknown as RunRecordPageResponse["records"][number]], nextBeforeSequence: null })))
+      .mockResolvedValueOnce(json(page({ records: [legacyInline], nextBeforeSequence: null }))));
 
-    for (let i = 0; i < 5; i += 1)
+    for (let i = 0; i < 6; i += 1)
       await expect(workflowsApi.getRunRecordPage(runId, { limit: 128 })).rejects.toThrow(/invalid workflow run record page/i);
   });
 

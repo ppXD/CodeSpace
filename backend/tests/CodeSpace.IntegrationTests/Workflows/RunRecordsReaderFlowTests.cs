@@ -148,6 +148,24 @@ public sealed class RunRecordsReaderFlowTests
     }
 
     [Fact]
+    public async Task Bounded_page_returns_only_payload_deferred_metadata_with_an_exact_record_identity()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId);
+        var recordId = Guid.NewGuid();
+        await SeedRecordAsync(runId, recordId, JsonSerializer.Serialize(new { body = new string('x', 2 * 1024 * 1024) }));
+
+        var page = await ReadPageAsync(userId, teamId, new RunRecordPageRequest(runId, teamId, null, null, 1));
+
+        page.ShouldNotBeNull();
+        var item = page!.Records.ShouldHaveSingleItem();
+        item.RecordId.ShouldBe(recordId);
+        item.PayloadState.ShouldBe(RunRecordPagePayloadStates.Deferred);
+        item.PayloadContentType.ShouldBe("application/json");
+        typeof(RunRecordPageItem).GetProperty("PayloadJson").ShouldBeNull("the new page contract must be structurally unable to carry an unbounded body");
+    }
+
+    [Fact]
     public async Task Exact_record_payload_is_losslessly_reconstructed_through_bounded_utf8_ranges()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);

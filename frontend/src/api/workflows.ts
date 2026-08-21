@@ -1,4 +1,4 @@
-import { ApiError, fetchJson } from "./request";
+import { ApiError, fetchJson, fetchResponse } from "./request";
 import type { RoomFileIdentity, RoomPullRequestResult } from "./sessions";
 
 // ─── Types (mirror backend DTOs) ───────────────────────────────────────────────
@@ -583,6 +583,20 @@ export interface RunRecordsResponse {
   records: RunRecordView[];
 }
 
+/** Body-free metadata returned by the bounded page. Payload bytes are fetched only for one exact expanded record. */
+export interface RunRecordPageItem {
+  recordId: string;
+  sequence: number;
+  recordType: string;
+  nodeId: string | null;
+  iterationKey: string;
+  occurredAt: string;
+  payloadState: "Deferred";
+  payloadContentType: "application/json";
+  correlationId: string | null;
+  parentRecordId: string | null;
+}
+
 /** Closed keyset direction returned by the bounded raw-ledger reader. */
 export type RunRecordPageMode = "Tail" | "Older" | "Newer";
 
@@ -591,7 +605,7 @@ export interface RunRecordPageResponse {
   runId: string;
   runStatus: WorkflowRunStatus;
   mode: RunRecordPageMode;
-  records: RunRecordView[];
+  records: RunRecordPageItem[];
   nextBeforeSequence: number | null;
   nextAfterSequence: number | null;
 }
@@ -610,6 +624,28 @@ export class InvalidWorkflowRunRecordPageError extends Error {
     this.name = "InvalidWorkflowRunRecordPageError";
   }
 }
+
+export type RunRecordPayloadReadAvailability = "Missing" | "InvalidRange" | "BackendUnavailable" | "AccessDenied" | "InvalidResponse";
+
+export interface RunRecordPayloadRangeAvailable {
+  availability: "Available";
+  bytes: Uint8Array;
+  runId: string;
+  recordId: string;
+  sequence: number;
+  offsetBytes: number;
+  nextOffsetBytes: number | null;
+  totalBytes: number;
+  contentType: "application/json";
+}
+
+export interface RunRecordPayloadRangeProblem {
+  availability: RunRecordPayloadReadAvailability;
+  code: string;
+  isRetryable: boolean;
+}
+
+export type RunRecordPayloadRangeResult = RunRecordPayloadRangeAvailable | RunRecordPayloadRangeProblem;
 
 // ─── Decisions (the cross-grain "Needs decision" queue — GET /api/workflows/decisions) ───────────
 
@@ -859,6 +895,14 @@ function isNullableString(value: unknown): value is string | null {
   return value === null || typeof value === "string";
 }
 
+function hasNullableString(value: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key) && isNullableString(value[key]);
+}
+
+function isGuid(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+}
+
 function decodeRunRecordPage(value: unknown, expectedRunId: string, request: RunRecordPageRequest): RunRecordPageResponse {
   const expectedMode: RunRecordPageMode = request.afterSequence !== undefined ? "Newer" : request.beforeSequence !== undefined ? "Older" : "Tail";
   if (!isJsonObject(value) || value.runId !== expectedRunId || value.mode !== expectedMode || !RUN_RECORD_PAGE_MODES.has(value.mode as RunRecordPageMode) || !WORKFLOW_RUN_STATUSES.has(value.runStatus as WorkflowRunStatus) || !Array.isArray(value.records) || value.records.length > request.limit)
@@ -869,24 +913,28 @@ function decodeRunRecordPage(value: unknown, expectedRunId: string, request: Run
   if ((nextBefore !== null && !isSafeCount(nextBefore, true)) || (nextAfter !== null && !isSafeCount(nextAfter, true))) return invalidRunRecordPage();
   if ((expectedMode === "Newer" && nextBefore !== null) || (expectedMode !== "Newer" && nextAfter !== null)) return invalidRunRecordPage();
 
-  const records: RunRecordView[] = [];
+  const records: RunRecordPageItem[] = [];
+  const recordIds = new Set<string>();
   let previousSequence = 0;
   for (const candidate of value.records) {
-    if (!isJsonObject(candidate) || !isSafeCount(candidate.sequence, true) || candidate.sequence <= previousSequence || typeof candidate.recordType !== "string" || candidate.recordType.length === 0 || !isNullableString(candidate.nodeId) || typeof candidate.iterationKey !== "string" || typeof candidate.occurredAt !== "string" || !Number.isFinite(Date.parse(candidate.occurredAt)) || typeof candidate.payloadJson !== "string" || !isNullableString(candidate.correlationId) || !isNullableString(candidate.parentRecordId))
+    if (!isJsonObject(candidate) || Object.prototype.hasOwnProperty.call(candidate, "payloadJson") || !isGuid(candidate.recordId) || recordIds.has(candidate.recordId.toLowerCase()) || !isSafeCount(candidate.sequence, true) || candidate.sequence <= previousSequence || typeof candidate.recordType !== "string" || candidate.recordType.length === 0 || !hasNullableString(candidate, "nodeId") || typeof candidate.iterationKey !== "string" || typeof candidate.occurredAt !== "string" || !Number.isFinite(Date.parse(candidate.occurredAt)) || candidate.payloadState !== "Deferred" || candidate.payloadContentType !== "application/json" || !hasNullableString(candidate, "correlationId") || !hasNullableString(candidate, "parentRecordId"))
       return invalidRunRecordPage();
     if (request.beforeSequence !== undefined && candidate.sequence >= request.beforeSequence) return invalidRunRecordPage();
     if (request.afterSequence !== undefined && candidate.sequence <= request.afterSequence) return invalidRunRecordPage();
 
     records.push({
+      recordId: candidate.recordId,
       sequence: candidate.sequence,
       recordType: candidate.recordType,
-      nodeId: candidate.nodeId,
+      nodeId: candidate.nodeId as string | null,
       iterationKey: candidate.iterationKey,
       occurredAt: candidate.occurredAt,
-      payloadJson: candidate.payloadJson,
-      correlationId: candidate.correlationId,
-      parentRecordId: candidate.parentRecordId,
+      payloadState: "Deferred",
+      payloadContentType: "application/json",
+      correlationId: candidate.correlationId as string | null,
+      parentRecordId: candidate.parentRecordId as string | null,
     });
+    recordIds.add(candidate.recordId.toLowerCase());
     previousSequence = candidate.sequence;
   }
 
@@ -901,6 +949,87 @@ function decodeRunRecordPage(value: unknown, expectedRunId: string, request: Run
     nextBeforeSequence: nextBefore as number | null,
     nextAfterSequence: nextAfter as number | null,
   };
+}
+
+interface ExpectedRunRecordPayloadRange {
+  runId: string;
+  recordId: string;
+  sequence: number;
+  offsetBytes: number;
+  limitBytes: number;
+}
+
+function decodeRunRecordPayloadRange(headers: Headers, bytes: Uint8Array, expected: ExpectedRunRecordPayloadRange): RunRecordPayloadRangeResult {
+  const runId = headers.get("X-CodeSpace-Workflow-Run-Id");
+  const recordId = headers.get("X-CodeSpace-Workflow-Run-Record-Id");
+  const sequence = exactUnsignedIntegerHeader(headers, "X-CodeSpace-Workflow-Run-Record-Sequence");
+  const offsetBytes = exactUnsignedIntegerHeader(headers, "X-CodeSpace-Workflow-Run-Record-Payload-Offset");
+  const nextRaw = headers.get("X-CodeSpace-Workflow-Run-Record-Payload-Next-Offset");
+  const nextOffsetBytes = nextRaw == null ? null : exactUnsignedIntegerHeader(headers, "X-CodeSpace-Workflow-Run-Record-Payload-Next-Offset");
+  const totalBytes = exactUnsignedIntegerHeader(headers, "X-CodeSpace-Workflow-Run-Record-Payload-Total-Bytes");
+  const contentType = headers.get("X-CodeSpace-Workflow-Run-Record-Payload-Content-Type");
+  const transportType = headers.get("Content-Type")?.split(";", 1)[0].trim().toLowerCase();
+  const computedNext = offsetBytes == null ? null : offsetBytes + bytes.byteLength;
+  const hasMore = computedNext != null && totalBytes != null && computedNext < totalBytes;
+  const valid = runId?.toLowerCase() === expected.runId.toLowerCase() && recordId?.toLowerCase() === expected.recordId.toLowerCase()
+    && sequence === expected.sequence && offsetBytes === expected.offsetBytes && bytes.byteLength <= expected.limitBytes
+    && computedNext != null && Number.isSafeInteger(computedNext) && totalBytes != null && computedNext <= totalBytes
+    && !(bytes.byteLength === 0 && offsetBytes < totalBytes) && (hasMore ? nextRaw != null && nextOffsetBytes === computedNext : nextRaw == null)
+    && contentType === "application/json" && transportType === "application/octet-stream";
+  if (!valid) return { availability: "InvalidResponse", code: "invalid_record_payload_range_headers", isRetryable: false };
+  return {
+    availability: "Available", bytes, runId: expected.runId, recordId: expected.recordId, sequence: expected.sequence,
+    offsetBytes: expected.offsetBytes, nextOffsetBytes, totalBytes, contentType: "application/json",
+  };
+}
+
+function decodeRunRecordPayloadProblem(value: unknown, expected: Pick<ExpectedRunRecordPayloadRange, "runId" | "recordId" | "sequence">): RunRecordPayloadRangeProblem {
+  if (!isJsonObject(value) || value.runId !== expected.runId || value.recordId !== expected.recordId || value.sequence !== expected.sequence
+    || value.availability !== "InvalidRange" || typeof value.code !== "string" || value.code.length === 0 || value.isRetryable !== false)
+    return { availability: "InvalidResponse", code: "invalid_record_payload_problem", isRetryable: false };
+  return { availability: "InvalidRange", code: value.code, isRetryable: false };
+}
+
+function exactUnsignedIntegerHeader(headers: Headers, name: string): number | null {
+  const raw = headers.get(name);
+  if (raw == null || !/^\d+$/.test(raw)) return null;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+async function readBoundedBytes(response: Response, maximumBytes: number): Promise<Uint8Array | null> {
+  const declaredLength = response.headers.get("Content-Length");
+  const expectedLength = declaredLength == null || !/^\d+$/.test(declaredLength) ? null : Number(declaredLength);
+  if (declaredLength != null && (expectedLength == null || expectedLength > maximumBytes)) return null;
+  if (response.body == null) return expectedLength == null || expectedLength === 0 ? new Uint8Array() : null;
+
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  const reader = response.body.getReader();
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      total += next.value.byteLength;
+      if (total > maximumBytes) {
+        await reader.cancel();
+        return null;
+      }
+      chunks.push(next.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  if (expectedLength != null && expectedLength !== total) return null;
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
 }
 
 function invalidRunDataCompleteness(): never {
@@ -1013,7 +1142,7 @@ export const workflowsApi = {
   /** The run's RAW event ledger — every record unfiltered, in Sequence order (the Trace audit). */
   getRunRecords: (runId: string) => fetchJson<RunRecordsResponse>(`/api/workflows/runs/${runId}/records`),
 
-  /** One strict, bounded keyset page of the raw ledger. PayloadJson remains the server's exact string. */
+  /** One strict, bounded, body-free keyset page of the raw ledger. */
   getRunRecordPage: async (runId: string, request: RunRecordPageRequest, signal?: AbortSignal): Promise<RunRecordPageResponse> => {
     const validBefore = request.beforeSequence === undefined || isSafeCount(request.beforeSequence, true);
     const validAfter = request.afterSequence === undefined || isSafeCount(request.afterSequence);
@@ -1025,6 +1154,27 @@ export const workflowsApi = {
     if (request.afterSequence !== undefined) params.set("afterSequence", String(request.afterSequence));
     const value = await fetchJson<unknown>(`/api/workflows/runs/${encodeURIComponent(runId)}/records/page?${params}`, { signal });
     return decodeRunRecordPage(value, runId, request);
+  },
+
+  /** Exact record-scoped canonical JSONB bytes. The response body is consumed with a client-side hard cap too. */
+  readRunRecordPayloadRange: async (runId: string, recordId: string, sequence: number, offsetBytes: number, limitBytes: number, signal?: AbortSignal): Promise<RunRecordPayloadRangeResult> => {
+    if (!isGuid(runId) || !isGuid(recordId) || !isSafeCount(sequence, true) || !isSafeCount(offsetBytes) || !Number.isSafeInteger(limitBytes) || limitBytes < 1 || limitBytes > 64 * 1024 || offsetBytes > Number.MAX_SAFE_INTEGER - limitBytes)
+      return { availability: "InvalidResponse", code: "invalid_record_payload_range_request", isRetryable: false };
+
+    const path = `/api/workflows/runs/${encodeURIComponent(runId)}/records/${encodeURIComponent(recordId)}/payload?offsetBytes=${offsetBytes}&limitBytes=${limitBytes}`;
+    try {
+      const response = await fetchResponse(path, { signal, headers: { Accept: "application/octet-stream" } });
+      const bytes = await readBoundedBytes(response, limitBytes);
+      if (bytes == null) return { availability: "InvalidResponse", code: "invalid_record_payload_body_length", isRetryable: false };
+      return decodeRunRecordPayloadRange(response.headers, bytes, { runId, recordId, sequence, offsetBytes, limitBytes });
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") throw error;
+      if (!(error instanceof ApiError)) return { availability: "BackendUnavailable", code: "transport_unavailable", isRetryable: true };
+      if (error.status === 404) return { availability: "Missing", code: error.code, isRetryable: false };
+      if (error.status === 401 || error.status === 403) return { availability: "AccessDenied", code: error.code, isRetryable: false };
+      if (error.status === 408 || error.status === 429 || error.status >= 500) return { availability: "BackendUnavailable", code: error.code, isRetryable: true };
+      return decodeRunRecordPayloadProblem(error.body, { runId, recordId, sequence });
+    }
   },
 
   /** Metadata only; opening the drawer never eagerly downloads prompt/result blobs. */

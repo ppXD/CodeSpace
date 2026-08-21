@@ -76,7 +76,8 @@ public sealed class RunRecordPageReaderQueryTests
         sql.ShouldContain("LIMIT");
         sql.ShouldNotContain("OFFSET");
         sql.ShouldNotContain("COUNT(");
-        sql.ShouldContain("payload_json", customMessage: "the raw trace page still carries each selected row's payload");
+        sql.ShouldContain("id", customMessage: "metadata rows need the immutable record identity for a later exact payload read");
+        sql.ShouldNotContain("payload_json", customMessage: $"record-count bounding is not byte bounding; the page hot path must never detoast a payload. SQL was:\n{sql}");
     }
 
     private static CodeSpaceDbContext BuildContext() => new(new DbContextOptionsBuilder<CodeSpaceDbContext>()

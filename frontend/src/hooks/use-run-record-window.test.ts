@@ -1,7 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { InvalidWorkflowRunRecordPageError, type RunRecordPageRequest, type RunRecordPageResponse, type RunRecordView, type WorkflowRunStatus } from "@/api/workflows";
+import { InvalidWorkflowRunRecordPageError, type RunRecordPageItem, type RunRecordPageRequest, type RunRecordPageResponse, type WorkflowRunStatus } from "@/api/workflows";
 
 const { getPage } = vi.hoisted(() => ({ getPage: vi.fn() }));
 vi.mock("@/api/workflows", async (importOriginal) => {
@@ -11,15 +11,15 @@ vi.mock("@/api/workflows", async (importOriginal) => {
 
 import { RUN_RECORD_PAGE_LIMIT, RUN_RECORD_WINDOW_LIMIT, RUN_RECORD_WINDOW_MAX_POLL_MS, RUN_RECORD_WINDOW_POLL_MS, useRunRecordWindow } from "./use-workflows";
 
-function record(sequence: number): RunRecordView {
-  return { sequence, recordType: `record.${sequence}`, nodeId: null, iterationKey: "", occurredAt: "2026-08-21T00:00:00Z", payloadJson: `{"sequence":${sequence}}`, correlationId: null, parentRecordId: null };
+function record(sequence: number): RunRecordPageItem {
+  return { recordId: `00000000-0000-4000-8000-${String(sequence).padStart(12, "0")}`, sequence, recordType: `record.${sequence}`, nodeId: null, iterationKey: "", occurredAt: "2026-08-21T00:00:00Z", payloadState: "Deferred", payloadContentType: "application/json", correlationId: null, parentRecordId: null };
 }
 
-function records(from: number, count: number): RunRecordView[] {
+function records(from: number, count: number): RunRecordPageItem[] {
   return Array.from({ length: count }, (_, index) => record(from + index));
 }
 
-function page(mode: RunRecordPageResponse["mode"], rows: RunRecordView[], status: WorkflowRunStatus = "Running", more = false): RunRecordPageResponse {
+function page(mode: RunRecordPageResponse["mode"], rows: RunRecordPageItem[], status: WorkflowRunStatus = "Running", more = false): RunRecordPageResponse {
   return {
     runId: "run-1",
     runStatus: status,

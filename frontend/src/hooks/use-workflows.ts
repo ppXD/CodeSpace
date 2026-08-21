@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { keepPreviousData, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { buildRunListParams, InvalidWorkflowRunRecordPageError, workflowsApi, type AnswerDecisionInput, type CreateWorkflowInput, type RunListFilterInput, type RunRecordView, type UpdateWorkflowInput, type WorkflowRunStatus } from "@/api/workflows";
+import { buildRunListParams, InvalidWorkflowRunRecordPageError, workflowsApi, type AnswerDecisionInput, type CreateWorkflowInput, type RunListFilterInput, type RunRecordPageItem, type UpdateWorkflowInput, type WorkflowRunStatus } from "@/api/workflows";
 
 /**
  * Hooks for the workflows engine surface. Same shape as the repository hooks —
@@ -273,7 +273,7 @@ export const RUN_RECORD_WINDOW_POLL_MS = 2000;
 export const RUN_RECORD_WINDOW_MAX_POLL_MS = 16000;
 
 export interface RunRecordWindow {
-  records: RunRecordView[];
+  records: RunRecordPageItem[];
   runStatus: WorkflowRunStatus | undefined;
   isLoading: boolean;
   isLoadingOlder: boolean;
