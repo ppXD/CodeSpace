@@ -276,9 +276,14 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         if (decisions.Count == 0 && agentIds.Count > 0)
             agentResults = await ReadAgentRunResultsAsync(agentIds, cancellationToken).ConfigureAwait(false);
 
-        var changedFiles = agentResults
-            .SelectMany(r => r.ChangedFiles)
-            .Distinct(StringComparer.Ordinal).OrderBy(p => p, StringComparer.Ordinal).Take(MaxChangedFiles).ToList();
+        var changedFileIdentities = agentResults
+            .SelectMany(FileIdentities)
+            .DistinctBy(FileKey)
+            .OrderBy(file => file.RepositoryAlias, StringComparer.Ordinal)
+            .ThenBy(file => file.RepositoryId)
+            .ThenBy(file => file.Path, StringComparer.Ordinal)
+            .Take(MaxChangedFiles).ToList();
+        var changedFiles = changedFileIdentities.Select(file => file.Path).ToList();
 
         var agentSummaries = agentResults
             .Where(r => !string.IsNullOrWhiteSpace(r.Summary))
@@ -286,9 +291,11 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
 
         // Per-agent file attribution (B): each agent's OWN changed files, so a card shows WHICH agent produced a file
         // rather than the provenance-blind turn-level union. Bounded per agent; an agent that changed nothing is omitted.
-        var agentFiles = agentResults
-            .Where(r => r.ChangedFiles.Count > 0)
-            .ToDictionary(r => r.AgentRunId, r => (IReadOnlyList<string>)r.ChangedFiles.Take(MaxAgentFiles).ToList());
+        var agentFileIdentities = agentResults
+            .Select(result => (result.AgentRunId, Files: (IReadOnlyList<RoomFileIdentity>)FileIdentities(result).Take(MaxAgentFiles).ToList()))
+            .Where(result => result.Files.Count > 0)
+            .ToDictionary(result => result.AgentRunId, result => result.Files);
+        var agentFiles = agentFileIdentities.ToDictionary(pair => pair.Key, pair => (IReadOnlyList<string>)pair.Value.Select(file => file.Path).ToList());
 
         var stop = decisions.LastOrDefault(d => d.DecisionKind == SupervisorDecisionKinds.Stop);
         var acceptance = SupervisorOutcome.ReadAcceptanceGradePassed(stop?.OutcomeJson);
@@ -392,11 +399,13 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         {
             Rounds = rounds,
             Checklist = checklist,
-            FinalAnswer = BuildFinalAnswer(finalAnswerText, changedFiles, delivery, degraded),
+            FinalAnswer = BuildFinalAnswer(finalAnswerText, changedFileIdentities, delivery, degraded),
             LatestLines = latestLines,
             AgentFiles = agentFiles,
+            AgentFileIdentities = agentFileIdentities,
             Subtasks = subtasks,
             ChangedFiles = changedFiles,
+            ChangedFileIdentities = changedFileIdentities,
             ToolCalls = toolCalls,
             ToolHistogram = toolHistogram,
             ReasoningCount = reasoningCount,
@@ -473,12 +482,12 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
     }
 
     /// <summary>The rich final answer — the stop summary text + typed attachments (the changed files + the PR). Images are a true gap (no run output exposes them). Null when there's nothing to deliver. <paramref name="degraded"/> marks a fail-closed give-up stop so the card renders neutral, not a green success.</summary>
-    private static RoomFinalAnswer? BuildFinalAnswer(string? text, IReadOnlyList<string> files, RoomDelivery? pr, bool degraded)
+    private static RoomFinalAnswer? BuildFinalAnswer(string? text, IReadOnlyList<RoomFileIdentity> files, RoomDelivery? pr, bool degraded)
     {
         var attachments = new List<RoomAttachment>();
 
-        foreach (var f in files.Take(MaxAnswerFiles))
-            attachments.Add(new RoomAttachment(AnswerAttachmentKind.FileLink, f, Url: null, PreviewUrl: null, DownloadUrl: null));
+        foreach (var file in files.Take(MaxAnswerFiles))
+            attachments.Add(new RoomAttachment(AnswerAttachmentKind.FileLink, file.Path, Url: null, PreviewUrl: null, DownloadUrl: null, File: file));
 
         if (pr is { } d)
             attachments.Add(new RoomAttachment(AnswerAttachmentKind.Pr, d.Reference is { Length: > 0 } r ? $"{d.Title} {r}" : d.Title, Url: d.Url, PreviewUrl: null, DownloadUrl: null));
@@ -498,22 +507,31 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
     {
         var rows = await _db.AgentRun.AsNoTracking()
             .Where(r => agentIds.Contains(r.Id))
-            .Select(r => new { r.Id, r.Status, r.ResultJson })
+            .Select(r => new { r.Id, r.Status, r.Error, r.ResultJson })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        return rows.Select(r =>
-        {
-            var result = string.IsNullOrWhiteSpace(r.ResultJson) ? null : JsonSerializer.Deserialize<AgentRunResult>(r.ResultJson!, AgentJson.Options);
-
-            return new SupervisorAgentResult
-            {
-                AgentRunId = r.Id,
-                Status = r.Status.ToString(),
-                Summary = result?.Summary,
-                ChangedFiles = result?.ChangedFiles ?? Array.Empty<string>(),
-            };
-        }).ToList();
+        return rows.Select(r => SupervisorOutcome.ProjectCompact(r.Id, r.Status.ToString(), r.Error, r.ResultJson)).ToList();
     }
+
+    /// <summary>Project one compact result into clickable file identities. Per-repository results are authoritative whenever present; top-level paths are the legacy/single-repo fallback only.</summary>
+    private static IEnumerable<RoomFileIdentity> FileIdentities(SupervisorAgentResult result)
+    {
+        if (result.RepositoryResults.Count > 0)
+        {
+            foreach (var repository in result.RepositoryResults)
+                foreach (var path in repository.ChangedFiles)
+                    yield return new RoomFileIdentity { Path = path, AgentRunId = result.AgentRunId, RepositoryId = repository.RepositoryId, RepositoryAlias = repository.Alias };
+
+            yield break;
+        }
+
+        foreach (var path in result.ChangedFiles)
+            yield return new RoomFileIdentity { Path = path, AgentRunId = result.AgentRunId };
+    }
+
+    /// <summary>A file is unique by repository + repo-relative path. AgentRunId remains on the selected identity so the click resolves the exact producing attempt.</summary>
+    private static (Guid? RepositoryId, string? RepositoryAlias, string Path) FileKey(RoomFileIdentity file) =>
+        (file.RepositoryId, file.RepositoryId is null ? file.RepositoryAlias : null, file.Path);
 
     private const int MaxChangedFiles = 200;
     private const int MaxAgentFiles = 40;

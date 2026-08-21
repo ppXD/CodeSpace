@@ -248,6 +248,38 @@ public class RoomProjectorFlowTests
     }
 
     [Fact]
+    public async Task A_multi_repo_turn_keeps_same_path_files_distinct_and_carries_exact_identity_to_every_click_surface()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Multi-repo files");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Edit both READMEs", resultSummary: "Done.");
+        var webId = Guid.NewGuid();
+        var apiId = Guid.NewGuid();
+        var agentRunId = await SeedMultiRepoSpawnDecisionAsync(teamId, run,
+            new RepositoryRunResult { RepositoryId = webId, Alias = "web", ChangedFiles = new[] { "README.md" } },
+            new RepositoryRunResult { RepositoryId = apiId, Alias = "api", ChangedFiles = new[] { "README.md" } });
+
+        var turn = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
+        var files = turn.Blocks.OfType<StatBlock>().Single(block => block.Kind == "files");
+        var fileJson = JsonSerializer.SerializeToElement(files.Items, AgentJson.Options);
+
+        files.Items.Count.ShouldBe(2, "repo-relative path alone is not a change identity — web/README.md and api/README.md are two files");
+        fileJson.EnumerateArray().Select(item => item.GetProperty("file").GetProperty("repositoryAlias").GetString()).ShouldBe(new[] { "api", "web" }, ignoreOrder: true);
+        fileJson.EnumerateArray().ShouldAllBe(item => item.GetProperty("file").GetProperty("agentRunId").GetGuid() == agentRunId);
+
+        var card = turn.Blocks.OfType<AgentGroupBlock>().Single().Agents.ShouldHaveSingleItem();
+        var cardJson = JsonSerializer.SerializeToElement(card, AgentJson.Options);
+        cardJson.GetProperty("changedFileIdentities").GetArrayLength().ShouldBe(2, "the agent terminal's Files tab needs the same repo identity as the global Files row");
+        cardJson.GetProperty("changedFileIdentities").EnumerateArray().Select(item => item.GetProperty("repositoryAlias").GetString()).ShouldBe(new[] { "api", "web" }, ignoreOrder: true);
+
+        var attachments = turn.Blocks.OfType<FinalAnswerBlock>().Single().Attachments.Where(attachment => attachment.Kind == AnswerAttachmentKind.FileLink).ToList();
+        var attachmentJson = JsonSerializer.SerializeToElement(attachments, AgentJson.Options);
+        attachmentJson.GetArrayLength().ShouldBe(2);
+        attachmentJson.EnumerateArray().Select(item => item.GetProperty("file").GetProperty("repositoryAlias").GetString()).ShouldBe(new[] { "api", "web" }, ignoreOrder: true);
+        attachmentJson.EnumerateArray().ShouldAllBe(item => item.GetProperty("file").GetProperty("agentRunId").GetGuid() == agentRunId);
+    }
+
+    [Fact]
     public async Task A_reran_turn_surfaces_its_attempt_timeline_oldest_to_newest()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -699,6 +731,42 @@ public class RoomProjectorFlowTests
             });
 
         await db.SaveChangesAsync();
+    }
+
+    private async Task<Guid> SeedMultiRepoSpawnDecisionAsync(Guid teamId, Guid runId, params RepositoryRunResult[] repositories)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var agentRunId = Guid.NewGuid();
+        var primary = repositories[0];
+
+        var result = new SupervisorAgentResult
+        {
+            AgentRunId = agentRunId,
+            Status = "Succeeded",
+            ChangedFiles = primary.ChangedFiles,
+            Summary = "Edited both repositories",
+            RepositoryResults = repositories,
+        };
+        db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId,
+            DecisionKind = SupervisorDecisionKinds.Spawn, IdempotencyKey = $"spawn:{Guid.NewGuid():N}", InputHash = new string('0', 64),
+            Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = "{}",
+            OutcomeJson = JsonSerializer.Serialize(new { agentCount = 1, agentRunIds = new[] { agentRunId }, agentResults = new[] { result } }, AgentJson.Options),
+            CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+        db.AgentRun.Add(new AgentRun
+        {
+            Id = agentRunId, TeamId = teamId, WorkflowRunId = runId, NodeId = "sup", IterationKey = "sup",
+            Harness = "codex-cli", Status = AgentRunStatus.Succeeded, TaskJson = "{}",
+            CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        await db.SaveChangesAsync();
+        return agentRunId;
     }
 
     [Fact]

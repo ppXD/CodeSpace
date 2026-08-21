@@ -130,8 +130,17 @@ export interface ExecutionMapStep {
 
 export interface StatItem {
   text: string;
+  file?: RoomFileIdentity | null;
   detail?: string | null;
   tone?: NarrativeTone | null;
+}
+
+/** Stable identity of one changed file; repo-relative path alone is ambiguous in a multi-repository run. */
+export interface RoomFileIdentity {
+  path: string;
+  agentRunId?: string | null;
+  repositoryId?: string | null;
+  repositoryAlias?: string | null;
 }
 
 /// One agent in a group — `agentRunId` is enough to drive the live terminal (it self-polls).
@@ -153,6 +162,8 @@ export interface RoomAgentCard {
   /// This agent's OWN changed-file paths (bounded) — per-agent attribution so the UI shows WHICH agent produced a file
   /// (open the agent → preview its exact version). Empty for an agent that changed nothing.
   changedFiles?: string[] | null;
+  /// Exact repository + producing-attempt identities behind `changedFiles`.
+  changedFileIdentities?: RoomFileIdentity[] | null;
   /// Tool calls the agent made — for the card meta "3 files · 6 tool calls · 41s". Null when unknown.
   toolCount?: number | null;
   /// Wall-clock for the agent — final once terminal, else live elapsed. Null before it starts.
@@ -263,6 +274,8 @@ export interface AnswerAttachment {
   agentRunId?: string | null;
   /// For a file: a short label of the producing agent (its role / subtask) — the "· from <agent>" provenance cue.
   producer?: string | null;
+  /// Exact repository + producing-attempt identity for a file attachment.
+  file?: RoomFileIdentity | null;
 }
 /// The turn's rich final result — closing text + typed attachments (files / PR / images), rendered distinctly.
 export interface FinalAnswerBlock extends RoomBlockBase {
@@ -322,6 +335,7 @@ export type RoomBlock =
 /// (a notice + optional source link). Mirrors backend `RoomFilePreview`.
 export interface RoomFilePreview {
   path: string;
+  identity?: RoomFileIdentity | null;
   kind: "text" | "diff" | "binary" | "unavailable";
   changeKind?: string | null;
   text?: string | null;
@@ -329,7 +343,7 @@ export interface RoomFilePreview {
   truncated: boolean;
   sourceUrl?: string | null;
   note?: string | null;
-  unavailableReason?: "NotInChangeSet" | "MetadataMissing" | "PhysicalObjectMissing" | "IntegrityFailure" | "BackendUnavailable" | "AccessDenied" | "ReconstructionUnavailable" | null;
+  unavailableReason?: "NotInChangeSet" | "AmbiguousRepository" | "MetadataMissing" | "PhysicalObjectMissing" | "IntegrityFailure" | "BackendUnavailable" | "AccessDenied" | "ReconstructionUnavailable" | null;
 }
 
 /// One session as a backend-authored transcript. Mirrors backend `RoomView`.
@@ -513,6 +527,15 @@ export interface JournalView {
 
 // ─── Client (mirrors src/api/workflows.ts — fetchJson, auto JWT + X-Team-Id) ───
 
+/** Build the exact file-preview URL. Optional coordinates preserve legacy path-only callers while exact rows stay repo-bound. */
+export function roomFileUrl(runId: string, file: RoomFileIdentity): string {
+  const query = new URLSearchParams({ path: file.path });
+  if (file.agentRunId) query.set("agentRunId", file.agentRunId);
+  if (file.repositoryId) query.set("repositoryId", file.repositoryId);
+  if (file.repositoryAlias) query.set("repositoryAlias", file.repositoryAlias);
+  return `/api/sessions/by-run/${runId}/room/file?${query.toString()}`;
+}
+
 export const sessionsApi = {
   /// The team's sessions, most-recently-active first, keyset-paginated.
   listTeamSessions: (cursor?: string, limit = 30) =>
@@ -556,12 +579,11 @@ export const sessionsApi = {
   getSessionJournal: (sessionId: string, focusRunId?: string) =>
     fetchJson<JournalView>(`/api/sessions/${sessionId}/journal${focusRunId ? `?focusRunId=${encodeURIComponent(focusRunId)}` : ""}`),
 
-  /// A generic preview of one file a run's turn produced, keyed by repo-relative path. Pass `agentRunId` to scope to one
-  /// agent's version (per-agent attribution). Null when the run is foreign / missing (404).
-  getRoomFile: async (runId: string, path: string, agentRunId?: string): Promise<RoomFilePreview | null> => {
+  /// A generic preview of one file a run's turn produced, keyed by its full repository + attempt identity. A path-only
+  /// legacy identity remains supported only when the backend can resolve it unambiguously.
+  getRoomFile: async (runId: string, file: RoomFileIdentity): Promise<RoomFilePreview | null> => {
     try {
-      const scope = agentRunId ? `&agentRunId=${encodeURIComponent(agentRunId)}` : "";
-      return await fetchJson<RoomFilePreview>(`/api/sessions/by-run/${runId}/room/file?path=${encodeURIComponent(path)}${scope}`);
+      return await fetchJson<RoomFilePreview>(roomFileUrl(runId, file));
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) return null;
       throw e;

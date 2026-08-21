@@ -200,7 +200,9 @@ public static class RoomNarrative
             blocks.Add(fanout);
         }
 
-        if (FilesStat(idPrefix, seq, facts, FileProducers(facts, agentById)) is { } files) blocks.Add(files);
+        var fileProducers = FileProducers(facts, agentById);
+
+        if (FilesStat(idPrefix, seq, facts, fileProducers, agentById) is { } files) blocks.Add(files);
         if (ToolsStat(idPrefix, seq, facts) is { } tools) blocks.Add(tools);
 
         if (DeliveryFrom(idPrefix, seq, facts) is { } delivery) blocks.Add(delivery);
@@ -213,7 +215,7 @@ public static class RoomNarrative
 
         // The green "RESULT" card is a SUCCESS artifact — only a succeeded run delivers an answer. A failed / cancelled
         // run's outcome is the error diagnostic above, never a green Result echoing the failure text.
-        if (status == WorkflowRunStatus.Success && facts.FinalAnswer is { } fa) blocks.Add(FinalAnswerFrom(idPrefix, seq, fa, FileProducers(facts, agentById)));
+        if (status == WorkflowRunStatus.Success && facts.FinalAnswer is { } fa) blocks.Add(FinalAnswerFrom(idPrefix, seq, fa, fileProducers, agentById));
 
         if (IsActive(status) && LiveActivity(idPrefix, seq, facts) is { } live) blocks.Add(live);
 
@@ -288,24 +290,27 @@ public static class RoomNarrative
         facts.RetrySteps.Where(s => s.AgentRunId is not null).Select(s => s.AgentRunId!.Value).ToHashSet();
 
     /// <summary>The rich final answer — the closing text + typed attachments (files / PR / images), each rendered distinctly.</summary>
-    private static FinalAnswerBlock FinalAnswerFrom(string idPrefix, long seq, RoomFinalAnswer fa, IReadOnlyDictionary<string, (Guid AgentRunId, string Label)> producers) => new()
+    private static FinalAnswerBlock FinalAnswerFrom(string idPrefix, long seq, RoomFinalAnswer fa, IReadOnlyDictionary<string, (Guid AgentRunId, string Label)> producers, IReadOnlyDictionary<Guid, PhaseAgentRef> agentById) => new()
     {
         Id = $"{idPrefix}:final", Seq = seq,
         Text = fa.Text,
-        Attachments = fa.Attachments.Select(a => Attach(a, producers)).ToList(),
+        Attachments = fa.Attachments.Select(a => Attach(a, producers, agentById)).ToList(),
         Degraded = fa.Degraded,
     };
 
     /// <summary>Map a fact attachment to the DTO, attributing a FILE to its producing agent (so the RESULT never presents an intermediate agent's file as the final deliverable without saying whose it is).</summary>
-    private static AnswerAttachment Attach(RoomAttachment a, IReadOnlyDictionary<string, (Guid AgentRunId, string Label)> producers)
+    private static AnswerAttachment Attach(RoomAttachment a, IReadOnlyDictionary<string, (Guid AgentRunId, string Label)> producers, IReadOnlyDictionary<Guid, PhaseAgentRef> agentById)
     {
-        var producer = a.Kind == AnswerAttachmentKind.FileLink && producers.TryGetValue(a.Label, out var p) ? p : ((Guid, string)?)null;
+        var producer = a.File?.AgentRunId is { } exactAgentRunId
+            ? (exactAgentRunId, agentById.TryGetValue(exactAgentRunId, out var exactAgent) ? CardLabel(exactAgent) : "an agent")
+            : a.Kind == AnswerAttachmentKind.FileLink && producers.TryGetValue(a.Label, out var p) ? p : ((Guid, string)?)null;
 
         return new AnswerAttachment
         {
             Kind = a.Kind, Label = a.Label, Url = a.Url, PreviewUrl = a.PreviewUrl, DownloadUrl = a.DownloadUrl,
             AgentRunId = producer?.Item1,
             Producer = producer?.Item2,
+            File = a.File,
         };
     }
 
@@ -411,8 +416,28 @@ public static class RoomNarrative
     // ─── stat rows (label · detail, design vocabulary) ──────────────────────────────
 
     /// <summary>The "Files changed" row. Each path is attributed to its producing agent ("from {label}") via the SAME newest-accepted-writer-wins map the RESULT card uses — so when several agents (across waves) wrote one path, the row names whose version is the FINAL one. An un-attributed path (no per-agent entry — e.g. a supervisor-direct edit, or beyond the per-agent file cap) carries no attribution.</summary>
-    private static StatBlock? FilesStat(string idPrefix, long seq, RoomTurnFacts f, IReadOnlyDictionary<string, (Guid AgentRunId, string Label)> producers) =>
-        f.ChangedFiles.Count == 0 ? null : new StatBlock { Id = $"{idPrefix}:stat:files", Seq = seq, Kind = "files", Label = "Files changed", Detail = FilesDetail(f.Additions, f.Deletions, f.ChangedFiles.Count), Items = f.ChangedFiles.Select(p => new StatItem { Text = p, Detail = producers.TryGetValue(p, out var pr) ? $"from {pr.Label}" : null }).ToList() };
+    private static StatBlock? FilesStat(string idPrefix, long seq, RoomTurnFacts f, IReadOnlyDictionary<string, (Guid AgentRunId, string Label)> producers, IReadOnlyDictionary<Guid, PhaseAgentRef> agentById)
+    {
+        var files = f.ChangedFileIdentities.Count > 0
+            ? f.ChangedFileIdentities
+            : f.ChangedFiles.Select(path => new RoomFileIdentity { Path = path }).ToList();
+
+        if (files.Count == 0) return null;
+
+        return new StatBlock
+        {
+            Id = $"{idPrefix}:stat:files", Seq = seq, Kind = "files", Label = "Files changed", Detail = FilesDetail(f.Additions, f.Deletions, files.Count),
+            Items = files.Select(file => new StatItem { Text = file.Path, File = file, Detail = FileProducer(file, producers, agentById) }).ToList(),
+        };
+    }
+
+    private static string? FileProducer(RoomFileIdentity file, IReadOnlyDictionary<string, (Guid AgentRunId, string Label)> producers, IReadOnlyDictionary<Guid, PhaseAgentRef> agentById)
+    {
+        if (file.AgentRunId is { } agentRunId)
+            return $"from {(agentById.TryGetValue(agentRunId, out var agent) ? CardLabel(agent) : "an agent")}";
+
+        return producers.TryGetValue(file.Path, out var producer) ? $"from {producer.Label}" : null;
+    }
 
     /// <summary>The tools row — collapsed to just the total ("129 calls"); expanding reveals the per-tool breakdown (Read · 40, WebSearch · 15, …), one item per real tool NAME. A summary, not the raw per-call stream.</summary>
     private static StatBlock? ToolsStat(string idPrefix, long seq, RoomTurnFacts f) =>
@@ -466,6 +491,11 @@ public static class RoomNarrative
         CostUsd = a.CostUsd,
         FilesChanged = a.FilesChanged,
         ChangedFiles = facts.AgentFiles.TryGetValue(a.AgentRunId, out var files) ? files : Array.Empty<string>(),
+        ChangedFileIdentities = facts.AgentFileIdentities.TryGetValue(a.AgentRunId, out var identities)
+            ? identities
+            : facts.AgentFiles.TryGetValue(a.AgentRunId, out var legacyFiles)
+                ? legacyFiles.Select(path => new RoomFileIdentity { Path = path, AgentRunId = a.AgentRunId }).ToList()
+                : Array.Empty<RoomFileIdentity>(),
         ToolCount = a.ToolCount,
         DurationMs = a.DurationMs,
         Summary = facts.AgentSummaries.TryGetValue(a.AgentRunId, out var s) ? s : null,

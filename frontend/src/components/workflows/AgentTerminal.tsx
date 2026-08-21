@@ -2,6 +2,7 @@ import { useContext, useState, type ReactNode } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { AgentRunEventDto } from "@/api/agents";
+import type { RoomFileIdentity } from "@/api/sessions";
 import type { CellAttempt, NodeStatus, PhaseAgentRef } from "@/api/workflows";
 import { useAgentRun, useAgentRunEvents } from "@/hooks/use-agents";
 import { useCellAttempts } from "@/hooks/use-workflows";
@@ -21,7 +22,7 @@ import { formatDuration, formatTokens, formatUsd, tileState } from "./runActivit
  * STILL read-only — there is no input; the window only reveals scrollback / tools, never a real shell. The full raw
  * ledger lives in the Trace tab.
  */
-export function AgentTerminal({ agent, onClose, rerun, onOpenFile }: { agent: PhaseAgentRef; onClose?: () => void; rerun?: ReactNode; onOpenFile?: (path: string) => void }) {
+export function AgentTerminal({ agent, onClose, rerun, onOpenFile }: { agent: PhaseAgentRef; onClose?: () => void; rerun?: ReactNode; onOpenFile?: (file: RoomFileIdentity) => void }) {
   const [tab, setTab] = useState<"output" | "logs" | "tools" | "files">("output");
 
   // Per-cell rerun history: every attempt that ran THIS (node, branch) cell. Picking an earlier one shows that
@@ -46,7 +47,9 @@ export function AgentTerminal({ agent, onClose, rerun, onOpenFile }: { agent: Ph
 
   // This agent's own changed files (per-agent attribution) — a Files tab, shown only when it produced any. The
   // assigned-subtask strip is suppressed when it merely repeats the title (the terminal bar already leads with it).
-  const files = viewingLatest ? agent.changedFiles ?? [] : [];
+  const files: RoomFileIdentity[] = viewingLatest
+    ? agent.changedFileIdentities ?? (agent.changedFiles ?? []).map((path) => ({ path, agentRunId: agent.agentRunId }))
+    : [];
   const showSubtask = !!agent.assignedSubtask && agent.assignedSubtask !== name;
   // The bar leads (right of the lights) with the READABLE title — the assigned subtask when it adds over the name (the
   // name / id is already in the drawer header, so the bar needn't repeat it), else the name. The authored role rides as a
@@ -195,16 +198,16 @@ function codexLine(e: AgentRunEventDto): string | null {
 }
 
 /** The Files tab — the files THIS agent changed. Each is openable (a preview) when the host provides `onOpenFile`, else a plain listing. */
-function AgentFiles({ files, onOpenFile }: { files: string[]; onOpenFile?: (path: string) => void }) {
+function AgentFiles({ files, onOpenFile }: { files: RoomFileIdentity[]; onOpenFile?: (file: RoomFileIdentity) => void }) {
   if (files.length === 0) return <div className="agent-terminal-empty">No files changed.</div>;
 
   return (
     <ol className="agent-terminal-files">
-      {files.map((p) => (
-        <li key={p}>
+      {files.map((file) => (
+        <li key={`${file.repositoryId ?? file.repositoryAlias ?? ""}:${file.path}:${file.agentRunId ?? ""}`}>
           {onOpenFile
-            ? <button type="button" className="agent-terminal-file" onClick={() => onOpenFile(p)}><Ic.File size={12} aria-hidden="true" /><span>{p}</span></button>
-            : <span className="agent-terminal-file" data-static="true"><Ic.File size={12} aria-hidden="true" /><span>{p}</span></span>}
+            ? <button type="button" className="agent-terminal-file" onClick={() => onOpenFile(file)}><Ic.File size={12} aria-hidden="true" /><span>{file.repositoryAlias ? `${file.repositoryAlias}/${file.path}` : file.path}</span></button>
+            : <span className="agent-terminal-file" data-static="true"><Ic.File size={12} aria-hidden="true" /><span>{file.repositoryAlias ? `${file.repositoryAlias}/${file.path}` : file.path}</span></span>}
         </li>
       ))}
     </ol>
