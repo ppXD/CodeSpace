@@ -9,8 +9,8 @@ namespace CodeSpace.Core.Services.Workflows.Lifecycle;
 /// <c>log</c> records to make their internal API calls visible in the run-detail UI.
 ///
 /// All methods are fire-and-forget from the caller's perspective: each call inserts one
-/// record + SaveChanges. Sequence is assigned by the DB (BIGSERIAL); the returned id is the
-/// generated record id, useful as a correlation parent for nested events.
+/// record + SaveChanges. Sequence is assigned by the DB behind a run-scoped transaction gate;
+/// the returned id is the generated record id, useful as a correlation parent for nested events.
 ///
 /// Stateless service; thread-safe per scoped DbContext.
 /// </summary>

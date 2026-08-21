@@ -1,5 +1,7 @@
 using System.Text.Json;
 using Autofac;
+using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Tasks.Trace;
 using CodeSpace.Core.Services.Workflows.Lifecycle;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -7,6 +9,7 @@ using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Commands.Workflows;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Tasks.Trace;
+using Npgsql;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows;
@@ -76,6 +79,63 @@ public class RunRecordStreamerFlowTests
     }
 
     [Fact]
+    public async Task Run_scoped_sequence_is_assigned_after_the_commit_gate_so_a_late_transaction_cannot_land_behind_the_live_cursor()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId, userId);
+        var baseline = await ReadRunCursorAsync(runId);
+
+        await using var firstConnection = new NpgsqlConnection(_fixture.ConnectionString);
+        await firstConnection.OpenAsync();
+        await using var firstTransaction = await firstConnection.BeginTransactionAsync();
+        var firstSequence = await InsertRecordAsync(firstConnection, firstTransaction, runId, "test.first-transaction");
+
+        var applicationName = $"run-record-cursor-{Guid.NewGuid():N}";
+        var secondInsert = InsertRecordAndCommitAsync(runId, WorkflowRunRecordTypes.RunCompleted, applicationName);
+        var secondWaitsForFirstCommit = await WaitForLockAsync(applicationName, secondInsert);
+        if (!secondWaitsForFirstCommit)
+        {
+            await firstTransaction.RollbackAsync();
+            await secondInsert;
+        }
+
+        secondWaitsForFirstCommit.ShouldBeTrue(
+            "the production BEFORE INSERT trigger must retain the run gate from sequence assignment through transaction commit");
+
+        await firstTransaction.CommitAsync();
+        var secondSequence = await secondInsert.WaitAsync(TimeSpan.FromSeconds(10));
+        firstSequence.ShouldBeLessThan(secondSequence);
+
+        var streamed = await TailAsync(teamId, userId, runId, baseline);
+        streamed.Select(x => x.Sequence).ShouldBe(new[] { firstSequence, secondSequence });
+        streamed.Select(x => x.RecordType).ShouldBe(new[] { "test.first-transaction", WorkflowRunRecordTypes.RunCompleted });
+    }
+
+    [Fact]
+    public async Task Sequence_is_database_owned_even_when_an_EF_caller_supplies_a_value()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId, userId);
+        var record = new WorkflowRunRecord
+        {
+            Id = Guid.NewGuid(),
+            RunId = runId,
+            Sequence = long.MaxValue,
+            RecordType = "test.explicit-sequence",
+            IterationKey = string.Empty,
+            PayloadJson = "{}",
+        };
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.WorkflowRunRecord.Add(record);
+        await db.SaveChangesAsync();
+
+        record.Sequence.ShouldNotBe(long.MaxValue, "the tracked entity must receive the trigger-assigned cursor rather than retaining a caller-supplied value");
+        record.Sequence.ShouldBeGreaterThan(0);
+    }
+
+    [Fact]
     public async Task A_foreign_team_tails_nothing()
     {
         var (teamA, userA) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -98,6 +158,61 @@ public class RunRecordStreamerFlowTests
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private static JsonElement Payload(object value) => JsonSerializer.SerializeToElement(value);
+
+    private async Task<long> InsertRecordAndCommitAsync(Guid runId, string recordType, string applicationName)
+    {
+        var connectionString = new NpgsqlConnectionStringBuilder(_fixture.ConnectionString) { ApplicationName = applicationName }.ConnectionString;
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        var sequence = await InsertRecordAsync(connection, transaction, runId, recordType);
+        await transaction.CommitAsync();
+        return sequence;
+    }
+
+    private static async Task<long> InsertRecordAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId, string recordType)
+    {
+        await using var command = new NpgsqlCommand("""
+            INSERT INTO workflow_run_record (id, run_id, record_type, iteration_key, payload_json)
+            VALUES (gen_random_uuid(), @run_id, @record_type, '', '{}'::jsonb)
+            RETURNING sequence
+            """, connection, transaction);
+        command.Parameters.AddWithValue("run_id", runId);
+        command.Parameters.AddWithValue("record_type", recordType);
+        return (long)(await command.ExecuteScalarAsync())!;
+    }
+
+    private async Task<long> ReadRunCursorAsync(Guid runId)
+    {
+        await using var connection = new NpgsqlConnection(_fixture.ConnectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand("SELECT COALESCE(MAX(sequence), 0) FROM workflow_run_record WHERE run_id = @run_id", connection);
+        command.Parameters.AddWithValue("run_id", runId);
+        return (long)(await command.ExecuteScalarAsync())!;
+    }
+
+    private async Task<bool> WaitForLockAsync(string applicationName, Task<long> insert)
+    {
+        await using var connection = new NpgsqlConnection(_fixture.ConnectionString);
+        await connection.OpenAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        while (!timeout.IsCancellationRequested)
+        {
+            if (insert.IsCompleted) return false;
+            await using var command = new NpgsqlCommand("""
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_stat_activity
+                    WHERE application_name = @application_name AND wait_event_type = 'Lock'
+                )
+                """, connection);
+            command.Parameters.AddWithValue("application_name", applicationName);
+            if ((bool)(await command.ExecuteScalarAsync(timeout.Token))!) return true;
+            await Task.Delay(20, timeout.Token);
+        }
+
+        return false;
+    }
 
     private async Task<Guid> SeedRunAsync(Guid teamId, Guid userId)
     {

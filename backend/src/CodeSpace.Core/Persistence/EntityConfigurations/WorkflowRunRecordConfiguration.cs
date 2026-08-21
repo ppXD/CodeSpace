@@ -1,5 +1,6 @@
 using CodeSpace.Core.Persistence.Entities;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 
 namespace CodeSpace.Core.Persistence.EntityConfigurations;
@@ -11,9 +12,10 @@ public class WorkflowRunRecordConfiguration : IEntityTypeConfiguration<WorkflowR
         builder.HasKey(r => r.Id);
         // BIGSERIAL on the DB side; EF treats it as a value-generated-on-add column so the
         // SaveChanges round-trip returns the actual sequence number.
-        builder.Property(r => r.Sequence)
+        var sequence = builder.Property(r => r.Sequence)
             .HasColumnName("sequence")
             .ValueGeneratedOnAdd();
+        sequence.Metadata.SetBeforeSaveBehavior(PropertySaveBehavior.Ignore);
 
         builder.Property(r => r.PayloadJson).HasColumnName("payload_json").HasColumnType("jsonb");
 
