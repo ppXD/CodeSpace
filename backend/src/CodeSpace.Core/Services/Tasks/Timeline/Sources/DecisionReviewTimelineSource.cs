@@ -17,9 +17,9 @@ namespace CodeSpace.Core.Services.Tasks.Timeline.Sources;
 /// </summary>
 public sealed class DecisionReviewTimelineSource : IRunTimelineSource, IScopedDependency
 {
-    private readonly ISupervisorDecisionLog _decisions;
+    private readonly ISupervisorDecisionObservationBundle _decisions;
 
-    public DecisionReviewTimelineSource(ISupervisorDecisionLog decisions) { _decisions = decisions; }
+    public DecisionReviewTimelineSource(ISupervisorDecisionObservationBundle decisions) { _decisions = decisions; }
 
     public string SourceKey => ReviewVerdictTimelineMap.Key;
 

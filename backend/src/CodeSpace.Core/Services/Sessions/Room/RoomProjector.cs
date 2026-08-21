@@ -36,7 +36,7 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
     private readonly IRunPhaseProjector _phases;
     private readonly IDecisionQueueService _decisions;
     private readonly IRunActionCapabilityResolver _actions;
-    private readonly ISupervisorDecisionLog _decisionLog;
+    private readonly ISupervisorDecisionObservationBundle _decisionObservations;
     private readonly IWorkPlanChecklistService _checklists;
     private readonly IPublishManifestStore _manifests;
     private readonly ISupervisorPublishedBranchResolver _publishedBranches;
@@ -44,13 +44,13 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
     private readonly CodeSpaceDbContext _db;
     private readonly ISessionTurnCache _cache;
 
-    public RoomProjector(ISessionReadService sessions, IRunPhaseProjector phases, IDecisionQueueService decisions, IRunActionCapabilityResolver actions, ISupervisorDecisionLog decisionLog, IWorkPlanChecklistService checklists, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, IArtifactRangeReader artifacts, CodeSpaceDbContext db, ISessionTurnCache cache)
+    public RoomProjector(ISessionReadService sessions, IRunPhaseProjector phases, IDecisionQueueService decisions, IRunActionCapabilityResolver actions, ISupervisorDecisionObservationBundle decisionObservations, IWorkPlanChecklistService checklists, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, IArtifactRangeReader artifacts, CodeSpaceDbContext db, ISessionTurnCache cache)
     {
         _sessions = sessions;
         _phases = phases;
         _decisions = decisions;
         _actions = actions;
-        _decisionLog = decisionLog;
+        _decisionObservations = decisionObservations;
         _checklists = checklists;
         _manifests = manifests;
         _publishedBranches = publishedBranches;
@@ -176,7 +176,7 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
     {
         if (!WorkflowRunState.IsTerminal(status)) return null;
 
-        var priorDecisions = await _decisionLog.GetTerminalDecisionsAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+        var priorDecisions = await ReadTerminalDecisionsAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
 
         var branches = await _publishedBranches.ResolveAsync(runId, teamId, priorDecisions, primaryRepositoryId: null, cancellationToken).ConfigureAwait(false);
 
@@ -252,7 +252,7 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// </summary>
     private async Task<RoomTurnFacts> GatherFactsAsync(Guid runId, Guid teamId, IReadOnlyList<RunPhase> phases, Messages.Enums.WorkflowRunStatus status, string? error, CancellationToken cancellationToken)
     {
-        var decisions = await _decisionLog.GetForRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+        var decisions = await _decisionObservations.GetForRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
 
         // The supervisor rounds, segmented on each Plan (a re-plan opens a new round) — the render source (never lumped).
         var rounds = RoomRounds.Segment(decisions);
@@ -525,6 +525,12 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         Error = decision.Error,
     };
 
+    private async Task<IReadOnlyList<SupervisorPriorDecision>> ReadTerminalDecisionsAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var decisions = await _decisionObservations.GetForRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+        return decisions.Where(decision => SupervisorDecisionStateMachine.IsTerminal(decision.Status)).Select(ToPriorDecision).ToList();
+    }
+
     /// <summary>Project one compact result into clickable file identities. Per-repository results are authoritative whenever present; top-level paths are the legacy/single-repo fallback only.</summary>
     private static IEnumerable<RoomFileIdentity> FileIdentities(SupervisorAgentResult result)
     {
@@ -664,7 +670,7 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
 
         if (opened is null) return null;
 
-        var priorDecisions = await _decisionLog.GetTerminalDecisionsAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+        var priorDecisions = await ReadTerminalDecisionsAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
         var branches = await _publishedBranches.ResolveAsync(runId, teamId, priorDecisions, primaryRepositoryId: null, cancellationToken).ConfigureAwait(false);
         var branch = branches.FirstOrDefault(b => b.Alias == opened.RepositoryAlias);
 

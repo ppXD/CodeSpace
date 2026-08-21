@@ -20,9 +20,9 @@ namespace CodeSpace.Core.Services.Sessions.Journal.FactsSources;
 /// </summary>
 public sealed class SpawnFrontierFactsSource : IJournalFactsSource
 {
-    private readonly ISupervisorDecisionLog _decisions;
+    private readonly ISupervisorDecisionObservationBundle _decisions;
 
-    public SpawnFrontierFactsSource(ISupervisorDecisionLog decisions)
+    public SpawnFrontierFactsSource(ISupervisorDecisionObservationBundle decisions)
     {
         _decisions = decisions;
     }

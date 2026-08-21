@@ -12,7 +12,7 @@ using Microsoft.EntityFrameworkCore;
 namespace CodeSpace.Core.Services.Tasks.Phases.Sources.Supervisor;
 
 /// <summary>
-/// The SUPERVISOR-LEDGER phase source — it reuses <see cref="ISupervisorDecisionLog.GetForRunAsync"/> (team-scoped,
+/// The SUPERVISOR-LEDGER phase source — it reuses <see cref="ISupervisorDecisionObservationBundle.GetForRunAsync"/> (team-scoped,
 /// ordered by Sequence) and projects ONE <see cref="RunPhase"/> per decision. For spawn / retry decisions the Agents
 /// are the REAL <c>AgentRun</c> rows the outcome staged (read team-scoped by id, folding the GROUND-TRUTH status —
 /// mirroring <c>SupervisorScorecardService</c>, never the decider's self-report). For ask_human the Summary is the
@@ -27,12 +27,12 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
     /// <summary>High base offset so ledger phases sort AFTER the structural node phases (which use small monotonic indices). Each decision then orders by its per-run Sequence.</summary>
     public const int OrderBase = 1_000_000;
 
-    private readonly ISupervisorDecisionLog _ledger;
+    private readonly ISupervisorDecisionObservationBundle _observations;
     private readonly CodeSpaceDbContext _db;
 
-    public SupervisorPhaseSource(ISupervisorDecisionLog ledger, CodeSpaceDbContext db)
+    public SupervisorPhaseSource(ISupervisorDecisionObservationBundle observations, CodeSpaceDbContext db)
     {
-        _ledger = ledger;
+        _observations = observations;
         _db = db;
     }
 
@@ -40,7 +40,7 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
 
     public async Task<IReadOnlyList<RunPhase>> ContributeAsync(RunPhaseContext context, CancellationToken cancellationToken)
     {
-        var decisions = await _ledger.GetForRunAsync(context.RunId, context.TeamId, cancellationToken).ConfigureAwait(false);
+        var decisions = await _observations.GetForRunAsync(context.RunId, context.TeamId, cancellationToken).ConfigureAwait(false);
 
         if (decisions.Count == 0) return Array.Empty<RunPhase>();
 

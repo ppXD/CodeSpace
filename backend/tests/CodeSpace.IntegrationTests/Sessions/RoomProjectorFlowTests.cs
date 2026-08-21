@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
@@ -17,6 +18,7 @@ using CodeSpace.Messages.Dtos.Sessions.Room;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Plans;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Sessions;
@@ -38,6 +40,31 @@ public class RoomProjectorFlowTests
     private readonly PostgresFixture _fixture;
 
     public RoomProjectorFlowTests(PostgresFixture fixture) { _fixture = fixture; }
+
+    [Fact]
+    public async Task One_room_request_loads_the_supervisor_observation_tape_once()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "One room tape read");
+        var runId = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Observe it", resultSummary: "done");
+        await SeedPlanDecisionAsync(teamId, runId, "Inspect");
+
+        var recorder = new SupervisorTapeReadRecorder();
+        using var scope = _fixture.BeginScope(builder =>
+        {
+            var options = new DbContextOptionsBuilder<CodeSpaceDbContext>()
+                .UseNpgsql(_fixture.ConnectionString)
+                .UseSnakeCaseNamingConvention()
+                .AddInterceptors(recorder)
+                .Options;
+            builder.RegisterInstance(options).As<DbContextOptions<CodeSpaceDbContext>>().SingleInstance();
+        });
+
+        var room = await scope.Resolve<IRoomProjector>().ProjectByRunAsync(runId, teamId, CancellationToken.None);
+
+        room.ShouldNotBeNull();
+        recorder.Reads.ShouldBe(1, "phase, narrative and publish observations share one exact request-scoped tape");
+    }
 
     [Fact]
     public async Task Projects_every_turn_richly_not_just_the_focused_one()
@@ -1193,5 +1220,27 @@ public class RoomProjectorFlowTests
 
         await db.SaveChangesAsync();
         return repoId;
+    }
+
+    private sealed class SupervisorTapeReadRecorder : DbCommandInterceptor
+    {
+        public int Reads { get; private set; }
+
+        public override InterceptionResult<DbDataReader> ReaderExecuting(DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result)
+        {
+            Record(command);
+            return result;
+        }
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        {
+            Record(command);
+            return ValueTask.FromResult(result);
+        }
+
+        private void Record(DbCommand command)
+        {
+            if (command.CommandText.Contains("supervisor_decision", StringComparison.OrdinalIgnoreCase)) Reads++;
+        }
     }
 }

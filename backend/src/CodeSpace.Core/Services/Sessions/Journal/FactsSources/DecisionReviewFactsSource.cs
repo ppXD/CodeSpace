@@ -13,9 +13,9 @@ namespace CodeSpace.Core.Services.Sessions.Journal.FactsSources;
 /// </summary>
 public sealed class DecisionReviewFactsSource : IJournalFactsSource
 {
-    private readonly ISupervisorDecisionLog _decisions;
+    private readonly ISupervisorDecisionObservationBundle _decisions;
 
-    public DecisionReviewFactsSource(ISupervisorDecisionLog decisions) { _decisions = decisions; }
+    public DecisionReviewFactsSource(ISupervisorDecisionObservationBundle decisions) { _decisions = decisions; }
 
     public async Task<IReadOnlyDictionary<string, JournalStepFacts>> GatherAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
     {

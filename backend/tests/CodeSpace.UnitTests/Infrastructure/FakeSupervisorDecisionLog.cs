@@ -19,7 +19,7 @@ namespace CodeSpace.UnitTests.Infrastructure;
 /// double-terminal) throws <see cref="SupervisorDecisionTransitionException"/> exactly as the real ledger does.
 /// </para>
 /// </summary>
-public sealed class FakeSupervisorDecisionLog : ISupervisorDecisionLog
+public sealed class FakeSupervisorDecisionLog : ISupervisorDecisionLog, ISupervisorDecisionObservationBundle
 {
     public List<SupervisorDecisionRecord> Rows { get; } = new();
     private long _seq;
