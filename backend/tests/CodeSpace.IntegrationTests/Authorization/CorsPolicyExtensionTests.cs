@@ -29,6 +29,7 @@ public class CorsPolicyExtensionTests
 
         policy.ExposedHeaders.ShouldContain(HeaderCurrentTeam.HeaderName);
         foreach (var header in AgentRunLogHttpHeaders.RangeResponseHeaders) policy.ExposedHeaders.ShouldContain(header);
+        foreach (var header in AgentRunEventDataHttpHeaders.RangeResponseHeaders) policy.ExposedHeaders.ShouldContain(header);
     }
 
     private sealed class FakeHostEnvironment : IHostEnvironment
