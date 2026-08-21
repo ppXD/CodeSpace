@@ -87,6 +87,40 @@ public class NodeOutputArtifactOffloadFlowTests
     }
 
     [Fact]
+    public async Task Resume_fails_closed_when_a_required_node_output_artifact_is_missing()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, OffloadDefinition(withGate: true));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: JsonSerializer.Serialize(new { body = LargeBody() }));
+
+        await RunEngineAsync(runId);
+
+        using (var corrupt = _fixture.BeginScope())
+        {
+            var db = corrupt.Resolve<CodeSpaceDbContext>();
+            var emit = await db.WorkflowRunNode.SingleAsync(n => n.RunId == runId && n.NodeId == "emit" && n.IterationKey == "");
+            var missingId = Guid.NewGuid();
+            emit.OutputsJson = JsonSerializer.Serialize(new Dictionary<string, object>
+            {
+                ["body"] = new Dictionary<string, object>
+                {
+                    [NodeOutputArtifacts.RefKey] = new { id = missingId, size_bytes = 32 * 1024, content_type = "application/json" },
+                },
+            });
+            await db.SaveChangesAsync();
+        }
+
+        (await ApproveAsync(runId, teamId, userId)).ShouldBeTrue();
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var failed = await verify.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+        failed.Status.ShouldBe(WorkflowRunStatus.Failure);
+        failed.Error.ShouldContain(nameof(CodeSpace.Core.Services.Workflows.Artifacts.Exceptions.ArtifactContentUnavailableException));
+        failed.OutputsJson.ShouldNotContain(NodeOutputArtifacts.RefKey, Case.Sensitive, "the unresolved pointer must never become downstream terminal output");
+    }
+
+    [Fact]
     public async Task Large_map_container_aggregate_is_offloaded_from_the_ledger_yet_forwarded_in_full()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);

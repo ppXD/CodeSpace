@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
 
 namespace CodeSpace.Core.Services.Workflows.Artifacts;
 
@@ -14,9 +15,11 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts;
 ///
 /// <para>The reference shape is <c>{"$artifact_ref":{"id":"&lt;guid&gt;","size_bytes":N,"content_type":"…"}}</c> —
 /// the <c>$</c>-prefixed key marks it as a pointer (mirroring <c>NodeObservability.PersistArtifactAsync</c>'s
-/// convention) and is vanishingly unlikely to collide with real output data. Resolution is fail-SAFE: a ref whose
-/// artifact is missing / cross-team is left verbatim rather than dropped, so a storage miss never loses the
-/// structure. Offload is idempotent — an already-offloaded ref is passed through, never double-wrapped.</para>
+/// convention) and is vanishingly unlikely to collide with real output data. Display resolution is fail-SAFE: a ref
+/// whose artifact is missing / cross-team is left verbatim rather than dropped, so a storage miss never loses the
+/// structure. Required execution resolution is fail-CLOSED via <see cref="ResolveRequiredAsync"/>, so replay never
+/// feeds the pointer itself to a downstream node. Offload is idempotent — an already-offloaded ref is passed through,
+/// never double-wrapped.</para>
 ///
 /// <para>Offload touches only the LEDGER copy of a node's outputs; the engine keeps the FULL values in the
 /// in-process scope (via MergeNodeOutcome), so a single-pass walk resolves <c>{{nodes.X.outputs.*}}</c> against
@@ -61,6 +64,22 @@ public static class NodeOutputArtifacts
         return result;
     }
 
+    /// <summary>
+    /// Execution/replay counterpart to <see cref="ResolveAsync"/>. Every well-formed reference must produce verified
+    /// JSON bytes; missing metadata, unavailable storage, corrupt bytes, and malformed reference markers raise a typed
+    /// <see cref="ArtifactContentUnavailableException"/> instead of allowing the pointer object into model inputs,
+    /// map branch space, or loop state. Non-reference values pass through byte-for-byte.
+    /// </summary>
+    public static async Task<Dictionary<string, JsonElement>> ResolveRequiredAsync(IArtifactStore store, Guid teamId, IReadOnlyDictionary<string, JsonElement> outputs, CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<string, JsonElement>(outputs.Count);
+
+        foreach (var (key, value) in outputs)
+            result[key] = await ResolveRequiredValueAsync(store, teamId, value, cancellationToken).ConfigureAwait(false);
+
+        return result;
+    }
+
     private static async Task<JsonElement> OffloadValueAsync(IArtifactStore store, Guid teamId, JsonElement value, int thresholdBytes, CancellationToken cancellationToken)
     {
         if (thresholdBytes <= 0 || TryReadRefId(value, out _)) return value;
@@ -87,8 +106,60 @@ public static class NodeOutputArtifacts
         return doc.RootElement.Clone();
     }
 
+    private static async Task<JsonElement> ResolveRequiredValueAsync(IArtifactStore store, Guid teamId, JsonElement value, CancellationToken cancellationToken)
+    {
+        if (!TryReadRefId(value, out var artifactId))
+        {
+            if (HasRefMarker(value)) throw new ArtifactContentUnavailableException(Guid.Empty, ArtifactContentUnavailableKind.IntegrityFailure);
+            return value;
+        }
+
+        try
+        {
+            var artifact = await store.GetBytesAsync(teamId, artifactId, cancellationToken).ConfigureAwait(false);
+            if (artifact is null) throw new ArtifactContentUnavailableException(artifactId, ArtifactContentUnavailableKind.MetadataMissing);
+
+            using var doc = JsonDocument.Parse(artifact.Bytes);
+            return doc.RootElement.Clone();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (ArtifactContentUnavailableException)
+        {
+            throw;
+        }
+        catch (FileNotFoundException ex)
+        {
+            throw new ArtifactContentUnavailableException(artifactId, ArtifactContentUnavailableKind.PhysicalObjectMissing, ex);
+        }
+        catch (DirectoryNotFoundException ex)
+        {
+            throw new ArtifactContentUnavailableException(artifactId, ArtifactContentUnavailableKind.PhysicalObjectMissing, ex);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            throw new ArtifactContentUnavailableException(artifactId, ArtifactContentUnavailableKind.AccessDenied, ex);
+        }
+        catch (JsonException ex)
+        {
+            throw new ArtifactContentUnavailableException(artifactId, ArtifactContentUnavailableKind.IntegrityFailure, ex);
+        }
+        catch (InvalidOperationException ex)
+        {
+            throw new ArtifactContentUnavailableException(artifactId, ArtifactContentUnavailableKind.IntegrityFailure, ex);
+        }
+        catch (IOException ex)
+        {
+            throw new ArtifactContentUnavailableException(artifactId, ArtifactContentUnavailableKind.BackendUnavailable, ex);
+        }
+    }
+
     /// <summary>Whether the value is an offloaded-value reference object.</summary>
     public static bool IsRef(JsonElement value) => TryReadRefId(value, out _);
+
+    private static bool HasRefMarker(JsonElement value) => value.ValueKind == JsonValueKind.Object && value.TryGetProperty(RefKey, out _);
 
     private static JsonElement BuildRef(Guid artifactId, int sizeBytes) =>
         JsonSerializer.SerializeToElement(new Dictionary<string, object>

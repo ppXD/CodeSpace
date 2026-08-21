@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using CodeSpace.Core.Services.Workflows.Artifacts;
+using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Workflows;
@@ -83,6 +84,51 @@ public class NodeOutputArtifactsTests
     }
 
     [Fact]
+    public async Task Resolve_required_rejects_a_missing_artifact_instead_of_returning_a_bare_ref()
+    {
+        var store = new InMemoryArtifactStore();
+        var teamId = Guid.NewGuid();
+        var offloaded = await NodeOutputArtifacts.OffloadLargeAsync(store, teamId, Outputs(("body", JsonString(new string('q', Threshold * 2)))), Threshold, CancellationToken.None);
+        var artifactId = offloaded["body"].GetProperty(NodeOutputArtifacts.RefKey).GetProperty("id").GetGuid();
+
+        var exception = await Should.ThrowAsync<ArtifactContentUnavailableException>(() =>
+            NodeOutputArtifacts.ResolveRequiredAsync(store, Guid.NewGuid(), offloaded, CancellationToken.None));
+
+        exception.ArtifactId.ShouldBe(artifactId);
+        exception.Kind.ShouldBe(ArtifactContentUnavailableKind.MetadataMissing);
+    }
+
+    [Fact]
+    public async Task Resolve_required_keeps_healthy_inline_and_offloaded_values_byte_identical()
+    {
+        var store = new InMemoryArtifactStore();
+        var teamId = Guid.NewGuid();
+        var original = Outputs(("body", JsonString(new string('v', Threshold * 2))), ("meta", JsonRaw("""{ "z": 2, "a": [1, true] }""")));
+        var offloaded = await NodeOutputArtifacts.OffloadLargeAsync(store, teamId, original, Threshold, CancellationToken.None);
+
+        var resolved = await NodeOutputArtifacts.ResolveRequiredAsync(store, teamId, offloaded, CancellationToken.None);
+
+        resolved.Keys.ShouldBe(original.Keys);
+        foreach (var key in original.Keys) resolved[key].GetRawText().ShouldBe(original[key].GetRawText());
+    }
+
+    [Fact]
+    public async Task Resolve_required_rejects_corrupt_json_as_an_integrity_failure()
+    {
+        var store = new InMemoryArtifactStore();
+        var teamId = Guid.NewGuid();
+        var offloaded = await NodeOutputArtifacts.OffloadLargeAsync(store, teamId, Outputs(("body", JsonString(new string('q', Threshold * 2)))), Threshold, CancellationToken.None);
+        var artifactId = offloaded["body"].GetProperty(NodeOutputArtifacts.RefKey).GetProperty("id").GetGuid();
+        store.ReplaceBytes(teamId, artifactId, "not-json"u8.ToArray());
+
+        var exception = await Should.ThrowAsync<ArtifactContentUnavailableException>(() =>
+            NodeOutputArtifacts.ResolveRequiredAsync(store, teamId, offloaded, CancellationToken.None));
+
+        exception.ArtifactId.ShouldBe(artifactId);
+        exception.Kind.ShouldBe(ArtifactContentUnavailableKind.IntegrityFailure);
+    }
+
+    [Fact]
     public async Task Non_positive_threshold_disables_offload()
     {
         var store = new InMemoryArtifactStore();
@@ -108,6 +154,12 @@ public class NodeOutputArtifactsTests
         private readonly ConcurrentDictionary<(Guid Team, Guid Id), (string Sha, byte[] Bytes, string ContentType)> _byId = new();
 
         public int Count => _byId.Count;
+
+        public void ReplaceBytes(Guid teamId, Guid artifactId, byte[] bytes)
+        {
+            var current = _byId[(teamId, artifactId)];
+            _byId[(teamId, artifactId)] = (current.Sha, bytes, current.ContentType);
+        }
 
         public Task<Guid> PutAsync(Guid teamId, ReadOnlyMemory<byte> bytes, string contentType, CancellationToken cancellationToken)
         {

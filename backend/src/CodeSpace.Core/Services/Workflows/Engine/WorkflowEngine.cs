@@ -852,16 +852,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// </summary>
     private async Task<Dictionary<string, JsonElement>> LoadNodeOutputsAsync(string? outputsJson, Guid teamId, CancellationToken cancellationToken)
     {
-        var resolved = await NodeOutputArtifacts.ResolveAsync(_artifactStore, teamId, ParsePayloadObject(outputsJson), cancellationToken).ConfigureAwait(false);
-
-        // A ref that survives resolution (its artifact is missing / cross-team) is a corruption signal, not a
-        // benign no-op: ResolveAsync fails SAFE by keeping the ref rather than dropping the value, but feeding a
-        // bare ref object into replay scope silently diverges from the first-pass value. Surface it loudly.
-        foreach (var (key, value) in resolved)
-            if (NodeOutputArtifacts.IsRef(value))
-                _logger.LogWarning("Replay: node output '{Key}' is an artifact ref that did not resolve (missing or cross-team) — the bare ref is fed downstream; replay determinism for this value is broken", key);
-
-        return resolved;
+        return await NodeOutputArtifacts.ResolveRequiredAsync(_artifactStore, teamId, ParsePayloadObject(outputsJson), cancellationToken).ConfigureAwait(false);
     }
 
     private async Task StartRunAsync(WorkflowRun run, CancellationToken cancellationToken)
