@@ -10,10 +10,11 @@ namespace CodeSpace.Messages.Dtos.Workflows.Planning;
 /// — <see cref="Decision"/> drives termination (<c>done</c>/<c>abort</c> stop the loop) and
 /// <see cref="ReworkSubtasks"/> re-seeds the next round's <c>flow.map</c> fan-out.
 ///
-/// <para>The schema this round-trips from lives next to the planner as
-/// <c>CoordinatorSchema.ResponseSchema</c> (pinned by a unit test). Field names here MUST match that
-/// schema's property names so a schema-valid object deserializes cleanly. This is consumed by the engine
-/// through <c>{{...}}</c> refs on the loop config — nothing here runs by itself.</para>
+/// <para>The schema mirror lives next to the planner as <c>CoordinatorSchema.ResponseSchema</c>. Its root fields
+/// match this record exactly; its <c>reworkSubtasks</c> items deliberately admit only the coordinator's narrow
+/// <c>{id,title,instruction,rationale}</c> projection of <see cref="PlannedSubtask"/>, not every planner-only field.
+/// <c>PlanningJsonContractTests</c> pins both sets using <c>CoordinatorSchema.Options</c>. Production consumes the
+/// structured JSON through <c>{{...}}</c> refs on the loop config — nothing here runs by itself.</para>
 /// </summary>
 public sealed record CoordinatorDecision
 {

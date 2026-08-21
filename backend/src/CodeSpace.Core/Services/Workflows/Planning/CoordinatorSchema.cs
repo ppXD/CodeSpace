@@ -10,11 +10,11 @@ namespace CodeSpace.Core.Services.Workflows.Planning;
 /// fan-out) off it. Co-located with the planner concern (Rule 18) and pinned by a unit test — a drift in the
 /// schema or the property mapping is a contract change a reviewer must see, mirroring <c>PlannerSchema</c>.
 ///
-/// <para>The schema's property names map 1:1 onto <c>CoordinatorDecision</c> / <c>PlannedSubtask</c> (the
-/// options are case-insensitive). <c>additionalProperties: false</c> + <c>required [decision]</c> keep the
-/// model from inventing fields or dropping the one the loop's termination depends on. <c>reworkSubtasks</c>
-/// reuses the planner's exact subtask shape so a rework round re-seeds the same <c>{{item.title}}</c> /
-/// <c>{{item.instruction}}</c> body refs the map already binds.</para>
+/// <para>The root property names map 1:1 onto <c>CoordinatorDecision</c> (the options are case-insensitive).
+/// <c>additionalProperties: false</c> + <c>required [decision]</c> keep the model from inventing fields or dropping
+/// the one the loop's termination depends on. <c>reworkSubtasks</c> deliberately reuses only the planner subtask's
+/// <c>{id,title,instruction,rationale}</c> projection needed to re-seed the map; planner-only allocation, dependency,
+/// and acceptance fields are not coordinator output fields.</para>
 /// </summary>
 public static class CoordinatorSchema
 {

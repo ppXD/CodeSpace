@@ -9,11 +9,11 @@ namespace CodeSpace.Core.Services.Workflows.Planning;
 /// pinned by a unit test — a drift in either the schema or the property mapping is a contract change a
 /// reviewer must see, not an invisible refactor.
 ///
-/// <para>The schema's property names map 1:1 onto <c>PlannedWorkflow</c> / <c>PlannedSubtask</c> (the
-/// options are case-insensitive so the model's <c>goal</c> binds to <c>Goal</c>). <c>additionalProperties:
-/// false</c> + <c>required</c> keep the model from inventing fields or dropping the ones the projector
-/// depends on; <c>subtasks</c> is bounded <c>[1,20]</c> so a plan always fans out at least one branch and
-/// never an unbounded wave.</para>
+/// <para>The schema's property names map 1:1 onto the model-authored projection of <c>PlannedWorkflow</c> /
+/// <c>PlannedSubtask</c>; server-stamped provenance and server/runtime-only fields on reused acceptance records are
+/// explicit exclusions in the contract test. The options are case-insensitive so the model's <c>goal</c> binds to
+/// <c>Goal</c>. <c>additionalProperties: false</c> + <c>required</c> keep the model from inventing fields or dropping
+/// the ones the projector depends on; <c>subtasks</c> is bounded <c>[1,20]</c>.</para>
 /// </summary>
 public static class PlannerSchema
 {
