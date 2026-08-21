@@ -11,7 +11,7 @@ namespace CodeSpace.Core.Services.Tasks.Phases;
 /// or contributes none (an empty list). A NEW run shape plugs in as a dropped <see cref="IScopedDependency"/> impl
 /// the projector's injected <c>IEnumerable</c> picks up with ZERO projector edit (Rule 7 — narrow + additive).
 ///
-/// <para>Scoped because every source reads scoped DB (via <c>IWorkflowService</c> / <c>ISupervisorDecisionLog</c> /
+/// <para>Scoped because every source reads scoped DB (via <c>IWorkflowService</c> / <c>ISupervisorDecisionObservationBundle</c> /
 /// the scoped <c>CodeSpaceDbContext</c>). READ-ONLY — a source never writes or mutates the engine. A source that
 /// throws is caught per-source by the projector (a broken source degrades to fewer phases, never a 500).</para>
 /// </summary>

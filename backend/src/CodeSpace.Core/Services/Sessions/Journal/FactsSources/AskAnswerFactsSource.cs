@@ -22,9 +22,9 @@ namespace CodeSpace.Core.Services.Sessions.Journal.FactsSources;
 /// </summary>
 public sealed class AskAnswerFactsSource : IJournalFactsSource
 {
-    private readonly ISupervisorDecisionLog _decisions;
+    private readonly ISupervisorDecisionObservationBundle _decisions;
 
-    public AskAnswerFactsSource(ISupervisorDecisionLog decisions)
+    public AskAnswerFactsSource(ISupervisorDecisionObservationBundle decisions)
     {
         _decisions = decisions;
     }

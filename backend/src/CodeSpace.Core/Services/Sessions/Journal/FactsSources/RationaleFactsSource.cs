@@ -13,9 +13,9 @@ namespace CodeSpace.Core.Services.Sessions.Journal.FactsSources;
 /// </summary>
 public sealed class RationaleFactsSource : IJournalFactsSource
 {
-    private readonly ISupervisorDecisionLog _decisions;
+    private readonly ISupervisorDecisionObservationBundle _decisions;
 
-    public RationaleFactsSource(ISupervisorDecisionLog decisions)
+    public RationaleFactsSource(ISupervisorDecisionObservationBundle decisions)
     {
         _decisions = decisions;
     }

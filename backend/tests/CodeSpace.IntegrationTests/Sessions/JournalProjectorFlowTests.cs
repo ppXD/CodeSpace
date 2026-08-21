@@ -1,8 +1,10 @@
+using System.Data.Common;
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Sessions.Journal;
+using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
@@ -11,6 +13,7 @@ using CodeSpace.Messages.Dtos.Sessions.Journal;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Queries.Sessions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Sessions;
@@ -28,6 +31,37 @@ public sealed class JournalProjectorFlowTests
     private readonly PostgresFixture _fixture;
 
     public JournalProjectorFlowTests(PostgresFixture fixture) { _fixture = fixture; }
+
+    [Fact]
+    public async Task One_journal_request_loads_the_supervisor_observation_tape_once()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "One tape read");
+        var runId = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Observe it", resultSummary: "done");
+        await SeedDecisionAsync(runId, teamId, SupervisorDecisionKinds.Plan, DateTimeOffset.UtcNow, PlanPayload(("a", "Inspect")));
+
+        var recorder = new SupervisorTapeReadRecorder();
+        using var scope = _fixture.BeginScope(builder =>
+        {
+            var options = new DbContextOptionsBuilder<CodeSpaceDbContext>()
+                .UseNpgsql(_fixture.ConnectionString)
+                .UseSnakeCaseNamingConvention()
+                .AddInterceptors(recorder)
+                .Options;
+            builder.RegisterInstance(options).As<DbContextOptions<CodeSpaceDbContext>>().SingleInstance();
+        });
+
+        var view = await scope.Resolve<IJournalProjector>().ProjectByRunAsync(runId, teamId, CancellationToken.None);
+
+        view.ShouldNotBeNull();
+        recorder.Reads.ShouldBe(1, "timeline and journal facts consume one request-scoped observation tape, not one full SQL/parse per source");
+
+        var observations = scope.Resolve<ISupervisorDecisionObservationBundle>();
+        (await observations.GetForRunAsync(runId, Guid.NewGuid(), CancellationToken.None)).ShouldBeEmpty("a foreign team never reuses the cached owning-team tape");
+        recorder.Reads.ShouldBe(2, "a distinct team/run key performs its own exact scoped read");
+        (await observations.GetForRunAsync(runId, teamId, CancellationToken.None)).Count.ShouldBe(1);
+        recorder.Reads.ShouldBe(2, "returning to the owning key reuses its successful request cache");
+    }
 
     [Fact]
     public async Task Projects_a_session_focusing_the_anchored_turn_into_its_journal_steps()
@@ -465,5 +499,27 @@ public sealed class JournalProjectorFlowTests
         });
         await db.SaveChangesAsync();
         return runId;
+    }
+
+    private sealed class SupervisorTapeReadRecorder : DbCommandInterceptor
+    {
+        public int Reads { get; private set; }
+
+        public override InterceptionResult<DbDataReader> ReaderExecuting(DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result)
+        {
+            Record(command);
+            return result;
+        }
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        {
+            Record(command);
+            return ValueTask.FromResult(result);
+        }
+
+        private void Record(DbCommand command)
+        {
+            if (command.CommandText.Contains("supervisor_decision", StringComparison.OrdinalIgnoreCase)) Reads++;
+        }
     }
 }

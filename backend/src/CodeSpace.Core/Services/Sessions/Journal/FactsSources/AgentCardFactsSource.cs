@@ -18,11 +18,11 @@ namespace CodeSpace.Core.Services.Sessions.Journal.FactsSources;
 /// </summary>
 public sealed class AgentCardFactsSource : IJournalFactsSource
 {
-    private readonly ISupervisorDecisionLog _decisions;
+    private readonly ISupervisorDecisionObservationBundle _decisions;
     private readonly AgentMetricsReader _metrics;
     private readonly ReviewerVerdictReader _verdicts;
 
-    public AgentCardFactsSource(ISupervisorDecisionLog decisions, AgentMetricsReader metrics, ReviewerVerdictReader verdicts)
+    public AgentCardFactsSource(ISupervisorDecisionObservationBundle decisions, AgentMetricsReader metrics, ReviewerVerdictReader verdicts)
     {
         _decisions = decisions;
         _metrics = metrics;
