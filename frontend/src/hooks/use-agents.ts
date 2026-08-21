@@ -1,6 +1,8 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-import { agentsApi, isAgentRunActive, lastEventSequence, mergeRunEvents, type AgentDefinitionInput, type AgentRunEventDto, type ScorecardFilters } from "@/api/agents";
+import { agentsApi, InvalidAgentRunEventPageError, isAgentRunActive, lastEventSequence, mergeRunEvents, type AgentDefinitionInput, type AgentRunEventDto, type ScorecardFilters } from "@/api/agents";
+import { ApiError } from "@/api/request";
 
 /**
  * Agent-persona data hooks. The library list backs the editor's persona picker + (later) the Agents
@@ -150,6 +152,238 @@ export function useAgentRunEvents(agentRunId: string | undefined, active: boolea
     enabled: !!agentRunId,
     refetchInterval: active ? intervalMs : false,
   });
+}
+
+export const AGENT_EVENT_PAGE_LIMIT = 128;
+export const AGENT_EVENT_WINDOW_LIMIT = 512;
+export const AGENT_EVENT_WINDOW_POLL_MS = 1000;
+export const AGENT_EVENT_WINDOW_MAX_POLL_MS = 8000;
+
+export interface AgentRunEventWindow {
+  data: AgentRunEventDto[];
+  isLoading: boolean;
+  isLoadingOlder: boolean;
+  error: Error | null;
+  hasOlder: boolean;
+  olderEventsOmitted: boolean;
+  newerEventsOmitted: boolean;
+  atLatest: boolean;
+  loadOlder: () => Promise<void>;
+  returnToLatest: () => void;
+}
+
+interface AgentRunEventWindowState extends Omit<AgentRunEventWindow, "loadOlder" | "returnToLatest"> {
+  agentRunId: string | undefined;
+  nextOlderCursor: string | null;
+  nextNewerCursor: string;
+}
+
+function emptyAgentRunEventWindow(agentRunId: string | undefined, isLoading: boolean): AgentRunEventWindowState {
+  return {
+    agentRunId,
+    data: [],
+    isLoading,
+    isLoadingOlder: false,
+    error: null,
+    hasOlder: false,
+    olderEventsOmitted: false,
+    newerEventsOmitted: false,
+    atLatest: true,
+    nextOlderCursor: null,
+    nextNewerCursor: "0",
+  };
+}
+
+function isAbort(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+function isTransientEventPageError(error: unknown): boolean {
+  if (error instanceof InvalidAgentRunEventPageError || isAbort(error)) return false;
+  if (error instanceof ApiError) return error.status === 408 || error.status === 429 || error.status >= 500;
+  return true;
+}
+
+function asEventPageError(error: unknown, fallback: string): Error {
+  return error instanceof Error ? error : new Error(fallback);
+}
+
+/**
+ * A fixed-size, React-local window over one Agent Run's governed event stream. The legacy event query remains for
+ * compact preview consumers, while the terminal uses this page reader so neither the DOM nor React Query cache grows
+ * with a long-running CLI transcript.
+ */
+export function useAgentRunEventWindow(agentRunId: string | undefined, active: boolean): AgentRunEventWindow {
+  const [state, setState] = useState<AgentRunEventWindowState>(() => emptyAgentRunEventWindow(agentRunId, agentRunId !== undefined));
+  const [tailRevision, setTailRevision] = useState(0);
+  const [pollRevision, setPollRevision] = useState(0);
+  const generationRef = useRef(0);
+  const tailControllerRef = useRef<AbortController | null>(null);
+  const olderControllerRef = useRef<AbortController | null>(null);
+  const newerControllerRef = useRef<AbortController | null>(null);
+  const pollingBlockedRef = useRef(false);
+  const transientPollFailuresRef = useRef(0);
+
+  useEffect(() => () => {
+    ++generationRef.current;
+    tailControllerRef.current?.abort();
+    olderControllerRef.current?.abort();
+    newerControllerRef.current?.abort();
+    tailControllerRef.current = null;
+    olderControllerRef.current = null;
+    newerControllerRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    const generation = ++generationRef.current;
+    tailControllerRef.current?.abort();
+    olderControllerRef.current?.abort();
+    newerControllerRef.current?.abort();
+    pollingBlockedRef.current = false;
+    transientPollFailuresRef.current = 0;
+    setState(emptyAgentRunEventWindow(agentRunId, agentRunId !== undefined));
+    if (agentRunId === undefined) return;
+
+    let retryTimer: number | undefined;
+    let failures = 0;
+    const loadTail = () => {
+      const controller = new AbortController();
+      tailControllerRef.current?.abort();
+      tailControllerRef.current = controller;
+      void agentsApi.pageRunEvents(agentRunId, { mode: "Tail", limit: AGENT_EVENT_PAGE_LIMIT }, controller.signal).then((page) => {
+        if (generationRef.current !== generation || controller.signal.aborted) return;
+        setState({
+          agentRunId,
+          data: page.items,
+          isLoading: false,
+          isLoadingOlder: false,
+          error: null,
+          hasOlder: page.hasOlder,
+          olderEventsOmitted: page.hasOlder,
+          newerEventsOmitted: false,
+          atLatest: true,
+          nextOlderCursor: page.nextOlderCursor,
+          nextNewerCursor: page.nextNewerCursor,
+        });
+      }).catch((error: unknown) => {
+        if (generationRef.current !== generation || controller.signal.aborted || isAbort(error)) return;
+        failures = Math.min(failures + 1, 3);
+        setState((previous) => previous.agentRunId === agentRunId ? { ...previous, error: asEventPageError(error, "Could not load the Agent Run event window.") } : previous);
+        if (isTransientEventPageError(error)) {
+          const delay = Math.min(AGENT_EVENT_WINDOW_POLL_MS * 2 ** failures, AGENT_EVENT_WINDOW_MAX_POLL_MS);
+          retryTimer = window.setTimeout(loadTail, delay);
+        } else {
+          setState((previous) => previous.agentRunId === agentRunId ? { ...previous, isLoading: false } : previous);
+        }
+      });
+    };
+    loadTail();
+
+    return () => {
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+      tailControllerRef.current?.abort();
+      if (tailControllerRef.current?.signal.aborted) tailControllerRef.current = null;
+    };
+  }, [agentRunId, tailRevision]);
+
+  const visible = state.agentRunId === agentRunId ? state : emptyAgentRunEventWindow(agentRunId, agentRunId !== undefined);
+
+  useEffect(() => {
+    if (agentRunId === undefined || !active || visible.isLoading || visible.isLoadingOlder || !visible.atLatest || pollingBlockedRef.current) return;
+
+    const generation = generationRef.current;
+    const delay = Math.min(AGENT_EVENT_WINDOW_POLL_MS * 2 ** transientPollFailuresRef.current, AGENT_EVENT_WINDOW_MAX_POLL_MS);
+    const timer = window.setTimeout(() => {
+      const controller = new AbortController();
+      newerControllerRef.current?.abort();
+      newerControllerRef.current = controller;
+      void agentsApi.pageRunEvents(agentRunId, { mode: "Newer", cursor: visible.nextNewerCursor, limit: AGENT_EVENT_PAGE_LIMIT }, controller.signal).then((page) => {
+        if (generationRef.current !== generation || controller.signal.aborted) return;
+        transientPollFailuresRef.current = 0;
+        setState((previous) => {
+          if (previous.agentRunId !== agentRunId) return previous;
+          const combined = [...previous.data, ...page.items];
+          const overflow = Math.max(0, combined.length - AGENT_EVENT_WINDOW_LIMIT);
+          return {
+            ...previous,
+            data: overflow === 0 ? combined : combined.slice(overflow),
+            error: null,
+            // Newer.hasOlder only says the server has rows at/before this query cursor; those rows are already in
+            // our window. Only a pre-existing gap or a local cap eviction proves that earlier rows are omitted.
+            hasOlder: previous.hasOlder || overflow > 0,
+            olderEventsOmitted: previous.olderEventsOmitted || overflow > 0,
+            newerEventsOmitted: page.hasNewer,
+            nextOlderCursor: overflow > 0 ? String(combined[overflow].sequence) : previous.nextOlderCursor,
+            nextNewerCursor: page.nextNewerCursor,
+          };
+        });
+        setPollRevision((revision) => revision + 1);
+      }).catch((error: unknown) => {
+        if (generationRef.current !== generation || controller.signal.aborted || isAbort(error)) return;
+        if (error instanceof InvalidAgentRunEventPageError || !isTransientEventPageError(error)) pollingBlockedRef.current = true;
+        else transientPollFailuresRef.current = Math.min(transientPollFailuresRef.current + 1, 3);
+        setState((previous) => previous.agentRunId === agentRunId ? { ...previous, error: asEventPageError(error, "Could not refresh the Agent Run event window.") } : previous);
+        if (isTransientEventPageError(error)) setPollRevision((revision) => revision + 1);
+      }).finally(() => {
+        if (newerControllerRef.current === controller) newerControllerRef.current = null;
+      });
+    }, delay);
+
+    return () => {
+      window.clearTimeout(timer);
+      newerControllerRef.current?.abort();
+      newerControllerRef.current = null;
+    };
+  }, [active, agentRunId, pollRevision, visible.atLatest, visible.isLoading, visible.isLoadingOlder, visible.nextNewerCursor]);
+
+  const loadOlder = useCallback(async () => {
+    if (agentRunId === undefined || visible.isLoading || visible.isLoadingOlder || !visible.hasOlder || visible.nextOlderCursor === null || olderControllerRef.current !== null) return;
+    newerControllerRef.current?.abort();
+    newerControllerRef.current = null;
+    const generation = generationRef.current;
+    const controller = new AbortController();
+    olderControllerRef.current = controller;
+    setState((previous) => previous.agentRunId === agentRunId ? { ...previous, isLoadingOlder: true, error: null } : previous);
+
+    try {
+      const page = await agentsApi.pageRunEvents(agentRunId, { mode: "Older", cursor: visible.nextOlderCursor, limit: AGENT_EVENT_PAGE_LIMIT }, controller.signal);
+      if (generationRef.current !== generation || controller.signal.aborted) return;
+      setState((previous) => {
+        if (previous.agentRunId !== agentRunId) return previous;
+        const combined = [...page.items, ...previous.data];
+        const overflow = Math.max(0, combined.length - AGENT_EVENT_WINDOW_LIMIT);
+        return {
+          ...previous,
+          data: overflow === 0 ? combined : combined.slice(0, AGENT_EVENT_WINDOW_LIMIT),
+          isLoadingOlder: false,
+          error: null,
+          hasOlder: page.hasOlder,
+          olderEventsOmitted: page.hasOlder,
+          newerEventsOmitted: previous.newerEventsOmitted || overflow > 0,
+          atLatest: previous.atLatest && overflow === 0,
+          nextOlderCursor: page.nextOlderCursor,
+        };
+      });
+    } catch (error) {
+      if (generationRef.current !== generation || controller.signal.aborted || isAbort(error)) return;
+      setState((previous) => previous.agentRunId === agentRunId ? { ...previous, isLoadingOlder: false, error: asEventPageError(error, "Could not load older Agent Run events.") } : previous);
+    } finally {
+      if (olderControllerRef.current === controller) olderControllerRef.current = null;
+    }
+  }, [agentRunId, visible.hasOlder, visible.isLoading, visible.isLoadingOlder, visible.nextOlderCursor]);
+
+  const returnToLatest = useCallback(() => {
+    ++generationRef.current;
+    tailControllerRef.current?.abort();
+    olderControllerRef.current?.abort();
+    newerControllerRef.current?.abort();
+    pollingBlockedRef.current = false;
+    transientPollFailuresRef.current = 0;
+    setState((previous) => previous.agentRunId === agentRunId ? { ...previous, isLoading: agentRunId !== undefined, isLoadingOlder: false, error: null } : previous);
+    setTailRevision((revision) => revision + 1);
+  }, [agentRunId]);
+
+  return { ...visible, loadOlder, returnToLatest };
 }
 
 /**

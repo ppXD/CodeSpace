@@ -45,6 +45,9 @@ public sealed class PageAgentRunEventsQueryHandler : IRequestHandler<PageAgentRu
 
         return new AgentRunEventPage
         {
+            AgentRunId = request.AgentRunId,
+            Mode = request.Direction.ToString(),
+            RequestCursor = request.Cursor,
             Items = rows,
             HasOlder = hasOlder,
             HasNewer = hasNewer,

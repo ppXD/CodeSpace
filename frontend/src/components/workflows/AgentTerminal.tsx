@@ -4,7 +4,7 @@ import { Ic } from "@/_imported/ai-code-space/icons";
 import type { AgentRunCaptureGapObservation, AgentRunEventDto, AgentRunHarnessExecutionSummary } from "@/api/agents";
 import type { RoomFileIdentity } from "@/api/sessions";
 import type { CellAttempt, NodeStatus, PhaseAgentRef } from "@/api/workflows";
-import { useAgentRun, useAgentRunEvents } from "@/hooks/use-agents";
+import { useAgentRun, useAgentRunEventWindow } from "@/hooks/use-agents";
 import { useCellAttempts } from "@/hooks/use-workflows";
 
 import { AgentToolCalls } from "./AgentToolCalls";
@@ -39,7 +39,7 @@ export function AgentTerminal({ agent, onClose, rerun, onOpenFile }: { agent: Ph
   const run = useAgentRun(activeAgentRunId);
   const status = run.data?.status ?? (viewingLatest ? agent.status : "Running");
   const active = isAgentBusy(status);
-  const events = useAgentRunEvents(activeAgentRunId, active);
+  const events = useAgentRunEventWindow(activeAgentRunId, active);
 
   // Prefer the MEANINGFUL name (a supervisor agent's role / assigned subtask) over the structural node id, so the
   // title reads the same in every surface (run detail + the session room) and the alloc strip suppresses its duplicate.
@@ -122,7 +122,10 @@ export function AgentTerminal({ agent, onClose, rerun, onOpenFile }: { agent: Ph
 
       <div className="agent-terminal-body">
         {tab === "output"
-          ? <Scrollback agentRunId={activeAgentRunId} events={evts} loading={events.isLoading && evts.length === 0} error={tileState(status) === "failed" ? run.data?.error ?? null : null} />
+          ? <>
+              <EventWindowControls window={events} />
+              <Scrollback agentRunId={activeAgentRunId} events={evts} loading={events.isLoading && evts.length === 0} error={tileState(status) === "failed" ? run.data?.error ?? null : null} />
+            </>
           : tab === "logs" ? <AgentRunLogs key={activeAgentRunId} agentRunId={activeAgentRunId} />
           : tab === "tools" ? <AgentToolCalls agentRunId={activeAgentRunId} hideHeader />
           : <AgentFiles files={files} onOpenFile={onOpenFile} />}
@@ -141,6 +144,21 @@ export function AgentTerminal({ agent, onClose, rerun, onOpenFile }: { agent: Ph
           {files.length > 0 && <button type="button" data-active={tab === "files" || undefined} onClick={() => setTab("files")}>Files</button>}
         </div>
       </div>
+    </div>
+  );
+}
+
+function EventWindowControls({ window }: { window: ReturnType<typeof useAgentRunEventWindow> }) {
+  const showLatest = window.newerEventsOmitted || !window.atLatest;
+  if (!window.olderEventsOmitted && !showLatest && !window.error) return null;
+
+  return (
+    <div className="agent-terminal-window-controls" aria-live="polite">
+      {window.olderEventsOmitted && <span>Earlier events omitted.</span>}
+      {window.olderEventsOmitted && window.hasOlder && <button type="button" onClick={() => void window.loadOlder()} disabled={window.isLoadingOlder}>{window.isLoadingOlder ? "Loading…" : "Load earlier events"}</button>}
+      {showLatest && <span>Newer events omitted.</span>}
+      {showLatest && <button type="button" onClick={window.returnToLatest}>Return to latest</button>}
+      {window.error && <span role="status">Couldn&apos;t refresh events: {window.error.message}</span>}
     </div>
   );
 }

@@ -3,6 +3,12 @@ namespace CodeSpace.Messages.Dtos.Agents;
 /// <summary>A stable ascending event window plus the two sequence edges needed for history scrollback and live tailing.</summary>
 public sealed record AgentRunEventPage
 {
+    public required Guid AgentRunId { get; init; }
+    public required string Mode { get; init; }
+
+    /// <summary>The exact validated request cursor. Null only for Tail.</summary>
+    public string? RequestCursor { get; init; }
+
     public required IReadOnlyList<AgentRunEventDto> Items { get; init; }
     public required bool HasOlder { get; init; }
     public required bool HasNewer { get; init; }
