@@ -293,13 +293,18 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
 
     public async Task<AgentRunEvent> AppendEventAsync(Guid runId, AgentEvent @event, CancellationToken cancellationToken)
     {
+        var data = new[] { @event.Data?.GetRawText() };
+        var dataArtifactIds = new Guid?[1];
+        await OffloadLargeDataPayloadsAsync(runId, data, dataArtifactIds, cancellationToken).ConfigureAwait(false);
+
         var record = new AgentRunEvent
         {
             Id = Guid.NewGuid(),
             AgentRunId = runId,
             Kind = @event.Kind,
             Text = @event.Text,
-            DataJson = @event.Data?.GetRawText(),
+            DataJson = data[0],
+            DataArtifactId = dataArtifactIds[0],
         };
 
         _db.AgentRunEvent.Add(record);
@@ -349,10 +354,10 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
     }
 
     /// <summary>
-    /// D2 #1: offload any oversize structured payload (data_json) in the batch to the content-addressed artifact
+    /// D2 #1: offload any oversize structured payload (data_json) to the content-addressed artifact
     /// store via the shared <see cref="IArtifactOffloader"/>, nulling the inline value + recording the ref in the
     /// parallel <paramref name="dataArtifactIds"/> array. The common case — every payload small or absent — does
-    /// ZERO work (no team lookup, no store call), so the batched-write hot path is unchanged; the team id is
+    /// ZERO I/O (no team lookup, no store call), so both append paths' common case is unchanged; the team id is
     /// resolved once, lazily, only when something actually needs offloading.
     /// </summary>
     private async Task OffloadLargeDataPayloadsAsync(Guid runId, string?[] data, Guid?[] dataArtifactIds, CancellationToken cancellationToken)
