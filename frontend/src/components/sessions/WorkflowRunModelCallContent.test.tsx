@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { WorkflowRunCaptureCompleteness, WorkflowRunModelCallAttemptMetadata, WorkflowRunModelCallBodyReferenceState, WorkflowRunModelCallDetailMetadata } from "@/api/workflows";
+import type { WorkflowRunCaptureCompleteness, WorkflowRunModelCallAttemptMetadata, WorkflowRunModelCallBodyCaptureHealth, WorkflowRunModelCallBodyReferenceState, WorkflowRunModelCallDetailMetadata } from "@/api/workflows";
 
 import { WorkflowRunModelCallContent, type WorkflowRunModelCallTab } from "./WorkflowRunModelCallContent";
 
@@ -105,10 +105,14 @@ function exactLedgerDetail(responseReferenceState: WorkflowRunModelCallBodyRefer
   detail.attempts[0].sourceTerminalRecordId = "77777777-7777-7777-7777-777777777777";
   detail.attempts[0].bodies = [
     { body: "AttemptRequest", attemptId: activeAttemptId, artifactId: null, referenceState: "Partial", captureCompleteness: "Partial" },
-    { body: "AttemptResponse", attemptId: activeAttemptId, artifactId: null, referenceState: responseReferenceState, captureCompleteness: "Partial" },
+    { body: "AttemptResponse", attemptId: activeAttemptId, artifactId: null, referenceState: responseReferenceState, captureCompleteness: "Partial", captureHealth: "Retry", materializationFormat: null },
     { body: "AttemptError", attemptId: activeAttemptId, artifactId: null, referenceState: "Partial", captureCompleteness: "Partial" },
   ];
   return detail;
+}
+
+function activeResponse(detail: WorkflowRunModelCallDetailMetadata) {
+  return detail.attempts[1].bodies.find((body) => body.body === "AttemptResponse")!;
 }
 
 type FetchHandler = (url: URL, init: RequestInit) => Response | Promise<Response>;
@@ -164,11 +168,85 @@ describe("WorkflowRunModelCallContent", () => {
     expect(JSON.stringify(client.getQueryCache().getAll().map((query) => query.state.data))).not.toContain("first stable chunk");
     expect(vi.mocked(globalThis.fetch).mock.calls.some(([input]) => String(input).includes("/parts/"))).toBe(false);
     expect(vi.mocked(globalThis.fetch).mock.calls.filter(([input]) => String(input).includes("/bodies/")).length).toBe(1);
+    expect(screen.getByText("Capture health not reported")).toBeInTheDocument();
+    expect(screen.getByText("materialization format not reported")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Load more" }));
     expect(await screen.findByText("second stable chunk")).toBeInTheDocument();
     expect(document.querySelector(".room-mcpre")).toHaveTextContent("first stable chunksecond stable chunk");
     expect(vi.mocked(globalThis.fetch).mock.calls.some(([input]) => String(input).includes("offsetBytes=18"))).toBe(true);
+  });
+
+  it.each([
+    ["Pending", "Capture pending", "retryable", "materialization format pending"],
+    ["Materializing", "Capture materializing", "retryable after lease expiry", "materialization format pending"],
+    ["Retry", "Capture retry scheduled", "retryable", "materialization format pending"],
+    ["Failed", "Capture failed", "not retryable (retry exhausted)", "materialization format unavailable"],
+    ["Abandoned", "Capture abandoned", "not retryable", "materialization format unavailable"],
+  ] satisfies Array<[WorkflowRunModelCallBodyCaptureHealth, string, string, string]>)("renders %s capture health from stable metadata and never reads contradictory referenced bytes", async (health, label, retryability, format) => {
+    const detail = stableDetail();
+    const response = activeResponse(detail);
+    response.captureHealth = health;
+    response.materializationFormat = null;
+    renderContent((url) => {
+      if (url.pathname === "/api/workflows/runs/run-1/model-calls/42") return json(projectedMetadata());
+      if (url.pathname === `/api/workflows/runs/run-1/model-calls/${callId}`) return json(detail);
+      return json({ message: "Body read must not occur for a non-available capture" }, 500);
+    });
+
+    expect(await screen.findByText(label)).toBeInTheDocument();
+    expect(screen.getByText(retryability)).toBeInTheDocument();
+    expect(screen.getByText(format)).toBeInTheDocument();
+    await waitFor(() => expect(vi.mocked(globalThis.fetch)).toHaveBeenCalledTimes(2));
+  });
+
+  it.each([
+    ["external-artifact/v1", "format external artifact (external-artifact/v1)"],
+    ["utf8-string-envelope/v1", "format UTF-8 text envelope (utf8-string-envelope/v1)"],
+    ["json-envelope/v1", "format JSON envelope (json-envelope/v1)"],
+  ])("renders Available with closed format %s and reads only the selected body", async (materializationFormat, formatLabel) => {
+    const detail = stableDetail();
+    const response = activeResponse(detail);
+    response.captureHealth = "Available";
+    response.materializationFormat = materializationFormat;
+    const bodyText = `materialized ${materializationFormat}`;
+    renderContent((url) => {
+      if (url.pathname === "/api/workflows/runs/run-1/model-calls/42") return json(projectedMetadata());
+      if (url.pathname === `/api/workflows/runs/run-1/model-calls/${callId}`) return json(detail);
+      if (url.pathname.endsWith("/bodies/AttemptResponse")) return json({
+        body: "AttemptResponse", attemptId: activeAttemptId, captureCompleteness: "Exact", availability: "Available",
+        text: bodyText, offsetBytes: 0, returnedBytes: bodyText.length, totalBytes: bodyText.length, nextOffsetBytes: null,
+        contentType: "text/plain", artifactId: response.artifactId, integrityVerified: true, message: null,
+      });
+      return json({ message: `Unexpected ${url.pathname}` }, 500);
+    });
+
+    expect(await screen.findByText(bodyText)).toBeInTheDocument();
+    expect(screen.getByText("Capture available")).toBeInTheDocument();
+    expect(screen.getByText("complete")).toBeInTheDocument();
+    expect(screen.getByText(formatLabel)).toBeInTheDocument();
+    expect(vi.mocked(globalThis.fetch).mock.calls.filter(([input]) => String(input).includes("/bodies/")).length).toBe(1);
+  });
+
+  it.each([
+    ["FutureCaptureState", "utf8-string-envelope/v1", "Unsupported capture health"],
+    ["Available", "future-envelope/v2", "Unsupported materialization format"],
+    ["Available", null, "Available capture is missing its materialization format"],
+    ["Pending", "utf8-string-envelope/v1", "Non-available capture reported a materialization format"],
+    [null, "external-artifact/v1", "Materialization format reported without capture health"],
+  ])("fails closed on invalid stable capture metadata (%s, %s)", async (health, format, message) => {
+    const detail = stableDetail();
+    const response = activeResponse(detail);
+    response.captureHealth = health as WorkflowRunModelCallBodyCaptureHealth | null;
+    response.materializationFormat = format;
+    renderContent((url) => {
+      if (url.pathname === "/api/workflows/runs/run-1/model-calls/42") return json(projectedMetadata());
+      if (url.pathname === `/api/workflows/runs/run-1/model-calls/${callId}`) return json(detail);
+      return json({ message: "Body read must fail closed" }, 500);
+    });
+
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    await waitFor(() => expect(vi.mocked(globalThis.fetch)).toHaveBeenCalledTimes(2));
   });
 
   it("pages past 50k-token scale, bounds a 128k-token-equivalent DOM window, and can restart at byte zero", async () => {
@@ -412,6 +490,8 @@ describe("WorkflowRunModelCallContent", () => {
     });
 
     expect(await screen.findByText("legacy inline result")).toBeInTheDocument();
+    expect(screen.getByText("Capture retry scheduled")).toBeInTheDocument();
+    expect(screen.getByText("retryable")).toBeInTheDocument();
     expect(parts).toEqual(["Result"]);
     expect(vi.mocked(globalThis.fetch).mock.calls.some(([input]) => String(input).includes("/bodies/"))).toBe(false);
 
@@ -419,6 +499,21 @@ describe("WorkflowRunModelCallContent", () => {
     expect(await screen.findByText("SystemPrompt from recorded artifact")).toBeInTheDocument();
     expect(screen.getByText("UserPrompt from recorded artifact")).toBeInTheDocument();
     expect(parts).toEqual(["Result", "SystemPrompt", "UserPrompt"]);
+  });
+
+  it("fails closed on unknown stable capture metadata before an otherwise-authorized legacy fallback", async () => {
+    const detail = exactLedgerDetail();
+    detail.attempts[0].bodies.find((body) => body.body === "AttemptResponse")!.captureHealth = "FutureCaptureState" as WorkflowRunModelCallBodyCaptureHealth;
+    renderContent((url) => {
+      if (url.pathname === "/api/workflows/runs/run-1/model-calls/42") return json(projectedMetadata());
+      if (url.pathname === `/api/workflows/runs/run-1/model-calls/${callId}`) return json(detail);
+      return json({ message: "No body source may be read for unknown capture metadata" }, 500);
+    });
+
+    expect(await screen.findByText("Unsupported capture health")).toBeInTheDocument();
+    await waitFor(() => expect(vi.mocked(globalThis.fetch)).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(globalThis.fetch).mock.calls.some(([input]) => String(input).includes("/parts/"))).toBe(false);
+    expect(vi.mocked(globalThis.fetch).mock.calls.some(([input]) => String(input).includes("/bodies/"))).toBe(false);
   });
 
   it("uses the exact failed ledger source for a bounded error fallback", async () => {

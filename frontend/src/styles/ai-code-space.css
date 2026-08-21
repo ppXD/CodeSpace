@@ -6969,6 +6969,15 @@ input.lt3-chip2-add::placeholder { color: var(--accent); opacity: 0.75; }
 .room-mcwindow button:disabled { cursor: default; opacity: .6; }
 .room-mcwindow-note { margin: 6px 14px 0; color: var(--muted); font-size: 10.5px; }
 .room-mcpart-title { padding: 12px 14px 0; color: var(--muted); font-size: 10.5px; font-weight: 650; letter-spacing: .08em; }
+.room-mccapture { margin: 9px 14px 0; color: var(--muted); font-size: 10.5px; }
+.room-mccapture strong { color: var(--ink-2); }
+.room-mccapture[data-capture-health="Available"] strong { color: var(--rm-good); }
+.room-mccapture[data-capture-health="Failed"] strong,
+.room-mccapture[data-capture-health="Invalid"] strong { color: var(--rm-danger); }
+.room-mccapture[data-capture-health="Pending"] strong,
+.room-mccapture[data-capture-health="Materializing"] strong,
+.room-mccapture[data-capture-health="Retry"] strong,
+.room-mccapture[data-capture-health="Abandoned"] strong { color: var(--rm-warn); }
 .room-mcload { margin: 0 14px 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink-2); font: inherit; font-size: 11.5px; padding: 6px 10px; cursor: pointer; }
 .room-mcload:hover:not(:disabled) { border-color: var(--line-strong); color: var(--ink); }
 .room-mcload:disabled { cursor: default; opacity: .6; }
