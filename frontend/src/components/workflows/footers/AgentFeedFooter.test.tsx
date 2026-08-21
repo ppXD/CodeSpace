@@ -5,21 +5,22 @@ import type { AgentRunEventDto, ToolCallView } from "@/api/agents";
 import type { NodeStatus, WorkflowRunNodeSummary } from "@/api/workflows";
 
 import type { WorkflowNodeData } from "../WorkflowNode";
-import { AgentFeedFooter, countChangedFiles, eventIcon, firstPendingApproval, supervisorTone } from "./AgentFeedFooter";
+import { AgentFeedFooter, eventIcon, firstPendingApproval, supervisorTone } from "./AgentFeedFooter";
 
 // The footer's whole source is the three agent-run hooks — mock them so the component runs without a
 // QueryClient / network. `isAgentRunActive` stays REAL (imported from @/api/agents), driven by the mocked status.
 const agentState = vi.hoisted(() => ({
   status: undefined as string | undefined,
+  filesChanged: undefined as number | undefined,
   events: [] as AgentRunEventDto[],
   tools: [] as ToolCallView[],
 }));
 vi.mock("@/hooks/use-agents", () => ({
-  useAgentRun: () => ({ data: agentState.status ? { status: agentState.status } : undefined }),
-  useAgentRunEvents: () => ({ data: agentState.events }),
+  useAgentRun: () => ({ data: agentState.status ? { status: agentState.status, filesChanged: agentState.filesChanged } : undefined }),
+  useAgentRunEventPreview: () => ({ data: agentState.events }),
   useToolCalls: () => ({ data: agentState.tools }),
 }));
-afterEach(() => { agentState.status = undefined; agentState.events = []; agentState.tools = []; });
+afterEach(() => { agentState.status = undefined; agentState.filesChanged = undefined; agentState.events = []; agentState.tools = []; });
 
 /** One live event row. */
 function ev(sequence: number, kind: string, text: string): AgentRunEventDto {
@@ -65,11 +66,6 @@ describe("AgentFeedFooter — pure helpers", () => {
     expect(eventIcon("SomeFutureKind").key).toBe("dot");
   });
 
-  it("countChangedFiles dedupes FileChanged targets and ignores other kinds", () => {
-    expect(countChangedFiles([ev(1, "FileChanged", "src/a.ts"), ev(2, "FileChanged", "src/a.ts"), ev(3, "FileChanged", "src/b.ts"), ev(4, "ToolCall", "Read")])).toBe(2);
-    expect(countChangedFiles([ev(1, "ToolCall", "x")])).toBe(0);
-  });
-
   it("supervisorTone keeps Stopped OFF the success reading (Completed=success, Stopped=warn, AcceptanceFailed=failure)", () => {
     expect(supervisorTone("Completed")).toBe("success");
     expect(supervisorTone("Stopped")).toBe("warn");
@@ -85,11 +81,12 @@ describe("AgentFeedFooter — pure helpers", () => {
 });
 
 describe("AgentFeedFooter — working feed", () => {
-  it("Running with 5 events renders ONLY the last 3, with the correct per-kind icons + a changed-files count", () => {
+  it("Running with a recent event preview renders ONLY the last 3, with icons + the run's git-truth file count", () => {
     agentState.status = "Running";
+    agentState.filesChanged = 2;
     agentState.events = [
-      ev(1, "FileChanged", "src/a.ts"),        // before the tail — still counted
-      ev(2, "FileChanged", "src/b.ts"),        // before the tail — still counted
+      ev(1, "FileChanged", "src/a.ts"),
+      ev(2, "FileChanged", "src/b.ts"),
       ev(3, "ToolCall", "Read the config"),
       ev(4, "CommandExecuted", "npm test"),
       ev(5, "AssistantMessage", "wrapping up the change now"),
@@ -99,7 +96,15 @@ describe("AgentFeedFooter — working feed", () => {
     expect(container.querySelector(".wf-rf-feed-title")?.textContent).toBe("Agent working");
     expect(container.querySelectorAll(".wf-rf-feed-row")).toHaveLength(3);            // DOM capped at 3 rows
     expect(iconKeys(container)).toEqual(["wrench", "terminal", "chat"]);              // per-kind icons, in order
-    expect(container.querySelector(".wf-rf-feed-meta")?.textContent).toContain("2 files");  // deduped across ALL events
+    expect(container.querySelector(".wf-rf-feed-meta")?.textContent).toContain("2 files");
+  });
+
+  it("omits a file count when the run detail has no git-truth metric instead of counting the recent Tail", () => {
+    agentState.status = "Running";
+    agentState.events = [ev(1, "FileChanged", "src/a.ts"), ev(2, "FileChanged", "src/b.ts")];
+    const { container } = renderFooter("Running", [agentRow({ status: "Running" })]);
+
+    expect(container.querySelector(".wf-rf-feed-meta")?.textContent ?? "").not.toContain("files");
   });
 
   it("an unknown event kind degrades to the neutral dot icon without crashing", () => {

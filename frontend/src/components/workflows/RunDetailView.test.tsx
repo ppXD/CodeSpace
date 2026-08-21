@@ -35,6 +35,8 @@ vi.mock("@/hooks/use-workflows", () => ({
 // AgentToolCalls (embedded peer of the timeline) also reads useToolCalls — default to an empty audit.
 vi.mock("@/hooks/use-agents", () => ({
   useAgentRun: (id?: string) => useAgentRunMock(id),
+  useAgentRunEventPreview: () => ({ data: [] }),
+  useAgentRunEventWindow: () => ({ data: [], isLoading: false, isLoadingOlder: false, error: null, hasOlder: false, olderEventsOmitted: false, newerEventsOmitted: false, atLatest: true, loadOlder: vi.fn(), returnToLatest: vi.fn() }),
   useAgentRunEvents: () => ({ data: [] }),
   useToolCalls: () => ({ data: [], isLoading: false }),
 }));

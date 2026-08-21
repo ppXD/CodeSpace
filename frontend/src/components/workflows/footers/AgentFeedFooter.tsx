@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { isAgentRunActive, type AgentRunEventDto, type ToolCallView } from "@/api/agents";
 import type { WorkflowRunNodeSummary } from "@/api/workflows";
-import { useAgentRun, useAgentRunEvents, useToolCalls } from "@/hooks/use-agents";
+import { useAgentRun, useAgentRunEventPreview, useToolCalls } from "@/hooks/use-agents";
 
 import { parseTurnKey } from "../mapBranches";
 import { formatTokens, formatUsd } from "../runActivity";
@@ -14,12 +14,12 @@ import type { NodeFooterProps } from "./index";
 /**
  * The flagship live footer for the two Agent nodes (`agent.run`, `agent.supervisor`). Its source is the
  * bound agent run (`rows[0].agentRunId`), read through the agent-run hooks: {@link useAgentRun} for status,
- * {@link useAgentRunEvents} for the streamed event feed, {@link useToolCalls} for the governed tool-call
+ * {@link useAgentRunEventPreview} for a bounded recent feed, {@link useToolCalls} for the governed tool-call
  * ledger. It reads in three moods:
  *
  *  - WORKING — while the run is active (or the node paints Running), a compact tail of the last 3 events
- *    (per-kind chip · kind · short text), a deduped changed-files count, and any token/cost the run detail
- *    carries. Header "Agent working" with the shared spinner.
+ *    (per-kind chip · kind · short text), plus any git-truth file count/token/cost the run detail carries. Header
+ *    "Agent working" with the shared spinner. The recent Tail is never counted as complete file history.
  *  - AWAITING APPROVAL — when the governed ledger has a tool call in `AwaitingApproval`, an AMBER banner
  *    "Awaiting approval: {tool}" + an inline approve/deny row, so "the agent is working" vs "the agent needs YOU" are
  *    visually unmistakable. (The decision itself is not wired yet — see the TODO on {@link ApprovalBar}.)
@@ -37,7 +37,7 @@ export function AgentFeedFooter(props: NodeFooterProps) {
   const agentRunId = props.rows[0]?.agentRunId ?? null;
   const run = useAgentRun(agentRunId ?? undefined);
   const active = isAgentRunActive(run.data?.status);
-  const events = useAgentRunEvents(agentRunId ?? undefined, active);
+  const events = useAgentRunEventPreview(agentRunId ?? undefined, active);
   const tools = useToolCalls(agentRunId ?? undefined, active);
 
   if (props.status === "Pending") return null;   // not reached yet → no footer (matches ReceiptFooter)
@@ -59,14 +59,13 @@ export function AgentFeedFooter(props: NodeFooterProps) {
 
 // ─── Live working feed ───────────────────────────────────────────────────────────
 
-/** The last-3-events working feed: header + a ≤3-row tail (older rows fade), a changed-files count, live metrics. */
+/** The last-3-events working feed: header + a ≤3-row recent Tail (older rows fade), plus authoritative live metrics. */
 function FeedBar({ events, metricsSource, supervisor, rows }: { events: AgentRunEventDto[]; metricsSource: unknown; supervisor: boolean; rows: WorkflowRunNodeSummary[] }) {
   const tail = events.slice(-3);                 // newest at the bottom; DOM stays ≤3 rows
-  const changed = countChangedFiles(events);
-  const metrics = readAgentMetrics(metricsSource);   // token/cost only when the run detail carries them (absent today)
+  const metrics = readAgentMetrics(metricsSource);   // metrics only when the run detail carries them
   const turn = supervisor ? currentTurn(rows) : null;
 
-  const hasMeta = changed > 0 || metrics.tokens != null || metrics.costUsd != null;
+  const hasMeta = metrics.changedFiles != null || metrics.tokens != null || metrics.costUsd != null;
 
   return (
     <div className="wf-rf-result wf-rf-feed nodrag nopan" data-status="running">
@@ -76,7 +75,7 @@ function FeedBar({ events, metricsSource, supervisor, rows }: { events: AgentRun
         {turn != null && <span className="wf-rf-feed-turn">turn {turn}</span>}
         {hasMeta && (
           <span className="wf-rf-feed-meta">
-            {changed > 0 && <span>{changed} files</span>}
+            {metrics.changedFiles != null && <span>{metrics.changedFiles} files</span>}
             {metrics.tokens != null && <span>{formatTokens(metrics.tokens)}</span>}
             {metrics.costUsd != null && <span>{formatUsd(metrics.costUsd)}</span>}
           </span>
@@ -199,16 +198,6 @@ export function eventIcon(kind: string): { key: string; Icon: IconRenderer } {
 /** The first governed tool call parked awaiting a human decision, or null when none is pending. */
 export function firstPendingApproval(tools: ToolCallView[] | undefined): ToolCallView | null {
   return tools?.find((t) => t.status === "AwaitingApproval") ?? null;
-}
-
-/** Distinct files touched, deduped by the FileChanged event's target (its text; the sequence as a defensive fallback). */
-export function countChangedFiles(events: AgentRunEventDto[]): number {
-  const files = new Set<string>();
-  for (const e of events) {
-    if (e.kind !== "FileChanged") continue;
-    files.add((e.text ?? "").trim() || `#${e.sequence}`);
-  }
-  return files.size;
 }
 
 /** The current supervisor turn — the highest `#turn{N}` across the node's rows, or null when none carry one. */

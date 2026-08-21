@@ -17,6 +17,7 @@ vi.mock("./AgentToolCalls", () => ({ AgentToolCalls: ({ agentRunId }: { agentRun
 const agentHook = vi.hoisted(() => ({ status: undefined as string | undefined }));
 vi.mock("@/hooks/use-agents", () => ({
   useAgentRun: () => ({ data: agentHook.status ? { status: agentHook.status } : undefined }),
+  useAgentRunEventPreview: () => ({ data: [] }),
   useAgentRunEvents: () => ({ data: [] }),
   useToolCalls: () => ({ data: [] }),
 }));

@@ -2,7 +2,7 @@ import { useEffect, useRef, type ReactNode } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { PhaseAgentRef } from "@/api/workflows";
-import { useAgentRun, useAgentRunEvents } from "@/hooks/use-agents";
+import { useAgentRun, useAgentRunEventPreview } from "@/hooks/use-agents";
 
 import { isAgentBusy } from "./runPhases";
 import { formatTokens, tileState, type TileState } from "./runActivity";
@@ -26,17 +26,16 @@ export function AgentTile({ agent, selected, open, onOpen, rerun }: { agent: Pha
   const run = useAgentRun(agent.agentRunId);
   const status = run.data?.status ?? agent.status;
   const active = isAgentBusy(status);
-  // 2s preview cadence (the expanded terminal streams at 1s) — a wave of M tiles each polling 1s is the steady-state
-  // jank; the preview's latest-line + file count don't need second-by-second freshness. Opening this agent's terminal
-  // adds a 1s observer on the shared query, so the open one speeds back up.
-  const events = useAgentRunEvents(agent.agentRunId, active, 2000);
+  // The shared query contains only the recent Tail and replaces it on refresh; it is a latest-line preview, not a
+  // complete history. File count comes from the phase ref's git result below, never from this bounded event slice.
+  const events = useAgentRunEventPreview(agent.agentRunId, active);
 
   const name = agent.label || agent.nodeId || `agent ${agent.agentRunId.slice(0, 8)}`;
   const state = tileState(status);
 
   const evts = events.data ?? [];
   const latest = evts.length > 0 ? evts[evts.length - 1].text : undefined;
-  const files = evts.filter((e) => e.kind === "FileChanged").length;
+  const files = agent.filesChanged ?? 0;
   const tokens = (agent.inputTokens ?? 0) + (agent.outputTokens ?? 0);
   const summary = metricLine(files, tokens);
   const failReason = run.data?.error || undefined;   // a fail-before-events run has no `latest`; its reason lives on the run (|| so an empty error falls through to "stopped")

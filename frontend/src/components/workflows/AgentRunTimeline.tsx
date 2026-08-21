@@ -1,5 +1,5 @@
 import { isAgentRunActive } from "@/api/agents";
-import { useAgentRun, useAgentRunEvents } from "@/hooks/use-agents";
+import { useAgentRun, useAgentRunEventWindow } from "@/hooks/use-agents";
 
 /**
  * Live, chat-style monitor for one agent run, embedded under an `agent.run` step in the run detail. While
@@ -13,8 +13,8 @@ export function AgentRunTimeline({ agentRunId }: { agentRunId: string }) {
   const status = run.data?.status;
   const active = isAgentRunActive(status);
 
-  const events = useAgentRunEvents(agentRunId, active);
-  const rows = events.data ?? [];
+  const events = useAgentRunEventWindow(agentRunId, active);
+  const rows = events.data;
 
   return (
     <div className="ar-timeline">
@@ -28,8 +28,24 @@ export function AgentRunTimeline({ agentRunId }: { agentRunId: string }) {
 
       {run.data?.error && <pre className="wf-json wf-json-err">{run.data.error}</pre>}
 
+      {(events.olderEventsOmitted || events.hasOlder) && (
+        <div className="ar-window-notice">
+          <span>{events.olderEventsOmitted ? "Earlier activity omitted." : "Earlier activity is available."}</span>
+          {events.hasOlder && <button type="button" onClick={() => void events.loadOlder()} disabled={events.isLoadingOlder}>{events.isLoadingOlder ? "Loading…" : "Load earlier activity"}</button>}
+        </div>
+      )}
+
+      {(events.newerEventsOmitted || !events.atLatest) && (
+        <div className="ar-window-notice">
+          <span>Newer activity omitted.</span>
+          <button type="button" onClick={events.returnToLatest}>Return to latest activity</button>
+        </div>
+      )}
+
+      {events.error && <div className="ar-window-error" role="status">{events.error.message}</div>}
+
       {rows.length === 0 ? (
-        <div className="ar-empty">{active ? "Waiting for the agent's first output…" : "No activity recorded."}</div>
+        <div className="ar-empty">{events.isLoading ? "Loading activity…" : active ? "Waiting for the agent's first output…" : "No activity recorded."}</div>
       ) : (
         <ol className="ar-events">
           {rows.map((e) => (

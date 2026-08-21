@@ -2197,6 +2197,10 @@ textarea:-webkit-autofill {
 @keyframes ar-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
 .acs-root .ar-harness { margin-left: auto; color: var(--muted); font-family: var(--font-mono, ui-monospace, monospace); }
 .acs-root .ar-empty { padding: 12px 10px; font-size: 11.5px; color: var(--muted); font-style: italic; }
+.acs-root .ar-window-notice { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 10px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 10.5px; }
+.acs-root .ar-window-notice button { border: 0; padding: 2px 0; background: transparent; color: var(--accent); font: inherit; font-weight: 600; cursor: pointer; }
+.acs-root .ar-window-notice button:disabled { color: var(--muted-2); cursor: default; }
+.acs-root .ar-window-error { padding: 5px 10px; border-bottom: 1px solid var(--line); color: #9E3535; font-size: 10.5px; }
 .acs-root .ar-events { list-style: none; margin: 0; padding: 4px 0; max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; }
 .acs-root .ar-event { display: flex; align-items: baseline; gap: 8px; padding: 4px 10px; font-size: 11.5px; line-height: 1.5; border-top: 1px solid color-mix(in srgb, var(--line) 50%, transparent); }
 .acs-root .ar-event:first-child { border-top: 0; }

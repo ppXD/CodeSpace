@@ -128,15 +128,13 @@ export function useAgentRun(agentRunId: string | undefined) {
 }
 
 /**
- * One agent run's live event log, streamed INCREMENTALLY: each poll (while `active`) fetches only the
+ * One agent run's complete live event log, streamed INCREMENTALLY: each poll (while `active`) fetches only the
  * events past the highest sequence already held (the `after` cursor) and merges them in, so a long run
  * streams deltas instead of re-pulling the whole log every tick. Polling stops once terminal. The log is
  * append-only + immutable, so the merge is a safe dedup-by-sequence (see {@link mergeRunEvents}).
  *
- * `intervalMs` is the live cadence: the expanded terminal streams at 1s, but a wave's collapsed PREVIEW tiles pass a
- * slower cadence (a many-agent wave of M tiles each polling 1s is the steady-state jank driver, and a preview line
- * doesn't need second-by-second freshness). Tiles + terminal share one query per agent, so React Query polls the
- * agent at the fastest cadence among its mounted observers — opening a terminal speeds that one agent back to 1s.
+ * This compatibility reader is intentionally retained for the native ToolCall audit until it has a complete,
+ * filtered page endpoint. General timeline/preview surfaces must use the bounded readers below instead.
  */
 export function useAgentRunEvents(agentRunId: string | undefined, active: boolean, intervalMs = 1000) {
   const queryClient = useQueryClient();
@@ -151,6 +149,25 @@ export function useAgentRunEvents(agentRunId: string | undefined, active: boolea
     },
     enabled: !!agentRunId,
     refetchInterval: active ? intervalMs : false,
+  });
+}
+
+export const AGENT_EVENT_PREVIEW_LIMIT = 16;
+export const AGENT_EVENT_PREVIEW_POLL_MS = 2000;
+
+/**
+ * A small recent-event preview for collapsed surfaces. The validated Tail page is the cache value, so every refresh
+ * replaces at most sixteen rows; it never accumulates or implies that the Tail is the run's complete history.
+ */
+export function useAgentRunEventPreview(agentRunId: string | undefined, active: boolean) {
+  return useQuery({
+    queryKey: ["agent-run-event-preview", agentRunId],
+    queryFn: ({ signal }) => agentsApi.pageRunEvents(agentRunId!, { mode: "Tail", limit: AGENT_EVENT_PREVIEW_LIMIT }, signal),
+    select: (page) => page.items,
+    enabled: !!agentRunId,
+    refetchInterval: (query) => active && !(query.state.error instanceof InvalidAgentRunEventPageError) ? AGENT_EVENT_PREVIEW_POLL_MS : false,
+    retry: (failureCount, error) => failureCount < 2 && isTransientEventPageError(error),
+    retryDelay: (failureCount) => Math.min(500 * 2 ** failureCount, AGENT_EVENT_PREVIEW_POLL_MS),
   });
 }
 
@@ -209,9 +226,8 @@ function asEventPageError(error: unknown, fallback: string): Error {
 }
 
 /**
- * A fixed-size, React-local window over one Agent Run's governed event stream. The legacy event query remains for
- * compact preview consumers, while the terminal uses this page reader so neither the DOM nor React Query cache grows
- * with a long-running CLI transcript.
+ * A fixed-size, React-local window over one Agent Run's governed event stream. Timeline surfaces use this page reader
+ * so neither the DOM nor React Query cache grows with a long-running CLI transcript.
  */
 export function useAgentRunEventWindow(agentRunId: string | undefined, active: boolean): AgentRunEventWindow {
   const [state, setState] = useState<AgentRunEventWindowState>(() => emptyAgentRunEventWindow(agentRunId, agentRunId !== undefined));
