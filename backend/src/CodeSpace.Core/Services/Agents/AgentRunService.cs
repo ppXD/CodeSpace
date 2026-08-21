@@ -735,8 +735,86 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
             HeartbeatAt = run.HeartbeatAt,
             CompletedAt = run.CompletedAt,
             CreatedDate = run.CreatedDate,
+            HarnessExecution = await ReadHarnessExecutionAsync(runId, teamId, cancellationToken).ConfigureAwait(false),
         };
     }
+
+    /// <summary>
+    /// Read the latest durable harness execution and a bounded attempt window for the operator drawer. This plane is
+    /// observational: a missing table row or a read failure yields null and never hides the Agent Run's authoritative
+    /// status/result. Runner locators are deliberately excluded because only the named runner may interpret them.
+    /// </summary>
+    private async Task<AgentRunHarnessExecutionSummary?> ReadHarnessExecutionAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var execution = await _db.WorkflowRunHarnessExecution.AsNoTracking()
+                .Where(candidate => candidate.TeamId == teamId && candidate.AgentRunId == runId)
+                .OrderByDescending(candidate => candidate.Generation)
+                .Select(candidate => new
+                {
+                    candidate.Id,
+                    candidate.Generation,
+                    candidate.HarnessTypeKey,
+                    candidate.RunnerKind,
+                    candidate.State,
+                    candidate.AttemptCount,
+                    candidate.TerminalAt,
+                    HasCapturedNativeRecords = _db.WorkflowRunNativeRecord.Any(record => record.TeamId == teamId && record.ExecutionId == candidate.Id),
+                })
+                .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+            if (execution is null) return null;
+
+            var rows = await _db.WorkflowRunHarnessProcessAttempt.AsNoTracking()
+                .Where(candidate => candidate.TeamId == teamId && candidate.AgentRunId == runId && candidate.ExecutionId == execution.Id)
+                .OrderBy(candidate => candidate.AttemptOrdinal)
+                .Take(MaxObservedHarnessAttempts + 1)
+                .Select(candidate => new
+                {
+                    candidate.Id,
+                    candidate.AttemptOrdinal,
+                    candidate.State,
+                    candidate.StartedAt,
+                    candidate.LastObservedAt,
+                    candidate.ExitedAt,
+                    candidate.ExitCode,
+                    candidate.ErrorCode,
+                })
+                .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+            return new AgentRunHarnessExecutionSummary
+            {
+                Id = execution.Id,
+                Generation = execution.Generation,
+                HarnessTypeKey = execution.HarnessTypeKey,
+                RunnerKind = execution.RunnerKind,
+                State = execution.State.ToString(),
+                AttemptCount = execution.AttemptCount,
+                HasCapturedNativeRecords = execution.HasCapturedNativeRecords,
+                TerminalAt = execution.TerminalAt,
+                Attempts = rows.Take(MaxObservedHarnessAttempts).Select(row => new AgentRunHarnessProcessAttemptSummary
+                {
+                    Id = row.Id,
+                    AttemptOrdinal = row.AttemptOrdinal,
+                    State = row.State.ToString(),
+                    StartedAt = row.StartedAt,
+                    LastObservedAt = row.LastObservedAt,
+                    ExitedAt = row.ExitedAt,
+                    ExitCode = row.ExitCode,
+                    ErrorCode = row.ErrorCode,
+                }).ToList(),
+                AttemptsTruncated = rows.Count > MaxObservedHarnessAttempts,
+            };
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(exception, "Harness execution observation could not be read for agent run {RunId}; the authoritative Agent Run summary remains available", runId);
+            return null;
+        }
+    }
+
+    private const int MaxObservedHarnessAttempts = 100;
 
     /// <summary>The agent's GOAL (its instruction / prompt) off the durable task envelope — a NARROW projection of the one leaf, so the heavy task fields (workspace / permissions / repos) never materialize; null on an absent/malformed blob (best-effort, never throws).</summary>
     private static string? ReadGoal(string? taskJson)

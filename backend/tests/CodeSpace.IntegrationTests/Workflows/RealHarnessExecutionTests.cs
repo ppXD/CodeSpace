@@ -2,6 +2,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Capture;
 using CodeSpace.Core.Services.Agents.Harnesses.Claude;
 using CodeSpace.Core.Services.Agents.Harnesses.Codex;
 using CodeSpace.Core.Services.Tasks.Phases;
@@ -418,6 +419,20 @@ public class RealHarnessExecutionTests
         var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
         result.Summary.ShouldBe(expected.Summary);
         result.ChangedFiles.ShouldBe(expected.ChangedFiles);
+
+        var observed = (await svc.GetSummaryForTeamAsync(runId, teamId, CancellationToken.None))!.HarnessExecution
+            .ShouldNotBeNull(customMessage: $"{harnessKind}: the production operator read must expose the execution identity both shipped CLI harnesses already produce");
+        observed.HarnessTypeKey.ShouldBe(harnessKind == CodexHarness.HarnessKind ? "codex-cli/v1" : "claude-code/v2");
+        observed.RunnerKind.ShouldBe("local");
+        observed.State.ShouldBe("Exited");
+        observed.HasCapturedNativeRecords.ShouldBeTrue($"{harnessKind}: its native stream is captured behind the same execution identity the read model exposes");
+        observed.AttemptsTruncated.ShouldBeFalse();
+
+        var attempt = observed.Attempts.ShouldHaveSingleItem();
+        attempt.AttemptOrdinal.ShouldBe(1);
+        attempt.State.ShouldBe("Exited");
+        attempt.ExitCode.ShouldBe(0);
+        attempt.ErrorCode.ShouldBeNull();
     }
 
     [Fact]
@@ -437,21 +452,32 @@ public class RealHarnessExecutionTests
         run.Error.ShouldNotBeNull();
     }
 
-    [Fact]
-    public async Task A_harness_that_overruns_its_timeout_is_killed_and_lands_timed_out()
+    [Theory]
+    [InlineData("codex-cli")]
+    [InlineData("claude-code")]
+    public async Task A_harness_that_overruns_its_timeout_is_killed_and_exposes_an_honest_lost_process(string harnessKind)
     {
         if (OperatingSystem.IsWindows()) return;
 
-        using var cli = new FakeCli(CodexHarness.CommandEnvVar, CodexFixture);
+        var expected = HappyCase(harnessKind);
+        using var cli = new FakeCli(expected.CommandEnvVar, expected.Fixture);
         var teamId = await SeedTeamAsync();
         // Real CTS-driven kill: the fixture script sleeps 10s, the run's wall-clock cap is 1s.
-        var runId = await CreateRunAsync(teamId, "codex-cli", cli.Env(sleepSeconds: 10), timeoutSeconds: 1);
+        var runId = await CreateRunAsync(teamId, harnessKind, cli.Env(sleepSeconds: 10), timeoutSeconds: 1);
 
         await ExecuteRealAsync(runId);
 
         using var scope = _fixture.BeginScope();
-        (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status
+        var runs = scope.Resolve<IAgentRunService>();
+        (await runs.GetAsync(runId, CancellationToken.None)).Status
             .ShouldBe(AgentRunStatus.TimedOut, "the linked CTS fired, the process tree was killed, and the run mapped to TimedOut — not Failed");
+
+        var execution = (await runs.GetSummaryForTeamAsync(runId, teamId, CancellationToken.None))!.HarnessExecution.ShouldNotBeNull();
+        execution.State.ShouldBe("Exited", "the execution is terminal because every attempt reached a terminal process state; this is not a task-success claim");
+        var attempt = execution.Attempts.ShouldHaveSingleItem();
+        attempt.State.ShouldBe("Lost", "a timeout kills the process; no natural exit was observed, so the process attempt must not claim Exited");
+        attempt.ExitCode.ShouldBeNull();
+        attempt.ErrorCode.ShouldBe(NativeRecordPlane.ProcessOutcomeUnobservedErrorCode);
     }
 
     [Fact]

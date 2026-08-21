@@ -100,6 +100,58 @@ public class AgentRunServiceTests
     }
 
     [Fact]
+    public async Task Harness_execution_observation_bounds_attempt_history_without_hiding_the_durable_head()
+    {
+        var teamId = await SeedTeamAsync();
+        Guid runId;
+        long fence;
+        using (var scope = _fixture.BeginScope())
+        {
+            var runs = scope.Resolve<IAgentRunService>();
+            runId = (await runs.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+            fence = await runs.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        var executionId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.WorkflowRunHarnessExecution.Add(new WorkflowRunHarnessExecution
+            {
+                Id = executionId, TeamId = teamId, AgentRunId = runId, Generation = 1,
+                HarnessTypeKey = "codex-cli/v1", RunnerKind = "local", RunnerLocatorSchemaVersion = 1,
+                State = HarnessExecutionState.Pending, AttemptCount = 0, NextAttemptOrdinal = 1,
+                LeaseFence = 0, Revision = 1, CreatedAt = now, LastModifiedAt = now,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        // More physical attempts than the operator drawer is allowed to materialize. Persist one-by-one because
+        // the database trigger advances the execution's contiguous ordinal head after every accepted row.
+        for (var ordinal = 1; ordinal <= 101; ordinal++)
+        {
+            using var scope = _fixture.BeginScope();
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.WorkflowRunHarnessProcessAttempt.Add(new WorkflowRunHarnessProcessAttempt
+            {
+                Id = Guid.NewGuid(), TeamId = teamId, AgentRunId = runId, ExecutionId = executionId,
+                AttemptOrdinal = ordinal, WorkerFenceEpoch = fence, RunnerLocatorJson = "{}",
+                State = HarnessProcessAttemptState.Running, ClaimFence = 0, Revision = 1,
+                StartedAt = now, LastObservedAt = now, CreatedAt = now, LastModifiedAt = now,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        using var read = _fixture.BeginScope();
+        var observed = (await read.Resolve<IAgentRunService>().GetSummaryForTeamAsync(runId, teamId, CancellationToken.None))!.HarnessExecution.ShouldNotBeNull();
+        observed.AttemptCount.ShouldBe(101, "the durable head remains visible even when its detail window is capped");
+        observed.Attempts.Count.ShouldBe(100);
+        observed.Attempts.Select(candidate => candidate.AttemptOrdinal).ShouldBe(Enumerable.Range(1, 100));
+        observed.AttemptsTruncated.ShouldBeTrue();
+    }
+
+    [Fact]
     public async Task AppendEventAsync_offloads_a_large_data_json_payload_using_the_batch_contract()
     {
         var teamId = await SeedTeamAsync();
