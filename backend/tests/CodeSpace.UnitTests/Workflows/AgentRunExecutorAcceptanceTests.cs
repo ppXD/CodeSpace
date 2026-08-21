@@ -251,11 +251,14 @@ public class AgentRunExecutorAcceptanceTests
     {
         var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "ok" });
         var artifactId = Guid.NewGuid();
+        const string compatibilityCopy = "diff --git a/x b/x";
 
         await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")),
-            SucceededPatchOnly() with { Patch = "diff --git a/x b/x", PatchArtifactId = artifactId }, workspace: null, CancellationToken.None);
+            SucceededPatchOnly() with { Patch = compatibilityCopy, PatchArtifactId = artifactId }, workspace: null, CancellationToken.None);
 
-        grader.PatchCalls.ShouldBe(1, "an inline patch OR an artifact id both count as gradeable — either is threaded to GradePatchAsync, which resolves whichever the offloader needs");
+        grader.PatchCalls.ShouldBe(1, "the pre-completion two-carrier result must reach the patch grader exactly once");
+        grader.LastInlinePatch.ShouldBe(compatibilityCopy, "the executor retains its bounded compatibility copy until AgentRunService persists the terminal result");
+        grader.LastPatchArtifactId.ShouldBe(artifactId, "the authoritative full artifact must reach the grader beside that copy");
     }
 
     // ── S2: no branch, no patch, expectsChanges decides the outcome ─────────────────────
@@ -416,6 +419,8 @@ public class AgentRunExecutorAcceptanceTests
 
         public int PatchCalls { get; private set; }
         public string? LastPatchBaseSha { get; private set; }
+        public string? LastInlinePatch { get; private set; }
+        public Guid? LastPatchArtifactId { get; private set; }
 
         public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
         {
@@ -432,6 +437,8 @@ public class AgentRunExecutorAcceptanceTests
         {
             PatchCalls++;
             LastPatchBaseSha = baseSha;
+            LastInlinePatch = inlinePatch;
+            LastPatchArtifactId = patchArtifactId;
             LastCommand = spec.Command;
 
             if (Throw is { } ex) throw ex;

@@ -12,8 +12,8 @@ namespace CodeSpace.Core.Services.Supervisor.Executors;
 /// agent results by id + fold them into one outcome. Each merged entry carries the FULL <see cref="AgentRunResult"/>
 /// work products — <c>summary</c> AND <c>changedFiles</c> / <c>producedBranch</c> / <c>patch</c> / <c>error</c> — so
 /// the synthesis never discards what each agent produced (the branch + diff a downstream PR-open step consumes). A
-/// large diff that was offloaded to the artifact store (D2: PatchArtifactId set, inline Patch empty) is RESOLVED back
-/// here, so the merge never silently loses a big agent's work product.
+/// large diff that was offloaded to the artifact store (D2: PatchArtifactId set, inline Patch cleared by terminal
+/// persistence) is RESOLVED back here, so the merge never silently loses a big agent's work product.
 ///
 /// <para>SOTA #3: when the integrate gate is on (<c>RealSupervisorActionExecutor.Integrate.cs</c>) the fold is
 /// AUGMENTED with an <c>integration</c> key (the K diffs INTEGRATED on disk into one reviewable branch, fail-safe)
@@ -216,7 +216,7 @@ public sealed partial class RealSupervisorActionExecutor
         return resolved;
     }
 
-    /// <summary>The inline patch when present; otherwise the full diff resolved from the artifact store via the D2 PatchArtifactId ref (so an offloaded large diff is folded into the merge, not lost). Empty when there's neither. Routes through the shared <see cref="IArtifactOffloader"/> — the same primitive the producer used.</summary>
+    /// <summary>Resolve a terminal persisted patch carrier. <c>AgentRunService</c> clears the bounded executor-side compatibility copy before storing a non-null D2 PatchArtifactId, so these inputs are mutually exclusive here: inline when small, otherwise the full referenced diff. Empty when there's neither. Routes through the shared <see cref="IArtifactOffloader"/> — the same primitive the producer used.</summary>
     private Task<string> ResolvePatchAsync(AgentRunResult? result, Guid teamId, CancellationToken cancellationToken) =>
         result == null
             ? Task.FromResult("")

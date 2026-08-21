@@ -1,5 +1,6 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark;
+using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Core.Services.Agents.Workspace.Providers;
@@ -26,7 +27,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
     /// the SAME PR as any change to grading semantics — oracle dispatch, restore/tamper behavior, evidence
     /// capture, fail-closed arms. Pinned by test; the literal is the wire value on durable receipts.
     /// </summary>
-    public const string EvaluatorVersion = "supervisor-acceptance/v2";   // v2 (P5-2): evidence capture emits the inline EvidenceTail; multi-repo failure aggregates keep Class/EvidenceArtifactId (receipts gain EvidenceRef where v1 never bound one)
+    public const string EvaluatorVersion = "supervisor-acceptance/v3";   // v3: a pre-completion full patch artifact is authoritative over its bounded inline compatibility copy
 
     /// <summary>The grading clone + oracle commands run on the worker host's own local runner. NOT the deployment
     /// default (<c>AgentDefaultRunnerSetting</c>): this funnel never reads a caller-supplied runner kind, and the
@@ -119,7 +120,9 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
 
             await CloneAtBaseAsync(clone, baseSha, directory, cancellationToken).ConfigureAwait(false);
 
-            var patch = await _offloader.ResolveRequiredAsync(teamId, inlinePatch, patchArtifactId, cancellationToken).ConfigureAwait(false);
+            // This is the live pre-completion two-carrier seam: executor capture may supply both a bounded inline copy
+            // and the full artifact. The ref is authoritative; missing/corrupt/foreign bytes fail closed, never inline.
+            var patch = await _offloader.ResolvePatchRequiredAsync(teamId, inlinePatch, patchArtifactId, cancellationToken).ConfigureAwait(false);
 
             if (string.IsNullOrEmpty(patch))
             {
