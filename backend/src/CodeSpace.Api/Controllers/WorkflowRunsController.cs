@@ -6,6 +6,7 @@ using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Queries.Sessions;
 using CodeSpace.Messages.Queries.Tasks;
 using CodeSpace.Messages.Queries.Workflows;
+using CodeSpace.Messages.Tasks.Trace;
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
 
@@ -201,6 +202,23 @@ public class WorkflowRunsController : ControllerBase
     public async Task<IActionResult> GetRecords([FromRoute] Guid runId, CancellationToken cancellationToken)
     {
         var result = await _mediator.Send(new GetRunRecordsQuery { RunId = runId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
+    /// <summary>One bounded keyset page of the raw ledger. No cursor returns the newest tail; before walks history; after reads newly committed rows.</summary>
+    [HttpGet("{runId:guid}/records/page")]
+    public async Task<IActionResult> GetRecordPage([FromRoute] Guid runId, [FromQuery] long? beforeSequence, [FromQuery] long? afterSequence, [FromQuery] int limit = RunRecordPageLimits.DefaultLimit, CancellationToken cancellationToken = default)
+    {
+        if (!RunRecordPageLimits.IsValid(beforeSequence, afterSequence, limit)) return BadRequest();
+
+        var result = await _mediator.Send(new GetRunRecordPageQuery
+        {
+            RunId = runId,
+            BeforeSequence = beforeSequence,
+            AfterSequence = afterSequence,
+            Limit = limit,
+        }, cancellationToken).ConfigureAwait(false);
+
         return result == null ? NotFound() : Ok(result);
     }
 
