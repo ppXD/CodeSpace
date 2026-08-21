@@ -201,7 +201,7 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
         <RunTabComingSoon title="Changes"
           note="The files this run created or modified — per-repo change sets, diffs, and the pull requests it opened." />
       ) : !nested && view === "trace" ? (
-        <RunTrace runId={runId} />
+        <RunTrace runId={runId} active={isRunActive(r.status)} />
       ) : (
         <>
           {/* Activity — the run's execution story as one chronological timeline: milestone events, each phase's agents

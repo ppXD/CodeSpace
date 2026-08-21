@@ -1,12 +1,14 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { RunRecordsResponse, RunRecordView } from "@/api/workflows";
+import type { RunRecordsResponse, RunRecordView, WorkflowRunDataCompletenessView } from "@/api/workflows";
 
 // Drive the records through the hook; stub JsonView so the test asserts "the raw payload is shown" without its tree.
 const recordsMock: { data: RunRecordsResponse | undefined; isLoading: boolean } = { data: undefined, isLoading: false };
+const completenessMock: { data: WorkflowRunDataCompletenessView | null | undefined; isLoading: boolean; error: Error | null } = { data: undefined, isLoading: false, error: null };
 vi.mock("@/hooks/use-workflows", () => ({
   useRunRecords: () => recordsMock,
+  useRunDataCompleteness: () => completenessMock,
 }));
 vi.mock("./JsonView", () => ({
   JsonView: ({ data }: { data: unknown }) => <div data-testid="jsonview">{JSON.stringify(data)}</div>,
@@ -23,9 +25,16 @@ function withRecords(records: RunRecordView[] | undefined, isLoading = false) {
   recordsMock.isLoading = isLoading;
 }
 
+function completeness(facets: WorkflowRunDataCompletenessView["facets"]): WorkflowRunDataCompletenessView {
+  return { runId: "r1", scope: "RecordedFacetsOnly", facets, hasStatements: facets.length > 0, runWideVerdict: null, truncated: false };
+}
+
 beforeEach(() => {
   recordsMock.data = undefined;
   recordsMock.isLoading = false;
+  completenessMock.data = completeness([]);
+  completenessMock.isLoading = false;
+  completenessMock.error = null;
 });
 
 describe("RunTrace", () => {
@@ -39,6 +48,46 @@ describe("RunTrace", () => {
     withRecords([], false);
     render(<RunTrace runId="r1" />);
     expect(screen.getByText(/no records yet/i)).toBeInTheDocument();
+  });
+
+  it("shows recorded facets independently and never presents them as a run-wide verdict", () => {
+    withRecords([record({ sequence: 1 })]);
+    completenessMock.data = completeness([
+      { facet: "harness-process-attempt", expectedRecordCount: 2, presentRecordCount: 1, knownMissingCount: 1, verdict: "Partial", isStrictlyReadable: false, revision: 4, schemaVersion: 1, lastModifiedAt: "2026-08-21T02:00:00Z" },
+      { facet: "native-record", expectedRecordCount: 1, presentRecordCount: 1, knownMissingCount: 0, verdict: "Exact", isStrictlyReadable: true, revision: 2, schemaVersion: 1, lastModifiedAt: "2026-08-21T02:00:01Z" },
+    ]);
+
+    render(<RunTrace runId="r1" active />);
+
+    expect(screen.getByText(/recorded facets only/i)).toBeInTheDocument();
+    expect(screen.getByText(/no run-wide verdict/i)).toBeInTheDocument();
+    expect(screen.getByText("harness-process-attempt")).toBeInTheDocument();
+    expect(screen.getByText("Partial")).toBeInTheDocument();
+    expect(screen.getByText(/1 present \/ 2 expected/i)).toBeInTheDocument();
+    expect(screen.getByText("native-record")).toBeInTheDocument();
+    expect(screen.getByText("Exact")).toBeInTheDocument();
+  });
+
+  it("keeps zero statements visibly unstated instead of calling the run exact", () => {
+    withRecords([record({ sequence: 1 })]);
+
+    render(<RunTrace runId="r1" />);
+
+    expect(screen.getByText(/no producer has stated completeness/i)).toBeInTheDocument();
+    expect(screen.queryByText(/all data complete/i)).toBeNull();
+  });
+
+  it("keeps the last valid statements visible when a live metadata refresh fails", () => {
+    withRecords([record({ sequence: 1 })]);
+    completenessMock.data = completeness([
+      { facet: "native-record", expectedRecordCount: 1, presentRecordCount: 1, knownMissingCount: 0, verdict: "Exact", isStrictlyReadable: true, revision: 2, schemaVersion: 1, lastModifiedAt: "2026-08-21T02:00:01Z" },
+    ]);
+    completenessMock.error = new Error("transient");
+
+    render(<RunTrace runId="r1" active />);
+
+    expect(screen.getByText("native-record")).toBeInTheDocument();
+    expect(screen.getByText(/last refresh failed/i)).toBeInTheDocument();
   });
 
   it("renders every record's raw type verbatim, in order, including narrative-dropped types", () => {

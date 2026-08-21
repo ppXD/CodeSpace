@@ -1,8 +1,8 @@
 import { useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
-import type { RunRecordView } from "@/api/workflows";
-import { useRunRecords } from "@/hooks/use-workflows";
+import type { RunRecordView, WorkflowRunDataCompletenessView } from "@/api/workflows";
+import { useRunDataCompleteness, useRunRecords } from "@/hooks/use-workflows";
 
 import { JsonView } from "./JsonView";
 
@@ -13,21 +13,53 @@ import { JsonView } from "./JsonView";
  * place to its raw JSON. Source-agnostic — the RecordType is an OPEN string rendered verbatim, never switched on; only
  * a failure tone is derived for scanning. Polls in lockstep with the run.
  */
-export function RunTrace({ runId }: { runId: string }) {
+export function RunTrace({ runId, active = false }: { runId: string; active?: boolean }) {
   const records = useRunRecords(runId);
+  const completeness = useRunDataCompleteness(runId, active);
   const rows = records.data?.records ?? [];
-
-  if (rows.length === 0) {
-    return <div className="run-trace-empty">{records.isLoading ? "Loading the event ledger…" : "No records yet."}</div>;
-  }
 
   return (
     <div className="run-trace">
-      <div className="run-trace-head"><Ic.Code size={12} aria-hidden="true" /> Event ledger · {rows.length} records</div>
-      <ol className="run-trace-list">
-        {rows.map((r) => <TraceRow key={r.sequence} record={r} />)}
-      </ol>
+      <RunDataCompleteness view={completeness.data} loading={completeness.isLoading} failed={completeness.error != null} />
+      {rows.length === 0 ? (
+        <div className="run-trace-empty">{records.isLoading ? "Loading the event ledger…" : "No records yet."}</div>
+      ) : (
+        <>
+          <div className="run-trace-head"><Ic.Code size={12} aria-hidden="true" /> Event ledger · {rows.length} records</div>
+          <ol className="run-trace-list">
+            {rows.map((r) => <TraceRow key={r.sequence} record={r} />)}
+          </ol>
+        </>
+      )}
     </div>
+  );
+}
+
+function RunDataCompleteness({ view, loading, failed }: { view: WorkflowRunDataCompletenessView | null | undefined; loading: boolean; failed: boolean }) {
+  return (
+    <section className="run-data-completeness" aria-label="Recorded Workflow Run data completeness">
+      <div className="run-data-completeness-head">Data completeness</div>
+      <div className="run-data-completeness-scope">Recorded facets only · omitted facets remain indeterminate · no run-wide verdict.</div>
+      {loading && view === undefined ? (
+        <div className="run-data-completeness-empty">Loading producer statements…</div>
+      ) : view == null ? (
+        <div className="run-data-completeness-empty">Completeness metadata unavailable.</div>
+      ) : view.facets.length === 0 ? (
+        <div className="run-data-completeness-empty">No producer has stated completeness for this run.</div>
+      ) : (
+        <ul className="run-data-completeness-list">
+          {view.facets.map((facet) => (
+            <li key={facet.facet} className="run-data-completeness-row" data-readable={facet.isStrictlyReadable || undefined}>
+              <code>{facet.facet}</code>
+              <span className="run-data-completeness-count">{facet.presentRecordCount} present {facet.expectedRecordCount == null ? "· expected unstated" : `/ ${facet.expectedRecordCount} expected`}{facet.knownMissingCount > 0 ? ` · ${facet.knownMissingCount} known missing` : ""}</span>
+              <span className="run-data-completeness-verdict">{facet.verdict}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {failed && view != null && <div className="run-data-completeness-warning">Last refresh failed; displaying the last valid producer statements.</div>}
+      {view?.truncated && <div className="run-data-completeness-warning">Additional recorded facets were omitted by the bounded metadata read.</div>}
+    </section>
   );
 }
 
