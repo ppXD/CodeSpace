@@ -119,13 +119,125 @@ public sealed class AgentMetricsReaderFlowTests
         m.FilesChanged.ShouldBe(3, "the git-truth changed-file count off the persisted result");
     }
 
+    [Fact]
+    public async Task Workflow_observation_ignores_multi_megabyte_baggage_and_is_exact_team_run_scoped()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (foreignTeamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowRunId = Guid.NewGuid();
+        var wrongWorkflowRunId = Guid.NewGuid();
+        var changedFiles = Enumerable.Range(0, 55).Select(i => $"src/file-{i:D2}.cs").ToArray();
+        var stats = changedFiles.Select((path, i) => new FileDiffStat(path, i, i + 1)).ToArray();
+        var resultJson = JsonSerializer.Serialize(new AgentRunResult
+        {
+            Status = AgentRunStatus.Failed,
+            ExitReason = "failed",
+            Summary = new string('s', 2 * 1024 * 1024),
+            Error = new string('e', 450),
+            Model = "claude-opus-4-8",
+            TokenUsage = new AgentTokenUsage { InputTokens = 1_000, OutputTokens = 500 },
+            ChangedFiles = changedFiles,
+            FileStats = stats,
+        }, AgentJson.Options);
+        var taskJson = JsonSerializer.Serialize(new AgentTask
+        {
+            Goal = "ignored because displayTitle is present",
+            DisplayTitle = new string('g', 160),
+            SystemPrompt = new string('p', 2 * 1024 * 1024),
+            Harness = "claude-code",
+            Model = "task-model",
+            ResumeFromSessionId = "session-1",
+        }, AgentJson.Options);
+        var target = await SeedAgentRunAsync(teamId, AgentRunStatus.Failed, DateTimeOffset.UtcNow.AddSeconds(-10), DateTimeOffset.UtcNow, taskJson, resultJson, workflowRunId);
+        var wrongRun = await SeedAgentRunAsync(teamId, AgentRunStatus.Succeeded, null, null, Task("wrong-run"), Result(1, 1), wrongWorkflowRunId);
+        var standalone = await SeedAgentRunAsync(teamId, AgentRunStatus.Succeeded, null, null, Task("standalone"), Result(1, 1));
+        var foreign = await SeedAgentRunAsync(foreignTeamId, AgentRunStatus.Succeeded, null, null, Task("foreign"), Result(1, 1), workflowRunId);
+
+        IReadOnlyDictionary<Guid, AgentRunMetrics> metrics;
+        using (var scope = _fixture.BeginScope())
+            metrics = await scope.Resolve<AgentMetricsReader>().ReadForWorkflowRunAsync(teamId, workflowRunId, new[] { target, wrongRun, standalone, foreign }, DateTimeOffset.UtcNow, CancellationToken.None);
+
+        metrics.Keys.ShouldBe(new[] { target });
+        var m = metrics[target];
+        m.Status.ShouldBe(AgentRunStatus.Failed);
+        m.InputTokens.ShouldBe(1_000);
+        m.OutputTokens.ShouldBe(500);
+        m.Model.ShouldBe("claude-opus-4-8", "the reported model still wins over the task-pinned model");
+        m.Harness.ShouldBe("claude-code");
+        m.Resumed.ShouldBeTrue();
+        m.Goal.ShouldBe(new string('g', 140) + "…");
+        m.Error.ShouldBe(new string('e', 400) + "…");
+        m.FilesChanged.ShouldBe(55, "the full count is computed in PostgreSQL without transferring the full array");
+        m.ChangedFiles.ShouldBe(changedFiles.Take(40));
+        m.ChangedFileStats.ShouldBe(stats.Take(40));
+    }
+
+    [Fact]
+    public async Task Workflow_observation_reads_pascal_legacy_and_fails_closed_per_malformed_leaf()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowRunId = Guid.NewGuid();
+        var legacyResult = JsonSerializer.Serialize(new
+        {
+            TokenUsage = new { InputTokens = 31, OutputTokens = 17 },
+            Model = "legacy-model",
+            ChangedFiles = new[] { "legacy/a.cs", "legacy/b.cs" },
+            FileStats = new[] { new { Path = "legacy/a.cs", Additions = 3, Deletions = 1 } },
+            Error = "\tlegacy failure\t",
+        });
+        var legacyTask = JsonSerializer.Serialize(new { Goal = "\tLegacy goal\t\r\nsecond line", Harness = "legacy-cli", ResumeFromSessionId = "legacy-session" });
+        var legacy = await SeedAgentRunAsync(teamId, AgentRunStatus.Failed, null, null, legacyTask, legacyResult, workflowRunId);
+        var malformed = await SeedAgentRunAsync(teamId, AgentRunStatus.Failed, null, null, "42", "[]", workflowRunId, rowError: "row fallback");
+        var wrongTypes = await SeedAgentRunAsync(teamId, AgentRunStatus.Failed, null, null,
+            JsonSerializer.Serialize(new { goal = 123, harness = new { bad = true }, model = "task-fallback" }),
+            JsonSerializer.Serialize(new { tokenUsage = "unknown", model = new { bad = true }, changedFiles = new { bad = true }, fileStats = 5, error = false }),
+            workflowRunId, rowError: "typed row fallback");
+        var oversizedLabels = await SeedAgentRunAsync(teamId, AgentRunStatus.Running, null, null,
+            JsonSerializer.Serialize(new { goal = "g", harness = new string('h', 513), model = new string('t', 513) }),
+            JsonSerializer.Serialize(new { model = new string('m', 513), changedFiles = Array.Empty<string>(), fileStats = Array.Empty<object>() }),
+            workflowRunId);
+
+        IReadOnlyDictionary<Guid, AgentRunMetrics> metrics;
+        using (var scope = _fixture.BeginScope())
+            metrics = await scope.Resolve<AgentMetricsReader>().ReadForWorkflowRunAsync(teamId, workflowRunId, new[] { legacy, malformed, wrongTypes, oversizedLabels }, DateTimeOffset.UtcNow, CancellationToken.None);
+
+        var old = metrics[legacy];
+        old.InputTokens.ShouldBe(31);
+        old.OutputTokens.ShouldBe(17);
+        old.Model.ShouldBe("legacy-model");
+        old.Goal.ShouldBe("Legacy goal");
+        old.Harness.ShouldBe("legacy-cli");
+        old.Resumed.ShouldBeTrue();
+        old.FilesChanged.ShouldBe(2);
+        old.ChangedFiles.ShouldBe(new[] { "legacy/a.cs", "legacy/b.cs" });
+        old.ChangedFileStats.ShouldBe(new[] { new FileDiffStat("legacy/a.cs", 3, 1) });
+        old.Error.ShouldBe("legacy failure");
+
+        metrics[malformed].InputTokens.ShouldBeNull();
+        metrics[malformed].FilesChanged.ShouldBeNull();
+        metrics[malformed].Goal.ShouldBeNull();
+        metrics[malformed].Error.ShouldBe("row fallback");
+
+        metrics[wrongTypes].InputTokens.ShouldBeNull();
+        metrics[wrongTypes].FilesChanged.ShouldBeNull();
+        metrics[wrongTypes].ChangedFiles.ShouldBeEmpty();
+        metrics[wrongTypes].ChangedFileStats.ShouldBeEmpty();
+        metrics[wrongTypes].Goal.ShouldBeNull();
+        metrics[wrongTypes].Harness.ShouldBeNull();
+        metrics[wrongTypes].Model.ShouldBe("task-fallback", "one malformed result leaf cannot erase a healthy task fallback");
+        metrics[wrongTypes].Error.ShouldBe("typed row fallback");
+
+        metrics[oversizedLabels].Model.ShouldBeNull("an oversized provider-controlled label fails closed instead of crossing the observation boundary");
+        metrics[oversizedLabels].Harness.ShouldBeNull();
+    }
+
     private static string Result(int input, int output) =>
         JsonSerializer.Serialize(new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", TokenUsage = new AgentTokenUsage { InputTokens = input, OutputTokens = output } }, AgentJson.Options);
 
     private static string Task(string? model) =>
         JsonSerializer.Serialize(new AgentTask { Goal = "g", Harness = "claude-code", Model = model }, AgentJson.Options);
 
-    private async Task<Guid> SeedAgentRunAsync(Guid teamId, AgentRunStatus status, DateTimeOffset? startedAt, DateTimeOffset? completedAt, string taskJson, string? resultJson)
+    private async Task<Guid> SeedAgentRunAsync(Guid teamId, AgentRunStatus status, DateTimeOffset? startedAt, DateTimeOffset? completedAt, string taskJson, string? resultJson, Guid? workflowRunId = null, string? rowError = null)
     {
         var id = Guid.NewGuid();
 
@@ -134,7 +246,7 @@ public sealed class AgentMetricsReaderFlowTests
         var now = DateTimeOffset.UtcNow;
         db.AgentRun.Add(new AgentRun
         {
-            Id = id, TeamId = teamId, Harness = "claude-code", Status = status, TaskJson = taskJson, ResultJson = resultJson,
+            Id = id, TeamId = teamId, WorkflowRunId = workflowRunId, Harness = "claude-code", Status = status, TaskJson = taskJson, ResultJson = resultJson, Error = rowError,
             StartedAt = startedAt, CompletedAt = completedAt,
             CreatedDate = now, CreatedBy = Guid.Empty, LastModifiedDate = now, LastModifiedBy = Guid.Empty,
         });

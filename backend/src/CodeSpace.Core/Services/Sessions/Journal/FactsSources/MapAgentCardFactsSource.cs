@@ -34,7 +34,7 @@ public sealed class MapAgentCardFactsSource : IJournalFactsSource
         if (maps.Count == 0) return EmptyFacts;
 
         var allAgentIds = maps.SelectMany(m => BranchAgentIds(m.Branches)).Distinct().ToList();
-        var metrics = await _metrics.ReadAsync(teamId, allAgentIds, DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false);
+        var metrics = await _metrics.ReadForWorkflowRunAsync(teamId, runId, allAgentIds, DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false);
 
         var facts = new Dictionary<string, JournalStepFacts>();
 

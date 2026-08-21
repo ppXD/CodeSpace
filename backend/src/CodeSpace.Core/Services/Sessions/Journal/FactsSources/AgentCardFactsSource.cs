@@ -41,7 +41,7 @@ public sealed class AgentCardFactsSource : IJournalFactsSource
         if (stagedByDecision.Count == 0) return EmptyFacts;
 
         var allAgentIds = stagedByDecision.SelectMany(x => x.AgentIds).Distinct().ToList();
-        var metrics = await _metrics.ReadAsync(teamId, allAgentIds, DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false);
+        var metrics = await _metrics.ReadForWorkflowRunAsync(teamId, runId, allAgentIds, DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false);
 
         // The SAME allocation (short subtask label) + ledger compact (git-truth files) the room card reads, folded from
         // the already-loaded tape — so a journal card can't disagree with the room card for the same agent.
