@@ -165,7 +165,7 @@ export function useAgentRunEventPreview(agentRunId: string | undefined, active: 
     queryFn: ({ signal }) => agentsApi.pageRunEvents(agentRunId!, { mode: "Tail", limit: AGENT_EVENT_PREVIEW_LIMIT }, signal),
     select: (page) => page.items,
     enabled: !!agentRunId,
-    refetchInterval: (query) => active && !(query.state.error instanceof InvalidAgentRunEventPageError) ? AGENT_EVENT_PREVIEW_POLL_MS : false,
+    refetchInterval: (query) => active && (query.state.error === null || isTransientEventPageError(query.state.error)) ? AGENT_EVENT_PREVIEW_POLL_MS : false,
     retry: (failureCount, error) => failureCount < 2 && isTransientEventPageError(error),
     retryDelay: (failureCount) => Math.min(500 * 2 ** failureCount, AGENT_EVENT_PREVIEW_POLL_MS),
   });
