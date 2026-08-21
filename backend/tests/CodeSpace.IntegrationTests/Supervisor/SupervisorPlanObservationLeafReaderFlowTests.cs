@@ -5,10 +5,12 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Sessions.Journal.FactsSources;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Observation;
+using CodeSpace.Core.Services.Tasks.Timeline.Sources;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Dtos.Sessions.Journal;
 using CodeSpace.Messages.Dtos.Workflows.Supervisor;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
@@ -19,8 +21,7 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Supervisor;
 
 /// <summary>
-/// True-PostgreSQL pins for the additive Plan leaf foundation. Current Journal facts remain on #1615 by design; the
-/// healthy parity assertions compare their values but do not cut those sources over without an omission contract.
+/// True-PostgreSQL pins for the bounded Plan leaf reader and its completeness-aware Journal fact consumers.
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -46,6 +47,12 @@ public sealed class SupervisorPlanObservationLeafReaderFlowTests
         empty.ShouldNotBeNull();
         empty.Items.ShouldBeEmpty();
         empty.HasMore.ShouldBeFalse();
+
+        using var sourceScope = _fixture.BeginScope();
+        var bundle = sourceScope.Resolve<ISupervisorPlanObservationPageBundle>();
+        (await new PlanFactsSource(bundle).GatherAsync(foreignRun, teamId, CancellationToken.None)).ShouldBeEmpty();
+        (await new SupervisorPlanModelCallFactsSource(bundle).GatherAsync(foreignRun, teamId, CancellationToken.None)).ShouldBeEmpty(
+            "foreign/missing stays conflated and the shared null page cannot leak a decision identity");
     }
 
     [Fact]
@@ -82,7 +89,7 @@ public sealed class SupervisorPlanObservationLeafReaderFlowTests
 
         using (var scope = _fixture.BeginScope())
         {
-            var bundle = scope.Resolve<ISupervisorDecisionObservationBundle>();
+            var bundle = scope.Resolve<ISupervisorPlanObservationPageBundle>();
             var planFacts = await new PlanFactsSource(bundle).GatherAsync(runId, teamId, CancellationToken.None);
             var callFacts = await new SupervisorPlanModelCallFactsSource(bundle).GatherAsync(runId, teamId, CancellationToken.None);
             var stepId = $"supervisor-{decisionId:N}";
@@ -148,6 +155,17 @@ public sealed class SupervisorPlanObservationLeafReaderFlowTests
 
         page.Items.Single(item => item.Metadata.DecisionId == corruptStatusId).Metadata.Status
             .ShouldBe(SupervisorDecisionObservationStatus.Corrupt, "a future persisted status cannot EF-materialize or masquerade as known");
+
+        using var sourceScope = _fixture.BeginScope();
+        var sourceBundle = sourceScope.Resolve<ISupervisorPlanObservationPageBundle>();
+        var planFacts = await new PlanFactsSource(sourceBundle).GatherAsync(runId, teamId, CancellationToken.None);
+        var callFacts = await new SupervisorPlanModelCallFactsSource(sourceBundle).GatherAsync(runId, teamId, CancellationToken.None);
+        planFacts[SupervisorDecisionTimelineMap.EventId(cappedId)].Plan.ShouldBeNull("capped prefixes never become a normal Plan fact");
+        planFacts[SupervisorDecisionTimelineMap.EventId(cappedId)].ObservationCoverage!.Single().Reason.ShouldBe(JournalObservationCoverageReason.TruncatedLeaf);
+        planFacts[SupervisorDecisionTimelineMap.EventId(invalidId)].ObservationCoverage!.Single().Reason.ShouldBe(JournalObservationCoverageReason.InvalidLeaf);
+        callFacts[SupervisorDecisionTimelineMap.EventId(cappedId)].ModelCall.ShouldBeNull("a capped model prefix never becomes normal model usage");
+        callFacts[SupervisorDecisionTimelineMap.EventId(cappedId)].ObservationCoverage!.Single().Reason.ShouldBe(JournalObservationCoverageReason.TruncatedLeaf);
+        callFacts.ShouldNotContainKey(SupervisorDecisionTimelineMap.EventId(missingId), "Missing model usage remains the healthy pre-capture no-fact case");
     }
 
     [Fact]
@@ -173,6 +191,17 @@ public sealed class SupervisorPlanObservationLeafReaderFlowTests
 
         var newer = (await ReadAsync(teamId, runId, SupervisorDecisionObservationStoryPageMode.Newer, tail.NextNewerCursor, 500))!;
         newer.Items.ShouldBeEmpty("newer rows of other kinds never leak into the Plan-only story page");
+
+        using (var sourceScope = _fixture.BeginScope())
+        {
+            var facts = await new PlanFactsSource(sourceScope.Resolve<ISupervisorPlanObservationPageBundle>())
+                .GatherAsync(runId, teamId, CancellationToken.None);
+            facts.Count.ShouldBe(500, "one bounded Tail page is the hard per-request source ceiling");
+            var boundary = facts.Values.SelectMany(value => value.ObservationCoverage ?? []).Single(value => value.Reason == JournalObservationCoverageReason.OlderItemsOmitted);
+            boundary.ObservedCount.ShouldBe(500);
+            boundary.OmittedCount.ShouldBe(1);
+            boundary.OmittedCountIsLowerBound.ShouldBeTrue();
+        }
 
         var plan = await ExplainAsync(SupervisorPlanObservationLeafReader.OlderSql, teamId, runId, long.MaxValue, 501);
         plan.ShouldContain("ix_supervisor_decision_run_kind_story_order");
@@ -354,4 +383,5 @@ public sealed class SupervisorPlanObservationLeafReaderFlowTests
     }
 
     private sealed record DecisionIdentity(Guid TeamId, Guid RunId, Guid DecisionId, string Kind, string Status);
+
 }

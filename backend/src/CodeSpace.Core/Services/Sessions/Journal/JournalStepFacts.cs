@@ -23,6 +23,9 @@ public sealed record JournalStepFacts
     /// <summary>The subtasks the model authored on a PLAN step — the plan, rendered inline under "planned the work". Null when the step isn't a plan.</summary>
     public IReadOnlyList<JournalSubtask>? Plan { get; init; }
 
+    /// <summary>Typed bounded-observation gaps for this durable decision. Null is the healthy/no-gap case.</summary>
+    public IReadOnlyList<JournalObservationCoverage>? ObservationCoverage { get; init; }
+
     /// <summary>The operator's ANSWER on an ASK_HUMAN step — the decision the human made (approve, or the change requested). Carried as its own field (not folded into the question prose) so the frontend renders it distinctly. Null when the step isn't an ask, or it's still pending.</summary>
     public string? Answer { get; init; }
 
@@ -48,6 +51,7 @@ public sealed record JournalStepFacts
         Agents = other.Agents ?? Agents,
         Deferred = other.Deferred ?? Deferred,
         Plan = other.Plan ?? Plan,
+        ObservationCoverage = MergeCoverage(ObservationCoverage, other.ObservationCoverage),
         Answer = other.Answer ?? Answer,
         ModelCall = other.ModelCall ?? ModelCall,
         Review = other.Review ?? Review,
@@ -55,4 +59,15 @@ public sealed record JournalStepFacts
         PlanConfirmation = other.PlanConfirmation || PlanConfirmation,
         Draft = other.Draft ?? Draft,
     };
+
+    private static IReadOnlyList<JournalObservationCoverage>? MergeCoverage(IReadOnlyList<JournalObservationCoverage>? first, IReadOnlyList<JournalObservationCoverage>? second)
+    {
+        var merged = first is null or { Count: 0 } ? second
+            : second is null or { Count: 0 } ? first
+                : first.Concat(second).ToList();
+        if (merged is null or { Count: 0 }) return null;
+        if (merged is { Count: > JournalObservationCoverageLimits.MaximumEntriesPerStep })
+            throw new InvalidOperationException($"A journal step cannot carry more than {JournalObservationCoverageLimits.MaximumEntriesPerStep} observation coverage entries.");
+        return merged;
+    }
 }

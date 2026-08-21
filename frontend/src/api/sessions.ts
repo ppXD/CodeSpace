@@ -481,6 +481,18 @@ export interface JournalSubtask {
   title: string;
 }
 
+/** A typed bounded-read gap on one durable supervisor Plan decision. Present only when observation was incomplete. */
+export interface JournalObservationCoverage {
+  sourceKind: string;
+  reason: string;
+  observedCount: number;
+  omittedCount: number;
+  omittedCountIsLowerBound: boolean;
+  decisionId: string;
+  /** Exact Int64 decimal identity; intentionally not a JavaScript number. */
+  storyOrder: string;
+}
+
 /// One chronological step of a run's work journal — the frontend renders by `kind`. Mirrors backend `JournalStep`.
 /// The structured facts of one model call — mirrors backend `JournalModelCall`. Rendered as a row in the expanded model
 /// fold (purpose · model · tokens · latency · cost · status). Cost/latency/tokens are null when unknown (unpriced model,
@@ -542,6 +554,8 @@ export interface JournalStep {
   deferred: JournalDeferredSubtask[];
   /// The subtasks this PLAN step authored — rendered inline under "planned the work". Empty for a non-plan step.
   plan: JournalSubtask[];
+  /** Explicit unavailable/omitted Plan observation facts. Absent on the healthy wire. */
+  observationCoverage?: JournalObservationCoverage[] | null;
   agentRunId?: string | null;
   nodeId?: string | null;
 }

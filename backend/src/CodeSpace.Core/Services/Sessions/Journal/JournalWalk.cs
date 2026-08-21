@@ -48,6 +48,7 @@ public sealed class JournalWalk : IJournalWalk, IScopedDependency
             Agents = facts.Agents ?? step.Agents,
             Deferred = facts.Deferred ?? step.Deferred,
             Plan = facts.Plan ?? step.Plan,
+            ObservationCoverage = ValidateCoverage(facts.ObservationCoverage ?? step.ObservationCoverage),
             Answer = facts.Answer ?? step.Answer,
             ModelCall = facts.ModelCall ?? step.ModelCall,
             Review = facts.Review ?? step.Review,
@@ -55,4 +56,12 @@ public sealed class JournalWalk : IJournalWalk, IScopedDependency
             PlanConfirmation = facts.PlanConfirmation || step.PlanConfirmation,
             Draft = facts.Draft ?? step.Draft,
         };
+
+    private static IReadOnlyList<JournalObservationCoverage>? ValidateCoverage(IReadOnlyList<JournalObservationCoverage>? coverage)
+    {
+        if (coverage is null or { Count: 0 }) return null;
+        if (coverage.Count > JournalObservationCoverageLimits.MaximumEntriesPerStep || coverage.Any(item => item.ValidateShape().Count > 0))
+            throw new InvalidOperationException("Journal observation coverage is malformed or exceeds its per-step bound.");
+        return coverage;
+    }
 }

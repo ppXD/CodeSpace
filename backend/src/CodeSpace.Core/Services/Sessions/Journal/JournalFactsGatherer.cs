@@ -7,8 +7,8 @@ namespace CodeSpace.Core.Services.Sessions.Journal;
 /// merges their per-step facts into one bundle (Rule 16 thin composition). Autofac injects the whole <c>IEnumerable</c>,
 /// so a new source is purely a dropped impl — the gatherer never names a concrete one. When two sources contribute to the
 /// SAME step id (a decision that has both a rationale and staged agents) their facts <see cref="JournalStepFacts.Merge"/>
-/// field-wise, so they compose rather than clobber. Scoped — repeated supervisor-tape consumers share one request
-/// observation bundle, though that tape read is still explicitly unbounded until the later leaf/page projection.
+/// field-wise, so they compose rather than clobber. Scoped — most supervisor-tape consumers share one request bundle;
+/// the two Plan sources share one hard-capped leaf page. Other supervisor observation consumers remain full-tape debt.
 /// </summary>
 public sealed class JournalFactsGatherer : IJournalFactsGatherer, IScopedDependency
 {

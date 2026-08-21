@@ -6,13 +6,13 @@ using Microsoft.AspNetCore.Http;
 namespace CodeSpace.Core.Services.Supervisor;
 
 /// <summary>
-/// Request-scoped, observation-only access to a supervisor decision tape. Timeline, Room and Journal projections often
-/// fold the same tape independently; this seam shares their one in-flight read and its successful result for the exact
+/// Request-scoped, observation-only access to a supervisor decision tape. Timeline, Room and the remaining non-Plan
+/// Journal projections often fold the same tape independently; this seam shares their one in-flight read for the exact
 /// tenant/run key. It is deliberately NOT an execution or authority seam: rehydrate, decision and mutation paths keep
 /// reading <see cref="ISupervisorDecisionLog"/> directly.
 ///
-/// <para>This first cost slice still loads every payload/outcome byte for the run. It removes duplicate SQL/transfer/parse
-/// inside one request; a later bounded-leaf/page projection is still required for long-run scaling.</para>
+/// <para>This seam still loads every payload/outcome byte for the run. Plan facts have moved to their bounded leaf page;
+/// the remaining consumers need their own honest leaf/page contracts before this full-tape seam can disappear.</para>
 /// </summary>
 public interface ISupervisorDecisionObservationBundle
 {

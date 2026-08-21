@@ -14,6 +14,7 @@ import type {
   FinalAnswerBlock,
   JournalAgentCard,
   JournalModelCall,
+  JournalObservationCoverage,
   JournalReviewVerdict,
   JournalStep,
   JournalSubtask,
@@ -91,6 +92,55 @@ const usePaneNodeFocus = () => useContext(PaneNodeFocusContext);
  */
 export function journalStepNodeId(step: JournalStep): string | null {
   return step.nodeId ?? null;
+}
+
+/** Closed presentation decoder for bounded Plan observation gaps. Unknown/malformed values remain a visible warning. */
+export function journalObservationCoverageText(coverage: JournalObservationCoverage): string {
+  const storyOrderValid = typeof coverage?.storyOrder === "string" && /^[1-9]\d*$/.test(coverage.storyOrder)
+    && (coverage.storyOrder.length < 19 || coverage.storyOrder.length === 19 && coverage.storyOrder <= "9223372036854775807");
+  const valid = coverage != null && typeof coverage === "object"
+    && typeof coverage.sourceKind === "string" && coverage.sourceKind.length > 0 && coverage.sourceKind.length <= 100
+    && Number.isInteger(coverage.observedCount) && coverage.observedCount >= 0 && coverage.observedCount <= 500
+    && Number.isInteger(coverage.omittedCount) && coverage.omittedCount >= 0 && coverage.omittedCount <= 2_147_483_647
+    && typeof coverage.omittedCountIsLowerBound === "boolean"
+    && typeof coverage.decisionId === "string" && coverage.decisionId !== "00000000-0000-0000-0000-000000000000"
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(coverage.decisionId)
+    && storyOrderValid;
+  if (!valid) return "Plan observation unavailable · invalid coverage metadata";
+
+  const source = coverage.sourceKind === "supervisor-plan-subtasks/v1" ? "Plan subtasks"
+    : coverage.sourceKind === "supervisor-plan-model-usage/v1" ? "Plan model usage"
+      : coverage.sourceKind === "supervisor-plan-metadata/v1" ? "Plan decision"
+        : coverage.sourceKind === "supervisor-plan-page/v1" ? "Plan history"
+          : "Plan observation";
+
+  switch (coverage.reason) {
+    case "OlderItemsOmitted":
+      return coverage.omittedCountIsLowerBound && coverage.omittedCount > 0
+        ? `${source} partially available · showing ${coverage.observedCount}; at least ${coverage.omittedCount} older omitted`
+        : "Plan observation unavailable · invalid coverage metadata";
+    case "InvalidLeaf": return !coverage.omittedCountIsLowerBound ? `${source} unavailable · recorded data is invalid` : "Plan observation unavailable · invalid coverage metadata";
+    case "TruncatedLeaf": return coverage.omittedCountIsLowerBound
+      ? "Plan observation unavailable · invalid coverage metadata"
+      : coverage.omittedCount > 0
+        ? `${source} unavailable · bounded read omitted ${coverage.omittedCount} item${coverage.omittedCount === 1 ? "" : "s"}`
+        : `${source} unavailable · recorded data exceeds bounded display limits`;
+    case "CorruptLeaf": return !coverage.omittedCountIsLowerBound ? `${source} unavailable · recorded data is corrupt` : "Plan observation unavailable · invalid coverage metadata";
+    case "CorruptDecisionStatus": return !coverage.omittedCountIsLowerBound ? `${source} unavailable · decision status is unknown or corrupt` : "Plan observation unavailable · invalid coverage metadata";
+    default: return `${source} unavailable · unknown coverage state`;
+  }
+}
+
+/** Small render seam so typed coverage can be tested without mounting the full Room. */
+export function JournalObservationCoverageWarnings({ coverage }: { coverage?: JournalObservationCoverage[] | null }) {
+  if (coverage == null) return null;
+  if (!Array.isArray(coverage) || coverage.length > 3) return <div className="room-jdetail room-jdetail-warn">Plan observation unavailable · invalid coverage metadata</div>;
+  if (coverage.length === 0) return null;
+  return <>{coverage.map((item, index) => (
+    <div className="room-jdetail room-jdetail-warn" key={index}>
+      {journalObservationCoverageText(item)}
+    </div>
+  ))}</>;
 }
 
 /** The companion pane's bound run + turn, resolved from a turn number against the room's blocks. Pure so the
@@ -1130,6 +1180,7 @@ function JournalStepRow({ step, muted, planCard, planVersion, planSuperseded, as
           {step.modelCall.costUsd != null && <span className="room-jmodel-x"> · {formatCostUsd(step.modelCall.costUsd)}</span>}
         </div>
       )}
+      <JournalObservationCoverageWarnings coverage={step.observationCoverage} />
       {step.plan.length > 0 && (
         <div className="room-jplan-card">
           {planCard
