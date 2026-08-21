@@ -63,6 +63,76 @@ public class AgentRunExecutorTests
     }
 
     [Fact]
+    public async Task A_missing_required_resume_transcript_fails_before_launch_instead_of_cold_starting_the_named_session()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        Guid runId;
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var created = await scope.Resolve<IAgentRunService>().CreateAsync(
+                new AgentTask
+                {
+                    Goal = "resume the prior work",
+                    Harness = "scripted",
+                    Model = "test-model",
+                    ResumeFromSessionId = "session-with-required-state",
+                    RestoredTranscriptArtifactId = Guid.NewGuid(),
+                },
+                teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
+            runId = created.Id;
+        }
+
+        await ExecuteAsync(runId, new ScriptedHarness("printf 'must-not-launch\\n'"));
+
+        using var verify = _fixture.BeginScope();
+        var service = verify.Resolve<IAgentRunService>();
+        var persisted = await service.GetAsync(runId, CancellationToken.None);
+        var result = JsonSerializer.Deserialize<AgentRunResult>(persisted.ResultJson!, AgentJson.Options)!;
+
+        persisted.Status.ShouldBe(AgentRunStatus.Failed, "a named resume session without its required bytes is not a valid cold start");
+        result.ExitReason.ShouldBe("executor-error");
+        result.Error.ShouldContain("artifact", Case.Insensitive);
+        (await service.GetEventsAsync(runId, teamId, 0, CancellationToken.None)).ShouldBeEmpty("the harness must not run after required resume state is unavailable");
+    }
+
+    [Fact]
+    public async Task An_available_required_resume_transcript_reaches_the_harness_byte_for_byte()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        const string transcript = "prior session state\nwith exact utf8 π\n";
+        var teamId = await SeedTeamAsync();
+        Guid runId;
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var artifactId = await scope.Resolve<IArtifactStore>().PutAsync(teamId, System.Text.Encoding.UTF8.GetBytes(transcript), "text/plain", CancellationToken.None);
+            var created = await scope.Resolve<IAgentRunService>().CreateAsync(
+                new AgentTask
+                {
+                    Goal = "resume the prior work",
+                    Harness = "scripted",
+                    Model = "test-model",
+                    ResumeFromSessionId = "session-with-required-state",
+                    RestoredTranscriptArtifactId = artifactId,
+                },
+                teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
+            runId = created.Id;
+        }
+
+        var harness = new ScriptedHarness("printf 'resumed\\n'");
+        await ExecuteAsync(runId, harness);
+
+        using var verify = _fixture.BeginScope();
+        (await verify.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded);
+        harness.BuiltTask.ShouldNotBeNull().RestoredTranscript.ShouldBe(transcript);
+        harness.BuiltTask.RestoredTranscriptArtifactId.ShouldBeNull("the harness consumes the resolved bytes, not a storage coordinate");
+    }
+
+    [Fact]
     public async Task The_launch_hands_the_runner_the_autonomy_tier_s_resource_ceilings()
     {
         if (OperatingSystem.IsWindows()) return;
@@ -1497,7 +1567,13 @@ public class AgentRunExecutorTests
         public string Version => "test";
         public IReadOnlyList<string> Models { get; } = new[] { "test-model" };
 
-        public SandboxSpec BuildInvocation(AgentTask task) => new() { Command = "/bin/sh", Args = new[] { "-c", _script }, WorkingDirectory = task.WorkspaceDirectory, TimeoutSeconds = task.TimeoutSeconds };
+        public AgentTask? BuiltTask { get; private set; }
+
+        public SandboxSpec BuildInvocation(AgentTask task)
+        {
+            BuiltTask = task;
+            return new SandboxSpec { Command = "/bin/sh", Args = new[] { "-c", _script }, WorkingDirectory = task.WorkspaceDirectory, TimeoutSeconds = task.TimeoutSeconds };
+        }
 
         public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) =>
             string.IsNullOrWhiteSpace(rawLine) ? Array.Empty<AgentEvent>() : new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine.Trim() } };
