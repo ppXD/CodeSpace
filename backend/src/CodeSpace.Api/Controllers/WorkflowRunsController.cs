@@ -74,6 +74,14 @@ public class WorkflowRunsController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>Resolve a run ref to its bounded canonical identity. Team-scoped; foreign / absent are the same 404.</summary>
+    [HttpGet("{idOrNumber}/identity")]
+    public async Task<IActionResult> GetIdentity([FromRoute] string idOrNumber, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetWorkflowRunIdentityByRefQuery { IdOrNumber = idOrNumber }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
     /// <summary>
     /// One run's detail — status, per-node cells, version-pinned definition snapshot, outputs, pending wait.
     /// Addressed by a URL ref: the team-scoped run number (canonical clean URL, e.g. <c>runs/1042</c>) or a

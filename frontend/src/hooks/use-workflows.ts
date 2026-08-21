@@ -187,6 +187,21 @@ export function useWorkflowRun(runId: string | null) {
   });
 }
 
+export const WORKFLOW_RUN_IDENTITY_POLL_MS = 2000;
+
+/** Bounded canonical route lookup. Full run detail remains owned by the session-less detail fallback. */
+export function useWorkflowRunIdentity(ref: string | null) {
+  return useQuery({
+    queryKey: ["workflow-run-identity", ref],
+    queryFn: ({ signal }) => workflowsApi.getRunIdentity(ref!, signal),
+    enabled: ref != null,
+    refetchInterval: (query) => {
+      const identity = query.state.data;
+      return identity && isRunActive(identity.status) ? WORKFLOW_RUN_IDENTITY_POLL_MS : false;
+    },
+  });
+}
+
 /**
  * Observation-only completeness statements. The query is one bounded metadata read; while a run is active it follows
  * newly admitted producer statements, then stops permanently once the parent run is terminal.

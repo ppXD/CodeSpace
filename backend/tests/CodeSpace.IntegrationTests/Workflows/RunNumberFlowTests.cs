@@ -1,11 +1,14 @@
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Services.Identity;
+using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Authorization;
 using CodeSpace.Messages.Commands.Workflows;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
+using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Queries.Workflows;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
@@ -100,6 +103,62 @@ public class RunNumberFlowTests
     }
 
     [Fact]
+    public async Task GetRunIdentityByRef_projects_only_canonical_identity_by_number_and_guid()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        using var verify = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        var mediator = verify.Resolve<IMediator>();
+
+        var byNumber = await mediator.Send(new GetWorkflowRunIdentityByRefQuery { IdOrNumber = "1" });
+        var byGuid = await mediator.Send(new GetWorkflowRunIdentityByRefQuery { IdOrNumber = runId.ToString() });
+
+        byNumber.ShouldNotBeNull();
+        byNumber!.ShouldBe(new WorkflowRunIdentity { Id = runId, RunNumber = 1, Status = WorkflowRunStatus.Pending });
+        byGuid.ShouldBe(byNumber);
+    }
+
+    [Fact]
+    public async Task GetRunIdentityByRef_never_calls_the_output_inflater_or_artifact_store()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, await CreateWorkflowAsync(teamId, userId), teamId);
+        var inflater = new BombInflater();
+        var artifacts = new BombArtifactStore();
+        using var scope = _fixture.BeginScope(builder =>
+        {
+            builder.RegisterInstance(new TestCurrentUser(userId, "test", Roles.Admin)).As<ICurrentUser>().SingleInstance();
+            builder.RegisterInstance(new TestCurrentTeam(teamId)).As<ICurrentTeam>().SingleInstance();
+            builder.RegisterInstance(inflater).As<IRunNodeOutputInflater>().SingleInstance();
+            builder.RegisterInstance(artifacts).As<IArtifactStore>().SingleInstance();
+        });
+
+        var result = await scope.Resolve<IMediator>().Send(new GetWorkflowRunIdentityByRefQuery { IdOrNumber = runId.ToString() });
+
+        result.ShouldNotBeNull();
+        inflater.Calls.ShouldBe(0);
+        artifacts.Calls.ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task GetRunIdentityByRef_conflates_foreign_and_missing_refs_as_not_found()
+    {
+        var (teamA, userA) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamB, userB) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runA = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, await CreateWorkflowAsync(teamA, userA), teamA);
+        await WorkflowsTestSeed.SeedManualRunAsync(_fixture, await CreateWorkflowAsync(teamB, userB), teamB);
+
+        using var teamBScope = _fixture.BeginScopeAs(userB, teamB, Roles.Admin);
+        var mediator = teamBScope.Resolve<IMediator>();
+
+        (await mediator.Send(new GetWorkflowRunIdentityByRefQuery { IdOrNumber = runA.ToString() })).ShouldBeNull();
+        (await mediator.Send(new GetWorkflowRunIdentityByRefQuery { IdOrNumber = "999999" })).ShouldBeNull();
+        (await mediator.Send(new GetWorkflowRunIdentityByRefQuery { IdOrNumber = "not-a-ref" })).ShouldBeNull();
+    }
+
+    [Fact]
     public async Task GetRunByRef_by_number_is_team_scoped()
     {
         // Team A run #1 and team B run #1 both exist; team B's by-number lookup MUST return B's run.
@@ -185,6 +244,35 @@ ON CONFLICT (team_id) DO UPDATE SET last_run_number = EXCLUDED.last_run_number;"
         next.ShouldBe(4, customMessage: "counter seeded to MAX → the first post-migration run is MAX+1, never colliding with a backfilled number");
 
         await tx.RollbackAsync();
+    }
+
+    private sealed class BombInflater : IRunNodeOutputInflater
+    {
+        public int Calls { get; private set; }
+
+        public Task<WorkflowRunDetail> InflateAsync(WorkflowRunDetail run, Guid teamId, CancellationToken cancellationToken) => Fail();
+        public Task<WorkflowRunDetail> InflateAsync(WorkflowRunDetail run, Guid teamId, IReadOnlySet<string> nodeIds, CancellationToken cancellationToken) => Fail();
+
+        private Task<WorkflowRunDetail> Fail()
+        {
+            Calls++;
+            throw new InvalidOperationException("The identity reader must not inflate run output.");
+        }
+    }
+
+    private sealed class BombArtifactStore : IArtifactStore
+    {
+        public int Calls { get; private set; }
+
+        public Task<Guid> PutAsync(Guid teamId, ReadOnlyMemory<byte> bytes, string contentType, CancellationToken cancellationToken) => Fail<Guid>();
+        public Task<ArtifactBytes?> GetBytesAsync(Guid teamId, Guid artifactId, CancellationToken cancellationToken) => Fail<ArtifactBytes?>();
+        public Task<ArtifactMetadata?> GetMetadataAsync(Guid teamId, Guid artifactId, CancellationToken cancellationToken) => Fail<ArtifactMetadata?>();
+
+        private Task<T> Fail<T>()
+        {
+            Calls++;
+            throw new InvalidOperationException("The identity reader must not touch artifact storage.");
+        }
     }
 
     private async Task<Guid> CreateWorkflowAsync(Guid teamId, Guid userId)

@@ -4,7 +4,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { ApiError } from "@/api/request";
 import { RunDetailView, type RunView } from "@/components/workflows/RunDetailView";
 import type { AssistantTurnBlock, RoomBlock } from "@/api/sessions";
-import { useWorkflowRun } from "@/hooks/use-workflows";
+import { useWorkflowRunIdentity } from "@/hooks/use-workflows";
 import { useRunJournal, useRunRoom } from "@/hooks/use-sessions";
 import { SessionRoomView } from "@/components/sessions/SessionRoomView";
 import { RoomSkeleton } from "@/components/sessions/RoomSkeleton";
@@ -81,34 +81,36 @@ export const Route = createFileRoute("/_app/teams/$teamSlug/runs/$runNumber")({
   validateSearch: validateRunDetailSearch,
 });
 
-// The URL segment is a ref — the canonical team-scoped run number, or a legacy GUID. Resolve it to the
-// run (getting its real id + number) before the room/journal fetches, which are all GUID-keyed. Remount
+// The URL segment is a ref — the canonical team-scoped run number, or a legacy GUID. Resolve only its
+// bounded identity (real id + number + status) before the room/journal fetches, which are all GUID-keyed. Remount
 // per resolved id so the modal state resets cleanly on navigation.
 function RunDetailPage() {
   const { teamSlug, runNumber } = Route.useParams();
   const navigate = useNavigate();
-  const run = useWorkflowRun(runNumber);
+  const identity = useWorkflowRunIdentity(runNumber);
 
   // Canonicalise a legacy-GUID URL to the number URL.
   useEffect(() => {
-    const resolved = run.data;
+    const resolved = identity.data;
     if (resolved && String(resolved.runNumber) !== runNumber) {
       navigate({ to: "/teams/$teamSlug/runs/$runNumber", params: { teamSlug, runNumber: String(resolved.runNumber) }, replace: true });
     }
-  }, [run.data, runNumber, teamSlug, navigate]);
+  }, [identity.data, runNumber, teamSlug, navigate]);
 
-  if (run.isLoading) return <RoomSkeleton />;
+  if (identity.isLoading) return <RoomSkeleton />;
 
-  if (run.error instanceof ApiError || !run.data) {
+  if (identity.error || !identity.data) {
+    const inaccessible = identity.error instanceof ApiError && (identity.error.status === 403 || identity.error.status === 404);
     return (
       <div className="run-outline-empty" style={{ padding: 48 }}>
-        Run not found.
+        {inaccessible ? "Run not found or you don't have access." : "Couldn't verify this run right now."}
+        {!inaccessible && <button type="button" className="btn" style={{ marginLeft: 8 }} onClick={() => void identity.refetch()}>Retry</button>}
         <a className="btn" style={{ marginLeft: 8 }} onClick={() => navigate({ to: "/teams/$teamSlug/runs", params: { teamSlug } })}>Back to runs</a>
       </div>
     );
   }
 
-  return <RunDetail key={run.data.id} teamSlug={teamSlug} runNumber={String(run.data.runNumber)} runId={run.data.id} />;
+  return <RunDetail key={identity.data.id} teamSlug={teamSlug} runNumber={String(identity.data.runNumber)} runId={identity.data.id} />;
 }
 
 // The Session — the Room frame with the Journal's chronological steps ③ as its middle. The strangler rebuild is complete:

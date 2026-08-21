@@ -1,5 +1,5 @@
 import { Outlet } from "@tanstack/react-router";
-import { waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { RoomBlock } from "@/api/sessions";
@@ -29,7 +29,7 @@ describe("run-detail canonical redirect", () => {
     stubFetch({
       "/room": undefined,
       "/journal": undefined,
-      "/api/workflows/runs/": { id: "run-guid-1", runNumber: 42 },
+      "/identity": { id: "11111111-1111-1111-1111-111111111111", runNumber: 42, status: "Success" },
       "/api/users/me": me,
     });
 
@@ -42,7 +42,7 @@ describe("run-detail canonical redirect", () => {
     stubFetch({
       "/room": undefined,
       "/journal": undefined,
-      "/api/workflows/runs/": { id: "run-guid-1", runNumber: 42 },
+      "/identity": { id: "11111111-1111-1111-1111-111111111111", runNumber: 42, status: "Success" },
       "/api/users/me": me,
     });
 
@@ -51,6 +51,29 @@ describe("run-detail canonical redirect", () => {
     // Give any stray redirect a chance to fire, then assert the URL is unchanged.
     await new Promise((r) => setTimeout(r, 50));
     expect(currentPath()).toBe("/teams/acme/runs/42");
+  });
+
+  it("renders a scoped not-found/access message only for an identity 404", async () => {
+    stubFetch({ "/api/users/me": me });
+
+    await renderRoute("/teams/acme/runs/999");
+
+    expect(await screen.findByText("Run not found or you don't have access.")).toBeInTheDocument();
+    expect(screen.queryByText(/artifact/i)).not.toBeInTheDocument();
+  });
+
+  it("renders identity backend failure as retryable unavailability, not not-found", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/users/me")) return new Response(JSON.stringify(me), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (url.includes("/identity")) return new Response(JSON.stringify({ code: "backend_unavailable", message: "offline" }), { status: 503, headers: { "Content-Type": "application/json" } });
+      return new Response("", { status: 404 });
+    }));
+
+    await renderRoute("/teams/acme/runs/42");
+
+    expect(await screen.findByText("Couldn't verify this run right now.")).toBeInTheDocument();
+    expect(screen.queryByText("Run not found.")).not.toBeInTheDocument();
   });
 });
 
@@ -71,7 +94,7 @@ describe("run-detail trace deep-link", () => {
     stubFetch({
       "/room": undefined,       // 404 → session-less run → the raw-trace modal IS the page
       "/journal": undefined,
-      "/api/workflows/runs/": { id: "run-guid-1", runNumber: 42 },
+      "/identity": { id: "11111111-1111-1111-1111-111111111111", runNumber: 42, status: "Success" },
       "/api/users/me": me,
     });
 
