@@ -103,6 +103,22 @@ public class SupervisorPublishGateTests
     }
 
     [Fact]
+    public void A_stop_after_a_partial_multi_repo_merge_before_resolution_parks_instead_of_shipping_the_clean_subset()
+    {
+        var context = Context(
+            Decision(SupervisorDecisionKinds.Spawn, 1, SpawnOutcome(hasWork: true)),
+            Decision(SupervisorDecisionKinds.Merge, 2, PartialMultiRepoMergeOutcome()));
+
+        var substituted = SupervisorPublishGate.Validate(context, StopDecision("partially integrated"));
+
+        substituted.ShouldNotBeNull("one clean child repository does not make the aggregate conflicted integration published");
+        substituted!.Kind.ShouldBe(SupervisorDecisionKinds.AskHuman, "the merge already diagnosed the unresolved repository, so stop must park before resolve rather than auto-merge forever");
+
+        var question = JsonSerializer.Deserialize<SupervisorAskHumanPayload>(substituted.PayloadJson, AgentJson.Options)!.Question;
+        question.ShouldContain("api conflicted", Case.Insensitive, "the partial child blocks remain diagnostic even though none is exposed as an authoritative final branch");
+    }
+
+    [Fact]
     public void Fresh_work_staged_after_a_failed_merge_gets_its_own_forced_merge_attempt()
     {
         // A NEW spawn after the failed merge is a NEW frontier — I3 must not permanently park a run that later made
@@ -355,6 +371,21 @@ public class SupervisorPublishGateTests
 
     private static string MergeOutcome(string integrationStatus, string? integratedBranch, string? reason = null) =>
         JsonSerializer.Serialize(new { merged = Array.Empty<object>(), count = 0, integration = new { status = integrationStatus, integratedBranch, reason } }, AgentJson.Options);
+
+    private static string PartialMultiRepoMergeOutcome() =>
+        JsonSerializer.Serialize(new
+        {
+            merged = Array.Empty<object>(), count = 0,
+            integration = new
+            {
+                status = "Conflicted", reason = "api conflicted",
+                repositories = new object[]
+                {
+                    new { repositoryId = Guid.NewGuid(), alias = "web", status = "Clean", integratedBranch = "codespace/integration/run/turn1", baseBranch = "main" },
+                    new { repositoryId = Guid.NewGuid(), alias = "api", status = "Conflicted", integratedBranch = (string?)null, baseBranch = "main" },
+                },
+            },
+        }, AgentJson.Options);
 
     private static string ResolveOutcomeWithBranch(string summary, string producedBranch)
     {

@@ -1002,7 +1002,7 @@ public static class SupervisorOutcome
     /// Fold the run's FINAL per-repo reviewable integrated branches off the durable tape (resolver loop #379, S7-D1) —
     /// the MULTI-repo complement of <see cref="ReadFinalIntegratedBranch"/> (which is single-valued and so empty for a
     /// multi-repo run). A reverse walk (latest wins) returns the most recent <c>merge</c> whose per-repo
-    /// <c>repositories[]</c> block carries any CLEAN repo (each with its own integrated branch); a fresh spawn / retry /
+    /// <c>repositories[]</c> block is aggregate CLEAN (each repo then carries its own integrated branch); a fresh spawn / retry /
     /// resolve that nothing later merged is the same BARRIER as <see cref="ReadFinalIntegratedBranch"/> (don't surface a
     /// stale set past un-integrated work). EMPTY for a single-repo run (no <c>repositories[]</c>) — it surfaces the
     /// single <see cref="ReadFinalIntegratedBranch"/> instead. Pure + replay-deterministic.
@@ -1059,7 +1059,7 @@ public static class SupervisorOutcome
         return null;
     }
 
-    /// <summary>Read the CLEAN per-repo integrated branches off ONE multi-repo merge's <c>integration.repositories[]</c> block — each repo whose status is <c>Clean</c> with a non-empty <c>integratedBranch</c>. Empty for a single-repo merge (no <c>repositories[]</c>) or a block with no clean repos. Best-effort + pure.</summary>
+    /// <summary>Read the authoritative per-repo integrated branches off ONE multi-repo merge's <c>integration.repositories[]</c> block — only when the aggregate integration status is <c>Clean</c>, then each repo whose status is also <c>Clean</c> with a non-empty <c>integratedBranch</c>. A partial child success under a Conflicted/Failed/Skipped aggregate remains diagnostic input for resolution, never a publishable subset. Empty for a single-repo merge (no <c>repositories[]</c>) or any non-clean/malformed aggregate. Best-effort + pure.</summary>
     private static IReadOnlyList<SupervisorRepositoryBranch> ReadMergeRepositoryBranches(string? outcomeJson)
     {
         if (string.IsNullOrWhiteSpace(outcomeJson)) return Array.Empty<SupervisorRepositoryBranch>();
@@ -1069,6 +1069,9 @@ public static class SupervisorOutcome
             var root = JsonDocument.Parse(outcomeJson).RootElement;
 
             if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("integration", out var integration) || integration.ValueKind != JsonValueKind.Object)
+                return Array.Empty<SupervisorRepositoryBranch>();
+
+            if (!(integration.TryGetProperty("status", out var aggregateStatus) && aggregateStatus.ValueKind == JsonValueKind.String && aggregateStatus.GetString() == "Clean"))
                 return Array.Empty<SupervisorRepositoryBranch>();
 
             if (!integration.TryGetProperty("repositories", out var repositories) || repositories.ValueKind != JsonValueKind.Array)

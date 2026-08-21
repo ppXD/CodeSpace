@@ -462,7 +462,7 @@ public class SupervisorResolverTests
     }
 
     [Fact]
-    public void ReadFinalRepositoryBranches_includes_only_the_CLEAN_repos_of_a_partial_conflict()
+    public void ReadFinalRepositoryBranches_withholds_every_repo_of_a_partial_conflict()
     {
         var tape = new[]
         {
@@ -472,9 +472,8 @@ public class SupervisorResolverTests
                 ("api", Guid.NewGuid(), "Conflicted", null))),
         };
 
-        var branches = SupervisorOutcome.ReadFinalRepositoryBranches(tape);
-
-        branches.Select(b => b.Alias).ShouldBe(new[] { "web" }, "only the cleanly-integrated repo surfaces a branch; the conflicted repo has none (its resolution is S7-D2)");
+        SupervisorOutcome.ReadFinalRepositoryBranches(tape)
+            .ShouldBeEmpty("the aggregate is not Clean, so no partial repository set is authoritative before the conflicted repo is resolved");
     }
 
     [Fact]
