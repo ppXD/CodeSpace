@@ -119,17 +119,11 @@ public sealed partial class ArtifactStore : IArtifactStore, IArtifactRangeReader
             _db.Entry(artifact).State = EntityState.Detached;
             if (declared is not null) _db.Entry(declared).State = EntityState.Detached;
 
-            var raceWinner = await _db.WorkflowArtifact.AsNoTracking()
-                .Where(a => a.TeamId == teamId && a.Sha256 == sha)
-                .Select(a => a.Id)
-                .SingleAsync(cancellationToken)
-                .ConfigureAwait(false);
+            var raceWinner = await FindDedupTargetAsync(teamId, sha, cancellationToken).ConfigureAwait(false);
+            if (raceWinner == null)
+                throw new ArtifactStorageDestinationUnavailableException(teamId, ArtifactCasProblemCode.TargetMissing);
 
-            // We are the SECOND writer of these bytes: the winner's id is now held by two producers, so any retention
-            // declaration on it no longer enumerates every reference and must die.
-            await RevokeDeclarationAsync(teamId, raceWinner, cancellationToken).ConfigureAwait(false);
-
-            return new ArtifactRetentionWrite(raceWinner, false);
+            return new ArtifactRetentionWrite(raceWinner.Id, false);
         }
     }
 
@@ -156,7 +150,9 @@ public sealed partial class ArtifactStore : IArtifactStore, IArtifactRangeReader
 
     private async Task<ArtifactDedupTarget?> ReadDedupTargetAsync(Guid teamId, string sha, CancellationToken cancellationToken) =>
         await _db.WorkflowArtifact.AsNoTracking()
-            .Where(a => a.TeamId == teamId && a.Sha256 == sha)
+            .Where(a => a.TeamId == teamId && a.Sha256 == sha
+                && (a.CasArtifactObjectId == null || _db.ArtifactLocation.Any(location => location.TeamId == teamId
+                    && location.ArtifactObjectId == a.CasArtifactObjectId && location.State == ArtifactLocationState.Available)))
             .Select(a => new ArtifactDedupTarget(a.Id, a.StorageUrl))
             .SingleOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false);

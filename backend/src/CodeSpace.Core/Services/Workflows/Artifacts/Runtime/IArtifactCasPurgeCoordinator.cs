@@ -12,6 +12,9 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 /// </summary>
 public interface IArtifactCasPurgeCoordinator : IScopedDependency
 {
+    Task<ArtifactCasPurgeClaimResult> ClaimAsync(ArtifactCasPurgeRequest request, CancellationToken cancellationToken);
+    Task<ArtifactCasPurgeResult> DeleteAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken);
+    Task<bool> ReleaseAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken);
     Task<ArtifactCasPurgeResult> PurgeAsync(ArtifactCasPurgeRequest request, CancellationToken cancellationToken);
 }
 
@@ -29,4 +32,32 @@ public abstract record ArtifactCasPurgeResult
 
     public sealed record Purged(Guid LocationId, long LocationRevision, bool WasAlreadyPurged) : ArtifactCasPurgeResult;
     public sealed record Rejected(ArtifactCasProblem Problem) : ArtifactCasPurgeResult;
+}
+
+public abstract record ArtifactCasPurgeClaimResult
+{
+    private ArtifactCasPurgeClaimResult() { }
+
+    public sealed record Claimed(ArtifactCasPurgeClaim Claim) : ArtifactCasPurgeClaimResult;
+    public sealed record Purged(Guid LocationId, long LocationRevision) : ArtifactCasPurgeClaimResult;
+    public sealed record Rejected(ArtifactCasProblem Problem) : ArtifactCasPurgeClaimResult;
+}
+
+/// <summary>
+/// Secret-free fence over one exact recorded location. A caller may persist this shape, but cannot manufacture
+/// authority with it: delete/release re-read the team, object, location, state and revision before any effect.
+/// </summary>
+public sealed record ArtifactCasPurgeClaim
+{
+    public required Guid TeamId { get; init; }
+    public required Guid ArtifactObjectId { get; init; }
+    public required Guid LocationId { get; init; }
+    public required long LocationRevision { get; init; }
+    public required Guid StorageProfileId { get; init; }
+    public required int StorageProfileRevision { get; init; }
+    public required string ObjectKey { get; init; }
+    public required string? ProviderETag { get; init; }
+    public required string? ProviderObjectVersion { get; init; }
+    public required Guid ActorId { get; init; }
+    public required TimeSpan OperationTimeout { get; init; }
 }

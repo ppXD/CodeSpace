@@ -96,8 +96,63 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         }, CancellationToken.None);
 
         var purged = result.ShouldBeOfType<ArtifactCasPurgeResult.Purged>();
-        purged.LocationRevision.ShouldBe(3, "Missing after a durable Deleting claim is the idempotent crash-recovery outcome");
+        purged.LocationRevision.ShouldBe(4, "the recovery advances Deleting before treating Missing as idempotent success, then finalizes Purged");
         purged.WasAlreadyPurged.ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task Every_recovery_attempt_advances_the_deleting_claim_before_it_can_repeat_provider_io()
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState
+        {
+            Capabilities = StorageProviderCapabilities.StreamingWrite | StorageProviderCapabilities.StreamingRead
+                | StorageProviderCapabilities.ConditionalCreate | StorageProviderCapabilities.Delete,
+        };
+        var bytes = "bytes awaiting recovery"u8.ToArray();
+        var committed = (await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "purge-reclaim")))
+            .ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        await MoveLocationAsync(committed.ArtifactLocationId, ArtifactLocationState.Deleting);
+
+        using var purgeScope = Scope(storage);
+        var claimed = (await purgeScope.Resolve<IArtifactCasPurgeCoordinator>().ClaimAsync(new ArtifactCasPurgeRequest
+        {
+            TeamId = world.TeamId, ArtifactObjectId = committed.ArtifactObjectId, ActorId = world.ActorId,
+        }, CancellationToken.None)).ShouldBeOfType<ArtifactCasPurgeClaimResult.Claimed>();
+
+        claimed.Claim.LocationRevision.ShouldBe(3, "recovery must claim Deleting again; reusing rev2 would make its byte effect invisible to a newer fence");
+        storage.DeleteCalls.ShouldBe(0, "claiming is a short database effect and cannot perform provider I/O");
+    }
+
+    [Fact]
+    public async Task A_claim_abandoned_before_provider_io_restores_the_available_location_with_an_event()
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState
+        {
+            Capabilities = StorageProviderCapabilities.StreamingWrite | StorageProviderCapabilities.StreamingRead
+                | StorageProviderCapabilities.ConditionalCreate | StorageProviderCapabilities.Delete,
+        };
+        var bytes = "bytes a late reference keeps"u8.ToArray();
+        var committed = (await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "purge-release")))
+            .ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+
+        using var purgeScope = Scope(storage);
+        var coordinator = purgeScope.Resolve<IArtifactCasPurgeCoordinator>();
+        var claimed = (await coordinator.ClaimAsync(new ArtifactCasPurgeRequest
+        {
+            TeamId = world.TeamId, ArtifactObjectId = committed.ArtifactObjectId, ActorId = world.ActorId,
+        }, CancellationToken.None)).ShouldBeOfType<ArtifactCasPurgeClaimResult.Claimed>();
+        (await coordinator.ReleaseAsync(claimed.Claim, CancellationToken.None)).ShouldBeTrue();
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        var location = await db.ArtifactLocation.AsNoTracking().SingleAsync(value => value.Id == committed.ArtifactLocationId);
+        location.State.ShouldBe(ArtifactLocationState.Available);
+        location.Revision.ShouldBe(3);
+        (await db.ArtifactLocationEvent.CountAsync(value => value.ArtifactLocationId == location.Id)).ShouldBe(3);
+        storage.Objects.ShouldContainKey("cas/purge-release.bin");
+        storage.DeleteCalls.ShouldBe(0);
     }
 
     [Fact]
