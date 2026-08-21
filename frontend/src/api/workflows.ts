@@ -704,6 +704,70 @@ export type WorkflowRunModelCallProjectionState = "Projected" | "LegacyFallback"
 export type WorkflowRunCaptureCompleteness = "Exact" | "RedactedExact" | "Partial" | "Unavailable" | "Corrupt" | "LegacyUnknown";
 export type WorkflowRunDataCompletenessScope = "RecordedFacetsOnly";
 
+export type WorkflowRunToolCallEffectClass = "ReadOnly" | "SideEffecting" | "Unknown" | "LegacyUnknown" | "Corrupt";
+export type WorkflowRunToolCallObservationState = "Pending" | "Running" | "Completed" | "Abandoned" | "LegacyUnknown" | "Corrupt";
+export type WorkflowRunToolCallAttemptStatus = "Pending" | "Running" | "Succeeded" | "Failed" | "Denied" | "Cancelled" | "TimedOut" | "Indeterminate" | "LegacyUnknown" | "Corrupt";
+export type WorkflowRunToolCallErrorCode = "LedgerFailedOutcomeUnknown" | "GovernanceDenied" | "ApprovalExpired" | "LegacyUnknown" | "Corrupt";
+
+/** Metadata-only observation. CallOrdinal is per Agent Run, never the Workflow Run page order. */
+export interface WorkflowRunToolCallMetadata {
+  toolCallId: string;
+  runId: string;
+  toolAdapterKind: string;
+  toolName: string;
+  effectClass: WorkflowRunToolCallEffectClass;
+  state: WorkflowRunToolCallObservationState;
+  callOrdinal: number;
+  sourceKind: string | null;
+  sourceCorrelationId: string | null;
+  captureSource: string;
+  captureCompleteness: WorkflowRunCaptureCompleteness;
+  createdAt: string;
+  lastModifiedAt: string;
+  terminalAt: string | null;
+  errorCode: WorkflowRunToolCallErrorCode | null;
+}
+
+export interface WorkflowRunToolCallAttemptMetadata {
+  attemptOrdinal: number;
+  status: WorkflowRunToolCallAttemptStatus;
+  captureSource: string;
+  captureCompleteness: WorkflowRunCaptureCompleteness;
+  /** Source admission lower-bound, not an observed provider wire start. */
+  startedAt: string;
+  completedAt: string | null;
+  createdAt: string;
+  lastModifiedAt: string;
+  errorCode: WorkflowRunToolCallErrorCode | null;
+}
+
+export interface WorkflowRunToolCallPage {
+  runId: string;
+  requestCursor: string | null;
+  limit: number;
+  items: WorkflowRunToolCallMetadata[];
+  nextCursor: string | null;
+}
+
+export interface WorkflowRunToolCallDetail {
+  call: WorkflowRunToolCallMetadata;
+  attempts: WorkflowRunToolCallAttemptMetadata[];
+  attemptsTruncated: boolean;
+}
+
+export interface WorkflowRunToolCallPageRequest {
+  cursor?: string;
+  limit: number;
+}
+
+/** A non-retryable request/wire-contract violation; transport faults remain retryable errors. */
+export class InvalidWorkflowRunToolCallResponseError extends Error {
+  constructor() {
+    super("Invalid Workflow Run tool-call response.");
+    this.name = "InvalidWorkflowRunToolCallResponseError";
+  }
+}
+
 export interface WorkflowRunDataFacetCompleteness {
   /** Open registered facet identity; future producer facets render without a frontend release. */
   facet: string;
@@ -874,6 +938,13 @@ export interface WorkflowRunModelCallBodyRead {
 const WORKFLOW_RUN_CAPTURE_COMPLETENESS = new Set<WorkflowRunCaptureCompleteness>(["Exact", "RedactedExact", "Partial", "Unavailable", "Corrupt", "LegacyUnknown"]);
 const WORKFLOW_RUN_STATUSES = new Set<WorkflowRunStatus>(["Pending", "Enqueued", "Running", "Success", "Failure", "Cancelled", "Suspended"]);
 const RUN_RECORD_PAGE_MODES = new Set<RunRecordPageMode>(["Tail", "Older", "Newer"]);
+const WORKFLOW_RUN_TOOL_CALL_EFFECTS = new Set<WorkflowRunToolCallEffectClass>(["ReadOnly", "SideEffecting", "Unknown", "LegacyUnknown", "Corrupt"]);
+const WORKFLOW_RUN_TOOL_CALL_STATES = new Set<WorkflowRunToolCallObservationState>(["Pending", "Running", "Completed", "Abandoned", "LegacyUnknown", "Corrupt"]);
+const WORKFLOW_RUN_TOOL_CALL_ATTEMPT_STATUSES = new Set<WorkflowRunToolCallAttemptStatus>(["Pending", "Running", "Succeeded", "Failed", "Denied", "Cancelled", "TimedOut", "Indeterminate", "LegacyUnknown", "Corrupt"]);
+const WORKFLOW_RUN_TOOL_CALL_ERROR_CODES = new Set<WorkflowRunToolCallErrorCode>(["LedgerFailedOutcomeUnknown", "GovernanceDenied", "ApprovalExpired", "LegacyUnknown", "Corrupt"]);
+const WORKFLOW_RUN_TOOL_CALL_CURSOR_MAX = 96;
+const WORKFLOW_RUN_TOOL_CALL_PAGE_MAX = 200;
+const WORKFLOW_RUN_TOOL_CALL_ATTEMPT_MAX = 100;
 
 function isJsonObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -901,6 +972,126 @@ function hasNullableString(value: Record<string, unknown>, key: string): boolean
 
 function isGuid(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+}
+
+function invalidRunToolCall(): never {
+  throw new InvalidWorkflowRunToolCallResponseError();
+}
+
+function sameGuid(left: unknown, right: string): left is string {
+  return isGuid(left) && left.toLowerCase() === right.toLowerCase();
+}
+
+/** Exact-enough key for PostgreSQL timestamptz JSON (up to nanoseconds), without Date's millisecond collapse. */
+function instantKey(value: unknown): bigint | null {
+  if (typeof value !== "string") return null;
+  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/.exec(value);
+  if (!match) return null;
+  const milliseconds = Date.parse(`${match[1]}${match[3]}`);
+  if (!Number.isFinite(milliseconds)) return null;
+  const nanoseconds = BigInt((match[2] ?? "").padEnd(9, "0"));
+  return BigInt(milliseconds) * 1_000_000n + nanoseconds;
+}
+
+function decodeRunToolCall(value: unknown, expectedRunId: string): WorkflowRunToolCallMetadata {
+  if (!isJsonObject(value) || !isGuid(value.toolCallId) || !sameGuid(value.runId, expectedRunId)
+    || typeof value.toolAdapterKind !== "string" || value.toolAdapterKind.length === 0
+    || typeof value.toolName !== "string" || value.toolName.length === 0
+    || !WORKFLOW_RUN_TOOL_CALL_EFFECTS.has(value.effectClass as WorkflowRunToolCallEffectClass)
+    || !WORKFLOW_RUN_TOOL_CALL_STATES.has(value.state as WorkflowRunToolCallObservationState)
+    || !isSafeCount(value.callOrdinal, true) || !hasNullableString(value, "sourceKind")
+    || (typeof value.sourceKind === "string" && value.sourceKind.length === 0)
+    || !Object.prototype.hasOwnProperty.call(value, "sourceCorrelationId")
+    || (value.sourceCorrelationId !== null && !isGuid(value.sourceCorrelationId))
+    || typeof value.captureSource !== "string" || value.captureSource.length === 0
+    || !WORKFLOW_RUN_CAPTURE_COMPLETENESS.has(value.captureCompleteness as WorkflowRunCaptureCompleteness)
+    || instantKey(value.createdAt) === null || instantKey(value.lastModifiedAt) === null
+    || !Object.prototype.hasOwnProperty.call(value, "terminalAt") || (value.terminalAt !== null && instantKey(value.terminalAt) === null)
+    || !Object.prototype.hasOwnProperty.call(value, "errorCode")
+    || (value.errorCode !== null && !WORKFLOW_RUN_TOOL_CALL_ERROR_CODES.has(value.errorCode as WorkflowRunToolCallErrorCode)))
+    return invalidRunToolCall();
+
+  return {
+    toolCallId: value.toolCallId,
+    runId: value.runId as string,
+    toolAdapterKind: value.toolAdapterKind,
+    toolName: value.toolName,
+    effectClass: value.effectClass as WorkflowRunToolCallEffectClass,
+    state: value.state as WorkflowRunToolCallObservationState,
+    callOrdinal: value.callOrdinal,
+    sourceKind: value.sourceKind as string | null,
+    sourceCorrelationId: value.sourceCorrelationId as string | null,
+    captureSource: value.captureSource,
+    captureCompleteness: value.captureCompleteness as WorkflowRunCaptureCompleteness,
+    createdAt: value.createdAt as string,
+    lastModifiedAt: value.lastModifiedAt as string,
+    terminalAt: value.terminalAt as string | null,
+    errorCode: value.errorCode as WorkflowRunToolCallErrorCode | null,
+  };
+}
+
+function decodeRunToolCallAttempt(value: unknown): WorkflowRunToolCallAttemptMetadata {
+  if (!isJsonObject(value) || !isSafeCount(value.attemptOrdinal, true)
+    || !WORKFLOW_RUN_TOOL_CALL_ATTEMPT_STATUSES.has(value.status as WorkflowRunToolCallAttemptStatus)
+    || typeof value.captureSource !== "string" || value.captureSource.length === 0
+    || !WORKFLOW_RUN_CAPTURE_COMPLETENESS.has(value.captureCompleteness as WorkflowRunCaptureCompleteness)
+    || instantKey(value.startedAt) === null
+    || !Object.prototype.hasOwnProperty.call(value, "completedAt") || (value.completedAt !== null && instantKey(value.completedAt) === null)
+    || instantKey(value.createdAt) === null || instantKey(value.lastModifiedAt) === null
+    || !Object.prototype.hasOwnProperty.call(value, "errorCode")
+    || (value.errorCode !== null && !WORKFLOW_RUN_TOOL_CALL_ERROR_CODES.has(value.errorCode as WorkflowRunToolCallErrorCode)))
+    return invalidRunToolCall();
+
+  return {
+    attemptOrdinal: value.attemptOrdinal,
+    status: value.status as WorkflowRunToolCallAttemptStatus,
+    captureSource: value.captureSource,
+    captureCompleteness: value.captureCompleteness as WorkflowRunCaptureCompleteness,
+    startedAt: value.startedAt as string,
+    completedAt: value.completedAt as string | null,
+    createdAt: value.createdAt as string,
+    lastModifiedAt: value.lastModifiedAt as string,
+    errorCode: value.errorCode as WorkflowRunToolCallErrorCode | null,
+  };
+}
+
+function decodeRunToolCallPage(value: unknown, expectedRunId: string, request: WorkflowRunToolCallPageRequest): WorkflowRunToolCallPage {
+  const expectedCursor = request.cursor ?? null;
+  if (!isJsonObject(value) || !sameGuid(value.runId, expectedRunId) || value.requestCursor !== expectedCursor
+    || value.limit !== request.limit || !Array.isArray(value.items) || value.items.length > request.limit
+    || !Object.prototype.hasOwnProperty.call(value, "nextCursor")
+    || (value.nextCursor !== null && (typeof value.nextCursor !== "string" || value.nextCursor.length === 0 || value.nextCursor.length > WORKFLOW_RUN_TOOL_CALL_CURSOR_MAX)))
+    return invalidRunToolCall();
+
+  const items = value.items.map((candidate) => decodeRunToolCall(candidate, expectedRunId));
+  const ids = new Set<string>();
+  let previous: WorkflowRunToolCallMetadata | null = null;
+  for (const item of items) {
+    const id = item.toolCallId.toLowerCase();
+    const instant = instantKey(item.createdAt)!;
+    const previousInstant = previous === null ? null : instantKey(previous.createdAt)!;
+    if (ids.has(id) || (previous !== null && (previousInstant! < instant || (previousInstant === instant && previous.toolCallId.toLowerCase() <= id))))
+      return invalidRunToolCall();
+    ids.add(id);
+    previous = item;
+  }
+  if ((items.length === 0 || items.length < request.limit) && value.nextCursor !== null) return invalidRunToolCall();
+  return { runId: value.runId as string, requestCursor: expectedCursor, limit: request.limit, items, nextCursor: value.nextCursor as string | null };
+}
+
+function decodeRunToolCallDetail(value: unknown, expectedRunId: string, expectedCallId: string): WorkflowRunToolCallDetail {
+  if (!isJsonObject(value) || !Array.isArray(value.attempts) || value.attempts.length > WORKFLOW_RUN_TOOL_CALL_ATTEMPT_MAX || typeof value.attemptsTruncated !== "boolean")
+    return invalidRunToolCall();
+  const call = decodeRunToolCall(value.call, expectedRunId);
+  if (!sameGuid(call.toolCallId, expectedCallId)) return invalidRunToolCall();
+  const attempts = value.attempts.map(decodeRunToolCallAttempt);
+  let previousOrdinal = 0;
+  for (const attempt of attempts) {
+    if (attempt.attemptOrdinal <= previousOrdinal) return invalidRunToolCall();
+    previousOrdinal = attempt.attemptOrdinal;
+  }
+  if (value.attemptsTruncated && attempts.length !== WORKFLOW_RUN_TOOL_CALL_ATTEMPT_MAX) return invalidRunToolCall();
+  return { call, attempts, attemptsTruncated: value.attemptsTruncated };
 }
 
 function decodeRunRecordPage(value: unknown, expectedRunId: string, request: RunRecordPageRequest): RunRecordPageResponse {
@@ -1121,6 +1312,34 @@ export const workflowsApi = {
   getRunDataCompleteness: async (runId: string, signal?: AbortSignal): Promise<WorkflowRunDataCompletenessView | null> => {
     try {
       return decodeRunDataCompleteness(await fetchJson<unknown>(`/api/workflows/runs/${runId}/data-completeness`, { signal }), runId);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null;
+      throw error;
+    }
+  },
+
+  /** One metadata-only CreatedAt+id keyset page of terminal governed side-effect observations. */
+  pageRunToolCalls: async (runId: string, request: WorkflowRunToolCallPageRequest, signal?: AbortSignal): Promise<WorkflowRunToolCallPage | null> => {
+    if (!isGuid(runId) || !Number.isSafeInteger(request.limit) || request.limit < 1 || request.limit > WORKFLOW_RUN_TOOL_CALL_PAGE_MAX
+      || (request.cursor !== undefined && (request.cursor.length === 0 || request.cursor.trim() !== request.cursor || request.cursor.length > WORKFLOW_RUN_TOOL_CALL_CURSOR_MAX)))
+      return invalidRunToolCall();
+    const params = new URLSearchParams({ limit: String(request.limit) });
+    if (request.cursor !== undefined) params.set("cursor", request.cursor);
+    try {
+      const value = await fetchJson<unknown>(`/api/workflows/runs/${encodeURIComponent(runId)}/tool-calls?${params}`, { signal });
+      return decodeRunToolCallPage(value, runId, request);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null;
+      throw error;
+    }
+  },
+
+  /** One stable call's metadata plus at most 100 ordered metadata-only attempts. */
+  getRunToolCall: async (runId: string, toolCallId: string, signal?: AbortSignal): Promise<WorkflowRunToolCallDetail | null> => {
+    if (!isGuid(runId) || !isGuid(toolCallId)) return invalidRunToolCall();
+    try {
+      const value = await fetchJson<unknown>(`/api/workflows/runs/${encodeURIComponent(runId)}/tool-calls/${encodeURIComponent(toolCallId)}`, { signal });
+      return decodeRunToolCallDetail(value, runId, toolCallId);
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) return null;
       throw error;

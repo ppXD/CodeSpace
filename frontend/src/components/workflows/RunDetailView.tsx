@@ -9,6 +9,7 @@ import { isRunActive, useNodeManifests, useResumeRun, useRunPhases, useWorkflowR
 
 import { AgentRunTimeline } from "./AgentRunTimeline";
 import { AgentToolCalls } from "./AgentToolCalls";
+import { GovernedToolsPanel } from "./GovernedToolsPanel";
 import { JsonView } from "./JsonView";
 import { RunActionsContext } from "./runActionsContext";
 import { RunActivityTimeline } from "./RunActivityTimeline";
@@ -38,7 +39,7 @@ const MAX_EMBED_DEPTH = 3;
  * host must live inside `.acs-root` (the route does; the editor overlay renders in-tree rather
  * than portaling to <body> for exactly this reason).
  */
-export type RunView = "activity" | "canvas" | "changes" | "trace";
+export type RunView = "activity" | "canvas" | "changes" | "governed-tools" | "trace";
 
 export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, defaultView = "activity", view: controlledView, onViewChange, selectedPhaseId, selectedAgentRunId, onSelectAgent }: { runId: string; nested?: boolean; depth?: number; onOpenRun?: (runId: string) => void; defaultView?: RunView; view?: RunView; onViewChange?: (v: RunView) => void; selectedPhaseId?: string | null; selectedAgentRunId?: string | null; onSelectAgent?: (agentRunId: string | null) => void }) {
   const run = useWorkflowRun(runId);
@@ -176,6 +177,9 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
           <button type="button" role="tab" aria-selected={view === "changes"} data-active={view === "changes"} onClick={() => setView("changes")}>
             <Ic.Branch size={13} /> Changes
           </button>
+          <button type="button" role="tab" aria-selected={view === "governed-tools"} data-active={view === "governed-tools"} onClick={() => setView("governed-tools")}>
+            <Ic.Wrench size={13} /> Governed tools
+          </button>
           <button type="button" role="tab" aria-selected={view === "trace"} data-active={view === "trace"} onClick={() => setView("trace")}>
             <Ic.Code size={13} /> Trace
           </button>
@@ -200,6 +204,8 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
       ) : !nested && view === "changes" ? (
         <RunTabComingSoon title="Changes"
           note="The files this run created or modified — per-repo change sets, diffs, and the pull requests it opened." />
+      ) : !nested && view === "governed-tools" ? (
+        <GovernedToolsPanel runId={runId} active={isRunActive(r.status)} />
       ) : !nested && view === "trace" ? (
         <RunTrace runId={runId} active={isRunActive(r.status)} />
       ) : (
