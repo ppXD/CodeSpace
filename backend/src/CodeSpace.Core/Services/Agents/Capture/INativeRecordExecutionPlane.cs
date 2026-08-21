@@ -171,7 +171,7 @@ public sealed partial class NativeRecordPlane : INativeRecordExecutionPlane
     {
         var head = await db.WorkflowRunNativeRecord.AsNoTracking()
             .Where(record => record.TeamId == request.TeamId && record.AttemptId == attemptId && record.Channel == request.Channel)
-            .MaxAsync(record => (long?)(record.SourceOffsetBytes + record.SourceLengthBytes + (record.IsFinal ? 1 : 0)), cancellationToken).ConfigureAwait(false);
+            .MaxAsync(record => (long?)(record.SourceEndOffsetBytes ?? record.SourceOffsetBytes + record.SourceLengthBytes + (record.IsFinal ? 1 : 0)), cancellationToken).ConfigureAwait(false);
 
         return head ?? 0;
     }

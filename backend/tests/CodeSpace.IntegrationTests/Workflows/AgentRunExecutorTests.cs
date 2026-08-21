@@ -1366,7 +1366,7 @@ public class AgentRunExecutorTests
             return Task.FromResult(new SandboxHandle { Kind = Kind, ProcessId = System.Environment.ProcessId, SpoolDirectory = spoolDirectory, Deadline = DateTimeOffset.UtcNow.AddMinutes(5) });
         }
 
-        public Task<SandboxResult> AttachAsync(SandboxHandle handle, Func<string, CancellationToken, Task> onStdoutLine, CancellationToken cancellationToken, Func<long, CancellationToken, Task>? onCheckpoint = null) =>
+        public Task<SandboxResult> AttachAsync(SandboxHandle handle, Func<SandboxOutputFrame, CancellationToken, Task> onStdoutFrame, CancellationToken cancellationToken, Func<long, CancellationToken, Task>? onCheckpoint = null) =>
             Task.FromResult(new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "", Stderr = "" });
 
         public Task<SandboxProbe> ProbeAsync(SandboxHandle handle, CancellationToken cancellationToken) =>

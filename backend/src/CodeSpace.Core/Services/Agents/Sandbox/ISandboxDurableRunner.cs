@@ -46,8 +46,8 @@ public interface ISandboxDurableRunner
 
     /// <summary>
     /// Observe a launched run: tail its stdout spool from <see cref="SandboxHandle.StdoutOffset"/> (0 = the
-    /// start; a re-attach resumes from the dead observer's checkpoint), invoking <paramref name="onStdoutLine"/>
-    /// for each line as it lands, until the process exits (its exit marker appears) or the
+    /// start; a re-attach resumes from the dead observer's checkpoint), invoking <paramref name="onStdoutFrame"/>
+    /// for each frame as it lands, until the process exits (its exit marker appears) or the
     /// <see cref="SandboxHandle.Deadline"/> elapses (the process is terminated → <see cref="SandboxStatus.TimedOut"/>).
     /// Returns the terminal <see cref="SandboxResult"/> (stdout empty — delivered live via the callback;
     /// <see cref="SandboxResult.Stderr"/> a BOUNDED excerpt of the spooled diagnostics rather than one string that
@@ -56,13 +56,15 @@ public interface ISandboxDurableRunner
     /// than one of its read passes). Cancelling <paramref name="cancellationToken"/> stops observing and
     /// leaves the process running, throwing <see cref="OperationCanceledException"/> (see the type remarks).
     ///
-    /// <para><paramref name="onCheckpoint"/> (optional) is invoked with the advanced byte offset after each
+    /// <para>Every delivered <see cref="SandboxOutputFrame"/> carries the exact half-open source byte range the reader
+    /// consumed. Its text omits LF/CRLF exactly as before, but a durable consumer never has to reconstruct source
+    /// positions from decoded text. <paramref name="onCheckpoint"/> (optional) is invoked with the advanced byte offset after each
     /// emitted batch (only when it advanced), so the caller can persist it onto the handle and a re-attach
-    /// resumes there. It is called AFTER the batch's lines are delivered, so the persisted offset never runs
+    /// resumes there. It is called AFTER the batch's frames are delivered, so the persisted offset never runs
     /// ahead of the events — a re-attach at worst re-emits the last batch (at-least-once; exactly-once is a
     /// later slice), never loses lines.</para>
     /// </summary>
-    Task<SandboxResult> AttachAsync(SandboxHandle handle, Func<string, CancellationToken, Task> onStdoutLine, CancellationToken cancellationToken, Func<long, CancellationToken, Task>? onCheckpoint = null);
+    Task<SandboxResult> AttachAsync(SandboxHandle handle, Func<SandboxOutputFrame, CancellationToken, Task> onStdoutFrame, CancellationToken cancellationToken, Func<long, CancellationToken, Task>? onCheckpoint = null);
 
     /// <summary>
     /// Snapshot a launched run's liveness from its <paramref name="handle"/> WITHOUT observing it:

@@ -572,14 +572,30 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         await using var transcript = new AgentTranscriptSpool(TranscriptSpillDirectory(context.RunId));   // D3/G0: the faithful raw stream of the RESUMED tail (the pre-crash prefix lived in the dead observer's run), bounded exactly as the live tail's is and spilled into the SAME run-owned, reaper-swept spool directory
         var writer = new BufferedEventWriter(_runs, context.RunId);   // same batched-append + flush-at-checkpoint path as the live tail
         var native = await OpenResumedCaptureAsync(context, redactor, cancellationToken).ConfigureAwait(false);   // G1: the RESUMED frame stream of the same process, continuing its source cursor and the execution's reduction
+        var applicationSourceHead = context.Handle.StdoutOffset;
 
-        async Task PersistLineAsync(string line)
+        async Task PersistFrameAsync(SandboxOutputFrame output)
         {
+            var line = output.Text;
             var redactedLine = redactor.Redact(line);
+
+            // A best-effort native flush may have failed after the normalized events were durable and before this
+            // source head was checkpointed. Rewind the reader to the plane head to recover those native frames, but do
+            // not feed their already-consumed text back into the transcript, normalized log, folder or facts.
+            if (output.SourceStartOffsetBytes < applicationSourceHead)
+            {
+                var backfill = await native.CaptureBackfillAsync(output, redactedLine, context.Harness, cancellationToken).ConfigureAwait(false);
+                foreach (var normalized in backfill.Events)
+                {
+                    var redacted = Redact(normalized, redactor);
+                    native.Project(backfill, redacted);
+                }
+                return;
+            }
 
             await transcript.AppendLineAsync(redactedLine, cancellationToken).ConfigureAwait(false);
 
-            var frame = await native.CaptureAsync(line, redactedLine, context.Harness, cancellationToken).ConfigureAwait(false);
+            var frame = await native.CaptureAsync(output, redactedLine, context.Harness, cancellationToken).ConfigureAwait(false);
 
             foreach (var normalized in frame.Events)
             {
@@ -599,7 +615,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var capture = await OpenLogCaptureAsync(new LogCaptureContext(context.TeamId, context.RunId, context.ActorId, context.WorkerFenceEpoch, redactor), context.Durable, handle, cancellationToken).ConfigureAwait(false);
         if (!ReferenceEquals(capture.Handle, handle) && capture.Handle != handle)
             await _runs.SetRunnerHandleAsync(context.RunId, JsonSerializer.Serialize(capture.Handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
-        var sandbox = await capture.ObserveAsync((capturedHandle, token) => context.Durable.AttachAsync(capturedHandle, (line, _) => PersistLineAsync(line), token, CheckpointHandleOffset(context.RunId, capturedHandle, new HarnessSinks(writer, native))), cancellationToken).ConfigureAwait(false);
+        var sandbox = await capture.ObserveAsync((capturedHandle, token) =>
+        {
+            var replayHandle = capturedHandle with { StdoutOffset = Math.Min(capturedHandle.StdoutOffset, native.ReplayStartOffset) };
+            return context.Durable.AttachAsync(replayHandle, (frame, _) => PersistFrameAsync(frame), token, CheckpointHandleOffset(context.RunId, capturedHandle, new HarnessSinks(writer, native)));
+        }, cancellationToken).ConfigureAwait(false);
 
         // Final flush for the terminal-drain lines (no trailing checkpoint), as in the live path.
         await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
@@ -2225,7 +2245,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var writer = new BufferedEventWriter(_runs, context.RunId);   // batches the DB inserts; flushed at each spool checkpoint + once at the end
         var native = await OpenNativeCaptureAsync(context, cancellationToken).ConfigureAwait(false);   // G1: the lossless frame plane, dual-written beside the log; a plane that won't open leaves this path unchanged
 
-        async Task PersistLineAsync(string line)
+        async Task PersistAsync(string line, SandboxOutputFrame? output)
         {
             var redactedLine = context.Redactor.Redact(line);
 
@@ -2239,7 +2259,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // native class the adapter never learned). The pump owns the parse from here, and owns it TRANSPARENTLY:
             // a parser that throws gets its record marked normalization-failed and the throw is then re-raised, so
             // this loop fails exactly where `foreach (var e in Harness.ParseEvents(line))` used to.
-            var frame = await native.CaptureAsync(line, redactedLine, context.Harness, cancellationToken).ConfigureAwait(false);
+            var frame = output is { } source
+                ? await native.CaptureAsync(source, redactedLine, context.Harness, cancellationToken).ConfigureAwait(false)
+                : await native.CaptureAsync(line, redactedLine, context.Harness, cancellationToken).ConfigureAwait(false);
 
             // ONE native line can carry several content blocks (reasoning + tool_use + text) → several events, in
             // stream order. Each is redacted BEFORE the append-only log freezes it (the log can't be edited later).
@@ -2255,12 +2277,15 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             }
         }
 
+        Task PersistLineAsync(string line) => PersistAsync(line, null);
+        Task PersistFrameAsync(SandboxOutputFrame frame) => PersistAsync(frame.Text, frame);
+
         // The heartbeat is owned by ExecuteAsync (it spans the whole run, including the completion tail), so
         // streaming here just emits events — a quiet step's liveness is kept fresh by that outer heartbeat. The
         // redactor's fingerprint is stamped onto the durable handle so a re-attach can prove it rebuilt the SAME
         // key before re-tailing the spool (a rotated/deleted key → marker-only, never an unmaskable leak). The MCP
         // token rides the handle too so a re-attach re-binds the SAME socket+token the agent's declaration carries.
-        var sandbox = await RunSandboxAsync(context, PersistLineAsync, new HarnessSinks(writer, native), cancellationToken).ConfigureAwait(false);
+        var sandbox = await RunSandboxAsync(context, PersistLineAsync, PersistFrameAsync, new HarnessSinks(writer, native), cancellationToken).ConfigureAwait(false);
 
         // Final flush: the durable runner's terminal-drain paths (CompleteFromSpool/Timeout/Vanished) deliver the last
         // lines WITHOUT a trailing checkpoint, so anything buffered after the last checkpoint must be flushed here
@@ -2373,10 +2398,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// otherwise the live-stream / batch path. Feature-detected via <c>runner is ISandboxDurableRunner</c>, so
     /// a runner that can't be durable transparently falls back to streaming.
     /// </summary>
-    private async Task<SandboxResult> RunSandboxAsync(HarnessRunContext context, Func<string, Task> persistLine, HarnessSinks sinks, CancellationToken cancellationToken)
+    private async Task<SandboxResult> RunSandboxAsync(HarnessRunContext context, Func<string, Task> persistLine, Func<SandboxOutputFrame, Task> persistFrame, HarnessSinks sinks, CancellationToken cancellationToken)
     {
         if (context.Runner is ISandboxDurableRunner durable)
-            return await RunDurableAsync(context, durable, persistLine, sinks, cancellationToken).ConfigureAwait(false);
+            return await RunDurableAsync(context, durable, persistFrame, sinks, cancellationToken).ConfigureAwait(false);
 
         // Non-durable fallback (no spool/checkpoint): the writer's size cap + the caller's final flush drain it.
         return await RunAndStreamAsync(context.Runner, context.Spec, persistLine, cancellationToken).ConfigureAwait(false);
@@ -2388,7 +2413,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// observer dies mid-tail. On a host-shutdown cancel the attach stops observing WITHOUT killing the
     /// process (leaving the run Running for re-attach/recovery); only the spec timeout terminates it.
     /// </summary>
-    private async Task<SandboxResult> RunDurableAsync(HarnessRunContext context, ISandboxDurableRunner durable, Func<string, Task> persistLine, HarnessSinks sinks, CancellationToken cancellationToken)
+    private async Task<SandboxResult> RunDurableAsync(HarnessRunContext context, ISandboxDurableRunner durable, Func<SandboxOutputFrame, Task> persistFrame, HarnessSinks sinks, CancellationToken cancellationToken)
     {
         // Stamp the injected-key fingerprint + the MCP run token onto the handle at launch. The fingerprint lets a
         // re-attach verify it rebuilt the same redactor before re-tailing (rotated/deleted credential → marker-only);
@@ -2418,7 +2443,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         // Checkpoint the advancing spool offset onto the handle as we tail, so a backend restart mid-run can
         // re-attach (ReattachAsync) and resume from here instead of re-emitting the whole spool.
-        var result = await capture.ObserveAsync((capturedHandle, token) => durable.AttachAsync(capturedHandle, (line, _) => persistLine(line), token, CheckpointHandleOffset(context.RunId, capturedHandle, sinks)), cancellationToken).ConfigureAwait(false);
+        var result = await capture.ObserveAsync((capturedHandle, token) => durable.AttachAsync(capturedHandle, (frame, _) => persistFrame(frame), token, CheckpointHandleOffset(context.RunId, capturedHandle, sinks)), cancellationToken).ConfigureAwait(false);
 
         // The stdout stream's terminal-drain frames and the checkpoint they complete must be durable BEFORE the
         // diagnostics fold resumes from that checkpoint — two openings of one execution advance one reduction, and
@@ -2578,7 +2603,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         {
             await sinks.Events.FlushAsync(ct).ConfigureAwait(false);
             await sinks.Frames.FlushAsync(ct).ConfigureAwait(false);   // the frame plane rides the same checkpoint — best-effort, so a refused frame flush stops capture for the round rather than holding the offset back
-            await _runs.SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle with { StdoutOffset = offset }, AgentJson.Options), ct).ConfigureAwait(false);
+            await _runs.SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle with { StdoutOffset = Math.Max(handle.StdoutOffset, offset) }, AgentJson.Options), ct).ConfigureAwait(false);
         };
 
     /// <summary>

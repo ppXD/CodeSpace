@@ -52,11 +52,14 @@ public sealed class WorkflowRunNativeRecord : IEntity<Guid>
     /// <summary>When capture observed the frame — the only clock the capture side controls.</summary>
     public DateTimeOffset IngestedAt { get; set; }
 
-    /// <summary>Offset of the RAW frame within its stream. A per-stream cursor derived from the frames as delivered, each counted as its bytes plus one terminator — the source's own offsets for the newline-terminated stream a runner spools, and not otherwise a byte-exact index into one. Resuming the TAIL reads the log-capture plane's committed source head and never this, while a resumed CAPTURE starts its own stream at that same committed offset so both sides of a re-attach state their positions in one coordinate. Not a no-overlap guarantee — the re-attach is re-delivered every line recorded past that offset, and what keeps each source line recorded once is the writer refusing anything below the head its process already covers.</summary>
+    /// <summary>Exact start of the raw frame in its source stream for durable stdout. Legacy/non-durable producers retain their best-known cursor here and leave <see cref="SourceEndOffsetBytes"/> null.</summary>
     public long SourceOffsetBytes { get; set; }
 
     /// <summary>Byte length of the RAW frame. It differs from <see cref="SizeBytes"/> exactly when redaction changed the bytes, which is how much redaction cost.</summary>
     public long SourceLengthBytes { get; set; }
+
+    /// <summary>The exact exclusive source end stated by the reader. Null on records written before migration 0153, whose head retains the legacy reconstruction.</summary>
+    public long? SourceEndOffsetBytes { get; set; }
 
     /// <summary>The captured payload, for a frame small enough to ride inline. Mutually exclusive with <see cref="PayloadRefJson"/> — never both, never neither, so an absent payload can never be read as an empty frame.</summary>
     public string? InlinePayload { get; set; }

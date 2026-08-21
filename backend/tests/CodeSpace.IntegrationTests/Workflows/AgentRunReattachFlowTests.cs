@@ -72,9 +72,9 @@ public sealed class AgentRunReattachFlowTests : IDisposable
             using var deadCts = new CancellationTokenSource();
             var persisted = 0;
             await Should.ThrowAsync<OperationCanceledException>(() => runner.AttachAsync(handle,
-                async (line, _) =>
+                async (frame, _) =>
                 {
-                    await svc.AppendEventAsync(runId, new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = line.Trim() }, CancellationToken.None);
+                    await svc.AppendEventAsync(runId, new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = frame.Text.Trim() }, CancellationToken.None);
                     persisted++;
                 },
                 deadCts.Token,
@@ -153,7 +153,7 @@ public sealed class AgentRunReattachFlowTests : IDisposable
 
             var buffered = new List<AgentEvent>();
             await Should.ThrowAsync<CrashSimulation>(() => runner.AttachAsync(handle,
-                (line, _) => { buffered.Add(new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = line.Trim() }); return Task.CompletedTask; },
+                (frame, _) => { buffered.Add(new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = frame.Text.Trim() }); return Task.CompletedTask; },
                 CancellationToken.None,
                 async (_, _) =>
                 {

@@ -289,7 +289,7 @@ public sealed partial class NativeRecordPlane : INativeRecordPlane, IScopedDepen
             AttemptId = handle.AttemptId, StreamId = frame.StreamId, Ordinal = frame.Ordinal, Channel = frame.Channel,
             NativeType = frame.NativeType, NativeSchema = frame.NativeSchema, NativeSchemaVersion = frame.NativeSchemaVersion,
             OccurredAt = frame.OccurredAt, IngestedAt = frame.IngestedAt,
-            SourceOffsetBytes = frame.ByteOffset, SourceLengthBytes = frame.ByteLength,
+            SourceOffsetBytes = frame.ByteOffset, SourceLengthBytes = frame.ByteLength, SourceEndOffsetBytes = frame.ByteEndOffset,
             InlinePayload = frame.InlinePayload, PayloadRefJson = ArtifactRefJson(frame.PayloadRef),
             DigestAlgorithm = frame.DigestAlgorithm, Digest = frame.Digest, SizeBytes = frame.SizeBytes,
             PayloadEncoding = frame.Encoding, Redaction = frame.Redaction, IsFinal = frame.IsFinal,

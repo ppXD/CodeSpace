@@ -22,27 +22,21 @@ namespace CodeSpace.Core.Services.Agents.Capture;
 /// from the frames, so a refused claim can never take a frame down with it.</para>
 ///
 /// <para><b>What it does NOT mean</b>, because a manifest that overstated its reach would be worse than none. It is a
-/// claim about the frames the runner's reader DELIVERED, never about the harness's whole output: this plane never sees
-/// a line the reader dropped, and <see cref="AgentNativeRecordPump"/> already names the byte accounting that drifts
-/// where a reader trims a CR or delivers an unterminated final line. And it covers exactly the frames that reached a
+/// claim about the frames the runner's reader DELIVERED, never about bytes the durable source did not retain. And it covers exactly the frames that reached a
 /// batch — a worker killed with lines still buffered was never able to state them, which is the window 0146 names as
 /// the one incremental counters cannot close, bounded here by <see cref="AgentNativeRecordPump.MaxBuffered"/> frames
 /// or one poll. What closes that window for a run rather than for a batch is
 /// <see cref="MarkIndeterminateAsync"/>: an observer that died leaves its process attempt Running, and the run's
 /// expectation stops being knowable at all rather than being read as satisfied.</para>
 ///
-/// <para><b>The one hole a complete verdict here can still sit over, named rather than implied.</b> A re-attach whose
-/// observation resumes AHEAD of the plane's recorded head never records the bytes in between, and this producer counts
-/// neither of them — so that run reads complete over a span nothing holds. The honest gap for it is
-/// <see cref="CaptureGapReason.ReattachTorn"/> and it is deliberately NOT produced here, because the two heads that
-/// would locate it are not comparable to the byte: the spool reader trims the CR of a CRLF ending and delivers an
-/// unterminated final line as whole (<c>LocalProcessRunner.SplitLines</c>), while
-/// <see cref="AgentNativeRecordPump"/> reconstructs its cursor as each delivered line's byte count plus one terminator.
-/// The two drift in both directions, so a gap derived from their difference would manufacture missing spans on every
-/// CRLF re-attach — and a run that can never be complete is not fail-closed, it is fail-always. That divergence is
-/// pinned as arithmetic by <c>LocalProcessDurableRunnerTests</c>, so this is a measured bound rather than a remembered
-/// one, and the pin fails if the two quantities ever become comparable. Closing it needs the reader to state each
-/// line's true offset, which is the same prerequisite the pump already names.</para>
+/// <para><b>The re-attach tear is closed physically, but not rounded up administratively.</b> Durable stdout frames
+/// now carry reader-authored half-open byte ranges, so a replacement observes from the lesser of the application head
+/// and this plane's recorded head. Frames below the application head repair only this plane; they never re-enter the
+/// normalized timeline. A second worker replacement resumes that repair at the exact recorded end, while its
+/// application checkpoint remains monotonic. Backfill does not re-declare an expectation a refused batch already
+/// declared, and this producer does not silently close the corresponding <see cref="CaptureGapReason.WriteRefused"/>
+/// gap. Admitting the recovered range into that historical expectation requires a separate digest/ordinal-aware
+/// recovery transition; until then the open gap keeps the terminal verdict conservative.</para>
 ///
 /// <para><b>The expectation is discovered line by line, and declared one batch ahead.</b> 0146 contemplates a producer
 /// that states what it expects before the records land. A stdout stream's total frame count cannot be known in advance
@@ -87,7 +81,7 @@ public sealed partial class NativeRecordPlane
     /// </summary>
     private async Task CommitAsync(CodeSpaceDbContext db, NativeRecordBatch batch, CancellationToken cancellationToken)
     {
-        await DeclareAsync(batch, cancellationToken).ConfigureAwait(false);
+        if (!batch.BackfillsDeclaredFrames) await DeclareAsync(batch, cancellationToken).ConfigureAwait(false);
 
         try
         {

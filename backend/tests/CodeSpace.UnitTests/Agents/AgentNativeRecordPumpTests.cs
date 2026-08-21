@@ -47,6 +47,21 @@ public sealed class AgentNativeRecordPumpTests
         plane.Events.ShouldBeEmpty();
     }
 
+    [Fact]
+    public async Task A_frame_persists_the_readers_exact_source_range_instead_of_reconstructing_a_terminator()
+    {
+        var plane = new RecordingPlane();
+        var pump = await OpenAsync(plane);
+
+        await pump.CaptureAsync(new SandboxOutputFrame("你", 11, 16, true), "你", new EchoHarness(), CancellationToken.None);
+        await pump.FlushAsync(CancellationToken.None);
+
+        var captured = plane.Records.ShouldHaveSingleItem().Frame;
+        captured.ByteOffset.ShouldBe(11);
+        captured.ByteLength.ShouldBe(3, "the raw frame content remains three UTF-8 bytes");
+        captured.ByteEndOffset.ShouldBe(16, "the source range includes the two CRLF bytes the delivered text does not");
+    }
+
     /// <summary>
     /// A parser that throws must lose its interpretation of the frame, not the frame — AND must re-raise, so the run
     /// resolves exactly as it did before this plane existed. The record is flushed on the way out, because a throw
@@ -320,6 +335,55 @@ public sealed class AgentNativeRecordPumpTests
             customMessage: "the checkpoint claims exactly the frames this opening contributed, not the ones it was merely shown again");
     }
 
+    [Fact]
+    public async Task Exact_crlf_ranges_drop_the_replayed_prefix_and_start_new_records_at_the_true_plane_head()
+    {
+        var plane = new RecordingPlane { RecordedHead = 7 };
+        var pump = await AgentNativeRecordPump.OpenAsync(plane, Resume(0), SecretRedactor.None, NullLogger.Instance, CancellationToken.None);
+
+        await pump.CaptureAsync(new SandboxOutputFrame("a", 0, 3, true), "a", new EchoHarness(), CancellationToken.None);
+        await pump.CaptureAsync(new SandboxOutputFrame("bb", 3, 7, true), "bb", new EchoHarness(), CancellationToken.None);
+        await pump.CaptureAsync(new SandboxOutputFrame("new", 7, 11, true), "new", new EchoHarness(), CancellationToken.None);
+        await pump.FlushAsync(CancellationToken.None);
+
+        var frame = plane.Records.ShouldHaveSingleItem().Frame;
+        frame.InlinePayload.ShouldBe("new");
+        frame.ByteOffset.ShouldBe(7);
+        frame.ByteEndOffset.ShouldBe(11);
+    }
+
+    [Fact]
+    public async Task A_plane_behind_the_application_head_replays_from_its_head_without_redeclaring_expectation()
+    {
+        var plane = new RecordingPlane { RecordedHead = 4 };
+        var pump = await AgentNativeRecordPump.OpenAsync(plane, Resume(10), SecretRedactor.None, NullLogger.Instance, CancellationToken.None);
+
+        pump.ReplayStartOffset.ShouldBe(4);
+
+        await pump.CaptureBackfillAsync(new SandboxOutputFrame("old", 4, 8, true), "old", new EchoHarness(), CancellationToken.None);
+        await pump.CaptureBackfillAsync(new SandboxOutputFrame("x", 8, 10, true), "x", new EchoHarness(), CancellationToken.None);
+        await pump.CaptureAsync(new SandboxOutputFrame("new", 10, 14, true), "new", new EchoHarness(), CancellationToken.None);
+        await pump.FlushAsync(CancellationToken.None);
+
+        plane.BatchKinds.ToArray().ShouldBe(new[] { true, false },
+            customMessage: "recovered presence must not share a batch with new expectation, or the recovered frame count is declared twice and the manifest remains permanently short");
+        plane.Records.Select(record => (record.Frame.ByteOffset, record.Frame.ByteEndOffset)).ShouldBe(new[]
+        {
+            (4L, (long?)8), (8L, (long?)10), (10L, (long?)14),
+        });
+    }
+
+    [Fact]
+    public async Task A_backfill_parser_failure_is_recorded_but_cannot_change_the_already_consumed_run()
+    {
+        var plane = new RecordingPlane { RecordedHead = 0 };
+        var pump = await AgentNativeRecordPump.OpenAsync(plane, Resume(4), SecretRedactor.None, NullLogger.Instance, CancellationToken.None);
+
+        await pump.CaptureBackfillAsync(new SandboxOutputFrame("boom", 0, 4, true), "boom", new ThrowingHarness(), CancellationToken.None);
+
+        plane.Records.ShouldHaveSingleItem().Normalization.ShouldBe(NativeRecordNormalization.Failed);
+    }
+
     /// <summary>A re-attach that resumes at or past the recorded head has nothing re-delivered — the ordinary case, and the one where dropping anything would be a lost line rather than a saved duplicate.</summary>
     [Fact]
     public async Task A_resume_at_the_recorded_head_drops_nothing()
@@ -339,11 +403,23 @@ public sealed class AgentNativeRecordPumpTests
     public async Task A_resume_with_no_live_process_leaves_the_parse_path_untouched()
     {
         var plane = new RecordingPlane { RecordedHead = null };
-        var pump = await AgentNativeRecordPump.OpenAsync(plane, Resume(0), SecretRedactor.None, NullLogger.Instance, CancellationToken.None);
+        var pump = await AgentNativeRecordPump.OpenAsync(plane, Resume(19), SecretRedactor.None, NullLogger.Instance, CancellationToken.None);
 
         pump.IsCapturing.ShouldBeFalse();
+        pump.ReplayStartOffset.ShouldBe(19, "no live plane means no authority to rewind the application source");
         (await pump.CaptureAsync("hello", "hello", new EchoHarness(), CancellationToken.None)).Events.ShouldHaveSingleItem();
         plane.Records.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task An_absent_or_failed_resume_plane_never_rewinds_the_durable_source()
+    {
+        var absent = await AgentNativeRecordPump.OpenAsync(null, Resume(23), SecretRedactor.None, NullLogger.Instance, CancellationToken.None);
+        var failed = await AgentNativeRecordPump.OpenAsync(new ThrowingResumePlane(), Resume(23), SecretRedactor.None, NullLogger.Instance, CancellationToken.None);
+
+        absent.ReplayStartOffset.ShouldBe(23);
+        failed.ReplayStartOffset.ShouldBe(23,
+            customMessage: "capture is shadow; an unavailable plane may cost a warning but cannot make the executor reread an arbitrarily large spool prefix");
     }
 
     /// <summary>
@@ -718,6 +794,7 @@ public sealed class AgentNativeRecordPumpTests
         public List<AgentSemanticEventV1> Events { get; } = new();
         public List<HarnessModelCallProjectionV1> ModelCalls { get; } = new();
         public List<HarnessReductionCheckpointV1> Checkpoints { get; } = new();
+        public List<bool> BatchKinds { get; } = new();
         public int LargestRecordBatch { get; private set; }
         public int LargestEventBatch { get; private set; }
         public int LargestModelCallBatch { get; private set; }
@@ -788,6 +865,7 @@ public sealed class AgentNativeRecordPumpTests
         private Task Accept(NativeRecordBatch batch)
         {
             Batches++;
+            BatchKinds.Add(batch.BackfillsDeclaredFrames);
             LargestRecordBatch = Math.Max(LargestRecordBatch, batch.Records.Count);
             LargestEventBatch = Math.Max(LargestEventBatch, batch.Events.Count);
             LargestModelCallBatch = Math.Max(LargestModelCallBatch, batch.ModelCalls.Count);
@@ -829,6 +907,15 @@ public sealed class AgentNativeRecordPumpTests
 
         public Task WriteAsync(NativeRecordBatch batch, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, CancellationToken cancellationToken) => Task.CompletedTask;
+    }
+
+    private sealed class ThrowingResumePlane : INativeRecordPlane, INativeRecordExecutionPlane
+    {
+        public Task<NativeRecordCaptureHandle?> OpenAsync(NativeRecordCaptureRequest request, CancellationToken cancellationToken) => throw new InvalidOperationException();
+        public Task<NativeRecordCaptureOpening?> ReopenAsync(NativeRecordCaptureRequest request, CancellationToken cancellationToken) => throw new InvalidOperationException();
+        public Task WriteAsync(NativeRecordBatch batch, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task TerminalizeAsync(Guid teamId, Guid agentRunId, long expectedEpoch, CancellationToken cancellationToken) => Task.CompletedTask;
     }
 
     private sealed class RefusingWritePlane : INativeRecordPlane

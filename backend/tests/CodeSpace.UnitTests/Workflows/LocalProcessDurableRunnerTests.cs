@@ -38,7 +38,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     private async Task<(SandboxResult Result, List<string> Lines)> AttachCollectAsync(SandboxHandle handle, CancellationToken ct = default)
     {
         var lines = new List<string>();
-        var result = await _runner.AttachAsync(handle, (l, _) => { lines.Add(l.Trim()); return Task.CompletedTask; }, ct);
+        var result = await _runner.AttachAsync(handle, (frame, _) => { lines.Add(frame.Text.Trim()); return Task.CompletedTask; }, ct);
         return (result, lines);
     }
 
@@ -874,7 +874,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
 
         var lines = new List<string>();
         var checkpoints = new List<long>();
-        await _runner.AttachAsync(handle, (l, _) => { lines.Add(l.Trim()); return Task.CompletedTask; }, default,
+        await _runner.AttachAsync(handle, (frame, _) => { lines.Add(frame.Text.Trim()); return Task.CompletedTask; }, default,
             (offset, _) => { checkpoints.Add(offset); return Task.CompletedTask; });
 
         lines.ShouldBe(new[] { "a", "b", "c" });
@@ -1456,42 +1456,84 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         end.ShouldBe(7);
     }
 
+    [Fact]
+    public void ReadNewFrames_preserves_the_exact_source_range_of_lf_crlf_and_an_unterminated_tail()
+    {
+        var path = Path.Combine(TempDir(), "out.log");
+        File.WriteAllBytes(path, Encoding.UTF8.GetBytes("a\r\n你\nlast"));
+
+        var (terminated, offset) = LocalProcessRunner.ReadNewFrames(path, 0, drainPartial: false);
+
+        terminated.Select(frame => (frame.Text, frame.SourceStartOffsetBytes, frame.SourceEndOffsetBytes, frame.IsComplete)).ShouldBe(new[]
+        {
+            ("a", 0L, 3L, true),
+            ("你", 3L, 7L, true),
+        });
+        offset.ShouldBe(7);
+
+        var (tail, end) = LocalProcessRunner.ReadNewFrames(path, offset, drainPartial: true);
+
+        tail.Select(frame => (frame.Text, frame.SourceStartOffsetBytes, frame.SourceEndOffsetBytes, frame.IsComplete)).ShouldBe(new[]
+        {
+            ("last", 7L, 11L, true),
+        });
+        end.ShouldBe(11);
+    }
+
+    [Fact]
+    public void ReadNewFrames_holds_a_multi_poll_partial_tail_then_keeps_its_original_start()
+    {
+        var path = Path.Combine(TempDir(), "partial.log");
+        File.WriteAllText(path, "par");
+
+        var (none, held) = LocalProcessRunner.ReadNewFrames(path, 0, drainPartial: false);
+        none.ShouldBeEmpty();
+        held.ShouldBe(0);
+
+        File.AppendAllText(path, "t\r\n");
+        var (frame, end) = LocalProcessRunner.ReadNewFrames(path, held, drainPartial: false);
+
+        frame.ShouldHaveSingleItem().ShouldBe(new SandboxOutputFrame("part", 0, 6, true));
+        end.ShouldBe(6);
+    }
+
+    [Fact]
+    public void ReadNewFrames_never_splits_a_utf8_character_at_the_bounded_read_cut()
+    {
+        const int readChunk = 8 * 1024 * 1024;
+        var prefix = new string('x', readChunk - 2);
+        var path = Path.Combine(TempDir(), "utf8-boundary.log");
+        File.WriteAllText(path, prefix + "你\n");
+
+        var (first, offset) = LocalProcessRunner.ReadNewFrames(path, 0, drainPartial: false);
+
+        first.ShouldHaveSingleItem().ShouldBe(new SandboxOutputFrame(prefix, 0, readChunk - 2, false));
+        offset.ShouldBe(readChunk - 2);
+
+        var (continuation, end) = LocalProcessRunner.ReadNewFrames(path, offset, drainPartial: false);
+        continuation.ShouldHaveSingleItem().ShouldBe(new SandboxOutputFrame("你", readChunk - 2, readChunk + 2, true));
+        continuation[0].Text.ShouldNotContain("�", customMessage: "neither side of a bounded read may decode half a UTF-8 character");
+        end.ShouldBe(readChunk + 2);
+    }
+
     /// <summary>
-    /// The KNOWN BOUND behind the one gap the native-record completeness producer deliberately does not detect, pinned
-    /// as arithmetic instead of left as a doc-comment. A <c>ReattachTorn</c> gap — a re-attach whose observation resumes
-    /// AHEAD of the plane's recorded head, so the bytes in between are never recorded — would be located by comparing
-    /// two quantities: this reader's offset, which is a true file position, and the cursor
-    /// <c>AgentNativeRecordPump.BuildFrame</c> reconstructs as each delivered line's UTF-8 byte count plus one
-    /// terminator byte for a terminated line.
-    ///
-    /// <para>They are NOT comparable to the byte. <see cref="LocalProcessRunner.SplitLines"/> trims the CR of a CRLF
-    /// ending, so the reconstruction is short by one byte for every such line and the shortfall accumulates; and a
-    /// final drain delivers an unterminated remainder as a whole line, which the reconstruction then credits with a
-    /// terminator the file never held, drifting the other way. A gap derived from their difference would manufacture a
-    /// missing span on every CRLF re-attach and a healthy run could never read complete — fail-closed would have become
-    /// fail-always, which is why an approximate comparison is worse than a named bound. Closing it needs the reader to
-    /// state each line's own byte extent, the same prerequisite the pump's cursor doc already names.</para>
+    /// The source positions handed to capture are the reader's own byte ranges, not a reconstruction from decoded text.
+    /// CRLF is therefore two source bytes even though the delivered text trims CR, and the accumulated head remains a
+    /// true file position that a re-attach can compare without manufacturing a torn gap.
     /// </summary>
     [Theory]
-    [InlineData("a\r\n", 3, 2)]          // CRLF: the file holds 3 bytes; the reconstruction credits "a" + one terminator
-    [InlineData("a\r\nbb\r\n", 7, 5)]    // ...and the shortfall accumulates per line rather than cancelling
-    public void The_readers_offset_and_the_pumps_reconstructed_cursor_are_not_comparable_to_the_byte(string spool, long expectedReaderOffset, long expectedReconstruction)
+    [InlineData("a\r\n", 3)]
+    [InlineData("a\r\nbb\r\n", 7)]
+    public void Every_delivered_frame_ends_at_the_readers_true_byte_offset(string spool, long expectedReaderOffset)
     {
         var path = Path.Combine(TempDir(), "crlf.log");
         File.WriteAllText(path, spool);
 
-        var (lines, readerOffset) = LocalProcessRunner.ReadNewLines(path, 0, drainPartial: false);
+        var (frames, readerOffset) = LocalProcessRunner.ReadNewFrames(path, 0, drainPartial: false);
 
         readerOffset.ShouldBe(expectedReaderOffset, "the reader answers a true file position");
-
-        // Exactly what AgentNativeRecordPump.BuildFrame does: byteCount(rawLine) + (isFinal ? 1 : 0) per delivered line.
-        var reconstructed = lines.Sum(line => (long)Encoding.UTF8.GetByteCount(line) + 1);
-
-        reconstructed.ShouldBe(expectedReconstruction);
-        reconstructed.ShouldNotBe(readerOffset,
-            customMessage: "if these two ever agree to the byte, a ReattachTorn gap becomes producible and the native-record "
-                         + "facet's last known false-complete path can be closed — update NativeRecordPlane.Completeness's "
-                         + "doc and this test together rather than leaving the bound named after it stopped being one");
+        frames[^1].SourceEndOffsetBytes.ShouldBe(readerOffset,
+            customMessage: "the last frame's exclusive end is the checkpoint; deriving it from text would lose one byte per CRLF");
     }
 
     [Theory]

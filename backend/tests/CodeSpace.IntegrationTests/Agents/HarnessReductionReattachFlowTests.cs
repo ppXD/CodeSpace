@@ -7,6 +7,7 @@ using CodeSpace.Core.Services.Agents.Capture;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Agents.Reduction;
 using CodeSpace.Core.Services.Agents.Sandbox;
+using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
@@ -249,6 +250,100 @@ public sealed class HarnessReductionReattachFlowTests
     }
 
     /// <summary>
+    /// The opposite crash window: normalized output and the spool checkpoint advanced, but the shadow frame write was
+    /// refused and disabled. Re-attach rewinds native capture to its recorded head while application output remains
+    /// gated at the original source head, recovering the source prefix exactly once without re-emitting its events.
+    /// </summary>
+    [Fact]
+    public async Task A_re_attach_backfills_a_native_plane_behind_the_source_head_without_re_emitting_events()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+
+        await TearDownMidStreamAsync(runId, SixSteps, inner => new RefusingCheckpointPlane(inner));
+
+        var sourceHead = await ResumeOffsetAsync(runId);
+        sourceHead.ShouldBeGreaterThan(0, "the application head must have advanced past bytes the refused native plane did not record");
+        (await CountRecordsAsync(runId)).ShouldBe(0);
+
+        await ReclaimAsync(runId);
+        await ReattachAsync(runId);
+
+        var records = await OrderedRecordsAsync(runId);
+        records.ShouldNotBeEmpty();
+        records[0].SourceOffsetBytes.ShouldBe(0, "backfill starts at the plane head, not at the later application head");
+        records.ShouldAllBe(record => record.SourceEndOffsetBytes != null,
+            customMessage: "every recovered frame must carry reader-authored source geometry; reconstructed bytes+1 would reopen the tear on CRLF");
+
+        using var scope = _fixture.BeginScope();
+        var runs = scope.Resolve<IAgentRunService>();
+        var run = await runs.GetAsync(runId, CancellationToken.None);
+        run.Status.ShouldBe(AgentRunStatus.Succeeded, customMessage: "shadow backfill cannot change what the same harness run resolves to");
+
+        var events = (await runs.GetEventsAsync(runId, teamId, 0, CancellationToken.None)).Select(candidate => candidate.Text).ToList();
+        events.GroupBy(text => text).ShouldAllBe(group => group.Count() == 1,
+            customMessage: "the replay prefix repairs native capture only; feeding it through the normalized writer again duplicates application-visible output");
+        events.ShouldBe(new[] { "step1", "step2", "step3", "step4", "step5", "step6" });
+    }
+
+    /// <summary>
+    /// A backfill can span more than one bounded spool read. If the replacement worker is itself torn down after the
+    /// first read, its checkpoint must never move the APPLICATION head backwards to the native recovery cursor. The
+    /// next replacement still starts native recovery at the exact recorded head, while the normalized timeline stays
+    /// frozen at the original application head.
+    /// </summary>
+    [Fact]
+    public async Task A_multi_poll_backfill_survives_another_worker_teardown_without_regressing_or_replaying_application_output()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+
+        await TearDownMidStreamAsync(runId, SixSteps, inner => new RefusingCheckpointPlane(inner));
+        var before = await EventTextsAsync(runId, teamId);
+        var applicationSourceHead = await AppendClaimedBackfillAsync(runId, (8 * 1024 * 1024) + 4096);
+
+        await ReclaimAsync(runId);
+        var firstReplacement = await ReattachWithRunnerAsync(runId, cancelAfterFirstCheckpoint: true);
+
+        firstReplacement.Checkpoints.ShouldHaveSingleItem();
+        firstReplacement.AttachOffsets.ShouldHaveSingleItem().ShouldBe(0,
+            customMessage: "the native plane recorded nothing, so the first replacement must recover from the source start");
+        (await ResumeOffsetAsync(runId)).ShouldBe(applicationSourceHead,
+            customMessage: "a native recovery checkpoint below the application head must not durably rewind normalized replay");
+
+        var recoveredHead = await RecordedHeadAsync(runId);
+        recoveredHead.ShouldBeGreaterThan(0);
+        recoveredHead.ShouldBeLessThan(applicationSourceHead,
+            customMessage: "the forced teardown must land between bounded recovery polls, leaving a real second slice to recover");
+        (await EventTextsAsync(runId, teamId)).ShouldBe(before,
+            customMessage: "the first recovery slice belongs only to the native plane");
+
+        await ReclaimAsync(runId);
+        var secondReplacement = await ReattachWithRunnerAsync(runId, cancelAfterFirstCheckpoint: false);
+
+        secondReplacement.AttachOffsets.ShouldHaveSingleItem().ShouldBe(recoveredHead,
+            customMessage: "the next worker resumes native recovery at the durable plane head, not the later application head and not zero");
+        (await ResumeOffsetAsync(runId)).ShouldBe(applicationSourceHead,
+            customMessage: "every bounded recovery checkpoint is monotonic in application coordinates");
+        (await RecordedHeadAsync(runId)).ShouldBe(applicationSourceHead,
+            customMessage: "the second replacement closes the exact remaining native range without a hole or overlap");
+        var ranges = (await OrderedRecordsAsync(runId)).OrderBy(record => record.SourceOffsetBytes)
+            .Select(record => (Start: record.SourceOffsetBytes, End: record.SourceEndOffsetBytes!.Value)).ToList();
+        ranges.Select(range => range.Start).Distinct().Count().ShouldBe(ranges.Count,
+            customMessage: "a worker replacement may not record a native source range twice");
+        ranges[0].Start.ShouldBe(0);
+        ranges[^1].End.ShouldBe(applicationSourceHead);
+        ranges.Zip(ranges.Skip(1)).ShouldAllBe(pair => pair.First.End == pair.Second.Start,
+            customMessage: "the two replacement workers' exact source ranges meet without a hole or overlap");
+        (await EventTextsAsync(runId, teamId)).ShouldBe(before,
+            customMessage: "neither replacement may feed a recovered prefix back through normalized application output");
+    }
+
+    /// <summary>
     /// The write authority the terminalize path used to be missing. A superseded worker reaches terminalization on
     /// exactly the reclaim-for-reattach path: a lost completion CAS raises the same
     /// <c>AgentRunTransitionException</c> the already-terminal branch swallows, and it then falls through to close the
@@ -403,6 +498,48 @@ public sealed class HarnessReductionReattachFlowTests
         await runs.SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle with { StdoutOffset = 0 }, AgentJson.Options), CancellationToken.None);
     }
 
+    private async Task<long> ResumeOffsetAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+        return JsonSerializer.Deserialize<SandboxHandle>(run.RunnerHandleJson!, AgentJson.Options)!.StdoutOffset;
+    }
+
+    private async Task<IReadOnlyList<string>> EventTextsAsync(Guid runId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        return (await scope.Resolve<IAgentRunService>().GetEventsAsync(runId, teamId, 0, CancellationToken.None)).Select(candidate => candidate.Text).ToList();
+    }
+
+    private async Task<long> AppendClaimedBackfillAsync(Guid runId, int bytes)
+    {
+        SandboxHandle handle;
+        using (var scope = _fixture.BeginScope())
+        {
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            handle = JsonSerializer.Deserialize<SandboxHandle>(run.RunnerHandleJson!, AgentJson.Options)!;
+        }
+
+        var exitPath = Path.Combine(handle.SpoolDirectory, "exit");
+        using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+            while (!File.Exists(exitPath)) await Task.Delay(25, timeout.Token);
+
+        var stdoutPath = Path.Combine(handle.SpoolDirectory, "out.log");
+        await using (var output = new FileStream(stdoutPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite, 128 * 1024, FileOptions.Asynchronous))
+        {
+            var block = new byte[128 * 1024];
+            Array.Fill(block, (byte)' ');
+            for (var remaining = bytes; remaining > 0; remaining -= block.Length)
+                await output.WriteAsync(block.AsMemory(0, Math.Min(block.Length, remaining)));
+        }
+
+        var sourceHead = new FileInfo(stdoutPath).Length;
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle with { StdoutOffset = sourceHead }, AgentJson.Options), CancellationToken.None);
+
+        return sourceHead;
+    }
+
     /// <summary>The first source position no record covers, computed as the plane computes it. One attempt on one channel in these runs, so the run-wide maximum IS that process's head.</summary>
     private async Task<long> RecordedHeadAsync(Guid runId)
     {
@@ -410,9 +547,9 @@ public sealed class HarnessReductionReattachFlowTests
 
         var head = await scope.Resolve<CodeSpaceDbContext>().WorkflowRunNativeRecord.AsNoTracking()
             .Where(record => record.AgentRunId == runId)
-            .MaxAsync(record => (long?)(record.SourceOffsetBytes + record.SourceLengthBytes));
+            .MaxAsync(record => (long?)(record.SourceEndOffsetBytes ?? record.SourceOffsetBytes + record.SourceLengthBytes + (record.IsFinal ? 1 : 0)));
 
-        return head is null ? 0 : head.Value + 1;
+        return head ?? 0;
     }
 
     private async Task<long> FenceEpochAsync(Guid runId)
@@ -424,11 +561,14 @@ public sealed class HarnessReductionReattachFlowTests
     }
 
     /// <summary>Runs the live path until the harness has seen a step, then tears the worker down exactly as a pod shutdown does: the process keeps running, the run stays Running, and the observer is gone.</summary>
-    private async Task TearDownMidStreamAsync(Guid runId, string script = SixSteps)
+    private async Task TearDownMidStreamAsync(Guid runId, string script = SixSteps, Func<INativeRecordPlane, INativeRecordPlane?>? plane = null)
     {
         using var teardown = new CancellationTokenSource();
 
-        await Should.ThrowAsync<OperationCanceledException>(() => ExecuteAsync(runId, new SteppingHarness(script, teardown, "step3"), teardown.Token));
+        if (plane is null)
+            await Should.ThrowAsync<OperationCanceledException>(() => ExecuteAsync(runId, new SteppingHarness(script, teardown, "step3"), teardown.Token));
+        else
+            await Should.ThrowAsync<OperationCanceledException>(() => ExecuteAsync(runId, new SteppingHarness(script, teardown, "step3"), plane, teardown.Token));
 
         using var scope = _fixture.BeginScope();
         (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Running,
@@ -458,7 +598,20 @@ public sealed class HarnessReductionReattachFlowTests
         await Executor(scope, new SteppingHarness(SixSteps), inner => inner).ReattachAsync(runId, CancellationToken.None);
     }
 
-    private static AgentRunExecutor Executor(ILifetimeScope scope, IAgentHarness harness, Func<INativeRecordPlane, INativeRecordPlane?> plane)
+    private async Task<CheckpointObservingRunner> ReattachWithRunnerAsync(Guid runId, bool cancelAfterFirstCheckpoint)
+    {
+        using var scope = _fixture.BeginScope();
+        var inner = scope.Resolve<ISandboxRunnerRegistry>().Resolve(LocalProcessRunner.LocalKind);
+        var runner = new CheckpointObservingRunner(inner, cancelAfterFirstCheckpoint);
+        var reattach = () => Executor(scope, new SteppingHarness(SixSteps), plane => plane, new SingleRunnerRegistry(runner)).ReattachAsync(runId, CancellationToken.None);
+        if (cancelAfterFirstCheckpoint)
+            await Should.ThrowAsync<OperationCanceledException>(reattach);
+        else
+            await reattach();
+        return runner;
+    }
+
+    private static AgentRunExecutor Executor(ILifetimeScope scope, IAgentHarness harness, Func<INativeRecordPlane, INativeRecordPlane?> plane, ISandboxRunnerRegistry? runners = null)
     {
         var registry = new AgentHarnessRegistry(new[] { harness });
 
@@ -466,7 +619,7 @@ public sealed class HarnessReductionReattachFlowTests
             scope.Resolve<IAgentRunService>(),
             registry,
             new HarnessModelReconciler(registry, scope.Resolve<IModelPoolSelector>(), scope.Resolve<CodeSpaceDbContext>()),
-            scope.Resolve<ISandboxRunnerRegistry>(),
+            runners ?? scope.Resolve<ISandboxRunnerRegistry>(),
             scope.Resolve<IAgentWorkspaceResolver>(),
             scope.Resolve<IModelCredentialResolver>(),
             scope.Resolve<IWorkspaceProviderRegistry>(),
@@ -483,6 +636,46 @@ public sealed class HarnessReductionReattachFlowTests
             NullLogger<AgentRunExecutor>.Instance,
             logCapture: null,
             nativeRecords: plane(scope.Resolve<INativeRecordPlane>()));
+    }
+
+    private sealed class SingleRunnerRegistry(ISandboxRunner runner) : ISandboxRunnerRegistry
+    {
+        public IReadOnlyList<ISandboxRunner> All { get; } = new[] { runner };
+        public ISandboxRunner Resolve(string kind) => string.Equals(kind, runner.Kind, StringComparison.Ordinal) ? runner : throw new InvalidOperationException($"Runner '{kind}' is unavailable.");
+    }
+
+    private sealed class CheckpointObservingRunner : ISandboxRunner, ISandboxDurableRunner
+    {
+        private readonly ISandboxRunner _runner;
+        private readonly ISandboxDurableRunner _durable;
+        private readonly bool _cancelAfterFirstCheckpoint;
+
+        public CheckpointObservingRunner(ISandboxRunner runner, bool cancelAfterFirstCheckpoint)
+        {
+            _runner = runner;
+            _durable = (ISandboxDurableRunner)runner;
+            _cancelAfterFirstCheckpoint = cancelAfterFirstCheckpoint;
+        }
+
+        public string Kind => _runner.Kind;
+        public List<long> AttachOffsets { get; } = [];
+        public List<long> Checkpoints { get; } = [];
+        public Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken) => _runner.RunAsync(spec, cancellationToken);
+        public Task<SandboxHandle> LaunchAsync(SandboxSpec spec, string spoolKey, CancellationToken cancellationToken) => _durable.LaunchAsync(spec, spoolKey, cancellationToken);
+
+        public async Task<SandboxResult> AttachAsync(SandboxHandle handle, Func<SandboxOutputFrame, CancellationToken, Task> onStdoutFrame, CancellationToken cancellationToken, Func<long, CancellationToken, Task>? onCheckpoint = null)
+        {
+            AttachOffsets.Add(handle.StdoutOffset);
+            return await _durable.AttachAsync(handle, onStdoutFrame, cancellationToken, async (offset, token) =>
+            {
+                if (onCheckpoint is not null) await onCheckpoint(offset, token);
+                Checkpoints.Add(offset);
+                if (_cancelAfterFirstCheckpoint) throw new OperationCanceledException("simulated replacement-worker teardown");
+            });
+        }
+
+        public Task<SandboxProbe> ProbeAsync(SandboxHandle handle, CancellationToken cancellationToken) => _durable.ProbeAsync(handle, cancellationToken);
+        public Task TerminateAsync(SandboxHandle handle, CancellationToken cancellationToken) => _durable.TerminateAsync(handle, cancellationToken);
     }
 
     private async Task<WorkflowRunHarnessReductionCheckpoint?> ReadCheckpointAsync(Guid runId)
@@ -571,6 +764,7 @@ public sealed class HarnessReductionReattachFlowTests
         IngestedAt = record.IngestedAt,
         ByteOffset = record.SourceOffsetBytes,
         ByteLength = record.SourceLengthBytes,
+        ByteEndOffset = record.SourceEndOffsetBytes,
         InlinePayload = record.InlinePayload,
         DigestAlgorithm = record.DigestAlgorithm,
         Digest = record.Digest,

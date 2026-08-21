@@ -188,7 +188,7 @@ public sealed class BubblewrapConfinementSandboxTests : IDisposable
     private async Task<(SandboxResult Result, List<string> Lines)> AttachCollectAsync(SandboxHandle handle, CancellationToken ct = default)
     {
         var lines = new List<string>();
-        var result = await _runner.AttachAsync(handle, (l, _) => { lines.Add(l.Trim()); return Task.CompletedTask; }, ct);
+        var result = await _runner.AttachAsync(handle, (frame, _) => { lines.Add(frame.Text.Trim()); return Task.CompletedTask; }, ct);
         return (result, lines);
     }
 

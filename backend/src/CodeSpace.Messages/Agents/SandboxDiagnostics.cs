@@ -1,6 +1,14 @@
 namespace CodeSpace.Messages.Agents;
 
 /// <summary>
+/// One frame read from a durable process output spool. <see cref="SourceStartOffsetBytes"/> and
+/// <see cref="SourceEndOffsetBytes"/> are the reader's exact half-open source byte range; they include whatever line
+/// terminator the source carried even though <see cref="Text"/> does not. A bounded reader that must cut a line marks
+/// the prefix incomplete and the continuation starts exactly at its end.
+/// </summary>
+public readonly record struct SandboxOutputFrame(string Text, long SourceStartOffsetBytes, long SourceEndOffsetBytes, bool IsComplete);
+
+/// <summary>
 /// One delivery from a run's diagnostic stream: the text, and whether it is a WHOLE diagnostic. False only where the reader had to cut a line no single pass could terminate, so a continuation follows; the source's own final line is whole even when it carries no terminator, because nothing was cut from it.
 ///
 /// <para><b>Why the flag exists.</b> A bounded reader works in passes, and a line longer than one pass is a line no

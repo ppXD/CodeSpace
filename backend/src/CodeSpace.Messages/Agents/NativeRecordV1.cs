@@ -110,21 +110,22 @@ public sealed record NativeRecordV1
     public required DateTimeOffset IngestedAt { get; init; }
 
     /// <summary>
-    /// Offset of the ORIGINAL frame within its stream: a per-stream cursor derived from the frames as delivered, each
-    /// counted as its bytes plus one terminator. That reproduces the source's own offsets for the newline-terminated
-    /// stream a runner spools and is not otherwise a byte-exact index into one, because a writer that only sees
-    /// delivered lines cannot know what the stream carried between them. Resuming the TAIL reads the log-capture
-    /// plane's committed source head and never this; a resumed CAPTURE starts its own stream at that same committed
-    /// offset, so both sides of a re-attach state their positions in one coordinate (a new process, or another channel,
-    /// reads from its own start and restarts at zero).
+    /// Start of the ORIGINAL frame within its stream. Durable stdout producers copy the source reader's exact start;
+    /// legacy/non-durable producers retain their best-known cursor and leave <see cref="ByteEndOffset"/> null.
     /// <para>It is not a claim that the seam has no overlap. The re-attach is re-delivered every line recorded after
     /// that committed offset, and what keeps each source line recorded once is the writer dropping anything below the
-    /// head its process already covers — not this field being contiguous.</para>
+    /// exact head its process already covers — not this field being contiguous.</para>
     /// </summary>
     public required long ByteOffset { get; init; }
 
     /// <summary>Byte length of the ORIGINAL frame in the stream. It differs from <see cref="SizeBytes"/> whenever the payload was masked or withheld, which is precisely how much was dropped.</summary>
     public required long ByteLength { get; init; }
+
+    /// <summary>
+    /// Exclusive end of this frame in the source reader's byte coordinates. Null only for a legacy producer that
+    /// could state decoded content length but not the source terminator; durable stdout producers always set it.
+    /// </summary>
+    public long? ByteEndOffset { get; init; }
 
     /// <summary>The payload itself, for frames small enough to ride inline. Mutually exclusive with <see cref="PayloadRef"/>.</summary>
     public string? InlinePayload { get; init; }
@@ -169,6 +170,8 @@ public sealed record NativeRecordV1
             errors.Add("nativeType must be non-empty");
         if (ByteOffset < 0 || ByteLength < 0)
             errors.Add("byteOffset and byteLength must be non-negative");
+        if (ByteEndOffset is { } end && end < ByteOffset + ByteLength)
+            errors.Add("byteEndOffset must cover the raw frame content");
 
         errors.AddRange(DigestErrors());
         errors.AddRange(PayloadErrors());
@@ -182,7 +185,7 @@ public sealed record NativeRecordV1
     {
         builder.Append($"ContractVersion = {ContractVersion}, RecordId = {RecordId}, StreamId = {StreamId}, Ordinal = {Ordinal}, ");
         builder.Append($"Channel = {Channel}, NativeType = {NativeType}, NativeSchema = {NativeSchema}, NativeSchemaVersion = {NativeSchemaVersion}, ");
-        builder.Append($"OccurredAt = {OccurredAt:O}, IngestedAt = {IngestedAt:O}, ByteOffset = {ByteOffset}, ByteLength = {ByteLength}, ");
+        builder.Append($"OccurredAt = {OccurredAt:O}, IngestedAt = {IngestedAt:O}, ByteOffset = {ByteOffset}, ByteLength = {ByteLength}, ByteEndOffset = {ByteEndOffset}, ");
         builder.Append($"InlinePayloadLength = {InlinePayload?.Length}, PayloadRef = {PayloadRef}, ");
         builder.Append($"DigestAlgorithm = {DigestAlgorithm}, Digest = {Digest}, SizeBytes = {SizeBytes}, ");
         builder.Append($"Encoding = {Encoding}, Redaction = {Redaction}, IsFinal = {IsFinal}");

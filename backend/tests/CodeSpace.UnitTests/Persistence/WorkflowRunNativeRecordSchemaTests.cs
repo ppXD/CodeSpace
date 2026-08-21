@@ -35,7 +35,7 @@ public sealed class WorkflowRunNativeRecordSchemaTests
             "ExecutionId", "Id", "IngestedAt", "InlinePayload", "IsFinal", "NativeSchema", "NativeSchemaVersion",
             "NativeType", "Normalization", "NormalizationErrorCode", "NormalizationErrorMessage", "OccurredAt",
             "Ordinal", "PayloadEncoding", "PayloadRefJson", "Redaction", "SizeBytes", "SourceLengthBytes",
-            "SourceOffsetBytes", "StreamId", "TeamId",
+            "SourceOffsetBytes", "SourceEndOffsetBytes", "StreamId", "TeamId",
         }.Order());
         entity.FindProperty(nameof(WorkflowRunNativeRecord.PayloadRefJson))!.GetColumnName().ShouldBe("payload_ref_jsonb");
         entity.FindProperty(nameof(WorkflowRunNativeRecord.OccurredAt))!.IsNullable.ShouldBeTrue(
@@ -127,6 +127,8 @@ public sealed class WorkflowRunNativeRecordSchemaTests
             customMessage: "0143 admits the NotParsed normalization. Without it deployed, the CHECK constraint refuses " +
                            "every diagnostic frame the executor now records — and the refusal surfaces only as a warning " +
                            "from a plane that is designed never to fail a run, so nothing else would report it.");
+        scripts.ShouldContain(name => name.EndsWith("0153_workflow_run_native_record_source_end.sql", StringComparison.OrdinalIgnoreCase),
+            customMessage: "0153 carries the reader's exact source end; without it every new frame write names a column the deployed catalog does not have and capture silently disables itself.");
     }
 
     private static CodeSpaceDbContext BuildContext()
