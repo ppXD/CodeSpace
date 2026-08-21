@@ -106,6 +106,7 @@ internal sealed class SessionRunMetadataPageReader : ISessionRunMetadataPageRead
             SessionId = header.SessionId,
             Direction = request.Direction,
             RequestCursor = request.Cursor,
+            Limit = request.Limit,
             MembershipHeadRunNumber = header.MembershipHeadRunNumber,
             AnchorRootRunId = header.AnchorRootRunId,
             Consistency = SessionRunMetadataConsistency.MembershipHeadOnly,

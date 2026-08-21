@@ -82,6 +82,67 @@ export interface SessionDetail {
   turns: SessionTurn[];
 }
 
+export type SessionRunMetadataSelector =
+  | { kind: "Session"; sessionId: string; runAnchorId: null }
+  | { kind: "RunAnchor"; sessionId: null; runAnchorId: string };
+export type SessionRunMetadataPageDirection = "Tail" | "Older";
+export type SessionRunMetadataTextState = "None" | "Complete" | "Truncated" | "Corrupt";
+export type WorkflowRunRequestStatus = "Received" | "Verified" | "Normalized" | "Matched" | "Consumed" | "Rejected";
+
+export interface SessionRunMetadataPageRequest {
+  direction: SessionRunMetadataPageDirection;
+  cursor?: string;
+  /** Required for Older so the client can reject a continuation that changes membership family. Never sent separately. */
+  membershipHeadRunNumber?: number;
+  limit: number;
+}
+
+export interface SessionRunMetadataText {
+  text: string | null;
+  sizeBytes: number;
+  state: SessionRunMetadataTextState;
+}
+
+export interface SessionRunMetadataItem {
+  runId: string;
+  runNumber: number;
+  runRequestId: string;
+  rootRunId: string | null;
+  sessionTurnIndex: number | null;
+  status: WorkflowRunStatus;
+  projectionKind: SessionRunMetadataText;
+  sourceType: SessionRunMetadataText;
+  rerunFromNodeId: SessionRunMetadataText;
+  createdDate: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  error: SessionRunMetadataText;
+  requestStatus: WorkflowRunRequestStatus;
+  requestReceivedAt: string;
+}
+
+/** MembershipHeadRunNumber freezes membership only. Mutable status/error/timing are fresh per-page observations. */
+export interface SessionRunMetadataPage {
+  selector: SessionRunMetadataSelector;
+  sessionId: string;
+  direction: SessionRunMetadataPageDirection;
+  requestCursor: string | null;
+  limit: number;
+  membershipHeadRunNumber: number;
+  anchorRootRunId: string | null;
+  consistency: "MembershipHeadOnly";
+  items: SessionRunMetadataItem[];
+  omitted: { older: boolean; newer: boolean };
+  continuation: { olderCursor: string | null; returnToTail: boolean };
+}
+
+export class InvalidSessionRunMetadataPageError extends Error {
+  constructor() {
+    super("Invalid Session run metadata page response.");
+    this.name = "InvalidSessionRunMetadataPageError";
+  }
+}
+
 // ─── Session Room (the backend-authored AI work transcript) ───
 // Mirrors backend CodeSpace.Messages.Dtos.Sessions.Room. The frontend renders blocks by `type` and owns no
 // copy / order / status — an UNKNOWN `type` falls to a generic renderer, so a new backend block kind needs zero
@@ -544,6 +605,17 @@ export const sessionsApi = {
   /// One thread as a conversation (turns + nested attempts).
   getSessionDetail: (sessionId: string) => fetchJson<SessionDetail>(`/api/sessions/${sessionId}`),
 
+  /** A hard-bounded, exact-identity membership window. It is intentionally not a React Query whole-history feed. */
+  pageRunMetadata: async (selector: SessionRunMetadataSelector, request: SessionRunMetadataPageRequest, signal?: AbortSignal) => {
+    ensureValidSessionRunMetadataRequest(selector, request);
+    const identity = selector.kind === "Session" ? selector.sessionId : selector.runAnchorId;
+    const path = selector.kind === "Session" ? `/api/sessions/${identity}/runs/page` : `/api/sessions/by-run/${identity}/runs/page`;
+    const query = new URLSearchParams({ direction: request.direction, limit: String(request.limit) });
+    if (request.cursor !== undefined) query.set("cursor", request.cursor);
+    const value = await fetchJson<unknown>(`${path}?${query}`, { signal });
+    return decodeSessionRunMetadataPage(value, selector, request);
+  },
+
   /// Rename a session's thread title — 204 on success, 404 when foreign / missing. The backend sanitises + truncates.
   renameSession: (sessionId: string, title: string) =>
     fetchJson<void>(`/api/sessions/${sessionId}`, { method: "PATCH", body: JSON.stringify({ title }) }),
@@ -636,3 +708,120 @@ export const sessionsApi = {
     }
   },
 };
+
+const RUN_STATUSES = new Set<WorkflowRunStatus>(["Pending", "Enqueued", "Running", "Success", "Failure", "Cancelled", "Suspended"]);
+const REQUEST_STATUSES = new Set<WorkflowRunRequestStatus>(["Received", "Verified", "Normalized", "Matched", "Consumed", "Rejected"]);
+const TEXT_STATES = new Set<SessionRunMetadataTextState>(["None", "Complete", "Truncated", "Corrupt"]);
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MAX_CURSOR_LENGTH = 512;
+
+function ensureValidSessionRunMetadataRequest(selector: SessionRunMetadataSelector, request: SessionRunMetadataPageRequest): void {
+  const validSelector = selector.kind === "Session"
+    ? validUuid(selector.sessionId) && selector.runAnchorId === null
+    : selector.kind === "RunAnchor" && selector.sessionId === null && validUuid(selector.runAnchorId);
+  const validDirection = request.direction === "Tail" || request.direction === "Older";
+  const validCursor = request.direction === "Tail"
+    ? request.cursor === undefined && request.membershipHeadRunNumber === undefined
+    : typeof request.cursor === "string" && request.cursor.trim().length > 0 && request.cursor.length <= MAX_CURSOR_LENGTH
+      && safeInteger(request.membershipHeadRunNumber, 1);
+  if (!validSelector || !validDirection || !validCursor || !safeInteger(request.limit, 1) || request.limit > 256)
+    throw new Error("Invalid Session run metadata page request.");
+}
+
+function decodeSessionRunMetadataPage(value: unknown, selector: SessionRunMetadataSelector, request: SessionRunMetadataPageRequest): SessionRunMetadataPage {
+  const requestCursor = request.cursor ?? null;
+  if (!isRecord(value) || !sameSelector(value.selector, selector) || !validUuid(value.sessionId) || value.direction !== request.direction
+    || value.requestCursor !== requestCursor || value.limit !== request.limit || !safeInteger(value.membershipHeadRunNumber, 0)
+    || value.consistency !== "MembershipHeadOnly" || !Array.isArray(value.items) || value.items.length > request.limit
+    || !isRecord(value.omitted) || typeof value.omitted.older !== "boolean" || typeof value.omitted.newer !== "boolean"
+    || !isRecord(value.continuation) || !(value.continuation.olderCursor === null || validOpaqueCursor(value.continuation.olderCursor))
+    || typeof value.continuation.returnToTail !== "boolean") throw new InvalidSessionRunMetadataPageError();
+
+  const head = Number(value.membershipHeadRunNumber);
+  if ((request.direction === "Older" && head !== request.membershipHeadRunNumber)
+    || (selector.kind === "Session" ? value.sessionId !== selector.sessionId || value.anchorRootRunId !== null : !validUuid(value.anchorRootRunId))
+    || value.omitted.older !== (value.continuation.olderCursor !== null)
+    || (value.omitted.older && value.items.length === 0)
+    || value.omitted.newer !== (request.direction === "Older")
+    || value.continuation.returnToTail !== (request.direction === "Older")) throw new InvalidSessionRunMetadataPageError();
+
+  const items: SessionRunMetadataItem[] = [];
+  let previous = 0;
+  for (const candidate of value.items) {
+    const decoded = decodeSessionRunMetadataItem(candidate, head);
+    if (decoded.runNumber <= previous) throw new InvalidSessionRunMetadataPageError();
+    previous = decoded.runNumber;
+    items.push(decoded);
+  }
+
+  return {
+    selector,
+    sessionId: value.sessionId,
+    direction: request.direction,
+    requestCursor,
+    limit: request.limit,
+    membershipHeadRunNumber: head,
+    anchorRootRunId: value.anchorRootRunId as string | null,
+    consistency: "MembershipHeadOnly",
+    items,
+    omitted: { older: value.omitted.older, newer: value.omitted.newer },
+    continuation: { olderCursor: value.continuation.olderCursor as string | null, returnToTail: value.continuation.returnToTail },
+  };
+}
+
+function decodeSessionRunMetadataItem(value: unknown, head: number): SessionRunMetadataItem {
+  if (!isRecord(value) || !validUuid(value.runId) || !safeInteger(value.runNumber, 1) || Number(value.runNumber) > head
+    || !validUuid(value.runRequestId) || !(value.rootRunId === null || validUuid(value.rootRunId))
+    || !(value.sessionTurnIndex === null || safeInteger(value.sessionTurnIndex, 1))
+    || typeof value.status !== "string" || !RUN_STATUSES.has(value.status as WorkflowRunStatus)
+    || !validDate(value.createdDate) || !(value.startedAt === null || validDate(value.startedAt)) || !(value.completedAt === null || validDate(value.completedAt))
+    || typeof value.requestStatus !== "string" || !REQUEST_STATUSES.has(value.requestStatus as WorkflowRunRequestStatus) || !validDate(value.requestReceivedAt))
+    throw new InvalidSessionRunMetadataPageError();
+
+  return {
+    runId: value.runId,
+    runNumber: Number(value.runNumber),
+    runRequestId: value.runRequestId,
+    rootRunId: value.rootRunId as string | null,
+    sessionTurnIndex: value.sessionTurnIndex as number | null,
+    status: value.status as WorkflowRunStatus,
+    projectionKind: decodeBoundedText(value.projectionKind, 128),
+    sourceType: decodeBoundedText(value.sourceType, 128),
+    rerunFromNodeId: decodeBoundedText(value.rerunFromNodeId, 256),
+    createdDate: value.createdDate,
+    startedAt: value.startedAt as string | null,
+    completedAt: value.completedAt as string | null,
+    error: decodeBoundedText(value.error, 512),
+    requestStatus: value.requestStatus as WorkflowRunRequestStatus,
+    requestReceivedAt: value.requestReceivedAt,
+  };
+}
+
+function decodeBoundedText(value: unknown, maximumBytes: number): SessionRunMetadataText {
+  if (!isRecord(value) || typeof value.state !== "string" || !TEXT_STATES.has(value.state as SessionRunMetadataTextState)
+    || !safeInteger(value.sizeBytes, 0) || !(value.text === null || typeof value.text === "string")) throw new InvalidSessionRunMetadataPageError();
+  const state = value.state as SessionRunMetadataTextState;
+  const sizeBytes = Number(value.sizeBytes);
+  const text = value.text as string | null;
+  const encoded = text === null ? null : new TextEncoder().encode(text);
+  const wellFormed = text === null || new TextDecoder("utf-8", { fatal: true }).decode(encoded!) === text;
+  const valid = state === "None" ? text === null && sizeBytes === 0
+    : state === "Corrupt" ? text === null
+      : text !== null && wellFormed && encoded!.byteLength <= maximumBytes
+        && (state === "Complete" ? encoded!.byteLength === sizeBytes : state === "Truncated" && encoded!.byteLength < sizeBytes && sizeBytes > maximumBytes);
+  if (!valid) throw new InvalidSessionRunMetadataPageError();
+  return { text, sizeBytes, state };
+}
+
+function sameSelector(value: unknown, expected: SessionRunMetadataSelector): boolean {
+  if (!isRecord(value) || value.kind !== expected.kind) return false;
+  return expected.kind === "Session"
+    ? value.sessionId === expected.sessionId && value.runAnchorId === null
+    : value.sessionId === null && value.runAnchorId === expected.runAnchorId;
+}
+
+function validOpaqueCursor(value: unknown): value is string { return typeof value === "string" && value.trim().length > 0 && value.length <= MAX_CURSOR_LENGTH; }
+function validUuid(value: unknown): value is string { return typeof value === "string" && UUID.test(value); }
+function safeInteger(value: unknown, minimum: number): value is number { return Number.isSafeInteger(value) && Number(value) >= minimum; }
+function validDate(value: unknown): value is string { return typeof value === "string" && Number.isFinite(Date.parse(value)); }
+function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }

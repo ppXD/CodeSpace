@@ -183,6 +183,44 @@ public sealed class SessionsEndpointE2ETests : IClassFixture<TaskLaunchApiFactor
             .ShouldBe(HttpStatusCode.NotFound);
     }
 
+    [Fact]
+    public async Task Run_metadata_page_is_team_governed_exact_and_bounded_over_both_selectors()
+    {
+        var (userId, teamId) = await SeedTeamMembershipAsync();
+        var (foreignUserId, foreignTeamId) = await SeedTeamMembershipAsync();
+        var first = await LaunchAsync(userId, teamId, "First", continueSessionId: null);
+        var second = await LaunchAsync(userId, teamId, "Second", continueSessionId: first.SessionId);
+        var foreign = await LaunchAsync(foreignUserId, foreignTeamId, "Foreign", continueSessionId: null);
+
+        var tail = await GetAsync<SessionRunMetadataPage>(userId, teamId, $"/api/sessions/{first.SessionId}/runs/page?direction=Tail&limit=1");
+        tail.Selector.ShouldBe(new SessionRunMetadataSelector { Kind = SessionRunMetadataSelectorKind.Session, SessionId = first.SessionId });
+        tail.Direction.ShouldBe(SessionRunMetadataPageDirection.Tail);
+        tail.RequestCursor.ShouldBeNull();
+        tail.Limit.ShouldBe(1);
+        tail.Items.ShouldHaveSingleItem().RunId.ShouldBe(second.RunId);
+        tail.Omitted.ShouldBe(new SessionRunMetadataOmission { Older = true, Newer = false });
+
+        var anchor = await GetAsync<SessionRunMetadataPage>(userId, teamId, $"/api/sessions/by-run/{second.RunId}/runs/page?direction=Tail&limit=1");
+        anchor.Selector.ShouldBe(new SessionRunMetadataSelector { Kind = SessionRunMetadataSelectorKind.RunAnchor, RunAnchorId = second.RunId });
+        anchor.SessionId.ShouldBe(first.SessionId);
+        anchor.Limit.ShouldBe(1);
+
+        var olderPath = $"/api/sessions/{first.SessionId}/runs/page?direction=Older&limit=1&cursor={Uri.EscapeDataString(tail.Continuation.OlderCursor!)}";
+        var older = await GetAsync<SessionRunMetadataPage>(userId, teamId, olderPath);
+        older.RequestCursor.ShouldBe(tail.Continuation.OlderCursor);
+        older.MembershipHeadRunNumber.ShouldBe(tail.MembershipHeadRunNumber);
+        older.Items.ShouldHaveSingleItem().RunId.ShouldBe(first.RunId);
+        older.Omitted.ShouldBe(new SessionRunMetadataOmission { Older = false, Newer = true });
+
+        (await SendAsync(userId, teamId, $"/api/sessions/{foreign.SessionId}/runs/page")).StatusCode.ShouldBe(HttpStatusCode.NotFound);
+        (await SendAsync(userId, teamId, $"/api/sessions/by-run/{foreign.RunId}/runs/page")).StatusCode.ShouldBe(HttpStatusCode.NotFound);
+        (await SendAsync(userId, teamId, $"/api/sessions/{Guid.NewGuid()}/runs/page")).StatusCode.ShouldBe(HttpStatusCode.NotFound);
+        (await SendAsync(userId, teamId, $"/api/sessions/{first.SessionId}/runs/page?direction=Tail&cursor=x")).StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+
+        var anonymous = await _factory.CreateClient().GetAsync($"/api/sessions/{first.SessionId}/runs/page");
+        anonymous.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private async Task<T> GetAsync<T>(Guid userId, Guid teamId, string path) where T : class

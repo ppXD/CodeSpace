@@ -43,6 +43,7 @@ public sealed class SessionRunMetadataPageFlowTests
         tail.SessionId.ShouldBe(sessionId);
         tail.Direction.ShouldBe(SessionRunMetadataPageDirection.Tail);
         tail.RequestCursor.ShouldBeNull();
+        tail.Limit.ShouldBe(2);
         tail.MembershipHeadRunNumber.ShouldBe(runs[^1].RunNumber);
         tail.Consistency.ShouldBe(SessionRunMetadataConsistency.MembershipHeadOnly);
         tail.Items.Select(item => item.RunId).ShouldBe(new[] { runs[2].RunId, runs[3].RunId });
@@ -66,6 +67,7 @@ public sealed class SessionRunMetadataPageFlowTests
         older.Selector.ShouldBe(selector);
         older.Direction.ShouldBe(SessionRunMetadataPageDirection.Older);
         older.RequestCursor.ShouldBe(tail.Continuation.OlderCursor);
+        older.Limit.ShouldBe(2);
         older.MembershipHeadRunNumber.ShouldBe(tail.MembershipHeadRunNumber);
         older.Items.Select(item => item.RunId).ShouldBe(new[] { runs[0].RunId, runs[1].RunId });
         older.Items.Single(item => item.RunId == runs[1].RunId).Status.ShouldBe(WorkflowRunStatus.Failure,
