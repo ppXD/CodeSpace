@@ -1,5 +1,6 @@
 using CodeSpace.Core.Settings;
 using System.IO;
+using System.Text;
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
@@ -57,6 +58,27 @@ public class RoomFilePreviewFlowTests
         preview.ChangeKind.ShouldBe("Added");
         preview.Text.ShouldBe("# Plan\nShip it.");
         preview.Truncated.ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task A_large_cjk_file_projects_a_real_utf8_byte_bounded_room_payload()
+    {
+        const int maxPreviewBytes = 512 * 1024;
+        var body = string.Concat(Enumerable.Repeat("界", maxPreviewBytes / 3 + 2));
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedTurnWithAgentAsync(teamId, changedFiles: new[] { "cjk.md" }, patch: AddedFile("cjk.md", body));
+
+        var preview = await PreviewAsync(runId, "cjk.md", teamId);
+
+        preview.ShouldNotBeNull();
+        preview!.Kind.ShouldBe("text");
+        preview.Text.ShouldNotBeNull();
+        preview.Note.ShouldNotBeNull();
+        preview.SizeBytes.ShouldBe(Encoding.UTF8.GetByteCount(body), "SizeBytes describes the complete reconstructed file, not the excerpt");
+        Encoding.UTF8.GetByteCount(preview.Text!).ShouldBeLessThanOrEqualTo(maxPreviewBytes, "the DTO handed to the API serializer is itself byte-bounded; the frontend never receives a 1.5 MiB CJK '512K-char' body");
+        preview.Text!.ShouldNotContain('\uFFFD');
+        preview.Truncated.ShouldBeTrue();
+        preview.Note!.ShouldContain("truncated");
     }
 
     [Fact]
