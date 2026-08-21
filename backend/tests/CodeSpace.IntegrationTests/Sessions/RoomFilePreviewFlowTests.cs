@@ -6,6 +6,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Sessions.Room;
+using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Artifacts.Backends;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -138,6 +139,78 @@ public class RoomFilePreviewFlowTests
     }
 
     [Fact]
+    public async Task A_path_only_multi_repo_preview_fails_closed_when_two_repositories_changed_the_same_path()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId);
+        var agentRunId = await AddMultiRepoAgentAsync(teamId, runId,
+            (Guid.NewGuid(), "web", "README.md", "WEB"),
+            (Guid.NewGuid(), "api", "README.md", "API"));
+
+        var preview = await PreviewAsync(runId, "README.md", teamId, agentRunId);
+
+        preview.ShouldNotBeNull();
+        preview!.Kind.ShouldBe("unavailable", "path + agent is not a repository identity when two repos carry that path; selecting the first per-repo result would show the wrong file");
+        preview.Text.ShouldBeNull();
+        preview.Note.ShouldContain("repository", customMessage: "the display must say why the path cannot be determined, never present an arbitrary sibling repo's bytes");
+    }
+
+    [Fact]
+    public async Task Exact_multi_repo_identity_previews_only_the_requested_repository()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId);
+        var webId = Guid.NewGuid();
+        var apiId = Guid.NewGuid();
+        var agentRunId = await AddMultiRepoAgentAsync(teamId, runId,
+            (webId, "web", "README.md", "WEB"),
+            (apiId, "api", "README.md", "API"));
+
+        var preview = await PreviewIdentityAsync(runId, teamId, new RoomFileIdentity { Path = "README.md", AgentRunId = agentRunId, RepositoryId = apiId, RepositoryAlias = "api" });
+
+        preview.ShouldNotBeNull();
+        preview!.Text.ShouldBe("API", "the exact api identity must not return the first/web per-repo result carrying the same path");
+        preview.Identity.ShouldBe(new RoomFileIdentity { Path = "README.md", AgentRunId = agentRunId, RepositoryId = apiId, RepositoryAlias = "api" });
+    }
+
+    [Fact]
+    public async Task A_mismatched_repository_id_and_alias_never_fall_back_to_a_sibling()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId);
+        var webId = Guid.NewGuid();
+        var apiId = Guid.NewGuid();
+        var agentRunId = await AddMultiRepoAgentAsync(teamId, runId,
+            (webId, "web", "README.md", "WEB"),
+            (apiId, "api", "README.md", "API"));
+
+        var preview = await PreviewIdentityAsync(runId, teamId, new RoomFileIdentity { Path = "README.md", AgentRunId = agentRunId, RepositoryId = webId, RepositoryAlias = "api" });
+
+        preview.ShouldNotBeNull();
+        preview!.Kind.ShouldBe("unavailable");
+        preview.UnavailableReason.ShouldBe(RoomFileUnavailableReason.NotInChangeSet);
+        preview.Text.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task An_exact_manifest_can_supply_the_offloaded_patch_without_artifact_n_plus_one()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId);
+        var webId = Guid.NewGuid();
+        var apiId = Guid.NewGuid();
+        var agentRunId = await AddMultiRepoAgentAsync(teamId, runId,
+            (webId, "web", "README.md", "WEB"),
+            (apiId, "api", "README.md", ""));
+        await AddManifestAsync(teamId, runId, agentRunId, apiId, "api", "README.md", AddedFile("README.md", "API FROM MANIFEST"));
+
+        var preview = await PreviewIdentityAsync(runId, teamId, new RoomFileIdentity { Path = "README.md", AgentRunId = agentRunId, RepositoryId = apiId, RepositoryAlias = "api" });
+
+        preview.ShouldNotBeNull();
+        preview!.Text.ShouldBe("API FROM MANIFEST", "the exact per-repo manifest is the durable patch carrier when the result's inline carrier is empty");
+    }
+
+    [Fact]
     public async Task A_missing_offloaded_patch_reports_the_typed_storage_fact_instead_of_fake_expiry_or_a_500()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -164,6 +237,12 @@ public class RoomFilePreviewFlowTests
     {
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<IRoomFilePreviewService>().PreviewAsync(runId, path, teamId, agentRunId, CancellationToken.None);
+    }
+
+    private async Task<RoomFilePreview?> PreviewIdentityAsync(Guid runId, Guid teamId, RoomFileIdentity identity)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IRoomFilePreviewService>().PreviewAsync(runId, identity, teamId, CancellationToken.None);
     }
 
     /// <summary>Seed a workflow_artifact METADATA row whose blob is MISSING — an offloaded storage_url UNDER the store root (so it passes the backend's under-root check) pointing at a sharded file that was never written. Reading it throws FileNotFoundException, exactly like a temp-cleaned artifact.</summary>
@@ -260,5 +339,56 @@ public class RoomFilePreviewFlowTests
 
         await db.SaveChangesAsync();
         return agentRunId;
+    }
+
+    private async Task<Guid> AddMultiRepoAgentAsync(Guid teamId, Guid runId, params (Guid RepositoryId, string Alias, string Path, string Body)[] repositories)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var agentRunId = Guid.NewGuid();
+        var primary = repositories[0];
+        var result = new AgentRunResult
+        {
+            Status = AgentRunStatus.Succeeded,
+            ExitReason = "completed",
+            ChangedFiles = new[] { primary.Path },
+            Patch = AddedFile(primary.Path, primary.Body),
+            RepositoryResults = repositories.Select(repository => new RepositoryRunResult
+            {
+                RepositoryId = repository.RepositoryId,
+                Alias = repository.Alias,
+                ChangedFiles = new[] { repository.Path },
+                Patch = AddedFile(repository.Path, repository.Body),
+            }).ToList(),
+        };
+
+        db.AgentRun.Add(new AgentRun
+        {
+            Id = agentRunId, TeamId = teamId, WorkflowRunId = runId, Harness = "codex-cli",
+            Status = AgentRunStatus.Succeeded, CreatedDate = DateTimeOffset.UtcNow, ResultJson = JsonSerializer.Serialize(result, AgentJson.Options),
+        });
+
+        await db.SaveChangesAsync();
+        return agentRunId;
+    }
+
+    private async Task AddManifestAsync(Guid teamId, Guid runId, Guid agentRunId, Guid repositoryId, string alias, string path, string patch)
+    {
+        Guid artifactId;
+        using (var artifactScope = _fixture.BeginScope())
+            artifactId = await artifactScope.Resolve<IArtifactStore>().PutAsync(teamId, System.Text.Encoding.UTF8.GetBytes(patch), "text/x-diff", CancellationToken.None);
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        db.PublishManifest.Add(new PublishManifest
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, WorkflowRunId = runId, AgentRunId = agentRunId, Kind = PublishManifestKind.Agent,
+            RepositoryId = repositoryId, RepositoryAlias = alias, PatchArtifactId = artifactId, ChangedFileCount = 1,
+            ChangedFilesJson = JsonSerializer.Serialize(new[] { path }), PublishStateValue = PublishState.PatchOnly,
+            CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId,
+        });
+        await db.SaveChangesAsync();
     }
 }

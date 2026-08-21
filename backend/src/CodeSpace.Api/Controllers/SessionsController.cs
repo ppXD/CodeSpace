@@ -76,11 +76,11 @@ public class SessionsController : ControllerBase
         return result == null ? NotFound() : Ok(result);
     }
 
-    /// <summary>A generic preview of one file the run's turn produced (from the producing agent's captured diff), keyed by repo-relative path. Optional <c>agentRunId</c> scopes to one agent's version (per-agent attribution). Team-scoped; foreign / absent run → 404.</summary>
+    /// <summary>A generic preview of one file the run's turn produced (from the producing agent's captured diff), keyed by path + optional agent/repository identity. Team-scoped; foreign / absent run → 404.</summary>
     [HttpGet("by-run/{runId:guid}/room/file")]
-    public async Task<IActionResult> RunRoomFile([FromRoute] Guid runId, [FromQuery] string path, [FromQuery] Guid? agentRunId, CancellationToken cancellationToken)
+    public async Task<IActionResult> RunRoomFile([FromRoute] Guid runId, [FromQuery] GetSessionRoomFileQuery query, CancellationToken cancellationToken)
     {
-        var result = await _mediator.Send(new GetSessionRoomFileQuery { RunId = runId, Path = path, AgentRunId = agentRunId }, cancellationToken).ConfigureAwait(false);
+        var result = await _mediator.Send(query with { RunId = runId }, cancellationToken).ConfigureAwait(false);
         return result == null ? NotFound() : Ok(result);
     }
 
