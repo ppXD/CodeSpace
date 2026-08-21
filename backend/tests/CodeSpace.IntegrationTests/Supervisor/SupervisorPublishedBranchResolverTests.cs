@@ -153,6 +153,22 @@ public sealed class SupervisorPublishedBranchResolverTests
     }
 
     [Fact]
+    public async Task Ledger_direct_fallback_does_not_surface_a_manifest_from_before_the_active_plan()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var repoId = await SeedBoundRepositoryAsync(teamId);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var oldAgentRunId = Guid.NewGuid();
+        await SeedSpawnAsync(runId, teamId, oldAgentRunId, acceptancePassed: true);
+        await SeedAgentManifestAsync(runId, teamId, oldAgentRunId, repoId, "codespace/agent/old", PublishState.Pushed);
+        await SeedPlanAsync(runId, teamId, "replacement");
+
+        (await ResolveAsync(runId, teamId, primaryRepositoryId: null))
+            .ShouldBeEmpty("a pushed manifest remains durable evidence, but it cannot become the current plan generation's published head");
+    }
+
+    [Fact]
     public async Task Ledger_direct_fallback_excludes_an_acceptance_rejected_contributor()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -323,6 +339,19 @@ public sealed class SupervisorPublishedBranchResolverTests
         await AddTerminalDecisionAsync(db, runId, teamId, SupervisorDecisionKinds.Merge, outcome);
     }
 
+    private async Task SeedPlanAsync(Guid runId, Guid teamId, string subtaskId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var payload = JsonSerializer.Serialize(new SupervisorPlanPayload
+        {
+            Goal = "replacement",
+            Subtasks = new[] { new SupervisorPlannedSubtask { Id = subtaskId, Title = subtaskId, Instruction = $"do {subtaskId}" } },
+        }, AgentJson.Options);
+
+        await AddTerminalDecisionAsync(db, runId, teamId, SupervisorDecisionKinds.Plan, "{}", payload);
+    }
+
     /// <summary>Hand-seeds a TERMINAL spawn decision with one folded agent result — the shape <see cref="SupervisorOutcome.ReadAgentResults"/> reads, which the ledger-direct fallback's rejection filter (<see cref="SupervisorOutcome.WithheldAgentRunIds"/>) scans.</summary>
     private async Task SeedSpawnAsync(Guid runId, Guid teamId, Guid agentRunId, bool? acceptancePassed)
     {
@@ -350,14 +379,14 @@ public sealed class SupervisorPublishedBranchResolverTests
         }, CancellationToken.None);
     }
 
-    private static async Task AddTerminalDecisionAsync(CodeSpaceDbContext db, Guid runId, Guid teamId, string decisionKind, string outcomeJson)
+    private static async Task AddTerminalDecisionAsync(CodeSpaceDbContext db, Guid runId, Guid teamId, string decisionKind, string outcomeJson, string payloadJson = "{}")
     {
         var now = DateTimeOffset.UtcNow;
         db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
         {
             Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId,
             DecisionKind = decisionKind, IdempotencyKey = $"{decisionKind}-{Guid.NewGuid():N}", InputHash = "test",
-            Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = outcomeJson,
+            Status = SupervisorDecisionStatus.Succeeded, PayloadJson = payloadJson, OutcomeJson = outcomeJson,
             FenceEpoch = 1, CreatedDate = now, CreatedBy = Guid.Empty, LastModifiedDate = now, LastModifiedBy = Guid.Empty,
         });
         await db.SaveChangesAsync();

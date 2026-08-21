@@ -978,6 +978,8 @@ public static class SupervisorOutcome
     /// </summary>
     public static string? ReadFinalIntegratedBranch(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
     {
+        priorDecisions = SupervisorPlanWindow.Read(priorDecisions).Decisions;
+
         for (var i = priorDecisions.Count - 1; i >= 0; i--)
         {
             var decision = priorDecisions[i];
@@ -1009,6 +1011,8 @@ public static class SupervisorOutcome
     /// </summary>
     public static IReadOnlyList<SupervisorRepositoryBranch> ReadFinalRepositoryBranches(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
     {
+        priorDecisions = SupervisorPlanWindow.Read(priorDecisions).Decisions;
+
         for (var i = priorDecisions.Count - 1; i >= 0; i--)
         {
             var decision = priorDecisions[i];
@@ -1044,6 +1048,8 @@ public static class SupervisorOutcome
     /// </summary>
     public static SupervisorPriorDecision? FindUnpublishedFrontier(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
     {
+        priorDecisions = SupervisorPlanWindow.Read(priorDecisions).Decisions;
+
         for (var i = priorDecisions.Count - 1; i >= 0; i--)
         {
             var decision = priorDecisions[i];
