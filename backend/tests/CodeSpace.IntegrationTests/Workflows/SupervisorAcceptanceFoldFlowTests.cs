@@ -91,6 +91,27 @@ public sealed class SupervisorAcceptanceFoldFlowTests
     }
 
     [Fact]
+    public async Task A_resolvers_sole_concrete_manifest_for_another_repository_is_not_accepted_or_graded()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var targetRepositoryId = Guid.NewGuid();
+        var otherRepositoryId = Guid.NewGuid();
+        var agentId = Guid.NewGuid();
+
+        await SeedResolveDecisionAsync(runId, teamId, ResolveOutcomeWithAgentId(agentId, producedBranch: null, markerPresent: true));
+        await SeedManifestAsync(teamId, agentId, otherRepositoryId, branch: null, baseSha: "deadbeef", patchArtifactId: Guid.NewGuid());
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = true, Detail = "should-not-run" });
+        var ctx = await RehydrateAsync(runId, teamId, GoalConfig(targetRepositoryId, Command), grader);
+
+        grader.CallCount.ShouldBe(0);
+        grader.PatchCallCount.ShouldBe(0, "a mismatched manifest is rejected before the acceptance grader can read its patch artifact");
+        var resolve = ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Resolve);
+        SupervisorOutcome.ReadAcceptanceGradePassed(resolve.OutcomeJson).ShouldBe(false, "missing target-repository evidence fails acceptance closed");
+    }
+
+    [Fact]
     public async Task A_resolver_with_no_branch_and_no_patch_still_fails_closed_resolve_has_no_expects_changes_concept()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);

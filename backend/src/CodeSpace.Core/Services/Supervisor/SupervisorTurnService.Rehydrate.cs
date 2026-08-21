@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Cost;
+using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Constants;
@@ -867,9 +868,8 @@ public sealed partial class SupervisorTurnService
 
             if (string.IsNullOrWhiteSpace(manifest?.BaseSha)) return null;
 
-            // The store's single-manifest fallback may hand back ANOTHER repo's manifest (a retry of a
-            // repo-overridden unit) — a base sha from repo Y must never baseline repo X (a fork could even
-            // "succeed" against the wrong history). No manifest for THIS repo ⇒ no baseline.
+            // A legacy null-id manifest cannot prove the repository whose base it describes. It remains usable for
+            // the historical grade carrier, but never as a concrete repository baseline authority.
             if (manifest!.RepositoryId != repositoryId.Value) return null;
 
             // The unit must have produced something the candidate grade actually measured — a vacuous/fail-closed
@@ -1022,7 +1022,7 @@ public sealed partial class SupervisorTurnService
     {
         var manifests = await _manifests.ListForAgentRunAsync(agentRunId, teamId, cancellationToken).ConfigureAwait(false);
 
-        return manifests.FirstOrDefault(m => m.RepositoryId == repositoryId) ?? (manifests.Count == 1 ? manifests[0] : null);
+        return PublishManifestRepositorySelector.Select(manifests, repositoryId);
     }
 
     /// <summary>The subtask id each unit of a spawn (positional, the fan-out order) or a retry (one) ran — the positional join to the folded agentResults (<c>results[i]</c> ran <c>subtaskIds[i]</c>, the SAME order the executor staged them in).</summary>

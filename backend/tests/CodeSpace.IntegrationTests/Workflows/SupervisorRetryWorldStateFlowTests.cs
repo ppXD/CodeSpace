@@ -75,6 +75,36 @@ public sealed class SupervisorRetryWorldStateFlowTests
     }
 
     [Fact]
+    public async Task A_retry_does_not_resume_git_state_from_a_sole_concrete_manifest_for_another_repository()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        var credentialId = await SeedCredentialAsync(teamId);
+        using var priorRemote = new BareRemote();
+        using var retryRemote = new BareRemote();
+        await priorRemote.SeedWithOneCommitAsync();
+        await retryRemote.SeedWithOneCommitAsync();
+        var priorRepositoryId = await SeedRepositoryAsync(teamId, priorRemote.Url, credentialId, RepositoryPublishMode.Branch);
+        var retryRepositoryId = await SeedRepositoryAsync(teamId, retryRemote.Url, credentialId, RepositoryPublishMode.Branch);
+        var runId = await SeedSupervisorRunAsync(teamId);
+
+        var (priorAttemptRunId, _) = await RunPriorAttemptAsync(teamId, priorRepositoryId, runId, "printf 'wrong repository\n' > done.txt; echo edited");
+        var manifest = await SingleManifestAsync(priorAttemptRunId, teamId);
+        manifest.RepositoryId.ShouldBe(priorRepositoryId);
+        manifest.Branch.ShouldNotBeNull();
+
+        var context = ContextWith(runId, teamId, retryRepositoryId,
+            plan: Plan("sb"),
+            priorAttempt: await FailedAttempt(teamId, "sb", priorAttemptRunId));
+
+        var task = await ExecuteRetryAsync(context, "sb");
+
+        task.Workspace.ShouldBeNull("repository A's sole concrete manifest cannot provide repository B's retry continuity");
+        task.Goal.ShouldNotContain(manifest.Branch!, customMessage: "the retry prompt must not claim another repository's branch was preserved");
+    }
+
+    [Fact]
     public async Task A_retry_of_a_patch_only_prior_attempt_stays_on_the_default_branch_with_an_honest_redo_hint()
     {
         if (!await GitAvailableAsync()) return;
