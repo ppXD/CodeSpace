@@ -124,6 +124,8 @@ public sealed class WorkflowRunModelCallAttemptConfiguration : IEntityTypeConfig
             .HasDatabaseName("ux_workflow_run_model_call_attempt_source_terminal").HasFilter("source_terminal_record_id IS NOT NULL");
         builder.HasIndex(a => new { a.WorkflowRunId, a.ModelCallId }).HasDatabaseName("ix_workflow_run_model_call_attempt_late_start")
             .HasFilter("source_terminal_record_id IS NOT NULL AND source_started_record_id IS NULL");
+        builder.HasIndex(a => new { a.CreatedDate, a.Id }).HasDatabaseName("ix_workflow_run_model_call_attempt_body_capture")
+            .HasFilter("source_terminal_record_id IS NOT NULL");
 
         // One captured frame evidences at most one attempt. It is the second, independent guard on re-projection: the
         // call-level source identity collapses two frames of one response, and this one refuses two attempts from one frame.

@@ -30,6 +30,7 @@ public static class WorkflowRunDataNames
     public const string Prefix = "workflow_run_";
     public const string ModelCall = Prefix + "model_call";
     public const string ModelCallAttempt = Prefix + "model_call_attempt";
+    public const string ModelCallBodyCapture = Prefix + "model_call_body_capture";
     public const string HarnessExecution = Prefix + "harness_execution";
     public const string HarnessProcessAttempt = Prefix + "harness_process_attempt";
     public const string HarnessDescriptor = Prefix + "harness_descriptor";
@@ -48,7 +49,7 @@ public static class WorkflowRunDataNames
 
     private static readonly IReadOnlyList<string> Registered = Array.AsReadOnly(new[]
     {
-        ModelCall, ModelCallAttempt, HarnessExecution, HarnessProcessAttempt, HarnessDescriptor,
+        ModelCall, ModelCallAttempt, ModelCallBodyCapture, HarnessExecution, HarnessProcessAttempt, HarnessDescriptor,
         HarnessReductionCheckpoint, RunnerHandle, NativeRecord, SemanticEvent, ToolCall, ToolCallAttempt, LogStream,
         LogSegment, Session, SessionStateRevision, CaptureGap, DataManifest,
     });
@@ -63,6 +64,7 @@ public static class WorkflowRunDataOwnerKinds
 {
     public const string ModelCall = "model-call";
     public const string ModelCallAttempt = "model-call-attempt";
+    public const string ModelCallBodyCapture = "model-call-body-capture";
     public const string HarnessExecution = "harness-execution";
     public const string HarnessProcessAttempt = "harness-process-attempt";
     public const string HarnessDescriptor = "harness-descriptor";
@@ -81,7 +83,7 @@ public static class WorkflowRunDataOwnerKinds
 
     private static readonly IReadOnlySet<string> Registered = new HashSet<string>(StringComparer.Ordinal)
     {
-        ModelCall, ModelCallAttempt, HarnessExecution, HarnessProcessAttempt, HarnessDescriptor,
+        ModelCall, ModelCallAttempt, ModelCallBodyCapture, HarnessExecution, HarnessProcessAttempt, HarnessDescriptor,
         HarnessReductionCheckpoint, RunnerHandle, NativeRecord, SemanticEvent, ToolCall, ToolCallAttempt, LogStream,
         LogSegment, Session, SessionStateRevision, CaptureGap, DataManifest,
     };

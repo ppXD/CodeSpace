@@ -15,7 +15,7 @@ public sealed class WorkflowRunModelCallProjectorContractTests
         typeof(IWorkflowRunModelCallProjector).GetInterfaces().Select(value => value.Name).ShouldContain("IScopedDependency");
         typeof(IWorkflowRunModelCallProjector).GetMethods().Select(value => value.Name).ShouldBe(["SweepAsync"]);
         new ProjectWorkflowRunModelCallsCommand().BatchSize.ShouldBe(250);
-        new WorkflowRunModelCallProjectionResult(2, 3).TotalChanges.ShouldBe(5);
+        new WorkflowRunModelCallProjectionResult(2, 3, 4).TotalChanges.ShouldBe(9);
     }
 
     [Fact]

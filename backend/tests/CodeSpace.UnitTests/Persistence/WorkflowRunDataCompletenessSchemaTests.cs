@@ -29,6 +29,7 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
 
     /// <summary>The migration that moved the per-run rendezvous inside the two functions a producer calls.</summary>
     private const string RendezvousMigration = "0148_workflow_run_data_manifest_advance.sql";
+    private const string BodyCaptureMigration = "0151_workflow_run_model_call_body_capture.sql";
 
     [Fact]
     public void A_gap_is_one_known_missing_span_with_a_subject_a_coordinate_a_typed_reason_and_a_notice_time()
@@ -276,7 +277,7 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
     [Fact]
     public void Every_modelled_check_constraint_is_spelled_identically_in_its_migration()
     {
-        var migration = NormalizeWhitespace(File.ReadAllText(MigrationPath()));
+        var migration = NormalizeWhitespace(File.ReadAllText(MigrationPath()) + Environment.NewLine + File.ReadAllText(BodyCaptureMigrationPath()));
 
         using var db = BuildContext();
         var modelled = new[] { Entity<WorkflowRunCaptureGap>(db), Entity<WorkflowRunDataManifest>(db) }
@@ -287,7 +288,7 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
         foreach (var constraint in modelled)
         {
             migration.ShouldContain(NormalizeWhitespace(constraint.Sql!),
-                customMessage: $"'{constraint.Name}' differs between the EF model and 0146. The migration is what the " +
+                customMessage: $"'{constraint.Name}' differs from the effective 0146+0151 migration sequence. The database is what " +
                                "database actually enforces, so a mirror that drifts leaves this suite asserting a " +
                                "constraint production does not have. Reconcile the two spellings, not the test.");
         }
@@ -386,6 +387,7 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
         WorkflowRunDataNames.All.Select(name => name[WorkflowRunDataNames.Prefix.Length..].Replace('_', '-')).ToList();
 
     private static string MigrationPath() => Path.Combine(AppContext.BaseDirectory, "Persistence", "DbUpFiles", "0146_workflow_run_data_completeness.sql");
+    private static string BodyCaptureMigrationPath() => Path.Combine(AppContext.BaseDirectory, "Persistence", "DbUpFiles", BodyCaptureMigration);
 
     /// <summary>The migration wraps its constraints over several indented lines; the model states them on one. Only the whitespace may differ.</summary>
     private static string NormalizeWhitespace(string sql) => string.Join(' ', sql.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
