@@ -27,11 +27,12 @@ public static class SupervisorDependencyGate
     /// </summary>
     public static (IReadOnlyList<string> Ready, IReadOnlyList<string> Deferred) Partition(SupervisorTurnContext context, IReadOnlyList<string> requestedSubtaskIds)
     {
-        var dependsOn = DependsOnBySubtask(context);
+        var window = SupervisorPlanWindow.Read(context.PriorDecisions);
+        var dependsOn = DependsOnBySubtask(window);
 
         if (dependsOn.Count == 0) return (requestedSubtaskIds, Array.Empty<string>());   // no DAG → every subtask is ready (byte-identical to pre-slice)
 
-        var satisfied = SatisfiedSubtaskIds(context);
+        var satisfied = SatisfiedSubtaskIds(window.Decisions);
 
         var ready = new List<string>();
         var deferred = new List<string>();
@@ -55,16 +56,17 @@ public static class SupervisorDependencyGate
     /// </summary>
     public static (IReadOnlyList<string> Ready, IReadOnlyList<BlockedSubtask> Blocked) Frontier(SupervisorTurnContext context)
     {
-        var dependsOn = DependsOnBySubtask(context);
+        var window = SupervisorPlanWindow.Read(context.PriorDecisions);
+        var dependsOn = DependsOnBySubtask(window);
 
         if (dependsOn.Count == 0) return (Array.Empty<string>(), Array.Empty<BlockedSubtask>());
 
-        var satisfied = SatisfiedSubtaskIds(context);
+        var satisfied = SatisfiedSubtaskIds(window.Decisions);
 
         var ready = new List<string>();
         var blocked = new List<BlockedSubtask>();
 
-        foreach (var id in AllPlannedSubtaskIds(context))
+        foreach (var id in AllPlannedSubtaskIds(window))
         {
             if (satisfied.Contains(id)) continue;   // already done — not part of the frontier
 
@@ -85,8 +87,8 @@ public static class SupervisorDependencyGate
     /// every prior spawn/retry positionally (<c>subtaskIds[i] ↔ agentResults[i]</c>, the ordering-safe join), LAST attempt
     /// wins (a retry supersedes the original), and a unit counts only when <c>Succeeded</c> AND not acceptance-rejected.
     /// </summary>
-    private static IReadOnlySet<string> SatisfiedSubtaskIds(SupervisorTurnContext context) =>
-        LatestResultsBySubtask(context)
+    private static IReadOnlySet<string> SatisfiedSubtaskIds(IReadOnlyList<SupervisorPriorDecision> priorDecisions) =>
+        LatestResultsBySubtask(priorDecisions)
             .Where(kv => IsSatisfied(kv.Value))
             .Select(kv => kv.Key)
             .ToHashSet();
@@ -100,7 +102,7 @@ public static class SupervisorDependencyGate
     /// </summary>
     public static IReadOnlyList<Guid> LatestSucceededAgentRunIds(SupervisorTurnContext context, IReadOnlyList<string> dependsOn)
     {
-        var latest = LatestResultsBySubtask(context);
+        var latest = LatestResultsBySubtask(SupervisorPlanWindow.Read(context.PriorDecisions).Decisions);
 
         return dependsOn
             .Select(dep => latest.TryGetValue(dep, out var result) && IsSatisfied(result) ? result.AgentRunId : (Guid?)null)
@@ -120,14 +122,17 @@ public static class SupervisorDependencyGate
     /// to stage its workspace from. Null when the subtask has no recorded prior attempt (a genuine cold-start retry).
     /// </summary>
     public static Guid? LatestAgentRunId(SupervisorTurnContext context, string subtaskId) =>
-        LatestResultsBySubtask(context).TryGetValue(subtaskId, out var result) ? result.AgentRunId : null;
+        LatestResultsBySubtask(SupervisorPlanWindow.Read(context.PriorDecisions).Decisions).TryGetValue(subtaskId, out var result) ? result.AgentRunId : null;
 
     /// <summary>Every planned subtask id's LATEST folded result (a retry's result supersedes its original), read positionally off every prior spawn/retry/resolve decision (<c>subtaskIds[i] ↔ agentResults[i]</c>) — the shared walk <see cref="SatisfiedSubtaskIds"/> and <see cref="LatestSucceededAgentRunIds"/> both derive from.</summary>
-    internal static IReadOnlyDictionary<string, SupervisorAgentResult> LatestResultsBySubtask(SupervisorTurnContext context)
+    internal static IReadOnlyDictionary<string, SupervisorAgentResult> LatestResultsBySubtask(SupervisorTurnContext context) =>
+        LatestResultsBySubtask(SupervisorPlanWindow.Read(context.PriorDecisions).Decisions);
+
+    private static IReadOnlyDictionary<string, SupervisorAgentResult> LatestResultsBySubtask(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
     {
         var latest = new Dictionary<string, SupervisorAgentResult>();
 
-        foreach (var prior in context.PriorDecisions.Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind)))
+        foreach (var prior in priorDecisions.Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind)))
         {
             var ids = SubtaskIdsOf(prior);
             var results = SupervisorOutcome.ReadAgentResults(prior.OutcomeJson);
@@ -145,34 +150,37 @@ public static class SupervisorDependencyGate
             ? SupervisorOutcome.ReadSpawnSubtaskIds(decision.PayloadJson)
             : SupervisorOutcome.ReadRetrySubtaskId(decision.PayloadJson) is { } id ? new[] { id } : Array.Empty<string>();
 
-    /// <summary>The most recent plan's <c>DependsOn</c> edges, keyed by subtask id — only subtasks that DECLARE a dependency are included (an empty map ⇒ a flat plan ⇒ the byte-identical fast path). Duplicate ids keep the first.</summary>
-    private static IReadOnlyDictionary<string, IReadOnlyList<string>> DependsOnBySubtask(SupervisorTurnContext context)
+    /// <summary>The active plan generation's <c>DependsOn</c> edges, keyed by subtask id — only subtasks that DECLARE a dependency are included (an empty map ⇒ a flat plan ⇒ the byte-identical fast path). Duplicate ids keep the first.</summary>
+    private static IReadOnlyDictionary<string, IReadOnlyList<string>> DependsOnBySubtask(SupervisorPlanWindowSlice window)
     {
-        for (var i = context.PriorDecisions.Count - 1; i >= 0; i--)
-        {
-            if (context.PriorDecisions[i].DecisionKind != SupervisorDecisionKinds.Plan) continue;
+        var plan = PlanOf(window);
 
-            var map = new Dictionary<string, IReadOnlyList<string>>();
+        if (plan is null) return EmptyDependsOn;
 
-            foreach (var subtask in SupervisorOutcome.ReadPlanSubtasks(context.PriorDecisions[i].PayloadJson))
-                if (subtask.DependsOn is { Count: > 0 } deps && !map.ContainsKey(subtask.Id))
-                    map[subtask.Id] = deps;
+        var map = new Dictionary<string, IReadOnlyList<string>>();
 
-            return map;
-        }
+        foreach (var subtask in SupervisorOutcome.ReadPlanSubtasks(plan.PayloadJson))
+            if (subtask.DependsOn is { Count: > 0 } deps && !map.ContainsKey(subtask.Id))
+                map[subtask.Id] = deps;
 
-        return EmptyDependsOn;
+        return map;
     }
 
     private static readonly IReadOnlyDictionary<string, IReadOnlyList<string>> EmptyDependsOn = new Dictionary<string, IReadOnlyList<string>>();
 
-    /// <summary>Every planned subtask id off the most recent plan (in plan order) — the universe the <see cref="Frontier"/> partitions. Empty when no plan was recorded.</summary>
-    private static IReadOnlyList<string> AllPlannedSubtaskIds(SupervisorTurnContext context)
-    {
-        for (var i = context.PriorDecisions.Count - 1; i >= 0; i--)
-            if (context.PriorDecisions[i].DecisionKind == SupervisorDecisionKinds.Plan)
-                return SupervisorOutcome.ReadPlanSubtasks(context.PriorDecisions[i].PayloadJson).Select(s => s.Id).ToList();
+    /// <summary>Every planned subtask id off the active plan (in plan order) — the universe the <see cref="Frontier"/> partitions. Empty when no plan was recorded.</summary>
+    private static IReadOnlyList<string> AllPlannedSubtaskIds(SupervisorPlanWindowSlice window) =>
+        PlanOf(window) is { } plan ? SupervisorOutcome.ReadPlanSubtasks(plan.PayloadJson).Select(s => s.Id).ToList() : Array.Empty<string>();
 
-        return Array.Empty<string>();
+    /// <summary>The window boundary is the authoritative valid Plan. A tape with no valid boundary retains the old backwards lookup so malformed-only legacy histories remain behavior-identical.</summary>
+    private static SupervisorPriorDecision? PlanOf(SupervisorPlanWindowSlice window)
+    {
+        if (window.IsPlanBounded) return window.Decisions[0];
+
+        for (var i = window.Decisions.Count - 1; i >= 0; i--)
+            if (window.Decisions[i].DecisionKind == SupervisorDecisionKinds.Plan)
+                return window.Decisions[i];
+
+        return null;
     }
 }
