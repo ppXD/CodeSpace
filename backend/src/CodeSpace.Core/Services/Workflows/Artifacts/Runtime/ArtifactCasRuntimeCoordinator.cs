@@ -12,7 +12,7 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 /// Profile-pinned streaming transfer/read coordinator for the additive CAS v2 tables. Provider I/O is deliberately
 /// outside database transactions; durable intent + monotonic revision/fence claims make every commit replay-safe.
 /// </summary>
-public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinator, IArtifactCasRangeReader
+public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinator, IArtifactCasRangeReader, IArtifactCasPurgeCoordinator
 {
     private static readonly TimeSpan DefaultOperationTimeout = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan MaximumOperationTimeout = TimeSpan.FromMinutes(10);

@@ -26,6 +26,110 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
     public ArtifactCasRuntimeCoordinatorTests(PostgresFixture fixture) => _fixture = fixture;
 
     [Fact]
+    public async Task Routed_purge_claims_the_exact_recorded_location_before_provider_io_and_finalizes_it_monotonically()
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState
+        {
+            Capabilities = StorageProviderCapabilities.StreamingWrite | StorageProviderCapabilities.StreamingRead
+                | StorageProviderCapabilities.ConditionalCreate | StorageProviderCapabilities.Delete,
+            BlockNextDelete = true,
+        };
+        var bytes = "routed bytes to reclaim"u8.ToArray();
+        var committed = (await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "purge-order")))
+            .ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+
+        using var purgeScope = Scope(storage);
+        var pending = purgeScope.Resolve<IArtifactCasPurgeCoordinator>().PurgeAsync(new ArtifactCasPurgeRequest
+        {
+            TeamId = world.TeamId, ArtifactObjectId = committed.ArtifactObjectId, ActorId = world.ActorId,
+        }, CancellationToken.None);
+        var first = await Task.WhenAny(storage.DeleteEntered.Task, pending).WaitAsync(TimeSpan.FromSeconds(5));
+        var early = first == pending ? await pending : null;
+        first.ShouldBe(storage.DeleteEntered.Task, $"provider delete must be reached, but purge completed early as {early}");
+
+        using (var observe = _fixture.BeginScope())
+        {
+            var location = await observe.Resolve<CodeSpaceDbContext>().ArtifactLocation.AsNoTracking()
+                .SingleAsync(value => value.Id == committed.ArtifactLocationId);
+            location.State.ShouldBe(ArtifactLocationState.Deleting, "the durable claim must commit before provider bytes are touched");
+            location.Revision.ShouldBe(2);
+        }
+
+        storage.ReleaseDelete.TrySetResult();
+        var purged = (await pending).ShouldBeOfType<ArtifactCasPurgeResult.Purged>();
+        purged.LocationId.ShouldBe(committed.ArtifactLocationId);
+        purged.LocationRevision.ShouldBe(3);
+        purged.WasAlreadyPurged.ShouldBeFalse();
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        var finalized = await db.ArtifactLocation.AsNoTracking().SingleAsync(value => value.Id == committed.ArtifactLocationId);
+        finalized.State.ShouldBe(ArtifactLocationState.Purged);
+        finalized.Revision.ShouldBe(3);
+        (await db.ArtifactLocationEvent.AsNoTracking().Where(value => value.ArtifactLocationId == finalized.Id)
+            .OrderBy(value => value.Revision).Select(value => value.State).ToListAsync())
+            .ShouldBe(new[] { ArtifactLocationState.Available, ArtifactLocationState.Deleting, ArtifactLocationState.Purged });
+        storage.Objects.ShouldNotContainKey("cas/purge-order.bin");
+        storage.FactoryProfileRevision.ShouldBe(1, "purge must activate the profile revision stamped on the location, not a current route");
+    }
+
+    [Fact]
+    public async Task Routed_purge_recovers_a_deleting_location_after_bytes_were_removed()
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState
+        {
+            Capabilities = StorageProviderCapabilities.StreamingWrite | StorageProviderCapabilities.StreamingRead
+                | StorageProviderCapabilities.ConditionalCreate | StorageProviderCapabilities.Delete,
+        };
+        var bytes = "bytes removed before finalize"u8.ToArray();
+        var committed = (await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "purge-recover")))
+            .ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        await MoveLocationAsync(committed.ArtifactLocationId, ArtifactLocationState.Deleting);
+        storage.Objects.TryRemove("cas/purge-recover.bin", out _).ShouldBeTrue();
+
+        using var purgeScope = Scope(storage);
+        var result = await purgeScope.Resolve<IArtifactCasPurgeCoordinator>().PurgeAsync(new ArtifactCasPurgeRequest
+        {
+            TeamId = world.TeamId, ArtifactObjectId = committed.ArtifactObjectId, ActorId = world.ActorId,
+        }, CancellationToken.None);
+
+        var purged = result.ShouldBeOfType<ArtifactCasPurgeResult.Purged>();
+        purged.LocationRevision.ShouldBe(3, "Missing after a durable Deleting claim is the idempotent crash-recovery outcome");
+        purged.WasAlreadyPurged.ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task Routed_purge_fails_closed_before_claiming_an_object_with_multiple_locations()
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState
+        {
+            Capabilities = StorageProviderCapabilities.StreamingWrite | StorageProviderCapabilities.StreamingRead
+                | StorageProviderCapabilities.ConditionalCreate | StorageProviderCapabilities.Delete,
+        };
+        var bytes = "replicated routed bytes"u8.ToArray();
+        var committed = (await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "purge-multi")))
+            .ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        await AddSecondLocationAsync(world, committed.ArtifactObjectId, bytes);
+
+        using var purgeScope = Scope(storage);
+        var result = await purgeScope.Resolve<IArtifactCasPurgeCoordinator>().PurgeAsync(new ArtifactCasPurgeRequest
+        {
+            TeamId = world.TeamId, ArtifactObjectId = committed.ArtifactObjectId, ActorId = world.ActorId,
+        }, CancellationToken.None);
+
+        result.ShouldBeOfType<ArtifactCasPurgeResult.Rejected>().Problem.Code.ShouldBe(ArtifactCasProblemCode.MultipleLocationsUnsupported);
+        storage.DeleteCalls.ShouldBe(0);
+        using var verify = _fixture.BeginScope();
+        (await verify.Resolve<CodeSpaceDbContext>().ArtifactLocation.AsNoTracking()
+            .Where(value => value.TeamId == world.TeamId && value.ArtifactObjectId == committed.ArtifactObjectId)
+            .Select(value => value.State).ToListAsync()).ShouldAllBe(value => value == ArtifactLocationState.Available,
+                "a fail-closed multi-location object must not have a partial deletion claim");
+    }
+
+    [Fact]
     public async Task Streaming_put_readback_commit_and_verified_stream_read_round_trip()
     {
         var world = await SeedWorldAsync();
@@ -879,6 +983,32 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         return location.Revision;
     }
 
+    private async Task AddSecondLocationAsync(World world, Guid artifactObjectId, byte[] bytes)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var location = new ArtifactLocation
+        {
+            Id = Guid.NewGuid(), TeamId = world.TeamId, ArtifactObjectId = artifactObjectId,
+            StorageProfileRevisionId = world.ProfileRevisionId, Locator = "cas/purge-multi-replica.bin",
+            ObjectKey = "cas/purge-multi-replica.bin", ProviderETag = "replica-etag",
+            ProviderChecksumAlgorithm = "Sha256", ProviderChecksum = SHA256.HashData(bytes), ObservedSizeBytes = bytes.LongLength,
+            State = ArtifactLocationState.Available, Revision = 1, VerifiedAt = now,
+            CreatedDate = now, CreatedBy = world.ActorId, LastModifiedDate = now, LastModifiedBy = world.ActorId,
+        };
+        location.Events.Add(new ArtifactLocationEvent
+        {
+            Id = Guid.NewGuid(), TeamId = world.TeamId, ArtifactLocationId = location.Id, Revision = 1,
+            EventType = ArtifactLocationEventType.Verified, State = ArtifactLocationState.Available, ObservedAt = now,
+            ProviderETag = location.ProviderETag, ProviderChecksumAlgorithm = location.ProviderChecksumAlgorithm,
+            ProviderChecksum = location.ProviderChecksum, ObservedSizeBytes = location.ObservedSizeBytes, VerifiedAt = now,
+            DetailsJson = "{}", CreatedBy = world.ActorId,
+        });
+        db.ArtifactLocation.Add(location);
+        await db.SaveChangesAsync();
+    }
+
     private async Task SetProfileStateAsync(World world, StorageProfileState state)
     {
         using var scope = _fixture.BeginScope();
@@ -952,15 +1082,19 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         public TaskCompletionSource DriverDisposed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource FactoryCreateEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ReleaseFactoryCreate { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource DeleteEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseDelete { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public bool BlockNextPut;
         public bool BlockAfterNextPut;
         public bool BlockIgnoringCancellationNextPut;
         public bool BlockFactoryCreate;
         public bool BlockFactoryIgnoringCancellation;
+        public bool BlockNextDelete;
         public bool CorruptReads;
         public StorageProviderCapabilities Capabilities = StorageProviderCapabilities.StreamingWrite | StorageProviderCapabilities.StreamingRead | StorageProviderCapabilities.ConditionalCreate;
         public int MetadataRevision = 1;
         public int PutCalls;
+        public int DeleteCalls;
         public int FactoryCreateCalls;
         public int DisposeCalls;
         public bool FactoryCredentialHandleObserved;
@@ -1036,10 +1170,19 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
             return ValueTask.FromResult(ArtifactStorageReadResult.Opened(new MemoryStream(bytes, writable: false), bytes.LongLength, bytes.LongLength, metadata));
         }
 
-        public ValueTask<ArtifactStorageDeleteResult> DeleteAsync(ArtifactStorageDeleteRequest request, CancellationToken cancellationToken) =>
-            ValueTask.FromResult(state.Objects.TryRemove(request.ObjectKey, out _)
+        public async ValueTask<ArtifactStorageDeleteResult> DeleteAsync(ArtifactStorageDeleteRequest request, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref state.DeleteCalls);
+            if (state.BlockNextDelete)
+            {
+                state.BlockNextDelete = false;
+                state.DeleteEntered.TrySetResult();
+                await state.ReleaseDelete.Task.WaitAsync(cancellationToken);
+            }
+            return state.Objects.TryRemove(request.ObjectKey, out _)
                 ? ArtifactStorageDeleteResult.Removed()
-                : ArtifactStorageDeleteResult.Failed(new ArtifactStorageError(ArtifactStorageErrorCode.Missing, "missing")));
+                : ArtifactStorageDeleteResult.Failed(new ArtifactStorageError(ArtifactStorageErrorCode.Missing, "missing"));
+        }
 
         public ValueTask<ArtifactStorageProbeResult> ProbeAsync(ArtifactStorageProbeRequest request, CancellationToken cancellationToken) =>
             ValueTask.FromResult(new ArtifactStorageProbeResult { Status = ArtifactStorageProbeStatus.Available, Latency = TimeSpan.Zero });
