@@ -56,9 +56,16 @@ public sealed class SupervisorPublishedBranchResolver : ISupervisorPublishedBran
 
         var integratedBranch = SupervisorOutcome.ReadFinalIntegratedBranch(window.Decisions);
 
-        return string.IsNullOrEmpty(integratedBranch)
-            ? await ResolveLedgerDirectAsync(workflowRunId, teamId, window, cancellationToken).ConfigureAwait(false)
-            : await ResolveSingleIntegratedBranchAsync(workflowRunId, teamId, integratedBranch, primaryRepositoryId, cancellationToken).ConfigureAwait(false);
+        if (!string.IsNullOrEmpty(integratedBranch))
+            return await ResolveSingleIntegratedBranchAsync(workflowRunId, teamId, integratedBranch, primaryRepositoryId, cancellationToken).ConfigureAwait(false);
+
+        // An integrity-failed resolver is the active plan's newest staging frontier. Its own branch is correctly
+        // withheld above, but falling through to the generic manifest rung would publish an OLDER contributor branch
+        // from before the attempted reconciliation — precisely the conflicted/incomplete head resolve was meant to
+        // replace. Only a later authoritative merge/resolve may clear this barrier (and would have returned above).
+        if (SupervisorOutcome.HasActiveResolveContributorIntegrityBarrier(window.Decisions)) return Array.Empty<SupervisorRepositoryBranch>();
+
+        return await ResolveLedgerDirectAsync(workflowRunId, teamId, window, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>The traditional single-repo merge-derived path: the run's ONE configured primary repository, based against ITS OWN default branch. Prefers the caller's LIVE <paramref name="primaryRepositoryId"/> (pre-terminal); falls back to the run's terminal <c>OutputsJson</c> otherwise. Empty when the repository is unresolvable either way — never thrown; the caller decides whether that's an error.</summary>

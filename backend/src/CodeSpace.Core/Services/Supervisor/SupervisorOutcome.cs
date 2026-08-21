@@ -715,6 +715,44 @@ public static class SupervisorOutcome
     }
 
     /// <summary>
+    /// Append the fixed-size integrity fact for an active-plan resolver whose durable row and compact fold cannot be
+    /// reconciled. Additive and idempotent through <see cref="MergeKeys"/>; healthy and plan-less legacy resolves never
+    /// call this writer and retain their historical bytes.
+    /// </summary>
+    public static string AppendResolveContributorIntegrity(string? resolveOutcomeJson, SupervisorResolveContributorIntegrity integrity) =>
+        MergeKeys(resolveOutcomeJson, new Dictionary<string, object?> { ["resolveContributorIntegrity"] = integrity });
+
+    /// <summary>Whether a resolve outcome carries a contributor-integrity barrier. Any present value fails closed, including a malformed value.</summary>
+    public static bool HasResolveContributorIntegrity(string? resolveOutcomeJson)
+    {
+        if (string.IsNullOrWhiteSpace(resolveOutcomeJson)) return false;
+
+        try
+        {
+            var root = JsonDocument.Parse(resolveOutcomeJson).RootElement;
+            return root.ValueKind == JsonValueKind.Object && root.TryGetProperty("resolveContributorIntegrity", out _);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Whether the active plan's latest staging frontier is an integrity-failed resolve. This is the shared publication
+    /// barrier that prevents the published-branch resolver from falling through to an older contributor manifest after
+    /// the accepted-resolution readers correctly withheld the resolver branch. Plan-less legacy tapes are unchanged.
+    /// </summary>
+    public static bool HasActiveResolveContributorIntegrityBarrier(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
+    {
+        var window = SupervisorPlanWindow.Read(priorDecisions);
+        if (!window.IsPlanBounded) return false;
+
+        var frontier = window.Decisions.LastOrDefault(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind));
+        return frontier?.DecisionKind == SupervisorDecisionKinds.Resolve && HasResolveContributorIntegrity(frontier.OutcomeJson);
+    }
+
+    /// <summary>
     /// Append an OBJECTIVE acceptance grade onto an ARBITRARY decision outcome, preserving every existing key verbatim
     /// (L4 P1 — the terminal-STOP analogue of <see cref="FoldAcceptanceGrade"/>). Adds nothing but the grade: the
     /// outcome's own keys (a stop's <c>stopped</c>/<c>outcome</c>/<c>summary</c>) are copied in order by the shared
@@ -949,6 +987,8 @@ public static class SupervisorOutcome
     /// </summary>
     public static SupervisorResolutionVerdict ReadResolutionVerdict(string? resolveOutcomeJson)
     {
+        if (HasResolveContributorIntegrity(resolveOutcomeJson)) return SupervisorResolutionVerdict.Unverified;
+
         var results = ReadAgentResults(resolveOutcomeJson);
 
         if (results.Count == 0) return SupervisorResolutionVerdict.Unknown;

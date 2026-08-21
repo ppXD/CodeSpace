@@ -47,6 +47,31 @@ public sealed partial class SupervisorTurnService
             ? await CompactAgentResultsByIdAsync(rows, teamId, cancellationToken).ConfigureAwait(false)
             : EmptyAgentResults;
 
+        // Resolve contributor authority is stricter than the generic decider-visible compact fold: only an ACTIVE,
+        // plan-bounded resolve gets its one recorded AgentRun revalidated against the DB row/result it claims to
+        // summarize. One batched query covers every active resolve that has not already recorded a monotonic fault;
+        // plan-less legacy, pre-resolve, and already-faulted runs pay nothing and retain their historical bytes.
+        var rawWindow = SupervisorPlanWindow.Read(rows
+            .Where(r => SupervisorDecisionStateMachine.IsTerminal(r.Status))
+            .Select(ToPriorDecision)
+            .ToList());
+        var activeResolveDecisionIds = rawWindow.IsPlanBounded
+            ? rawWindow.Decisions
+                .Where(d => d.DecisionKind == SupervisorDecisionKinds.Resolve && !SupervisorOutcome.HasResolveContributorIntegrity(d.OutcomeJson))
+                .Select(d => d.Id)
+                .ToHashSet()
+            : EmptyGuidSet;
+        var resolveContributorIds = rawWindow.Decisions
+            .Where(d => activeResolveDecisionIds.Contains(d.Id))
+            .Select(d => TryReadResolveContributorId(d.OutcomeJson, out var id) ? id : (Guid?)null)
+            .Where(id => id.HasValue)
+            .Select(id => id!.Value)
+            .Distinct()
+            .ToList();
+        var resolveContributorRows = activeResolveDecisionIds.Count > 0
+            ? await ReadResolveContributorRowsAsync(resolveContributorIds, teamId, cancellationToken).ConfigureAwait(false)
+            : EmptyResolveContributorRows;
+
         // D4c-2: the PENDING decisions this run's child agent runs are blocked on — read off the cross-grain queue for the
         // arbiter to drain THIS turn (auto-answer or leave for a human). DB-gated on the SAME StagesAgents predicate as the
         // agent-results fold so a no-spawn run never hits the queue read (byte-identical, single ledger read); an empty
@@ -89,6 +114,8 @@ public sealed partial class SupervisorTurnService
             if (SupervisorDecisionStateMachine.IsTerminal(row.Status))
             {
                 decision = FoldAgentResults(decision, agentResultsById);
+                if (activeResolveDecisionIds.Contains(decision.Id))
+                    decision = FoldResolveContributorIntegrity(decision, resolveContributorRows, teamId);
 
                 // P3.5 — an LlmJudge-kind acceptance check makes a real model call; label it "grader.acceptance" so
                 // its spend lands on the ledger (RecordingLLMClientDecorator records nothing with no ambient scope) and
@@ -390,6 +417,8 @@ public sealed partial class SupervisorTurnService
     /// <summary>The shared empty agent-results map for the common no-spawn rehydrate — keeps that path allocation-light + DB-free (the EmptyAnswers analogue for SOTA #2).</summary>
     private static readonly IReadOnlyDictionary<Guid, SupervisorAgentResult> EmptyAgentResults = new Dictionary<Guid, SupervisorAgentResult>();
 
+    private static readonly IReadOnlyDictionary<Guid, ResolveContributorRow> EmptyResolveContributorRows = new Dictionary<Guid, ResolveContributorRow>();
+
     /// <summary>
     /// Fold a TERMINAL spawn/retry decision's spawned-agent COMPACT results into its replayed outcome (SOTA #2) —
     /// the FoldAskHumanAnswer analogue for the spawn path, so the decider sees "you spawned these, here is what each
@@ -424,6 +453,83 @@ public sealed partial class SupervisorTurnService
     }
 
     /// <summary>
+    /// Validate one active-plan resolve's fixed K=1 carrier against its tenant-scoped durable AgentRun. A failure adds
+    /// one fixed-size typed fact and never copies row/result/compact bytes. Existing facts are monotonic; healthy and
+    /// plan-less outcomes pass through byte-identically.
+    /// </summary>
+    private static SupervisorPriorDecision FoldResolveContributorIntegrity(SupervisorPriorDecision decision, IReadOnlyDictionary<Guid, ResolveContributorRow> rowsById, Guid teamId)
+    {
+        if (decision.DecisionKind != SupervisorDecisionKinds.Resolve || SupervisorOutcome.HasResolveContributorIntegrity(decision.OutcomeJson)) return decision;
+
+        SupervisorResolveContributorIntegrity? integrity;
+
+        if (!TryReadResolveContributorId(decision.OutcomeJson, out var agentRunId))
+            integrity = Integrity(null, SupervisorResolveContributorIssueKind.MalformedRecordedOutcome);
+        else if (!rowsById.TryGetValue(agentRunId, out var row))
+            integrity = Integrity(agentRunId, SupervisorResolveContributorIssueKind.MissingRow);
+        else if (row.TeamId != teamId)
+            integrity = Integrity(agentRunId, SupervisorResolveContributorIssueKind.CrossTeam);
+        else if (ReadResolveRowIssue(row) is { } rowIssue)
+            integrity = Integrity(agentRunId, rowIssue);
+        else
+        {
+            var compact = SupervisorOutcome.ReadAgentResults(decision.OutcomeJson);
+            var expected = SupervisorOutcome.ProjectCompact(row.Id, row.Status.ToString(), row.Error, row.ResultJson, ReadModel(row.TaskJson));
+            integrity = compact.Count == 1
+                        && compact[0].AgentRunId == row.Id
+                        && JsonSerializer.Serialize(compact[0], AgentJson.Options) == JsonSerializer.Serialize(expected, AgentJson.Options)
+                ? null
+                : Integrity(agentRunId, SupervisorResolveContributorIssueKind.CompactResultMismatch);
+        }
+
+        return integrity is null ? decision : decision with { OutcomeJson = SupervisorOutcome.AppendResolveContributorIntegrity(decision.OutcomeJson, integrity) };
+    }
+
+    private static SupervisorResolveContributorIntegrity Integrity(Guid? agentRunId, SupervisorResolveContributorIssueKind kind) =>
+        new() { AgentRunId = agentRunId, Kind = kind };
+
+    /// <summary>Strict fixed-K carrier read. Invalid/extra ids and non-integer counts are malformed, never silently filtered or expanded into a DB query.</summary>
+    private static bool TryReadResolveContributorId(string? outcomeJson, out Guid agentRunId)
+    {
+        agentRunId = Guid.Empty;
+        if (string.IsNullOrWhiteSpace(outcomeJson)) return false;
+
+        try
+        {
+            var root = JsonDocument.Parse(outcomeJson).RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("agentCount", out var count) || count.ValueKind != JsonValueKind.Number || !count.TryGetInt32(out var countValue) || countValue != 1
+                || !root.TryGetProperty("agentRunIds", out var ids) || ids.ValueKind != JsonValueKind.Array || ids.GetArrayLength() != 1)
+                return false;
+
+            var id = ids[0];
+            return id.ValueKind == JsonValueKind.String && Guid.TryParse(id.GetString(), out agentRunId);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Pure row/result consistency classification. Infrastructure reads are outside this method and remain throwing.</summary>
+    private static SupervisorResolveContributorIssueKind? ReadResolveRowIssue(ResolveContributorRow row)
+    {
+        if (!AgentRunStateMachine.IsTerminal(row.Status)) return SupervisorResolveContributorIssueKind.NonTerminalRow;
+
+        if (string.IsNullOrWhiteSpace(row.ResultJson))
+            return row.Status is AgentRunStatus.Succeeded or AgentRunStatus.NeedsReview
+                ? SupervisorResolveContributorIssueKind.MissingRequiredResult
+                : null;
+
+        AgentRunResult? result;
+        try { result = JsonSerializer.Deserialize<AgentRunResult>(row.ResultJson, AgentJson.Options); }
+        catch (JsonException) { return SupervisorResolveContributorIssueKind.MalformedResult; }
+
+        if (result is null) return SupervisorResolveContributorIssueKind.MalformedResult;
+        return result.Status != row.Status ? SupervisorResolveContributorIssueKind.ResultStatusMismatch : null;
+    }
+
+    /// <summary>
     /// Fold the OBJECTIVE acceptance grade onto a TERMINAL resolve decision (resolver loop #379, L4 A3) — the server-run
     /// verdict that REPLACES the resolver's self-reported marker. Runs the operator's acceptance command against the
     /// resolver's produced branch EXACTLY ONCE: the <see cref="SupervisorOutcome.ReadAcceptanceGradePassed"/> once-guard
@@ -436,6 +542,8 @@ public sealed partial class SupervisorTurnService
     private async Task<SupervisorPriorDecision> FoldAcceptanceGradeAsync(SupervisorPriorDecision decision, SupervisorGoalConfig? goalConfig, IReadOnlyList<string>? command, Guid supervisorRunId, string nodeId, Guid teamId, CancellationToken cancellationToken)
     {
         if (decision.DecisionKind != SupervisorDecisionKinds.Resolve) return decision;
+
+        if (SupervisorOutcome.HasResolveContributorIntegrity(decision.OutcomeJson)) return decision;
 
         if (command is null) return decision;
 
@@ -1159,6 +1267,32 @@ public sealed partial class SupervisorTurnService
         return runs.ToDictionary(r => r.Id, r => SupervisorOutcome.ProjectCompact(r.Id, r.Status.ToString(), r.Error, r.ResultJson, ReadModel(r.TaskJson)));
     }
 
+    /// <summary>
+    /// Batch-load the fixed K=1 contributor ids for every not-yet-faulted active-plan resolve. The unscoped id lookup distinguishes a
+    /// foreign row from a missing one, while SQL CASE prevents foreign Error/ResultJson/TaskJson bytes from crossing
+    /// the tenant boundary. DB/backend failures are intentionally uncaught infrastructure failures.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<Guid, ResolveContributorRow>> ReadResolveContributorRowsAsync(IReadOnlyList<Guid> ids, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (ids.Count == 0) return EmptyResolveContributorRows;
+
+        var rows = await _db.AgentRun.AsNoTracking()
+            .Where(r => ids.Contains(r.Id))
+            .Select(r => new
+            {
+                r.Id,
+                r.TeamId,
+                r.Status,
+                Error = r.TeamId == teamId ? r.Error : null,
+                ResultJson = r.TeamId == teamId ? r.ResultJson : null,
+                TaskJson = r.TeamId == teamId ? r.TaskJson : null,
+            })
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        return rows.ToDictionary(r => r.Id, r => new ResolveContributorRow(r.Id, r.TeamId, r.Status, r.Error, r.ResultJson, r.TaskJson));
+    }
+
     /// <summary>The agent's model off its task envelope (TaskJson), best-effort (malformed → null) — the price key for the cost fold.</summary>
     private static string? ReadModel(string? taskJson)
     {
@@ -1166,6 +1300,8 @@ public sealed partial class SupervisorTurnService
         try { return JsonSerializer.Deserialize<AgentTask>(taskJson, AgentJson.Options)?.Model; }
         catch (JsonException) { return null; }
     }
+
+    private sealed record ResolveContributorRow(Guid Id, Guid TeamId, AgentRunStatus Status, string? Error, string? ResultJson, string? TaskJson);
 
     /// <summary>
     /// Normalise the supervisor config's reused <c>AllowedTools</c> into the spawned-agent tool allow-list (P2-3),

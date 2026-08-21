@@ -12,6 +12,7 @@ using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Dtos.Agents;
+using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Shouldly;
@@ -166,6 +167,141 @@ public sealed class SupervisorAcceptanceFoldFlowTests
         SupervisorOutcome.ReadAcceptanceGradePassed(resolve.OutcomeJson).ShouldBeNull("no acceptanceGrade field is folded");
         SupervisorOutcome.ReadResolutionVerdict(resolve.OutcomeJson).ShouldBe(SupervisorResolutionVerdict.Verified, "the verdict falls back to the self-report marker");
         (await LedgerOutcomeAsync(runId, teamId)).ShouldBe(before, "the durable resolve row is unchanged — no spurious UPDATE on the no-command path");
+    }
+
+    [Fact]
+    public async Task Active_plan_resolve_with_a_missing_agent_is_needs_review_and_never_falls_back_to_an_older_pushed_branch()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+        var priorAgentId = Guid.NewGuid();
+        var missingResolverId = Guid.NewGuid();
+
+        await SeedPlanDecisionAsync(runId, teamId);
+        await SeedSpawnDecisionAsync(runId, teamId, priorAgentId);
+        await SeedAgentManifestAsync(runId, teamId, priorAgentId, repoId, "codespace/agent/pre-resolution");
+        await SeedResolveDecisionAsync(runId, teamId, ResolveOutcomeWithAgentId(missingResolverId, "codespace/resolve/forged", markerPresent: true));
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = true, Detail = "must-not-authorize-untrusted-input" });
+        var ctx = await RehydrateAsync(runId, teamId, GoalConfig(repoId, Command), grader);
+        var resolve = ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Resolve);
+        var integrity = JsonDocument.Parse(resolve.OutcomeJson!).RootElement.GetProperty("resolveContributorIntegrity");
+
+        integrity.GetProperty("status").GetString().ShouldBe("NeedsReview");
+        integrity.GetProperty("agentRunId").GetGuid().ShouldBe(missingResolverId);
+        integrity.GetProperty("kind").GetString().ShouldBe("MissingRow");
+        SupervisorOutcome.ReadResolutionVerdict(resolve.OutcomeJson).ShouldBe(SupervisorResolutionVerdict.Unverified);
+        SupervisorOutcome.ResolvedBranch(resolve).ShouldBeNull("a compact self-report without its recorded resolver run is never accepted authority");
+        grader.CallCount.ShouldBe(0, "an untrusted resolver branch is not passed to the acceptance grader");
+
+        using var scope = _fixture.BeginScope();
+        var published = await scope.Resolve<ISupervisorPublishedBranchResolver>()
+            .ResolveAsync(runId, teamId, ctx.PriorDecisions, repoId, CancellationToken.None);
+        published.ShouldBeEmpty("integrity failure is a publication barrier — the resolver cannot fall through to a pre-resolution contributor manifest");
+    }
+
+    [Fact]
+    public async Task Active_plan_resolve_does_not_filter_an_invalid_extra_id_out_of_its_fixed_size_carrier()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var resolverId = Guid.NewGuid();
+        var result = new AgentRunResult
+        {
+            Status = AgentRunStatus.Succeeded,
+            ExitReason = "completed",
+            Summary = $"reconciled {Marker}",
+            ProducedBranch = "codespace/resolve/claimed",
+        };
+        var resultJson = JsonSerializer.Serialize(result, AgentJson.Options);
+        var compact = SupervisorOutcome.ProjectCompact(resolverId, AgentRunStatus.Succeeded.ToString(), rowError: null, resultJson, model: null);
+        var malformedCarrier = JsonSerializer.Serialize(new { agentRunIds = new object[] { resolverId, "not-a-guid" }, agentCount = 1, agentResults = new[] { compact } }, AgentJson.Options);
+
+        await SeedPlanDecisionAsync(runId, teamId);
+        await SeedAgentRunRawAsync(resolverId, teamId, runId, AgentRunStatus.Succeeded, resultJson);
+        await SeedResolveDecisionAsync(runId, teamId, malformedCarrier);
+
+        var ctx = await RehydrateAsync(runId, teamId, GoalConfig(Guid.NewGuid(), acceptanceChecks: null), new RecordingGrader(new BenchmarkGrade { Passed = false, Detail = "should-not-run" }));
+        var resolve = ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Resolve);
+        var integrity = JsonDocument.Parse(resolve.OutcomeJson!).RootElement.GetProperty("resolveContributorIntegrity");
+
+        integrity.GetProperty("kind").GetString().ShouldBe("MalformedRecordedOutcome");
+        integrity.GetProperty("agentRunId").ValueKind.ShouldBe(JsonValueKind.Null, "a malformed K=1 carrier has no trustworthy contributor identity");
+        SupervisorOutcome.ResolvedBranch(resolve).ShouldBeNull();
+    }
+
+    [Theory]
+    [InlineData("cross-team", "CrossTeam")]
+    [InlineData("malformed", "MalformedResult")]
+    [InlineData("status-mismatch", "ResultStatusMismatch")]
+    [InlineData("compact-mismatch", "CompactResultMismatch")]
+    public async Task Active_plan_resolve_rejects_untrustworthy_resolver_rows_even_when_the_compact_claims_verified(string scenario, string expectedKind)
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var resolverId = Guid.NewGuid();
+        var result = new AgentRunResult
+        {
+            Status = scenario == "status-mismatch" ? AgentRunStatus.Failed : AgentRunStatus.Succeeded,
+            ExitReason = "test",
+            Summary = $"reconciled {Marker}",
+            ProducedBranch = scenario == "compact-mismatch" ? "codespace/resolve/recorded" : "codespace/resolve/claimed",
+        };
+
+        await SeedPlanDecisionAsync(runId, teamId);
+
+        if (scenario == "cross-team")
+        {
+            var (otherTeamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+            await SeedAgentRunRawAsync(resolverId, otherTeamId, runId, AgentRunStatus.Succeeded, JsonSerializer.Serialize(result, AgentJson.Options));
+        }
+        else
+        {
+            var resultJson = scenario == "malformed"
+                ? """{"status":"notAStatus","exitReason":"test"}"""
+                : JsonSerializer.Serialize(result, AgentJson.Options);
+            await SeedAgentRunRawAsync(resolverId, teamId, runId, AgentRunStatus.Succeeded, resultJson);
+        }
+
+        await SeedResolveDecisionAsync(runId, teamId, ResolveOutcomeWithAgentId(resolverId, "codespace/resolve/claimed", markerPresent: true));
+
+        var ctx = await RehydrateAsync(runId, teamId, GoalConfig(Guid.NewGuid(), acceptanceChecks: null), new RecordingGrader(new BenchmarkGrade { Passed = false, Detail = "should-not-run" }));
+        var resolve = ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Resolve);
+        var integrity = JsonDocument.Parse(resolve.OutcomeJson!).RootElement.GetProperty("resolveContributorIntegrity");
+
+        integrity.GetProperty("status").GetString().ShouldBe("NeedsReview");
+        integrity.GetProperty("kind").GetString().ShouldBe(expectedKind);
+        SupervisorOutcome.ResolvedBranch(resolve).ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task Active_plan_resolve_with_a_matching_terminal_row_keeps_its_persisted_bytes()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var resolverId = Guid.NewGuid();
+        var branch = "codespace/resolve/healthy";
+        var result = new AgentRunResult
+        {
+            Status = AgentRunStatus.Succeeded,
+            ExitReason = "completed",
+            Summary = $"reconciled {Marker}",
+            ProducedBranch = branch,
+        };
+
+        await SeedPlanDecisionAsync(runId, teamId);
+        await SeedAgentRunRawAsync(resolverId, teamId, runId, AgentRunStatus.Succeeded, JsonSerializer.Serialize(result, AgentJson.Options));
+        await SeedResolveDecisionAsync(runId, teamId, ResolveOutcomeWithAgentId(resolverId, branch, markerPresent: true));
+        var before = await LedgerOutcomeAsync(runId, teamId);
+
+        var ctx = await RehydrateAsync(runId, teamId, GoalConfig(Guid.NewGuid(), acceptanceChecks: null), new RecordingGrader(new BenchmarkGrade { Passed = false, Detail = "should-not-run" }));
+        var resolve = ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Resolve);
+
+        resolve.OutcomeJson.ShouldBe(before);
+        JsonDocument.Parse(resolve.OutcomeJson!).RootElement.TryGetProperty("resolveContributorIntegrity", out _).ShouldBeFalse();
+        SupervisorOutcome.ResolvedBranch(resolve).ShouldBe(branch);
+        (await LedgerOutcomeAsync(runId, teamId)).ShouldBe(before, "healthy active-plan resolution remains byte-identical and causes no ledger UPDATE");
     }
 
     [Fact]
@@ -1010,7 +1146,7 @@ public sealed class SupervisorAcceptanceFoldFlowTests
             Id = Guid.NewGuid(),
             TeamId = teamId,
             SupervisorRunId = runId,
-            Sequence = 1,
+            Sequence = await NextDecisionSequenceAsync(db, runId),
             DecisionKind = SupervisorDecisionKinds.Resolve,
             IdempotencyKey = $"resolve-{Guid.NewGuid():N}",
             InputHash = "test",
@@ -1025,6 +1161,75 @@ public sealed class SupervisorAcceptanceFoldFlowTests
         });
         await db.SaveChangesAsync();
     }
+
+    private async Task SeedPlanDecisionAsync(Guid runId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var payload = JsonSerializer.Serialize(new SupervisorPlanPayload
+        {
+            Goal = Goal,
+            Subtasks = new[] { new SupervisorPlannedSubtask { Id = "resolve", Title = "Resolve", Instruction = "resolve conflicts" } },
+        }, AgentJson.Options);
+
+        db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId, Sequence = await NextDecisionSequenceAsync(db, runId),
+            DecisionKind = SupervisorDecisionKinds.Plan, IdempotencyKey = $"plan-{Guid.NewGuid():N}", InputHash = "test",
+            Status = SupervisorDecisionStatus.Succeeded, PayloadJson = payload, OutcomeJson = "{}", FenceEpoch = 1,
+            CreatedDate = now, CreatedBy = Guid.Empty, LastModifiedDate = now, LastModifiedBy = Guid.Empty,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    private async Task SeedSpawnDecisionAsync(Guid runId, Guid teamId, Guid agentRunId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var result = new SupervisorAgentResult { AgentRunId = agentRunId, Status = "Succeeded", ChangedFiles = new[] { "a.txt" }, AcceptancePassed = true };
+        var outcome = JsonSerializer.Serialize(new { agentRunIds = new[] { agentRunId }, agentCount = 1, agentResults = new[] { result } }, AgentJson.Options);
+
+        db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId, Sequence = await NextDecisionSequenceAsync(db, runId),
+            DecisionKind = SupervisorDecisionKinds.Spawn, IdempotencyKey = $"spawn-{Guid.NewGuid():N}", InputHash = "test",
+            Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = outcome, FenceEpoch = 1,
+            CreatedDate = now, CreatedBy = Guid.Empty, LastModifiedDate = now, LastModifiedBy = Guid.Empty,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    private async Task SeedAgentRunRawAsync(Guid agentRunId, Guid teamId, Guid runId, AgentRunStatus status, string? resultJson)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.AgentRun.Add(new AgentRun
+        {
+            Id = agentRunId, TeamId = teamId, WorkflowRunId = runId, NodeId = NodeId, Harness = "codex-cli",
+            Status = status, TaskJson = "{}", ResultJson = resultJson,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    private async Task SeedAgentManifestAsync(Guid runId, Guid teamId, Guid agentRunId, Guid repositoryId, string branch)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>().UpsertForAgentRunAsync(agentRunId, new PublishManifestUpsert
+        {
+            TeamId = teamId,
+            WorkflowRunId = runId,
+            RepositoryAlias = "primary",
+            RepositoryId = repositoryId,
+            Branch = branch,
+            ChangedFileCount = 1,
+            PublishStateValue = PublishState.Pushed,
+        }, CancellationToken.None);
+    }
+
+    private static async Task<long> NextDecisionSequenceAsync(CodeSpaceDbContext db, Guid runId) =>
+        await db.SupervisorDecisionRecord.Where(d => d.SupervisorRunId == runId).Select(d => (long?)d.Sequence).MaxAsync() + 1 ?? 1;
 
     private async Task<string?> LedgerOutcomeAsync(Guid runId, Guid teamId)
     {
