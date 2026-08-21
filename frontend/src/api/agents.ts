@@ -87,6 +87,8 @@ export interface AgentRunHarnessExecutionSummary {
   runnerKind: string;
   state: string;
   attemptCount: number;
+  /** Open persisted coverage token. null/absent is legacy unknown; consumers must fail closed on future values. */
+  modelCallObservationCoverage?: string | null;
   /** Indexed existence observation; the drawer never performs an unbounded count over a long native stream. */
   hasCapturedNativeRecords: boolean;
   terminalAt: string | null;

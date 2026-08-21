@@ -175,6 +175,8 @@ public sealed class NativeRecordDualWriteFlowTests
         execution.Generation.ShouldBe(1);
         execution.HarnessTypeKey.ShouldBe("scripted/v1",
             customMessage: "the adapter identity is snapshotted so a row read a year later is interpretable against the adapter that wrote it");
+        execution.ModelCallObservationCoverage.ShouldBe(nameof(HarnessModelCallObservationCoverage.Unavailable),
+            customMessage: "coverage is the adapter's declaration at launch, never inferred later from the scripted harness name");
         execution.RunnerKind.ShouldBe("local");
         execution.AttemptCount.ShouldBe(1, customMessage: "the head is advanced by the appended attempt's own trigger, never by the writer");
 
@@ -188,6 +190,10 @@ public sealed class NativeRecordDualWriteFlowTests
         var records = await db.WorkflowRunNativeRecord.AsNoTracking().Where(candidate => candidate.AgentRunId == runId).ToListAsync();
         records.ShouldAllBe(record => record.ExecutionId == execution.Id && record.AttemptId == attempt.Id);
         records.ShouldAllBe(record => record.Channel == NativeRecordChannel.Stdout);
+
+        var summary = await scope.Resolve<IAgentRunService>().GetSummaryForTeamAsync(runId, teamId, CancellationToken.None);
+        summary.ShouldNotBeNull().HarnessExecution.ShouldNotBeNull().ModelCallObservationCoverage.ShouldBe(nameof(HarnessModelCallObservationCoverage.Unavailable),
+            customMessage: "the standalone Agent Run reads its own durable execution snapshot through the same bounded team-scoped summary as a workflow-bound run");
     }
 
     /// <summary>
@@ -289,7 +295,7 @@ public sealed class NativeRecordDualWriteFlowTests
     /// recognise (returns nothing, exactly as every real adapter does for an unknown native frame class) and a line it
     /// cannot read at all (throws, the bug case a durable capture floor has to survive).
     /// </summary>
-    private sealed class SelectiveHarness : IAgentHarness
+    private sealed class SelectiveHarness : IAgentHarness, IAgentHarnessModelCallObservation
     {
         private readonly string _script;
 
@@ -298,6 +304,7 @@ public sealed class NativeRecordDualWriteFlowTests
         public string Kind => "scripted";
         public string Version => "test";
         public IReadOnlyList<string> Models { get; } = new[] { "test-model" };
+        public HarnessModelCallObservationCoverage ModelCallObservationCoverage => HarnessModelCallObservationCoverage.Unavailable;
 
         public SandboxSpec BuildInvocation(AgentTask task) => new() { Command = "/bin/sh", Args = new[] { "-c", _script }, WorkingDirectory = task.WorkspaceDirectory, TimeoutSeconds = task.TimeoutSeconds };
 

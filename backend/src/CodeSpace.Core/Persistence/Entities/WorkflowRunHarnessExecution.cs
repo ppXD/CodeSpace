@@ -45,6 +45,9 @@ public sealed class WorkflowRunHarnessExecution : IEntity<Guid>
     /// <summary>The adapter identity that ran, snapshotted as <c>&lt;kind&gt;/v&lt;major&gt;</c> and immutable, so a row read a year later is interpretable against the adapter that produced it rather than against whatever the harness column has since become.</summary>
     public string HarnessTypeKey { get; set; } = string.Empty;
 
+    /// <summary>The adapter's model-call observation granularity snapshotted at launch. NULL is a legacy row, not evidence of unavailable telemetry; kept as an open string so an older reader can fail closed on a future value. A standalone execution has source-coverage truth here but no workflow-run model-call projection identity.</summary>
+    public string? ModelCallObservationCoverage { get; set; }
+
     /// <summary>Runner kind that owns this execution (e.g. <c>local</c>) — how a reader resolves who may interpret an attempt's locator.</summary>
     public string RunnerKind { get; set; } = string.Empty;
 

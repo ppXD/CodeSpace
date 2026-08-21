@@ -27,7 +27,7 @@ namespace CodeSpace.Core.Services.Agents.Harnesses.Codex;
 /// harness contributes NO model-call rows and the per-run aggregate stays the only figure it has. Recording nothing is
 /// the honest outcome; the fix is a Codex that prints per-call records, not a reader that invents them.</para>
 /// </summary>
-public sealed class CodexHarness : IAgentHarness, IAgentHarnessContractGeneration, IAgentHarnessRunFactKeys, IModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, IAgentTranscriptModelSource, IAgentGroundedFrameReader, ISingletonDependency
+public sealed class CodexHarness : IAgentHarness, IAgentHarnessContractGeneration, IAgentHarnessRunFactKeys, IAgentHarnessModelCallObservation, IModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, IAgentTranscriptModelSource, IAgentGroundedFrameReader, ISingletonDependency
 {
     public const string HarnessKind = "codex-cli";
 
@@ -101,6 +101,9 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessContractGeneratio
     /// <c>AgentNativeRecordPumpTests.Every_shipped_adapter_keys_its_rows_under_the_generation_it_declares</c>.
     /// </summary>
     public int ContractGeneration => 1;
+
+    /// <summary>The stream exposes only a cumulative turn total over calls it never enumerates, so it cannot support a per-call row.</summary>
+    public HarnessModelCallObservationCoverage ModelCallObservationCoverage => HarnessModelCallObservationCoverage.CumulativeAggregate;
 
     /// <summary>
     /// Where Codex's <c>exec --json</c> stream spells the three run facts: <c>thread_id</c> on <c>thread.started</c>
