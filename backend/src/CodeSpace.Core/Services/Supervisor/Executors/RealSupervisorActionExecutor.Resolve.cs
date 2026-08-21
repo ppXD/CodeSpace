@@ -94,7 +94,7 @@ public sealed partial class RealSupervisorActionExecutor
     }
 
     /// <summary>
-    /// EVERY produced branch the prior spawn/retry agents pushed FOR ONE REPO (by repository id), in spawn order, deduped
+    /// EVERY produced branch the active Plan generation's spawn/retry agents pushed FOR ONE REPO (by repository id), in spawn order, deduped
     /// — the FULL per-repo set the multi-repo resolver re-merges in that repo's subdirectory (the per-repo analogue of
     /// <see cref="CollectAgentBranches"/>, reading each agent's <c>RepositoryResults</c> entry for this repo). A null id
     /// or a branch-less per-repo entry contributes nothing.
@@ -105,7 +105,7 @@ public sealed partial class RealSupervisorActionExecutor
 
         var branches = new List<string>();
 
-        foreach (var prior in context.PriorDecisions.Where(d => d.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry))
+        foreach (var prior in SupervisorPlanWindow.Read(context.PriorDecisions).Decisions.Where(d => d.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry))
             foreach (var result in SupervisorOutcome.ReadAgentResults(prior.OutcomeJson))
             {
                 if (SupervisorOutcome.IsWithheldFromHead(result)) continue;   // slice 4: a per-unit-rejected unit's work never reaches the head, via the resolver door either
@@ -132,7 +132,7 @@ public sealed partial class RealSupervisorActionExecutor
         SupervisorOutcome.FindConflictDecision(context.PriorDecisions);
 
     /// <summary>
-    /// EVERY produced branch the prior spawn/retry agents pushed, in spawn order, deduped — the FULL set the resolver
+    /// EVERY produced branch the active Plan generation's spawn/retry agents pushed, in spawn order, deduped — the FULL set the resolver
     /// re-merges (NOT just the conflicting subset the integration block names; the resolver needs all the agents'
     /// branches to reconcile them) MINUS any unit a per-unit acceptance grade objectively REJECTED (slice 4 — withheld
     /// via <see cref="SupervisorOutcome.IsWithheldFromHead"/>). Mirrors <see cref="ResolveAgentRunIdsToMerge"/>'s "all
@@ -143,7 +143,7 @@ public sealed partial class RealSupervisorActionExecutor
     {
         var branches = new List<string>();
 
-        foreach (var prior in context.PriorDecisions.Where(d => d.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry))
+        foreach (var prior in SupervisorPlanWindow.Read(context.PriorDecisions).Decisions.Where(d => d.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry))
             foreach (var result in SupervisorOutcome.ReadAgentResults(prior.OutcomeJson))
                 if (!SupervisorOutcome.IsWithheldFromHead(result) && !string.IsNullOrWhiteSpace(result.ProducedBranch) && !branches.Contains(result.ProducedBranch!))
                     branches.Add(result.ProducedBranch!);

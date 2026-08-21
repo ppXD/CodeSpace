@@ -3,6 +3,7 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Eval;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Deciders;
+using CodeSpace.Core.Services.Supervisor.Executors;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Enums;
@@ -696,6 +697,32 @@ public class SupervisorResolverTests
     public void ReadConflictedRepos_is_empty_for_a_single_repo_conflicted_merge() =>
         SupervisorOutcome.ReadConflictedRepos(new[] { Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome("Conflicted", null)) })
             .ShouldBeEmpty("a single-repo conflicted merge (no repositories[]) yields no per-repo conflicted blocks — the flat resolve path handles it");
+
+    [Fact]
+    public void Conflict_and_resolution_authority_do_not_cross_a_new_plan_boundary()
+    {
+        var oldResolve = Decision(SupervisorDecisionKinds.Resolve, 2, ResolveOutcomeWithBranch("Succeeded", VerifiedSummary, "codespace/resolve/old"));
+        var oldMultiRepoConflict = Decision(SupervisorDecisionKinds.Merge, 3, MultiRepoConflictedMerge(("api", Guid.NewGuid(), "Conflicted", new[] { "api/Old.cs" })));
+        var currentPlan = Plan(4, ValidPlanPayload("replacement"));
+        var context = Context(5, oldResolve, oldMultiRepoConflict, currentPlan);
+
+        SupervisorOutcome.FindConflictDecision(context.PriorDecisions).ShouldBeNull("the new generation has not conflicted, so resolve is not an available action");
+        SupervisorOutcome.ReadConflictedRepos(context.PriorDecisions).ShouldBeEmpty("an old per-repo conflict cannot seed the new generation's resolver recipe");
+        RealSupervisorActionExecutor.AcceptedResolutionBranch(context).ShouldBeNull("a merge in the new generation cannot republish an old verified resolver branch");
+        RealSupervisorActionExecutor.AcceptedResolutionRepositories(context).ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void An_old_verified_multi_repo_resolution_cannot_short_circuit_the_active_generations_merge()
+    {
+        var oldResolve = Decision(SupervisorDecisionKinds.Resolve, 2, ResolveOutcomeWithRepos(
+            "Succeeded", VerifiedSummary,
+            ("web", Guid.NewGuid(), "codespace/resolve/old-web"),
+            ("api", Guid.NewGuid(), "codespace/resolve/old-api")));
+        var context = Context(4, oldResolve, Plan(3, ValidPlanPayload("replacement")));
+
+        RealSupervisorActionExecutor.AcceptedResolutionRepositories(context).ShouldBeEmpty("the old reconciled heads remain audit evidence; they cannot replace integration of the active generation");
+    }
 
     [Fact]
     public void BuildMultiRepoInstruction_names_each_repos_subdirectory_branches_files_and_the_verified_marker()

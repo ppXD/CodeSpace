@@ -32,6 +32,12 @@ public class SupervisorMergeWithholdTests
 
     private static SupervisorTurnContext Context(params SupervisorPriorDecision[] prior) => new() { Goal = "g", PriorDecisions = prior };
 
+    private static SupervisorPriorDecision Plan() => new()
+    {
+        Id = Guid.NewGuid(), Sequence = 2, DecisionKind = SupervisorDecisionKinds.Plan, Status = SupervisorDecisionStatus.Succeeded,
+        PayloadJson = """{"goal":"replacement","subtasks":[{"id":"same","title":"same","instruction":"do same"}]}""", OutcomeJson = "{}",
+    };
+
     [Fact]
     public void A_rejected_unit_is_withheld_while_passing_and_ungraded_units_integrate()
     {
@@ -92,6 +98,37 @@ public class SupervisorMergeWithholdTests
     }
 
     [Fact]
+    public void A_new_plan_generation_merges_and_resolves_only_its_own_agents()
+    {
+        var old = UnitWithBranch("b-old", true);
+        var current = UnitWithBranch("b-current", true);
+        var context = Context(Staging(SupervisorDecisionKinds.Spawn, old), Plan(), Staging(SupervisorDecisionKinds.Spawn, current));
+
+        RealSupervisorActionExecutor.ResolveAgentRunIdsToMerge(context).ShouldBe(new[] { current.AgentRunId }, "an old generation's accepted unit is still audit evidence, not a contributor to the new head");
+        RealSupervisorActionExecutor.CollectAgentBranches(context).ShouldBe(new[] { "b-current" }, "the resolver must reconcile the same active-generation set the merge consumes");
+    }
+
+    [Fact]
+    public void A_healthy_single_plan_generation_keeps_the_same_merge_and_resolver_projection()
+    {
+        var active = UnitWithBranch("b-active", null);
+        var context = Context(Plan(), Staging(SupervisorDecisionKinds.Spawn, active));
+
+        RealSupervisorActionExecutor.ResolveAgentRunIdsToMerge(context).ShouldBe(new[] { active.AgentRunId });
+        RealSupervisorActionExecutor.CollectAgentBranches(context).ShouldBe(new[] { "b-active" });
+    }
+
+    [Fact]
+    public void The_withheld_aggregate_is_scoped_to_the_active_plan_generation()
+    {
+        var oldRejected = Unit(false);
+        var currentWaived = Unit(null) with { AcceptanceVerdict = CodeSpace.Messages.Contracts.VerificationDisposition.Waived };
+        var tape = new[] { Staging(SupervisorDecisionKinds.Spawn, oldRejected), Plan(), Staging(SupervisorDecisionKinds.Spawn, currentWaived) };
+
+        SupervisorOutcome.WithheldAgentRunIds(tape).ShouldBe(new HashSet<Guid> { currentWaived.AgentRunId }, "an old rejection cannot withhold an unrelated same-id incarnation or manifest in the active generation");
+    }
+
+    [Fact]
     public void An_all_rejected_wave_integrates_nothing()
     {
         RealSupervisorActionExecutor.ResolveAgentRunIdsToMerge(Context(Staging(SupervisorDecisionKinds.Spawn, Unit(false), Unit(false))))
@@ -143,5 +180,21 @@ public class SupervisorMergeWithholdTests
 
         RealSupervisorActionExecutor.CollectAgentBranchesForRepo(context, repo)
             .ShouldBe(new[] { "r-passed" }, "the per-repo resolver set withholds a rejected unit too (defensive — multi-repo per-unit grades are deferred, so today rejected multi-repo units don't arise, but the guard holds)");
+    }
+
+    [Fact]
+    public void The_per_repo_resolver_does_not_collect_a_superseded_generations_branch()
+    {
+        var repo = Guid.NewGuid();
+
+        SupervisorAgentResult MultiRepoUnit(string branch) => new()
+        {
+            AgentRunId = Guid.NewGuid(), Status = "Succeeded",
+            RepositoryResults = new[] { new RepositoryRunResult { Alias = "r", RepositoryId = repo, ProducedBranch = branch, BaseBranch = "main", Access = WorkspaceAccess.Write } },
+        };
+
+        var context = Context(Staging(SupervisorDecisionKinds.Spawn, MultiRepoUnit("r-old")), Plan(), Staging(SupervisorDecisionKinds.Spawn, MultiRepoUnit("r-current")));
+
+        RealSupervisorActionExecutor.CollectAgentBranchesForRepo(context, repo).ShouldBe(new[] { "r-current" });
     }
 }

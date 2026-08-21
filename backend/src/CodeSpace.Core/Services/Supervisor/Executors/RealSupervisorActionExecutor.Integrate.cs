@@ -88,9 +88,9 @@ public sealed partial class RealSupervisorActionExecutor
     /// was a normal spawn/retry (there's fresh agent work to combine → run the integrator) or the resolution wasn't
     /// verified (the safety floor already withheld acceptance). Reads only durable folded state — pure + replay-safe.
     /// </summary>
-    private static string? AcceptedResolutionBranch(SupervisorTurnContext context)
+    internal static string? AcceptedResolutionBranch(SupervisorTurnContext context)
     {
-        var lastStaging = context.PriorDecisions.LastOrDefault(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind));
+        var lastStaging = SupervisorPlanWindow.Read(context.PriorDecisions).Decisions.LastOrDefault(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind));
 
         // The most-recent agent-staging decision must ITSELF be the accepted resolution — a spawn/retry after it means
         // fresh work to combine, so the integrator runs. The "verified resolve → its branch" rule is the SHARED
@@ -105,9 +105,9 @@ public sealed partial class RealSupervisorActionExecutor
     /// multi-repo analogue of <see cref="AcceptedResolutionBranch"/>, off the SHARED <see cref="SupervisorOutcome.ResolvedRepositoryBranches"/>
     /// (so the acceptance rule never drifts — Rule 7). Empty for a single-repo / unverified / non-resolve last staging.
     /// </summary>
-    private static IReadOnlyDictionary<Guid, string> AcceptedResolutionRepositories(SupervisorTurnContext context)
+    internal static IReadOnlyDictionary<Guid, string> AcceptedResolutionRepositories(SupervisorTurnContext context)
     {
-        var lastStaging = context.PriorDecisions.LastOrDefault(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind));
+        var lastStaging = SupervisorPlanWindow.Read(context.PriorDecisions).Decisions.LastOrDefault(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind));
 
         if (lastStaging is null) return EmptyResolution;
 
