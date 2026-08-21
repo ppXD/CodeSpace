@@ -1,7 +1,10 @@
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Services.Workflows.Artifacts;
+using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
 using CodeSpace.Core.Services.Workflows.Engine;
+using CodeSpace.Core.Services.Workflows.Lifecycle;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Authorization;
@@ -181,6 +184,47 @@ public class MapDurableResumeFlowTests
         var results = JsonDocument.Parse((await MapNodeAsync(fdb, runId)).OutputsJson).RootElement.GetProperty("results");
         results[0].GetProperty("summary").GetString().ShouldBe("RES-a");
         results[1].GetProperty("summary").GetString().ShouldBe("RES-b");
+    }
+
+    [Fact]
+    public async Task A_missing_required_completed_branch_artifact_fails_map_replay_instead_of_forwarding_its_pointer()
+    {
+        var key = "sp-" + Guid.NewGuid().ToString("N");
+        SuspendProbeNode.Reset(key);
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, SuspendingMapDefinition(key));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: """{ "things": ["a", "b"] }""");
+
+        await RunEngineAsync(runId);
+        (await ResolveBranchViaResumeWaitAsync(runId, key, "a", "RES-a")).ShouldBeTrue();
+        await RunEngineAsync(runId);
+
+        var missingArtifactId = Guid.NewGuid();
+        using (var corrupt = _fixture.BeginScope())
+        {
+            var missingRef = JsonSerializer.SerializeToElement(new Dictionary<string, object>
+            {
+                [NodeOutputArtifacts.RefKey] = new { id = missingArtifactId, size_bytes = 64, content_type = "application/json" },
+            });
+            await corrupt.Resolve<IRunRecordLogger>().NodeCompletedAsync(
+                runId, "leaf", "map#0",
+                new Dictionary<string, JsonElement>
+                {
+                    ["item"] = JsonSerializer.SerializeToElement("a"),
+                    ["summary"] = missingRef,
+                },
+                null, TimeSpan.Zero, CancellationToken.None);
+        }
+
+        (await ResolveBranchViaResumeWaitAsync(runId, key, "b", "RES-b")).ShouldBeTrue();
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var failed = await verify.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+        failed.Status.ShouldBe(WorkflowRunStatus.Failure, "map replay requires the completed branch bytes before it can aggregate or continue");
+        failed.Error.ShouldContain(nameof(ArtifactContentUnavailableException));
+        failed.OutputsJson.ShouldNotContain(NodeOutputArtifacts.RefKey, Case.Sensitive, "the unresolved pointer must never reach downstream terminal output");
     }
 
     [Fact]

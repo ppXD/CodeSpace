@@ -2095,12 +2095,12 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         return new MapReplayState(settled);
     }
 
-    /// <summary>Re-inflate any offloaded-value refs in a settled branch's replayed terminal outputs — the branch's own terminal output was offloaded on write, so the replayed result must resolve before it feeds the map's aggregated results. A failed / non-object outcome carries nothing to resolve.</summary>
+    /// <summary>Re-inflate required offloaded-value refs in a settled branch's replayed terminal outputs. A missing or unreadable value must fail closed before the branch can feed the map's aggregate; a failed / non-object outcome carries nothing to resolve.</summary>
     private async Task<MapBranchOutcome> ResolveBranchOutcomeAsync(MapBranchOutcome outcome, Guid teamId, CancellationToken cancellationToken)
     {
         if (outcome.Failed || outcome.Result.ValueKind != JsonValueKind.Object) return outcome;
 
-        var resolved = await NodeOutputArtifacts.ResolveAsync(_artifactStore, teamId, ParsePayloadObject(outcome.Result.GetRawText()), cancellationToken).ConfigureAwait(false);
+        var resolved = await NodeOutputArtifacts.ResolveRequiredAsync(_artifactStore, teamId, ParsePayloadObject(outcome.Result.GetRawText()), cancellationToken).ConfigureAwait(false);
 
         return outcome with { Result = JsonSerializer.SerializeToElement(resolved) };
     }
