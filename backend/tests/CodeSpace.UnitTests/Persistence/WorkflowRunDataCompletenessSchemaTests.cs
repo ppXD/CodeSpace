@@ -229,12 +229,12 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
     }
 
     /// <summary>
-    /// The isolation that still holds, checked rather than asserted in prose: TWO production producers, both in the
+    /// The isolation that still holds, checked rather than asserted in prose: THREE production producers, all in the
     /// capture plane, and TWO observation-only bounded readers. The only files in <c>backend/src</c> that may mention
     /// either table are the two entities, their two configurations, the DbContext that registers them, the shared
     /// completeness writer, the Workflow Run manifest reader, the Agent Run exact-gap reader, and the capture plane's
-    /// two completeness partials — the
-    /// native-record facet and the harness-process-attempt facet, each of which states its own facet, records a gap for
+    /// three completeness partials — the native-record, harness-process-attempt and harness-execution facets. Each
+    /// producer states its own facet, records a gap for
     /// its own refused write, and reads neither table for any decision. The summary reader observes only exact,
     /// team-scoped attribution, orders it deterministically, and takes one more than its display bound to state
     /// truncation without a count or unbounded materialization. In particular nothing in completion, terminal
@@ -242,11 +242,11 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
     /// separate, later, deliberate cutover, and this test is what turns that step into a visible red rather than a quiet
     /// import.
     ///
-    /// <para>Adding the second producer turned this list red, which is the list working: the count of producers in the
+    /// <para>Adding each producer turns this list red, which is the list working: the count of producers in the
     /// message below is the number a reader can trust without grepping.</para>
     /// </summary>
     [Fact]
-    public void Only_the_capture_planes_two_producers_and_two_bounded_operator_readers_touch_either_table()
+    public void Only_the_capture_planes_three_producers_and_two_bounded_operator_readers_touch_either_table()
     {
         var sourceRoot = ProductionSourceRoot();
 
@@ -263,6 +263,7 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
             "IRunDataCompletenessReader.cs",
             "IRunDataCompletenessWriter.cs",
             "NativeRecordPlane.Completeness.cs",
+            "NativeRecordPlane.ExecutionCompleteness.cs",
             "NativeRecordPlane.ProcessCompleteness.cs",
             "RunDataFacetAdvance.cs",
             "WorkflowRunCaptureGap.cs",
@@ -270,9 +271,9 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
             "WorkflowRunDataManifest.cs",
             "WorkflowRunDataManifestConfiguration.cs",
         }, customMessage: "a production file other than the shared completeness writer, the Workflow Run manifest " +
-                          "reader, the Agent Run exact-gap reader, and the capture plane's two completeness partials " +
-                          "now touches the capture-gap / data-manifest plane. Exactly two producers exist — the " +
-                          "native-record facet and the harness-process-attempt facet — and exactly two bounded, " +
+                          "reader, the Agent Run exact-gap reader, and the capture plane's three completeness partials " +
+                          "now touches the capture-gap / data-manifest plane. Exactly three producers exist — the " +
+                          "native-record, harness-process-attempt and harness-execution facets — and exactly two bounded, " +
                           "observation-only readers exist. No reducer folds a gap and terminal authority does not " +
                           "consult the manifest. Any new producer or reader is a deliberate step that updates this " +
                           "list — not a silent one.");

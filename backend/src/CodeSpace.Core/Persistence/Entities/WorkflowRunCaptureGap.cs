@@ -33,14 +33,15 @@ namespace CodeSpace.Core.Persistence.Entities;
 /// answer this table must never give.</para>
 ///
 /// <para><b>Who records and reads one.</b> The native-record capture plane (<c>NativeRecordPlane</c>) records a
-/// <see cref="CaptureGapReason.WriteRefused"/> span when either a captured frame batch or the process-attempt row it
-/// owes is refused durable storage. It is recorded through <c>IRunDataCompletenessWriter</c> on a commit of its OWN,
-/// never together with a claim about the record: the bad news has to survive whatever happens to the claim it
-/// contradicts, and a shared transaction would let a refused statement take the gap down with it. The other three
-/// reasons are representable and unproduced — no plane yet notices its own bound, its own torn re-attach or its own
-/// unreadable frame. The Agent Run operator summary is the first production reader, and only for gaps carrying the
-/// exact attempt attribution this row can prove; it is bounded, team-scoped and observation-only. No completion,
-/// terminal decision, planner, oracle or router reads or folds one.</para>
+/// <see cref="CaptureGapReason.WriteRefused"/> span when a batch of captured frames, a process-attempt identity, or a
+/// harness-execution identity is refused durable storage while the worker still owns it. It is recorded through
+/// <c>IRunDataCompletenessWriter</c> on a commit of its OWN, never together with a claim about the record: the bad news
+/// has to survive whatever happens to the claim it contradicts,
+/// and a shared transaction would let a refused statement take the gap down with it. The other three reasons are
+/// representable and unproduced — no plane yet notices its own bound, its own torn re-attach or its own unreadable
+/// frame. The Agent Run operator summary is the first production reader, and only for gaps carrying the exact attempt
+/// attribution this row can prove; it is bounded, team-scoped and observation-only. No completion, terminal decision,
+/// planner, oracle or router reads or folds one.</para>
 /// </summary>
 public sealed class WorkflowRunCaptureGap : IEntity<Guid>
 {

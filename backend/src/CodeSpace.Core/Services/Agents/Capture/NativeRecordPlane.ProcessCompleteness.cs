@@ -125,8 +125,12 @@ public sealed partial class NativeRecordPlane
     /// the refusal had not happened in yet.
     /// </summary>
     private static async Task<bool> StillOursAsync(CodeSpaceDbContext db, RefusedAttempt refused, CancellationToken cancellationToken) =>
+        await StillOursAsync(db, refused.TeamId, refused.AgentRunId, refused.WorkerFenceEpoch, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>The tenant-bound Agent Run still carries the exact launch fence this writer acted under.</summary>
+    private static async Task<bool> StillOursAsync(CodeSpaceDbContext db, Guid teamId, Guid agentRunId, long workerFenceEpoch, CancellationToken cancellationToken) =>
         await db.AgentRun.AsNoTracking()
-            .AnyAsync(run => run.TeamId == refused.TeamId && run.Id == refused.AgentRunId && run.FenceEpoch == refused.WorkerFenceEpoch, cancellationToken)
+            .AnyAsync(run => run.TeamId == teamId && run.Id == agentRunId && run.FenceEpoch == workerFenceEpoch, cancellationToken)
             .ConfigureAwait(false);
 
     /// <summary>
