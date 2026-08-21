@@ -96,6 +96,29 @@ public class WorkflowRunsController : ControllerBase
         return result == null ? NotFound() : Ok(result);
     }
 
+    /// <summary>
+    /// One bounded CreatedAt+id keyset page of metadata-only tool-call observations. Today this plane contains only
+    /// terminal governed side-effecting ledger calls; it is not an all-tools feed, and native CLI activity remains in
+    /// Agent Run events. CallOrdinal is per Agent Run and is never used as this Workflow Run page's cursor.
+    /// </summary>
+    [HttpGet("{runId:guid}/tool-calls")]
+    public async Task<IActionResult> ListToolCalls([FromRoute] Guid runId, [FromQuery] string? cursor, [FromQuery] int limit = ListWorkflowRunToolCallsQuery.DefaultPageSize, CancellationToken cancellationToken = default)
+    {
+        var result = await _mediator.Send(new ListWorkflowRunToolCallsQuery { RunId = runId, Cursor = cursor, Limit = limit }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
+    /// <summary>
+    /// Metadata-only detail for one stable tool-call id plus a hard-bounded attempt list. It never exposes arguments,
+    /// results, error bodies, transport endpoints, invocation ids, approval or idempotency authority.
+    /// </summary>
+    [HttpGet("{runId:guid}/tool-calls/{toolCallId:guid}")]
+    public async Task<IActionResult> GetToolCall([FromRoute] Guid runId, [FromRoute] Guid toolCallId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetWorkflowRunToolCallQuery { RunId = runId, ToolCallId = toolCallId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
     /// <summary>Metadata-only view of one model call owned by this Workflow Run. Prompt/output bytes are fetched through the bounded part route below.</summary>
     [HttpGet("{runId:guid}/model-calls/{sequence:long}")]
     public async Task<IActionResult> GetModelCall([FromRoute] Guid runId, [FromRoute] long sequence, CancellationToken cancellationToken)
