@@ -11,6 +11,7 @@ using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Queries.Workflows;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Npgsql;
@@ -182,6 +183,179 @@ public class WorkflowRunCellFieldReaderFlowTests
         fieldPlan.ShouldNotContain("Sort Method: external", Case.Sensitive);
     }
 
+    [Fact]
+    public async Task One_inline_field_crosses_the_range_seam_without_its_sixteen_megabyte_sibling()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId, null, null, DateTimeOffset.UtcNow);
+        var records = await SeedCellAsync(runId, new Dictionary<string, object?>(), new Dictionary<string, object?>
+        {
+            ["oneByte"] = 1,
+            ["zzBomb"] = Bomb + new string('b', 16 * 1024 * 1024),
+        }, null);
+
+        var commands = new ReadCommandRecorder();
+        using var scope = ReadScope(commands);
+        var page = await scope.Resolve<IWorkflowRunCellFieldRangeReader>().ReadAsync(
+            RangeRequest(teamId, runId, records, "oneByte"), CancellationToken.None);
+
+        page.ShouldNotBeNull();
+        page!.Availability.ShouldBe(WorkflowRunCellFieldRangeAvailability.Available);
+        page.Source.ShouldBe(WorkflowRunCellFieldRangeSource.Inline);
+        page.Text.ShouldBe("1");
+        page.ReturnedBytes.ShouldBe(1);
+        page.TotalBytes.ShouldBe(1);
+        page.NextCursor.ShouldBeNull();
+        page.IntegrityVerified.ShouldBeTrue();
+        page.CompleteJsonValue.ShouldBeTrue();
+        JsonSerializer.Serialize(page).ShouldNotContain(Bomb, Case.Sensitive);
+        commands.Commands.ShouldNotContain(value => value.Contains("SELECT state.payload_json", StringComparison.OrdinalIgnoreCase));
+        var plan = await ExplainRangeAsync(scope.Resolve<CodeSpaceDbContext>(), runId, records, "oneByte");
+        plan.ShouldNotContain("Seq Scan on workflow_run_record", Case.Sensitive);
+        plan.ShouldContain("Index Scan", Case.Sensitive);
+        plan.ShouldNotContain("Sort Method: external", Case.Sensitive);
+    }
+
+    [Fact]
+    public async Task Inline_pages_end_at_rune_boundaries_and_reject_mid_rune_long_and_stale_offsets()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId, null, null, DateTimeOffset.UtcNow);
+        var records = await SeedCellAsync(runId, new Dictionary<string, object?>(),
+            new Dictionary<string, object?> { ["unicode"] = "A💾B" }, null);
+        using var scope = _fixture.BeginScope();
+        var reader = scope.Resolve<IWorkflowRunCellFieldRangeReader>();
+        var request = RangeRequest(teamId, runId, records, "unicode") with { LimitBytes = 5 };
+        var pages = new List<WorkflowRunCellFieldRangePage>();
+        string? cursor = null;
+
+        do
+        {
+            var page = await reader.ReadAsync(request with { Cursor = cursor }, CancellationToken.None);
+            page.ShouldNotBeNull();
+            page!.Availability.ShouldBe(WorkflowRunCellFieldRangeAvailability.Available);
+            Encoding.UTF8.GetByteCount(page.Text!).ShouldBe(page.ReturnedBytes);
+            pages.Add(page);
+            cursor = page.NextCursor;
+        } while (cursor is not null);
+
+        string.Concat(pages.Select(value => value.Text)).ShouldBe("\"A💾B\"");
+        pages.Take(pages.Count - 1).ShouldAllBe(value => !value.CompleteJsonValue);
+        pages[^1].CompleteJsonValue.ShouldBeFalse("only the single 0..EOF response is independently parseable JSON");
+
+        var identity = RangeIdentity(request);
+        var midRune = new WorkflowRunCellFieldRangeCursor(identity, 3).Encode();
+        var invalid = await reader.ReadAsync(request with { Cursor = midRune }, CancellationToken.None);
+        invalid!.Availability.ShouldBe(WorkflowRunCellFieldRangeAvailability.InvalidRange);
+        var overflow = await reader.ReadAsync(request with
+        {
+            Cursor = new WorkflowRunCellFieldRangeCursor(identity, long.MaxValue).Encode(),
+        }, CancellationToken.None);
+        overflow!.Availability.ShouldBe(WorkflowRunCellFieldRangeAvailability.InvalidRange);
+
+        await AppendFailedStateAsync(runId);
+        var stale = await reader.ReadAsync(request with { Cursor = pages[0].NextCursor }, CancellationToken.None);
+        stale!.Availability.ShouldBe(WorkflowRunCellFieldRangeAvailability.StaleIdentity);
+    }
+
+    [Fact]
+    public async Task Output_artifact_reads_only_the_selected_reference_and_maps_storage_failures_without_leaking_identity()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId, null, null, DateTimeOffset.UtcNow);
+        var selectedId = Guid.NewGuid();
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(new { ok = true });
+        var outputs = Enumerable.Range(0, 24).ToDictionary(index => $"artifact{index:00}",
+            index => (object?)Ref(index == 7 ? selectedId : Guid.NewGuid(), bytes.LongLength), StringComparer.Ordinal);
+        var records = await SeedCellAsync(runId, new Dictionary<string, object?>(), outputs, null);
+        var artifacts = new RecordingArtifactRangeReader((_, artifactId, offset, length, _) =>
+            Task.FromResult(ArtifactRangeReadResult.Available(bytes.Skip((int)offset).Take(length).ToArray(),
+                bytes.LongLength, "sha256:test", "application/json", integrityVerified: true)));
+        using var scope = _fixture.BeginScope(builder => builder.RegisterInstance(artifacts).As<IArtifactRangeReader>());
+
+        var page = await scope.Resolve<IWorkflowRunCellFieldRangeReader>().ReadAsync(
+            RangeRequest(teamId, runId, records, "artifact07"), CancellationToken.None);
+
+        page.ShouldNotBeNull();
+        page!.Availability.ShouldBe(WorkflowRunCellFieldRangeAvailability.Available);
+        page.Source.ShouldBe(WorkflowRunCellFieldRangeSource.Artifact);
+        page.Text.ShouldBe(Encoding.UTF8.GetString(bytes));
+        artifacts.Reads.ShouldHaveSingleItem().ArtifactId.ShouldBe(selectedId);
+        artifacts.Reads[0].TeamId.ShouldBe(teamId);
+        var wire = JsonSerializer.Serialize(page);
+        wire.ShouldNotContain(selectedId.ToString(), Case.Insensitive);
+        page.NextCursor?.ShouldNotContain(selectedId.ToString(), Case.Insensitive);
+
+        var invalidUtf8 = new RecordingArtifactRangeReader((_, _, _, _, _) => Task.FromResult(
+            ArtifactRangeReadResult.Available([0xff], 1, "sha256:test", "application/json", integrityVerified: true)));
+        var invalidRunId = await SeedRunAsync(teamId, null, null, DateTimeOffset.UtcNow);
+        var oneByteRecords = await SeedTerminalOnlyCellAsync(invalidRunId,
+            new Dictionary<string, object?> { ["badUtf8"] = Ref(Guid.NewGuid(), 1) });
+        using var invalidScope = _fixture.BeginScope(builder => builder.RegisterInstance(invalidUtf8).As<IArtifactRangeReader>());
+        var invalid = await invalidScope.Resolve<IWorkflowRunCellFieldRangeReader>().ReadAsync(
+            RangeRequest(teamId, invalidRunId, oneByteRecords, "badUtf8"), CancellationToken.None);
+        invalid!.Availability.ShouldBe(WorkflowRunCellFieldRangeAvailability.IntegrityFailure);
+        invalid.Retryable.ShouldBeFalse();
+
+        var invalidJsonBytes = "not-json"u8.ToArray();
+        var invalidJsonReader = new RecordingArtifactRangeReader((_, _, _, _, _) => Task.FromResult(
+            ArtifactRangeReadResult.Available(invalidJsonBytes, invalidJsonBytes.LongLength, "sha256:test", "application/json",
+                integrityVerified: true)));
+        var invalidJsonRunId = await SeedRunAsync(teamId, null, null, DateTimeOffset.UtcNow);
+        var invalidJsonRecords = await SeedTerminalOnlyCellAsync(invalidJsonRunId,
+            new Dictionary<string, object?> { ["badJson"] = Ref(Guid.NewGuid(), invalidJsonBytes.LongLength) });
+        using var invalidJsonScope = _fixture.BeginScope(builder => builder.RegisterInstance(invalidJsonReader).As<IArtifactRangeReader>());
+        var invalidJson = await invalidJsonScope.Resolve<IWorkflowRunCellFieldRangeReader>().ReadAsync(
+            RangeRequest(teamId, invalidJsonRunId, invalidJsonRecords, "badJson"), CancellationToken.None);
+        invalidJson!.Availability.ShouldBe(WorkflowRunCellFieldRangeAvailability.IntegrityFailure);
+        invalidJson.CompleteJsonValue.ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task Field_range_conflates_foreign_coordinates_and_only_backend_unavailability_is_retryable()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId, null, null, DateTimeOffset.UtcNow);
+        var records = await SeedCellAsync(runId, new Dictionary<string, object?>(),
+            new Dictionary<string, object?>
+            {
+                ["stored"] = Ref(Guid.NewGuid(), 10),
+                ["corrupt"] = new Dictionary<string, object?> { ["$artifact_ref"] = new { id = "not-a-guid" } },
+            }, null);
+        var request = RangeRequest(teamId, runId, records, "stored");
+
+        foreach (var source in new[]
+                 {
+                     (ArtifactRangeReadState.MetadataMissing, WorkflowRunCellFieldRangeAvailability.MetadataMissing),
+                     (ArtifactRangeReadState.PhysicalObjectMissing, WorkflowRunCellFieldRangeAvailability.PhysicalObjectMissing),
+                     (ArtifactRangeReadState.IntegrityFailure, WorkflowRunCellFieldRangeAvailability.IntegrityFailure),
+                     (ArtifactRangeReadState.BackendUnavailable, WorkflowRunCellFieldRangeAvailability.BackendUnavailable),
+                     (ArtifactRangeReadState.AccessDenied, WorkflowRunCellFieldRangeAvailability.AccessDenied),
+                     (ArtifactRangeReadState.InvalidOffset, WorkflowRunCellFieldRangeAvailability.InvalidRange),
+                     ((ArtifactRangeReadState)int.MaxValue, WorkflowRunCellFieldRangeAvailability.IntegrityFailure),
+                 })
+        {
+            var fake = new RecordingArtifactRangeReader((_, _, _, _, _) => Task.FromResult(ArtifactRangeReadResult.Failed(source.Item1)));
+            using var scope = _fixture.BeginScope(builder => builder.RegisterInstance(fake).As<IArtifactRangeReader>());
+            var page = await scope.Resolve<IWorkflowRunCellFieldRangeReader>().ReadAsync(request, CancellationToken.None);
+            page!.Availability.ShouldBe(source.Item2);
+            page.Retryable.ShouldBe(source.Item1 == ArtifactRangeReadState.BackendUnavailable);
+        }
+
+        using var normalScope = _fixture.BeginScope();
+        var reader = normalScope.Resolve<IWorkflowRunCellFieldRangeReader>();
+        var corrupt = await reader.ReadAsync(request with { Name = "corrupt" }, CancellationToken.None);
+        corrupt!.Availability.ShouldBe(WorkflowRunCellFieldRangeAvailability.CorruptReference);
+        (await reader.ReadAsync(request with { TeamId = Guid.NewGuid() }, CancellationToken.None)).ShouldBeNull();
+        (await reader.ReadAsync(request with { SourceRunId = Guid.NewGuid() }, CancellationToken.None)).ShouldBeNull();
+
+        var aborting = new RecordingArtifactRangeReader((_, _, _, _, cancellationToken) =>
+            throw new OperationCanceledException(cancellationToken));
+        using var abortScope = _fixture.BeginScope(builder => builder.RegisterInstance(aborting).As<IArtifactRangeReader>());
+        await Should.ThrowAsync<OperationCanceledException>(() => abortScope.Resolve<IWorkflowRunCellFieldRangeReader>()
+            .ReadAsync(request, CancellationToken.None));
+    }
+
     private ILifetimeScope ReadScope(DbCommandInterceptor interceptor) => _fixture.BeginScope(builder =>
     {
         var options = new DbContextOptionsBuilder<CodeSpaceDbContext>().UseNpgsql(_fixture.ConnectionString)
@@ -193,6 +367,23 @@ public class WorkflowRunCellFieldReaderFlowTests
     {
         TeamId = teamId, RequestedRunId = requestedRunId, Scope = WorkflowRunViewScope.LineageMerged,
         SourceRunId = sourceRunId, NodeId = "work", IterationKey = string.Empty, Cursor = cursor, Limit = limit,
+    };
+
+    private static WorkflowRunCellFieldRangeReadRequest RangeRequest(Guid teamId, Guid runId, RecordFact records, string name) => new()
+    {
+        TeamId = teamId, RequestedRunId = runId, Scope = WorkflowRunViewScope.LineageMerged, SourceRunId = runId,
+        NodeId = "work", IterationKey = string.Empty,
+        Records = new WorkflowRunCellRecordIdentity(records.StateId, records.StateSequence,
+            records.StartedId == Guid.Empty ? null : records.StartedId, records.StartedSequence == 0 ? null : records.StartedSequence),
+        Section = WorkflowRunCellFieldSection.Output, Name = name,
+        LimitBytes = ReadWorkflowRunCellFieldRangeQuery.DefaultPageBytes,
+    };
+
+    private static WorkflowRunCellFieldRangeIdentity RangeIdentity(WorkflowRunCellFieldRangeReadRequest request) => new()
+    {
+        RequestedRunId = request.RequestedRunId, Scope = request.Scope, SourceRunId = request.SourceRunId,
+        NodeId = request.NodeId, IterationKey = request.IterationKey, Records = request.Records,
+        Section = request.Section, Name = request.Name,
     };
 
     private async Task<ArtifactFact> PutArtifactAsync(Guid teamId, byte[] bytes, string contentType = "application/json")
@@ -361,6 +552,32 @@ public class WorkflowRunCellFieldReaderFlowTests
         finally { await connection.CloseAsync(); }
     }
 
+    private static async Task<string> ExplainRangeAsync(CodeSpaceDbContext db, Guid runId, RecordFact records, string name)
+    {
+        var connection = (NpgsqlConnection)db.Database.GetDbConnection();
+        await connection.OpenAsync();
+        try
+        {
+            await using var command = new NpgsqlCommand("EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) " + WorkflowRunCellFieldRangeReader.InlineFieldSql, connection);
+            command.Parameters.AddWithValue("source_run_id", runId);
+            command.Parameters.AddWithValue("node_id", "work");
+            command.Parameters.AddWithValue("iteration_key", string.Empty);
+            command.Parameters.AddWithValue("state_record_id", records.StateId);
+            command.Parameters.AddWithValue("state_record_sequence", records.StateSequence);
+            command.Parameters.AddWithValue("first_record_id", records.StartedId);
+            command.Parameters.AddWithValue("first_record_sequence", records.StartedSequence);
+            command.Parameters.AddWithValue("section", (int)WorkflowRunCellFieldSection.Output);
+            command.Parameters.AddWithValue("field_name", name);
+            command.Parameters.AddWithValue("max_ref_id_chars", WorkflowRunCellFieldReader.MaximumArtifactIdCharacters);
+            command.Parameters.AddWithValue("max_declared_size_chars", WorkflowRunCellFieldReader.MaximumDeclaredSizeCharacters);
+            command.Parameters.AddWithValue("max_content_type_chars", WorkflowRunCellFieldReader.MaximumContentTypeCharacters);
+            command.Parameters.AddWithValue("offset", 0L);
+            command.Parameters.AddWithValue("take", ReadWorkflowRunCellFieldRangeQuery.MaximumPageBytes + WorkflowRunCellFieldRangeReader.Utf8LookaheadBytes);
+            return await ReadPlanAsync(command);
+        }
+        finally { await connection.CloseAsync(); }
+    }
+
     private static async Task<string> ReadPlanAsync(NpgsqlCommand command)
     {
         var lines = new List<string>();
@@ -381,5 +598,21 @@ public class WorkflowRunCellFieldReaderFlowTests
             Commands.Add(command.CommandText);
             return ValueTask.FromResult(result);
         }
+    }
+
+    private sealed class RecordingArtifactRangeReader(
+        Func<Guid, Guid, long, int, CancellationToken, Task<ArtifactRangeReadResult>> read) : IArtifactRangeReader
+    {
+        public List<(Guid TeamId, Guid ArtifactId, long Offset, int Length)> Reads { get; } = [];
+
+        public async Task<ArtifactRangeReadResult> ReadRangeAsync(Guid teamId, Guid artifactId, long offset, int length,
+            CancellationToken cancellationToken)
+        {
+            Reads.Add((teamId, artifactId, offset, length));
+            return await read(teamId, artifactId, offset, length, cancellationToken);
+        }
+
+        public Task<IReadOnlyDictionary<Guid, ArtifactRangeReadResult>> ReadRangesAsync(ArtifactRangesReadRequest request,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
     }
 }

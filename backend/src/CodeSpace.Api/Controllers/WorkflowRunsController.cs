@@ -121,6 +121,18 @@ public class WorkflowRunsController : ControllerBase
         return result == null ? NotFound() : Ok(result);
     }
 
+    /// <summary>
+    /// One UTF-8-safe byte window of one exact field descriptor. The cursor is bound to the selected cell and field;
+    /// artifact ids and storage locations never cross this route.
+    /// </summary>
+    [HttpGet("{runId:guid}/cells/fields/range")]
+    public async Task<IActionResult> ReadCellFieldRange([FromRoute] Guid runId, [FromQuery] ReadWorkflowRunCellFieldRangeQuery query,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await _mediator.Send(query with { RunId = runId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
     /// <summary>Bounded metadata-only view of producer-recorded data completeness; it never synthesizes a run-wide verdict.</summary>
     [HttpGet("{runId:guid}/data-completeness")]
     public async Task<IActionResult> GetDataCompleteness([FromRoute] Guid runId, CancellationToken cancellationToken)
