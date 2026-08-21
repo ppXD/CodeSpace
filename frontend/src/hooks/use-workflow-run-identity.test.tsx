@@ -9,7 +9,7 @@ vi.mock("@/api/workflows", async (importOriginal) => {
   return { ...original, workflowsApi: { ...original.workflowsApi, getRun, getRunIdentity } };
 });
 
-import { WORKFLOW_RUN_IDENTITY_POLL_MS, useWorkflowRunIdentity } from "./use-workflows";
+import { WORKFLOW_RUN_IDENTITY_POLL_MS, useWorkflowRun, useWorkflowRunIdentity } from "./use-workflows";
 
 function wrapper(client: QueryClient) {
   return function QueryWrapper({ children }: { children: ReactNode }) {
@@ -71,5 +71,18 @@ describe("useWorkflowRunIdentity", () => {
 
     unmount();
     expect(second.aborted).toBe(true);
+  });
+});
+
+describe("useWorkflowRun", () => {
+  it("passes an AbortSignal and aborts an in-flight full-detail read when its owning surface unmounts", async () => {
+    getRun.mockImplementation(() => new Promise(() => {}));
+    const { unmount } = renderHook(() => useWorkflowRun("42"), { wrapper: wrapper(new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity } } })) });
+    await settle();
+    expect(getRun).toHaveBeenCalledExactlyOnceWith("42", expect.any(AbortSignal));
+    const signal = getRun.mock.calls[0][1] as AbortSignal;
+
+    unmount();
+    expect(signal.aborted).toBe(true);
   });
 });

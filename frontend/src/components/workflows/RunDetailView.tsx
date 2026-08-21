@@ -2,10 +2,12 @@ import { useMemo, useState, type ReactNode } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { isAgentRunActive, type AgentRunStatus } from "@/api/agents";
-import type { WorkflowRunNodeSummary, WorkflowRunWaitInfo } from "@/api/workflows";
+import { adaptWorkflowRunViewToCanvas, type WorkflowRunViewAvailability, type WorkflowRunViewMetadata } from "@/api/workflowRunViewMetadataApi";
+import type { NodeManifestDto, WorkflowRunIdentity, WorkflowRunNodeSummary, WorkflowRunWaitInfo } from "@/api/workflows";
 import { ApiError } from "@/api/request";
 import { useAgentRun } from "@/hooks/use-agents";
-import { isRunActive, useNodeManifests, useResumeRun, useRunPhases, useWorkflowRun } from "@/hooks/use-workflows";
+import { useWorkflowRunViewMetadata } from "@/hooks/use-workflow-run-view-metadata";
+import { isRunActive, useNodeManifests, useResumeRun, useRunPhases, useWorkflowRun, useWorkflowRunIdentity } from "@/hooks/use-workflows";
 
 import { AgentRunTimeline } from "./AgentRunTimeline";
 import { AgentToolCalls } from "./AgentToolCalls";
@@ -30,9 +32,9 @@ export { RunStatusBadge };
 const MAX_EMBED_DEPTH = 3;
 
 /**
- * Shared run-detail view: status summary + normalized payload + declared outputs + the
- * per-node execution trace for one workflow run. Fetches by id and auto-polls while the run
- * is non-terminal (via useWorkflowRun).
+ * Shared run-detail shell. Activity and nested editor/child surfaces retain the authoritative legacy detail needed
+ * for run payloads and pending actions. Standalone Canvas, Trace, Changes and Governed tools mount only their bounded
+ * metadata readers, and changing surface unmounts the prior owner so its in-flight request is cancelled.
  *
  * Rendered both on the standalone run-detail route AND inside the editor's in-page run dialog,
  * so the two never drift. It deliberately uses the `.acs-root`-scoped `.wf-*` styles, so any
@@ -42,12 +44,6 @@ const MAX_EMBED_DEPTH = 3;
 export type RunView = "activity" | "canvas" | "changes" | "governed-tools" | "trace";
 
 export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, defaultView = "activity", view: controlledView, onViewChange, selectedPhaseId, selectedAgentRunId, onSelectAgent }: { runId: string; nested?: boolean; depth?: number; onOpenRun?: (runId: string) => void; defaultView?: RunView; view?: RunView; onViewChange?: (v: RunView) => void; selectedPhaseId?: string | null; selectedAgentRunId?: string | null; onSelectAgent?: (agentRunId: string | null) => void }) {
-  const run = useWorkflowRun(runId);
-  // The canvas renders the run's OWN version-pinned definition snapshot (run.definition) — never the
-  // workflow's current graph — so it stays faithful to how the run actually ran. Manifests drive the
-  // node icons/kinds for definitionToRfNodes.
-  const manifests = useNodeManifests();
-  const manifestByType = useMemo(() => new Map((manifests.data ?? []).map((m) => [m.typeKey, m])), [manifests.data]);
   // The view tab is controlled when a host lifts it via onViewChange (the run-detail route deep-links it as
   // ?view=); otherwise own it locally (a nested embed, the workflow editor). Presence of the setter marks control.
   const [localView, setLocalView] = useState<RunView>(defaultView);
@@ -59,11 +55,32 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
   const [pickedAgent, setPickedAgent] = useState<string | null>(null);
   const selAgent = onSelectAgent ? (selectedAgentRunId ?? null) : pickedAgent;
   const selectAgent = onSelectAgent ?? setPickedAgent;
+
+  if (nested || view === "activity") {
+    return <LegacyRunDetailView runId={runId} nested={nested} depth={depth} onOpenRun={onOpenRun} view={view} setView={setView}
+      selectedPhaseId={selectedPhaseId} selectedAgentRunId={selAgent} onSelectAgent={selectAgent} />;
+  }
+  if (view === "canvas") return <CanvasRunDetailView runId={runId} setView={setView} onOpenRun={onOpenRun} />;
+  return <IdentityRunDetailView runId={runId} view={view} setView={setView} />;
+}
+
+function LegacyRunDetailView({ runId, nested, depth, onOpenRun, view, setView, selectedPhaseId, selectedAgentRunId, onSelectAgent }: {
+  runId: string;
+  nested: boolean;
+  depth: number;
+  onOpenRun?: (runId: string) => void;
+  view: RunView;
+  setView: (view: RunView) => void;
+  selectedPhaseId?: string | null;
+  selectedAgentRunId: string | null;
+  onSelectAgent: (agentRunId: string | null) => void;
+}) {
+  const run = useWorkflowRun(runId);
   // The Live-work center is driven by the phase projection (shared ['run-phases', id] cache). Only the framed
   // route needs it — the embedded (nested) dialog keeps the plain node narrative, so it skips the fetch.
   const phases = useRunPhases(nested ? null : runId);
-  // Stable context value for the canvas fan-out rerun + the open terminal (non-nested only — the nested dialog never
-  // provides it) — without the memo a fresh object every 2s run poll re-renders every consumer (each open AgentTerminal)
+  // Stable context value for Activity's open terminal (non-nested only — the nested dialog never provides it) —
+  // without the memo a fresh object every 2s run poll re-renders every consumer (each open AgentTerminal)
   // for no change. Keyed on status, not run.data: run.data identity churns every poll, which would defeat the memo.
   // eslint-disable-next-line react-hooks/exhaustive-deps -- status is the only field read; run.data churns each poll
   const runActions = useMemo(() => (!nested && run.data ? { runId, isTerminal: !isRunActive(run.data.status) } : null), [nested, runId, run.data?.status]);
@@ -166,25 +183,7 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
             </>
           )}
         </div>
-      ) : (
-        <div className="wf-run-views wf-run-views-inline" role="tablist" aria-label="Run view">
-          <button type="button" role="tab" aria-selected={view === "activity"} data-active={view === "activity"} onClick={() => setView("activity")}>
-            <Ic.Clock size={13} /> Activity
-          </button>
-          <button type="button" role="tab" aria-selected={view === "canvas"} data-active={view === "canvas"} onClick={() => setView("canvas")}>
-            <Ic.Workflow size={13} /> Canvas
-          </button>
-          <button type="button" role="tab" aria-selected={view === "changes"} data-active={view === "changes"} onClick={() => setView("changes")}>
-            <Ic.Branch size={13} /> Changes
-          </button>
-          <button type="button" role="tab" aria-selected={view === "governed-tools"} data-active={view === "governed-tools"} onClick={() => setView("governed-tools")}>
-            <Ic.Wrench size={13} /> Governed tools
-          </button>
-          <button type="button" role="tab" aria-selected={view === "trace"} data-active={view === "trace"} onClick={() => setView("trace")}>
-            <Ic.Code size={13} /> Trace
-          </button>
-        </div>
-      )}
+      ) : <RunViewTabs view={view} setView={setView} />}
 
       {r.error && (
         <div className="cn-banner cn-banner-err" style={{ margin: 0 }}>
@@ -197,45 +196,132 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
         <SuspendedPanel runId={runId} wait={r.pendingWait} depth={depth} onOpenRun={onOpenRun} />
       )}
 
-      {!nested && view === "canvas" ? (
-        r.definition
-          ? <RunCanvas definition={r.definition} runNodes={r.nodes} runStatus={r.status} manifestByType={manifestByType} runId={runId} onOpenRun={onOpenRun} />
-          : <div className="wf-run-canvas wf-run-canvas-loading">This run's graph snapshot isn't available.</div>
-      ) : !nested && view === "changes" ? (
-        <RunTabComingSoon title="Changes"
-          note="The files this run created or modified — per-repo change sets, diffs, and the pull requests it opened." />
-      ) : !nested && view === "governed-tools" ? (
-        <GovernedToolsPanel runId={runId} active={isRunActive(r.status)} />
-      ) : !nested && view === "trace" ? (
-        <RunTrace runId={runId} active={isRunActive(r.status)} />
-      ) : (
-        <>
-          {/* Activity — the run's execution story as one chronological timeline: milestone events, each phase's agents
-              as an inline terminal / tile wave, decisions at their point. The outline scrolls it; Trace has the raw audit. */}
-          {!nested && (
-            <RunActionsContext.Provider value={runActions}>
-              <RunOpenContext.Provider value={onOpenRun ?? null}>
-                <RunActivityTimeline runId={runId} selectedPhaseId={selectedPhaseId} selectedAgentRunId={selAgent} onSelectAgent={selectAgent} rerunnableNodeIds={rerunnableNodeIds} />
-              </RunOpenContext.Provider>
-            </RunActionsContext.Provider>
-          )}
+      {/* Activity — the run's execution story as one chronological timeline: milestone events, each phase's agents
+          as an inline terminal / tile wave, decisions at their point. The outline scrolls it; Trace has the raw audit. */}
+      {!nested && (
+        <RunActionsContext.Provider value={runActions}>
+          <RunOpenContext.Provider value={onOpenRun ?? null}>
+            <RunActivityTimeline runId={runId} selectedPhaseId={selectedPhaseId} selectedAgentRunId={selectedAgentRunId} onSelectAgent={onSelectAgent} rerunnableNodeIds={rerunnableNodeIds} />
+          </RunOpenContext.Provider>
+        </RunActionsContext.Provider>
+      )}
 
-          {nested || (!phasesLoading && agents.length === 0) ? (
-            // The editor dialog, or a structural workflow with no agents: the node trace IS the content.
-            <>
-              {payloadBlock}
-              {nodeBlock}
-            </>
-          ) : (
-            // An agent / supervisor run: the Activity timeline above is the heart, so the raw input/output + node
-            // trace fold away (the full raw stream lives in the Trace tab).
-            <>
-              <Fold title="Run input & output">{payloadBlock}</Fold>
-              <Fold title="Workflow nodes">{nodeBlock}</Fold>
-            </>
-          )}
+      {nested || (!phasesLoading && agents.length === 0) ? (
+        // The editor dialog, or a structural workflow with no agents: the node trace IS the content.
+        <>
+          {payloadBlock}
+          {nodeBlock}
+        </>
+      ) : (
+        // An agent / supervisor run: the Activity timeline above is the heart, so the raw input/output + node
+        // trace fold away (the full raw stream lives in the Trace tab).
+        <>
+          <Fold title="Run input & output">{payloadBlock}</Fold>
+          <Fold title="Workflow nodes">{nodeBlock}</Fold>
         </>
       )}
+    </div>
+  );
+}
+
+function CanvasRunDetailView({ runId, setView, onOpenRun }: { runId: string; setView: (view: RunView) => void; onOpenRun?: (runId: string) => void }) {
+  const metadata = useWorkflowRunViewMetadata(runId, true);
+  const manifests = useNodeManifests();
+  const manifestByType = useMemo(() => new Map((manifests.data ?? []).map((manifest) => [manifest.typeKey, manifest])), [manifests.data]);
+  return (
+    <div className="wf-detail-body">
+      <RunViewTabs view="canvas" setView={setView} />
+      {metadata.isLoading ? <RunReadLoading /> : metadata.error || !metadata.data ? <BoundedRunReadFailure error={metadata.error} /> : (
+        <>
+          <BoundedRunStatusNotice status={metadata.data.status} failed={metadata.data.hasError} />
+          <BoundedRunCanvas runId={runId} metadata={metadata.data} manifestByType={manifestByType} onOpenRun={onOpenRun} />
+        </>
+      )}
+    </div>
+  );
+}
+
+/** Changes/Trace/Governed tools need only O(1) run identity; each selected tab owns its independent bounded body reader. */
+function IdentityRunDetailView({ runId, view, setView }: { runId: string; view: Exclude<RunView, "activity" | "canvas">; setView: (view: RunView) => void }) {
+  const identity = useWorkflowRunIdentity(runId, true);
+  return (
+    <div className="wf-detail-body">
+      <RunViewTabs view={view} setView={setView} />
+      {identity.isLoading ? <RunReadLoading /> : identity.error || !identity.data ? <BoundedRunReadFailure error={identity.error} /> : (
+        <>
+          <BoundedRunStatusNotice status={identity.data.status} />
+          {view === "changes" ? <RunTabComingSoon title="Changes" note="The files this run created or modified — per-repo change sets, diffs, and the pull requests it opened." />
+            : view === "governed-tools" ? <GovernedToolsPanel runId={runId} active={isRunActive(identity.data.status)} />
+              : <RunTrace runId={runId} active={isRunActive(identity.data.status)} />}
+        </>
+      )}
+    </div>
+  );
+}
+
+function RunReadLoading() {
+  return <div className="ct-empty"><div className="ct-empty-h">Loading run…</div></div>;
+}
+
+function BoundedRunReadFailure({ error }: { error: Error | null }) {
+  const inaccessible = error === null || error instanceof ApiError && (error.status === 403 || error.status === 404);
+  return (
+    <div className="cn-banner cn-banner-err" style={{ margin: 0 }}>
+      <div className="cn-banner-h">{inaccessible ? "Run not found" : "Couldn’t load bounded run metadata"}</div>
+      <div className="cn-banner-p">{inaccessible ? "It may have been removed or you may not have access." : "The prior full-detail response was not used as a fallback."}</div>
+    </div>
+  );
+}
+
+function BoundedRunStatusNotice({ status, failed = status === "Failure" }: { status: WorkflowRunIdentity["status"]; failed?: boolean }) {
+  return (
+    <>
+      {failed && (
+        <div className="cn-banner cn-banner-err" style={{ margin: 0 }}>
+          <div className="cn-banner-h">Run failed</div>
+          <div className="cn-banner-p">Open Activity to read the recorded run-level error.</div>
+        </div>
+      )}
+      {status === "Suspended" && (
+        <div className="cn-banner" style={{ margin: 0 }}>
+          <div className="cn-banner-h">Run suspended</div>
+          <div className="cn-banner-p">Open Activity to inspect the authoritative suspension state and any pending action.</div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function BoundedRunCanvas({ runId, metadata, manifestByType, onOpenRun }: { runId: string; metadata: WorkflowRunViewMetadata; manifestByType: Map<string, NodeManifestDto>; onOpenRun?: (runId: string) => void }) {
+  const canvas = adaptWorkflowRunViewToCanvas(metadata);
+  if (canvas === null) return <RunViewAvailabilityNotice label="Execution graph" availability={metadata.topologyAvailability} always />;
+  return (
+    <>
+      <RunViewAvailabilityNotice label="Cell status" availability={metadata.cellsAvailability} />
+      <RunViewAvailabilityNotice label="Agent/sub-workflow links" availability={metadata.linksAvailability} />
+      <RunCanvas definition={canvas.definition} runNodes={canvas.rows} runStatus={metadata.status} manifestByType={manifestByType} runId={runId} onOpenRun={onOpenRun} />
+    </>
+  );
+}
+
+function RunViewAvailabilityNotice({ label, availability, always = false }: { label: string; availability: WorkflowRunViewAvailability; always?: boolean }) {
+  if (!always && availability === "Available") return null;
+  const detail = availability === "Truncated" ? "is a trustworthy bounded prefix; more observations exist"
+    : availability === "TooLarge" ? "exceeds the safe display bound"
+      : availability === "Corrupt" ? "is malformed and was not treated as empty"
+        : availability === "Unavailable" ? "was not recorded"
+          : "is available";
+  return <div className="wf-run-canvas wf-run-canvas-loading" role="status">{label} {detail}.</div>;
+}
+
+function RunViewTabs({ view, setView }: { view: RunView; setView: (view: RunView) => void }) {
+  return (
+    <div className="wf-run-views wf-run-views-inline" role="tablist" aria-label="Run view">
+      <button type="button" role="tab" aria-selected={view === "activity"} data-active={view === "activity"} onClick={() => setView("activity")}><Ic.Clock size={13} /> Activity</button>
+      <button type="button" role="tab" aria-selected={view === "canvas"} data-active={view === "canvas"} onClick={() => setView("canvas")}><Ic.Workflow size={13} /> Canvas</button>
+      <button type="button" role="tab" aria-selected={view === "changes"} data-active={view === "changes"} onClick={() => setView("changes")}><Ic.Branch size={13} /> Changes</button>
+      <button type="button" role="tab" aria-selected={view === "governed-tools"} data-active={view === "governed-tools"} onClick={() => setView("governed-tools")}><Ic.Wrench size={13} /> Governed tools</button>
+      <button type="button" role="tab" aria-selected={view === "trace"} data-active={view === "trace"} onClick={() => setView("trace")}><Ic.Code size={13} /> Trace</button>
     </div>
   );
 }
