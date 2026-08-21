@@ -27,7 +27,10 @@ vi.mock("@/hooks/use-workflows", () => ({
 // hooks so they render without a QueryClient (these child nodes carry no agent run → no-op).
 vi.mock("@/hooks/use-agents", () => ({
   useAgentRun: () => ({ data: undefined }),
+  useAgentRunEventPreview: () => ({ data: [] }),
+  useAgentRunEventWindow: () => ({ data: [], isLoading: false, isLoadingOlder: false, error: null, hasOlder: false, olderEventsOmitted: false, newerEventsOmitted: false, atLatest: true, loadOlder: vi.fn(), returnToLatest: vi.fn() }),
   useAgentRunEvents: () => ({ data: [] }),
+  useToolCalls: () => ({ data: [], isLoading: false }),
 }));
 
 function approvalWait(prompt: string): WorkflowRunWaitInfo {

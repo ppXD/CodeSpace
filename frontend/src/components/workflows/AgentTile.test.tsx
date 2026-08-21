@@ -3,13 +3,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PhaseAgentRef } from "@/api/workflows";
 
-const { useAgentRunMock, useAgentRunEventsMock } = vi.hoisted(() => ({
+const { useAgentRunMock, useAgentRunEventPreviewMock } = vi.hoisted(() => ({
   useAgentRunMock: vi.fn(),
-  useAgentRunEventsMock: vi.fn(),
+  useAgentRunEventPreviewMock: vi.fn(),
 }));
 vi.mock("@/hooks/use-agents", () => ({
   useAgentRun: () => useAgentRunMock(),
-  useAgentRunEvents: (id: string | undefined, active: boolean, intervalMs?: number) => useAgentRunEventsMock(id, active, intervalMs),
+  useAgentRunEventPreview: (id: string | undefined, active: boolean) => useAgentRunEventPreviewMock(id, active),
 }));
 
 import { AgentTile } from "./AgentTile";
@@ -23,15 +23,13 @@ const tile = (c: HTMLElement) => c.querySelector<HTMLElement>(".agent-tile");
 beforeEach(() => {
   Element.prototype.scrollIntoView = vi.fn();   // jsdom doesn't implement it
   useAgentRunMock.mockReturnValue({ data: { status: "Running", harness: "claude-code" } });
-  useAgentRunEventsMock.mockReturnValue({ data: [] });
+  useAgentRunEventPreviewMock.mockReturnValue({ data: [] });
 });
 
 describe("AgentTile", () => {
-  it("streams its preview at the slower 2s cadence (the expanded terminal keeps 1s)", () => {
-    // A wave of many tiles each polling 1s is the steady-state jank; a preview line tolerates 2s. The tiles + the open
-    // terminal share one query per agent, so opening one speeds that agent back to 1s — the tile just asks for less.
+  it("reads the shared bounded event preview while active", () => {
     render(<AgentTile agent={tileAgent({ agentRunId: "a1" })} />);
-    expect(useAgentRunEventsMock).toHaveBeenCalledWith("a1", true, 2000);
+    expect(useAgentRunEventPreviewMock).toHaveBeenCalledWith("a1", true);
   });
 
   it("shows the model's allocation — the agent's role + the subtask it was assigned", () => {
@@ -47,7 +45,7 @@ describe("AgentTile", () => {
   });
 
   it("shows a running tile with its latest line as the live command + a cursor", () => {
-    useAgentRunEventsMock.mockReturnValue({ data: [evt("FileChanged", "editing auth/session.ts")] });
+    useAgentRunEventPreviewMock.mockReturnValue({ data: [evt("FileChanged", "editing auth/session.ts")] });
 
     const { container } = render(<AgentTile agent={tileAgent({ agentRunId: "a1", label: "backend-fix" })} />);
 
@@ -60,13 +58,22 @@ describe("AgentTile", () => {
 
   it("dims a done tile and keeps its output summary (files · tokens)", () => {
     useAgentRunMock.mockReturnValue({ data: { status: "Succeeded", harness: "claude-code" } });
-    useAgentRunEventsMock.mockReturnValue({ data: [evt("FileChanged", "x"), evt("FileChanged", "y")] });
+    useAgentRunEventPreviewMock.mockReturnValue({ data: [evt("AssistantMessage", "done")] });
 
-    const { container } = render(<AgentTile agent={tileAgent({ agentRunId: "a1", label: "frontend-fix", inputTokens: 9000, outputTokens: 2300 })} />);
+    const { container } = render(<AgentTile agent={tileAgent({ agentRunId: "a1", label: "frontend-fix", filesChanged: 2, inputTokens: 9000, outputTokens: 2300 })} />);
 
     expect(tile(container)?.dataset.state).toBe("done");
     expect(screen.getByText("2 files · 11.3k tokens")).toBeInTheDocument();
     expect(container.querySelector(".agent-tile-cursor")).toBeNull();   // no live cursor on a finished tile
+  });
+
+  it("does not present a recent FileChanged tail as the run's complete file count", () => {
+    useAgentRunEventPreviewMock.mockReturnValue({ data: [evt("FileChanged", "x"), evt("FileChanged", "y")] });
+
+    render(<AgentTile agent={tileAgent({ agentRunId: "a1", label: "frontend-fix", inputTokens: 100 })} />);
+
+    expect(screen.getByText("100 tokens")).toBeInTheDocument();
+    expect(screen.queryByText(/files?/)).not.toBeInTheDocument();
   });
 
   it("renders a queued agent as amber 'waiting', not failure", () => {
@@ -96,7 +103,7 @@ describe("AgentTile", () => {
 
   it("shows the run's failure reason on a failed tile that emitted no event (instead of bare 'stopped')", () => {
     useAgentRunMock.mockReturnValue({ data: { status: "Failed", error: "no drivable credential for codex-cli" } });
-    useAgentRunEventsMock.mockReturnValue({ data: [] });
+    useAgentRunEventPreviewMock.mockReturnValue({ data: [] });
 
     const { container } = render(<AgentTile agent={tileAgent({ agentRunId: "a1", label: "x" })} />);
 
@@ -106,7 +113,7 @@ describe("AgentTile", () => {
   });
 
   it("falls back to 'stopped' on a failed tile with neither a latest event nor a (non-empty) error", () => {
-    useAgentRunEventsMock.mockReturnValue({ data: [] });
+    useAgentRunEventPreviewMock.mockReturnValue({ data: [] });
 
     // null error → "stopped"
     useAgentRunMock.mockReturnValue({ data: { status: "Failed", error: null } });
