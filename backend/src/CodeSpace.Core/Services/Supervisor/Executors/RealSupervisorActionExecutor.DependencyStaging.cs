@@ -40,7 +40,8 @@ public sealed partial class RealSupervisorActionExecutor
 
         if (producerAgentRunIds.Count == 0) return NoStaging(dependsOn, repoId, 0, 0, context);
 
-        var producers = await ResolveProducerManifestsAsync(producerAgentRunIds, repoId, context.TeamId, cancellationToken).ConfigureAwait(false);
+        var producerReadLimit = DependencyManifestReadLimit(context);
+        var producers = await ResolveProducerManifestsAsync(producerAgentRunIds, repoId, context.TeamId, producerReadLimit, cancellationToken).ConfigureAwait(false);
 
         if (producers.Count == 0) return NoStaging(dependsOn, repoId, producerAgentRunIds.Count, 0, context);   // every producer made no changes to THIS repo — nothing to hand off
 
@@ -162,13 +163,14 @@ public sealed partial class RealSupervisorActionExecutor
         $" ({priorAttempt.ChangedFileCount} file(s) changed). This workspace is checked out AT that branch — do not redo work already present here.";
 
     /// <summary>Each producer's manifest row for THIS repository (exact concrete id, or the sole legacy null-id row) — the durable branch/patch/summary handoff never re-derived from a decision's outcome JSON snapshot.</summary>
-    private async Task<IReadOnlyList<Persistence.Entities.PublishManifest>> ResolveProducerManifestsAsync(IReadOnlyList<Guid> producerAgentRunIds, Guid repositoryId, Guid teamId, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<Persistence.Entities.PublishManifest>> ResolveProducerManifestsAsync(IReadOnlyList<Guid> producerAgentRunIds, Guid repositoryId, Guid teamId, int maxProducerCount, CancellationToken cancellationToken)
     {
         var manifests = new List<Persistence.Entities.PublishManifest>();
+        var rowsByAgentRun = await _manifests.ListForAgentRunsAsync(producerAgentRunIds, teamId, maxProducerCount, cancellationToken).ConfigureAwait(false);
 
-        foreach (var agentRunId in producerAgentRunIds)
+        foreach (var agentRunId in producerAgentRunIds.Distinct())
         {
-            var rows = await _manifests.ListForAgentRunAsync(agentRunId, teamId, cancellationToken).ConfigureAwait(false);
+            if (!rowsByAgentRun.TryGetValue(agentRunId, out var rows)) continue;
 
             var row = PublishManifestRepositorySelector.Select(rows, repositoryId);
 
@@ -177,6 +179,10 @@ public sealed partial class RealSupervisorActionExecutor
 
         return manifests;
     }
+
+    /// <summary>The manifest batch admission bound is the run's own already-resolved total-spawn plan cap, defensively clamped to the same lane limits as plan materialization.</summary>
+    internal static int DependencyManifestReadLimit(SupervisorTurnContext context) =>
+        Math.Clamp(context.MaxTotalSpawns ?? SupervisorLane.DefaultMaxTotalSpawns, 1, SupervisorLane.MaxTotalSpawnsCeiling);
 
     /// <summary>Combine ≥2 producers' (or one patch-only producer's) recorded patches onto a fresh run integration branch via the SAME <see cref="IBranchIntegrator"/> the supervisor <c>merge</c> drives. Clean → that branch; anything else → BLOCKED, never a silent default.</summary>
     private async Task<DependencyStagingResult> IntegrateProducersAsync(IReadOnlyList<Persistence.Entities.PublishManifest> producers, Guid repositoryId, SupervisorTurnContext context, CancellationToken cancellationToken)

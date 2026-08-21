@@ -1,3 +1,4 @@
+using System.Data.Common;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -6,6 +7,7 @@ using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Agents;
@@ -128,9 +130,92 @@ public class PublishManifestStoreTests
         row.ChangedFileCount.ShouldBe(2, "the captured diff's fact is recorded regardless of the owning run's eventual status");
     }
 
+    [Fact]
+    public async Task Batch_agent_run_read_is_one_team_scoped_query_with_deduplicated_owners_and_repository_order()
+    {
+        var teamId = await SeedTeamAsync();
+        var foreignTeamId = await SeedTeamAsync();
+        var firstOwner = Guid.NewGuid();
+        var secondOwner = Guid.NewGuid();
+        var foreignOwner = Guid.NewGuid();
+        var missingOwner = Guid.NewGuid();
+
+        await SeedManifestsAsync(
+            Manifest(teamId, firstOwner, Guid.NewGuid(), "web", "first-web"),
+            Manifest(teamId, firstOwner, Guid.NewGuid(), "api", "first-api"),
+            Manifest(teamId, secondOwner, Guid.NewGuid(), "primary", "second"),
+            Manifest(foreignTeamId, foreignOwner, Guid.NewGuid(), "primary", "foreign"));
+
+        var recorder = new ReadCommandRecorder();
+        using var read = ReadScope(recorder);
+        var rows = await Svc(read).ListForAgentRunsAsync(new[] { secondOwner, firstOwner, firstOwner, foreignOwner, missingOwner }, teamId, maxAgentRunIds: 4, CancellationToken.None);
+
+        recorder.Commands.Count.ShouldBe(1, "duplicate producer ids are folded before one SQL read, never one command per owner");
+        rows.Keys.ShouldBe(new[] { firstOwner, secondOwner }, ignoreOrder: true, customMessage: "foreign-team and absent owners have no dictionary entry");
+        rows[firstOwner].Select(row => row.RepositoryAlias).ShouldBe(new[] { "api", "web" }, "each owner's manifests retain ListForAgentRunAsync's repository-alias order");
+        rows[firstOwner].Select(row => row.Branch).ShouldBe(new[] { "first-api", "first-web" });
+        rows[firstOwner].Select(row => row.Summary).ShouldBe(new[] { "summary-first-api", "summary-first-web" }, "batching changes query count, never the manifest fields downstream folds consume");
+        rows[secondOwner].ShouldHaveSingleItem().Branch.ShouldBe("second");
+
+        var sql = recorder.Commands.Single();
+        sql.ShouldContain("publish_manifest", Case.Insensitive);
+        sql.ShouldContain("team_id", Case.Insensitive, customMessage: "tenancy must be in the SQL predicate, not post-filtered");
+        sql.ShouldContain("agent_run_id", Case.Insensitive, customMessage: "the owner set must be in the SQL predicate");
+        sql.ShouldNotContain("COUNT(", Case.Insensitive);
+        sql.ShouldNotContain("OFFSET", Case.Insensitive);
+    }
+
+    [Fact]
+    public async Task Empty_agent_run_batch_returns_without_a_database_query()
+    {
+        var recorder = new ReadCommandRecorder();
+        using var read = ReadScope(recorder);
+
+        var rows = await Svc(read).ListForAgentRunsAsync(Array.Empty<Guid>(), Guid.NewGuid(), maxAgentRunIds: 1, CancellationToken.None);
+
+        rows.ShouldBeEmpty();
+        recorder.Commands.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Agent_run_batch_refuses_more_distinct_owners_than_the_callers_plan_bound_before_querying()
+    {
+        var recorder = new ReadCommandRecorder();
+        using var read = ReadScope(recorder);
+
+        var exception = await Should.ThrowAsync<ArgumentOutOfRangeException>(() =>
+            Svc(read).ListForAgentRunsAsync(new[] { Guid.NewGuid(), Guid.NewGuid() }, Guid.NewGuid(), maxAgentRunIds: 1, CancellationToken.None));
+
+        exception.ParamName.ShouldBe("agentRunIds");
+        recorder.Commands.ShouldBeEmpty("the active plan bound is an admission guard, not a post-query check");
+    }
+
+    [Fact]
+    public async Task Agent_run_batch_database_fault_propagates_without_single_read_fallback()
+    {
+        var teamId = await SeedTeamAsync();
+        var ownerId = Guid.NewGuid();
+        await SeedManifestsAsync(Manifest(teamId, ownerId, Guid.NewGuid(), "primary", "branch"));
+
+        var fault = new ThrowingReadInterceptor();
+        using var read = ReadScope(fault);
+
+        var exception = await Should.ThrowAsync<InvalidOperationException>(() =>
+            Svc(read).ListForAgentRunsAsync(new[] { ownerId }, teamId, maxAgentRunIds: 1, CancellationToken.None));
+
+        exception.Message.ShouldBe(ThrowingReadInterceptor.Message);
+        fault.AttemptCount.ShouldBe(1, "a failed batch read is surfaced once; it never degrades to per-owner reads");
+    }
+
     // ─── helpers ───────────────────────────────────────────────────────────────
 
     private static IPublishManifestStore Svc(ILifetimeScope scope) => scope.Resolve<IPublishManifestStore>();
+
+    private ILifetimeScope ReadScope(DbCommandInterceptor interceptor) => _fixture.BeginScope(builder =>
+    {
+        var options = new DbContextOptionsBuilder<CodeSpaceDbContext>().UseNpgsql(_fixture.ConnectionString).UseSnakeCaseNamingConvention().AddInterceptors(interceptor).Options;
+        builder.RegisterInstance(options).As<DbContextOptions<CodeSpaceDbContext>>().SingleInstance();
+    });
 
     private static PublishManifestUpsert Upsert(Guid teamId, string? branch, int changedFileCount) => new()
     {
@@ -157,5 +242,55 @@ public class PublishManifestStoreTests
 
         await db.SaveChangesAsync();
         return teamId;
+    }
+
+    private async Task SeedManifestsAsync(params PublishManifest[] manifests)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.PublishManifest.AddRange(manifests);
+        await db.SaveChangesAsync();
+    }
+
+    private static PublishManifest Manifest(Guid teamId, Guid agentRunId, Guid repositoryId, string alias, string branch) => new()
+    {
+        Id = Guid.NewGuid(), TeamId = teamId, Kind = PublishManifestKind.Agent, AgentRunId = agentRunId, RepositoryId = repositoryId,
+        RepositoryAlias = alias, Branch = branch, Summary = $"summary-{branch}", PublishStateValue = PublishState.Pushed,
+    };
+
+    private sealed class ReadCommandRecorder : DbCommandInterceptor
+    {
+        public List<string> Commands { get; } = [];
+
+        public override InterceptionResult<DbDataReader> ReaderExecuting(DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result)
+        {
+            Commands.Add(command.CommandText);
+            return result;
+        }
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        {
+            Commands.Add(command.CommandText);
+            return ValueTask.FromResult(result);
+        }
+    }
+
+    private sealed class ThrowingReadInterceptor : DbCommandInterceptor
+    {
+        public const string Message = "manifest-batch-read-fault";
+
+        public int AttemptCount { get; private set; }
+
+        public override InterceptionResult<DbDataReader> ReaderExecuting(DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result)
+        {
+            AttemptCount++;
+            throw new InvalidOperationException(Message);
+        }
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        {
+            AttemptCount++;
+            throw new InvalidOperationException(Message);
+        }
     }
 }

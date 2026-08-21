@@ -30,6 +30,9 @@ internal sealed class FakePublishManifestStore : IPublishManifestStore
     public Task<IReadOnlyList<PublishManifest>> ListForAgentRunAsync(Guid agentRunId, Guid teamId, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<PublishManifest>>(Array.Empty<PublishManifest>());
 
+    public Task<IReadOnlyDictionary<Guid, IReadOnlyList<PublishManifest>>> ListForAgentRunsAsync(IReadOnlyCollection<Guid> agentRunIds, Guid teamId, int maxAgentRunIds, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyDictionary<Guid, IReadOnlyList<PublishManifest>>>(new Dictionary<Guid, IReadOnlyList<PublishManifest>>());
+
     public Task<IReadOnlyList<PublishManifest>> ListForWorkflowRunAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<PublishManifest>>(Array.Empty<PublishManifest>());
 
