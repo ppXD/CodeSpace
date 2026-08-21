@@ -583,6 +583,34 @@ export interface RunRecordsResponse {
   records: RunRecordView[];
 }
 
+/** Closed keyset direction returned by the bounded raw-ledger reader. */
+export type RunRecordPageMode = "Tail" | "Older" | "Newer";
+
+/** One bounded page from GET /api/workflows/runs/{id}/records/page. */
+export interface RunRecordPageResponse {
+  runId: string;
+  runStatus: WorkflowRunStatus;
+  mode: RunRecordPageMode;
+  records: RunRecordView[];
+  nextBeforeSequence: number | null;
+  nextAfterSequence: number | null;
+}
+
+/** Exactly one keyset direction: neither cursor is Tail, before is Older, after is Newer. */
+export interface RunRecordPageRequest {
+  beforeSequence?: number;
+  afterSequence?: number;
+  limit: number;
+}
+
+/** A non-retryable wire-contract violation; transport/backend faults remain ordinary retryable errors. */
+export class InvalidWorkflowRunRecordPageError extends Error {
+  constructor() {
+    super("Invalid Workflow Run record page response.");
+    this.name = "InvalidWorkflowRunRecordPageError";
+  }
+}
+
 // ─── Decisions (the cross-grain "Needs decision" queue — GET /api/workflows/decisions) ───────────
 
 /** The shape of the ask — an OPEN string (forward-compatible); the UI maps a known set to affordances and free-texts the rest. */
@@ -808,6 +836,8 @@ export interface WorkflowRunModelCallBodyRead {
 }
 
 const WORKFLOW_RUN_CAPTURE_COMPLETENESS = new Set<WorkflowRunCaptureCompleteness>(["Exact", "RedactedExact", "Partial", "Unavailable", "Corrupt", "LegacyUnknown"]);
+const WORKFLOW_RUN_STATUSES = new Set<WorkflowRunStatus>(["Pending", "Enqueued", "Running", "Success", "Failure", "Cancelled", "Suspended"]);
+const RUN_RECORD_PAGE_MODES = new Set<RunRecordPageMode>(["Tail", "Older", "Newer"]);
 
 function isJsonObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -815,6 +845,62 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
 
 function isSafeCount(value: unknown, positive = false): value is number {
   return Number.isSafeInteger(value) && (positive ? Number(value) > 0 : Number(value) >= 0);
+}
+
+function invalidRunRecordPageRequest(): never {
+  throw new Error("Invalid Workflow Run record page request.");
+}
+
+function invalidRunRecordPage(): never {
+  throw new InvalidWorkflowRunRecordPageError();
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+function decodeRunRecordPage(value: unknown, expectedRunId: string, request: RunRecordPageRequest): RunRecordPageResponse {
+  const expectedMode: RunRecordPageMode = request.afterSequence !== undefined ? "Newer" : request.beforeSequence !== undefined ? "Older" : "Tail";
+  if (!isJsonObject(value) || value.runId !== expectedRunId || value.mode !== expectedMode || !RUN_RECORD_PAGE_MODES.has(value.mode as RunRecordPageMode) || !WORKFLOW_RUN_STATUSES.has(value.runStatus as WorkflowRunStatus) || !Array.isArray(value.records) || value.records.length > request.limit)
+    return invalidRunRecordPage();
+
+  const nextBefore = value.nextBeforeSequence;
+  const nextAfter = value.nextAfterSequence;
+  if ((nextBefore !== null && !isSafeCount(nextBefore, true)) || (nextAfter !== null && !isSafeCount(nextAfter, true))) return invalidRunRecordPage();
+  if ((expectedMode === "Newer" && nextBefore !== null) || (expectedMode !== "Newer" && nextAfter !== null)) return invalidRunRecordPage();
+
+  const records: RunRecordView[] = [];
+  let previousSequence = 0;
+  for (const candidate of value.records) {
+    if (!isJsonObject(candidate) || !isSafeCount(candidate.sequence, true) || candidate.sequence <= previousSequence || typeof candidate.recordType !== "string" || candidate.recordType.length === 0 || !isNullableString(candidate.nodeId) || typeof candidate.iterationKey !== "string" || typeof candidate.occurredAt !== "string" || !Number.isFinite(Date.parse(candidate.occurredAt)) || typeof candidate.payloadJson !== "string" || !isNullableString(candidate.correlationId) || !isNullableString(candidate.parentRecordId))
+      return invalidRunRecordPage();
+    if (request.beforeSequence !== undefined && candidate.sequence >= request.beforeSequence) return invalidRunRecordPage();
+    if (request.afterSequence !== undefined && candidate.sequence <= request.afterSequence) return invalidRunRecordPage();
+
+    records.push({
+      sequence: candidate.sequence,
+      recordType: candidate.recordType,
+      nodeId: candidate.nodeId,
+      iterationKey: candidate.iterationKey,
+      occurredAt: candidate.occurredAt,
+      payloadJson: candidate.payloadJson,
+      correlationId: candidate.correlationId,
+      parentRecordId: candidate.parentRecordId,
+    });
+    previousSequence = candidate.sequence;
+  }
+
+  if ((nextBefore !== null && (records.length === 0 || nextBefore !== records[0].sequence)) || (nextAfter !== null && (records.length === 0 || nextAfter !== records.at(-1)?.sequence)))
+    return invalidRunRecordPage();
+
+  return {
+    runId: expectedRunId,
+    runStatus: value.runStatus as WorkflowRunStatus,
+    mode: expectedMode,
+    records,
+    nextBeforeSequence: nextBefore as number | null,
+    nextAfterSequence: nextAfter as number | null,
+  };
 }
 
 function invalidRunDataCompleteness(): never {
@@ -926,6 +1012,20 @@ export const workflowsApi = {
 
   /** The run's RAW event ledger — every record unfiltered, in Sequence order (the Trace audit). */
   getRunRecords: (runId: string) => fetchJson<RunRecordsResponse>(`/api/workflows/runs/${runId}/records`),
+
+  /** One strict, bounded keyset page of the raw ledger. PayloadJson remains the server's exact string. */
+  getRunRecordPage: async (runId: string, request: RunRecordPageRequest, signal?: AbortSignal): Promise<RunRecordPageResponse> => {
+    const validBefore = request.beforeSequence === undefined || isSafeCount(request.beforeSequence, true);
+    const validAfter = request.afterSequence === undefined || isSafeCount(request.afterSequence);
+    if (!validBefore || !validAfter || (request.beforeSequence !== undefined && request.afterSequence !== undefined) || !Number.isSafeInteger(request.limit) || request.limit < 1 || request.limit > 500)
+      return invalidRunRecordPageRequest();
+
+    const params = new URLSearchParams({ limit: String(request.limit) });
+    if (request.beforeSequence !== undefined) params.set("beforeSequence", String(request.beforeSequence));
+    if (request.afterSequence !== undefined) params.set("afterSequence", String(request.afterSequence));
+    const value = await fetchJson<unknown>(`/api/workflows/runs/${encodeURIComponent(runId)}/records/page?${params}`, { signal });
+    return decodeRunRecordPage(value, runId, request);
+  },
 
   /** Metadata only; opening the drawer never eagerly downloads prompt/result blobs. */
   getRunModelCall: async (runId: string, sequence: number, signal?: AbortSignal): Promise<WorkflowRunModelCallMetadata | null> => {

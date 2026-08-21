@@ -2,30 +2,43 @@ import { useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { RunRecordView, WorkflowRunDataCompletenessView } from "@/api/workflows";
-import { useRunDataCompleteness, useRunRecords } from "@/hooks/use-workflows";
+import { useRunDataCompleteness, useRunRecordWindow } from "@/hooks/use-workflows";
 
 import { JsonView } from "./JsonView";
 
 /**
- * The Trace tab — the run's RAW append-only event ledger (GET /records): the audit truth beside the Activity
+ * The Trace tab — a bounded window over the run's RAW append-only event ledger (GET /records/page): the audit truth beside the Activity
  * narrative. ONE chronological row per record (EVERY type, unfiltered — the lifecycle/log/scope rows the narrative
  * drops are here too), each showing the raw RecordType + node + time; a record with a non-trivial payload expands in
  * place to its raw JSON. Source-agnostic — the RecordType is an OPEN string rendered verbatim, never switched on; only
- * a failure tone is derived for scanning. Polls in lockstep with the run.
+ * a failure tone is derived for scanning. The latest window polls while the run is active; older pages are explicit.
  */
 export function RunTrace({ runId, active = false }: { runId: string; active?: boolean }) {
-  const records = useRunRecords(runId);
+  const records = useRunRecordWindow(runId);
   const completeness = useRunDataCompleteness(runId, active);
-  const rows = records.data?.records ?? [];
+  const rows = records.records;
 
   return (
     <div className="run-trace">
       <RunDataCompleteness view={completeness.data} loading={completeness.isLoading} failed={completeness.error != null} />
+      {records.olderRecordsOmitted && (
+        <div className="run-data-completeness-warning">
+          Earlier records are outside this bounded window.
+          {records.hasOlder && <>{" "}<button type="button" onClick={() => void records.loadOlder()} disabled={records.isLoadingOlder}>{records.isLoadingOlder ? "Loading older…" : "Load older"}</button></>}
+        </div>
+      )}
+      {records.newerRecordsOmitted && (
+        <div className="run-data-completeness-warning">
+          Newer records are outside this historical window.
+          {" "}<button type="button" onClick={records.returnToLatest}>Return to latest</button>
+        </div>
+      )}
+      {records.error != null && rows.length > 0 && <div className="run-data-completeness-warning">Last refresh failed; displaying the last valid bounded window.</div>}
       {rows.length === 0 ? (
-        <div className="run-trace-empty">{records.isLoading ? "Loading the event ledger…" : "No records yet."}</div>
+        <div className="run-trace-empty">{records.isLoading ? "Loading the event ledger…" : records.error != null ? "Couldn't load the event ledger." : "No records yet."}</div>
       ) : (
         <>
-          <div className="run-trace-head"><Ic.Code size={12} aria-hidden="true" /> Event ledger · {rows.length} records</div>
+          <div className="run-trace-head"><Ic.Code size={12} aria-hidden="true" /> Event ledger · showing {rows.length} records</div>
           <ol className="run-trace-list">
             {rows.map((r) => <TraceRow key={r.sequence} record={r} />)}
           </ol>
