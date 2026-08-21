@@ -144,6 +144,7 @@ public class DbUpRunnerTests
     [InlineData("ux_supervisor_decision_run_key", "0053_supervisor_decision.sql")]                       // PR-E E1: the exactly-once invariant — UNIQUE (supervisor_run_id, idempotency_key)
     [InlineData("idx_supervisor_decision_run_sequence", "0053_supervisor_decision.sql")]                 // the replay tape — (supervisor_run_id, sequence)
     [InlineData("idx_supervisor_decision_pending_created", "0053_supervisor_decision.sql")]              // the reaper's partial index — created_date WHERE status='Pending'
+    [InlineData("idx_are_run_kind_sequence", "0158_agent_run_event_kind_sequence_index.sql")]              // exact-kind Agent Run event page: (agent_run_id, kind, sequence)
     public async Task Index_exists_after_migration(string indexName, string addedBy)
     {
         var exists = await IndexExistsAsync(indexName).ConfigureAwait(false);

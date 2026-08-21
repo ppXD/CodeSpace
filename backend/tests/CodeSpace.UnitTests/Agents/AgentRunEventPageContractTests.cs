@@ -54,6 +54,31 @@ public sealed class AgentRunEventPageContractTests
         query.Direction.ShouldBe(AgentRunEventPageDirection.Tail);
         query.Limit.ShouldBe(PageAgentRunEventsQuery.DefaultPageSize);
         PageAgentRunEventsQuery.MaximumPageSize.ShouldBe(500);
+        PageAgentRunEventsQuery.MaximumKindFilterLength.ShouldBe(128);
+        query.KindFilter.ShouldBeNull();
+    }
+
+    [Theory]
+    [InlineData(null, true)]
+    [InlineData("ToolCall", true)]
+    [InlineData("FutureHarnessEvent", true)]
+    [InlineData("", false)]
+    [InlineData("   ", false)]
+    public void Kind_filter_is_optional_exact_and_open_but_never_blank(string? kindFilter, bool valid)
+    {
+        var query = new PageAgentRunEventsQuery { AgentRunId = Guid.NewGuid(), KindFilter = kindFilter };
+
+        ValidationErrors(query).Count.ShouldBe(valid ? 0 : 1);
+    }
+
+    [Fact]
+    public void Kind_filter_has_a_hard_wire_length_cap()
+    {
+        var valid = new PageAgentRunEventsQuery { AgentRunId = Guid.NewGuid(), KindFilter = new string('x', PageAgentRunEventsQuery.MaximumKindFilterLength) };
+        var invalid = valid with { KindFilter = new string('x', PageAgentRunEventsQuery.MaximumKindFilterLength + 1) };
+
+        ValidationErrors(valid).ShouldBeEmpty();
+        ValidationErrors(invalid).Count.ShouldBe(1);
     }
 
     private static List<ValidationResult> ValidationErrors(PageAgentRunEventsQuery query)

@@ -1,7 +1,9 @@
 using System.ComponentModel.DataAnnotations;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Exceptions;
 using CodeSpace.Core.Services.Identity;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Queries.Agents;
 using MediatR;
@@ -27,12 +29,12 @@ public sealed class PageAgentRunEventsQueryHandler : IRequestHandler<PageAgentRu
         if (!await _db.AgentRun.AsNoTracking().AnyAsync(run => run.Id == request.AgentRunId && run.TeamId == teamId, cancellationToken).ConfigureAwait(false)) return null;
 
         var cursor = request.TryGetCursor(out var parsedCursor) ? parsedCursor : 0;
-        var rows = await PageRowsQuery(_db, request.AgentRunId, request.Direction, cursor, request.Limit + 1).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var rows = await PageRowsQuery(_db, request.AgentRunId, request.Direction, cursor, request.Limit + 1, request.KindFilter).ToListAsync(cancellationToken).ConfigureAwait(false);
         var hasExtra = rows.Count > request.Limit;
         if (hasExtra) rows.RemoveAt(rows.Count - 1);
         if (request.Direction != AgentRunEventPageDirection.Newer) rows.Reverse();
 
-        var runRows = _db.AgentRunEvent.AsNoTracking().Where(item => item.AgentRunId == request.AgentRunId);
+        var runRows = FilterRows(_db.AgentRunEvent.AsNoTracking().Where(item => item.AgentRunId == request.AgentRunId), request.KindFilter);
         var hasOlder = request.Direction == AgentRunEventPageDirection.Newer
             ? await runRows.AnyAsync(item => item.Sequence <= cursor, cancellationToken).ConfigureAwait(false)
             : hasExtra;
@@ -48,6 +50,7 @@ public sealed class PageAgentRunEventsQueryHandler : IRequestHandler<PageAgentRu
             AgentRunId = request.AgentRunId,
             Mode = request.Direction.ToString(),
             RequestCursor = request.Cursor,
+            KindFilter = request.KindFilter,
             Items = rows,
             HasOlder = hasOlder,
             HasNewer = hasNewer,
@@ -57,9 +60,9 @@ public sealed class PageAgentRunEventsQueryHandler : IRequestHandler<PageAgentRu
     }
 
     /// <summary>The only row-bearing query: exact run predicate, strict sequence keyset, stable order, and Take before materialization.</summary>
-    internal static IQueryable<AgentRunEventDto> PageRowsQuery(CodeSpaceDbContext db, Guid runId, AgentRunEventPageDirection direction, long cursor, int take)
+    internal static IQueryable<AgentRunEventDto> PageRowsQuery(CodeSpaceDbContext db, Guid runId, AgentRunEventPageDirection direction, long cursor, int take, string? kindFilter = null)
     {
-        var rows = db.AgentRunEvent.AsNoTracking().Where(item => item.AgentRunId == runId);
+        var rows = FilterRows(db.AgentRunEvent.AsNoTracking().Where(item => item.AgentRunId == runId), kindFilter);
         if (direction == AgentRunEventPageDirection.Older) rows = rows.Where(item => item.Sequence < cursor);
         if (direction == AgentRunEventPageDirection.Newer) rows = rows.Where(item => item.Sequence > cursor);
 
@@ -76,6 +79,18 @@ public sealed class PageAgentRunEventsQueryHandler : IRequestHandler<PageAgentRu
             DataArtifactId = item.DataArtifactId,
             OccurredAt = item.OccurredAt,
         });
+    }
+
+    /// <summary>
+    /// Keeps the wire discriminator open without coercion. This deployment only persists the normalized enum
+    /// vocabulary; a future value is therefore a valid empty filter today, while an exact known value becomes an
+    /// indexable equality predicate. Numeric/case-insensitive aliases never select another kind accidentally.
+    /// </summary>
+    private static IQueryable<AgentRunEvent> FilterRows(IQueryable<AgentRunEvent> rows, string? kindFilter)
+    {
+        if (kindFilter == null) return rows;
+        if (!Enum.TryParse<AgentEventKind>(kindFilter, ignoreCase: false, out var kind) || Enum.GetName(kind) != kindFilter) return rows.Where(_ => false);
+        return rows.Where(item => item.Kind == kind);
     }
 
     private static long EmptyNewerCursor(AgentRunEventPageDirection direction, long cursor) => direction switch

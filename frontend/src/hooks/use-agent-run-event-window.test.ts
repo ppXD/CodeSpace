@@ -25,6 +25,7 @@ function page(mode: AgentRunEventPageResponse["mode"], rows: AgentRunEventDto[],
     agentRunId: options.runId ?? "run-1",
     mode,
     requestCursor,
+    kindFilter: null,
     items: rows,
     hasOlder: options.hasOlder ?? false,
     hasNewer: options.hasNewer ?? false,
@@ -54,6 +55,25 @@ describe("useAgentRunEventWindow", () => {
     expect(getPage).toHaveBeenCalledExactlyOnceWith("run-1", { mode: "Tail", limit: AGENT_EVENT_PAGE_LIMIT }, expect.any(AbortSignal));
     expect(result.current.data.map(({ sequence }) => sequence)).toEqual([1, 2]);
     expect(result.current.atLatest).toBe(true);
+  });
+
+  it("carries an exact kind filter through Tail/Older and resets identity when that filter changes", async () => {
+    getPage
+      .mockResolvedValueOnce({ ...page("Tail", [event(10)], { hasOlder: true }), kindFilter: "ToolCall" })
+      .mockResolvedValueOnce({ ...page("Older", [event(5)], { requestCursor: "10" }), kindFilter: "ToolCall" })
+      .mockResolvedValueOnce({ ...page("Tail", [event(20)]), kindFilter: "Reasoning" });
+
+    const { result, rerender } = renderHook(({ kind }) => useAgentRunEventWindow("run-1", false, kind), { initialProps: { kind: "ToolCall" } });
+    await settle();
+    expect(getPage).toHaveBeenLastCalledWith("run-1", { mode: "Tail", limit: AGENT_EVENT_PAGE_LIMIT, kindFilter: "ToolCall" }, expect.any(AbortSignal));
+
+    await act(async () => result.current.loadOlder());
+    expect(getPage).toHaveBeenLastCalledWith("run-1", { mode: "Older", cursor: "10", limit: AGENT_EVENT_PAGE_LIMIT, kindFilter: "ToolCall" }, expect.any(AbortSignal));
+
+    rerender({ kind: "Reasoning" });
+    await settle();
+    expect(getPage).toHaveBeenLastCalledWith("run-1", { mode: "Tail", limit: AGENT_EVENT_PAGE_LIMIT, kindFilter: "Reasoning" }, expect.any(AbortSignal));
+    expect(result.current.data.map(({ sequence }) => sequence)).toEqual([20]);
   });
 
   it("loads Older only on demand, caps the window, and explicitly marks discarded newer events", async () => {

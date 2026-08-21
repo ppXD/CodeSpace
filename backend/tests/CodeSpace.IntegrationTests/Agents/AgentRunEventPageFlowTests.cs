@@ -140,6 +140,46 @@ public sealed class AgentRunEventPageFlowTests
     }
 
     [Fact]
+    public async Task Exact_open_kind_filter_pages_only_matching_rows_and_computes_edges_from_that_filtered_set()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId);
+        await AppendAsync(runId, "reason-1", null, null);
+        var first = await AppendAsync(runId, "tool-1", """{"name":"Read"}""", null, AgentEventKind.ToolCall);
+        await AppendAsync(runId, "reason-2", null, null);
+        var second = await AppendAsync(runId, "tool-2", null, Guid.NewGuid(), AgentEventKind.ToolCall);
+        await AppendAsync(runId, "reason-3", null, null);
+        var third = await AppendAsync(runId, "tool-3", null, null, AgentEventKind.ToolCall);
+
+        var tail = (await ReadAsync(userId, teamId, runId, AgentRunEventPageDirection.Tail, null, 2, nameof(AgentEventKind.ToolCall)))!;
+        tail.KindFilter.ShouldBe(nameof(AgentEventKind.ToolCall));
+        tail.Items.Select(item => item.Sequence).ShouldBe([second.Sequence, third.Sequence]);
+        tail.Items.ShouldAllBe(item => item.Kind == AgentEventKind.ToolCall);
+        tail.HasOlder.ShouldBeTrue();
+        tail.NextOlderCursor.ShouldBe(second.Sequence.ToString());
+
+        var older = (await ReadAsync(userId, teamId, runId, AgentRunEventPageDirection.Older, tail.NextOlderCursor, 2, nameof(AgentEventKind.ToolCall)))!;
+        older.Items.Select(item => item.Sequence).ShouldBe([first.Sequence]);
+        older.HasOlder.ShouldBeFalse();
+        older.HasNewer.ShouldBeTrue();
+
+        await AppendAsync(runId, "reason-after", null, null);
+        var noMatchingDelta = (await ReadAsync(userId, teamId, runId, AgentRunEventPageDirection.Newer, tail.NextNewerCursor, 2, nameof(AgentEventKind.ToolCall)))!;
+        noMatchingDelta.Items.ShouldBeEmpty();
+        noMatchingDelta.HasNewer.ShouldBeFalse("non-matching rows never create a phantom filtered page");
+        noMatchingDelta.NextNewerCursor.ShouldBe(tail.NextNewerCursor);
+
+        var fourth = await AppendAsync(runId, "tool-4", null, null, AgentEventKind.ToolCall);
+        var matchingDelta = (await ReadAsync(userId, teamId, runId, AgentRunEventPageDirection.Newer, tail.NextNewerCursor, 2, nameof(AgentEventKind.ToolCall)))!;
+        matchingDelta.Items.Select(item => item.Sequence).ShouldBe([fourth.Sequence]);
+
+        var future = (await ReadAsync(userId, teamId, runId, AgentRunEventPageDirection.Tail, null, 2, "FutureHarnessEvent"))!;
+        future.KindFilter.ShouldBe("FutureHarnessEvent");
+        future.Items.ShouldBeEmpty("the open discriminator is accepted exactly even when this deployment has no producer for it");
+        future.HasOlder.ShouldBeFalse();
+    }
+
+    [Fact]
     public async Task Ten_thousand_events_still_compile_to_limit_keyset_queries_served_by_the_run_sequence_index()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -148,7 +188,7 @@ public sealed class AgentRunEventPageFlowTests
 
         using var shapeScope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
         var db = shapeScope.Resolve<CodeSpaceDbContext>();
-        var sql = PageAgentRunEventsQueryHandler.PageRowsQuery(db, runId, AgentRunEventPageDirection.Tail, cursor: 0, take: 201).ToQueryString();
+        var sql = PageAgentRunEventsQueryHandler.PageRowsQuery(db, runId, AgentRunEventPageDirection.Tail, cursor: 0, take: 201, kindFilter: null).ToQueryString();
         sql.ShouldContain("LIMIT");
         sql.ShouldContain("ORDER BY");
         sql.ShouldNotContain("OFFSET");
@@ -172,15 +212,41 @@ public sealed class AgentRunEventPageFlowTests
         newerPlan.ShouldNotContain("Sort");
     }
 
+    [Fact]
+    public async Task Filtered_tool_call_pages_use_the_run_kind_sequence_index_without_scan_or_sort()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId);
+        await InsertMixedFloodAsync(runId, 10_050);
+
+        using var shapeScope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        var db = shapeScope.Resolve<CodeSpaceDbContext>();
+        var sql = PageAgentRunEventsQueryHandler.PageRowsQuery(db, runId, AgentRunEventPageDirection.Tail, cursor: 0, take: 201, kindFilter: nameof(AgentEventKind.ToolCall)).ToQueryString();
+        sql.ShouldContain("kind");
+        sql.ShouldContain("ToolCall");
+        sql.ShouldContain("LIMIT");
+        sql.ShouldNotContain("OFFSET");
+
+        var page = (await ReadAsync(userId, teamId, runId, AgentRunEventPageDirection.Tail, null, 200, nameof(AgentEventKind.ToolCall)))!;
+        page.Items.Count.ShouldBe(200);
+        page.Items.ShouldAllBe(item => item.Kind == AgentEventKind.ToolCall);
+
+        var plan = await ExplainAsync(runId, "AND kind = 'ToolCall' ORDER BY sequence DESC LIMIT 201");
+        plan.ShouldContain("Limit");
+        plan.ShouldContain("idx_are_run_kind_sequence");
+        plan.ShouldNotContain("Seq Scan on agent_run_event");
+        plan.ShouldNotContain("Sort");
+    }
+
     private static string Route(MethodInfo[] methods, string methodName) =>
         methods.Single(method => method.Name == methodName).GetCustomAttribute<HttpGetAttribute>()!.Template!;
 
-    private async Task<AgentRunEventPage?> ReadAsync(Guid userId, Guid teamId, Guid runId, AgentRunEventPageDirection direction, string? cursor, int limit)
+    private async Task<AgentRunEventPage?> ReadAsync(Guid userId, Guid teamId, Guid runId, AgentRunEventPageDirection direction, string? cursor, int limit, string? kindFilter = null)
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
         return await scope.Resolve<IMediator>().Send(new PageAgentRunEventsQuery
         {
-            AgentRunId = runId, Direction = direction, Cursor = cursor, Limit = limit,
+            AgentRunId = runId, Direction = direction, Cursor = cursor, Limit = limit, KindFilter = kindFilter,
         });
     }
 
@@ -194,13 +260,13 @@ public sealed class AgentRunEventPageFlowTests
         return run.Id;
     }
 
-    private async Task<AgentRunEvent> AppendAsync(Guid runId, string text, string? dataJson, Guid? dataArtifactId)
+    private async Task<AgentRunEvent> AppendAsync(Guid runId, string text, string? dataJson, Guid? dataArtifactId, AgentEventKind kind = AgentEventKind.Reasoning)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         var value = new AgentRunEvent
         {
-            Id = Guid.NewGuid(), AgentRunId = runId, Kind = AgentEventKind.Reasoning, Text = text,
+            Id = Guid.NewGuid(), AgentRunId = runId, Kind = kind, Text = text,
             DataJson = dataJson, DataArtifactId = dataArtifactId, OccurredAt = DateTimeOffset.UtcNow,
         };
         db.AgentRunEvent.Add(value);
@@ -215,6 +281,23 @@ public sealed class AgentRunEventPageFlowTests
         await using var command = new NpgsqlCommand("""
             INSERT INTO agent_run_event (agent_run_id, kind, text, data_json, occurred_at)
             SELECT @run, 'Reasoning', 'flood-' || value, jsonb_build_object('ordinal', value), NOW()
+            FROM generate_series(1, @count) AS value
+            """, connection);
+        command.Parameters.AddWithValue("run", runId);
+        command.Parameters.AddWithValue("count", count);
+        await command.ExecuteNonQueryAsync();
+        await using var analyze = new NpgsqlCommand("ANALYZE agent_run_event", connection);
+        await analyze.ExecuteNonQueryAsync();
+    }
+
+    private async Task InsertMixedFloodAsync(Guid runId, int count)
+    {
+        await using var connection = new NpgsqlConnection(_fixture.ConnectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand("""
+            INSERT INTO agent_run_event (agent_run_id, kind, text, data_json, occurred_at)
+            SELECT @run, CASE WHEN value % 3 = 0 THEN 'ToolCall' ELSE 'Reasoning' END,
+                   'mixed-' || value, jsonb_build_object('ordinal', value), NOW()
             FROM generate_series(1, @count) AS value
             """, connection);
         command.Parameters.AddWithValue("run", runId);

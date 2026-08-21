@@ -165,6 +165,8 @@ export interface AgentRunEventPageRequest {
   mode: AgentRunEventPageMode;
   cursor?: string;
   limit: number;
+  /** Optional exact, open normalized event-kind discriminator. */
+  kindFilter?: string;
 }
 
 /** One validated page plus the exact request identity that selected it; raw event payload strings/refs are never rewritten. */
@@ -172,6 +174,7 @@ export interface AgentRunEventPageResponse {
   agentRunId: string;
   mode: AgentRunEventPageMode;
   requestCursor: string | null;
+  kindFilter: string | null;
   items: AgentRunEventDto[];
   hasOlder: boolean;
   hasNewer: boolean;
@@ -424,6 +427,7 @@ export const agentsApi = {
     ensureValidEventPageRequest(request);
     const params = new URLSearchParams({ direction: request.mode, limit: String(request.limit) });
     if (request.cursor !== undefined) params.set("cursor", request.cursor);
+    if (request.kindFilter !== undefined) params.set("kindFilter", request.kindFilter);
     const value = await fetchJson<unknown>(`/api/agents/runs/${encodeURIComponent(agentRunId)}/events/page?${params}`, { signal });
     return decodeAgentRunEventPage(value, agentRunId, request);
   },
@@ -502,13 +506,16 @@ function ensureValidEventPageRequest(request: AgentRunEventPageRequest): void {
   const cursor = request.cursor === undefined ? null : exactEventCursor(request.cursor, request.mode === "Older");
   const validMode = request.mode === "Tail" || request.mode === "Older" || request.mode === "Newer";
   const validCursorShape = request.mode === "Tail" ? request.cursor === undefined : cursor !== null;
-  if (!validMode || !validCursorShape || !Number.isSafeInteger(request.limit) || request.limit < 1 || request.limit > 500)
+  const validKindFilter = request.kindFilter === undefined || (typeof request.kindFilter === "string" && request.kindFilter.trim().length > 0 && request.kindFilter.length <= 128);
+  if (!validMode || !validCursorShape || !validKindFilter || !Number.isSafeInteger(request.limit) || request.limit < 1 || request.limit > 500)
     throw new Error("Invalid Agent Run event page request.");
 }
 
 function decodeAgentRunEventPage(value: unknown, agentRunId: string, request: AgentRunEventPageRequest): AgentRunEventPageResponse {
   const requestCursor = request.cursor ?? null;
+  const kindFilter = request.kindFilter ?? null;
   if (!isRecord(value) || value.agentRunId !== agentRunId || value.mode !== request.mode || value.requestCursor !== requestCursor
+    || value.kindFilter !== kindFilter
     || !Array.isArray(value.items) || value.items.length > request.limit || typeof value.hasOlder !== "boolean" || typeof value.hasNewer !== "boolean"
     || !(value.nextOlderCursor === null || typeof value.nextOlderCursor === "string") || typeof value.nextNewerCursor !== "string")
     throw new InvalidAgentRunEventPageError();
@@ -518,7 +525,7 @@ function decodeAgentRunEventPage(value: unknown, agentRunId: string, request: Ag
   let previousSequence = 0;
   for (const candidate of value.items) {
     if (!isRecord(candidate) || !Number.isSafeInteger(candidate.sequence) || Number(candidate.sequence) <= 0 || Number(candidate.sequence) <= previousSequence
-      || typeof candidate.kind !== "string" || !AGENT_EVENT_KINDS.has(candidate.kind) || typeof candidate.text !== "string"
+      || typeof candidate.kind !== "string" || !AGENT_EVENT_KINDS.has(candidate.kind) || (kindFilter !== null && candidate.kind !== kindFilter) || typeof candidate.text !== "string"
       || !(candidate.data === null || typeof candidate.data === "string")
       || !(candidate.dataArtifactId === null || (typeof candidate.dataArtifactId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(candidate.dataArtifactId)))
       || typeof candidate.occurredAt !== "string" || !Number.isFinite(Date.parse(candidate.occurredAt)))
@@ -545,6 +552,7 @@ function decodeAgentRunEventPage(value: unknown, agentRunId: string, request: Ag
     agentRunId,
     mode: request.mode,
     requestCursor,
+    kindFilter,
     items,
     hasOlder: value.hasOlder,
     hasNewer: value.hasNewer,

@@ -2,7 +2,7 @@ import { useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { isAgentRunActive, type ToolCallLedgerStatus } from "@/api/agents";
-import { useAgentRun, useAgentRunEvents, useToolCalls } from "@/hooks/use-agents";
+import { useAgentRun, useAgentRunEventWindow, useToolCalls } from "@/hooks/use-agents";
 import { useTeamMemberIdentityMap } from "@/hooks/use-team-members";
 import { AgentRunEventPayload } from "./AgentRunEventPayload";
 
@@ -22,16 +22,21 @@ export function AgentToolCalls({ agentRunId, hideHeader }: { agentRunId: string;
 
   const toolCalls = useToolCalls(agentRunId, active);
   const governed = toolCalls.data ?? [];
+  const nativeEnabled = toolCalls.isSuccess && governed.length === 0;
 
-  const events = useAgentRunEvents(agentRunId, active);
-  const native = (events.data ?? []).filter((e) => e.kind === "ToolCall");
+  // Governance is authoritative when present. Only a successfully-read empty ledger enables the separate native
+  // audit, whose server-side exact filter + local window preserve full browseability without loading other events.
+  const events = useAgentRunEventWindow(nativeEnabled ? agentRunId : undefined, active, "ToolCall");
+  const native = events.data;
 
   const identities = useTeamMemberIdentityMap();
 
-  if (governed.length === 0 && native.length === 0) {
-    // While loading we say nothing (the timeline already carries the run's live state); once we know both are
-    // genuinely empty, name it — the agent made no tool calls at all.
-    if (toolCalls.isLoading || events.isLoading) return null;
+  if (!nativeEnabled && governed.length === 0) return null;
+
+  if (nativeEnabled && native.length === 0 && !events.hasOlder && !events.olderEventsOmitted && !events.newerEventsOmitted && events.atLatest && events.error === null) {
+    // Only an exact ToolCall page with no matching older range proves emptiness. A ledger/page error or an omitted
+    // filtered range remains unknown and must never become a false "none" audit.
+    if (events.isLoading) return null;
     return (
       <div className="tc-panel" data-flush={hideHeader || undefined}>
         {!hideHeader && <div className="tc-panel-head"><Ic.Command size={12} /> Tool calls</div>}
@@ -67,24 +72,49 @@ export function AgentToolCalls({ agentRunId, hideHeader }: { agentRunId: string;
           })}
         </ol>
       ) : (
-        <ol className="tc-list">
-          {native.map((e) => {
-            const call = parseToolCall(e.data);
-            return (
-              <li key={e.sequence} className="tc-row" data-status="Succeeded">
-                <div className="tc-row-head">
-                  <span className="tc-tool">{call?.name ?? e.text ?? "tool"}</span>
-                  <span className="tc-when">{new Date(e.occurredAt).toLocaleTimeString()}</span>
-                </div>
-                {e.dataArtifactId
-                  ? <OffloadedToolCallArgs agentRunId={agentRunId} eventSequence={e.sequence} dataArtifactId={e.dataArtifactId} toolName={call?.name ?? e.text ?? "tool"} />
-                  : <ToolCallArgs value={call ? call.args : e.text} />}
-              </li>
-            );
-          })}
-        </ol>
+        <>
+          <NativeWindowControls events={events} />
+          {native.length > 0 && (
+            <ol className="tc-list">
+              {native.map((e) => {
+                const call = parseToolCall(e.data);
+                return (
+                  <li key={e.sequence} className="tc-row" data-status="Succeeded">
+                    <div className="tc-row-head">
+                      <span className="tc-tool">{call?.name ?? e.text ?? "tool"}</span>
+                      <span className="tc-when">{new Date(e.occurredAt).toLocaleTimeString()}</span>
+                    </div>
+                    {e.dataArtifactId
+                      ? <OffloadedToolCallArgs agentRunId={agentRunId} eventSequence={e.sequence} dataArtifactId={e.dataArtifactId} toolName={call?.name ?? e.text ?? "tool"} />
+                      : <ToolCallArgs value={call ? call.args : e.text} />}
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+        </>
       )}
     </div>
+  );
+}
+
+function NativeWindowControls({ events }: { events: ReturnType<typeof useAgentRunEventWindow> }) {
+  return (
+    <>
+      {(events.olderEventsOmitted || events.hasOlder) && (
+        <div className="tc-window-notice">
+          <span>{events.olderEventsOmitted ? "Earlier tool calls omitted." : "Earlier tool calls are available."}</span>
+          {events.hasOlder && <button type="button" onClick={() => void events.loadOlder()} disabled={events.isLoadingOlder}>{events.isLoadingOlder ? "Loading…" : "Load earlier tool calls"}</button>}
+        </div>
+      )}
+      {(events.newerEventsOmitted || !events.atLatest) && (
+        <div className="tc-window-notice">
+          <span>Newer tool calls omitted.</span>
+          <button type="button" onClick={events.returnToLatest}>Return to latest tool calls</button>
+        </div>
+      )}
+      {events.error && <div className="tc-window-error" role="status">{events.error.message}</div>}
+    </>
   );
 }
 

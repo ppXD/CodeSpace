@@ -15,6 +15,7 @@ public sealed record PageAgentRunEventsQuery : IQuery<AgentRunEventPage?>, IRequ
 {
     public const int DefaultPageSize = 200;
     public const int MaximumPageSize = 500;
+    public const int MaximumKindFilterLength = 128;
 
     public required Guid AgentRunId { get; init; }
     public AgentRunEventPageDirection Direction { get; init; } = AgentRunEventPageDirection.Tail;
@@ -23,6 +24,9 @@ public sealed record PageAgentRunEventsQuery : IQuery<AgentRunEventPage?>, IRequ
     public string? Cursor { get; init; }
 
     public int Limit { get; init; } = DefaultPageSize;
+
+    /// <summary>An optional exact event-kind discriminator. It is deliberately an open string so a new normalized kind does not require a paging-contract version.</summary>
+    public string? KindFilter { get; init; }
 
     public bool TryGetCursor(out long cursor) =>
         long.TryParse(Cursor, NumberStyles.None, CultureInfo.InvariantCulture, out cursor)
@@ -39,6 +43,9 @@ public sealed record PageAgentRunEventsQuery : IQuery<AgentRunEventPage?>, IRequ
 
         if (Limit is < 1 or > MaximumPageSize)
             yield return new ValidationResult($"Limit must be between 1 and {MaximumPageSize}.", [nameof(Limit)]);
+
+        if (KindFilter != null && (string.IsNullOrWhiteSpace(KindFilter) || KindFilter.Length > MaximumKindFilterLength))
+            yield return new ValidationResult($"KindFilter must be non-blank and at most {MaximumKindFilterLength} characters.", [nameof(KindFilter)]);
 
         if (Direction == AgentRunEventPageDirection.Tail)
         {

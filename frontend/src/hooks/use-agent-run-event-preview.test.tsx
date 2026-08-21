@@ -23,6 +23,7 @@ function page(runId: string, rows: AgentRunEventDto[]): AgentRunEventPageRespons
     agentRunId: runId,
     mode: "Tail",
     requestCursor: null,
+    kindFilter: null,
     items: rows,
     hasOlder: rows[0]?.sequence !== 1,
     hasNewer: false,
@@ -162,10 +163,10 @@ describe("useAgentRunEventPreview", () => {
     expect(secondSignal.aborted).toBe(true);
   });
 
-  it("keeps the accumulating legacy event reader exclusive to the complete native ToolCall consumer", () => {
+  it("keeps every production component off the accumulating legacy event reader", () => {
     const sources = import.meta.glob("../components/**/*.tsx", { eager: true, import: "default", query: "?raw" }) as Record<string, string>;
     const users = Object.entries(sources).filter(([path, source]) => !path.includes(".test.") && /\buseAgentRunEvents\b/.test(source)).map(([path]) => path).sort();
 
-    expect(users).toEqual(["../components/workflows/AgentToolCalls.tsx"]);
+    expect(users).toEqual([]);
   });
 });

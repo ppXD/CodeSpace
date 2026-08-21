@@ -1,7 +1,7 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { agentsApi, InvalidAgentRunEventPageError, isAgentRunActive, lastEventSequence, mergeRunEvents, type AgentDefinitionInput, type AgentRunEventDto, type ScorecardFilters } from "@/api/agents";
+import { agentsApi, InvalidAgentRunEventPageError, isAgentRunActive, type AgentDefinitionInput, type AgentRunEventDto, type AgentRunEventPageMode, type AgentRunEventPageRequest, type ScorecardFilters } from "@/api/agents";
 import { ApiError } from "@/api/request";
 
 /**
@@ -127,31 +127,6 @@ export function useAgentRun(agentRunId: string | undefined) {
   });
 }
 
-/**
- * One agent run's complete live event log, streamed INCREMENTALLY: each poll (while `active`) fetches only the
- * events past the highest sequence already held (the `after` cursor) and merges them in, so a long run
- * streams deltas instead of re-pulling the whole log every tick. Polling stops once terminal. The log is
- * append-only + immutable, so the merge is a safe dedup-by-sequence (see {@link mergeRunEvents}).
- *
- * This compatibility reader is intentionally retained for the native ToolCall audit until it has a complete,
- * filtered page endpoint. General timeline/preview surfaces must use the bounded readers below instead.
- */
-export function useAgentRunEvents(agentRunId: string | undefined, active: boolean, intervalMs = 1000) {
-  const queryClient = useQueryClient();
-  const queryKey = ["agent-run-events", agentRunId];
-
-  return useQuery({
-    queryKey,
-    queryFn: async () => {
-      const prev = queryClient.getQueryData<AgentRunEventDto[]>(queryKey) ?? [];
-      const fresh = await agentsApi.listRunEvents(agentRunId!, lastEventSequence(prev));
-      return mergeRunEvents(prev, fresh);
-    },
-    enabled: !!agentRunId,
-    refetchInterval: active ? intervalMs : false,
-  });
-}
-
 export const AGENT_EVENT_PREVIEW_LIMIT = 16;
 export const AGENT_EVENT_PREVIEW_POLL_MS = 2000;
 
@@ -191,13 +166,15 @@ export interface AgentRunEventWindow {
 
 interface AgentRunEventWindowState extends Omit<AgentRunEventWindow, "loadOlder" | "returnToLatest"> {
   agentRunId: string | undefined;
+  kindFilter: string | null;
   nextOlderCursor: string | null;
   nextNewerCursor: string;
 }
 
-function emptyAgentRunEventWindow(agentRunId: string | undefined, isLoading: boolean): AgentRunEventWindowState {
+function emptyAgentRunEventWindow(agentRunId: string | undefined, kindFilter: string | null, isLoading: boolean): AgentRunEventWindowState {
   return {
     agentRunId,
+    kindFilter,
     data: [],
     isLoading,
     isLoadingOlder: false,
@@ -209,6 +186,10 @@ function emptyAgentRunEventWindow(agentRunId: string | undefined, isLoading: boo
     nextOlderCursor: null,
     nextNewerCursor: "0",
   };
+}
+
+function eventPageRequest(mode: AgentRunEventPageMode, limit: number, cursor: string | undefined, kindFilter: string | null): AgentRunEventPageRequest {
+  return { mode, limit, ...(cursor === undefined ? {} : { cursor }), ...(kindFilter === null ? {} : { kindFilter }) };
 }
 
 function isAbort(error: unknown): boolean {
@@ -229,8 +210,9 @@ function asEventPageError(error: unknown, fallback: string): Error {
  * A fixed-size, React-local window over one Agent Run's governed event stream. Timeline surfaces use this page reader
  * so neither the DOM nor React Query cache grows with a long-running CLI transcript.
  */
-export function useAgentRunEventWindow(agentRunId: string | undefined, active: boolean): AgentRunEventWindow {
-  const [state, setState] = useState<AgentRunEventWindowState>(() => emptyAgentRunEventWindow(agentRunId, agentRunId !== undefined));
+export function useAgentRunEventWindow(agentRunId: string | undefined, active: boolean, kindFilter?: string): AgentRunEventWindow {
+  const exactKindFilter = kindFilter ?? null;
+  const [state, setState] = useState<AgentRunEventWindowState>(() => emptyAgentRunEventWindow(agentRunId, exactKindFilter, agentRunId !== undefined));
   const [tailRevision, setTailRevision] = useState(0);
   const [pollRevision, setPollRevision] = useState(0);
   const generationRef = useRef(0);
@@ -257,7 +239,7 @@ export function useAgentRunEventWindow(agentRunId: string | undefined, active: b
     newerControllerRef.current?.abort();
     pollingBlockedRef.current = false;
     transientPollFailuresRef.current = 0;
-    setState(emptyAgentRunEventWindow(agentRunId, agentRunId !== undefined));
+    setState(emptyAgentRunEventWindow(agentRunId, exactKindFilter, agentRunId !== undefined));
     if (agentRunId === undefined) return;
 
     let retryTimer: number | undefined;
@@ -266,10 +248,11 @@ export function useAgentRunEventWindow(agentRunId: string | undefined, active: b
       const controller = new AbortController();
       tailControllerRef.current?.abort();
       tailControllerRef.current = controller;
-      void agentsApi.pageRunEvents(agentRunId, { mode: "Tail", limit: AGENT_EVENT_PAGE_LIMIT }, controller.signal).then((page) => {
+      void agentsApi.pageRunEvents(agentRunId, eventPageRequest("Tail", AGENT_EVENT_PAGE_LIMIT, undefined, exactKindFilter), controller.signal).then((page) => {
         if (generationRef.current !== generation || controller.signal.aborted) return;
         setState({
           agentRunId,
+          kindFilter: exactKindFilter,
           data: page.items,
           isLoading: false,
           isLoadingOlder: false,
@@ -300,9 +283,9 @@ export function useAgentRunEventWindow(agentRunId: string | undefined, active: b
       tailControllerRef.current?.abort();
       if (tailControllerRef.current?.signal.aborted) tailControllerRef.current = null;
     };
-  }, [agentRunId, tailRevision]);
+  }, [agentRunId, exactKindFilter, tailRevision]);
 
-  const visible = state.agentRunId === agentRunId ? state : emptyAgentRunEventWindow(agentRunId, agentRunId !== undefined);
+  const visible = state.agentRunId === agentRunId && state.kindFilter === exactKindFilter ? state : emptyAgentRunEventWindow(agentRunId, exactKindFilter, agentRunId !== undefined);
 
   useEffect(() => {
     if (agentRunId === undefined || !active || visible.isLoading || visible.isLoadingOlder || !visible.atLatest || pollingBlockedRef.current) return;
@@ -313,7 +296,7 @@ export function useAgentRunEventWindow(agentRunId: string | undefined, active: b
       const controller = new AbortController();
       newerControllerRef.current?.abort();
       newerControllerRef.current = controller;
-      void agentsApi.pageRunEvents(agentRunId, { mode: "Newer", cursor: visible.nextNewerCursor, limit: AGENT_EVENT_PAGE_LIMIT }, controller.signal).then((page) => {
+      void agentsApi.pageRunEvents(agentRunId, eventPageRequest("Newer", AGENT_EVENT_PAGE_LIMIT, visible.nextNewerCursor, exactKindFilter), controller.signal).then((page) => {
         if (generationRef.current !== generation || controller.signal.aborted) return;
         transientPollFailuresRef.current = 0;
         setState((previous) => {
@@ -350,7 +333,7 @@ export function useAgentRunEventWindow(agentRunId: string | undefined, active: b
       newerControllerRef.current?.abort();
       newerControllerRef.current = null;
     };
-  }, [active, agentRunId, pollRevision, visible.atLatest, visible.isLoading, visible.isLoadingOlder, visible.nextNewerCursor]);
+  }, [active, agentRunId, exactKindFilter, pollRevision, visible.atLatest, visible.isLoading, visible.isLoadingOlder, visible.nextNewerCursor]);
 
   const loadOlder = useCallback(async () => {
     if (agentRunId === undefined || visible.isLoading || visible.isLoadingOlder || !visible.hasOlder || visible.nextOlderCursor === null || olderControllerRef.current !== null) return;
@@ -362,7 +345,7 @@ export function useAgentRunEventWindow(agentRunId: string | undefined, active: b
     setState((previous) => previous.agentRunId === agentRunId ? { ...previous, isLoadingOlder: true, error: null } : previous);
 
     try {
-      const page = await agentsApi.pageRunEvents(agentRunId, { mode: "Older", cursor: visible.nextOlderCursor, limit: AGENT_EVENT_PAGE_LIMIT }, controller.signal);
+      const page = await agentsApi.pageRunEvents(agentRunId, eventPageRequest("Older", AGENT_EVENT_PAGE_LIMIT, visible.nextOlderCursor, exactKindFilter), controller.signal);
       if (generationRef.current !== generation || controller.signal.aborted) return;
       setState((previous) => {
         if (previous.agentRunId !== agentRunId) return previous;
@@ -386,7 +369,7 @@ export function useAgentRunEventWindow(agentRunId: string | undefined, active: b
     } finally {
       if (olderControllerRef.current === controller) olderControllerRef.current = null;
     }
-  }, [agentRunId, visible.hasOlder, visible.isLoading, visible.isLoadingOlder, visible.nextOlderCursor]);
+  }, [agentRunId, exactKindFilter, visible.hasOlder, visible.isLoading, visible.isLoadingOlder, visible.nextOlderCursor]);
 
   const returnToLatest = useCallback(() => {
     ++generationRef.current;
