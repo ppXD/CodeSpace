@@ -118,6 +118,7 @@ public sealed partial class RealSupervisorActionExecutor
         var byId = loaded.ToDictionary(r => r.Id, r => new MergeContributorRow(r.Id, r.TeamId, r.Status, r.Error, r.ResultJson));
         var merged = new List<MergedAgent>(agentRunIds.Count);
         var issues = new List<SupervisorMergeContributorIssue>();
+        var artifacts = new MergeRequiredArtifactMemo(_offloader, teamId);
 
         foreach (var agentRunId in agentRunIds)
         {
@@ -139,7 +140,7 @@ public sealed partial class RealSupervisorActionExecutor
                 continue;
             }
 
-            merged.Add(await ProjectMergedAgentAsync(row, result, teamId, cancellationToken).ConfigureAwait(false));
+            merged.Add(await ProjectMergedAgentAsync(row, result, artifacts, cancellationToken).ConfigureAwait(false));
         }
 
         var integrity = issues.Count == 0
@@ -171,13 +172,13 @@ public sealed partial class RealSupervisorActionExecutor
     }
 
     /// <summary>Project ONE validated agent run into the typed <see cref="MergedAgent"/> — the compact fields from the SHARED <see cref="SupervisorOutcome.ProjectCompact"/> PLUS the offloaded-aware patch + recorded base SHA. Validation happens before any artifact fetch, while a required artifact failure still propagates unchanged.</summary>
-    private async Task<MergedAgent> ProjectMergedAgentAsync(MergeContributorRow row, AgentRunResult? result, Guid teamId, CancellationToken cancellationToken)
+    private async Task<MergedAgent> ProjectMergedAgentAsync(MergeContributorRow row, AgentRunResult? result, MergeRequiredArtifactMemo artifacts, CancellationToken cancellationToken)
     {
         var compact = SupervisorOutcome.ProjectCompact(row.Id, row.Status.ToString(), row.Error, row.ResultJson);
 
-        var patch = await ResolvePatchAsync(result, teamId, cancellationToken).ConfigureAwait(false);
+        var patch = await ResolvePatchAsync(result, row.Id, artifacts, cancellationToken).ConfigureAwait(false);
 
-        var repositoryResults = await ResolveRepositoryPatchesAsync(result, teamId, cancellationToken).ConfigureAwait(false);
+        var repositoryResults = await ResolveRepositoryPatchesAsync(result, row.Id, artifacts, cancellationToken).ConfigureAwait(false);
 
         return new MergedAgent
         {
@@ -200,7 +201,7 @@ public sealed partial class RealSupervisorActionExecutor
     /// for a single-repo run (no <see cref="AgentRunResult.RepositoryResults"/>), so the single-repo integrate path is
     /// untouched. The artifact id is cleared once resolved (the inline <c>Patch</c> now carries the full diff).
     /// </summary>
-    private async Task<IReadOnlyList<RepositoryRunResult>> ResolveRepositoryPatchesAsync(AgentRunResult? result, Guid teamId, CancellationToken cancellationToken)
+    private static async Task<IReadOnlyList<RepositoryRunResult>> ResolveRepositoryPatchesAsync(AgentRunResult? result, Guid agentRunId, MergeRequiredArtifactMemo artifacts, CancellationToken cancellationToken)
     {
         if (result is null || result.RepositoryResults.Count == 0) return Array.Empty<RepositoryRunResult>();
 
@@ -208,7 +209,7 @@ public sealed partial class RealSupervisorActionExecutor
 
         foreach (var repo in result.RepositoryResults)
         {
-            var patch = await _offloader.ResolveRequiredAsync(teamId, repo.Patch, repo.PatchArtifactId, cancellationToken).ConfigureAwait(false);
+            var patch = await artifacts.ResolveRequiredAsync(agentRunId, repo.Patch, repo.PatchArtifactId, cancellationToken).ConfigureAwait(false);
 
             resolved.Add(repo with { Patch = patch, PatchArtifactId = null });
         }
@@ -217,10 +218,49 @@ public sealed partial class RealSupervisorActionExecutor
     }
 
     /// <summary>Resolve a terminal persisted patch carrier. <c>AgentRunService</c> clears the bounded executor-side compatibility copy before storing a non-null D2 PatchArtifactId, so these inputs are mutually exclusive here: inline when small, otherwise the full referenced diff. Empty when there's neither. Routes through the shared <see cref="IArtifactOffloader"/> — the same primitive the producer used.</summary>
-    private Task<string> ResolvePatchAsync(AgentRunResult? result, Guid teamId, CancellationToken cancellationToken) =>
+    private static Task<string> ResolvePatchAsync(AgentRunResult? result, Guid agentRunId, MergeRequiredArtifactMemo artifacts, CancellationToken cancellationToken) =>
         result == null
             ? Task.FromResult("")
-            : _offloader.ResolveRequiredAsync(teamId, result.Patch, result.PatchArtifactId, cancellationToken);
+            : artifacts.ResolveRequiredAsync(agentRunId, result.Patch, result.PatchArtifactId, cancellationToken);
+
+    /// <summary>
+    /// Success-only memo for ONE <see cref="ReadMergeContributorsAsync"/> call. It memoizes only the immutable bytes
+    /// behind an exact artifact id; repository alias selection remains the caller's job and every first encounter still
+    /// goes through the existing team-scoped, fail-closed required reader. AgentRunId is part of the key so two
+    /// producers independently prove the artifact they name. A failure/cancellation never inserts, and this object is
+    /// method-local, so neither can escape into a later merge request.
+    /// </summary>
+    private sealed class MergeRequiredArtifactMemo
+    {
+        private readonly IArtifactOffloader _offloader;
+        private readonly Guid _teamId;
+        private readonly Dictionary<MergeRequiredArtifactKey, string> _resolved = new();
+
+        public MergeRequiredArtifactMemo(IArtifactOffloader offloader, Guid teamId)
+        {
+            _offloader = offloader;
+            _teamId = teamId;
+        }
+
+        public async Task<string> ResolveRequiredAsync(Guid agentRunId, string? inline, Guid? artifactId, CancellationToken cancellationToken)
+        {
+            // Preserve the required reader's exact carrier precedence. In particular, a malformed dual carrier still
+            // returns its inline value and a legacy/no-carrier result still returns empty without entering the memo.
+            if (!string.IsNullOrEmpty(inline) || artifactId is not { } id)
+                return await _offloader.ResolveRequiredAsync(_teamId, inline, artifactId, cancellationToken).ConfigureAwait(false);
+
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var key = new MergeRequiredArtifactKey(_teamId, agentRunId, id);
+            if (_resolved.TryGetValue(key, out var resolved)) return resolved;
+
+            resolved = await _offloader.ResolveRequiredAsync(_teamId, inline, id, cancellationToken).ConfigureAwait(false);
+            _resolved.Add(key, resolved);
+            return resolved;
+        }
+    }
+
+    private readonly record struct MergeRequiredArtifactKey(Guid TeamId, Guid AgentRunId, Guid ArtifactId);
 
     /// <summary>One merged agent's full work products — the typed holder the merged-array projection AND the SOTA #3 integrate step both read (so the gate-OFF array stays byte-identical while the integrate step gets baseSha + the resolved patch). Internal scratch, not a persisted noun.</summary>
     private sealed class MergedAgent
