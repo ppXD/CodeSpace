@@ -8,20 +8,20 @@ namespace CodeSpace.Core.Services.Sessions.Journal;
 
 /// <summary>
 /// Default <see cref="IJournalProjector"/> — mirrors the room projector's shape (reuse the turn skeleton from
-/// <see cref="ISessionReadService"/>, one query) but produces the JOURNAL: EVERY turn is walked into its chronological
+/// <see cref="ISessionSkeletonReader"/>, one query) but produces the JOURNAL: EVERY turn is walked into its chronological
 /// <see cref="JournalStep"/>s (via <see cref="IJournalWalk"/> — one heavy per-run read per turn), so each turn's full
 /// journal is available on expand, not just the focused one. Entering by a run id focuses the SPECIFIC attempt it names
 /// — a prior/reran attempt shows ITS OWN status, timing, and walked steps (not the newest), matching the room.
 /// READ-ONLY. <see cref="JournalView.Cursor"/> = the FOCUSED turn's newest step cursor (the delta head); past turns are
 /// terminal so their steps are immutable (a caching candidate to avoid re-walking on every live poll).
 /// </summary>
-public sealed class JournalProjector : IJournalProjector, IScopedDependency
+internal sealed class JournalProjector : IJournalProjector, IScopedDependency
 {
-    private readonly ISessionReadService _sessions;
+    private readonly ISessionSkeletonReader _sessions;
     private readonly IJournalWalk _walk;
     private readonly ISessionTurnCache _cache;
 
-    public JournalProjector(ISessionReadService sessions, IJournalWalk walk, ISessionTurnCache cache)
+    public JournalProjector(ISessionSkeletonReader sessions, IJournalWalk walk, ISessionTurnCache cache)
     {
         _sessions = sessions;
         _walk = walk;
@@ -38,7 +38,7 @@ public sealed class JournalProjector : IJournalProjector, IScopedDependency
 
     public async Task<JournalView?> ProjectAsync(Guid sessionId, Guid? focusRunId, Guid teamId, CancellationToken cancellationToken)
     {
-        var detail = await _sessions.GetDetailAsync(sessionId, teamId, cancellationToken).ConfigureAwait(false);
+        var detail = await _sessions.GetBySessionAsync(sessionId, teamId, cancellationToken).ConfigureAwait(false);
 
         if (detail == null) return null;
 
@@ -48,10 +48,10 @@ public sealed class JournalProjector : IJournalProjector, IScopedDependency
     }
 
     /// <summary>The turn a run belongs to — its identity, its newest attempt, or any nested attempt. Null when the run isn't a turn here.</summary>
-    private static int? TurnIndexOf(SessionDetail detail, Guid runId) =>
+    private static int? TurnIndexOf(SessionSkeleton detail, Guid runId) =>
         detail.Turns.FirstOrDefault(t => t.TurnRunId == runId || t.RunId == runId || (t.Attempts?.Any(a => a.RunId == runId) ?? false))?.TurnIndex;
 
-    private async Task<JournalView> BuildAsync(SessionDetail detail, int? focusTurnIndex, Guid? anchorRunId, Guid teamId, CancellationToken cancellationToken)
+    private async Task<JournalView> BuildAsync(SessionSkeleton detail, int? focusTurnIndex, Guid? anchorRunId, Guid teamId, CancellationToken cancellationToken)
     {
         var focusedTurn = (focusTurnIndex is { } fi ? detail.Turns.FirstOrDefault(t => t.TurnIndex == fi) : null) ?? detail.Turns.LastOrDefault();
 

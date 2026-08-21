@@ -22,7 +22,7 @@ using Microsoft.EntityFrameworkCore;
 namespace CodeSpace.Core.Services.Sessions.Room;
 
 /// <summary>
-/// Default <see cref="IRoomProjector"/>. Reuses the turn skeleton from <see cref="ISessionReadService"/> (one query,
+/// Default <see cref="IRoomProjector"/>. Reuses the narrow turn skeleton from <see cref="ISessionSkeletonReader"/> (one query,
 /// goals + latest-attempt run id + status per turn) and enriches EVERY turn with the heavy projections — the phase
 /// tree (<see cref="IRunPhaseProjector"/>), the pending decisions, the capability-aware actions, and the change
 /// watermark — so each turn's full execution UI is available on expand, not just the focused one. The focused turn
@@ -30,9 +30,9 @@ namespace CodeSpace.Core.Services.Sessions.Room;
 /// the pure <see cref="RoomNarrative"/>. READ-ONLY. (Past turns are terminal, so their projection is stable and a
 /// candidate for caching to avoid re-reading immutable turns on every live poll.)
 /// </summary>
-public sealed class RoomProjector : IRoomProjector, IScopedDependency
+internal sealed class RoomProjector : IRoomProjector, IScopedDependency
 {
-    private readonly ISessionReadService _sessions;
+    private readonly ISessionSkeletonReader _sessions;
     private readonly IRunPhaseProjector _phases;
     private readonly IDecisionQueueService _decisions;
     private readonly IRunActionCapabilityResolver _actions;
@@ -44,7 +44,7 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
     private readonly CodeSpaceDbContext _db;
     private readonly ISessionTurnCache _cache;
 
-    public RoomProjector(ISessionReadService sessions, IRunPhaseProjector phases, IDecisionQueueService decisions, IRunActionCapabilityResolver actions, ISupervisorDecisionObservationBundle decisionObservations, IWorkPlanChecklistService checklists, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, IArtifactRangeReader artifacts, CodeSpaceDbContext db, ISessionTurnCache cache)
+    public RoomProjector(ISessionSkeletonReader sessions, IRunPhaseProjector phases, IDecisionQueueService decisions, IRunActionCapabilityResolver actions, ISupervisorDecisionObservationBundle decisionObservations, IWorkPlanChecklistService checklists, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, IArtifactRangeReader artifacts, CodeSpaceDbContext db, ISessionTurnCache cache)
     {
         _sessions = sessions;
         _phases = phases;
@@ -69,7 +69,7 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
 
     public async Task<RoomView?> ProjectAsync(Guid sessionId, Guid? focusRunId, Guid teamId, CancellationToken cancellationToken)
     {
-        var detail = await _sessions.GetDetailAsync(sessionId, teamId, cancellationToken).ConfigureAwait(false);
+        var detail = await _sessions.GetBySessionAsync(sessionId, teamId, cancellationToken).ConfigureAwait(false);
 
         if (detail == null) return null;
 
@@ -79,10 +79,10 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
     }
 
     /// <summary>The turn a run belongs to — its identity, the latest attempt, or any nested attempt. Null when the run isn't a turn here.</summary>
-    private static int? TurnIndexOf(SessionDetail detail, Guid runId) =>
+    private static int? TurnIndexOf(SessionSkeleton detail, Guid runId) =>
         detail.Turns.FirstOrDefault(t => t.TurnRunId == runId || t.RunId == runId || (t.Attempts?.Any(a => a.RunId == runId) ?? false))?.TurnIndex;
 
-    private async Task<RoomView> BuildAsync(SessionDetail detail, int? focusTurnIndex, Guid? anchorRunId, Guid teamId, CancellationToken cancellationToken)
+    private async Task<RoomView> BuildAsync(SessionSkeleton detail, int? focusTurnIndex, Guid? anchorRunId, Guid teamId, CancellationToken cancellationToken)
     {
         var focused = (focusTurnIndex is { } fi ? detail.Turns.FirstOrDefault(t => t.TurnIndex == fi) : null) ?? detail.Turns.LastOrDefault();
 

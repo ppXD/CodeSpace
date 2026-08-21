@@ -25,10 +25,10 @@ public class JournalProjectorTests
         HasPendingDecision = false, CreatedDate = DateTimeOffset.UtcNow, AttemptCount = 1,
     };
 
-    private static SessionDetail Detail(int? anchor, params SessionTurn[] turns) => new()
+    private static SessionSkeleton Detail(int? anchor, params SessionTurn[] turns) => new()
     {
         Id = Guid.NewGuid(), Title = "A thread", Kind = WorkSessionKind.Task, Status = WorkSessionStatus.Open,
-        CreatedDate = DateTimeOffset.UtcNow, AnchorTurnIndex = anchor, Turns = turns,
+        AnchorTurnIndex = anchor, Turns = turns,
     };
 
     private static JournalStep Step(string id, string cursor) => new()
@@ -55,7 +55,7 @@ public class JournalProjectorTests
         };
     }
 
-    private static JournalProjector Projector(SessionDetail? detail, Func<Guid, IReadOnlyList<JournalStep>?>? steps = null) =>
+    private static JournalProjector Projector(SessionSkeleton? detail, Func<Guid, IReadOnlyList<JournalStep>?>? steps = null) =>
         new(new FakeSessions(detail), new FakeWalk(steps ?? (_ => Array.Empty<JournalStep>())), new SessionTurnCache());
 
     [Fact]
@@ -283,13 +283,12 @@ public class JournalProjectorTests
         (await Projector(null).ProjectByRunAsync(Guid.NewGuid(), Team, CancellationToken.None)).ShouldBeNull("a foreign / missing target is null, never a leak");
     }
 
-    private sealed class FakeSessions : ISessionReadService
+    private sealed class FakeSessions : ISessionSkeletonReader
     {
-        private readonly SessionDetail? _detail;
-        public FakeSessions(SessionDetail? detail) => _detail = detail;
-        public Task<SessionDetail?> GetDetailAsync(Guid sessionId, Guid teamId, CancellationToken cancellationToken) => Task.FromResult(_detail);
-        public Task<SessionDetail?> GetByRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken) => Task.FromResult(_detail);
-        public Task<SessionPage> ListAsync(Guid teamId, string? cursor, int limit, CancellationToken cancellationToken) => throw new NotSupportedException();
+        private readonly SessionSkeleton? _detail;
+        public FakeSessions(SessionSkeleton? detail) => _detail = detail;
+        public Task<SessionSkeleton?> GetBySessionAsync(Guid sessionId, Guid teamId, CancellationToken cancellationToken) => Task.FromResult(_detail);
+        public Task<SessionSkeleton?> GetByRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken) => Task.FromResult(_detail);
     }
 
     private sealed class FakeWalk : IJournalWalk
