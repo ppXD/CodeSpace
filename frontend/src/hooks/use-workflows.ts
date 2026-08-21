@@ -187,6 +187,19 @@ export function useWorkflowRun(runId: string | null) {
 }
 
 /**
+ * Observation-only completeness statements. The query is one bounded metadata read; while a run is active it follows
+ * newly admitted producer statements, then stops permanently once the parent run is terminal.
+ */
+export function useRunDataCompleteness(runId: string | null, active = false) {
+  return useQuery({
+    queryKey: ["run-data-completeness", runId],
+    queryFn: ({ signal }) => workflowsApi.getRunDataCompleteness(runId!, signal),
+    enabled: runId != null,
+    refetchInterval: active ? 4000 : false,
+  });
+}
+
+/**
  * The lineage's attempt ladder for the run-detail switcher — resolved from any member (the URL run id). Polls while
  * any attempt is still active so a live rerun's status (and a freshly-spawned attempt) stay fresh in the pills.
  */

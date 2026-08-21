@@ -638,6 +638,30 @@ export interface AnswerDecisionResult {
 export type WorkflowRunModelCallStatus = "Completed" | "Failed";
 export type WorkflowRunModelCallProjectionState = "Projected" | "LegacyFallback";
 export type WorkflowRunCaptureCompleteness = "Exact" | "RedactedExact" | "Partial" | "Unavailable" | "Corrupt" | "LegacyUnknown";
+export type WorkflowRunDataCompletenessScope = "RecordedFacetsOnly";
+
+export interface WorkflowRunDataFacetCompleteness {
+  /** Open registered facet identity; future producer facets render without a frontend release. */
+  facet: string;
+  expectedRecordCount: number | null;
+  presentRecordCount: number;
+  knownMissingCount: number;
+  verdict: WorkflowRunCaptureCompleteness;
+  isStrictlyReadable: boolean;
+  revision: number;
+  schemaVersion: number;
+  lastModifiedAt: string;
+}
+
+/** Observation-only producer statements. `runWideVerdict` is deliberately and always null. */
+export interface WorkflowRunDataCompletenessView {
+  runId: string;
+  scope: WorkflowRunDataCompletenessScope;
+  facets: WorkflowRunDataFacetCompleteness[];
+  hasStatements: boolean;
+  runWideVerdict: null;
+  truncated: boolean;
+}
 export type WorkflowRunModelCallPart = "Result" | "SystemPrompt" | "UserPrompt" | "Usage" | "Trace" | "Error";
 export type WorkflowRunModelCallPartSource = "NotRecorded" | "Inline" | "Artifact" | "Synthesized";
 export type WorkflowRunModelCallPartAvailability = "Available" | "NotRecorded" | "MetadataMissing" | "PhysicalObjectMissing" | "IntegrityFailure" | "BackendUnavailable" | "AccessDenied" | "InvalidOffset" | "Redacted" | "CapturePartial" | "CaptureUnavailable" | "CaptureCorrupt" | "LegacyUnknown" | "InvalidBodyReference";
@@ -783,6 +807,53 @@ export interface WorkflowRunModelCallBodyRead {
   limitBytes: number;
 }
 
+const WORKFLOW_RUN_CAPTURE_COMPLETENESS = new Set<WorkflowRunCaptureCompleteness>(["Exact", "RedactedExact", "Partial", "Unavailable", "Corrupt", "LegacyUnknown"]);
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isSafeCount(value: unknown, positive = false): value is number {
+  return Number.isSafeInteger(value) && (positive ? Number(value) > 0 : Number(value) >= 0);
+}
+
+function invalidRunDataCompleteness(): never {
+  throw new Error("Invalid Workflow Run data completeness response.");
+}
+
+function decodeRunDataCompleteness(value: unknown, expectedRunId: string): WorkflowRunDataCompletenessView {
+  if (!isJsonObject(value) || value.runId !== expectedRunId || value.scope !== "RecordedFacetsOnly" || value.runWideVerdict !== null || typeof value.hasStatements !== "boolean" || typeof value.truncated !== "boolean" || !Array.isArray(value.facets) || value.facets.length > 100)
+    return invalidRunDataCompleteness();
+
+  const facets: WorkflowRunDataFacetCompleteness[] = [];
+  let previousFacet: string | null = null;
+
+  for (const candidate of value.facets) {
+    if (!isJsonObject(candidate) || typeof candidate.facet !== "string" || candidate.facet.length === 0 || (previousFacet !== null && candidate.facet <= previousFacet) || !WORKFLOW_RUN_CAPTURE_COMPLETENESS.has(candidate.verdict as WorkflowRunCaptureCompleteness) || typeof candidate.isStrictlyReadable !== "boolean" || !isSafeCount(candidate.presentRecordCount) || !isSafeCount(candidate.knownMissingCount) || (candidate.expectedRecordCount !== null && !isSafeCount(candidate.expectedRecordCount)) || !isSafeCount(candidate.revision, true) || !isSafeCount(candidate.schemaVersion, true) || typeof candidate.lastModifiedAt !== "string" || !Number.isFinite(Date.parse(candidate.lastModifiedAt)))
+      return invalidRunDataCompleteness();
+
+    const verdict = candidate.verdict as WorkflowRunCaptureCompleteness;
+    if (candidate.isStrictlyReadable !== (verdict === "Exact" || verdict === "RedactedExact")) return invalidRunDataCompleteness();
+
+    facets.push({
+      facet: candidate.facet,
+      expectedRecordCount: candidate.expectedRecordCount as number | null,
+      presentRecordCount: candidate.presentRecordCount,
+      knownMissingCount: candidate.knownMissingCount,
+      verdict,
+      isStrictlyReadable: candidate.isStrictlyReadable,
+      revision: candidate.revision,
+      schemaVersion: candidate.schemaVersion,
+      lastModifiedAt: candidate.lastModifiedAt,
+    });
+    previousFacet = candidate.facet;
+  }
+
+  if (value.hasStatements !== (facets.length > 0)) return invalidRunDataCompleteness();
+
+  return { runId: expectedRunId, scope: "RecordedFacetsOnly", facets, hasStatements: value.hasStatements, runWideVerdict: null, truncated: value.truncated };
+}
+
 // ─── API client ────────────────────────────────────────────────────────────────
 
 export const workflowsApi = {
@@ -830,6 +901,16 @@ export const workflowsApi = {
 
   /** Resolve one run by ref — its team-scoped run number (clean URL) or GUID (legacy link). */
   getRun: (ref: string) => fetchJson<WorkflowRunDetail>(`/api/workflows/runs/${encodeURIComponent(ref)}`),
+
+  /** Bounded producer statements only; no record/blob read and no synthesized run-wide verdict. */
+  getRunDataCompleteness: async (runId: string, signal?: AbortSignal): Promise<WorkflowRunDataCompletenessView | null> => {
+    try {
+      return decodeRunDataCompleteness(await fetchJson<unknown>(`/api/workflows/runs/${runId}/data-completeness`, { signal }), runId);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null;
+      throw error;
+    }
+  },
 
   /** The lineage's attempt ladder (original + every rerun fork) — drives the run-detail attempt switcher. */
   getRunAttempts: (runId: string) => fetchJson<RunAttemptsResponse>(`/api/workflows/runs/${runId}/attempts`),
