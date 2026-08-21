@@ -50,8 +50,8 @@ public class WorkflowRunMapInput
     /// <summary>Frozen JSON of the resolved element array (an offload-ref envelope when large); NULL when <c>Sensitivity = "SecretDerived"</c> (re-resolved live).</summary>
     public string? ElementsJson { get; set; }
 
-    /// <summary>SHA-256 (uppercase hex) over the LOGICAL (pre-offload) resolved array. Written now; CONSUMED by the fork / rerun
-    /// slices for sibling-reuse integrity (compared against the re-inflated array, not the raw ElementsJson). Forensic until then.</summary>
+    /// <summary>SHA-256 (uppercase hex) over the LOGICAL (pre-offload) resolved array. Every Plain re-entry compares it
+    /// against the re-inflated array; fork/rerun sibling reuse must preserve the same rule and never hash the raw ref envelope.</summary>
     public string ContentHash { get; set; } = default!;
 
     /// <summary>"Plain" | "SecretDerived" — whether the <c>items</c> binding references a secret path.</summary>
