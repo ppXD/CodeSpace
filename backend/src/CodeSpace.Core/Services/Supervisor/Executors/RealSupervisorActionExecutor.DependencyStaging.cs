@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Messages.Agents;
 using Microsoft.Extensions.Logging;
@@ -147,7 +148,7 @@ public sealed partial class RealSupervisorActionExecutor
         if (repositoryId is not { } repoId || priorAgentRunId is not { } runId) return DependencyStagingResult.NoOverride;
 
         var rows = await _manifests.ListForAgentRunAsync(runId, context.TeamId, cancellationToken).ConfigureAwait(false);
-        var manifest = rows.FirstOrDefault(r => r.RepositoryId == repoId) ?? (rows.Count == 1 ? rows[0] : null);
+        var manifest = PublishManifestRepositorySelector.Select(rows, repoId);
 
         if (manifest is null || string.IsNullOrEmpty(manifest.Branch)) return DependencyStagingResult.NoOverride;
 
@@ -160,7 +161,7 @@ public sealed partial class RealSupervisorActionExecutor
         (string.IsNullOrWhiteSpace(priorAttempt.Summary) ? "" : $": {priorAttempt.Summary}") +
         $" ({priorAttempt.ChangedFileCount} file(s) changed). This workspace is checked out AT that branch — do not redo work already present here.";
 
-    /// <summary>Each producer's manifest row for THIS repository (by RepositoryId; the sole row when a producer only ever touched one repo) — the durable branch/patch/summary handoff never re-derived from a decision's outcome JSON snapshot.</summary>
+    /// <summary>Each producer's manifest row for THIS repository (exact concrete id, or the sole legacy null-id row) — the durable branch/patch/summary handoff never re-derived from a decision's outcome JSON snapshot.</summary>
     private async Task<IReadOnlyList<Persistence.Entities.PublishManifest>> ResolveProducerManifestsAsync(IReadOnlyList<Guid> producerAgentRunIds, Guid repositoryId, Guid teamId, CancellationToken cancellationToken)
     {
         var manifests = new List<Persistence.Entities.PublishManifest>();
@@ -169,7 +170,7 @@ public sealed partial class RealSupervisorActionExecutor
         {
             var rows = await _manifests.ListForAgentRunAsync(agentRunId, teamId, cancellationToken).ConfigureAwait(false);
 
-            var row = rows.FirstOrDefault(r => r.RepositoryId == repositoryId) ?? (rows.Count == 1 ? rows[0] : null);
+            var row = PublishManifestRepositorySelector.Select(rows, repositoryId);
 
             if (row is not null) manifests.Add(row);
         }

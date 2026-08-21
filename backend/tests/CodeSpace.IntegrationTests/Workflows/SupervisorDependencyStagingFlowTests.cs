@@ -70,6 +70,37 @@ public sealed class SupervisorDependencyStagingFlowTests
         task.Goal.ShouldContain(manifest.Branch!, customMessage: "the server-authored handoff block names the producer's branch in the agent's prompt");
     }
 
+    [Fact]
+    public async Task A_sole_concrete_manifest_for_another_repository_is_not_staged_as_this_repositories_branch()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        var credentialId = await SeedCredentialAsync(teamId);
+        using var producerRemote = new BareRemote();
+        using var dependentRemote = new BareRemote();
+        await producerRemote.SeedWithOneCommitAsync();
+        await dependentRemote.SeedWithOneCommitAsync();
+        var producerRepositoryId = await SeedRepositoryAsync(teamId, producerRemote.Url, credentialId, RepositoryPublishMode.Branch);
+        var dependentRepositoryId = await SeedRepositoryAsync(teamId, dependentRemote.Url, credentialId, RepositoryPublishMode.Branch);
+        var runId = await SeedSupervisorRunAsync(teamId);
+
+        var (producerRunId, _) = await RunProducerAsync(teamId, producerRepositoryId, "printf 'other repository work\n' > producer.txt; echo edited");
+        var manifest = await SingleManifestAsync(producerRunId, teamId);
+        manifest.RepositoryId.ShouldBe(producerRepositoryId);
+        manifest.Branch.ShouldNotBeNull();
+
+        var context = ContextWith(runId, teamId, dependentRepositoryId,
+            plan: Plan(("producer", null), ("dependent", new[] { "producer" })),
+            priorSpawns: await SucceededSpawn(teamId, ("producer", producerRunId)));
+
+        await ExecuteSpawnAsync(context, "dependent");
+
+        var task = await SingleStagedTaskAsync(runId);
+        task.Workspace.ShouldBeNull("a concrete manifest for repository A is not evidence of work in repository B, even when it is the producer's sole row");
+        task.Goal.ShouldNotContain(manifest.Branch!, customMessage: "the dependent must not be told that another repository's branch is inherited");
+    }
+
     /// <summary>
     /// The S1 probe must measure the HANDOFF, not the harness lottery. Which harness a live-brain run dispatches is
     /// the MODEL's choice (an authored <c>agents[].harness</c>, or an Anthropic-defaulted team pool that
@@ -255,6 +286,37 @@ public sealed class SupervisorDependencyStagingFlowTests
 
         (await remote.FileOnBranchAsync(integratedRef, "patch-only.txt")).Trim().Length.ShouldBe(9000,
             "the producer's RECORDED PATCH (resolved back from the artifact store) was applied onto a fresh integration branch even though it never pushed a branch of its own");
+    }
+
+    [Fact]
+    public async Task A_sole_concrete_patch_manifest_for_another_repository_is_not_read_or_applied()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        var credentialId = await SeedCredentialAsync(teamId);
+        using var producerRemote = new BareRemote();
+        using var dependentRemote = new BareRemote();
+        await producerRemote.SeedWithOneCommitAsync();
+        await dependentRemote.SeedWithOneCommitAsync();
+        var producerRepositoryId = await SeedRepositoryAsync(teamId, producerRemote.Url, credentialId, RepositoryPublishMode.PatchOnly);
+        var dependentRepositoryId = await SeedRepositoryAsync(teamId, dependentRemote.Url, credentialId, RepositoryPublishMode.Branch);
+        var runId = await SeedSupervisorRunAsync(teamId);
+
+        var (producerRunId, _) = await RunProducerAsync(teamId, producerRepositoryId, "head -c 9000 /dev/zero | tr '\\0' 'x' > patch-only.txt; echo edited");
+        var manifest = await SingleManifestAsync(producerRunId, teamId);
+        manifest.RepositoryId.ShouldBe(producerRepositoryId);
+        manifest.PatchArtifactId.ShouldNotBeNull();
+
+        var reader = new CountingPatchReader();
+        var context = ContextWith(runId, teamId, dependentRepositoryId,
+            plan: Plan(("producer", null), ("dependent", new[] { "producer" })),
+            priorSpawns: await SucceededSpawn(teamId, ("producer", producerRunId)));
+
+        await ExecuteSpawnAsync(context, "dependent", patchReader: reader);
+
+        reader.CallCount.ShouldBe(0, "a mismatched manifest must be rejected before any required artifact read");
+        (await SingleStagedTaskAsync(runId)).Workspace.ShouldBeNull("there is no repository-B handoff, so its default branch stands");
     }
 
     /// <summary>
@@ -612,12 +674,14 @@ public sealed class SupervisorDependencyStagingFlowTests
     // ─── Drive the real executor ──────────────────────────────────────────────────
 
     /// <summary>Execute a Spawn decision through the real executor, returning it as a TERMINAL <see cref="SupervisorPriorDecision"/> — ready to both inspect (OutcomeJson) and feed back in as a later turn's prior tape (e.g. for resolve to read its conflict).</summary>
-    private Task<SupervisorPriorDecision> ExecuteSpawnAsync(SupervisorTurnContext context, string subtaskId, IReadOnlyList<SupervisorAgentDispatch>? agents = null) => ExecuteSpawnAsync(context, new[] { subtaskId }, agents);
+    private Task<SupervisorPriorDecision> ExecuteSpawnAsync(SupervisorTurnContext context, string subtaskId, IReadOnlyList<SupervisorAgentDispatch>? agents = null, IAgentPatchReader? patchReader = null) => ExecuteSpawnAsync(context, new[] { subtaskId }, agents, patchReader);
 
     /// <summary>The K-at-once shape: ONE turn's spawn fanning out over several subtask ids — the only way to exercise what two dependents staged in the SAME turn do to each other.</summary>
-    private async Task<SupervisorPriorDecision> ExecuteSpawnAsync(SupervisorTurnContext context, IReadOnlyList<string> subtaskIds, IReadOnlyList<SupervisorAgentDispatch>? agents = null)
+    private async Task<SupervisorPriorDecision> ExecuteSpawnAsync(SupervisorTurnContext context, IReadOnlyList<string> subtaskIds, IReadOnlyList<SupervisorAgentDispatch>? agents = null, IAgentPatchReader? patchReader = null)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = patchReader is null
+            ? _fixture.BeginScope()
+            : _fixture.BeginScope(builder => builder.RegisterInstance(patchReader).As<IAgentPatchReader>());
         var executor = scope.Resolve<ISupervisorActionExecutor>();
 
         var payload = JsonSerializer.Serialize(new SupervisorSpawnPayload { SubtaskIds = subtaskIds, Agents = agents }, AgentJson.Options);
@@ -871,6 +935,17 @@ public sealed class SupervisorDependencyStagingFlowTests
         });
 
         return await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+    }
+
+    private sealed class CountingPatchReader : IAgentPatchReader
+    {
+        public int CallCount { get; private set; }
+
+        public Task<string> ReadAsync(Guid teamId, AgentPatchSource source, CancellationToken cancellationToken)
+        {
+            CallCount++;
+            return Task.FromResult("");
+        }
     }
 
     // ─── Git helpers ────────────────────────────────────────────────────────────
