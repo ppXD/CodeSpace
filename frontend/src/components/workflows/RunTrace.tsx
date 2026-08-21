@@ -35,7 +35,9 @@ export function RunTrace({ runId, active = false }: { runId: string; active?: bo
       )}
       {records.error != null && rows.length > 0 && <div className="run-data-completeness-warning">Last refresh failed; displaying the last valid bounded window.</div>}
       {rows.length === 0 ? (
-        <div className="run-trace-empty">{records.isLoading ? "Loading the event ledger…" : records.error != null ? "Couldn't load the event ledger." : "No records yet."}</div>
+        <div className="run-trace-empty">
+          {records.isLoading ? "Loading the event ledger…" : records.error != null ? <>Couldn't load the event ledger. <button type="button" onClick={records.returnToLatest}>Retry</button></> : "No records yet."}
+        </div>
       ) : (
         <>
           <div className="run-trace-head"><Ic.Code size={12} aria-hidden="true" /> Event ledger · showing {rows.length} records</div>

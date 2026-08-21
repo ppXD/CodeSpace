@@ -70,6 +70,8 @@ describe("RunTrace", () => {
 
     expect(screen.getByText(/couldn't load the event ledger/i)).toBeInTheDocument();
     expect(screen.queryByText(/no records yet/i)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /retry/i }));
+    expect(recordsMock.returnToLatest).toHaveBeenCalledTimes(1);
   });
 
   it("shows recorded facets independently and never presents them as a run-wide verdict", () => {

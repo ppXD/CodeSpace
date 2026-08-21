@@ -323,9 +323,16 @@ export function useRunRecordWindow(runId: string | null): RunRecordWindow {
   const newerControllerRef = useRef<AbortController | null>(null);
   const pollingBlockedRef = useRef(false);
   const transientPollFailuresRef = useRef(0);
+  const transientTailFailuresRef = useRef(0);
+  const tailRunIdRef = useRef(runId);
 
   useEffect(() => {
+    if (tailRunIdRef.current !== runId) {
+      tailRunIdRef.current = runId;
+      transientTailFailuresRef.current = 0;
+    }
     const generation = ++generationRef.current;
+    let retryTimer: number | null = null;
     tailControllerRef.current?.abort();
     olderControllerRef.current?.abort();
     newerControllerRef.current?.abort();
@@ -338,6 +345,7 @@ export function useRunRecordWindow(runId: string | null): RunRecordWindow {
     tailControllerRef.current = controller;
     void workflowsApi.getRunRecordPage(runId, { limit: RUN_RECORD_PAGE_LIMIT }, controller.signal).then((page) => {
       if (generationRef.current !== generation || controller.signal.aborted) return;
+      transientTailFailuresRef.current = 0;
       setState({
         runId,
         records: page.records,
@@ -353,9 +361,16 @@ export function useRunRecordWindow(runId: string | null): RunRecordWindow {
     }).catch((error: unknown) => {
       if (generationRef.current !== generation || controller.signal.aborted || isAbort(error)) return;
       setState({ ...emptyRunRecordWindow(runId, false), error: error instanceof Error ? error : new Error("Could not load the Workflow Run record window.") });
+      if (error instanceof InvalidWorkflowRunRecordPageError) return;
+      transientTailFailuresRef.current = Math.min(transientTailFailuresRef.current + 1, 4);
+      const delay = Math.min(RUN_RECORD_WINDOW_POLL_MS * 2 ** (transientTailFailuresRef.current - 1), RUN_RECORD_WINDOW_MAX_POLL_MS);
+      retryTimer = window.setTimeout(() => {
+        if (generationRef.current === generation && !controller.signal.aborted) setTailRevision((revision) => revision + 1);
+      }, delay);
     });
 
     return () => {
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
       controller.abort();
       if (tailControllerRef.current === controller) tailControllerRef.current = null;
     };
@@ -455,6 +470,7 @@ export function useRunRecordWindow(runId: string | null): RunRecordWindow {
     newerControllerRef.current?.abort();
     pollingBlockedRef.current = false;
     transientPollFailuresRef.current = 0;
+    transientTailFailuresRef.current = 0;
     setState((previous) => previous.runId === runId ? { ...previous, isLoading: runId != null, isLoadingOlder: false, error: null } : previous);
     setTailRevision((revision) => revision + 1);
   }, [runId]);
