@@ -1,0 +1,260 @@
+using System.Text;
+using System.Text.Json;
+using Autofac;
+using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Identity;
+using CodeSpace.Core.Services.Workflows;
+using CodeSpace.Core.Services.Workflows.Artifacts;
+using CodeSpace.Core.Services.Workflows.Display;
+using CodeSpace.IntegrationTests.Infrastructure;
+using CodeSpace.IntegrationTests.Workflows.Infrastructure;
+using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Dtos.Workflows;
+using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Queries.Workflows;
+using MediatR;
+using Microsoft.EntityFrameworkCore;
+using Npgsql;
+using Shouldly;
+
+namespace CodeSpace.IntegrationTests.Workflows;
+
+[Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
+public class WorkflowRunViewMetadataReaderFlowTests
+{
+    private const string Bomb = "metadata-must-not-return-this-body";
+    private readonly PostgresFixture _fixture;
+
+    public WorkflowRunViewMetadataReaderFlowTests(PostgresFixture fixture) { _fixture = fixture; }
+
+    [Fact]
+    public async Task View_metadata_is_exactly_scoped_lineage_aware_and_never_reads_execution_or_artifact_bodies()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var definition = Definition(Bomb + new string('p', 64 * 1024));
+        var artifactId = await PutBombArtifactAsync(teamId);
+        var original = await SeedSnapshotRunAsync(teamId, definition, null, null, DateTimeOffset.UtcNow.AddMinutes(-2));
+        var latest = await SeedSnapshotRunAsync(teamId, definition, original, original, DateTimeOffset.UtcNow);
+        var originalAgent = Guid.NewGuid();
+        var latestAgent = Guid.NewGuid();
+
+        await SeedCellAsync(original, "work", string.Empty, WorkflowRunRecordTypes.NodeFailed, originalAgent, artifactId);
+        await SeedCellAsync(latest, "work", string.Empty, WorkflowRunRecordTypes.NodeCompleted, latestAgent, artifactId);
+        var child = await SeedChildRunAsync(teamId, definition, latest, DateTimeOffset.UtcNow.AddSeconds(1));
+        await SeedCellAsync(child, "work", string.Empty, WorkflowRunRecordTypes.NodeCompleted, Guid.NewGuid(), artifactId);
+
+        var reads = new BodyReadObservation();
+        using var scope = _fixture.BeginScope(builder =>
+        {
+            builder.RegisterInstance(new TestCurrentUser(userId, "metadata-test", new[] { Roles.Admin })).As<ICurrentUser>().SingleInstance();
+            builder.RegisterInstance(new TestCurrentTeam(teamId)).As<ICurrentTeam>().SingleInstance();
+            builder.RegisterDecorator<IArtifactStore>((_, _, inner) => new ObservedArtifactStore(inner, reads));
+            builder.RegisterDecorator<IRunNodeOutputInflater>((_, _, inner) => new ObservedOutputInflater(inner, reads));
+        });
+
+        var mediator = scope.Resolve<IMediator>();
+        var merged = await mediator.Send(new GetWorkflowRunViewMetadataQuery { RunId = latest });
+        var originalOnly = await mediator.Send(new GetWorkflowRunViewMetadataQuery { RunId = original, Scope = WorkflowRunViewScope.AttemptOnly });
+        var foreign = await scope.Resolve<IWorkflowRunViewMetadataReader>().ReadAsync(latest, Guid.NewGuid(), WorkflowRunViewScope.LineageMerged, CancellationToken.None);
+        var childView = await scope.Resolve<IWorkflowRunViewMetadataReader>().ReadAsync(child, teamId, WorkflowRunViewScope.LineageMerged, CancellationToken.None);
+
+        merged.ShouldNotBeNull();
+        merged!.RunId.ShouldBe(latest, "the requested attempt remains the response identity even when cells are lineage-merged");
+        merged.CellsAvailability.ShouldBe(WorkflowRunViewAvailability.Available);
+        var latestCell = merged.Cells.Single(cell => cell.NodeId == "work" && cell.IterationKey == string.Empty);
+        latestCell.SourceRunId.ShouldBe(latest, "the latest attempt owns the returned cell body coordinate");
+        latestCell.AgentRunId.ShouldBe(latestAgent, "links are joined through that same exact source attempt");
+        latestCell.Status.ShouldBe(NodeStatus.Success);
+
+        var oldCell = originalOnly!.Cells.Single(cell => cell.NodeId == "work" && cell.IterationKey == string.Empty);
+        oldCell.SourceRunId.ShouldBe(original);
+        oldCell.AgentRunId.ShouldBe(originalAgent);
+        oldCell.Status.ShouldBe(NodeStatus.Failure);
+        foreign.ShouldBeNull("foreign and absent run ids are intentionally conflated");
+        childView!.Cells.ShouldHaveSingleItem().SourceRunId.ShouldBe(child, "a child execution is self-scoped, not erased by the top-level lineage-index exclusion");
+
+        reads.ArtifactReads.ShouldBe(0);
+        reads.InflaterReads.ShouldBe(0);
+        var wire = JsonSerializer.Serialize(merged, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        wire.ShouldNotContain(Bomb, Case.Sensitive);
+        wire.ShouldNotContain("$artifact_ref", Case.Sensitive);
+        merged.TopologyAvailability.ShouldBe(WorkflowRunViewAvailability.Available);
+        merged.Topology!.Nodes.Select(node => node.Id).ShouldBe(new[] { "start", "work" });
+    }
+
+    [Fact]
+    public async Task Ten_thousand_and_fifty_legal_map_cells_use_a_run_scoped_index_without_payload_detoast_or_disk_sort()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSnapshotRunAsync(teamId, Definition("small"), null, null, DateTimeOffset.UtcNow);
+        var foreignRunId = await SeedSnapshotRunAsync(teamId, Definition("small"), null, null, DateTimeOffset.UtcNow);
+        await BulkSeedCellsAsync(runId, 10_050, includeOneToastedBomb: true);
+        await BulkSeedCellsAsync(foreignRunId, 10_050, includeOneToastedBomb: false);
+
+        using var scope = _fixture.BeginScope();
+        var result = await scope.Resolve<IWorkflowRunViewMetadataReader>().ReadAsync(runId, teamId, WorkflowRunViewScope.AttemptOnly, CancellationToken.None);
+
+        result.ShouldNotBeNull();
+        result!.CellsAvailability.ShouldBe(WorkflowRunViewAvailability.Available);
+        result.Cells.Count.ShouldBe(10_050, "the engine admits 10,000 map branches; the metadata plane must not fail at 5,000");
+        result.Cells.ShouldAllBe(cell => cell.SourceRunId == runId);
+
+        var plan = await ExplainCellQueryAsync(scope.Resolve<CodeSpaceDbContext>(), runId);
+        var scans = string.Join('\n', plan.Split('\n').Where(line => line.Contains("Bitmap Index", StringComparison.Ordinal)
+            || line.Contains("Index Scan", StringComparison.Ordinal) || line.Contains("Seq Scan on workflow_run_record", StringComparison.Ordinal)));
+        scans.ShouldContain("idx_wrr_run_", Case.Sensitive, "an existing run-scoped ledger index bounds the scan to the requested run");
+        plan.ShouldNotContain("Seq Scan on workflow_run_record", Case.Sensitive);
+        plan.ShouldNotContain("Sort Method: external", Case.Sensitive, "the bounded metadata sort must remain in memory");
+        plan.ShouldNotContain("pg_toast", Case.Insensitive, "the selected columns never dereference payload_json's toasted body");
+    }
+
+    private async Task<Guid> PutBombArtifactAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IArtifactStore>().PutAsync(teamId, Encoding.UTF8.GetBytes(Bomb + new string('a', 16 * 1024)), "text/plain", CancellationToken.None);
+    }
+
+    private async Task<Guid> SeedSnapshotRunAsync(Guid teamId, WorkflowDefinition definition, Guid? parentRunId, Guid? rootRunId, DateTimeOffset createdAt)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var requestId = Guid.NewGuid();
+        var runId = Guid.NewGuid();
+        var definitionJson = JsonSerializer.Serialize(definition, WorkflowJson.Options);
+
+        db.WorkflowRunRequest.Add(new WorkflowRunRequest
+        {
+            Id = requestId, TeamId = teamId, SourceType = parentRunId is null ? WorkflowRunSourceTypes.Snapshot : WorkflowRunSourceTypes.Rerun,
+            ActorType = "user", ActorId = SystemUsers.SeederId, NormalizedPayloadJson = JsonSerializer.Serialize(new { body = Bomb }),
+            RequestMetadataJson = JsonSerializer.Serialize(new { body = Bomb }), Status = WorkflowRunRequestStatus.Consumed,
+            ReceivedAt = createdAt, VerifiedAt = createdAt, NormalizedAt = createdAt,
+        });
+        db.WorkflowRun.Add(new WorkflowRun
+        {
+            Id = runId, WorkflowId = null, WorkflowVersion = null, TeamId = teamId, RunRequestId = requestId,
+            SourceType = parentRunId is null ? WorkflowRunSourceTypes.Snapshot : WorkflowRunSourceTypes.Rerun,
+            DefinitionSnapshotJson = definitionJson, DefinitionSnapshotHash = DefinitionHash.Compute(definition),
+            ParentRunId = parentRunId, RootRunId = rootRunId, Status = WorkflowRunStatus.Success, OutputsJson = JsonSerializer.Serialize(new { body = Bomb }),
+            Error = Bomb, StartedAt = createdAt, CompletedAt = createdAt.AddSeconds(1), CreatedDate = createdAt,
+            CreatedBy = SystemUsers.SeederId, LastModifiedDate = createdAt.AddSeconds(1), LastModifiedBy = SystemUsers.SeederId,
+        });
+        await db.SaveChangesAsync().ConfigureAwait(false);
+        return runId;
+    }
+
+    private async Task SeedCellAsync(Guid runId, string nodeId, string iterationKey, string recordType, Guid agentRunId, Guid artifactId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        db.WorkflowRunRecord.Add(new WorkflowRunRecord
+        {
+            Id = Guid.NewGuid(), RunId = runId, RecordType = WorkflowRunRecordTypes.NodeStarted, NodeId = nodeId,
+            IterationKey = iterationKey, OccurredAt = now.AddSeconds(-1), PayloadJson = JsonSerializer.Serialize(new { inputs = new { body = Bomb }, config = new { body = Bomb } }),
+        });
+        await db.SaveChangesAsync().ConfigureAwait(false);
+        db.WorkflowRunRecord.Add(new WorkflowRunRecord
+        {
+            Id = Guid.NewGuid(), RunId = runId, RecordType = recordType, NodeId = nodeId, IterationKey = iterationKey,
+            OccurredAt = now, PayloadJson = JsonSerializer.Serialize(new { outputs = new { body = Bomb, artifact = new Dictionary<string, object> { ["$artifact_ref"] = artifactId } }, error = Bomb }),
+        });
+        db.WorkflowRunWait.Add(new WorkflowRunWait
+        {
+            Id = Guid.NewGuid(), RunId = runId, NodeId = nodeId, IterationKey = iterationKey, WaitKind = WorkflowWaitKinds.AgentRun,
+            Token = agentRunId.ToString(), Status = WorkflowWaitStatuses.Resolved, PayloadJson = JsonSerializer.Serialize(new { body = Bomb }), CreatedAt = now, ResolvedAt = now,
+        });
+        await db.SaveChangesAsync().ConfigureAwait(false);
+    }
+
+    private async Task<Guid> SeedChildRunAsync(Guid teamId, WorkflowDefinition definition, Guid parentRunId, DateTimeOffset createdAt)
+    {
+        var runId = await SeedSnapshotRunAsync(teamId, definition, parentRunId, null, createdAt);
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.Where(run => run.Id == runId)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(run => run.SourceType, WorkflowRunSourceTypes.ChildWorkflow)).ConfigureAwait(false);
+        return runId;
+    }
+
+    private async Task BulkSeedCellsAsync(Guid runId, int count, bool includeOneToastedBomb)
+    {
+        await using var connection = new NpgsqlConnection(_fixture.ConnectionString);
+        await connection.OpenAsync().ConfigureAwait(false);
+        const string sql = """
+            INSERT INTO workflow_run_record (id, run_id, record_type, node_id, iteration_key, occurred_at, payload_json)
+            SELECT gen_random_uuid(), @run_id, 'node.completed', 'leaf', 'map#' || lpad(value::text, 5, '0'), @occurred_at,
+                   CASE WHEN @with_bomb AND value = 1 THEN jsonb_build_object('outputs', repeat(@bomb, 65536)) ELSE '{}'::jsonb END
+            FROM generate_series(1, @count) AS value
+            """;
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddWithValue("run_id", runId);
+        command.Parameters.AddWithValue("occurred_at", DateTimeOffset.UtcNow);
+        command.Parameters.AddWithValue("with_bomb", includeOneToastedBomb);
+        command.Parameters.AddWithValue("bomb", Bomb);
+        command.Parameters.AddWithValue("count", count);
+        await command.ExecuteNonQueryAsync().ConfigureAwait(false);
+        await using var analyze = new NpgsqlCommand("ANALYZE workflow_run_record", connection);
+        await analyze.ExecuteNonQueryAsync().ConfigureAwait(false);
+    }
+
+    private static async Task<string> ExplainCellQueryAsync(CodeSpaceDbContext db, Guid runId)
+    {
+        var connection = (NpgsqlConnection)db.Database.GetDbConnection();
+        await connection.OpenAsync().ConfigureAwait(false);
+        try
+        {
+            await using var command = new NpgsqlCommand("EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) " + WorkflowRunViewMetadataReader.CellMetadataSql, connection);
+            command.Parameters.AddWithValue("run_ids", new[] { runId });
+            command.Parameters.AddWithValue("take", WorkflowRunViewMetadataReader.MaximumCells + 1);
+            command.Parameters.AddWithValue("max_identity_chars", WorkflowRunViewMetadataReader.MaximumIdentityCharacters);
+            var lines = new List<string>();
+            await using var reader = await command.ExecuteReaderAsync().ConfigureAwait(false);
+            while (await reader.ReadAsync().ConfigureAwait(false)) lines.Add(reader.GetString(0));
+            return string.Join('\n', lines);
+        }
+        finally
+        {
+            await connection.CloseAsync().ConfigureAwait(false);
+        }
+    }
+
+    private static WorkflowDefinition Definition(string prompt) => new()
+    {
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Label = "Start", Config = WorkflowsTestSeed.Json(JsonSerializer.Serialize(new { prompt })), Inputs = WorkflowsTestSeed.Json(JsonSerializer.Serialize(new { body = Bomb })), Position = new NodePosition { X = 1, Y = 2 } },
+            new() { Id = "work", TypeKey = "builtin.terminal", Label = "Work", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson(), Position = new NodePosition { X = 3, Y = 4 } },
+        },
+        Edges = new List<EdgeDefinition> { new() { From = "start", To = "work", Condition = "ok" } },
+        Inputs = new[] { new WorkflowVariable { Name = "secret", Schema = WorkflowsTestSeed.Json("""{"type":"string"}""") } },
+        Outputs = new[] { new WorkflowVariable { Name = "result", Schema = WorkflowsTestSeed.Json("""{"type":"string"}""") } },
+    };
+
+    private sealed class BodyReadObservation
+    {
+        public int ArtifactReads;
+        public int InflaterReads;
+    }
+
+    private sealed class ObservedArtifactStore : IArtifactStore
+    {
+        private readonly IArtifactStore _inner;
+        private readonly BodyReadObservation _observation;
+
+        public ObservedArtifactStore(IArtifactStore inner, BodyReadObservation observation) { _inner = inner; _observation = observation; }
+        public Task<Guid> PutAsync(Guid teamId, ReadOnlyMemory<byte> bytes, string contentType, CancellationToken cancellationToken) => _inner.PutAsync(teamId, bytes, contentType, cancellationToken);
+        public Task<ArtifactBytes?> GetBytesAsync(Guid teamId, Guid artifactId, CancellationToken cancellationToken) { Interlocked.Increment(ref _observation.ArtifactReads); return _inner.GetBytesAsync(teamId, artifactId, cancellationToken); }
+        public Task<ArtifactMetadata?> GetMetadataAsync(Guid teamId, Guid artifactId, CancellationToken cancellationToken) { Interlocked.Increment(ref _observation.ArtifactReads); return _inner.GetMetadataAsync(teamId, artifactId, cancellationToken); }
+    }
+
+    private sealed class ObservedOutputInflater : IRunNodeOutputInflater
+    {
+        private readonly IRunNodeOutputInflater _inner;
+        private readonly BodyReadObservation _observation;
+
+        public ObservedOutputInflater(IRunNodeOutputInflater inner, BodyReadObservation observation) { _inner = inner; _observation = observation; }
+        public Task<WorkflowRunDetail> InflateAsync(WorkflowRunDetail run, Guid teamId, CancellationToken cancellationToken) { Interlocked.Increment(ref _observation.InflaterReads); return _inner.InflateAsync(run, teamId, cancellationToken); }
+        public Task<WorkflowRunDetail> InflateAsync(WorkflowRunDetail run, Guid teamId, IReadOnlySet<string> nodeIds, CancellationToken cancellationToken) { Interlocked.Increment(ref _observation.InflaterReads); return _inner.InflateAsync(run, teamId, nodeIds, cancellationToken); }
+    }
+}
