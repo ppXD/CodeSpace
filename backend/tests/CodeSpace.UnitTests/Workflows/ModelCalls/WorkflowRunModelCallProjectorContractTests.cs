@@ -22,5 +22,7 @@ public sealed class WorkflowRunModelCallProjectorContractTests
     public void Recurring_job_uses_the_generic_job_contract()
     {
         typeof(WorkflowRunModelCallProjectionRecurringJob).GetInterfaces().ShouldContain(typeof(IRecurringJob));
+        typeof(WorkflowRunModelCallBodyMaterializationRecurringJob).GetInterfaces().ShouldContain(typeof(IRecurringJob));
+        new MaterializeWorkflowRunModelCallBodiesCommand().BatchSize.ShouldBe(100);
     }
 }

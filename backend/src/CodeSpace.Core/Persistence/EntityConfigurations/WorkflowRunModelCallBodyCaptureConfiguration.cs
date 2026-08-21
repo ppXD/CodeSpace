@@ -11,7 +11,7 @@ public sealed class WorkflowRunModelCallBodyCaptureConfiguration : IEntityTypeCo
     {
         builder.ToTable(WorkflowRunDataNames.ModelCallBodyCapture, table =>
         {
-            table.HasCheckConstraint("ck_workflow_run_model_call_body_capture_artifact", "(state = 'Available' AND artifact_id IS NOT NULL AND source_sha256 ~ '^[0-9a-f]{64}$' AND size_bytes >= 0 AND content_type IS NOT NULL AND btrim(content_type) <> '') OR (state <> 'Available' AND artifact_id IS NULL AND source_sha256 IS NULL AND size_bytes IS NULL AND content_type IS NULL)");
+            table.HasCheckConstraint("ck_workflow_run_model_call_body_capture_artifact", "(state = 'Available' AND artifact_id IS NOT NULL AND source_sha256 ~ '^[0-9a-f]{64}$' AND size_bytes >= 0 AND content_type IS NOT NULL AND btrim(content_type) <> '' AND materialization_format IN ('external-artifact/v1', 'utf8-string-envelope/v1', 'json-envelope/v1')) OR (state <> 'Available' AND artifact_id IS NULL AND source_sha256 IS NULL AND size_bytes IS NULL AND content_type IS NULL AND materialization_format IS NULL)");
             table.HasCheckConstraint("ck_workflow_run_model_call_body_capture_claim", "lease_fence >= 0 AND materialization_attempt_count >= 0 AND ((lease_owner_id IS NULL AND lease_expires_at IS NULL) OR (lease_owner_id IS NOT NULL AND lease_fence > 0 AND lease_expires_at IS NOT NULL))");
             table.HasCheckConstraint("ck_workflow_run_model_call_body_capture_error", "(last_error_code IS NULL AND last_error_message IS NULL) OR (last_error_code IS NOT NULL AND btrim(last_error_code) <> '')");
             table.HasCheckConstraint("ck_workflow_run_model_call_body_capture_identity", "source_kind = 'workflow-run-record/v1' AND ((body_kind = 'LogicalRequest' AND source_property = 'prompt') OR (body_kind = 'AttemptResponse' AND source_property = 'output') OR (body_kind = 'AttemptError' AND source_property = 'error'))");
@@ -25,6 +25,7 @@ public sealed class WorkflowRunModelCallBodyCaptureConfiguration : IEntityTypeCo
         builder.Property(value => value.State).HasConversion<string>().HasMaxLength(32);
         builder.Property(value => value.SourceSha256).HasMaxLength(64);
         builder.Property(value => value.ContentType).HasMaxLength(255);
+        builder.Property(value => value.MaterializationFormat).HasMaxLength(64);
         builder.Property(value => value.LastErrorCode).HasMaxLength(128);
         builder.Property(value => value.LastErrorMessage).HasMaxLength(2048);
         builder.Property(value => value.Revision).IsConcurrencyToken();
