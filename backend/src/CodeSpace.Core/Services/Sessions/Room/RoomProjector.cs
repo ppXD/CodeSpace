@@ -10,6 +10,7 @@ using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Tasks.Phases;
 using CodeSpace.Core.Services.Tasks.Timeline.Sources;
 using CodeSpace.Core.Services.Workflows;
+using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Decisions;
@@ -39,10 +40,11 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
     private readonly IWorkPlanChecklistService _checklists;
     private readonly IPublishManifestStore _manifests;
     private readonly ISupervisorPublishedBranchResolver _publishedBranches;
+    private readonly IArtifactRangeReader _artifacts;
     private readonly CodeSpaceDbContext _db;
     private readonly ISessionTurnCache _cache;
 
-    public RoomProjector(ISessionReadService sessions, IRunPhaseProjector phases, IDecisionQueueService decisions, IRunActionCapabilityResolver actions, ISupervisorDecisionLog decisionLog, IWorkPlanChecklistService checklists, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, CodeSpaceDbContext db, ISessionTurnCache cache)
+    public RoomProjector(ISessionReadService sessions, IRunPhaseProjector phases, IDecisionQueueService decisions, IRunActionCapabilityResolver actions, ISupervisorDecisionLog decisionLog, IWorkPlanChecklistService checklists, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, IArtifactRangeReader artifacts, CodeSpaceDbContext db, ISessionTurnCache cache)
     {
         _sessions = sessions;
         _phases = phases;
@@ -52,6 +54,7 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         _checklists = checklists;
         _manifests = manifests;
         _publishedBranches = publishedBranches;
+        _artifacts = artifacts;
         _db = db;
         _cache = cache;
     }
@@ -343,16 +346,18 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
 
         // The per-TOOL histogram (Read · WebSearch · Write · …) — grouped by the tool NAME parsed from each ToolCall
         // event's payload (data.name), NOT the event text (which for some tools is a path / description, so grouping on
-        // it produced noisy pseudo-"tools"). One bounded fetch of the payloads, grouped in-memory.
-        var toolPayloads = agentIds.Count == 0 ? new List<string?>() : await _db.AgentRunEvent.AsNoTracking()
+        // it produced noisy pseudo-"tools"). One bounded metadata fetch followed by bounded, tolerant prefix reads for
+        // the uncommon offloaded carriers; inline payloads retain the exact existing path.
+        var toolPayloads = agentIds.Count == 0 ? new List<ToolPayload>() : await _db.AgentRunEvent.AsNoTracking()
             .Where(e => agentIds.Contains(e.AgentRunId) && e.Kind == AgentEventKind.ToolCall)
             .OrderBy(e => e.Sequence)
-            .Select(e => e.DataJson)
+            .Select(e => new ToolPayload(e.DataJson, e.DataArtifactId))
             .Take(MaxToolScan)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        var toolHistogram = toolPayloads
-            .GroupBy(ToolName)
+        var toolNames = await ToolNamesAsync(toolPayloads, teamId, cancellationToken).ConfigureAwait(false);
+        var toolHistogram = toolNames
+            .GroupBy(name => name)
             .Select(g => new ToolKindCount(g.Key, g.Count()))
             .OrderByDescending(x => x.Count).ThenBy(x => x.Kind, StringComparer.Ordinal).ToList();
 
@@ -516,7 +521,62 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
     private const int MaxLatestLineScan = 200;
     private const int MaxAnswerFiles = 40;
     private const int MaxToolScan = 2000;
+    private const int MaxToolArtifactHydrates = 128;
+    private const int MaxToolPayloadPrefixBytes = 16 * 1024;
     private const int MaxFailureScan = 50;
+
+    /// <summary>
+    /// Resolve the narrow <c>data.name</c> display fact without loading whole large payloads. At most 128 distinct
+    /// artifacts × 16 KiB are inspected per turn; CAS duplicates share one read. Missing/corrupt/backend-unavailable
+    /// UI data remains an explicit typed display bucket rather than failing the room or dropping the call.
+    /// </summary>
+    private async Task<List<string>> ToolNamesAsync(IReadOnlyList<ToolPayload> payloads, Guid teamId, CancellationToken cancellationToken)
+    {
+        var names = new List<string>(payloads.Count);
+        var artifactIds = payloads
+            .Where(payload => payload.DataJson is null && payload.DataArtifactId is not null)
+            .Select(payload => payload.DataArtifactId!.Value)
+            .Distinct().Take(MaxToolArtifactHydrates).ToArray();
+        var artifactReads = artifactIds.Length == 0
+            ? new Dictionary<Guid, ArtifactRangeReadResult>()
+            : await _artifacts.ReadRangesAsync(new ArtifactRangesReadRequest(teamId, artifactIds, 0, MaxToolPayloadPrefixBytes), cancellationToken).ConfigureAwait(false);
+        var artifactNames = new Dictionary<Guid, string>();
+
+        foreach (var payload in payloads)
+        {
+            if (payload.DataJson is { } inline)
+            {
+                names.Add(ToolName(inline));
+                continue;
+            }
+
+            if (payload.DataArtifactId is not { } artifactId)
+            {
+                names.Add("tool");
+                continue;
+            }
+
+            if (!artifactNames.TryGetValue(artifactId, out var name))
+            {
+                name = artifactReads.TryGetValue(artifactId, out var read)
+                    ? read.State == ArtifactRangeReadState.Available ? ToolName(read.Bytes!) : UnavailableToolName(read.State)
+                    : "tool (payload not inspected)";
+                artifactNames.Add(artifactId, name);
+            }
+
+            names.Add(name);
+        }
+
+        return names;
+    }
+
+    private static string UnavailableToolName(ArtifactRangeReadState state) => state switch
+    {
+        ArtifactRangeReadState.MetadataMissing or ArtifactRangeReadState.PhysicalObjectMissing => "tool (payload missing)",
+        ArtifactRangeReadState.IntegrityFailure => "tool (payload corrupt)",
+        ArtifactRangeReadState.BackendUnavailable or ArtifactRangeReadState.AccessDenied => "tool (payload unavailable)",
+        _ => "tool (payload unavailable)",
+    };
 
     /// <summary>The tool NAME from a ToolCall event's payload (<c>data.name</c>, e.g. "Read" / "WebSearch") — the clean grouping key for the histogram. Falls back to "tool" for a missing / malformed payload.</summary>
     private static string ToolName(string? dataJson)
@@ -531,6 +591,28 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         }
         catch (JsonException) { return "tool"; }
     }
+
+    /// <summary>Streaming prefix parser for an offloaded JSON object; <c>isFinalBlock: false</c> deliberately accepts a bounded prefix without requiring the entire large document.</summary>
+    private static string ToolName(ReadOnlySpan<byte> utf8Json)
+    {
+        if (utf8Json.IsEmpty) return "tool";
+
+        try
+        {
+            var reader = new Utf8JsonReader(utf8Json, isFinalBlock: false, state: default);
+            while (reader.Read())
+            {
+                if (reader.TokenType != JsonTokenType.PropertyName || reader.CurrentDepth != 1 || !reader.ValueTextEquals("name")) continue;
+                if (!reader.Read() || reader.TokenType != JsonTokenType.String) return "tool";
+                return reader.GetString() is { Length: > 0 } name ? name : "tool";
+            }
+        }
+        catch (JsonException) { }
+
+        return "tool";
+    }
+
+    private sealed record ToolPayload(string? DataJson, Guid? DataArtifactId);
 
     /// <summary>The PR the turn opened, joined from the run's open-PR node output (number/url) + its inputs (title / branches) — OR, DC-3, a fallback onto <c>PublishManifest</c> for a PR opened OUTSIDE any workflow node (the Room's own Open-PR button, or a server-authored delivery step) that a pre-wired <c>git.open_pr</c> node never ran for. Null when the turn opened none either way.</summary>
     private async Task<RoomDelivery?> DeliveryAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
