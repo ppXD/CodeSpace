@@ -347,6 +347,36 @@ public class RoomProjectorFlowTests
     }
 
     [Fact]
+    public async Task A_terminal_cache_hit_overlays_the_fresh_attempt_ladder_without_rebuilding_the_heavy_block()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Flaky then continued");
+        var now = DateTimeOffset.UtcNow;
+
+        var original = await SeedAttemptAsync(teamId, sessionId, turnIndex: 1, rootRunId: null, status: WorkflowRunStatus.Failure, source: WorkflowRunSourceTypes.Snapshot, createdAt: now.AddMinutes(-10));
+        var winner = await SeedAttemptAsync(teamId, sessionId, turnIndex: null, rootRunId: original, status: WorkflowRunStatus.Success, source: WorkflowRunSourceTypes.Rerun, createdAt: now.AddMinutes(-9));
+        await SeedStopDecisionAsync(teamId, winner, outcome: "completed", summary: "Cached exact answer.");
+        var current = await SeedTurnAsync(teamId, sessionId, turn: 2, goal: "Continue", resultSummary: "Current turn.");
+
+        var before = (await ProjectByRunAsync(current, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(turn => turn.TurnIndex == 1);
+        before.Attempts.Select(attempt => attempt.RunId).ShouldBe(new[] { original, winner });
+        var cachedBody = JsonSerializer.Serialize(before with { Attempts = Array.Empty<RoomTurnAttempt>() }, AgentJson.Options);
+
+        var laterFailure = await SeedAttemptAsync(teamId, sessionId, turnIndex: null, rootRunId: original, status: WorkflowRunStatus.Failure, source: WorkflowRunSourceTypes.Rerun, createdAt: now.AddMinutes(-8));
+
+        var after = (await ProjectByRunAsync(current, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(turn => turn.TurnIndex == 1);
+
+        after.RunId.ShouldBe(winner, "the newest success remains the effective attempt even after a later failure");
+        after.Status.ShouldBe(WorkflowRunStatus.Success);
+        after.Attempts.Select(attempt => attempt.RunId).ShouldBe(new[] { original, winner, laterFailure }, "the cached terminal body must not freeze the attempt ladder");
+        after.Attempts.Select(attempt => attempt.Status).ShouldBe(new[] { WorkflowRunStatus.Failure, WorkflowRunStatus.Success, WorkflowRunStatus.Failure });
+        after.Attempts.Single(attempt => attempt.IsCurrent).RunId.ShouldBe(winner);
+        after.Blocks.ShouldBeSameAs(before.Blocks, "the expensive narrative remains the object cached for the effective terminal run");
+        after.Actions.ShouldBeSameAs(before.Actions, "only the cheap attempt ladder is overlaid on a cache hit");
+        JsonSerializer.Serialize(after with { Attempts = Array.Empty<RoomTurnAttempt>() }, AgentJson.Options).ShouldBe(cachedBody, "headline, answer, map, blocks and actions remain the exact cached heavy projection");
+    }
+
+    [Fact]
     public async Task Opening_a_prior_attempts_run_focuses_that_attempts_flow_not_the_latest()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
