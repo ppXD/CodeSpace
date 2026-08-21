@@ -18,7 +18,7 @@ namespace CodeSpace.Core.Services.Workflows.Display;
 /// </summary>
 public sealed class WorkflowRunViewMetadataReader : IWorkflowRunViewMetadataReader, IScopedDependency
 {
-    public const int MaximumLineageAttempts = 256;
+    public const int MaximumLineageAttempts = WorkflowRunViewAdmissionService.MaximumLineageAttempts;
     public const int MaximumTopologyNodes = 1000;
     public const int MaximumTopologyEdges = 5000;
     // A valid map may admit 10,000 branches. Budget two complete maximum-size branch waves plus the bounded
@@ -26,46 +26,11 @@ public sealed class WorkflowRunViewMetadataReader : IWorkflowRunViewMetadataRead
     public const int MaximumCells = Engine.MapPlan.MaxBranchesCeiling * 2 + MaximumTopologyNodes;
     public const int MaximumLinks = MaximumCells;
     public const int MaximumDefinitionJsonBytes = 8 * 1024 * 1024;
-    public const int MaximumIdentityCharacters = 256;
+    public const int MaximumIdentityCharacters = WorkflowRunViewAdmissionService.MaximumIdentityCharacters;
     public const int MaximumLabelCharacters = 512;
     public const int MaximumConditionCharacters = 1024;
 
-    internal const string CellMetadataSql = """
-        WITH lineage AS (
-            SELECT run_id, attempt_ordinal
-            FROM unnest(@run_ids::uuid[]) WITH ORDINALITY AS requested(run_id, attempt_ordinal)
-        ), attempt_cells AS (
-            SELECT record.run_id,
-                   lineage.attempt_ordinal,
-                   record.node_id,
-                   record.iteration_key,
-                   (array_agg(record.record_type ORDER BY record.sequence DESC))[1] AS latest_record_type,
-                   (array_agg(record.occurred_at ORDER BY record.sequence DESC))[1] AS latest_occurred_at,
-                   min(record.occurred_at) FILTER (WHERE record.record_type = 'node.started') AS first_started_at,
-                   min(record.occurred_at) AS first_occurred_at
-            FROM workflow_run_record AS record
-            INNER JOIN lineage ON lineage.run_id = record.run_id
-            WHERE record.run_id = ANY(@run_ids)
-              AND record.node_id IS NOT NULL
-              AND record.record_type LIKE 'node.%'
-            GROUP BY record.run_id, lineage.attempt_ordinal, record.node_id, record.iteration_key
-        ), cells AS (
-            SELECT DISTINCT ON (node_id, iteration_key)
-                   run_id, node_id, iteration_key, latest_record_type, latest_occurred_at, first_started_at, first_occurred_at
-            FROM attempt_cells
-            ORDER BY node_id, iteration_key, attempt_ordinal DESC
-        )
-        SELECT run_id,
-               CASE WHEN char_length(node_id) BETWEEN 1 AND @max_identity_chars THEN node_id END AS node_id,
-               CASE WHEN char_length(iteration_key) <= @max_identity_chars THEN iteration_key END AS iteration_key,
-               latest_record_type,
-               coalesce(first_started_at, first_occurred_at) AS started_at,
-               CASE WHEN latest_record_type IN ('node.completed', 'node.failed', 'node.skipped') THEN latest_occurred_at END AS completed_at,
-               NOT (char_length(node_id) BETWEEN 1 AND @max_identity_chars AND char_length(iteration_key) <= @max_identity_chars) AS identity_invalid
-        FROM cells
-        ORDER BY coalesce(first_started_at, first_occurred_at), node_id, iteration_key
-        LIMIT @take
-        """;
+    internal const string CellMetadataSql = WorkflowRunViewAdmissionService.SelectedCellsSql;
 
     internal const string LinkMetadataSql = """
         SELECT wait.run_id,
@@ -182,32 +147,25 @@ public sealed class WorkflowRunViewMetadataReader : IWorkflowRunViewMetadataRead
 
     private readonly CodeSpaceDbContext _db;
     private readonly INodeRegistry _nodeRegistry;
+    private readonly IWorkflowRunViewAdmission _admission;
 
-    public WorkflowRunViewMetadataReader(CodeSpaceDbContext db, INodeRegistry nodeRegistry)
+    public WorkflowRunViewMetadataReader(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IWorkflowRunViewAdmission admission)
     {
         _db = db;
         _nodeRegistry = nodeRegistry;
+        _admission = admission;
     }
 
     public async Task<WorkflowRunViewMetadata?> ReadAsync(Guid runId, Guid teamId, WorkflowRunViewScope scope, CancellationToken cancellationToken)
     {
-        if (!Enum.IsDefined(scope)) throw new ArgumentOutOfRangeException(nameof(scope), scope, "Unknown Workflow Run view scope.");
-        var run = await _db.WorkflowRun.AsNoTracking()
-            .Where(value => value.Id == runId && value.TeamId == teamId)
-            .Select(value => new RunHeader
-            {
-                Id = value.Id, RunNumber = value.RunNumber, WorkflowId = value.WorkflowId, WorkflowVersion = value.WorkflowVersion,
-                SourceType = value.SourceType, ParentRunId = value.ParentRunId, RootRunId = value.RootRunId, Status = value.Status,
-                HasError = value.Error != null, StartedAt = value.StartedAt, CompletedAt = value.CompletedAt, CreatedDate = value.CreatedDate,
-            })
-            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-        if (run is null) return null;
+        var admitted = await _admission.AdmitAsync(runId, teamId, scope, cancellationToken).ConfigureAwait(false);
+        if (admitted is null) return null;
+        var run = admitted.Header;
 
         var topology = await ReadTopologyAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
-        var lineage = await ReadLineageAsync(run, teamId, scope, cancellationToken).ConfigureAwait(false);
-        var cellResult = lineage.Availability == WorkflowRunViewAvailability.Available
-            ? await ReadCellsAsync(lineage.Rows, topology.Topology, cancellationToken).ConfigureAwait(false)
-            : new CellResult(lineage.Availability, WorkflowRunViewAvailability.Unavailable, Array.Empty<WorkflowRunCellMetadata>());
+        var cellResult = admitted.LineageAvailability == WorkflowRunViewAvailability.Available
+            ? await ReadCellsAsync(admitted, topology.Topology, cancellationToken).ConfigureAwait(false)
+            : new CellResult(admitted.LineageAvailability, WorkflowRunViewAvailability.Unavailable, Array.Empty<WorkflowRunCellMetadata>());
 
         return new WorkflowRunViewMetadata
         {
@@ -231,39 +189,16 @@ public sealed class WorkflowRunViewMetadataReader : IWorkflowRunViewMetadataRead
         };
     }
 
-    private async Task<LineageResult> ReadLineageAsync(RunHeader run, Guid teamId, WorkflowRunViewScope scope, CancellationToken cancellationToken)
+    private async Task<CellResult> ReadCellsAsync(WorkflowRunViewAdmission admission, WorkflowRunCanvasTopology? topology, CancellationToken cancellationToken)
     {
-        if (scope == WorkflowRunViewScope.AttemptOnly)
-            return new LineageResult(WorkflowRunViewAvailability.Available, new[] { new LineageRow(run.Id, run.CreatedDate) });
-
-        // Child executions are not members of the top-level rerun/replay ladder. Their metadata is still addressable
-        // by their own run id; treating the index's child exclusion as an empty execution would be missing-as-empty.
-        if (run.SourceType == WorkflowRunSourceTypes.ChildWorkflow)
-            return new LineageResult(WorkflowRunViewAvailability.Available, new[] { new LineageRow(run.Id, run.CreatedDate) });
-
-        var root = run.RootRunId ?? run.Id;
-        var rows = await _db.WorkflowRun.AsNoTracking()
-            .Where(value => value.TeamId == teamId && value.SourceType != WorkflowRunSourceTypes.ChildWorkflow && (value.RootRunId ?? value.Id) == root)
-            .OrderBy(value => value.CreatedDate).ThenBy(value => value.Id)
-            .Select(value => new LineageRow(value.Id, value.CreatedDate))
-            .Take(MaximumLineageAttempts + 1)
-            .ToListAsync(cancellationToken).ConfigureAwait(false);
-
-        return rows.Count > MaximumLineageAttempts
-            ? new LineageResult(WorkflowRunViewAvailability.TooLarge, Array.Empty<LineageRow>())
-            : new LineageResult(WorkflowRunViewAvailability.Available, rows);
-    }
-
-    private async Task<CellResult> ReadCellsAsync(IReadOnlyList<LineageRow> lineage, WorkflowRunCanvasTopology? topology, CancellationToken cancellationToken)
-    {
-        var rows = await ReadCellRowsAsync(lineage.Select(value => value.Id).ToArray(), cancellationToken).ConfigureAwait(false);
+        var rows = (await _admission.ReadSelectedCellsAsync(admission, coordinate: null, MaximumCells + 1, cancellationToken).ConfigureAwait(false)).ToList();
         var cellsAvailability = rows.Count > MaximumCells ? WorkflowRunViewAvailability.Truncated : WorkflowRunViewAvailability.Available;
         if (rows.Count > MaximumCells) rows.RemoveAt(rows.Count - 1);
         if (rows.Any(value => value.IdentityInvalid)) return new CellResult(WorkflowRunViewAvailability.Corrupt, WorkflowRunViewAvailability.Unavailable, Array.Empty<WorkflowRunCellMetadata>());
 
         var selected = rows;
 
-        var links = await ReadLinksAsync(lineage.Select(value => value.Id).ToArray(), cancellationToken).ConfigureAwait(false);
+        var links = await ReadLinksAsync(admission.Lineage.Select(value => value.Id).ToArray(), cancellationToken).ConfigureAwait(false);
         var linksAvailability = links.Count > MaximumLinks
             ? WorkflowRunViewAvailability.TooLarge
             : links.Any(value => value.IdentityInvalid) ? WorkflowRunViewAvailability.Corrupt : WorkflowRunViewAvailability.Available;
@@ -279,43 +214,19 @@ public sealed class WorkflowRunViewMetadataReader : IWorkflowRunViewMetadataRead
 
         var cells = selected.Select(value => new WorkflowRunCellMetadata
         {
-            SourceRunId = value.RunId,
+            SourceRunId = value.SourceRunId,
             NodeId = value.NodeId!,
             IterationKey = value.IterationKey!,
             ContainerKind = ResolveContainerKind(value.IterationKey!, containerTypeById),
-            Status = Status(value.RecordType),
+            Status = value.Status,
             StartedAt = value.StartedAt,
             CompletedAt = value.CompletedAt,
-            ChildRunId = ReadGuid(linkByCell.GetValueOrDefault((value.RunId, value.NodeId!, value.IterationKey!, WorkflowWaitKinds.Subworkflow))),
-            AgentRunId = ReadGuid(linkByCell.GetValueOrDefault((value.RunId, value.NodeId!, value.IterationKey!, WorkflowWaitKinds.AgentRun))),
+            ChildRunId = ReadGuid(linkByCell.GetValueOrDefault((value.SourceRunId, value.NodeId!, value.IterationKey!, WorkflowWaitKinds.Subworkflow))),
+            AgentRunId = ReadGuid(linkByCell.GetValueOrDefault((value.SourceRunId, value.NodeId!, value.IterationKey!, WorkflowWaitKinds.AgentRun))),
             RerunnableFromHere = value.IterationKey == WorkflowIterationKeys.TopLevel && rerunnable.Contains(value.NodeId!),
         }).ToList();
 
         return new CellResult(cellsAvailability, linksAvailability, cells);
-    }
-
-    private async Task<List<CellRow>> ReadCellRowsAsync(Guid[] runIds, CancellationToken cancellationToken)
-    {
-        var connection = _db.Database.GetDbConnection();
-        var closeAfter = connection.State != ConnectionState.Open;
-        if (closeAfter) await _db.Database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-
-        try
-        {
-            await using var command = Command(connection, CellMetadataSql);
-            Add(command, "run_ids", runIds);
-            Add(command, "take", DbType.Int32, MaximumCells + 1);
-            Add(command, "max_identity_chars", DbType.Int32, MaximumIdentityCharacters);
-            var rows = new List<CellRow>(Math.Min(MaximumCells + 1, 256));
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                rows.Add(new CellRow(reader.GetGuid(0), NullableString(reader, 1), NullableString(reader, 2), reader.GetString(3), NullableInstant(reader, 4), NullableInstant(reader, 5), reader.GetBoolean(6)));
-            return rows;
-        }
-        finally
-        {
-            if (closeAfter) await _db.Database.CloseConnectionAsync().ConfigureAwait(false);
-        }
     }
 
     private async Task<List<LinkRow>> ReadLinksAsync(Guid[] runIds, CancellationToken cancellationToken)
@@ -483,25 +394,6 @@ public sealed class WorkflowRunViewMetadataReader : IWorkflowRunViewMetadataRead
         command.Parameters.Add(parameter);
     }
 
-    private sealed record RunHeader
-    {
-        public required Guid Id { get; init; }
-        public required long RunNumber { get; init; }
-        public Guid? WorkflowId { get; init; }
-        public int? WorkflowVersion { get; init; }
-        public required string SourceType { get; init; }
-        public Guid? ParentRunId { get; init; }
-        public Guid? RootRunId { get; init; }
-        public required WorkflowRunStatus Status { get; init; }
-        public required bool HasError { get; init; }
-        public DateTimeOffset? StartedAt { get; init; }
-        public DateTimeOffset? CompletedAt { get; init; }
-        public required DateTimeOffset CreatedDate { get; init; }
-    }
-
-    private sealed record LineageRow(Guid Id, DateTimeOffset CreatedDate);
-    private sealed record LineageResult(WorkflowRunViewAvailability Availability, IReadOnlyList<LineageRow> Rows);
-    private sealed record CellRow(Guid RunId, string? NodeId, string? IterationKey, string RecordType, DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt, bool IdentityInvalid);
     private sealed record LinkRow(Guid RunId, string? NodeId, string? IterationKey, string WaitKind, string? Token, bool IdentityInvalid);
     private sealed record CellResult(WorkflowRunViewAvailability Availability, WorkflowRunViewAvailability LinksAvailability, IReadOnlyList<WorkflowRunCellMetadata> Cells);
     private sealed record TopologyResult(WorkflowRunViewAvailability Availability, WorkflowRunCanvasTopology? Topology);
