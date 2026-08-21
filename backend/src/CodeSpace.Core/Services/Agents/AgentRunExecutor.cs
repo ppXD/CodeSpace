@@ -63,6 +63,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// <summary>Cap on the captured diff inlined into the persisted result row (~1 MB). A larger diff is truncated with a marker; the full diff belongs in the artifact layer (a later slice).</summary>
     private const int MaxPatchChars = 1_000_000;
 
+    /// <summary>Redacted durable reason for a writable repository whose git facts could not be captured.</summary>
+    internal const string RepositoryCaptureUnavailableCode = "capture-unavailable";
+
     /// <summary>
     /// Air-gapped/large-context operator override (Rule 8) for the max session-transcript file size the P3 capture will
     /// read into memory. The session <c>.jsonl</c> is read whole into a string and then offloaded, so the transient
@@ -1070,10 +1073,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// call), so the top-level fields and the primary's per-repo entry agree; each entry carries its <see cref="RepositoryRunResult.RepositoryId"/>
     /// resolved from the run's authoring spec. The push step fills in each entry's produced branch.
     ///
-    /// <para>Per-repo ISOLATED + best-effort: a SECONDARY repo's capture failure is logged and that repo is dropped from
-    /// the set — it must never abort the whole capture (which would discard the repos that captured fine and silently
-    /// degrade a multi-repo run to look single-repo). The primary's capture already succeeded (it's the top-level diff),
-    /// so the change set always carries at least the primary.</para>
+    /// <para>Per-repo ISOLATED + best-effort: a SECONDARY repo's capture failure does not abort the agent run, but the
+    /// repo remains in the set with a stable <see cref="RepositoryRunResult.CaptureError"/>. This preserves the complete
+    /// writable-repo identity set and makes downstream integration fail closed instead of silently shipping siblings.
+    /// The primary's capture already succeeded (it's the top-level diff).</para>
     /// </summary>
     private async Task<AgentRunResult> CaptureRepositoryResultsAsync(Guid runId, Guid teamId, AgentTask task, AgentRunResult result, IWorkspaceHandle workspace, WorkspaceChanges primaryChanges, CancellationToken cancellationToken)
     {
@@ -1086,7 +1089,18 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             var changes = await CaptureOneRepoOrNullAsync(runId, repo, workspace, primaryChanges, cancellationToken).ConfigureAwait(false);
 
-            if (changes is null) continue;   // a secondary repo's capture failed (already logged) — drop it, keep the rest
+            if (changes is null)
+            {
+                perRepo.Add(new RepositoryRunResult
+                {
+                    Alias = repo.Alias,
+                    RepositoryId = repoIds is not null && repoIds.TryGetValue(repo.Alias, out var failedId) ? failedId : null,
+                    BaseBranch = repo.BaseBranch,
+                    Access = WorkspaceAccess.Write,
+                    CaptureError = RepositoryCaptureUnavailableCode,
+                });
+                continue;
+            }
 
             // Publish-manifest (I1): offload THIS repo's full, untruncated patch — TryOffloadPatchAsync is its OWN
             // best-effort step (never throws), so a per-repo artifact failure can only leave THAT repo's
@@ -1112,7 +1126,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         return result with { RepositoryResults = perRepo, ChangeSetId = ChangeSetIdFor(runId) };
     }
 
-    /// <summary>Capture one writable repo's changes (the primary's are already in hand, so reuse them). Returns null when a SECONDARY repo's capture fails — logged, isolated, never aborting the whole change set. Cancellation still propagates.</summary>
+    /// <summary>Capture one writable repo's changes (the primary's are already in hand, so reuse them). Returns null when a SECONDARY repo's capture fails — logged and durably warned, isolated, never aborting the agent run. Cancellation still propagates.</summary>
     private async Task<WorkspaceChanges?> CaptureOneRepoOrNullAsync(Guid runId, WorkspaceRepositoryHandle repo, IWorkspaceHandle workspace, WorkspaceChanges primaryChanges, CancellationToken cancellationToken)
     {
         if (repo.Alias == workspace.PrimaryAlias) return primaryChanges;
@@ -1123,8 +1137,22 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogWarning(ex, "Agent run {RunId}: failed to capture changes for repo '{Alias}'; dropping it from the change set, keeping the others", runId, repo.Alias);
+            _logger.LogWarning(ex, "Agent run {RunId}: failed to capture changes for repo '{Alias}'; recording an unavailable repo fact and keeping the others", runId, repo.Alias);
+            await AppendRepositoryCaptureFailureWarningAsync(runId, repo.Alias, cancellationToken).ConfigureAwait(false);
             return null;
+        }
+    }
+
+    /// <summary>Persist a redacted timeline fact for a secondary-repository capture gap. Best-effort and shadow: observability failure never changes the harness result.</summary>
+    private async Task AppendRepositoryCaptureFailureWarningAsync(Guid runId, string alias, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _runs.AppendEventAsync(runId, new AgentEvent { Kind = AgentEventKind.Warning, Text = $"Could not capture git changes for repository '{alias}'; the change set is incomplete and cannot be published as clean." }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Agent run {RunId}: could not record the repository capture warning for '{Alias}'", runId, alias);
         }
     }
 

@@ -197,4 +197,20 @@ public class SupervisorMergeWithholdTests
 
         RealSupervisorActionExecutor.CollectAgentBranchesForRepo(context, repo).ShouldBe(new[] { "r-current" });
     }
+
+    [Fact]
+    public void A_capture_failed_repo_is_not_laundered_as_untouched()
+    {
+        RealSupervisorActionExecutor.IsUntouched(new RepositoryRunResult { Alias = "api", RepositoryId = Guid.NewGuid(), CaptureError = AgentRunExecutor.RepositoryCaptureUnavailableCode })
+            .ShouldBeFalse("the failed writable axis must reach integration and make its aggregate non-Clean");
+        RealSupervisorActionExecutor.HasCaptureFailure(new[] { new RepositoryRunResult { Alias = "api", CaptureError = AgentRunExecutor.RepositoryCaptureUnavailableCode } })
+            .ShouldBeTrue("exact-id and null-id integration both classify the durable gap as Partial");
+
+        var untouched = new RepositoryRunResult { Alias = "docs", RepositoryId = Guid.NewGuid() };
+        RealSupervisorActionExecutor.IsUntouched(untouched)
+            .ShouldBeTrue("a healthy repo with no patch or branch remains the ordinary untouched case");
+        RealSupervisorActionExecutor.HasCaptureFailure(new[] { untouched }).ShouldBeFalse();
+        JsonSerializer.Serialize(untouched, AgentJson.Options).ShouldNotContain("captureError", Case.Sensitive,
+            "healthy and legacy repository result JSON remains byte-shape compatible");
+    }
 }
