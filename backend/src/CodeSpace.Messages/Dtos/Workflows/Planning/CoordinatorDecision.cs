@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace CodeSpace.Messages.Dtos.Workflows.Planning;
 
 /// <summary>
@@ -16,17 +18,22 @@ namespace CodeSpace.Messages.Dtos.Workflows.Planning;
 public sealed record CoordinatorDecision
 {
     /// <summary>What the round resolved to. <c>done</c> / <c>abort</c> terminate the loop; <c>rework</c> runs another round over <see cref="ReworkSubtasks"/>; <c>ask_human</c> is reserved for a future in-loop HITL pause (see CoordinatorSchema follow-up note).</summary>
+    [JsonPropertyName("decision")]
     public required string Decision { get; init; }
 
     /// <summary>One-paragraph summary of the round's results + the reasoning behind the decision — what a reviewer reads.</summary>
+    [JsonPropertyName("summary")]
     public string Summary { get; init; } = "";
 
     /// <summary>The next round's work when <see cref="Decision"/> is <c>rework</c> — same {id,title,instruction} shape as a <see cref="PlannedSubtask"/>; the loop's <c>subtasks</c> update re-seeds the map from this.</summary>
+    [JsonPropertyName("reworkSubtasks")]
     public IReadOnlyList<PlannedSubtask> ReworkSubtasks { get; init; } = Array.Empty<PlannedSubtask>();
 
     /// <summary>The question to a human when <see cref="Decision"/> is <c>ask_human</c>. Empty otherwise.</summary>
+    [JsonPropertyName("question")]
     public string Question { get; init; } = "";
 
     /// <summary>The coordinator's risk read of its own decision — surfaced for the reviewer; not consumed by the loop wiring.</summary>
+    [JsonPropertyName("riskLevel")]
     public string RiskLevel { get; init; } = "low";
 }

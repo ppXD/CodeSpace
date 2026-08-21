@@ -313,6 +313,39 @@ public class WorkflowPlannerTests
         decision.RiskLevel.ShouldBe("medium");
     }
 
+    [Fact]
+    public void Planning_contract_wire_names_are_explicit_not_an_ambient_serializer_policy_accident()
+    {
+        var adversarial = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
+        var plan = new PlannedWorkflow
+        {
+            Goal = "ship",
+            Subtasks = new[] { new PlannedSubtask { Id = "s1", Title = "Build", Instruction = "Do it", DependsOn = new[] { "s0" } } },
+            SuccessCriteria = new[] { "done" },
+            RecommendedWorkflowKind = "coding",
+            HasEnoughContext = false,
+        };
+        var coordinator = new CoordinatorDecision
+        {
+            Decision = "rework",
+            ReworkSubtasks = plan.Subtasks,
+            RiskLevel = "medium",
+        };
+
+        var planJson = JsonSerializer.SerializeToElement(plan, adversarial);
+        var coordinatorJson = JsonSerializer.SerializeToElement(coordinator, adversarial);
+
+        planJson.TryGetProperty("successCriteria", out _).ShouldBeTrue("the schema's exact lower-camel wire key must survive any host serializer policy");
+        planJson.TryGetProperty("recommendedWorkflowKind", out _).ShouldBeTrue();
+        planJson.TryGetProperty("hasEnoughContext", out _).ShouldBeTrue();
+        planJson.GetProperty("subtasks")[0].TryGetProperty("dependsOn", out _).ShouldBeTrue();
+        planJson.TryGetProperty("success_criteria", out _).ShouldBeFalse("ambient snake_case must never silently rename the durable/template contract");
+
+        coordinatorJson.TryGetProperty("reworkSubtasks", out _).ShouldBeTrue();
+        coordinatorJson.TryGetProperty("riskLevel", out _).ShouldBeTrue();
+        coordinatorJson.TryGetProperty("rework_subtasks", out _).ShouldBeFalse();
+    }
+
     // ── PR-D.5: the coordinated projection validates (both body kinds) ─────────
 
     [Theory]
