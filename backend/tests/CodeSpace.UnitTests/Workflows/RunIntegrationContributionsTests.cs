@@ -100,9 +100,10 @@ public class RunIntegrationContributionsTests
         {
             Status = AgentRunStatus.Succeeded,
             ExitReason = "completed",
+            Patch = "diff-primary-compatibility-mirror",
             RepositoryResults = new[]
             {
-                new RepositoryRunResult { Alias = "api", Patch = "diff-api" },
+                new RepositoryRunResult { Alias = "primary", Patch = "diff-primary" },
                 new RepositoryRunResult { Alias = "web", Patch = "diff-web" },
             },
         }, AgentJson.Options);
@@ -111,7 +112,7 @@ public class RunIntegrationContributionsTests
             new[] { Manifest(runId, Repo, PublishState.Pushed, alias: "web") },
             new[] { Work(runId, "agent", "map#0", 1, resultJson) }).ShouldHaveSingleItem();
 
-        contribution.Patch.ShouldBe("diff-web");
+        contribution.Patch.ShouldBe("diff-web", customMessage: "git.integrate_run must bind the manifest alias before the multi-repo result's primary compatibility mirror");
     }
 
     [Fact]

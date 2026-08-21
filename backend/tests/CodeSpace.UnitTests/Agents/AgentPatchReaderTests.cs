@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Publish;
+using CodeSpace.Core.Services.Agents.Publish.Exceptions;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
@@ -56,13 +57,77 @@ public class AgentPatchReaderTests
     [Fact]
     public void A_single_repo_result_yields_its_top_level_patch()
     {
-        var resultJson = Result(new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Patch = "diff --git a/x b/x" });
+        const string patch = "diff --git a/x b/x\r\n@@ -1 +1 @@\r\n-before\r\n+after\r\n";
+        var resultJson = Result(new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Patch = patch });
 
-        AgentInlinePatch.From(resultJson, "primary").ShouldBe("diff --git a/x b/x");
+        AgentInlinePatch.From(resultJson, "legacy-alias-not-recorded").ShouldBe(patch,
+            "a legacy/single-repo result has no per-repo identity to select; its top-level carrier must remain byte-identical");
     }
 
     [Fact]
-    public void A_multi_repo_result_yields_the_entry_matching_the_manifests_alias()
+    public void A_multi_repo_result_selects_the_exact_alias_before_the_primary_compatibility_mirror()
+    {
+        var resultJson = Result(new AgentRunResult
+        {
+            Status = AgentRunStatus.Succeeded,
+            ExitReason = "completed",
+            Patch = "diff-primary-compatibility-mirror",
+            RepositoryResults = new[]
+            {
+                new RepositoryRunResult { Alias = "primary", Patch = "diff-primary" },
+                new RepositoryRunResult { Alias = "web", Patch = "diff-web" },
+            },
+        });
+
+        AgentInlinePatch.From(resultJson, "web").ShouldBe("diff-web",
+            "the top-level patch mirrors primary in a multi-repo result; it must never be grafted onto a secondary manifest");
+    }
+
+    [Fact]
+    public void A_multi_repo_result_with_no_exact_alias_fails_closed()
+    {
+        var resultJson = Result(new AgentRunResult
+        {
+            Status = AgentRunStatus.Succeeded,
+            ExitReason = "completed",
+            Patch = "diff-primary-compatibility-mirror",
+            RepositoryResults = new[]
+            {
+                new RepositoryRunResult { Alias = "primary", Patch = "diff-primary" },
+                new RepositoryRunResult { Alias = "Web", Patch = "diff-web" },
+            },
+        });
+
+        var exception = Should.Throw<AgentInlinePatchResolutionException>(() => AgentInlinePatch.From(resultJson, "web"));
+
+        exception.Kind.ShouldBe(AgentInlinePatchResolutionKind.RepositoryAliasMissing);
+        exception.RepositoryAlias.ShouldBe("web");
+    }
+
+    [Fact]
+    public void A_multi_repo_inline_read_with_an_artifact_reference_fails_closed()
+    {
+        var artifactId = Guid.NewGuid();
+        var resultJson = Result(new AgentRunResult
+        {
+            Status = AgentRunStatus.Succeeded,
+            ExitReason = "completed",
+            RepositoryResults = new[]
+            {
+                new RepositoryRunResult { Alias = "primary", Patch = "diff-primary" },
+                new RepositoryRunResult { Alias = "web", PatchArtifactId = artifactId },
+            },
+        });
+
+        var exception = Should.Throw<AgentInlinePatchResolutionException>(() => AgentInlinePatch.From(resultJson, "web"));
+
+        exception.Kind.ShouldBe(AgentInlinePatchResolutionKind.UnexpectedArtifactReference);
+        exception.RepositoryAlias.ShouldBe("web");
+        exception.ArtifactId.ShouldBe(artifactId);
+    }
+
+    [Fact]
+    public void Duplicate_exact_aliases_fail_closed_instead_of_selecting_by_result_order()
     {
         var resultJson = Result(new AgentRunResult
         {
@@ -70,13 +135,26 @@ public class AgentPatchReaderTests
             ExitReason = "completed",
             RepositoryResults = new[]
             {
-                new RepositoryRunResult { Alias = "api", Patch = "diff-api" },
-                new RepositoryRunResult { Alias = "web", Patch = "diff-web" },
+                new RepositoryRunResult { Alias = "web", Patch = "first" },
+                new RepositoryRunResult { Alias = "web", Patch = "second" },
             },
         });
 
-        AgentInlinePatch.From(resultJson, "web").ShouldBe("diff-web");
-        AgentInlinePatch.From(resultJson, "mobile").ShouldBe("", "an alias no entry carries resolves to nothing — never a sibling repo's diff grafted onto the wrong repository");
+        var exception = Should.Throw<AgentInlinePatchResolutionException>(() => AgentInlinePatch.From(resultJson, "web"));
+
+        exception.Kind.ShouldBe(AgentInlinePatchResolutionKind.RepositoryAliasAmbiguous);
+    }
+
+    [Fact]
+    public void A_legacy_inline_read_with_an_artifact_reference_fails_closed()
+    {
+        var artifactId = Guid.NewGuid();
+        var resultJson = Result(new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", PatchArtifactId = artifactId });
+
+        var exception = Should.Throw<AgentInlinePatchResolutionException>(() => AgentInlinePatch.From(resultJson, "primary"));
+
+        exception.Kind.ShouldBe(AgentInlinePatchResolutionKind.UnexpectedArtifactReference);
+        exception.ArtifactId.ShouldBe(artifactId);
     }
 
     [Theory]
