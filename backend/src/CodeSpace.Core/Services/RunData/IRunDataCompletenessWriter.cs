@@ -30,9 +30,10 @@ namespace CodeSpace.Core.Services.RunData;
 /// <c>false</c> rather than thrown.</para>
 ///
 /// <para><b>Production reads are observation-only.</b> <see cref="IRunDataCompletenessReader"/> exposes bounded
-/// manifest metadata to operators, but no terminal verdict, planner, oracle or completion path consumes it. Wiring a
-/// terminal verdict before every facet has a producer would park every run, since a facet with no statement is
-/// indeterminate.</para>
+/// manifest metadata to Workflow Run operators, while the Agent Run summary exposes bounded gaps carrying exact
+/// process-attempt attribution. Neither read is an execution authority, and no terminal verdict, planner, oracle,
+/// completion or routing path consumes either one. Wiring a terminal verdict before every facet has a producer would
+/// park every run, since a facet with no statement is indeterminate.</para>
 /// </summary>
 public interface IRunDataCompletenessWriter
 {

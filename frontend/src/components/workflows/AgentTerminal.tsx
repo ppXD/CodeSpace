@@ -1,7 +1,7 @@
 import { useContext, useState, type ReactNode } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
-import type { AgentRunEventDto, AgentRunHarnessExecutionSummary } from "@/api/agents";
+import type { AgentRunCaptureGapObservation, AgentRunEventDto, AgentRunHarnessExecutionSummary } from "@/api/agents";
 import type { RoomFileIdentity } from "@/api/sessions";
 import type { CellAttempt, NodeStatus, PhaseAgentRef } from "@/api/workflows";
 import { useAgentRun, useAgentRunEvents } from "@/hooks/use-agents";
@@ -72,6 +72,7 @@ export function AgentTerminal({ agent, onClose, rerun, onOpenFile }: { agent: Ph
     m.toolCount != null && `${m.toolCount} ${m.toolCount === 1 ? "tool" : "tools"}`,
     m.durationMs != null && formatDuration(m.durationMs),
     harnessExecutionFact(run.data?.harnessExecution),
+    captureGapFact(run.data?.captureGaps),
   ].filter(Boolean) as string[];
 
   return (
@@ -154,6 +155,18 @@ function harnessExecutionFact(execution?: AgentRunHarnessExecutionSummary | null
   const attempts = `${execution.attemptCount} ${execution.attemptCount === 1 ? "attempt" : "attempts"}`;
   const capture = execution.hasCapturedNativeRecords ? "native capture" : "no native frames";
   return `${process} · ${attempts} · ${capture}`;
+}
+
+/** Known-missing capture is an observation beside the run verdict, never a replacement for it. */
+function captureGapFact(observation?: AgentRunCaptureGapObservation | null): string | null {
+  if (!observation) return null;
+  if (observation.availability !== "Available") return "capture gaps unavailable";
+  if (observation.items.length === 0) return null;
+
+  const allOpen = observation.items.every(item => item.resolution === "Open");
+  const count = `${observation.items.length}${observation.truncated ? "+" : ""}`;
+  const noun = `${allOpen && !observation.truncated ? "open " : ""}capture gap${observation.items.length === 1 && !observation.truncated ? "" : "s"}`;
+  return `${count} ${noun} · ${humanize(observation.items[0].reason)}`;
 }
 
 function Scrollback({ events, loading, error }: { events: AgentRunEventDto[]; loading: boolean; error: string | null }) {

@@ -8,6 +8,7 @@ using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Decisions;
+using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
@@ -149,6 +150,35 @@ public class AgentRunServiceTests
         observed.Attempts.Count.ShouldBe(100);
         observed.Attempts.Select(candidate => candidate.AttemptOrdinal).ShouldBe(Enumerable.Range(1, 100));
         observed.AttemptsTruncated.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task Capture_gap_observation_failure_is_typed_and_does_not_hide_the_authoritative_agent_run()
+    {
+        var teamId = await SeedTeamAsync();
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+            runId = (await scope.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlRawAsync("ALTER TABLE workflow_run_capture_gap RENAME TO workflow_run_capture_gap_unavailable_test");
+
+        try
+        {
+            using var read = _fixture.BeginScope();
+            var summary = await read.Resolve<IAgentRunService>().GetSummaryForTeamAsync(runId, teamId, CancellationToken.None);
+
+            summary.ShouldNotBeNull(customMessage: "observation is fail-open: losing its table must never hide or fail the authoritative Agent Run");
+            summary.Status.ShouldBe(AgentRunStatus.Queued);
+            summary.CaptureGaps.Availability.ShouldBe(AgentRunCaptureGapReadAvailability.BackendUnavailable);
+            summary.CaptureGaps.Items.ShouldBeEmpty();
+            summary.CaptureGaps.ErrorCode.ShouldBe("capture-gap.read-failed");
+        }
+        finally
+        {
+            using var restore = _fixture.BeginScope();
+            await restore.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlRawAsync("ALTER TABLE workflow_run_capture_gap_unavailable_test RENAME TO workflow_run_capture_gap");
+        }
     }
 
     [Fact]
