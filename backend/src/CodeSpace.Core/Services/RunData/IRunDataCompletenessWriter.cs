@@ -29,9 +29,10 @@ namespace CodeSpace.Core.Services.RunData;
 /// caller's DbContext and any transaction it is holding are untouched, and a refusal is logged and reported as
 /// <c>false</c> rather than thrown.</para>
 ///
-/// <para><b>Nothing READS either table in production.</b> This is the write side only; wiring a terminal verdict to the
-/// manifest before every facet has a producer would park every run, since a facet with no statement is indeterminate.
-/// </para>
+/// <para><b>Production reads are observation-only.</b> <see cref="IRunDataCompletenessReader"/> exposes bounded
+/// manifest metadata to operators, but no terminal verdict, planner, oracle or completion path consumes it. Wiring a
+/// terminal verdict before every facet has a producer would park every run, since a facet with no statement is
+/// indeterminate.</para>
 /// </summary>
 public interface IRunDataCompletenessWriter
 {

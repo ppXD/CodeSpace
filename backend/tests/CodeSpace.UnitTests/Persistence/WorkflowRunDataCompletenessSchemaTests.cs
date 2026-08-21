@@ -211,9 +211,9 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
 
     /// <summary>
     /// The isolation that still holds, checked rather than asserted in prose: TWO production producers, both in the
-    /// capture plane, and STILL zero production readers. The only files in <c>backend/src</c> that may mention either
-    /// table are the two entities, their two configurations, the DbContext that registers them, the shared completeness
-    /// WRITER every facet's producer states through, and the capture plane's two completeness partials — the
+    /// capture plane, and ONE observation-only manifest reader. The only files in <c>backend/src</c> that may mention
+    /// either table are the two entities, their two configurations, the DbContext that registers them, the shared
+    /// completeness writer and bounded reader, and the capture plane's two completeness partials — the
     /// native-record facet and the harness-process-attempt facet, each of which states its own facet, records a gap for
     /// its own refused write, and reads neither table for any decision. In particular nothing in completion, terminal
     /// decision, planner, oracle, critic or routing may read the manifest: making terminal authority answer to it is a
@@ -224,7 +224,7 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
     /// message below is the number a reader can trust without grepping.</para>
     /// </summary>
     [Fact]
-    public void Only_the_capture_planes_two_producers_touch_either_table()
+    public void Only_the_capture_planes_two_producers_and_observation_reader_touch_either_table()
     {
         var sourceRoot = ProductionSourceRoot();
 
@@ -237,6 +237,7 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
         mentions.ShouldBe(new[]
         {
             "CodeSpaceDbContext.cs",
+            "IRunDataCompletenessReader.cs",
             "IRunDataCompletenessWriter.cs",
             "NativeRecordPlane.Completeness.cs",
             "NativeRecordPlane.ProcessCompleteness.cs",
@@ -245,12 +246,12 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
             "WorkflowRunCaptureGapConfiguration.cs",
             "WorkflowRunDataManifest.cs",
             "WorkflowRunDataManifestConfiguration.cs",
-        }, customMessage: "a production file other than the shared completeness writer and the capture plane's two " +
-                          "completeness partials now reads or writes the capture-gap / data-manifest plane. Exactly two " +
-                          "producers exist — the native-record facet and the harness-process-attempt facet — and nothing " +
-                          "reads either table: no reducer folds a gap and terminal authority does not consult the " +
-                          "manifest. If a third producer or the FIRST READER is genuinely being added, it is a deliberate " +
-                          "step that updates this list — not a silent one.");
+        }, customMessage: "a production file other than the shared completeness writer, bounded observation reader, " +
+                          "and capture plane's two completeness partials now reads or writes the capture-gap / " +
+                          "data-manifest plane. Exactly two producers exist — the native-record facet and the " +
+                          "harness-process-attempt facet — and the only reader reports recorded facets without a " +
+                          "run-wide verdict. No reducer or terminal authority consults the manifest. Any additional " +
+                          "producer or reader is a deliberate step that updates this list — not a silent one.");
     }
 
     /// <summary>

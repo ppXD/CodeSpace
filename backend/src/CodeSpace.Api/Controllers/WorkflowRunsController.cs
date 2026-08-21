@@ -86,6 +86,14 @@ public class WorkflowRunsController : ControllerBase
         return result == null ? NotFound() : Ok(result);
     }
 
+    /// <summary>Bounded metadata-only view of producer-recorded data completeness; it never synthesizes a run-wide verdict.</summary>
+    [HttpGet("{runId:guid}/data-completeness")]
+    public async Task<IActionResult> GetDataCompleteness([FromRoute] Guid runId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetWorkflowRunDataCompletenessQuery { RunId = runId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
     /// <summary>Metadata-only view of one model call owned by this Workflow Run. Prompt/output bytes are fetched through the bounded part route below.</summary>
     [HttpGet("{runId:guid}/model-calls/{sequence:long}")]
     public async Task<IActionResult> GetModelCall([FromRoute] Guid runId, [FromRoute] long sequence, CancellationToken cancellationToken)

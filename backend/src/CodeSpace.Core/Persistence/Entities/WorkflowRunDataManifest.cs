@@ -45,13 +45,13 @@ namespace CodeSpace.Core.Persistence.Entities;
 /// run is a LATER, deliberate slice, and that fold must treat a facet with no row as indeterminate, which is precisely
 /// why no terminal decision, completion assessment, planner, oracle or router reads this table in this slice.</para>
 ///
-/// <para><b>Who writes one, and who does not read it.</b> Exactly one producer exists: the native-record capture plane
-/// (<c>NativeRecordPlane</c>) states the <see cref="WorkflowRunDataOwnerKinds.NativeRecord"/> facet of a run bound to a
-/// workflow run — declaring each batch's expectation before it writes the frames, stating their presence once they are
-/// durable, and unstating the expectation when an observer dies inside the capture window. Every other facet has no
-/// producer, so its absent row is the indeterminate answer above. NOTHING reads this table: no completion, terminal
-/// decision, planner, oracle, critic or router consults it, because a reader wired before the producers exist would
-/// park every run whose facets nobody states.</para>
+/// <para><b>Who writes one, and who reads it.</b> The native-record capture plane states the
+/// <see cref="WorkflowRunDataOwnerKinds.NativeRecord"/> facet; harness process-attempt capture states
+/// <see cref="WorkflowRunDataOwnerKinds.HarnessProcessAttempt"/>. Every other facet has no producer, so its absent row
+/// is the indeterminate answer above. <c>IRunDataCompletenessReader</c> reads these rows only as bounded operator
+/// metadata and explicitly refuses a run-wide verdict. No completion, terminal decision, planner, oracle, critic or
+/// router consults it, because an authority reader wired before all producers exist would park every run whose facets
+/// nobody states.</para>
 ///
 /// <para><b>And every writer arrives the same way.</b> No producer writes this table directly:
 /// <c>workflow_run_data_manifest_advance</c> / <c>workflow_run_data_manifest_unstate_expectation</c> (migration 0148)
