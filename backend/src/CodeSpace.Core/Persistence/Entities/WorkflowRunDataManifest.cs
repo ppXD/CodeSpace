@@ -47,7 +47,8 @@ namespace CodeSpace.Core.Persistence.Entities;
 ///
 /// <para><b>Who writes one, and who reads it.</b> The native-record capture plane states the
 /// <see cref="WorkflowRunDataOwnerKinds.NativeRecord"/> facet; harness process-attempt capture states
-/// <see cref="WorkflowRunDataOwnerKinds.HarnessProcessAttempt"/>. Every other facet has no producer, so its absent row
+/// <see cref="WorkflowRunDataOwnerKinds.HarnessProcessAttempt"/>; and a newly minted harness execution states
+/// <see cref="WorkflowRunDataOwnerKinds.HarnessExecution"/>. Every other facet has no producer, so its absent row
 /// is the indeterminate answer above. <c>IRunDataCompletenessReader</c> reads these rows only as bounded operator
 /// metadata and explicitly refuses a run-wide verdict. No completion, terminal decision, planner, oracle, critic or
 /// router consults it, because an authority reader wired before all producers exist would park every run whose facets

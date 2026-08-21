@@ -83,13 +83,14 @@ public sealed class NativeRecordContractException : Exception, IFailure
 /// bearing, because the refusals are reachable BY DESIGN: 0137 rejects a superseded worker's fence on exactly the
 /// reclaim-for-reattach case, which is the outcome that case is supposed to have.
 ///
-/// <para>It also ACCOUNTS for what it wrote, for TWO facets of the run's record. Every batch advances the completeness
+/// <para>It also ACCOUNTS for what it wrote, for THREE facets of the run's record. Every batch advances the completeness
 /// statement for the <see cref="WorkflowRunDataOwnerKinds.NativeRecord"/> facet, and a batch the database refuses
 /// becomes a known-missing span; every LAUNCH does the same for
 /// <see cref="WorkflowRunDataOwnerKinds.HarnessProcessAttempt"/>, whose expectation — one process record per launch — is
-/// the first in this plane that is declared rather than discovered. Each half lives in its own completeness partial,
-/// which states plainly what a complete verdict there does and does not mean, and that nothing reads either table
-/// yet.</para>
+/// declared rather than discovered; and only a launch that mints a new
+/// <see cref="WorkflowRunDataOwnerKinds.HarnessExecution"/> identity states that facet. Each concern lives in its own
+/// completeness partial, which states plainly what a complete verdict there does and does not mean. The operator
+/// completeness view reads the bounded statements; no run authority or intelligence path does.</para>
 /// </summary>
 public sealed partial class NativeRecordPlane : INativeRecordPlane, IScopedDependency
 {
@@ -120,10 +121,28 @@ public sealed partial class NativeRecordPlane : INativeRecordPlane, IScopedDepen
         if (run is null) return null;
 
         var execution = await ResolveExecutionAsync(db, request, run, cancellationToken).ConfigureAwait(false);
+        var opensExecution = db.Entry(execution).State == EntityState.Added;
+        var executionDeclared = opensExecution && await DeclareExecutionAsync(request.TeamId, run.WorkflowRunId, cancellationToken).ConfigureAwait(false);
+
         var attempt = AppendedAttempt(request, execution);
 
         db.WorkflowRunHarnessProcessAttempt.Add(attempt);
-        await AppendAttemptAsync(db, request, run.WorkflowRunId, attempt.Id, cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            await AppendAttemptAsync(db, request, run.WorkflowRunId, attempt.Id, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception refusal) when (opensExecution && run.WorkflowRunId.HasValue && (refusal is not OperationCanceledException || !cancellationToken.IsCancellationRequested))
+        {
+            await NoticeRefusedExecutionAsync(db, new RefusedExecution(request.TeamId, request.AgentRunId, run.WorkflowRunId!.Value, execution.Id, request.WorkerFenceEpoch), refusal, cancellationToken).ConfigureAwait(false);
+
+            throw;
+        }
+
+        if (executionDeclared)
+            await AccountForExecutionAsync(request.TeamId, run.WorkflowRunId, cancellationToken).ConfigureAwait(false);
+        else if (opensExecution && run.WorkflowRunId is { } workflowRunId)
+            await MarkExecutionExpectationIndeterminateAsync(request.TeamId, workflowRunId, cancellationToken).ConfigureAwait(false);
 
         return new NativeRecordCaptureHandle
         {

@@ -133,7 +133,8 @@ public sealed class HarnessProcessAttemptCompletenessFlowTests
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
 
-        var gap = await db.WorkflowRunCaptureGap.AsNoTracking().SingleAsync(candidate => candidate.WorkflowRunId == run.WorkflowRunId);
+        var gap = await db.WorkflowRunCaptureGap.AsNoTracking().SingleAsync(candidate => candidate.WorkflowRunId == run.WorkflowRunId
+            && candidate.SubjectKind == WorkflowRunDataOwnerKinds.HarnessProcessAttempt);
         gap.SubjectKind.ShouldBe(WorkflowRunDataOwnerKinds.HarnessProcessAttempt);
         gap.SubjectId.ShouldNotBeNullOrWhiteSpace(customMessage: "the row this span names is exactly the one that does not exist, and its minted id is the coordinate that locates it");
         gap.RangeKind.ShouldBe(CaptureGapRangeKind.Unbounded,
