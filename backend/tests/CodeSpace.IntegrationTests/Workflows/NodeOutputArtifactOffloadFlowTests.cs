@@ -2,7 +2,9 @@ using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Workflows.Artifacts;
+using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
 using CodeSpace.Core.Services.Workflows.Engine;
+using CodeSpace.Core.Services.Workflows.Lifecycle;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Commands.Workflows;
@@ -95,19 +97,18 @@ public class NodeOutputArtifactOffloadFlowTests
 
         await RunEngineAsync(runId);
 
+        var missingId = Guid.NewGuid();
         using (var corrupt = _fixture.BeginScope())
         {
             var db = corrupt.Resolve<CodeSpaceDbContext>();
-            var emit = await db.WorkflowRunNode.SingleAsync(n => n.RunId == runId && n.NodeId == "emit" && n.IterationKey == "");
-            var missingId = Guid.NewGuid();
-            emit.OutputsJson = JsonSerializer.Serialize(new Dictionary<string, object>
+            var missingRef = JsonSerializer.SerializeToElement(new Dictionary<string, object>
             {
-                ["body"] = new Dictionary<string, object>
-                {
-                    [NodeOutputArtifacts.RefKey] = new { id = missingId, size_bytes = 32 * 1024, content_type = "application/json" },
-                },
+                [NodeOutputArtifacts.RefKey] = new { id = missingId, size_bytes = 32 * 1024, content_type = "application/json" },
             });
-            await db.SaveChangesAsync();
+            await corrupt.Resolve<IRunRecordLogger>().NodeCompletedAsync(
+                runId, "emit", "", new Dictionary<string, JsonElement> { ["body"] = missingRef }, null, TimeSpan.Zero, CancellationToken.None);
+            (await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "emit" && n.IterationKey == "")).OutputsJson
+                .ShouldContain(missingId.ToString(), Case.Insensitive, "precondition: the replay row really points at absent content");
         }
 
         (await ApproveAsync(runId, teamId, userId)).ShouldBeTrue();
@@ -116,7 +117,7 @@ public class NodeOutputArtifactOffloadFlowTests
         using var verify = _fixture.BeginScope();
         var failed = await verify.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
         failed.Status.ShouldBe(WorkflowRunStatus.Failure);
-        failed.Error.ShouldContain(nameof(CodeSpace.Core.Services.Workflows.Artifacts.Exceptions.ArtifactContentUnavailableException));
+        failed.Error.ShouldContain(nameof(ArtifactContentUnavailableException));
         failed.OutputsJson.ShouldNotContain(NodeOutputArtifacts.RefKey, Case.Sensitive, "the unresolved pointer must never become downstream terminal output");
     }
 

@@ -1,9 +1,12 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Variables;
 using CodeSpace.Core.Services.Workflows;
+using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.Lifecycle;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -111,7 +114,7 @@ public class MapInputSnapshotFlowTests
             {
                 Id = Guid.NewGuid(), RunId = runId, MapNodeId = "map", IterationKey = "",
                 DefinitionHash = "preseed", ElementCount = 1, ElementsJson = """["Z"]""",
-                ContentHash = "preseed", Sensitivity = "Plain", CapturedAt = DateTimeOffset.UtcNow,
+                ContentHash = SnapshotHash("""["Z"]"""), Sensitivity = "Plain", CapturedAt = DateTimeOffset.UtcNow,
             });
             await db.SaveChangesAsync();
         }
@@ -311,6 +314,41 @@ public class MapInputSnapshotFlowTests
         // fan over 0 elements and orphan the 16 parked branches.
         JsonDocument.Parse((await MapNodeAsync(fdb, runId)).OutputsJson).RootElement.GetProperty("count").GetInt32()
             .ShouldBe(16, "the offloaded snapshot re-inflated to all 16 elements on resume");
+    }
+
+    [Fact]
+    public async Task A_missing_offloaded_plain_snapshot_fails_closed_instead_of_resuming_with_zero_branches()
+    {
+        var key = "sp-" + Guid.NewGuid().ToString("N");
+        SuspendProbeNode.Reset(key);
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var element = "big-" + new string('x', 16 * 1024);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, TriggerSuspendingMapDefinition(key));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: JsonSerializer.Serialize(new { things = new[] { element } }));
+
+        await RunEngineAsync(runId);
+        await AssertSuspendedAsync(runId, "the one large branch parked after its map snapshot offloaded");
+
+        using (var corrupt = _fixture.BeginScope())
+        {
+            var db = corrupt.Resolve<CodeSpaceDbContext>();
+            var snapshot = await db.WorkflowRunMapInput.SingleAsync(s => s.RunId == runId && s.MapNodeId == "map");
+            snapshot.ElementsJson.ShouldContain(NodeOutputArtifacts.RefKey);
+            snapshot.ElementsJson = JsonSerializer.Serialize(new Dictionary<string, object>
+            {
+                [NodeOutputArtifacts.RefKey] = new { id = Guid.NewGuid(), size_bytes = element.Length, content_type = "application/json" },
+            });
+            await db.SaveChangesAsync();
+        }
+
+        (await ResolveBranchAsync(runId, key, "b-0", "RES-0")).ShouldBeTrue();
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var failed = await verify.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+        failed.Status.ShouldBe(WorkflowRunStatus.Failure);
+        failed.Error.ShouldContain(nameof(CodeSpace.Core.Services.Workflows.Artifacts.Exceptions.ArtifactContentUnavailableException));
     }
 
     [Fact]
@@ -522,6 +560,13 @@ public class MapInputSnapshotFlowTests
     {
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<CodeSpaceDbContext>().WorkflowRunMapInput.AsNoTracking().SingleAsync(s => s.RunId == runId && s.MapNodeId == "map");
+    }
+
+    private static string SnapshotHash(string arrayJson)
+    {
+        using var document = JsonDocument.Parse(arrayJson);
+        var elements = document.RootElement.EnumerateArray().Select(element => element.Clone()).ToList();
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(elements))));
     }
 
     private async Task<Guid> CreateWorkflowAsync(Guid teamId, Guid userId, WorkflowDefinition definition)

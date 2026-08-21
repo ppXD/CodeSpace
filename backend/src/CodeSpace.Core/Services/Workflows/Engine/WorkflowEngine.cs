@@ -1898,7 +1898,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         return await LoadSnapshotElementsAsync(winner, mapNode, scope, run.TeamId, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Read a persisted map-input snapshot back to the element array: a SecretDerived snapshot re-resolves live (no frozen array was stored); a Plain snapshot deserializes its frozen array, re-inflating any offloaded artifact ref. The frozen <c>ElementCount</c> guards the branch space on BOTH paths against a resolve-to-null collapse on resume.</summary>
+    /// <summary>Read a persisted map-input snapshot back to the element array: a SecretDerived snapshot re-resolves live (no frozen array was stored); a Plain snapshot deserializes its frozen array, re-inflating any offloaded artifact ref. The frozen <c>ElementCount</c> guards the branch space on BOTH paths, while a Plain snapshot's <c>ContentHash</c> proves the logical array survived storage and re-inflation unchanged.</summary>
     private async Task<IReadOnlyList<JsonElement>> LoadSnapshotElementsAsync(Core.Persistence.Entities.WorkflowRunMapInput snapshot, NodeDefinition mapNode, NodeRunScope scope, Guid teamId, CancellationToken cancellationToken)
     {
         // SecretDerived stored no frozen array (no plaintext at rest) — re-resolve live. The frozen ElementCount still
@@ -1914,19 +1914,44 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             return live;
         }
 
-        // Defensive only: a Plain map always stores "[]" for an empty collection (SecretDerived returned above), so a
-        // NULL column here means a corrupt row, not a normal empty map.
+        // A Plain map always stores "[]" for an empty collection (SecretDerived returned above), so NULL is corrupt,
+        // never a normal empty map. Returning [] here would erase an already-fanned-out branch space on re-entry.
         if (snapshot.ElementsJson == null)
-            return Array.Empty<JsonElement>();
+            throw new NodeFailureException($"Map '{mapNode.Id}' plain input snapshot has no frozen element array; the map cannot safely resume.");
 
-        using var doc = JsonDocument.Parse(snapshot.ElementsJson);
-        var stored = doc.RootElement.Clone();
+        JsonElement stored;
+        try
+        {
+            using var doc = JsonDocument.Parse(snapshot.ElementsJson);
+            stored = doc.RootElement.Clone();
+        }
+        catch (JsonException ex)
+        {
+            throw new NodeFailureException($"Map '{mapNode.Id}' plain input snapshot is not valid JSON; the map cannot safely resume.", ex);
+        }
 
-        var resolved = await NodeOutputArtifacts.ResolveAsync(_artifactStore, teamId, new Dictionary<string, JsonElement> { ["elements"] = stored }, cancellationToken).ConfigureAwait(false);
+        var resolved = await NodeOutputArtifacts.ResolveRequiredAsync(_artifactStore, teamId, new Dictionary<string, JsonElement> { ["elements"] = stored }, cancellationToken).ConfigureAwait(false);
+        if (!resolved.TryGetValue("elements", out var array))
+            throw new NodeFailureException($"Map '{mapNode.Id}' plain input snapshot has no element value; the map cannot safely resume.");
 
-        return resolved.TryGetValue("elements", out var arr) && arr.ValueKind == JsonValueKind.Array
-            ? arr.EnumerateArray().Select(e => e.Clone()).ToList()
-            : Array.Empty<JsonElement>();
+        return ValidatePlainMapSnapshot(mapNode.Id, snapshot.ElementCount, snapshot.ContentHash, array);
+    }
+
+    /// <summary>Validate the logical, re-inflated Plain map array before it drives any branch. Internal for hermetic invariant tests.</summary>
+    internal static IReadOnlyList<JsonElement> ValidatePlainMapSnapshot(string mapNodeId, int expectedCount, string expectedContentHash, JsonElement array)
+    {
+        if (array.ValueKind != JsonValueKind.Array)
+            throw new NodeFailureException($"Map '{mapNodeId}' plain input snapshot resolved to {array.ValueKind}, not an array; the map cannot safely resume.");
+
+        var elements = array.EnumerateArray().Select(element => element.Clone()).ToList();
+        if (elements.Count != expectedCount)
+            throw new NodeFailureException($"Map '{mapNodeId}' plain input snapshot froze {expectedCount} elements but its stored array contained {elements.Count}; the branch space changed, so the map cannot safely resume.");
+
+        var observedHash = ComputeMapElementsHash(elements);
+        if (!string.Equals(observedHash, expectedContentHash, StringComparison.Ordinal))
+            throw new NodeFailureException($"Map '{mapNodeId}' plain input snapshot content hash did not match its re-inflated array; refusing to replay a changed branch space.");
+
+        return elements;
     }
 
     /// <summary>Classify + persist the map's frozen input array, committed before any branch dispatches so a child scope never runs against an un-snapshotted map. Returns false (without throwing) when a concurrent writer already created the row (23505) — the caller re-reads the winner.</summary>
@@ -1980,9 +2005,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         return MapInputSensitivity.Plain;
     }
 
-    /// <summary>SHA-256 over the LOGICAL (pre-offload) resolved array, so the hash is offload-invariant. Written now; the
-    /// fork/rerun slices consume it for sibling-reuse integrity and must compare it against the RE-INFLATED array from
-    /// <see cref="LoadSnapshotElementsAsync"/>, never against the raw (possibly offloaded) ElementsJson column.</summary>
+    /// <summary>SHA-256 over the LOGICAL (pre-offload) resolved array, so the hash is offload-invariant. Every Plain
+    /// snapshot re-entry compares it against the RE-INFLATED array from <see cref="LoadSnapshotElementsAsync"/>;
+    /// fork/rerun sibling reuse must preserve the same rule and never hash the raw ref envelope.</summary>
     private static string ComputeMapElementsHash(IReadOnlyList<JsonElement> elements) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(elements))));
 
@@ -3469,6 +3494,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     private sealed class NodeFailureException : Exception
     {
         public NodeFailureException(string message) : base(message) { }
+        public NodeFailureException(string message, Exception innerException) : base(message, innerException) { }
     }
 
     /// <summary>Thrown to abort the walk when a node parks the run. Caught in RunAfterClaimAsync, which sets Suspended.</summary>
