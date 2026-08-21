@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text;
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
@@ -264,15 +265,28 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
         };
     }
 
-    /// <summary>Bound the preview body to <see cref="MaxPreviewBytes"/> (a preview, not a byte-exact stream); report the real size + whether it was cut.</summary>
-    private static (string Text, long Size, bool Truncated) Cap(string body)
+    /// <summary>Bound the preview body to <see cref="MaxPreviewBytes"/> UTF-8 bytes (a preview, not a byte-exact stream); report the complete encoded size and cut only between Unicode scalar values.</summary>
+    internal static (string Text, long Size, bool Truncated) Cap(string body)
     {
         var bytes = Encoding.UTF8.GetByteCount(body);
 
         if (bytes <= MaxPreviewBytes) return (body, bytes, false);
 
-        var capped = body[..Math.Min(body.Length, MaxPreviewBytes)];
-        return (capped, bytes, capped.Length < body.Length);
+        var remaining = body.AsSpan();
+        var previewBytes = 0;
+        var previewChars = 0;
+
+        while (!remaining.IsEmpty)
+        {
+            var status = Rune.DecodeFromUtf16(remaining, out var rune, out var charsConsumed);
+            if (status != OperationStatus.Done || rune.Utf8SequenceLength > MaxPreviewBytes - previewBytes) break;
+
+            previewBytes += rune.Utf8SequenceLength;
+            previewChars += charsConsumed;
+            remaining = remaining[charsConsumed..];
+        }
+
+        return (body[..previewChars], bytes, true);
     }
 
     private static RoomFilePreview Unavailable(RoomFileIdentity identity, string? sourceUrl, RoomFileUnavailableReason reason, string note) =>
