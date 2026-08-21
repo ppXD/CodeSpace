@@ -870,13 +870,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// P3 (3.2c): resolve a REFERENCED restored transcript (the producer stamped <c>RestoredTranscriptArtifactId</c> to
     /// keep the bytes out of task_jsonb) to its bytes on <see cref="AgentTask.RestoredTranscript"/>, clearing the ref, so
     /// the harness's <c>BuildConfigHomeFiles</c> stays a pure bytes consumer. A task with no ref (inline bytes, or no
-    /// resume at all) is returned unchanged. The offloader resolves inline-or-artifact transparently.
+    /// resume at all) is returned unchanged. A referenced transcript is execution-required state: unavailable,
+    /// corrupt, or inaccessible bytes fail closed before launch rather than silently cold-starting a named session.
     /// </summary>
     private async Task<AgentTask> ResolveRestoredTranscriptAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken)
     {
         if (task.RestoredTranscriptArtifactId is not { } artifactId) return task;
 
-        var transcript = await _offloader.ResolveAsync(teamId, task.RestoredTranscript, artifactId, cancellationToken).ConfigureAwait(false);
+        var transcript = await _offloader.ResolveRequiredAsync(teamId, task.RestoredTranscript, artifactId, cancellationToken).ConfigureAwait(false);
 
         return task with { RestoredTranscript = transcript, RestoredTranscriptArtifactId = null };
     }
