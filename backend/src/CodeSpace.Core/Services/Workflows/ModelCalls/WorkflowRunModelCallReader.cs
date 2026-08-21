@@ -173,6 +173,7 @@ public sealed class WorkflowRunModelCallReader : IWorkflowRunModelCallReader, IS
         SourceStartedRecordId = attempt.SourceStartedRecordId,
         SourceTerminalRecordId = attempt.SourceTerminalRecordId,
         SourceEvidenceRevision = attempt.SourceEvidenceRevision,
+        UnavailableFigures = attempt.UnavailableFigures,
         Usage = new WorkflowRunModelCallUsageMetadata
         {
             InputTokens = attempt.InputTokens,

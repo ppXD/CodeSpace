@@ -49,6 +49,11 @@ public sealed class WorkflowRunModelCallReaderV2Tests
         metadata.Attempts[1].SourceEvidence.ShouldBe(WorkflowRunModelCallSourceEvidence.LateStartAttached);
         metadata.Attempts[1].Usage.InputTokens.ShouldBe(50_001);
         metadata.Attempts[1].Usage.OutputTokens.ShouldBe(1_234);
+        metadata.Attempts[1].UnavailableFigures.ShouldBe([
+            ModelCallFigures.CacheReadTokens,
+            ModelCallFigures.CostAmount,
+            ModelCallFigures.ReasoningTokens,
+        ]);
         metadata.Attempts[1].Bodies.Single(value => value.Body == WorkflowRunModelCallBody.AttemptResponse).ReferenceState
             .ShouldBe(WorkflowRunModelCallBodyReferenceState.Referenced);
         metadata.Bodies.Single().ReferenceState.ShouldBe(WorkflowRunModelCallBodyReferenceState.Partial);
@@ -227,6 +232,7 @@ public sealed class WorkflowRunModelCallReaderV2Tests
                 CaptureCompleteness = WorkflowRunCaptureCompleteness.Partial,
                 InputTokens = 50_001,
                 OutputTokens = 1_234,
+                UnavailableFigures = [ModelCallFigures.CacheReadTokens, ModelCallFigures.CostAmount, ModelCallFigures.ReasoningTokens],
                 StartedAt = started2.OccurredAt,
                 CompletedAt = terminal2.OccurredAt,
             });

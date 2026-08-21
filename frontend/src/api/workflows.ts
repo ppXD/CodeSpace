@@ -713,6 +713,8 @@ export interface WorkflowRunModelCallAttemptMetadata {
   sourceStartedRecordId?: string | null;
   sourceTerminalRecordId?: string | null;
   sourceEvidenceRevision: number;
+  /** Figures this producer explicitly could not observe; null without a member here is only unstated. */
+  unavailableFigures: string[];
   usage: WorkflowRunModelCallUsageMetadata;
   costAmount?: number | null;
   costCurrency?: string | null;

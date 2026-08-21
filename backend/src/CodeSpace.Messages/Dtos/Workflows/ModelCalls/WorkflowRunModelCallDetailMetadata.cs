@@ -55,6 +55,11 @@ public sealed record WorkflowRunModelCallAttemptMetadata
     public Guid? SourceStartedRecordId { get; init; }
     public Guid? SourceTerminalRecordId { get; init; }
     public required int SourceEvidenceRevision { get; init; }
+    /// <summary>
+    /// Figures the producer explicitly could not observe. A nullable scalar without a member here remains merely
+    /// unstated; clients must not turn either state into a measured zero.
+    /// </summary>
+    public required IReadOnlyList<string> UnavailableFigures { get; init; }
     public required WorkflowRunModelCallUsageMetadata Usage { get; init; }
     public decimal? CostAmount { get; init; }
     public string? CostCurrency { get; init; }

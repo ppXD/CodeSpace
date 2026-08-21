@@ -252,7 +252,14 @@ function descriptor(owner: { bodies: WorkflowRunModelCallBodyDescriptor[] }, bod
 }
 
 function totalTokens(attempt: WorkflowRunModelCallAttemptMetadata) {
-  return (attempt.usage.inputTokens ?? 0) + (attempt.usage.outputTokens ?? 0);
+  return attempt.usage.inputTokens == null || attempt.usage.outputTokens == null
+    ? null
+    : attempt.usage.inputTokens + attempt.usage.outputTokens;
+}
+
+function figure<T>(attempt: WorkflowRunModelCallAttemptMetadata, name: string | null, value: T | null | undefined, format: (present: T) => string) {
+  if (name != null && attempt.unavailableFigures?.includes(name)) return "unavailable";
+  return value == null ? "not recorded" : format(value);
 }
 
 function StableMetadata({ metadata, selectedAttemptId, onSelectAttempt }: { metadata: WorkflowRunModelCallDetailMetadata; selectedAttemptId?: string; onSelectAttempt: (attemptId: string) => void }) {
@@ -288,11 +295,13 @@ function StableUsage({ attempt }: { attempt: WorkflowRunModelCallAttemptMetadata
   const usage = attempt.usage;
   return (
     <dl className="room-mcusage">
-      <div><dt>Input</dt><dd>{formatTokens(usage.inputTokens ?? 0)} tokens</dd></div>
-      <div><dt>Output</dt><dd>{formatTokens(usage.outputTokens ?? 0)} tokens</dd></div>
-      <div><dt>Reasoning</dt><dd>{formatTokens(usage.reasoningTokens ?? 0)} tokens</dd></div>
-      <div><dt>Total</dt><dd>{formatTokens(totalTokens(attempt))} tokens</dd></div>
-      <div><dt>Cost</dt><dd>{attempt.costAmount == null ? "not recorded" : `${attempt.costAmount} ${attempt.costCurrency ?? ""}`.trim()}</dd></div>
+      <div><dt>Input</dt><dd>{figure(attempt, null, usage.inputTokens, (value) => `${formatTokens(value)} tokens`)}</dd></div>
+      <div><dt>Output</dt><dd>{figure(attempt, null, usage.outputTokens, (value) => `${formatTokens(value)} tokens`)}</dd></div>
+      <div><dt>Cache read</dt><dd>{figure(attempt, "cache_read_tokens", usage.cacheReadTokens, (value) => `${formatTokens(value)} tokens`)}</dd></div>
+      <div><dt>Cache write</dt><dd>{figure(attempt, "cache_write_tokens", usage.cacheWriteTokens, (value) => `${formatTokens(value)} tokens`)}</dd></div>
+      <div><dt>Reasoning</dt><dd>{figure(attempt, "reasoning_tokens", usage.reasoningTokens, (value) => `${formatTokens(value)} tokens`)}</dd></div>
+      <div><dt>Total</dt><dd>{figure(attempt, null, totalTokens(attempt), (value) => `${formatTokens(value)} tokens`)}</dd></div>
+      <div><dt>Cost</dt><dd>{figure(attempt, "cost_amount", attempt.costAmount, (value) => `${value} ${attempt.costCurrency ?? ""}`.trim())}</dd></div>
       <div><dt>Finish</dt><dd>{attempt.finishReason ?? attempt.errorCode ?? "not recorded"}</dd></div>
     </dl>
   );
@@ -305,8 +314,10 @@ function StableTrace({ metadata, attempt }: { metadata: WorkflowRunModelCallDeta
       <dl className="room-mcusage">
         <div><dt>Status</dt><dd>{attempt.status}</dd></div>
         <div><dt>Transport</dt><dd>{attempt.transportKind ?? "not recorded"}</dd></div>
-        <div><dt>Provider request</dt><dd>{attempt.providerRequestId ?? "not recorded"}</dd></div>
+        <div><dt>Provider request</dt><dd>{figure(attempt, "provider_request_id", attempt.providerRequestId, String)}</dd></div>
         <div><dt>HTTP</dt><dd>{attempt.httpStatusCode ?? "not recorded"}</dd></div>
+        <div><dt>First token</dt><dd>{figure(attempt, "first_token_at", attempt.firstTokenAt, String)}</dd></div>
+        <div><dt>Completed at</dt><dd>{figure(attempt, "completed_at", attempt.completedAt, String)}</dd></div>
         <div><dt>Evidence</dt><dd>{attempt.sourceEvidence} · revision {attempt.sourceEvidenceRevision}</dd></div>
         <div><dt>Schema</dt><dd>logical {metadata.schemaVersion} · attempt {attempt.schemaVersion}</dd></div>
       </dl>
