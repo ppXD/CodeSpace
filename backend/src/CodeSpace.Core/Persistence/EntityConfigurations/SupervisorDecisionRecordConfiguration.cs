@@ -1,5 +1,6 @@
 using CodeSpace.Core.Persistence.Entities;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 
 namespace CodeSpace.Core.Persistence.EntityConfigurations;
@@ -29,6 +30,17 @@ public class SupervisorDecisionRecordConfiguration : IEntityTypeConfiguration<Su
         // BIGSERIAL on the DB side; value-generated-on-add so the SaveChanges round-trip returns the actual sequence
         // number (mirrors WorkflowRunRecord.Sequence).
         builder.Property(d => d.Sequence).HasColumnName("sequence").ValueGeneratedOnAdd();
+
+        // Observation-only axes. Neither has a column default: 0161's trigger allocates only after taking the exact-run
+        // transaction lock. StoryOrder never changes; ObservationRevision is regenerated on every accepted update.
+        var storyOrder = builder.Property(d => d.StoryOrder).HasColumnName("story_order").ValueGeneratedOnAdd();
+        storyOrder.Metadata.SetBeforeSaveBehavior(PropertySaveBehavior.Ignore);
+        storyOrder.Metadata.SetAfterSaveBehavior(PropertySaveBehavior.Throw);
+        var observationRevision = builder.Property(d => d.ObservationRevision).HasColumnName("observation_revision").ValueGeneratedOnAddOrUpdate();
+        observationRevision.Metadata.SetBeforeSaveBehavior(PropertySaveBehavior.Ignore);
+        observationRevision.Metadata.SetAfterSaveBehavior(PropertySaveBehavior.Ignore);
+        builder.HasIndex(d => new { d.SupervisorRunId, d.StoryOrder }).IsUnique().HasDatabaseName("ux_supervisor_decision_run_story_order");
+        builder.HasIndex(d => new { d.SupervisorRunId, d.ObservationRevision }).IsUnique().HasDatabaseName("ux_supervisor_decision_run_observation_revision");
 
         // The exactly-once invariant: one row per (run, idempotency key). A racing duplicate INSERT hits this and the
         // loser reads the winner's row (the dedup path) — see SupervisorDecisionLog.TryClaimAsync.
