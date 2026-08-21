@@ -76,12 +76,16 @@ internal static class SupervisorSynthesisPrompt
     private static IReadOnlyList<SupervisorSynthesisPart> RoundRobinSources(IReadOnlyList<SupervisorSynthesisSource> agents)
     {
         var result = new List<SupervisorSynthesisPart>();
-        var maxDiffs = agents.Count == 0 ? 0 : agents.Max(agent => agent.Diffs.Count);
+        var maxDiffs = agents.Count == 0 ? 0 : Math.Max(1, agents.Max(agent => agent.Diffs.Count));
 
         for (var diffIndex = 0; diffIndex < maxDiffs; diffIndex++)
             foreach (var agent in agents)
                 if (agent.Diffs.Count > diffIndex)
                     result.Add(new SupervisorSynthesisPart(agent.AgentRunId, agent.Status, agent.Summary, agent.Diffs[diffIndex]));
+                else if (diffIndex == 0 && agent.Diffs.Count == 0)
+                    // Identity/status/summary are still synthesis evidence. One empty-diff part keeps them bounded and
+                    // makes coverage account for the contributor without changing the within-budget legacy rendering.
+                    result.Add(new SupervisorSynthesisPart(agent.AgentRunId, agent.Status, agent.Summary, new SupervisorSynthesisDiff(null, "")));
 
         return result;
     }
