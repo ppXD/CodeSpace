@@ -44,6 +44,11 @@ namespace CodeSpace.Core.Services.Tasks.Projection.Builders.Supervisor;
 /// </summary>
 public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, ISingletonDependency
 {
+    public const string SynthesisPromptBudgetCharsEnvVar = "CODESPACE_SUPERVISOR_SYNTH_PROMPT_BUDGET_CHARS";
+
+    /// <summary>Resolved at definition-build time and stamped into the snapshot so later environment changes cannot alter a replayed run's synthesis coverage.</summary>
+    public static int SynthesisPromptBudgetChars => SupervisorSynthesisBudget.Normalize(int.TryParse(Environment.GetEnvironmentVariable(SynthesisPromptBudgetCharsEnvVar), out var value) ? value : null);
+
     public string ProjectionKind => TaskProjectionKinds.Supervisor;
 
     public WorkflowDefinition Build(TaskBuildContext context) => new()
@@ -80,6 +85,7 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
             // way the agent.run projections inject it, so the supervisor plans the follow-up against prior work.
             ["goal"] = AgentNodeMapping.ComposeGoal(context.Seed.Goal, context.GroundingContext),
             ["approvalPolicy"] = context.Route.Caps.RequiresApproval ? "spawns" : "none",
+            ["synthesisPromptBudgetChars"] = SynthesisPromptBudgetChars,
         };
 
         AddIfPresent(config, "maxParallelism", context.Route.Caps.MaxParallelism);

@@ -1,4 +1,3 @@
-using System.Text;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Publish;
@@ -40,7 +39,7 @@ public sealed partial class RealSupervisorActionExecutor
         if (!forcedByPublishGate)
             // Synthesis (facet b) reads the diffs — no repo needed; runs whenever the gate is on. Best-effort: a model
             // failure degrades to a note, NEVER crashing the merge turn (which would strand the decision row Running).
-            outcome["synthesis"] = await TrySynthesizeAsync(context.TeamId, context.Goal, merged, profile, cancellationToken).ConfigureAwait(false);
+            outcome["synthesis"] = await TrySynthesizeAsync(context, merged, cancellationToken).ConfigureAwait(false);
 
         // Integration (facet a) writes a branch — only with a resolvable repository. EXCEPT when the conflict was
         // already RESOLVED: a VERIFIED resolver's own tested branch IS the reconciled merge, so re-running the
@@ -150,11 +149,11 @@ public sealed partial class RealSupervisorActionExecutor
     // ── Facet (b): the model synthesis reduce over the K real diffs ──────────────────
 
     /// <summary>Best-effort wrapper: synthesis is a non-essential enrichment, so ANY failure (a model 4xx/5xx, a missing pool model, a transport / serialization fault) degrades to a note — it must never escape and strand the turn. Cancellation still propagates.</summary>
-    private async Task<object> TrySynthesizeAsync(Guid teamId, string goal, IReadOnlyList<MergedAgent> merged, SupervisorAgentProfile? profile, CancellationToken cancellationToken)
+    private async Task<object> TrySynthesizeAsync(SupervisorTurnContext context, IReadOnlyList<MergedAgent> merged, CancellationToken cancellationToken)
     {
         try
         {
-            return await SynthesizeAsync(teamId, goal, merged, profile, cancellationToken).ConfigureAwait(false);
+            return await SynthesizeAsync(context, merged, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -163,7 +162,7 @@ public sealed partial class RealSupervisorActionExecutor
         }
     }
 
-    private async Task<object> SynthesizeAsync(Guid teamId, string goal, IReadOnlyList<MergedAgent> merged, SupervisorAgentProfile? profile, CancellationToken cancellationToken)
+    private async Task<object> SynthesizeAsync(SupervisorTurnContext context, IReadOnlyList<MergedAgent> merged, CancellationToken cancellationToken)
     {
         // The synthesis is a plain-TEXT reduce, so it prefers a dedicated text-completion provider (the established
         // synth seam) and falls back to any registered client — in production the structured-capable provider also
@@ -176,46 +175,32 @@ public sealed partial class RealSupervisorActionExecutor
         // Pure pool-driven (S6b): the model + credential come from the team's pool for the chosen client's provider —
         // the profile's model is a PIN (it must be a qualifying pool model), else the pool's recommended one. A text
         // reduce doesn't need structured output. No pool model → degrade to a note (never an env key, never a default).
-        var pick = await _modelSelector.SelectAsync(teamId, client.Provider, allowedModels: null, pinnedModel: profile?.Model, cancellationToken).ConfigureAwait(false);
+        var pick = await _modelSelector.SelectAsync(context.TeamId, client.Provider, allowedModels: null, pinnedModel: context.AgentProfile?.Model, cancellationToken).ConfigureAwait(false);
 
         if (pick is null) return new { note = $"no pool model available for synthesis on provider '{client.Provider}'" };
 
+        var projection = SupervisorSynthesisPrompt.Project(context.Goal, merged.Select(ToSynthesisSource).ToList(), context.SynthesisPromptBudgetChars);
         var request = new LLMCompletionRequest
         {
             Model = pick.ModelId,
             Credential = pick.Credential,
             SystemPrompt = "You are combining the work of several parallel coding agents into ONE coherent change. Each agent's unified diff follows. Produce a concise synthesis: what the combined change does, how the pieces fit, and any overlaps or risks a reviewer should check. Do not invent changes that are not in the diffs.",
-            UserPrompt = BuildSynthesisPrompt(goal, merged),
+            UserPrompt = projection.Text,
         };
 
         var completion = await client.CompleteAsync(request, cancellationToken).ConfigureAwait(false);
 
-        return new { text = completion.Text, model = completion.Model };
+        return new { text = completion.Text, model = completion.Model, coverage = projection.Coverage };
     }
 
-    /// <summary>The synthesis user prompt — the goal + each agent's status/summary AND its REAL unified diff (the hunk bodies), so the reduce reasons over what the agents actually changed, not just their self-reported summaries.</summary>
-    private static string BuildSynthesisPrompt(string goal, IReadOnlyList<MergedAgent> merged)
-    {
-        var sb = new StringBuilder();
-        sb.Append("Goal: ").Append(goal).Append("\n\n");
-
-        foreach (var a in merged)
-        {
-            sb.Append("=== Agent ").Append(a.AgentRunId).Append(" (").Append(a.Status).Append(") ===\n");
-            if (!string.IsNullOrWhiteSpace(a.Summary)) sb.Append("Summary: ").Append(a.Summary).Append('\n');
-
-            // Multi-repo: narrate EACH repo's real diff (so the synthesis covers the whole change set, not just the
-            // primary repo's top-level patch); a single-repo agent (no per-repo results) keeps the byte-identical
-            // top-level Diff: section.
-            if (a.RepositoryResults.Count > 0)
-                foreach (var repo in a.RepositoryResults.Where(r => !IsUntouched(r)))
-                    sb.Append("Diff [").Append(repo.Alias).Append("]:\n").Append(string.IsNullOrEmpty(repo.Patch) ? "(no diff captured)" : repo.Patch).Append("\n\n");
-            else
-                sb.Append("Diff:\n").Append(string.IsNullOrEmpty(a.Patch) ? "(no diff captured)" : a.Patch).Append("\n\n");
-        }
-
-        return sb.ToString();
-    }
+    /// <summary>Project internal merge scratch into the pure prompt noun. Multi-repo untouched results remain excluded exactly as before; deterministic integration still retains every full patch.</summary>
+    private static SupervisorSynthesisSource ToSynthesisSource(MergedAgent agent) => new(
+        agent.AgentRunId,
+        agent.Status,
+        agent.Summary,
+        agent.RepositoryResults.Count > 0
+            ? agent.RepositoryResults.Where(repo => !IsUntouched(repo)).Select(repo => new SupervisorSynthesisDiff(repo.Alias, repo.Patch)).ToList()
+            : new[] { new SupervisorSynthesisDiff(null, agent.Patch) });
 
     // ── Facet (a): the model-free on-disk integration ───────────────────────────────
 

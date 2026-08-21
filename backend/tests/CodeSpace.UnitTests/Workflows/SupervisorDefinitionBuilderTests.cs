@@ -123,6 +123,15 @@ public class SupervisorDefinitionBuilderTests
     }
 
     [Fact]
+    public void Supervisor_config_bakes_the_synthesis_prompt_budget_for_replay()
+    {
+        var config = Builder.Build(Context()).Nodes.Single(n => n.Id == "sup").Config;
+
+        config.GetProperty("synthesisPromptBudgetChars").GetInt32().ShouldBe(SupervisorDefinitionBuilder.SynthesisPromptBudgetChars);
+        SupervisorDefinitionBuilder.SynthesisPromptBudgetCharsEnvVar.ShouldBe("CODESPACE_SUPERVISOR_SYNTH_PROMPT_BUDGET_CHARS");
+    }
+
+    [Fact]
     public void Supervisor_config_folds_the_caps_into_the_bounds()
     {
         var caps = new RouteCaps { MaxParallelism = 5, MaxTotalSpawns = 20, MaxCostUsd = 12.50m };
