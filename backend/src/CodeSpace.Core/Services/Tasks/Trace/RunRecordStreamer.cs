@@ -17,7 +17,8 @@ namespace CodeSpace.Core.Services.Tasks.Trace;
 /// (the same tenancy boundary the snapshot reader uses — a record is the team's iff its run is); a foreign / absent run
 /// yields nothing. Drains a backlog immediately (a full batch re-polls without delay); waits the interval only once
 /// caught up. Ends at a terminal <c>run.*</c> record or on cancellation. The 2s Room poll stays the fallback, so nothing
-/// breaks when this stream is unavailable.
+/// breaks when this stream is unavailable. Since migration 0154, sequence is assigned behind a transaction-scoped
+/// run gate, so advancing this run-local cursor cannot skip a lower value that becomes visible later.
 /// </summary>
 public sealed class RunRecordStreamer : IRunRecordStreamer, IScopedDependency
 {

@@ -21,14 +21,15 @@ public class WorkflowRunRecord : IEntity<Guid>
     public Guid RunId { get; set; }
 
     /// <summary>
-    /// Allocation-order token, backed by a single PostgreSQL BIGSERIAL sequence shared across
-    /// every <c>workflow_run_record</c> row in the database. It is monotonic at allocation and
-    /// remains useful for deterministic ordering inside a run (the index <c>idx_wrr_run_sequence</c>
-    /// covers this), but it is gapful and is not transaction commit order.
+    /// Gapful run-scoped commit-admission cursor, backed by a PostgreSQL sequence shared across
+    /// every <c>workflow_run_record</c> row in the database. A BEFORE INSERT trigger acquires a
+    /// transaction-scoped lock for <see cref="RunId"/> before assigning the value, so a committed
+    /// row for one run cannot later be followed by a newly-visible lower value. The index
+    /// <c>idx_wrr_run_sequence</c> covers cursor scans.
     ///
-    /// <para>A durable global consumer MUST NOT advance a high-water mark over this value: a transaction can allocate
-    /// a lower sequence and commit after another transaction whose higher value is already visible. Use an outbox,
-    /// source-id anti-join, or another commit-aware admission protocol instead.</para>
+    /// <para>It is still not gapless or a global commit cursor: rollbacks consume values and unrelated runs are not
+    /// mutually ordered. Durable cross-run consumers must use an outbox, source-id anti-join, or another
+    /// commit-aware admission protocol.</para>
     /// </summary>
     public long Sequence { get; set; }
 
