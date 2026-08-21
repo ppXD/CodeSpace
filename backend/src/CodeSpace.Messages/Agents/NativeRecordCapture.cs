@@ -66,11 +66,10 @@ public sealed record NativeRecordCaptureRequest
     /// Where a RESUMED observation restarts reading its source, in the coordinates
     /// <see cref="NativeRecordV1.ByteOffset"/> is stated in. Zero on a launch, which reads from the beginning.
     ///
-    /// <para>It is the position the observation ACTUALLY resumes at, and deliberately not the head of what is already
-    /// recorded, because those two can differ: a frame is made durable by its batch write while the resume position is
-    /// persisted afterwards, so the records can run ahead and the span between them is re-delivered. Starting the
-    /// cursor here is what makes a re-delivered line land on the ground its first record already described, instead of
-    /// on invented ground past that head where nothing could tell it apart from a line the process really emitted.</para>
+    /// <para>It is the persisted APPLICATION head, deliberately separate from the head of what is already recorded.
+    /// Records can lead it when a frame batch landed before the checkpoint; the plane can trail it when a best-effort
+    /// capture write failed while application output continued. The resumed reader chooses the lesser head, while the
+    /// application consumer remains gated here.</para>
     /// </summary>
     public long ResumeSourceOffset { get; init; }
 }
@@ -79,12 +78,10 @@ public sealed record NativeRecordCaptureRequest
 /// What a capture opening actually got: the durable identity it writes against, the SOURCE CURSOR its first frame is
 /// recorded at, and how far this process's frames are already recorded.
 ///
-/// <para>The last two are separate values because they can disagree, and the disagreement is the whole seam. A
-/// re-attach resumes reading at <see cref="SourceHead"/>, which the write ordering keeps at or behind
-/// <see cref="RecordedHead"/>; the span between them is re-delivered to the resumed observation. Recording at
-/// <see cref="SourceHead"/> keeps every frame's position the position the source really has, and a line below
-/// <see cref="RecordedHead"/> is one an earlier opening already recorded — dropped rather than recorded a second time,
-/// because the fold counts a record and chains its digest and would do both twice.</para>
+/// <para>The last two are separate values because either can lead. A re-attach reads at their minimum. A frame below
+/// <see cref="RecordedHead"/> is an already-recorded re-delivery and is dropped; a frame below <see cref="SourceHead"/>
+/// but at or above the recorded head repairs only the native plane. Frames at or above the application head continue
+/// through the normal consumer. Every comparison uses the durable reader's exact source byte ranges.</para>
 /// </summary>
 public sealed record NativeRecordCaptureOpening
 {
@@ -157,4 +154,11 @@ public sealed record NativeRecordBatch
     /// together or not at all.
     /// </summary>
     public IReadOnlyList<HarnessModelCallProjectionV1> ModelCalls { get; init; } = Array.Empty<HarnessModelCallProjectionV1>();
+
+    /// <summary>
+    /// These frames recover a source prefix whose expectation was declared by an earlier refused write. The write
+    /// advances presence only; declaring expectation again would leave the facet permanently short by the recovered
+    /// frame count. False for every ordinary capture batch.
+    /// </summary>
+    public bool BackfillsDeclaredFrames { get; init; }
 }

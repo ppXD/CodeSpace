@@ -462,7 +462,7 @@ public sealed partial class LocalProcessRunner
         catch { return false; }
     }
 
-    public async Task<SandboxResult> AttachAsync(SandboxHandle handle, Func<string, CancellationToken, Task> onStdoutLine, CancellationToken cancellationToken, Func<long, CancellationToken, Task>? onCheckpoint = null)
+    public async Task<SandboxResult> AttachAsync(SandboxHandle handle, Func<SandboxOutputFrame, CancellationToken, Task> onStdoutFrame, CancellationToken cancellationToken, Func<long, CancellationToken, Task>? onCheckpoint = null)
     {
         var stdoutPath = Path.Combine(handle.SpoolDirectory, StdoutFile);
         var exitPath = Path.Combine(handle.SpoolDirectory, ExitMarkerFile);
@@ -483,7 +483,7 @@ public sealed partial class LocalProcessRunner
 
         while (true)
         {
-            var advanced = await EmitNewLinesAsync(stdoutPath, offset, onStdoutLine, drainPartial: false, cancellationToken).ConfigureAwait(false);
+            var advanced = await EmitNewFramesAsync(stdoutPath, offset, onStdoutFrame, drainPartial: false, cancellationToken).ConfigureAwait(false);
 
             // Checkpoint AFTER the batch's lines were delivered, only when it advanced — so the persisted offset
             // never runs ahead of the events (a re-attach at worst re-emits the last batch, never loses lines).
@@ -493,20 +493,20 @@ public sealed partial class LocalProcessRunner
             offset = advanced;
 
             if (TryReadExitCode(exitPath, out var code))
-                return await CompleteFromSpoolAsync(handle, offset, code, onStdoutLine, cancellationToken).ConfigureAwait(false);
+                return await CompleteFromSpoolAsync(handle, offset, code, onStdoutFrame, cancellationToken).ConfigureAwait(false);
 
             // The execution wall deadline is checked BEFORE the lease and nothing can renew past it. It is not the whole
             // safety argument though — it is optional (TimeoutSeconds ≤0 ⇒ MaxValue), and a run without one refuses the
             // lease outright so this watchdog keeps its pre-lease bound.
             if (DateTimeOffset.UtcNow >= handle.Deadline)
-                return await TimeoutAsync(handle, offset, onStdoutLine, cancellationToken).ConfigureAwait(false);
+                return await TimeoutAsync(handle, offset, onStdoutFrame, cancellationToken).ConfigureAwait(false);
 
             if (progress is not null)
             {
                 progress.Observe();
 
                 if (progress.NoProgress)
-                    return await StalledAsync(handle, offset, onStdoutLine, cancellationToken).ConfigureAwait(false);
+                    return await StalledAsync(handle, offset, onStdoutFrame, cancellationToken).ConfigureAwait(false);
             }
 
             // Only a pid THIS worker can resolve may end the observation as vanished. A re-attach dispatched onto a
@@ -514,7 +514,7 @@ public sealed partial class LocalProcessRunner
             // exit marker on a shared spool — and otherwise lands on the deadline / no-progress bound rather than
             // reporting a live run as failed.
             if (IsSupervisorGone(handle))
-                return await VanishedAsync(handle, offset, onStdoutLine, cancellationToken).ConfigureAwait(false);
+                return await VanishedAsync(handle, offset, onStdoutFrame, cancellationToken).ConfigureAwait(false);
 
             await Task.Delay(PollInterval, cancellationToken).ConfigureAwait(false);
         }
@@ -584,7 +584,7 @@ public sealed partial class LocalProcessRunner
     }
 
     /// <summary>Final drain (incl. a trailing partial line) + the bounded stderr excerpt, mapped to Success / Failed / ResourceExhausted by the exit code and the run's cgroup OOM evidence.</summary>
-    private async Task<SandboxResult> CompleteFromSpoolAsync(SandboxHandle handle, long offset, int exitCode, Func<string, CancellationToken, Task> onLine, CancellationToken ct)
+    private async Task<SandboxResult> CompleteFromSpoolAsync(SandboxHandle handle, long offset, int exitCode, Func<SandboxOutputFrame, CancellationToken, Task> onFrame, CancellationToken ct)
     {
         var producerExited = await WaitForProducerExitAsync(handle, ct).ConfigureAwait(false);
         if (producerExited && SuccessfulLogCopiers(handle) && await WaitForSpoolsQuiescentAsync(handle, ct).ConfigureAwait(false))
@@ -595,7 +595,7 @@ public sealed partial class LocalProcessRunner
 
         await TearDownIsolationAsync(handle).ConfigureAwait(false);
 
-        await EmitNewLinesAsync(Path.Combine(handle.SpoolDirectory, StdoutFile), offset, onLine, drainPartial: true, ct).ConfigureAwait(false);
+        await EmitNewFramesAsync(Path.Combine(handle.SpoolDirectory, StdoutFile), offset, onFrame, drainPartial: true, ct).ConfigureAwait(false);
 
         var stderr = await ReadDiagnosticTailAsync(Path.Combine(handle.SpoolDirectory, StderrFile)).ConfigureAwait(false);
 
@@ -625,13 +625,13 @@ public sealed partial class LocalProcessRunner
     }
 
     /// <summary>Deadline elapsed: terminate the process tree, drain what landed, return TimedOut.</summary>
-    private async Task<SandboxResult> TimeoutAsync(SandboxHandle handle, long offset, Func<string, CancellationToken, Task> onLine, CancellationToken ct)
+    private async Task<SandboxResult> TimeoutAsync(SandboxHandle handle, long offset, Func<SandboxOutputFrame, CancellationToken, Task> onFrame, CancellationToken ct)
     {
         await KillByIdAndWaitAsync(handle, ct).ConfigureAwait(false);
 
         await TearDownIsolationAsync(handle).ConfigureAwait(false);
 
-        await EmitNewLinesAsync(Path.Combine(handle.SpoolDirectory, StdoutFile), offset, onLine, drainPartial: true, ct).ConfigureAwait(false);
+        await EmitNewFramesAsync(Path.Combine(handle.SpoolDirectory, StdoutFile), offset, onFrame, drainPartial: true, ct).ConfigureAwait(false);
 
         var stderr = await ReadDiagnosticTailAsync(Path.Combine(handle.SpoolDirectory, StderrFile)).ConfigureAwait(false);
 
@@ -639,13 +639,13 @@ public sealed partial class LocalProcessRunner
     }
 
     /// <summary>The no-progress watchdog tripped (no progress signal of any kind for the whole window): terminate the process tree, drain what landed, return Stalled — the SAME terminal it has always resolved to; only WHEN it is reached changed.</summary>
-    private async Task<SandboxResult> StalledAsync(SandboxHandle handle, long offset, Func<string, CancellationToken, Task> onLine, CancellationToken ct)
+    private async Task<SandboxResult> StalledAsync(SandboxHandle handle, long offset, Func<SandboxOutputFrame, CancellationToken, Task> onFrame, CancellationToken ct)
     {
         await KillByIdAndWaitAsync(handle, ct).ConfigureAwait(false);
 
         await TearDownIsolationAsync(handle).ConfigureAwait(false);
 
-        await EmitNewLinesAsync(Path.Combine(handle.SpoolDirectory, StdoutFile), offset, onLine, drainPartial: true, ct).ConfigureAwait(false);
+        await EmitNewFramesAsync(Path.Combine(handle.SpoolDirectory, StdoutFile), offset, onFrame, drainPartial: true, ct).ConfigureAwait(false);
 
         var stderr = await ReadDiagnosticTailAsync(Path.Combine(handle.SpoolDirectory, StderrFile)).ConfigureAwait(false);
 
@@ -653,14 +653,14 @@ public sealed partial class LocalProcessRunner
     }
 
     /// <summary>Supervisor disappeared: it writes the marker before exiting, so re-check after a beat — a true "gone with no marker" was a kill.</summary>
-    private async Task<SandboxResult> VanishedAsync(SandboxHandle handle, long offset, Func<string, CancellationToken, Task> onLine, CancellationToken ct)
+    private async Task<SandboxResult> VanishedAsync(SandboxHandle handle, long offset, Func<SandboxOutputFrame, CancellationToken, Task> onFrame, CancellationToken ct)
     {
         await Task.Delay(PollInterval, ct).ConfigureAwait(false);
 
         // The marker re-check delegates to CompleteFromSpoolAsync (which itself tears the netns down), so tear down only
         // on the genuine "gone with no marker" branch below — idempotence makes a double-call harmless either way.
         if (TryReadExitCode(Path.Combine(handle.SpoolDirectory, ExitMarkerFile), out var code))
-            return await CompleteFromSpoolAsync(handle, offset, code, onLine, ct).ConfigureAwait(false);
+            return await CompleteFromSpoolAsync(handle, offset, code, onFrame, ct).ConfigureAwait(false);
 
         // Same read as the marker path, and for the same reason: the OOM killer can take the supervisor along with the
         // agent, leaving no marker at all — the cgroup counter is what tells that apart from an external kill.
@@ -668,7 +668,7 @@ public sealed partial class LocalProcessRunner
 
         await TearDownIsolationAsync(handle).ConfigureAwait(false);
 
-        await EmitNewLinesAsync(Path.Combine(handle.SpoolDirectory, StdoutFile), offset, onLine, drainPartial: true, ct).ConfigureAwait(false);
+        await EmitNewFramesAsync(Path.Combine(handle.SpoolDirectory, StdoutFile), offset, onFrame, drainPartial: true, ct).ConfigureAwait(false);
 
         var stderr = await ReadDiagnosticTailAsync(Path.Combine(handle.SpoolDirectory, StderrFile)).ConfigureAwait(false);
 
@@ -720,7 +720,7 @@ public sealed partial class LocalProcessRunner
     /// One bounded pass of the diagnostics spool: the bytes appended since <paramref name="offset"/>, capped at
     /// <see cref="MaxReadChunk"/>, at <paramref name="maxBytes"/> and at <paramref name="maxLines"/> whole lines, split
     /// into lines with the advanced offset that covers exactly them and whether the last of them was terminated. Its
-    /// own reader rather than <see cref="ReadNewLines"/> because that one has no line budget and its final-drain mode
+    /// own reader rather than <see cref="ReadNewFrames"/> because that one has no line budget and its final-drain mode
     /// cuts wherever the chunk ends.
     /// </summary>
     private static (IReadOnlyList<string> Lines, long NewOffset, bool EndsLine) ReadDiagnosticLines(string path, long offset, int maxLines, int maxBytes)
@@ -753,7 +753,7 @@ public sealed partial class LocalProcessRunner
     /// never hold a newline however often it is retried, so the caller sees the same offset twice, reads that as a
     /// finished stream, and every diagnostic after the long line becomes unreachable through this seam while the record
     /// says the drain completed. The sibling stdout resolver forces the same progress for the same reason
-    /// (<see cref="ResolveBoundary"/>). What the cut costs is that the line arrives as a frame plus its continuation
+    /// (<see cref="ResolveFrameBoundary"/>). What the cut costs is that the line arrives as a frame plus its continuation
     /// instead of as one frame — which the caller is told, and can record as the partial it is.</para>
     /// </summary>
     internal static (int Bytes, bool EndsLine) DiagnosticBoundary(byte[] buffer, int read, int maxLines, bool reachesEnd)
@@ -797,12 +797,12 @@ public sealed partial class LocalProcessRunner
         return end > 0 ? end : read;
     }
 
-    /// <summary>Read the complete lines that landed since <paramref name="offset"/>, emit each, and return the advanced offset.</summary>
-    private static async Task<long> EmitNewLinesAsync(string path, long offset, Func<string, CancellationToken, Task> onLine, bool drainPartial, CancellationToken ct)
+    /// <summary>Read the complete frames that landed since <paramref name="offset"/>, emit each with its exact source range, and return the advanced offset.</summary>
+    private static async Task<long> EmitNewFramesAsync(string path, long offset, Func<SandboxOutputFrame, CancellationToken, Task> onFrame, bool drainPartial, CancellationToken ct)
     {
-        var (lines, newOffset) = ReadNewLines(path, offset, drainPartial);
+        var (frames, newOffset) = ReadNewFrames(path, offset, drainPartial);
 
-        foreach (var line in lines) await onLine(line, ct).ConfigureAwait(false);
+        foreach (var frame in frames) await onFrame(frame, ct).ConfigureAwait(false);
 
         return newOffset;
     }
@@ -1054,31 +1054,60 @@ public sealed partial class LocalProcessRunner
     /// </summary>
     internal static (IReadOnlyList<string> Lines, long NewOffset) ReadNewLines(string path, long offset, bool drainPartial)
     {
-        if (!File.Exists(path)) return (Array.Empty<string>(), offset);
+        var (frames, newOffset) = ReadNewFrames(path, offset, drainPartial);
+        return (frames.Select(frame => frame.Text).ToList(), newOffset);
+    }
+
+    /// <summary>
+    /// Read stdout as frames whose exact half-open source ranges survive decoding. LF and CRLF are removed from the
+    /// delivered text but remain in the range; a forced bounded cut backs off to a whole UTF-8 character and is marked
+    /// incomplete, while a terminal drain makes the unterminated tail a complete final frame.
+    /// </summary>
+    internal static (IReadOnlyList<SandboxOutputFrame> Frames, long NewOffset) ReadNewFrames(string path, long offset, bool drainPartial)
+    {
+        if (!File.Exists(path)) return (Array.Empty<SandboxOutputFrame>(), offset);
 
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
 
-        if (fs.Length <= offset) return (Array.Empty<string>(), offset);
+        if (fs.Length <= offset) return (Array.Empty<SandboxOutputFrame>(), offset);
 
         fs.Seek(offset, SeekOrigin.Begin);
         var buffer = new byte[(int)Math.Min(fs.Length - offset, MaxReadChunk)];
         var read = fs.Read(buffer, 0, buffer.Length);
+        var boundary = ResolveFrameBoundary(buffer, read, drainPartial);
 
-        var boundary = ResolveBoundary(buffer, read, drainPartial);
-        if (boundary == 0) return (Array.Empty<string>(), offset);
+        if (boundary.Bytes == 0) return (Array.Empty<SandboxOutputFrame>(), offset);
 
-        return (SplitLines(Encoding.UTF8.GetString(buffer, 0, boundary)), offset + boundary);
+        var frames = new List<SandboxOutputFrame>();
+        var frameStart = 0;
+
+        for (var i = 0; i < boundary.Bytes; i++)
+        {
+            if (buffer[i] != (byte)'\n') continue;
+
+            var textEnd = i > frameStart && buffer[i - 1] == (byte)'\r' ? i - 1 : i;
+            frames.Add(Frame(buffer, frameStart, textEnd, offset, i + 1, isComplete: true));
+            frameStart = i + 1;
+        }
+
+        if (frameStart < boundary.Bytes)
+            frames.Add(Frame(buffer, frameStart, boundary.Bytes, offset, boundary.Bytes, boundary.IsComplete));
+
+        return (frames, offset + boundary.Bytes);
     }
 
-    /// <summary>How many bytes to consume this read: everything on a final drain; otherwise up to the last newline (0 = no whole line yet, unless a full chunk has no newline — then force progress).</summary>
-    private static int ResolveBoundary(byte[] buffer, int read, bool drainPartial)
+    private static SandboxOutputFrame Frame(byte[] buffer, int textStart, int textEnd, long offset, int sourceEnd, bool isComplete) =>
+        new(Encoding.UTF8.GetString(buffer, textStart, textEnd - textStart), offset + textStart, offset + sourceEnd, isComplete);
+
+    /// <summary>How many bytes this pass consumes and whether its non-newline tail is a whole final frame.</summary>
+    private static (int Bytes, bool IsComplete) ResolveFrameBoundary(byte[] buffer, int read, bool drainPartial)
     {
-        if (drainPartial) return read;
+        if (drainPartial) return (read, true);
 
         for (var i = read - 1; i >= 0; i--)
-            if (buffer[i] == (byte)'\n') return i + 1;
+            if (buffer[i] == (byte)'\n') return (i + 1, true);
 
-        return read == MaxReadChunk ? read : 0;
+        return read == MaxReadChunk ? (WholeCharacters(buffer, read), false) : (0, false);
     }
 
     /// <summary>Split decoded spool text into lines: drop the empty remainder after a final newline, keep a non-empty trailing partial, and trim a CR from CRLF endings.</summary>

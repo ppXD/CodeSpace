@@ -11,7 +11,7 @@ public sealed class WorkflowRunNativeRecordConfiguration : IEntityTypeConfigurat
     {
         builder.ToTable(WorkflowRunDataNames.NativeRecord, table =>
         {
-            table.HasCheckConstraint("ck_workflow_run_native_record_bounds", "ordinal >= 0 AND source_offset_bytes >= 0 AND source_length_bytes >= 0 AND size_bytes >= 0 AND contract_version > 0 AND btrim(native_type) <> '' AND (native_schema IS NULL OR btrim(native_schema) <> '') AND (native_schema_version IS NULL OR btrim(native_schema_version) <> '')");
+            table.HasCheckConstraint("ck_workflow_run_native_record_bounds", "ordinal >= 0 AND source_offset_bytes >= 0 AND source_length_bytes >= 0 AND (source_end_offset_bytes IS NULL OR source_end_offset_bytes >= source_offset_bytes + source_length_bytes) AND size_bytes >= 0 AND contract_version > 0 AND btrim(native_type) <> '' AND (native_schema IS NULL OR btrim(native_schema) <> '') AND (native_schema_version IS NULL OR btrim(native_schema_version) <> '')");
             table.HasCheckConstraint("ck_workflow_run_native_record_channel", "channel IN ('Stdout', 'Stderr', 'Protocol', 'Control', 'SessionState', 'ModelWire', 'ToolWire', 'Hook', 'Metric', 'Debug')");
             table.HasCheckConstraint("ck_workflow_run_native_record_digest", "digest_algorithm = 'sha256/v1' AND digest ~ '^[0-9a-f]{64}$'");
             table.HasCheckConstraint("ck_workflow_run_native_record_encoding", "payload_encoding IN ('Utf8', 'Base64')");

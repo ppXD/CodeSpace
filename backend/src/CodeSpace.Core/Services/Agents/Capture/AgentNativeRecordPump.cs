@@ -46,13 +46,11 @@ namespace CodeSpace.Core.Services.Agents.Capture;
 /// them, and a replaced worker resumes from exactly the prefix that is actually recorded — which is what a re-attach
 /// has until now had no way to recover.</para>
 ///
-/// <para><b>The seam re-delivers, and the pump drops what it re-delivers.</b> A frame becomes durable at its batch
-/// write; the spool position a re-attach resumes from is persisted after that write, so the records legitimately run
-/// AHEAD of it and the span between the two is delivered a second time to the resumed observation. A resumed opening
-/// therefore starts its cursor where the observation actually resumes rather than at the recorded head, so a
-/// re-delivered line is described at the position its first record already used, and it records nothing below
-/// <see cref="NativeRecordCaptureOpening.RecordedHead"/> — the fold counts each record and chains its digest, so a
-/// second copy would not be a harmless duplicate but a stored state witnessing a prefix the process never produced.</para>
+/// <para><b>The seam can tear in either direction.</b> Records may lead the persisted application head when a frame
+/// batch lands before its checkpoint; the pump drops those exact re-deliveries. The application head may lead records
+/// when a best-effort capture write fails; a resumed reader then starts at the recorded head and backfills this plane,
+/// while the executor gates normalized output at the original application head. Exact reader-authored ranges make
+/// both comparisons stable across CRLF, UTF-8 cuts and unterminated tails.</para>
 ///
 /// <para><b>It cannot change what the run resolves to.</b> A plane that will not open, a reduction that will not
 /// resume, and a write that will not land each disable their half for the round with a warning; the harness's own
@@ -91,18 +89,21 @@ internal sealed class AgentNativeRecordPump
     private readonly List<NativeRecordCapture> _records = new();
     private readonly List<AgentSemanticEventV1> _events = new();
     private readonly List<HarnessModelCallProjectionV1> _modelCalls = new();
+    private bool _backfillsDeclaredFrames;
 
     private NativeRecordCaptureHandle? _handle;
     private long _ordinal;
     private long _sourceOffset;
+    private readonly long _openingSourceHead;
     private readonly long _recordedHead;
 
-    private AgentNativeRecordPump(INativeRecordPlane? plane, NativeRecordCaptureOpening? opening, SecretRedactor redactor, HarnessReductionSink reduction, ILogger logger)
+    private AgentNativeRecordPump(INativeRecordPlane? plane, NativeRecordCaptureOpening? opening, long fallbackSourceHead, SecretRedactor redactor, HarnessReductionSink reduction, ILogger logger)
     {
         _plane = plane;
         _handle = opening?.Handle;
-        _sourceOffset = opening?.SourceHead ?? 0;
-        _recordedHead = opening?.RecordedHead ?? 0;
+        _openingSourceHead = opening?.SourceHead ?? fallbackSourceHead;
+        _sourceOffset = _openingSourceHead;
+        _recordedHead = opening?.RecordedHead ?? fallbackSourceHead;
         _redactor = redactor;
         _reduction = reduction;
         _logger = logger;
@@ -113,6 +114,14 @@ internal sealed class AgentNativeRecordPump
 
     /// <summary>Whether the captured frames are also being folded into a resumable reduction. False ⇒ frames are still captured and no checkpoint is written.</summary>
     internal bool IsReducing => _reduction.IsReducing;
+
+    /// <summary>
+    /// Earliest source position a resumed observer must replay. Normally this is the persisted spool head; when a
+    /// best-effort frame flush failed before that head advanced, it rewinds only to the plane's recorded head so the
+    /// missing native span can be recovered. The executor keeps normalized output/transcript consumption gated at the
+    /// original source head, so backfill never duplicates application-visible output.
+    /// </summary>
+    internal long ReplayStartOffset => Math.Min(_openingSourceHead, _recordedHead);
 
     /// <summary>
     /// The execution-identity key for a harness, as <c>&lt;kind&gt;/v&lt;major&gt;</c>: the adapter's stable tag plus
@@ -143,23 +152,23 @@ internal sealed class AgentNativeRecordPump
     /// </summary>
     internal static async Task<AgentNativeRecordPump> OpenAsync(INativeRecordPlane? plane, NativeRecordCaptureRequest request, SecretRedactor redactor, ILogger logger, CancellationToken cancellationToken)
     {
-        if (plane is null) return Closed(redactor, logger);
+        if (plane is null) return Closed(request.ResumeSourceOffset, redactor, logger);
 
         try
         {
             var opening = await OpenedAsync(plane, request, cancellationToken).ConfigureAwait(false);
 
-            if (opening is null) return Closed(redactor, logger);
+            if (opening is null) return Closed(request.ResumeSourceOffset, redactor, logger);
 
             var reduction = await HarnessReductionSink.OpenAsync(plane, opening.Handle, logger, cancellationToken).ConfigureAwait(false);
 
-            return new AgentNativeRecordPump(plane, opening, redactor, reduction, logger);
+            return new AgentNativeRecordPump(plane, opening, request.ResumeSourceOffset, redactor, reduction, logger);
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             logger.LogWarning(exception, "Native record capture could not open for agent run {RunId}; the run streams unchanged with no native records", request.AgentRunId);
 
-            return Closed(redactor, logger);
+            return Closed(request.ResumeSourceOffset, redactor, logger);
         }
     }
 
@@ -186,7 +195,7 @@ internal sealed class AgentNativeRecordPump
     }
 
     /// <summary>A pump that parses exactly as before and records nothing.</summary>
-    private static AgentNativeRecordPump Closed(SecretRedactor redactor, ILogger logger) => new(null, null, redactor, HarnessReductionSink.Disabled(logger), logger);
+    private static AgentNativeRecordPump Closed(long sourceHead, SecretRedactor redactor, ILogger logger) => new(null, null, sourceHead, redactor, HarnessReductionSink.Disabled(logger), logger);
 
     /// <summary>
     /// Capture one frame and then ask the harness what it is. The record is built from the REDACTED line, so no secret
@@ -197,10 +206,31 @@ internal sealed class AgentNativeRecordPump
     /// that succeeds, and would do it differently depending on whether the plane is deployed.
     /// </summary>
     internal async Task<NativeFrame> CaptureAsync(string rawLine, string redactedLine, IAgentHarness harness, CancellationToken cancellationToken)
+        => await CaptureAsync(rawLine, redactedLine, harness, null, backfill: false, propagateParserFailure: true, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>Capture durable stdout using the source reader's exact range; no source position is reconstructed from decoded text.</summary>
+    internal async Task<NativeFrame> CaptureAsync(SandboxOutputFrame output, string redactedLine, IAgentHarness harness, CancellationToken cancellationToken)
+        => await CaptureAsync(output.Text, redactedLine, harness, output, backfill: false, propagateParserFailure: true, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// Recover a durable frame below the persisted application-output head. Parsing is repeated only to restore the
+    /// native plane's projections; its result is never emitted to the normalized log/folder/transcript, and a
+    /// non-deterministic parser failure is contained because replay work must not change the already-consumed run.
+    /// </summary>
+    internal async Task<NativeFrame> CaptureBackfillAsync(SandboxOutputFrame output, string redactedLine, IAgentHarness harness, CancellationToken cancellationToken)
     {
+        var frame = await CaptureAsync(output.Text, redactedLine, harness, output, backfill: true, propagateParserFailure: false, cancellationToken).ConfigureAwait(false);
+        return frame;
+    }
+
+    private async Task<NativeFrame> CaptureAsync(string rawLine, string redactedLine, IAgentHarness harness, SandboxOutputFrame? output, bool backfill, bool propagateParserFailure, CancellationToken cancellationToken)
+    {
+        await FlushForModeAsync(backfill, cancellationToken).ConfigureAwait(false);
         await FlushIfFullAsync(cancellationToken).ConfigureAwait(false);
 
-        var frame = IsCapturing ? BuildFrame(rawLine, redactedLine, isFinal: true) : null;
+        _backfillsDeclaredFrames = backfill;
+
+        var frame = IsCapturing ? BuildFrame(rawLine, redactedLine, output?.IsComplete ?? true, output?.SourceStartOffsetBytes, output?.SourceEndOffsetBytes) : null;
 
         if (frame is not null) Ground(frame, harness);
 
@@ -216,7 +246,9 @@ internal sealed class AgentNativeRecordPump
         {
             await RecordUnreadableAsync(frame, harness, exception, cancellationToken).ConfigureAwait(false);
 
-            throw;
+            if (propagateParserFailure) throw;
+
+            return new NativeFrame(frame?.RecordId, Array.Empty<AgentEvent>());
         }
     }
 
@@ -245,7 +277,10 @@ internal sealed class AgentNativeRecordPump
     /// </summary>
     internal async Task CaptureDiagnosticAsync(string rawLine, string redactedLine, bool isComplete, CancellationToken cancellationToken)
     {
+        await FlushForModeAsync(backfill: false, cancellationToken).ConfigureAwait(false);
         await FlushIfFullAsync(cancellationToken).ConfigureAwait(false);
+
+        _backfillsDeclaredFrames = false;
 
         if (!IsCapturing) return;
 
@@ -350,11 +385,12 @@ internal sealed class AgentNativeRecordPump
         if (_plane is null || _handle is not { } handle) return;
         if (_records.Count == 0 && _events.Count == 0 && _modelCalls.Count == 0) return;
 
-        var batch = new NativeRecordBatch { Handle = handle, Records = _records.ToList(), Events = _events.ToList(), ModelCalls = _modelCalls.ToList() };
+        var batch = new NativeRecordBatch { Handle = handle, Records = _records.ToList(), Events = _events.ToList(), ModelCalls = _modelCalls.ToList(), BackfillsDeclaredFrames = _backfillsDeclaredFrames };
 
         _records.Clear();
         _events.Clear();
         _modelCalls.Clear();
+        _backfillsDeclaredFrames = false;
 
         // Folded BEFORE the write, so a frame that becomes durable is already in the reduction, and the checkpoint it
         // produces then commits with that very batch — the window in which a durable frame is missing from the stored
@@ -409,6 +445,14 @@ internal sealed class AgentNativeRecordPump
         await FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>Backfill presence and newly discovered expectation are different completeness deltas, so they may never share one batch.</summary>
+    private async Task FlushForModeAsync(bool backfill, CancellationToken cancellationToken)
+    {
+        if (_records.Count == 0 || _backfillsDeclaredFrames == backfill) return;
+
+        await FlushAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>
     /// Records a frame its parser could not read, then flushes BEFORE the throw unwinds the round — the buffered batch
     /// gets no later chance to become durable, and a frame nobody can interpret that nobody can see either is exactly
@@ -447,25 +491,20 @@ internal sealed class AgentNativeRecordPump
     /// source, which the skipped line occupies whether or not this opening records it, while the ordinal counts this
     /// stream's own frames and 0139 requires it contiguous.</para>
     ///
-    /// <para>The cursor is reconstructed from the delivered lines plus the terminator byte a TERMINATED one carried.
-    /// For the newline-terminated spool a runner writes that is the source's own byte offset, which is what lets the
-    /// resume position and the recorded head be compared at all. A line the reader states it had to CUT carried no
-    /// terminator and is counted without one, so its continuation opens exactly where it ended. Where the reader
-    /// cannot preserve the accounting — a CR it trimmed from a CRLF ending, an unterminated final line it delivered as
-    /// whole — the two drift, and the seam then carries a re-delivered line the head no longer covers. That is a
-    /// duplicate the byte ranges show, not one they hide, and closing it needs the reader to state each line's true
-    /// offset rather than this side to guess better.</para>
+    /// <para>A durable stdout caller supplies the reader-authored half-open source range. It therefore preserves LF,
+    /// CRLF, unterminated tails, UTF-8 boundary cuts and multi-poll continuations without reconstructing geometry from
+    /// decoded text. The nullable fallback remains only for legacy/non-durable and diagnostic callers; records produced
+    /// through that path deliberately leave <see cref="NativeRecordV1.ByteEndOffset"/> null.</para>
     /// </summary>
-    private NativeRecordV1? BuildFrame(string rawLine, string redactedLine, bool isFinal)
+    private NativeRecordV1? BuildFrame(string rawLine, string redactedLine, bool isFinal, long? sourceStart = null, long? sourceEnd = null)
     {
         var handle = _handle!;
         var captured = Encoding.UTF8.GetBytes(redactedLine);
         var sourceLength = Encoding.UTF8.GetByteCount(rawLine);
-        var offset = _sourceOffset;
+        var offset = sourceStart ?? _sourceOffset;
+        var end = sourceEnd ?? offset + sourceLength + (isFinal ? 1 : 0);
 
-        // The line terminator the stream carried but the delivered line does not — a cut line carried none, so counting
-        // one for it would put its own continuation a byte past where the reader will resume.
-        _sourceOffset += sourceLength + (isFinal ? 1 : 0);
+        _sourceOffset = end;
 
         if (offset < _recordedHead) return null;
 
@@ -480,6 +519,7 @@ internal sealed class AgentNativeRecordPump
             IngestedAt = DateTimeOffset.UtcNow,
             ByteOffset = offset,
             ByteLength = sourceLength,
+            ByteEndOffset = sourceEnd,
             InlinePayload = redactedLine,
             DigestAlgorithm = WorkflowRunDataContract.Sha256Algorithm,
             Digest = Convert.ToHexString(SHA256.HashData(captured)).ToLowerInvariant(),

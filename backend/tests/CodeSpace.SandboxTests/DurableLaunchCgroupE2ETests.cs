@@ -95,7 +95,7 @@ public sealed class DurableLaunchCgroupE2ETests
 
             var handle = await runner.LaunchAsync(spec, key, CancellationToken.None);
             var lines = new List<string>();
-            var result = await runner.AttachAsync(handle, (l, _) => { lines.Add(l.Trim()); return Task.CompletedTask; }, CancellationToken.None);
+            var result = await runner.AttachAsync(handle, (frame, _) => { lines.Add(frame.Text.Trim()); return Task.CompletedTask; }, CancellationToken.None);
 
             handle.CgroupRunKey.ShouldBe(key, "the memory cap must place the run in a cgroup leaf — otherwise the cgroupns assertion has no teeth");
             result.Status.ShouldBe(SandboxStatus.Success, $"the cgroup-view probe runs to a clean exit. Stderr: {result.Stderr}");

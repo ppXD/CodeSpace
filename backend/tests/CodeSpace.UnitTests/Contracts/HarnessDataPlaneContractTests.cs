@@ -198,6 +198,7 @@ public sealed class HarnessDataPlaneContractTests
         roundTrip!.Channel.ShouldBe(NativeRecordChannel.Stdout);
         roundTrip.Encoding.ShouldBe(NativeRecordPayloadEncoding.Utf8);
         roundTrip.IsFinal.ShouldBeTrue();
+        roundTrip.ByteEndOffset.ShouldBe(record.ByteEndOffset);
         JsonSerializer.Serialize(roundTrip, AgentJson.Options).ShouldBe(json);
     }
 
@@ -386,7 +387,7 @@ public sealed class HarnessDataPlaneContractTests
         typeof(RunnerHandleEnvelope).GetProperties().Length.ShouldBe(10, $"{byHand} — and to PrintMembers, or a new opaque field starts reaching logs");
         typeof(HarnessDescriptor).GetProperties().Length.ShouldBe(7, byHand);
         typeof(AgentSemanticEventV1).GetProperties().Length.ShouldBe(16, byHand);
-        typeof(NativeRecordV1).GetProperties().Length.ShouldBe(20, "NativeRecordV1 keeps the generated equality but prints its members by hand — a field added here must be added to PrintMembers, or a new payload-bearing field starts reaching logs");
+        typeof(NativeRecordV1).GetProperties().Length.ShouldBe(21, "NativeRecordV1 keeps the generated equality but prints its members by hand — a field added here must be added to PrintMembers, or a new payload-bearing field starts reaching logs");
     }
 
     private static void AssertRoundTripsByValue<T>(T original) where T : notnull
@@ -422,6 +423,7 @@ public sealed class HarnessDataPlaneContractTests
         IngestedAt = DateTimeOffset.UnixEpoch,
         ByteOffset = 4096,
         ByteLength = 20,
+        ByteEndOffset = 4117,
         InlinePayload = "{\"type\":\"assistant\"}",
         DigestAlgorithm = WorkflowRunDataContract.Sha256Algorithm,
         Digest = new string('a', 64),
