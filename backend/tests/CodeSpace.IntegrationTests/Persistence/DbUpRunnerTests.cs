@@ -107,6 +107,7 @@ public class DbUpRunnerTests
     [InlineData("tool_call_ledger", "idempotency_key", "0049_tool_call_ledger.sql")]        // the server-derived at-most-once handle (one terminal row per run+key — the exactly-once invariant)
     [InlineData("tool_call_ledger", "approved_by_user_id", "0050_tool_call_ledger_approval.sql")] // durable-HITL approve sub-state — who approved the parked call
     [InlineData("tool_call_ledger", "approved_at", "0050_tool_call_ledger_approval.sql")]          // durable-HITL approve sub-state — NULL distinguishes not-yet-decided from approved-but-unexecuted
+    [InlineData("tool_call_ledger", "admission_ordinal", "0156_tool_call_ledger_admission_ordinal.sql")] // commit-serialized one-based source order per AgentRun; legacy rows remain NULL
     [InlineData("supervisor_decision", "idempotency_key", "0053_supervisor_decision.sql")]         // PR-E E1: the server-derived at-most-once handle (one terminal row per run+key — the exactly-once invariant)
     [InlineData("supervisor_decision", "payload_jsonb", "0053_supervisor_decision.sql")]           // the emitted decision — a frozen-at-insert JOURNAL field (the immutability trigger protects it)
     [InlineData("supervisor_decision", "outcome_jsonb", "0053_supervisor_decision.sql")]           // the execution result — the deliberately-mutable CAS path

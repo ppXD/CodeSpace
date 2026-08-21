@@ -37,6 +37,14 @@ public class ToolCallLedger : IEntity<Guid>, IAuditable
     /// <summary>The agent run this call belongs to. Soft link (no FK), like <see cref="AgentRunEvent.AgentRunId"/>.</summary>
     public Guid AgentRunId { get; set; }
 
+    /// <summary>
+    /// Database-owned, one-based admission order within <see cref="AgentRunId"/>. Allocation is serialized until
+    /// COMMIT for that AgentRun, so a later observation projector has a durable source order that timestamps and
+    /// random ids cannot provide. NULL means the row predates durable ordering and is intentionally ineligible for
+    /// ordered projection; legacy history is never guessed or backfilled.
+    /// </summary>
+    public long? AdmissionOrdinal { get; set; }
+
     /// <summary><c>IAgentTool.Kind</c>, e.g. "git.open_pr" — the tool that was called.</summary>
     public string ToolKind { get; set; } = default!;
 
