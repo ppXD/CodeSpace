@@ -29,8 +29,9 @@ public sealed class WorkflowRunModelCallProjector : IWorkflowRunModelCallProject
 
         var projected = await ProjectTerminalsAsync(batchSize, cancellationToken).ConfigureAwait(false);
         var lateStarts = await AttachLateStartsAsync(batchSize, cancellationToken).ConfigureAwait(false);
+        var bodyCaptures = await DeclareBodyCapturesAsync(batchSize, cancellationToken).ConfigureAwait(false);
         if (ownsTransaction) await transaction!.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new WorkflowRunModelCallProjectionResult(projected, lateStarts);
+        return new WorkflowRunModelCallProjectionResult(projected, lateStarts, bodyCaptures);
     }
 
     private async Task<int> ProjectTerminalsAsync(int batchSize, CancellationToken cancellationToken)
@@ -137,6 +138,95 @@ public sealed class WorkflowRunModelCallProjector : IWorkflowRunModelCallProject
         return changed;
     }
 
+    /// <summary>
+    /// Declares body work from stable source ids only. This runs in the projector transaction but deliberately never
+    /// reads or writes artifact bytes: storage latency/failure belongs to the independently leased materializer, while
+    /// this durable row keeps the immutable source discoverable until materialization reaches an honest outcome.
+    /// </summary>
+    private async Task<int> DeclareBodyCapturesAsync(int batchSize, CancellationToken cancellationToken)
+    {
+        var candidates = await (from attempt in _db.WorkflowRunModelCallAttempt.AsNoTracking()
+                                join call in _db.WorkflowRunModelCall.AsNoTracking() on attempt.ModelCallId equals call.Id
+                                join terminal in _db.WorkflowRunRecord.AsNoTracking() on attempt.SourceTerminalRecordId equals terminal.Id
+                                where call.SourceKind == SourceKind
+                                      && ((attempt.SourceStartedRecordId != null && !_db.WorkflowRunModelCallBodyCapture.Any(value => value.ModelCallAttemptId == attempt.Id
+                                              && value.BodyKind == WorkflowRunModelCallBodyKind.LogicalRequest))
+                                          || (terminal.RecordType == WorkflowRunRecordTypes.InteractionCompleted
+                                              && !_db.WorkflowRunModelCallBodyCapture.Any(value => value.ModelCallAttemptId == attempt.Id
+                                                  && value.BodyKind == WorkflowRunModelCallBodyKind.AttemptResponse))
+                                          || (terminal.RecordType == WorkflowRunRecordTypes.InteractionFailed
+                                              && !_db.WorkflowRunModelCallBodyCapture.Any(value => value.ModelCallAttemptId == attempt.Id
+                                                  && value.BodyKind == WorkflowRunModelCallBodyKind.AttemptError)))
+                                orderby attempt.CreatedDate, attempt.Id
+                                select new BodyCaptureCandidate(call.TeamId, call.WorkflowRunId, call.Id, attempt.Id,
+                                    attempt.SourceStartedRecordId, attempt.SourceTerminalRecordId!.Value, terminal.RecordType, attempt.ResponseArtifactId))
+            .Take(batchSize).ToListAsync(cancellationToken).ConfigureAwait(false);
+        if (candidates.Count == 0) return 0;
+
+        await TakeRunLocksAsync(candidates.Select(value => value.WorkflowRunId), cancellationToken).ConfigureAwait(false);
+        var attemptIds = candidates.Select(value => value.ModelCallAttemptId).ToArray();
+        var existing = (await _db.WorkflowRunModelCallBodyCapture.AsNoTracking().Where(value => attemptIds.Contains(value.ModelCallAttemptId))
+            .Select(value => new BodyCaptureIdentity(value.ModelCallAttemptId, value.BodyKind)).ToListAsync(cancellationToken).ConfigureAwait(false)).ToHashSet();
+        var artifactIds = candidates.Select(value => value.ResponseArtifactId).OfType<Guid>().Distinct().ToArray();
+        var teamIds = candidates.Select(value => value.TeamId).Distinct().ToArray();
+        var artifacts = artifactIds.Length == 0 ? [] : await _db.WorkflowArtifact.AsNoTracking()
+            .Where(value => teamIds.Contains(value.TeamId) && artifactIds.Contains(value.Id))
+            .Select(value => new BodyArtifact(value.TeamId, value.Id, value.Sha256, value.SizeBytes, value.ContentType))
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        var artifactsByIdentity = artifacts.ToDictionary(value => new ArtifactIdentity(value.TeamId, value.Id));
+        var now = DateTimeOffset.UtcNow;
+        var declared = 0;
+
+        foreach (var candidate in candidates)
+        {
+            if (candidate.SourceStartedRecordId is { } startedRecordId
+                && existing.Add(new BodyCaptureIdentity(candidate.ModelCallAttemptId, WorkflowRunModelCallBodyKind.LogicalRequest)))
+            {
+                _db.WorkflowRunModelCallBodyCapture.Add(PendingCapture(candidate, WorkflowRunModelCallBodyKind.LogicalRequest, startedRecordId, "prompt", now));
+                declared++;
+            }
+
+            var kind = candidate.TerminalRecordType == WorkflowRunRecordTypes.InteractionCompleted
+                ? WorkflowRunModelCallBodyKind.AttemptResponse : WorkflowRunModelCallBodyKind.AttemptError;
+            if (!existing.Add(new BodyCaptureIdentity(candidate.ModelCallAttemptId, kind))) continue;
+            var property = kind == WorkflowRunModelCallBodyKind.AttemptResponse ? "output" : "error";
+            if (kind == WorkflowRunModelCallBodyKind.AttemptResponse && candidate.ResponseArtifactId is { } artifactId
+                && artifactsByIdentity.TryGetValue(new ArtifactIdentity(candidate.TeamId, artifactId), out var artifact))
+                _db.WorkflowRunModelCallBodyCapture.Add(AvailableCapture(candidate, kind, property, artifact, now));
+            else
+                _db.WorkflowRunModelCallBodyCapture.Add(PendingCapture(candidate, kind, candidate.SourceTerminalRecordId, property, now));
+            declared++;
+        }
+
+        if (declared > 0) await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        return declared;
+    }
+
+    private static WorkflowRunModelCallBodyCapture PendingCapture(BodyCaptureCandidate source, WorkflowRunModelCallBodyKind kind,
+        Guid sourceRecordId, string sourceProperty, DateTimeOffset now) => Capture(source, kind, sourceRecordId, sourceProperty, now);
+
+    private static WorkflowRunModelCallBodyCapture AvailableCapture(BodyCaptureCandidate source, WorkflowRunModelCallBodyKind kind,
+        string sourceProperty, BodyArtifact artifact, DateTimeOffset now)
+    {
+        var capture = Capture(source, kind, source.SourceTerminalRecordId, sourceProperty, now);
+        capture.State = WorkflowRunModelCallBodyCaptureState.Available;
+        capture.ArtifactId = artifact.Id;
+        capture.SourceSha256 = artifact.Sha256;
+        capture.SizeBytes = artifact.SizeBytes;
+        capture.ContentType = artifact.ContentType;
+        capture.TerminalAt = now;
+        return capture;
+    }
+
+    private static WorkflowRunModelCallBodyCapture Capture(BodyCaptureCandidate source, WorkflowRunModelCallBodyKind kind,
+        Guid sourceRecordId, string sourceProperty, DateTimeOffset now) => new()
+    {
+        Id = Guid.NewGuid(), TeamId = source.TeamId, WorkflowRunId = source.WorkflowRunId, ModelCallId = source.ModelCallId,
+        ModelCallAttemptId = source.ModelCallAttemptId, BodyKind = kind, SourceKind = SourceKind, SourceRecordId = sourceRecordId,
+        SourceProperty = sourceProperty, State = WorkflowRunModelCallBodyCaptureState.Pending, NextMaterializationAt = now,
+        Revision = 1, CreatedAt = now, LastModifiedAt = now,
+    };
+
     private async Task<Dictionary<SourceScope, SourceStarted>> ReadStartsAsync(IReadOnlyCollection<SourceScope> scopes, CancellationToken cancellationToken)
     {
         var runIds = scopes.Select(value => value.RunId).Distinct().ToArray();
@@ -216,6 +306,10 @@ public sealed class WorkflowRunModelCallProjector : IWorkflowRunModelCallProject
         string IterationKey, Guid CorrelationId, DateTimeOffset OccurredAt, string RecordType, string PayloadJson);
     private sealed record LateStartCandidate(Guid AttemptId, int SourceEvidenceRevision, Guid TerminalRecordId, Guid ModelCallId,
         Guid TeamId, Guid WorkflowRunId, string? NodeId, string IterationKey, Guid CorrelationId);
+    private sealed record BodyCaptureCandidate(Guid TeamId, Guid WorkflowRunId, Guid ModelCallId, Guid ModelCallAttemptId,
+        Guid? SourceStartedRecordId, Guid SourceTerminalRecordId, string TerminalRecordType, Guid? ResponseArtifactId);
+    private sealed record BodyArtifact(Guid TeamId, Guid Id, string Sha256, long SizeBytes, string ContentType);
+    private readonly record struct BodyCaptureIdentity(Guid ModelCallAttemptId, WorkflowRunModelCallBodyKind BodyKind);
     private readonly record struct SourceIdentity(Guid TeamId, Guid RunId, Guid CorrelationId)
     {
         public static SourceIdentity For(TerminalCandidate value) => new(value.TeamId, value.RunId, value.CorrelationId);

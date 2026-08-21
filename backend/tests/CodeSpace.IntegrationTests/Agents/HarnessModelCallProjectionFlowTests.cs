@@ -89,6 +89,8 @@ public sealed class HarnessModelCallProjectionFlowTests
         attempt.SourceNativeRecordId.ShouldBe(frame.RecordId, customMessage: "the frame is the row's whole evidence, so provenance is a column rather than a join a reader has to know to make");
         attempt.SourceTerminalRecordId.ShouldBeNull("this row projects no workflow-run record, and 0130's guard refuses one that claimed to");
         attempt.SourceEvidenceRevision.ShouldBe(0);
+        (await db.WorkflowRunModelCallBodyCapture.CountAsync(value => value.ModelCallAttemptId == attempt.Id)).ShouldBe(0,
+            "workflow-run-record body declarations never reinterpret or mix harness-native evidence");
         attempt.UnavailableFigures.ShouldBe(new[]
         {
             ModelCallFigures.CompletedAt, ModelCallFigures.FirstTokenAt,

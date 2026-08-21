@@ -11,7 +11,7 @@ public interface IWorkflowRunModelCallProjector : IScopedDependency
     Task<WorkflowRunModelCallProjectionResult> SweepAsync(int batchSize, CancellationToken cancellationToken);
 }
 
-public sealed record WorkflowRunModelCallProjectionResult(int TerminalAttemptsProjected, int LateStartsAttached)
+public sealed record WorkflowRunModelCallProjectionResult(int TerminalAttemptsProjected, int LateStartsAttached, int BodyCapturesDeclared = 0)
 {
-    public int TotalChanges => TerminalAttemptsProjected + LateStartsAttached;
+    public int TotalChanges => TerminalAttemptsProjected + LateStartsAttached + BodyCapturesDeclared;
 }

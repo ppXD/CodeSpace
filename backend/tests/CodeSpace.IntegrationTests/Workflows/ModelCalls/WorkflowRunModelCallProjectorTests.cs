@@ -41,7 +41,7 @@ public sealed class WorkflowRunModelCallProjectorTests
         var first = await SweepAsync(50);
         var second = await SweepAsync(50);
 
-        first.ShouldBe(new WorkflowRunModelCallProjectionResult(1, 0));
+        first.ShouldBe(new WorkflowRunModelCallProjectionResult(1, 0, 2));
         second.ShouldBe(new WorkflowRunModelCallProjectionResult(0, 0));
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -63,6 +63,15 @@ public sealed class WorkflowRunModelCallProjectorTests
         attempt.FinishReason.ShouldBe("stop");
         attempt.ResponseArtifactId.ShouldBe(artifactId);
         attempt.TransportKind.ShouldBeNull("the legacy tape cannot attest a physical HTTP/CLI transport");
+        var captures = await db.WorkflowRunModelCallBodyCapture.AsNoTracking().Where(value => value.ModelCallAttemptId == attempt.Id)
+            .OrderBy(value => value.BodyKind).ToListAsync();
+        captures.Count.ShouldBe(2);
+        captures.Single(value => value.BodyKind == WorkflowRunModelCallBodyKind.LogicalRequest).State.ShouldBe(WorkflowRunModelCallBodyCaptureState.Pending);
+        var response = captures.Single(value => value.BodyKind == WorkflowRunModelCallBodyKind.AttemptResponse);
+        response.State.ShouldBe(WorkflowRunModelCallBodyCaptureState.Available);
+        response.ArtifactId.ShouldBe(artifactId);
+        response.SourceRecordId.ShouldBe(terminal.Id);
+        response.SourceProperty.ShouldBe("output");
     }
 
     [Fact]
@@ -74,12 +83,12 @@ public sealed class WorkflowRunModelCallProjectorTests
             """{"kind":"planner.plan","provider":"custom","error":"gateway down","category":"Transport","failureKind":"provider"}""");
         await AddRecordsAsync(terminal);
 
-        (await SweepAsync(50)).ShouldBe(new WorkflowRunModelCallProjectionResult(1, 0));
+        (await SweepAsync(50)).ShouldBe(new WorkflowRunModelCallProjectionResult(1, 0, 1));
         var started = Record(world.RunId, WorkflowRunRecordTypes.InteractionStarted, correlationId,
             """{"kind":"planner.plan","provider":"custom","model":"planner-v2","prompt":{"user":"late"}}""", terminal.OccurredAt.AddSeconds(5));
         await AddRecordsAsync(started);
 
-        (await SweepAsync(50)).ShouldBe(new WorkflowRunModelCallProjectionResult(0, 1));
+        (await SweepAsync(50)).ShouldBe(new WorkflowRunModelCallProjectionResult(0, 1, 1));
         (await SweepAsync(50)).ShouldBe(new WorkflowRunModelCallProjectionResult(0, 0));
 
         using var scope = _fixture.BeginScope();
@@ -93,6 +102,9 @@ public sealed class WorkflowRunModelCallProjectorTests
         attempt.ErrorCode.ShouldBe("Transport");
         attempt.CompletedAt.HasValue.ShouldBeTrue();
         attempt.StartedAt.ShouldBe(attempt.CompletedAt.Value, "a late observation is clamped to the persisted terminal timestamp and cannot produce an impossible completed-before-started interval");
+        var captures = await db.WorkflowRunModelCallBodyCapture.AsNoTracking().Where(value => value.ModelCallAttemptId == attempt.Id).ToListAsync();
+        captures.Select(value => value.BodyKind).ShouldBe(new[] { WorkflowRunModelCallBodyKind.LogicalRequest, WorkflowRunModelCallBodyKind.AttemptError }, ignoreOrder: true);
+        captures.ShouldAllBe(value => value.State == WorkflowRunModelCallBodyCaptureState.Pending);
     }
 
     [Fact]
@@ -150,7 +162,7 @@ public sealed class WorkflowRunModelCallProjectorTests
             """{"kind":"single-observation","provider":"test","failureKind":"provider"}""", completed.OccurredAt.AddSeconds(1));
         await AddRecordsAsync(completed, duplicate);
 
-        (await SweepAsync(50)).ShouldBe(new WorkflowRunModelCallProjectionResult(1, 0));
+        (await SweepAsync(50)).ShouldBe(new WorkflowRunModelCallProjectionResult(1, 0, 1));
         await AddRecordsAsync(Record(world.RunId, WorkflowRunRecordTypes.InteractionFailed, correlationId,
             """{"kind":"single-observation","provider":"test","failureKind":"provider"}""", duplicate.OccurredAt.AddSeconds(1)));
 
@@ -264,6 +276,48 @@ public sealed class WorkflowRunModelCallProjectorTests
         var projector = scope.Resolve<IWorkflowRunModelCallProjector>();
         await Should.ThrowAsync<ArgumentOutOfRangeException>(() => projector.SweepAsync(0, CancellationToken.None));
         await Should.ThrowAsync<ArgumentOutOfRangeException>(() => projector.SweepAsync(1001, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Inline_bodies_are_declared_transactionally_without_artifact_io_and_replay_is_idempotent()
+    {
+        var world = await SeedRunAsync();
+        var correlationId = Guid.NewGuid();
+        var started = Record(world.RunId, WorkflowRunRecordTypes.InteractionStarted, correlationId,
+            """{"kind":"inline","prompt":"large logical prompt"}""");
+        var terminal = Record(world.RunId, WorkflowRunRecordTypes.InteractionCompleted, correlationId,
+            """{"kind":"inline","output":"large inline response"}""", started.OccurredAt.AddSeconds(1));
+        await AddRecordsAsync(started, terminal);
+
+        int artifactsBefore;
+        using (var beforeScope = _fixture.BeginScope())
+            artifactsBefore = await beforeScope.Resolve<CodeSpaceDbContext>().WorkflowArtifact.CountAsync(value => value.TeamId == world.TeamId);
+
+        (await SweepAsync(50)).ShouldBe(new WorkflowRunModelCallProjectionResult(1, 0, 2));
+        (await SweepAsync(50)).ShouldBe(new WorkflowRunModelCallProjectionResult(0, 0, 0));
+
+        using (var gapScope = _fixture.BeginScope())
+        {
+            var gapDb = gapScope.Resolve<CodeSpaceDbContext>();
+            var callId = await gapDb.WorkflowRunModelCall.Where(value => value.SourceCorrelationId == correlationId).Select(value => value.Id).SingleAsync();
+            var attemptId = await gapDb.WorkflowRunModelCallAttempt.Where(value => value.ModelCallId == callId).Select(value => value.Id).SingleAsync();
+            (await gapDb.WorkflowRunModelCallBodyCapture.Where(value => value.ModelCallAttemptId == attemptId
+                && value.BodyKind == WorkflowRunModelCallBodyKind.AttemptResponse).ExecuteDeleteAsync()).ShouldBe(1);
+        }
+
+        (await SweepAsync(50)).ShouldBe(new WorkflowRunModelCallProjectionResult(0, 0, 1));
+        (await SweepAsync(50)).ShouldBe(new WorkflowRunModelCallProjectionResult(0, 0, 0));
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var call = await db.WorkflowRunModelCall.AsNoTracking().SingleAsync(value => value.SourceCorrelationId == correlationId);
+        var attempt = await db.WorkflowRunModelCallAttempt.AsNoTracking().SingleAsync(value => value.ModelCallId == call.Id);
+        var captures = await db.WorkflowRunModelCallBodyCapture.AsNoTracking().Where(value => value.ModelCallAttemptId == attempt.Id).ToListAsync();
+        captures.Count.ShouldBe(2);
+        captures.ShouldAllBe(value => value.State == WorkflowRunModelCallBodyCaptureState.Pending && value.ArtifactId == null
+            && value.MaterializationAttemptCount == 0 && value.LeaseOwnerId == null);
+        (await db.WorkflowArtifact.CountAsync(value => value.TeamId == world.TeamId)).ShouldBe(artifactsBefore,
+            "the projector transaction declares durable work but never performs object-store I/O");
     }
 
     private async Task<WorkflowRunModelCallProjectionResult> SweepAsync(int batchSize)
