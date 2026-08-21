@@ -1,6 +1,8 @@
 using CodeSpace.Core.Services.Sessions.Journal.FactsSources;
 using CodeSpace.Core.Services.Tasks.Timeline.Sources;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Dtos.Sessions.Journal;
+using CodeSpace.Messages.Dtos.Workflows.Supervisor;
 using CodeSpace.UnitTests.Infrastructure;
 using Shouldly;
 
@@ -73,6 +75,77 @@ public class PlanFactsSourceTests
         log.SeedTerminal(runId, teamId, SupervisorDecisionKinds.Plan, "{}", "{}");   // a plan whose payload authored no subtasks
 
         (await new PlanFactsSource(log).GatherAsync(runId, teamId, CancellationToken.None)).ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Truncated_subtasks_emit_coverage_without_promoting_prefixes_to_the_plan()
+    {
+        var item = SupervisorPlanObservationTestData.Item(new SupervisorPlanObservationItemSpec
+        {
+            SubtasksState = SupervisorPlanObservationLeafState.Truncated,
+            SubtaskTotal = 25,
+            SubtaskOmitted = 5,
+            Subtasks = Enumerable.Range(1, 20).Select(i => SupervisorPlanObservationTestData.Subtask($"s{i}", $"prefix-{i}")).ToList(),
+        });
+        var bundle = new FakeSupervisorPlanObservationPageBundle { Page = SupervisorPlanObservationTestData.Page(items: item) };
+
+        var facts = await new PlanFactsSource(bundle).GatherAsync(item.Metadata.SupervisorRunId, Guid.NewGuid(), CancellationToken.None);
+
+        var fact = facts[SupervisorDecisionTimelineMap.EventId(item.Metadata.DecisionId)];
+        fact.Plan.ShouldBeNull("bounded prefixes never become an apparently complete plan");
+        var coverage = fact.ObservationCoverage.ShouldHaveSingleItem();
+        coverage.SourceKind.ShouldBe(JournalObservationCoverageSourceKinds.SupervisorPlanSubtasks);
+        coverage.Reason.ShouldBe(JournalObservationCoverageReason.TruncatedLeaf);
+        coverage.ObservedCount.ShouldBe(20);
+        coverage.OmittedCount.ShouldBe(5);
+    }
+
+    [Fact]
+    public async Task Page_cap_is_explicit_on_the_oldest_observed_decision()
+    {
+        var first = SupervisorPlanObservationTestData.Item(new SupervisorPlanObservationItemSpec { StoryOrder = 501 });
+        var second = SupervisorPlanObservationTestData.Item(new SupervisorPlanObservationItemSpec { StoryOrder = 502 });
+        var bundle = new FakeSupervisorPlanObservationPageBundle { Page = SupervisorPlanObservationTestData.Page(true, first, second) };
+
+        var facts = await new PlanFactsSource(bundle).GatherAsync(first.Metadata.SupervisorRunId, Guid.NewGuid(), CancellationToken.None);
+
+        var boundary = facts[SupervisorDecisionTimelineMap.EventId(first.Metadata.DecisionId)].ObservationCoverage!
+            .Single(value => value.Reason == JournalObservationCoverageReason.OlderItemsOmitted);
+        boundary.ObservedCount.ShouldBe(2);
+        boundary.OmittedCount.ShouldBe(1);
+        boundary.OmittedCountIsLowerBound.ShouldBeTrue("limit+1 proves at least one older row without an unbounded COUNT");
+    }
+
+    [Fact]
+    public async Task Corrupt_status_and_malformed_exact_leaf_fail_closed()
+    {
+        var corruptStatus = SupervisorPlanObservationTestData.Item(new SupervisorPlanObservationItemSpec { Status = SupervisorDecisionObservationStatus.LegacyUnknown, StoryOrder = 1 });
+        var malformedExact = SupervisorPlanObservationTestData.Item(new SupervisorPlanObservationItemSpec
+        {
+            StoryOrder = 2,
+            Subtasks = [SupervisorPlanObservationTestData.Subtask("truncated", "prefix", titleBytes: 99)],
+        });
+        var bundle = new FakeSupervisorPlanObservationPageBundle { Page = SupervisorPlanObservationTestData.Page(items: [corruptStatus, malformedExact]) };
+
+        var facts = await new PlanFactsSource(bundle).GatherAsync(corruptStatus.Metadata.SupervisorRunId, Guid.NewGuid(), CancellationToken.None);
+
+        facts.Values.ShouldAllBe(fact => fact.Plan == null);
+        facts[SupervisorDecisionTimelineMap.EventId(corruptStatus.Metadata.DecisionId)].ObservationCoverage!.Single().Reason
+            .ShouldBe(JournalObservationCoverageReason.CorruptDecisionStatus);
+        facts[SupervisorDecisionTimelineMap.EventId(malformedExact.Metadata.DecisionId)].ObservationCoverage!.Single().Reason
+            .ShouldBe(JournalObservationCoverageReason.CorruptLeaf);
+    }
+
+    [Fact]
+    public async Task Observation_database_fault_propagates_as_infrastructure()
+    {
+        var error = new InvalidOperationException("plan-observation-db-fault");
+        var bundle = new FakeSupervisorPlanObservationPageBundle { Page = null, Error = error };
+
+        var thrown = await Should.ThrowAsync<InvalidOperationException>(() => new PlanFactsSource(bundle)
+            .GatherAsync(Guid.NewGuid(), Guid.NewGuid(), CancellationToken.None));
+
+        thrown.ShouldBeSameAs(error);
     }
 
     private static string PlanPayload(params (string id, string title)[] subtasks) =>

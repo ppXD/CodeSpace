@@ -157,6 +157,36 @@ public class JournalWalkTests
         tool.Agents.ShouldBeEmpty("a bare step's Agents default to empty, never null");
     }
 
+    [Fact]
+    public async Task Composes_and_surfaces_multiple_typed_observation_gaps_on_the_decision_step()
+    {
+        var decisionId = Guid.NewGuid();
+        JournalObservationCoverage Gap(string source, JournalObservationCoverageReason reason) => new()
+        {
+            SourceKind = source,
+            Reason = reason,
+            ObservedCount = 0,
+            OmittedCount = 1,
+            OmittedCountIsLowerBound = false,
+            DecisionId = decisionId,
+            StoryOrder = "12",
+        };
+        var planGap = Gap(JournalObservationCoverageSourceKinds.SupervisorPlanSubtasks, JournalObservationCoverageReason.InvalidLeaf);
+        var usageGap = Gap(JournalObservationCoverageSourceKinds.SupervisorPlanModelUsage, JournalObservationCoverageReason.CorruptLeaf);
+        var merged = new JournalStepFacts { ObservationCoverage = [planGap] }.Merge(new JournalStepFacts { ObservationCoverage = [usageGap] });
+        var id = $"supervisor-{decisionId:N}";
+        var walk = WalkOver([Event(id, "supervisor", title: "Supervisor planned the work")], new JournalFacts
+        {
+            ByStepId = new Dictionary<string, JournalStepFacts> { [id] = merged },
+        });
+
+        var step = (await walk.WalkAsync(Guid.NewGuid(), Guid.NewGuid(), CancellationToken.None))!.Single();
+
+        step.ObservationCoverage.ShouldBe([planGap, usageGap]);
+        step.Plan.ShouldBeEmpty("unavailable prefixes remain absent from the normal Plan field");
+        step.ModelCall.ShouldBeNull("unavailable usage remains absent from the normal ModelCall field");
+    }
+
     private sealed class FakeTimeline : IRunTimelineProjector
     {
         private readonly IReadOnlyList<RunTimelineEvent>? _events;

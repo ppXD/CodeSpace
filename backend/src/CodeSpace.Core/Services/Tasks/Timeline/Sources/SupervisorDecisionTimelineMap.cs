@@ -27,7 +27,10 @@ public static class SupervisorDecisionTimelineMap
     public const string Key = "supervisor";
 
     /// <summary>The timeline event id (and thus the journal step id) for a decision row — the ONE format both this map and the journal facts sources key by, so an enrichment source can address a decision's step without the format drifting.</summary>
-    public static string EventId(SupervisorDecisionRecord d) => $"supervisor-{d.Id:N}";
+    public static string EventId(SupervisorDecisionRecord d) => EventId(d.Id);
+
+    /// <summary>The same event identity for bounded observation models that deliberately do not materialize a ledger row.</summary>
+    public static string EventId(Guid decisionId) => $"supervisor-{decisionId:N}";
 
     public static RunTimelineEvent ToEvent(SupervisorDecisionRecord d) =>
         new()

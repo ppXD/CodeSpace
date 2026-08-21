@@ -1,6 +1,8 @@
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Supervisor;
+using CodeSpace.Core.Services.Supervisor.Observation;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Dtos.Workflows.Supervisor;
 
 namespace CodeSpace.UnitTests.Infrastructure;
 
@@ -18,8 +20,10 @@ namespace CodeSpace.UnitTests.Infrastructure;
 /// NEVER drift from production's legality rules: an illegal hop (e.g. Pending→Succeeded without the claim, or a
 /// double-terminal) throws <see cref="SupervisorDecisionTransitionException"/> exactly as the real ledger does.
 /// </para>
+/// <para>The bounded Plan-page interface is a test-only convenience derived from these in-memory bodies. It validates
+/// facts-source behavior, not the production SQL/body boundary; true-PostgreSQL leaf-reader tests own that proof.</para>
 /// </summary>
-public sealed class FakeSupervisorDecisionLog : ISupervisorDecisionLog, ISupervisorDecisionObservationBundle
+public sealed class FakeSupervisorDecisionLog : ISupervisorDecisionLog, ISupervisorDecisionObservationBundle, ISupervisorPlanObservationPageBundle
 {
     public List<SupervisorDecisionRecord> Rows { get; } = new();
     private long _seq;
@@ -78,6 +82,76 @@ public sealed class FakeSupervisorDecisionLog : ISupervisorDecisionLog, ISupervi
 
     public Task<IReadOnlyList<SupervisorDecisionRecord>> GetForRunAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<SupervisorDecisionRecord>>(Rows.Where(r => r.SupervisorRunId == supervisorRunId && r.TeamId == teamId).OrderBy(r => r.Sequence).ToList());
+
+    Task<SupervisorPlanObservationPage?> ISupervisorPlanObservationPageBundle.GetForRunAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var rows = Rows.Where(row => row.SupervisorRunId == supervisorRunId && row.TeamId == teamId && row.DecisionKind == SupervisorDecisionKinds.Plan)
+            .OrderByDescending(row => row.Sequence).Take(SupervisorPlanObservationPageBundle.PageLimit + 1).ToList();
+        var hasMore = rows.Count > SupervisorPlanObservationPageBundle.PageLimit;
+        if (hasMore) rows.RemoveAt(rows.Count - 1);
+        rows.Reverse();
+        var items = rows.Select(ToPlanObservation).ToList();
+        return Task.FromResult<SupervisorPlanObservationPage?>(new SupervisorPlanObservationPage
+        {
+            SupervisorRunId = supervisorRunId,
+            Mode = SupervisorDecisionObservationStoryPageMode.Tail.ToString(),
+            Limit = SupervisorPlanObservationPageBundle.PageLimit,
+            SnapshotRevision = rows.Count,
+            HeadRevision = rows.Count,
+            Items = items,
+            HasMore = hasMore,
+            NextNewerCursor = "test-only",
+        });
+    }
+
+    private static SupervisorPlanObservationItem ToPlanObservation(SupervisorDecisionRecord row)
+    {
+        var subtasks = SupervisorOutcome.ReadPlanSubtasks(row.PayloadJson);
+        var usage = SupervisorOutcome.ReadModelUsage(row.OutcomeJson);
+        return new SupervisorPlanObservationItem
+        {
+            Metadata = new SupervisorDecisionObservationMetadata
+            {
+                DecisionId = row.Id,
+                SupervisorRunId = row.SupervisorRunId,
+                DecisionKind = row.DecisionKind,
+                Status = row.Status switch
+                {
+                    SupervisorDecisionStatus.Pending => SupervisorDecisionObservationStatus.Pending,
+                    SupervisorDecisionStatus.AwaitingApproval => SupervisorDecisionObservationStatus.AwaitingApproval,
+                    SupervisorDecisionStatus.Running => SupervisorDecisionObservationStatus.Running,
+                    SupervisorDecisionStatus.Succeeded => SupervisorDecisionObservationStatus.Succeeded,
+                    SupervisorDecisionStatus.Failed => SupervisorDecisionObservationStatus.Failed,
+                    SupervisorDecisionStatus.Expired => SupervisorDecisionObservationStatus.Expired,
+                    _ => SupervisorDecisionObservationStatus.Corrupt,
+                },
+                StoryOrder = row.Sequence,
+                ObservationRevision = row.Sequence,
+                CreatedAt = row.CreatedDate,
+                LastModifiedAt = row.LastModifiedDate,
+                ErrorTotalBytes = 0,
+                ErrorState = SupervisorDecisionObservationErrorState.None,
+            },
+            SubtasksState = subtasks.Count == 0 ? SupervisorPlanObservationLeafState.Missing : SupervisorPlanObservationLeafState.Exact,
+            SubtasksTotalCount = subtasks.Count,
+            SubtasksOmittedCount = 0,
+            Subtasks = subtasks.Select(subtask => new SupervisorPlanSubtaskObservationLeaf
+            {
+                IdPrefix = subtask.Id,
+                IdTotalBytes = System.Text.Encoding.UTF8.GetByteCount(subtask.Id),
+                TitlePrefix = subtask.Title,
+                TitleTotalBytes = System.Text.Encoding.UTF8.GetByteCount(subtask.Title),
+            }).ToList(),
+            ModelUsageState = usage is null ? SupervisorPlanObservationLeafState.Missing : SupervisorPlanObservationLeafState.Exact,
+            ModelUsage = usage is null ? null : new SupervisorPlanModelUsageObservationLeaf
+            {
+                ModelPrefix = usage.Model,
+                ModelTotalBytes = System.Text.Encoding.UTF8.GetByteCount(usage.Model),
+                InputTokens = usage.InputTokens,
+                OutputTokens = usage.OutputTokens,
+            },
+        };
+    }
 
     public Task<IReadOnlyList<SupervisorPriorDecision>> GetTerminalDecisionsAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<SupervisorPriorDecision>>(Rows

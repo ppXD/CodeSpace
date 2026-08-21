@@ -2,6 +2,8 @@ using CodeSpace.Core.Services.Sessions.Journal.FactsSources;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Tasks.Timeline.Sources;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Dtos.Sessions.Journal;
+using CodeSpace.Messages.Dtos.Workflows.Supervisor;
 using CodeSpace.UnitTests.Infrastructure;
 using Shouldly;
 
@@ -72,5 +74,42 @@ public class SupervisorPlanModelCallFactsSourceTests
 
         (await new SupervisorPlanModelCallFactsSource(log).GatherAsync(runId, teamId, CancellationToken.None))
             .ShouldBeEmpty("only a plan decision whose outcome carries captured usage contributes");
+    }
+
+    [Fact]
+    public async Task Missing_usage_remains_silent_but_truncated_usage_is_explicit_and_never_a_model_call()
+    {
+        var missing = SupervisorPlanObservationTestData.Item(new SupervisorPlanObservationItemSpec { StoryOrder = 1 });
+        var truncated = SupervisorPlanObservationTestData.Item(new SupervisorPlanObservationItemSpec
+        {
+            StoryOrder = 2,
+            ModelUsageState = SupervisorPlanObservationLeafState.Truncated,
+            ModelUsage = SupervisorPlanObservationTestData.Usage(new string('m', 200), modelBytes: 300),
+        });
+        var bundle = new FakeSupervisorPlanObservationPageBundle { Page = SupervisorPlanObservationTestData.Page(items: [missing, truncated]) };
+
+        var facts = await new SupervisorPlanModelCallFactsSource(bundle).GatherAsync(missing.Metadata.SupervisorRunId, Guid.NewGuid(), CancellationToken.None);
+
+        facts.ShouldNotContainKey(SupervisorDecisionTimelineMap.EventId(missing.Metadata.DecisionId), "pre-capture Missing stays no ModelCall and no warning");
+        var fact = facts[SupervisorDecisionTimelineMap.EventId(truncated.Metadata.DecisionId)];
+        fact.ModelCall.ShouldBeNull("the bounded model prefix is never presented as an exact model");
+        fact.ObservationCoverage!.Single().Reason.ShouldBe(JournalObservationCoverageReason.TruncatedLeaf);
+    }
+
+    [Fact]
+    public async Task Inconsistent_exact_usage_fails_closed_instead_of_promoting_a_prefix()
+    {
+        var item = SupervisorPlanObservationTestData.Item(new SupervisorPlanObservationItemSpec
+        {
+            ModelUsageState = SupervisorPlanObservationLeafState.Exact,
+            ModelUsage = SupervisorPlanObservationTestData.Usage("prefix", modelBytes: 100),
+        });
+        var bundle = new FakeSupervisorPlanObservationPageBundle { Page = SupervisorPlanObservationTestData.Page(items: item) };
+
+        var fact = (await new SupervisorPlanModelCallFactsSource(bundle).GatherAsync(item.Metadata.SupervisorRunId, Guid.NewGuid(), CancellationToken.None))
+            [SupervisorDecisionTimelineMap.EventId(item.Metadata.DecisionId)];
+
+        fact.ModelCall.ShouldBeNull();
+        fact.ObservationCoverage!.Single().Reason.ShouldBe(JournalObservationCoverageReason.CorruptLeaf);
     }
 }

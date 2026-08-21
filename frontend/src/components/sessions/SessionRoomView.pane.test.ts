@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import type { JournalStep, RoomBlock } from "@/api/sessions";
+import type { JournalObservationCoverage, JournalStep, RoomBlock } from "@/api/sessions";
 import type { WorkflowRunStatus } from "@/api/workflows";
-import { journalStepNodeId, type PaneBinding, resolveBinding, resolvePaneFromTurn, shouldShowJumpToLatest } from "./SessionRoomView";
+import { journalObservationCoverageText, journalStepNodeId, type PaneBinding, resolveBinding, resolvePaneFromTurn, shouldShowJumpToLatest } from "./SessionRoomView";
 
 /**
  * The companion pane's split-state decision, extracted as a pure helper so it's testable without rendering the
@@ -113,5 +113,32 @@ describe("shouldShowJumpToLatest", () => {
     expect(shouldShowJumpToLatest({ open: true, mode: "follow", view: "canvas" }, { turnIndex: 5, status: "Running" })).toBe(false);
     expect(shouldShowJumpToLatest({ open: false }, { turnIndex: 5, status: "Running" })).toBe(false);
     expect(shouldShowJumpToLatest(pinned2, null)).toBe(false);
+  });
+});
+
+describe("journalObservationCoverageText", () => {
+  const coverage = (over: Partial<JournalObservationCoverage> = {}): JournalObservationCoverage => ({
+    sourceKind: "supervisor-plan-page/v1", reason: "OlderItemsOmitted", observedCount: 500, omittedCount: 1,
+    omittedCountIsLowerBound: true, decisionId: "00000000-0000-0000-0000-000000000001", storyOrder: "9223372036854775807", ...over,
+  });
+
+  it("makes an Older page gap and its lower-bound count explicit", () => {
+    expect(journalObservationCoverageText(coverage())).toBe("Plan history partially available · showing 500; at least 1 older omitted");
+  });
+
+  it.each([
+    ["InvalidLeaf", "Plan subtasks unavailable · recorded data is invalid"],
+    ["TruncatedLeaf", "Plan subtasks unavailable · bounded read omitted 3 items"],
+    ["CorruptLeaf", "Plan subtasks unavailable · recorded data is corrupt"],
+    ["CorruptDecisionStatus", "Plan decision unavailable · decision status is unknown or corrupt"],
+  ])("shows closed unavailable reason %s", (reason, expected) => {
+    const sourceKind = reason === "CorruptDecisionStatus" ? "supervisor-plan-metadata/v1" : "supervisor-plan-subtasks/v1";
+    expect(journalObservationCoverageText(coverage({ sourceKind, reason, observedCount: 0, omittedCount: reason === "TruncatedLeaf" ? 3 : 0, omittedCountIsLowerBound: false }))).toBe(expected);
+  });
+
+  it("fails closed for unknown or malformed wire values", () => {
+    expect(journalObservationCoverageText(coverage({ reason: "FutureCoverage" }))).toBe("Plan history unavailable · unknown coverage state");
+    expect(journalObservationCoverageText(coverage({ storyOrder: "9007199254740993.0" }))).toBe("Plan observation unavailable · invalid coverage metadata");
+    expect(journalObservationCoverageText(coverage({ storyOrder: "9223372036854775808" }))).toBe("Plan observation unavailable · invalid coverage metadata");
   });
 });
