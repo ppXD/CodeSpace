@@ -179,6 +179,7 @@ public sealed class HarnessReductionSinkTests
         AgentRunId = Guid.NewGuid(),
         ExecutionId = HarnessReductionStream.ExecutionId,
         AttemptId = Guid.NewGuid(),
+        WorkerFenceEpoch = 1,
         StreamId = HarnessReductionStream.PrimaryStreamId,
         Channel = NativeRecordChannel.Stdout,
         WorkflowRunId = Guid.NewGuid(),

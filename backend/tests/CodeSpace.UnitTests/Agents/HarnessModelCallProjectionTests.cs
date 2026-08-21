@@ -354,7 +354,7 @@ public sealed class HarnessModelCallProjectionTests
     private static NativeRecordCaptureHandle Handle() => new()
     {
         TeamId = Guid.NewGuid(), AgentRunId = Guid.NewGuid(), ExecutionId = Guid.NewGuid(),
-        AttemptId = Guid.NewGuid(), StreamId = Guid.NewGuid(), Channel = NativeRecordChannel.Stdout,
+        AttemptId = Guid.NewGuid(), WorkerFenceEpoch = 1, StreamId = Guid.NewGuid(), Channel = NativeRecordChannel.Stdout,
         WorkflowRunId = Guid.NewGuid(),
     };
 

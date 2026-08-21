@@ -176,6 +176,8 @@ public sealed partial class NativeRecordPlane
         return new WorkflowRunCaptureGap
         {
             Id = Guid.NewGuid(), TeamId = batch.Handle.TeamId, WorkflowRunId = workflowRunId,
+            AgentRunId = batch.Handle.AgentRunId, HarnessExecutionId = batch.Handle.ExecutionId,
+            HarnessProcessAttemptId = batch.Handle.AttemptId, AttemptWorkerFenceEpoch = batch.Handle.WorkerFenceEpoch,
             SubjectKind = WorkflowRunDataOwnerKinds.NativeRecord, StreamId = batch.Handle.StreamId,
             Channel = batch.Handle.Channel, RangeKind = CaptureGapRangeKind.Ordinal, RangeStart = first,
             Reason = CaptureGapReason.WriteRefused,

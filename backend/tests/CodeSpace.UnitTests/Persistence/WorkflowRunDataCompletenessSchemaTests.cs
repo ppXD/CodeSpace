@@ -30,6 +30,7 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
     /// <summary>The migration that moved the per-run rendezvous inside the two functions a producer calls.</summary>
     private const string RendezvousMigration = "0148_workflow_run_data_manifest_advance.sql";
     private const string BodyCaptureMigration = "0151_workflow_run_model_call_body_capture.sql";
+    private const string AttemptAttributionMigration = "0155_workflow_run_capture_gap_attempt_attribution.sql";
 
     [Fact]
     public void A_gap_is_one_known_missing_span_with_a_subject_a_coordinate_a_typed_reason_and_a_notice_time()
@@ -40,10 +41,10 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
         entity.GetTableName().ShouldBe(WorkflowRunDataNames.CaptureGap);
         entity.GetProperties().Select(property => property.Name).Order().ShouldBe(new[]
         {
-            "CaptureSource", "Channel", "CreatedAt", "Id", "NoticedAt", "RangeEnd", "RangeEndedAt", "RangeKind",
-            "RangeStart", "RangeStartedAt", "Reason", "ReasonDetail", "RecoveredAt", "RecoveredById",
-            "RecoveredByKind", "Resolution", "SchemaVersion", "StreamId", "SubjectId", "SubjectKind", "TeamId",
-            "WorkflowRunId",
+            "AgentRunId", "AttemptWorkerFenceEpoch", "CaptureSource", "Channel", "CreatedAt", "HarnessExecutionId",
+            "HarnessProcessAttemptId", "Id", "NoticedAt", "RangeEnd", "RangeEndedAt", "RangeKind", "RangeStart",
+            "RangeStartedAt", "Reason", "ReasonDetail", "RecoveredAt", "RecoveredById", "RecoveredByKind",
+            "Resolution", "SchemaVersion", "StreamId", "SubjectId", "SubjectKind", "TeamId", "WorkflowRunId",
         }.Order());
 
         // The five facts the span has to carry to be worth anything: what was being captured, which stream/channel,
@@ -63,12 +64,14 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
         Enum.GetNames<CaptureGapResolution>().ShouldBe(new[] { "Open", "Recovered" });
 
         ForeignKey(entity, typeof(WorkflowRun)).Properties.Select(property => property.Name).ShouldBe(new[] { "TeamId", "WorkflowRunId" });
+        ForeignKey(entity, typeof(WorkflowRunHarnessProcessAttempt)).Properties.Select(property => property.Name).ShouldBe(new[] { "HarnessProcessAttemptId" });
         entity.FindProperty(nameof(WorkflowRunCaptureGap.WorkflowRunId))!.IsNullable.ShouldBeFalse(
             customMessage: "the plane is keyed as the tool-call plane is, so one reader asks every run-owned plane the same question");
 
         entity.GetCheckConstraints().Select(constraint => constraint.Name).ShouldBe(new[]
         {
             "ck_workflow_run_capture_gap_bounds", "ck_workflow_run_capture_gap_channel",
+            "ck_workflow_run_capture_gap_attempt_attribution",
             "ck_workflow_run_capture_gap_range", "ck_workflow_run_capture_gap_reason",
             "ck_workflow_run_capture_gap_resolution", "ck_workflow_run_capture_gap_subject",
             "ck_workflow_run_capture_gap_time",
@@ -78,6 +81,22 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
         probe.GetFilter().ShouldBe("resolution = 'Open'",
             customMessage: "the manifest's open-gap probe must stay partial, or asking 'is anything still missing' scans every span ever recovered");
         probe.Properties.Select(property => property.Name).ShouldBe(new[] { "TeamId", "WorkflowRunId", "SubjectKind" });
+
+        var agentRun = Index(entity, "ix_workflow_run_capture_gap_agent_run_noticed");
+        agentRun.GetFilter().ShouldBe("agent_run_id IS NOT NULL");
+        agentRun.Properties.Select(property => property.Name).ShouldBe(new[] { "TeamId", "AgentRunId", "NoticedAt", "Id" });
+    }
+
+    [Fact]
+    public void Attempt_attribution_is_an_all_or_none_exact_frozen_coordinate()
+    {
+        using var db = BuildContext();
+        var attribution = Constraint(Entity<WorkflowRunCaptureGap>(db), "ck_workflow_run_capture_gap_attempt_attribution");
+
+        attribution.ShouldContain("agent_run_id IS NULL AND harness_execution_id IS NULL AND harness_process_attempt_id IS NULL AND attempt_worker_fence_epoch IS NULL",
+            customMessage: "legacy and non-harness gaps stay representable only as a wholly unattributed arm");
+        attribution.ShouldContain("agent_run_id IS NOT NULL AND harness_execution_id IS NOT NULL AND harness_process_attempt_id IS NOT NULL AND attempt_worker_fence_epoch IS NOT NULL AND attempt_worker_fence_epoch > 0",
+            customMessage: "a half-coordinate would make a reader guess which process the gap belongs to");
     }
 
     /// <summary>
@@ -268,6 +287,14 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
                            "a deployed image creates neither table and still reports a successful upgrade.");
     }
 
+    [Fact]
+    public void Its_attempt_attribution_migration_travels_with_the_build()
+    {
+        DbUpRunner.DiscoverScriptNames().ShouldContain(
+            name => name.EndsWith(AttemptAttributionMigration, StringComparison.OrdinalIgnoreCase),
+            customMessage: $"{AttemptAttributionMigration} must be discoverable by DbUp or deployed gaps cannot carry the exact process identity the producer now writes.");
+    }
+
     /// <summary>
     /// The DRIFT DETECTOR, and the reason every other assertion in this class is worth anything. Those read the EF
     /// model, but production runs 0146 — the model's check constraints are a MIRROR, never their source. Let the two
@@ -277,7 +304,7 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
     [Fact]
     public void Every_modelled_check_constraint_is_spelled_identically_in_its_migration()
     {
-        var migration = NormalizeWhitespace(File.ReadAllText(MigrationPath()) + Environment.NewLine + File.ReadAllText(BodyCaptureMigrationPath()));
+        var migration = NormalizeWhitespace(File.ReadAllText(MigrationPath()) + Environment.NewLine + File.ReadAllText(BodyCaptureMigrationPath()) + Environment.NewLine + File.ReadAllText(AttemptAttributionMigrationPath()));
 
         using var db = BuildContext();
         var modelled = new[] { Entity<WorkflowRunCaptureGap>(db), Entity<WorkflowRunDataManifest>(db) }
@@ -388,6 +415,7 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
 
     private static string MigrationPath() => Path.Combine(AppContext.BaseDirectory, "Persistence", "DbUpFiles", "0146_workflow_run_data_completeness.sql");
     private static string BodyCaptureMigrationPath() => Path.Combine(AppContext.BaseDirectory, "Persistence", "DbUpFiles", BodyCaptureMigration);
+    private static string AttemptAttributionMigrationPath() => Path.Combine(AppContext.BaseDirectory, "Persistence", "DbUpFiles", AttemptAttributionMigration);
 
     /// <summary>The migration wraps its constraints over several indented lines; the model states them on one. Only the whitespace may differ.</summary>
     private static string NormalizeWhitespace(string sql) => string.Join(' ', sql.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));

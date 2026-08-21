@@ -52,6 +52,30 @@ public sealed class WorkflowRunCaptureGap : IEntity<Guid>
     public Guid WorkflowRunId { get; set; }
 
     /// <summary>
+    /// Exact Agent Run coordinate when the producer noticed this gap while observing one harness process. This and the
+    /// three attempt coordinates below are all null or all present; a partial attribution is refused rather than left
+    /// for a reader to guess.
+    /// </summary>
+    public Guid? AgentRunId { get; set; }
+
+    /// <summary>The durable harness execution that owns the attributed process attempt.</summary>
+    public Guid? HarnessExecutionId { get; set; }
+
+    /// <summary>
+    /// The exact durable process attempt whose capture noticed the gap. Hard-referenced because the attempt already
+    /// exists before a native batch can be refused; this never points at the missing native row and therefore remains
+    /// locatable when the first frame batch wrote no rows at all.
+    /// </summary>
+    public Guid? HarnessProcessAttemptId { get; set; }
+
+    /// <summary>
+    /// Immutable fence that launched <see cref="HarnessProcessAttemptId"/>, copied from the capture opening. The gap
+    /// guard matches it to the attempt row rather than to the Agent Run's current fence: a legitimate re-attach raises
+    /// the latter while continuing to observe the same frozen process identity.
+    /// </summary>
+    public long? AttemptWorkerFenceEpoch { get; set; }
+
+    /// <summary>
     /// WHAT was being captured, named in <see cref="WorkflowRunDataOwnerKinds"/> rather than a parallel vocabulary, so
     /// a gap can always be matched to the plane whose record is missing — which is what lets the manifest count it
     /// against the right facet instead of only suppressing the whole run.
@@ -114,6 +138,8 @@ public sealed class WorkflowRunCaptureGap : IEntity<Guid>
     public int SchemaVersion { get; set; } = WorkflowRunDataContract.CurrentVersion;
 
     public DateTimeOffset CreatedAt { get; set; }
+
+    public WorkflowRunHarnessProcessAttempt? HarnessProcessAttempt { get; set; }
 }
 
 /// <summary>

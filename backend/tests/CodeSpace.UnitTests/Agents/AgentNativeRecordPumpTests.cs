@@ -811,7 +811,7 @@ public sealed class AgentNativeRecordPumpTests
         {
             Openings++;
 
-            return Task.FromResult<NativeRecordCaptureHandle?>(Handle(request.TeamId, request.AgentRunId, request.Channel));
+            return Task.FromResult<NativeRecordCaptureHandle?>(Handle(request.TeamId, request.AgentRunId, request.WorkerFenceEpoch, request.Channel));
         }
 
         public Task<NativeRecordCaptureOpening?> ReopenAsync(NativeRecordCaptureRequest request, CancellationToken cancellationToken)
@@ -822,7 +822,7 @@ public sealed class AgentNativeRecordPumpTests
                 ? null
                 : new NativeRecordCaptureOpening
                 {
-                    Handle = Handle(request.TeamId, request.AgentRunId, request.Channel),
+                    Handle = Handle(request.TeamId, request.AgentRunId, request.WorkerFenceEpoch, request.Channel),
                     SourceHead = request.ResumeSourceOffset,
                     RecordedHead = head,
                 });
@@ -855,10 +855,11 @@ public sealed class AgentNativeRecordPumpTests
 
         public Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, CancellationToken cancellationToken) => Task.CompletedTask;
 
-        private NativeRecordCaptureHandle Handle(Guid teamId, Guid agentRunId, NativeRecordChannel channel) => new()
+        private NativeRecordCaptureHandle Handle(Guid teamId, Guid agentRunId, long workerFenceEpoch, NativeRecordChannel channel) => new()
         {
             TeamId = teamId, AgentRunId = agentRunId, ExecutionId = _executionId,
-            AttemptId = Guid.NewGuid(), StreamId = Guid.NewGuid(), Channel = channel,
+            AttemptId = Guid.NewGuid(), WorkerFenceEpoch = workerFenceEpoch,
+            StreamId = Guid.NewGuid(), Channel = channel,
             WorkflowRunId = _workflowRunId,
         };
 
@@ -886,7 +887,8 @@ public sealed class AgentNativeRecordPumpTests
             Task.FromResult<NativeRecordCaptureHandle?>(new NativeRecordCaptureHandle
             {
                 TeamId = request.TeamId, AgentRunId = request.AgentRunId, ExecutionId = Guid.NewGuid(),
-                AttemptId = Guid.NewGuid(), StreamId = Guid.NewGuid(), Channel = request.Channel,
+                AttemptId = Guid.NewGuid(), WorkerFenceEpoch = request.WorkerFenceEpoch,
+                StreamId = Guid.NewGuid(), Channel = request.Channel,
                 WorkflowRunId = Guid.NewGuid(),
             });
 
@@ -927,7 +929,8 @@ public sealed class AgentNativeRecordPumpTests
             Task.FromResult<NativeRecordCaptureHandle?>(new NativeRecordCaptureHandle
             {
                 TeamId = request.TeamId, AgentRunId = request.AgentRunId, ExecutionId = Guid.NewGuid(),
-                AttemptId = Guid.NewGuid(), StreamId = Guid.NewGuid(), Channel = request.Channel,
+                AttemptId = Guid.NewGuid(), WorkerFenceEpoch = request.WorkerFenceEpoch,
+                StreamId = Guid.NewGuid(), Channel = request.Channel,
                 WorkflowRunId = Guid.NewGuid(),
             });
 
