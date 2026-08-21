@@ -92,6 +92,20 @@ public sealed class SupervisorPublishedBranchResolverTests
     }
 
     [Fact]
+    public async Task Partial_multi_repo_merge_exposes_no_authoritative_branch_before_resolution()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var webRepoId = await SeedBoundRepositoryAsync(teamId);
+        var apiRepoId = await SeedBoundRepositoryAsync(teamId);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        await SeedPartialMultiRepoMergeAsync(runId, teamId, webRepoId, apiRepoId);
+
+        (await ResolveAsync(runId, teamId, primaryRepositoryId: null))
+            .ShouldBeEmpty("the resolver must not publish the clean child of an aggregate-conflicted integration before the conflicted repository is resolved");
+    }
+
+    [Fact]
     public async Task Merge_derived_branches_win_uncontaminated_by_a_leftover_unrelated_manifest_row()
     {
         // Sweep-found coverage gap: a run that DID merge cleanly can still carry an unrelated, EARLIER round's
@@ -284,6 +298,27 @@ public sealed class SupervisorPublishedBranchResolverTests
 
         var blocks = repos.Select(r => new { repositoryId = r.RepositoryId, alias = r.Alias, status = "Clean", integratedBranch = r.SourceBranch, baseBranch = r.TargetBranch }).ToList();
         var outcome = JsonSerializer.Serialize(new { integration = new { status = "Clean", reason = (string?)null, repositories = blocks } }, AgentJson.Options);
+
+        await AddTerminalDecisionAsync(db, runId, teamId, SupervisorDecisionKinds.Merge, outcome);
+    }
+
+    private async Task SeedPartialMultiRepoMergeAsync(Guid runId, Guid teamId, Guid webRepoId, Guid apiRepoId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var outcome = JsonSerializer.Serialize(new
+        {
+            integration = new
+            {
+                status = "Conflicted", reason = "api conflicted",
+                repositories = new object[]
+                {
+                    new { repositoryId = webRepoId, alias = "web", status = "Clean", integratedBranch = "codespace/integration/run/turn1", baseBranch = "main" },
+                    new { repositoryId = apiRepoId, alias = "api", status = "Conflicted", integratedBranch = (string?)null, baseBranch = "main" },
+                },
+            },
+        }, AgentJson.Options);
 
         await AddTerminalDecisionAsync(db, runId, teamId, SupervisorDecisionKinds.Merge, outcome);
     }
