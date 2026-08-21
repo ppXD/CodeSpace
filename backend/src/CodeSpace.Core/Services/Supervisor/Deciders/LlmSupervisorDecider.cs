@@ -789,9 +789,9 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             return;
         }
 
-        // A merge whose on-disk integration CONFLICTED is rendered as a legible, actionable block (resolver loop #379) —
-        // the conflicted files + the PRESERVED agent branches + the resolve-or-stop choice — so the decider acts on the
-        // conflict rather than parsing it out of raw outcome jsonb. A clean/skipped merge keeps the compact line below.
+        // A merge never feeds its raw durable outcome back to the model. That outcome intentionally carries full
+        // patches for replay/integration; reinjecting it makes the next turn scale with repository bytes instead of
+        // decision facts. Conflict and non-conflict paths below project only the bounded facts the decider can act on.
         // A spawn dependency staging WITHHELD: well-formed, but the server refused to hand off silently. Rendered
         // BEFORE the conflict block because a blocked spawn may carry BOTH — the withheld units AND the integration
         // detail — and the model needs to know WHICH units it lost before it reads why.
@@ -818,6 +818,12 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             return;
         }
 
+        if (prior.DecisionKind == SupervisorDecisionKinds.Merge)
+        {
+            AppendCompletedMerge(builder, prior);
+            return;
+        }
+
         // DC-2d — publish is SERVER-AUTHORED ONLY (SupervisorDeliveryGate substitutes it; the decider never
         // chooses it), so without an explicit explanation here the model would see an unexplained "publish" entry
         // on the tape and might wonder whether IT made that choice. Names the per-target disposition plainly.
@@ -840,6 +846,60 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         }
 
         builder.AppendLine($"- {prior.DecisionKind}: payload={prior.PayloadJson} outcome={prior.OutcomeJson ?? "(none)"}");
+    }
+
+    /// <summary>
+    /// Project a non-conflicted merge into bounded operational facts. The durable merge outcome remains byte-identical
+    /// and keeps its full patches for execution/replay; this model-facing projection carries only contributor identity,
+    /// integration state, reviewable heads, and a bounded reason. Pure over the recorded tape, so replay re-renders the
+    /// same prompt without fetching artifacts or changing terminal authority.
+    /// </summary>
+    private static void AppendCompletedMerge(StringBuilder builder, SupervisorPriorDecision prior)
+    {
+        const int maxItems = 12;
+        const int maxReasonChars = 240;
+
+        var contributorIds = SupervisorOutcome.ReadMergedAgentRunIds(prior.OutcomeJson);
+        var shownIds = string.Join(", ", contributorIds.Take(maxItems));
+        var moreIds = contributorIds.Count > maxItems ? $" (+{contributorIds.Count - maxItems} more)" : "";
+        var contributorText = contributorIds.Count == 0 ? "no durable contributor ids" : $"{contributorIds.Count} contributor(s): {shownIds}{moreIds}";
+        var integration = SupervisorOutcome.ReadIntegration(prior.OutcomeJson);
+
+        if (integration is not null && string.Equals(integration.Status, "Failed", StringComparison.OrdinalIgnoreCase))
+        {
+            builder.AppendLine($"- merge: INTEGRATION FAILED — {contributorText}.");
+            if (!string.IsNullOrWhiteSpace(integration.Reason)) builder.AppendLine($"    reason: {BoundOneLine(integration.Reason, maxReasonChars)}");
+            return;
+        }
+
+        builder.AppendLine($"- merge: COMPLETED — {contributorText}.");
+
+        if (integration is null)
+        {
+            builder.AppendLine("    integration not requested or no integration result was recorded.");
+            return;
+        }
+
+        builder.AppendLine($"    integration: {BoundOneLine(integration.Status, maxReasonChars)}");
+
+        if (!string.IsNullOrWhiteSpace(integration.IntegratedBranch))
+            builder.AppendLine($"    reviewable branch: {BoundOneLine(integration.IntegratedBranch, maxReasonChars)}");
+
+        var repositoryBranches = SupervisorOutcome.ReadFinalRepositoryBranches(new[] { prior });
+        if (repositoryBranches.Count > 0)
+        {
+            var shown = repositoryBranches.Take(maxItems).Select(r => $"{r.Alias}: {r.SourceBranch}");
+            var more = repositoryBranches.Count > maxItems ? $" (+{repositoryBranches.Count - maxItems} more)" : "";
+            builder.AppendLine($"    reviewable repository branches: {string.Join(", ", shown)}{more}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(integration.Reason)) builder.AppendLine($"    reason: {BoundOneLine(integration.Reason, maxReasonChars)}");
+    }
+
+    private static string BoundOneLine(string value, int maxChars)
+    {
+        var oneLine = value.Replace('\r', ' ').Replace('\n', ' ').Trim();
+        return oneLine.Length <= maxChars ? oneLine : oneLine[..maxChars] + "…";
     }
 
     /// <summary>
