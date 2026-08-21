@@ -1,5 +1,5 @@
 import { ApiError, fetchJson } from "./request";
-import type { RoomPullRequestResult } from "./sessions";
+import type { RoomFileIdentity, RoomPullRequestResult } from "./sessions";
 
 // ─── Types (mirror backend DTOs) ───────────────────────────────────────────────
 
@@ -488,6 +488,8 @@ export interface PhaseAgentRef {
   filesChanged?: number | null;
   /** The agent's OWN changed-file paths (the Files tab). Optional — populated by the Session Room card mapping; a bare phase ref carries only the count above. */
   changedFiles?: string[] | null;
+  /** Exact repository + producing-attempt identities behind `changedFiles`; absent on legacy/bare phase refs. */
+  changedFileIdentities?: RoomFileIdentity[] | null;
 }
 
 /** Mirrors backend `PhaseMetrics` — the small roll-up a phase row shows. */

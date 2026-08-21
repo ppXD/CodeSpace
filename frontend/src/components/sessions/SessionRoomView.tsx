@@ -4,6 +4,7 @@ import { useNavigate } from "@tanstack/react-router";
 
 import type {
   AgentGroupBlock,
+  AnswerAttachment,
   AssistantTurnBlock,
   DecisionBlock,
   DeliveryBlock,
@@ -25,6 +26,7 @@ import type {
   RoomAgentCard,
   RoomBlock,
   RoomFilePreview,
+  RoomFileIdentity,
   RoomPlanQuestion,
   RoomTurnAttempt,
   RoomView,
@@ -57,7 +59,7 @@ import { WorkflowRunModelCallContent, type WorkflowRunModelCallTab } from "./Wor
 /** What the right-side preview drawer is showing — an agent (its terminal) or a file (its content + download). */
 type DrawerTarget =
   | { kind: "agent"; agent: RoomAgentCard; runId: string }
-  | { kind: "file"; runId: string; path: string; agentRunId?: string }
+  | { kind: "file"; runId: string; file: RoomFileIdentity }
   | { kind: "modelcall"; runId: string; sequence: number; call: JournalModelCall };
 
 /** Open the unified preview drawer. Any row (an agent card, a changed file) calls this to preview on the right. */
@@ -433,7 +435,7 @@ function AgentDrawer({ agent, runId, onClose }: { agent: RoomAgentCard; runId: s
       </div>
       <div className="room-drawer-body">
         <div className="room-drawer-term">
-          <AgentTerminal agent={toPhaseAgentRef(agent)} onClose={onClose} onOpenFile={(path) => openDrawer({ kind: "file", runId, path, agentRunId: agent.agentRunId })} />
+          <AgentTerminal agent={toPhaseAgentRef(agent)} onClose={onClose} onOpenFile={(file) => openDrawer({ kind: "file", runId, file: { ...file, agentRunId: file.agentRunId ?? agent.agentRunId } })} />
         </div>
       </div>
     </>
@@ -474,8 +476,8 @@ function ModelCallDrawer({ target, onClose }: { target: Extract<DrawerTarget, { 
 /** A file preview in the drawer — the header carries a small download icon (only when there's content); the body renders content / diff / notice by kind. */
 function FileDrawer({ target, onClose }: { target: Extract<DrawerTarget, { kind: "file" }>; onClose: () => void }) {
   const q = useQuery({
-    queryKey: ["roomFile", target.runId, target.path, target.agentRunId ?? ""],
-    queryFn: () => sessionsApi.getRoomFile(target.runId, target.path, target.agentRunId),
+    queryKey: roomFileQueryKey(target.runId, target.file),
+    queryFn: () => sessionsApi.getRoomFile(target.runId, target.file),
     staleTime: 60_000,
   });
 
@@ -487,12 +489,12 @@ function FileDrawer({ target, onClose }: { target: Extract<DrawerTarget, { kind:
     <>
       <div className="room-drawer-head">
         <span className="room-drawer-ic"><Sym n="file" s={15} /></span>
-        <span className="room-drawer-title" title={target.path}>{baseName(target.path)}</span>
+        <span className="room-drawer-title" title={target.file.path}>{roomFileDisplayName(target.file)}</span>
         {downloadable && <button className="room-drawer-act" onClick={download} title="Download file" aria-label="Download file"><Sym n="download" s={14} /></button>}
         <button className="room-drawer-close" onClick={onClose} aria-label="Close"><Sym n="x" s={15} /></button>
       </div>
       <div className="room-drawer-body">
-        <FilePreviewBody file={file} loading={q.isLoading} error={q.isError} path={target.path} />
+        <FilePreviewBody file={file} loading={q.isLoading} error={q.isError} path={target.file.path} />
       </div>
     </>
   );
@@ -1355,9 +1357,9 @@ function FinalAnswer({ answer }: { answer: FinalAnswerBlock }) {
       {files.length > 0 && (
         <div className="room-final-files">
           {files.map((a, i) => (
-            <button className="room-final-file" key={i} disabled={!run} onClick={() => run && openDrawer({ kind: "file", runId: run.runId, path: a.label, agentRunId: a.agentRunId ?? undefined })}>
+            <button className="room-final-file" key={i} disabled={!run} onClick={() => run && openDrawer({ kind: "file", runId: run.runId, file: attachmentFileIdentity(a) })}>
               <Sym n="file" s={13} cls="room-final-file-ic" />
-              <span className="room-final-file-name">{a.label}</span>
+              <span className="room-final-file-name">{roomFileDisplayName(attachmentFileIdentity(a))}</span>
               {a.producer && <span className="room-final-file-by">· from {a.producer}</span>}
               <Sym n="chevron-right" s={12} cls="room-final-file-caret" />
             </button>
@@ -1512,8 +1514,8 @@ function FileRow({ item }: { item: StatItem }) {
   const openDrawer = useRoomDrawer();
   const run = useContext(RunActionsContext);
   return (
-    <button className="room-file" disabled={!run} onClick={() => run && openDrawer({ kind: "file", runId: run.runId, path: item.text })}>
-      <span className="room-file-path">{item.text}</span>
+    <button className="room-file" disabled={!run} onClick={() => run && openDrawer({ kind: "file", runId: run.runId, file: statItemFileIdentity(item) })}>
+      <span className="room-file-path">{roomFileDisplayName(statItemFileIdentity(item))}</span>
       {item.detail && <span className="room-file-from">{item.detail}</span>}
       <Sym n="chevron-right" s={11} cls="room-file-caret" />
     </button>
@@ -1996,7 +1998,28 @@ function toPhaseAgentRef(c: RoomAgentCard): PhaseAgentRef {
     assignedSubtask: c.assignedSubtask ?? null, model: c.model ?? null, inputTokens: c.tokens ?? null, outputTokens: null,
     durationMs: c.durationMs ?? null, toolCount: c.toolCount ?? null, costUsd: c.costUsd ?? null, filesChanged: c.filesChanged ?? null,
     changedFiles: c.changedFiles ?? null,
+    changedFileIdentities: c.changedFileIdentities ?? null,
   };
+}
+
+/** Stable cache identity: two repositories with the same relative path must never share a query entry. */
+export function roomFileQueryKey(runId: string, file: RoomFileIdentity): readonly string[] {
+  return ["roomFile", runId, file.path, file.agentRunId ?? "", file.repositoryId ?? "", file.repositoryAlias ?? ""];
+}
+
+/** Prefer backend-authored exact identity; retain path-only compatibility for old room projections. */
+export function statItemFileIdentity(item: Pick<StatItem, "text" | "file">): RoomFileIdentity {
+  return item.file ?? { path: item.text };
+}
+
+/** Prefer backend-authored exact identity; old result attachments retain their producing-agent scope. */
+export function attachmentFileIdentity(attachment: Pick<AnswerAttachment, "kind" | "label" | "file" | "agentRunId">): RoomFileIdentity {
+  return attachment.file ?? { path: attachment.label, ...(attachment.agentRunId ? { agentRunId: attachment.agentRunId } : {}) };
+}
+
+/** Human-readable multi-repo disambiguation; the wire path remains repository-relative. */
+function roomFileDisplayName(file: RoomFileIdentity): string {
+  return file.repositoryAlias ? `${file.repositoryAlias}/${file.path}` : file.path;
 }
 
 const FAILED_AGENT = new Set(["Failed", "Cancelled", "TimedOut"]);

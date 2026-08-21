@@ -143,6 +143,25 @@ describe("AgentTerminal", () => {
     expect(screen.queryByTestId("tool-calls")).toBeNull();
   });
 
+  it("keeps same-path files from different repositories distinct and opens the exact identity", () => {
+    const onOpenFile = vi.fn();
+    render(<AgentTerminal agent={termAgent({
+      agentRunId: "a1",
+      changedFiles: ["README.md", "README.md"],
+      changedFileIdentities: [
+        { path: "README.md", agentRunId: "a1", repositoryId: "repo-web", repositoryAlias: "web" },
+        { path: "README.md", agentRunId: "a1", repositoryId: "repo-api", repositoryAlias: "api" },
+      ],
+    })} onOpenFile={onOpenFile} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Files" }));
+    expect(screen.getByRole("button", { name: "web/README.md" })).toBeInTheDocument();
+    const api = screen.getByRole("button", { name: "api/README.md" });
+
+    fireEvent.click(api);
+    expect(onOpenFile).toHaveBeenCalledWith({ path: "README.md", agentRunId: "a1", repositoryId: "repo-api", repositoryAlias: "api" });
+  });
+
   it("mounts durable logs only when selected and remounts them for the selected attempt", () => {
     useCellAttemptsMock.mockReturnValue({ data: { attempts: [
       { attemptNumber: 1, runId: "r1", agentRunId: "ag1", status: "Failure", createdDate: "2026-06-23T00:00:00Z", isLatest: false },

@@ -147,6 +147,9 @@ public sealed record RoomAgentCard
     /// <summary>This agent's OWN changed-file paths (bounded) — per-agent file attribution so a reader sees WHICH agent produced a file (open the agent to preview its exact version), not just the turn-level union. Empty for an agent that changed nothing.</summary>
     public IReadOnlyList<string> ChangedFiles { get; init; } = Array.Empty<string>();
 
+    /// <summary>The exact identities behind <see cref="ChangedFiles"/>. Multi-repo files carry repository id/alias so equal repo-relative paths remain distinct; empty on legacy projections.</summary>
+    public IReadOnlyList<RoomFileIdentity> ChangedFileIdentities { get; init; } = Array.Empty<RoomFileIdentity>();
+
     /// <summary>Side-effecting tool calls the agent made — the card meta "3 files · 6 tool calls · 41s". Null when the agent row is absent (0 is a real "made none").</summary>
     public int? ToolCount { get; init; }
 
@@ -186,6 +189,9 @@ public sealed record StatBlock : RoomBlock
 public sealed record StatItem
 {
     public required string Text { get; init; }
+
+    /// <summary>Exact file identity for a files stat item. Null for non-file and legacy path-only items.</summary>
+    public RoomFileIdentity? File { get; init; }
 
     /// <summary>Optional trailing detail per item (e.g. a file's "+12 −3", a tool call's kind). Null when none.</summary>
     public string? Detail { get; init; }
@@ -390,6 +396,9 @@ public sealed record AnswerAttachment
 
     /// <summary>For a file: a short label of the producing agent (its role / subtask) — the "· from &lt;agent&gt;" provenance cue so a reader never mistakes an intermediate agent's file for the final deliverable. Null when unattributed.</summary>
     public string? Producer { get; init; }
+
+    /// <summary>For a file: the exact repository + producing-attempt identity used by the preview endpoint. Null for non-file and legacy attachments.</summary>
+    public RoomFileIdentity? File { get; init; }
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]

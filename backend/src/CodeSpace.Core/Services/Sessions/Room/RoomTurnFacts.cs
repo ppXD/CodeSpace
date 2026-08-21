@@ -29,6 +29,9 @@ public sealed record RoomTurnFacts
     /// <summary>The distinct changed-file paths across the turn's agents — the "Changed N files" row.</summary>
     public IReadOnlyList<string> ChangedFiles { get; init; } = Array.Empty<string>();
 
+    /// <summary>The distinct changed files with repository + producing-attempt identity. Empty on legacy facts, where <see cref="ChangedFiles"/> remains authoritative.</summary>
+    public IReadOnlyList<RoomFileIdentity> ChangedFileIdentities { get; init; } = Array.Empty<RoomFileIdentity>();
+
     /// <summary>+added / −removed line totals across the turn, when captured (a true data-gap today → null → the row omits "+X −Y").</summary>
     public int? Additions { get; init; }
     public int? Deletions { get; init; }
@@ -44,6 +47,9 @@ public sealed record RoomTurnFacts
 
     /// <summary>Each agent's OWN changed-file paths, keyed by its run id (bounded per agent) — the per-agent file attribution the card renders, so a reader sees WHICH agent produced a file rather than the provenance-blind turn-level union. Empty for an agent that changed nothing.</summary>
     public IReadOnlyDictionary<Guid, IReadOnlyList<string>> AgentFiles { get; init; } = new Dictionary<Guid, IReadOnlyList<string>>();
+
+    /// <summary>Each agent's exact changed-file identities. Multi-repo equal paths remain separate; empty on legacy facts.</summary>
+    public IReadOnlyDictionary<Guid, IReadOnlyList<RoomFileIdentity>> AgentFileIdentities { get; init; } = new Dictionary<Guid, IReadOnlyList<RoomFileIdentity>>();
 
     /// <summary>How many reasoning entries the turn produced — the "Reasoning" row's count.</summary>
     public int ReasoningCount { get; init; }
@@ -106,7 +112,7 @@ public sealed record RoomFinalAnswer
 }
 
 /// <summary>One typed final-answer attachment (a file, the PR, or an image).</summary>
-public sealed record RoomAttachment(AnswerAttachmentKind Kind, string Label, string? Url, string? PreviewUrl, string? DownloadUrl);
+public sealed record RoomAttachment(AnswerAttachmentKind Kind, string Label, string? Url, string? PreviewUrl, string? DownloadUrl, RoomFileIdentity? File = null);
 
 /// <summary>The PR / change set a turn produced — joined from the run's open-PR node. Provider-agnostic.</summary>
 public sealed record RoomDelivery
