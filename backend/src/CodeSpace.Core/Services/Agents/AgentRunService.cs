@@ -468,11 +468,16 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
     /// <summary>
     /// D2: if the unified diff is larger than the artifact inline threshold, offload it to the content-addressed
     /// artifact store (team-scoped) and return the result with <c>Patch</c> cleared + <c>PatchArtifactId</c> set —
-    /// so <c>result_jsonb</c> stays bounded. A small/empty diff is returned unchanged (stays inline). Idempotent:
-    /// the store dedups by sha, so a re-completion (reattach) reuses the same artifact id.
+    /// so <c>result_jsonb</c> stays bounded. An existing artifact id is the producer's authoritative full diff;
+    /// completion clears its bounded inline carrier without re-offloading or replacing that identity. A small/empty
+    /// diff without an existing artifact stays inline. Idempotent: the store dedups by sha, so a re-completion
+    /// (reattach) reuses the same artifact id.
     /// </summary>
     private async Task<AgentRunResult> OffloadLargePatchAsync(AgentRunResult result, Guid teamId, CancellationToken cancellationToken)
     {
+        if (result.PatchArtifactId is not null)
+            return result with { Patch = string.Empty };
+
         var (inline, artifactId) = await _offloader.OffloadIfLargeAsync(teamId, result.Patch, "text/x-diff", cancellationToken).ConfigureAwait(false);
 
         return artifactId is null ? result : result with { Patch = inline, PatchArtifactId = artifactId };
@@ -481,8 +486,9 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
     /// <summary>
     /// D2 (multi-repo): offload EACH writable repo's per-repo diff exactly like the top-level patch — a per-repo diff
     /// larger than the inline threshold moves to the team-scoped artifact store, clearing its inline <c>Patch</c> +
-    /// setting <c>PatchArtifactId</c>, so <c>result_jsonb</c> stays bounded even for a many-repo change set. A
-    /// single-repo run has no <see cref="AgentRunResult.RepositoryResults"/> → a no-op (byte-identical). Idempotent
+    /// setting <c>PatchArtifactId</c>, so <c>result_jsonb</c> stays bounded even for a many-repo change set. Existing
+    /// artifact ids remain the producer's authoritative full diffs and only their bounded inline carriers are cleared.
+    /// A single-repo run has no <see cref="AgentRunResult.RepositoryResults"/> → a no-op (byte-identical). Idempotent
     /// (the store dedups by sha), so a re-completion reuses the same artifact ids.
     /// </summary>
     private async Task<AgentRunResult> OffloadLargeRepositoryPatchesAsync(AgentRunResult result, Guid teamId, CancellationToken cancellationToken)
@@ -493,6 +499,12 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
 
         foreach (var repo in result.RepositoryResults)
         {
+            if (repo.PatchArtifactId is not null)
+            {
+                offloaded.Add(repo with { Patch = string.Empty });
+                continue;
+            }
+
             var (inline, artifactId) = await _offloader.OffloadIfLargeAsync(teamId, repo.Patch, "text/x-diff", cancellationToken).ConfigureAwait(false);
 
             offloaded.Add(artifactId is null ? repo : repo with { Patch = inline, PatchArtifactId = artifactId });

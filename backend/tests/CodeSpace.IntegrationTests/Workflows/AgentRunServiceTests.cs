@@ -676,6 +676,45 @@ public class AgentRunServiceTests
     }
 
     [Fact]
+    public async Task Completing_preserves_the_existing_full_patch_artifact_instead_of_replacing_it_with_the_truncated_inline_carrier()
+    {
+        var teamId = await SeedTeamAsync();
+        var fullPatch = string.Concat(Enumerable.Range(0, 100_000).Select(i => $"+full line {i:D6}\n"));
+        var truncatedCarrier = fullPatch[..1_000_000] + $"\n... diff truncated ({fullPatch.Length} chars; capped at 1000000) ...\n";
+        Guid fullArtifactId;
+        Guid runId;
+
+        using (var scope = _fixture.BeginScope())
+        {
+            fullArtifactId = await scope.Resolve<IArtifactStore>().PutAsync(teamId, System.Text.Encoding.UTF8.GetBytes(fullPatch), "text/x-diff", CancellationToken.None);
+            var runs = scope.Resolve<IAgentRunService>();
+            runId = (await runs.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+            await runs.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().CompleteAsync(runId, new AgentRunResult
+            {
+                Status = AgentRunStatus.Succeeded,
+                ExitReason = "completed",
+                Patch = truncatedCarrier,
+                PatchArtifactId = fullArtifactId,
+                ChangedFiles = new[] { "src/large.ts" },
+            }, CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            var stored = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+
+            stored.Patch.ShouldBe("", "the bounded inline carrier is redundant once the full artifact is authoritative");
+            stored.PatchArtifactId.ShouldBe(fullArtifactId, "completion must preserve the producer's full-patch identity");
+            var artifact = await scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, stored.PatchArtifactId.Value, CancellationToken.None);
+            System.Text.Encoding.UTF8.GetString(artifact!.Bytes).ShouldBe(fullPatch, "merge and UI must resolve the full diff, never the truncated carrier");
+        }
+    }
+
+    [Fact]
     public async Task Completing_with_a_small_patch_keeps_it_inline_with_no_artifact()
     {
         // A small diff stays inline in result_jsonb (no offload, no artifact ref) — the common case is unchanged.
@@ -756,6 +795,56 @@ public class AgentRunServiceTests
             artifact.ShouldNotBeNull();
             System.Text.Encoding.UTF8.GetString(artifact!.Bytes).ShouldBe(bigPatch, "the offloaded per-repo diff is recoverable in full");
             artifact.ContentType.ShouldBe("text/x-diff");
+        }
+    }
+
+    [Fact]
+    public async Task Completing_preserves_each_existing_full_repository_patch_artifact()
+    {
+        var teamId = await SeedTeamAsync();
+        var fullPatch = string.Concat(Enumerable.Range(0, 100_000).Select(i => $"+repo line {i:D6}\n"));
+        var truncatedCarrier = fullPatch[..1_000_000] + $"\n... diff truncated ({fullPatch.Length} chars; capped at 1000000) ...\n";
+        Guid fullArtifactId;
+        Guid runId;
+
+        using (var scope = _fixture.BeginScope())
+        {
+            fullArtifactId = await scope.Resolve<IArtifactStore>().PutAsync(teamId, System.Text.Encoding.UTF8.GetBytes(fullPatch), "text/x-diff", CancellationToken.None);
+            var runs = scope.Resolve<IAgentRunService>();
+            runId = (await runs.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+            await runs.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().CompleteAsync(runId, new AgentRunResult
+            {
+                Status = AgentRunStatus.Succeeded,
+                ExitReason = "completed",
+                ChangeSetId = "cs-full-carrier",
+                RepositoryResults = new[]
+                {
+                    new RepositoryRunResult
+                    {
+                        Alias = "web",
+                        RepositoryId = Guid.NewGuid(),
+                        Patch = truncatedCarrier,
+                        PatchArtifactId = fullArtifactId,
+                        BaseSha = "base-web",
+                        Access = WorkspaceAccess.Write,
+                    },
+                },
+            }, CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            var stored = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+            var web = stored.RepositoryResults.ShouldHaveSingleItem();
+
+            web.Patch.ShouldBe("", "the per-repository inline carrier is redundant once the full artifact is authoritative");
+            web.PatchArtifactId.ShouldBe(fullArtifactId, "completion must preserve the producer's per-repository full-patch identity");
+            var artifact = await scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, web.PatchArtifactId.Value, CancellationToken.None);
+            System.Text.Encoding.UTF8.GetString(artifact!.Bytes).ShouldBe(fullPatch);
         }
     }
 
