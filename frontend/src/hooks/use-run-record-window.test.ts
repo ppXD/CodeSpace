@@ -9,7 +9,7 @@ vi.mock("@/api/workflows", async (importOriginal) => {
   return { ...original, workflowsApi: { ...original.workflowsApi, getRunRecordPage: getPage } };
 });
 
-import { RUN_RECORD_PAGE_LIMIT, RUN_RECORD_WINDOW_LIMIT, RUN_RECORD_WINDOW_POLL_MS, useRunRecordWindow } from "./use-workflows";
+import { RUN_RECORD_PAGE_LIMIT, RUN_RECORD_WINDOW_LIMIT, RUN_RECORD_WINDOW_MAX_POLL_MS, RUN_RECORD_WINDOW_POLL_MS, useRunRecordWindow } from "./use-workflows";
 
 function record(sequence: number): RunRecordView {
   return { sequence, recordType: `record.${sequence}`, nodeId: null, iterationKey: "", occurredAt: "2026-08-21T00:00:00Z", payloadJson: `{"sequence":${sequence}}`, correlationId: null, parentRecordId: null };
@@ -51,6 +51,50 @@ describe("useRunRecordWindow", () => {
     expect(getPage).toHaveBeenCalledExactlyOnceWith("run-1", { limit: RUN_RECORD_PAGE_LIMIT }, expect.any(AbortSignal));
     expect(result.current.records.map(({ sequence }) => sequence)).toEqual([1, 2]);
     expect(result.current.atLatest).toBe(true);
+  });
+
+  it("retries a transient initial Tail fault with bounded delay and recovers the empty window", async () => {
+    getPage
+      .mockRejectedValueOnce(new Error("backend unavailable"))
+      .mockResolvedValueOnce(page("Tail", [record(1)], "Success"));
+
+    const { result } = renderHook(() => useRunRecordWindow("run-1"));
+    await settle();
+    expect(result.current.error).toEqual(new Error("backend unavailable"));
+    expect(result.current.records).toEqual([]);
+
+    await act(() => vi.advanceTimersByTimeAsync(RUN_RECORD_WINDOW_POLL_MS - 1));
+    expect(getPage).toHaveBeenCalledTimes(1);
+    await act(() => vi.advanceTimersByTimeAsync(1));
+
+    expect(getPage).toHaveBeenCalledTimes(2);
+    expect(result.current.records.map(({ sequence }) => sequence)).toEqual([1]);
+    expect(result.current.error).toBeNull();
+  });
+
+  it("does not auto-retry an invalid initial Tail wire response", async () => {
+    getPage.mockRejectedValueOnce(new InvalidWorkflowRunRecordPageError());
+
+    const { result } = renderHook(() => useRunRecordWindow("run-1"));
+    await settle();
+    await act(() => vi.advanceTimersByTimeAsync(RUN_RECORD_WINDOW_POLL_MS * 16));
+
+    expect(result.current.error).toBeInstanceOf(InvalidWorkflowRunRecordPageError);
+    expect(getPage).toHaveBeenCalledTimes(1);
+  });
+
+  it("caps repeated transient Tail retry delay instead of growing it without bound", async () => {
+    getPage.mockRejectedValue(new Error("offline"));
+
+    renderHook(() => useRunRecordWindow("run-1"));
+    await settle();
+    for (const delay of [RUN_RECORD_WINDOW_POLL_MS, RUN_RECORD_WINDOW_POLL_MS * 2, RUN_RECORD_WINDOW_POLL_MS * 4, RUN_RECORD_WINDOW_MAX_POLL_MS, RUN_RECORD_WINDOW_MAX_POLL_MS]) {
+      const calls = getPage.mock.calls.length;
+      await act(() => vi.advanceTimersByTimeAsync(delay - 1));
+      expect(getPage).toHaveBeenCalledTimes(calls);
+      await act(() => vi.advanceTimersByTimeAsync(1));
+      expect(getPage).toHaveBeenCalledTimes(calls + 1);
+    }
   });
 
   it("loads Older only on demand, caps the window, and explicitly marks discarded newer rows", async () => {
