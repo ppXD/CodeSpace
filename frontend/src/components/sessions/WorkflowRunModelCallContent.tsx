@@ -24,6 +24,7 @@ const MODEL_CALL_PAGE_BYTES = 64 * 1024;
 const MAX_VISIBLE_MODEL_CALL_PAGES = 8;
 const MODEL_CALL_METADATA_STALE_MS = 30_000;
 const MODEL_CALL_METADATA_GC_MS = 60_000;
+const MODEL_CALL_CAPTURE_POLL_MS = 3_000;
 
 type BoundedRead =
   | { kind: "legacy"; runId: string; sequence: number; part: WorkflowRunModelCallPart }
@@ -228,6 +229,17 @@ function capturePresentation(descriptor: WorkflowRunModelCallBodyDescriptor): Ca
   }
 }
 
+function shouldPollCaptureMetadata(metadata: WorkflowRunModelCallDetailMetadata | null | undefined): boolean {
+  if (metadata == null) return false;
+  let active = false;
+  for (const body of [...metadata.bodies, ...metadata.attempts.flatMap((attempt) => attempt.bodies)]) {
+    const state = capturePresentation(body).state;
+    if (state === "Invalid") return false;
+    if (state === "Pending" || state === "Materializing" || state === "Retry") active = true;
+  }
+  return active;
+}
+
 function StableCaptureState({ presentation }: { presentation: CapturePresentation }) {
   return (
     <p className="room-mccapture" data-capture-health={presentation.state}>
@@ -309,9 +321,13 @@ function LegacyTab({ runId, sequence, tab }: { runId: string; sequence: number; 
 
 function StableBody({ metadata, descriptor, heading, emptyLabel }: { metadata: WorkflowRunModelCallDetailMetadata; descriptor?: WorkflowRunModelCallBodyDescriptor; heading?: string; emptyLabel: string }) {
   const capture = descriptor == null ? null : capturePresentation(descriptor);
-  const read = useMemo<BoundedRead | null>(() => descriptor?.referenceState === "Referenced" && capture?.allowReferencedBody === true
-    ? { kind: "stable", runId: metadata.runId, modelCallId: metadata.workflowRunModelCallId, body: descriptor.body, attemptId: descriptor.attemptId }
-    : null, [capture?.allowReferencedBody, descriptor, metadata.runId, metadata.workflowRunModelCallId]);
+  const body = descriptor?.body;
+  const attemptId = descriptor?.attemptId;
+  const referenceState = descriptor?.referenceState;
+  const allowReferencedBody = capture?.allowReferencedBody;
+  const read = useMemo<BoundedRead | null>(() => referenceState === "Referenced" && allowReferencedBody === true && body != null
+    ? { kind: "stable", runId: metadata.runId, modelCallId: metadata.workflowRunModelCallId, body, attemptId }
+    : null, [allowReferencedBody, attemptId, body, referenceState, metadata.runId, metadata.workflowRunModelCallId]);
   const pages = useLocalBoundedPages(read);
 
   if (descriptor == null) return <>{heading && <div className="room-mcpart-title">{heading}</div>}<ReadState availability="MetadataMissing" message="No body descriptor was projected." /></>;
@@ -460,6 +476,7 @@ export function WorkflowRunModelCallContent({ runId, sequence, tab }: { runId: s
     staleTime: MODEL_CALL_METADATA_STALE_MS,
     gcTime: MODEL_CALL_METADATA_GC_MS,
     retry: retryModelCallRead,
+    refetchInterval: (query) => shouldPollCaptureMetadata(query.state.data) ? MODEL_CALL_CAPTURE_POLL_MS : false,
   });
 
   if (route.isLoading) return <p className="room-para room-muted">Loading…</p>;
@@ -468,7 +485,7 @@ export function WorkflowRunModelCallContent({ runId, sequence, tab }: { runId: s
   if (route.data.projectionState === "LegacyFallback") return <LegacyTab runId={runId} sequence={sequence} tab={tab} />;
   if (stableId == null) return <ReadState availability="MetadataMissing" message="Projected metadata is missing its stable model-call id." completeness={route.data.captureCompleteness} />;
   if (stable.isLoading) return <p className="room-para room-muted">Loading stable model-call metadata…</p>;
-  if (stable.isError) return <p className="room-para room-muted">Couldn't load stable model-call metadata. {stable.error instanceof ApiError ? `(${stable.error.code})` : ""}</p>;
+  if (stable.isError && stable.data == null) return <p className="room-para room-muted">Couldn't load stable model-call metadata. {stable.error instanceof ApiError ? `(${stable.error.code})` : ""}</p>;
   if (stable.data == null) return <ReadState availability="MetadataMissing" message="The stable model-call projection is unavailable." completeness={route.data.captureCompleteness} />;
   if (stable.data.runId !== runId || stable.data.workflowRunModelCallId !== stableId) return <ReadState availability="IntegrityFailure" message="Stable model-call identity does not match the requested Workflow Run." completeness={stable.data.captureCompleteness} />;
   return <StableCall metadata={stable.data} sequence={sequence} tab={tab} />;
