@@ -1,8 +1,9 @@
 /* eslint-disable react-refresh/only-export-components -- this module co-locates its render component with the small pure helpers (glyphs, formatters, digest/label builders) that only it and its sibling footers use; fast-refresh granularity is moot for these. */
-import { useContext, useState, type ReactNode } from "react";
+import { lazy, Suspense, useContext, useState, type ReactNode } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { NodeStatus, WorkflowRunNodeSummary } from "@/api/workflows";
+import { workflowRunLazyFieldRead } from "@/api/workflowRunViewMetadataApi";
 
 import { AgentRunTimeline } from "../AgentRunTimeline";
 import { AgentToolCalls } from "../AgentToolCalls";
@@ -10,6 +11,11 @@ import { JsonView } from "../JsonView";
 import { fanoutSummary, nodeIterationLabel } from "../mapBranches";
 import { RunOpenContext } from "../runOpenContext";
 import type { NodeFooterProps } from "./index";
+
+const LazyWorkflowRunCellFields = lazy(async () => {
+  const module = await import("../WorkflowRunCellFields");
+  return { default: module.WorkflowRunCellFields };
+});
 
 /**
  * Coze/Dify-style run-result footer that hangs UNDER a node in a run view: a compact "status · duration"
@@ -19,12 +25,13 @@ import type { NodeFooterProps } from "./index";
  */
 export function ReceiptFooter({ status, rows, title, labelSlot }: NodeFooterProps & { labelSlot?: ReactNode }) {
   const [open, setOpen] = useState(false);
+  const [selectedLazyRow, setSelectedLazyRow] = useState<string | null>(null);
   if (status === "Pending") return null;                 // not reached yet → no footer (matches coze)
 
   const durationMs = aggregateDurationMs(rows);
   const expandable = rows.some(isRowExpandable);
   // An embedded agent timeline / sub-workflow link needs more room than a node-width panel — widen it.
-  const rich = rows.some((r) => !!r.agentRunId || !!r.childRunId);
+  const rich = rows.some((r) => !!r.agentRunId || !!r.childRunId || workflowRunLazyFieldRead(r) !== null);
 
   return (
     <div className="wf-rf-result nodrag nopan" data-status={status.toLowerCase()} data-open={open || undefined}>
@@ -34,7 +41,7 @@ export function ReceiptFooter({ status, rows, title, labelSlot }: NodeFooterProp
         data-expandable={expandable || undefined}
         aria-expanded={expandable ? open : undefined}
         title={title}
-        onClick={(e) => { e.stopPropagation(); if (expandable) setOpen((v) => !v); }}
+        onClick={(e) => { e.stopPropagation(); if (expandable) { if (open) setSelectedLazyRow(null); setOpen(!open); } }}
       >
         <span className="wf-rf-result-glyph" aria-hidden="true">{resultGlyph(status)}</span>
         <span className="wf-rf-result-label">{labelSlot ?? resultLabel(status, rows)}</span>
@@ -50,13 +57,22 @@ export function ReceiptFooter({ status, rows, title, labelSlot }: NodeFooterProp
                 // nested) OR a supervisor turn (turn 2 · parked) — NOT the array position, which is StartedAt
                 // order. "" for a loop/try row, which stays unlabeled, exactly as the timeline view does.
                 const badge = nodeIterationLabel(r);
+                const lazy = workflowRunLazyFieldRead(r);
+                const lazyKey = lazy ? `${lazy.sourceRunId}\n${lazy.nodeId}\n${lazy.iterationKey}` : null;
                 return (
                   <div key={`${r.nodeId}:${r.iterationKey}:${i}`} className="wf-rf-result-branch">
                     <div className="wf-rf-result-branch-h">
                       {badge && <span className="wf-rf-result-branch-ix">{badge}</span>}
                       <span className="wf-rf-result-branch-st" data-status={r.status.toLowerCase()}>{r.status}</span>
+                      {lazyKey && (
+                        <button type="button" aria-expanded={selectedLazyRow === lazyKey}
+                          aria-label={`Inspect recorded fields for ${r.nodeId} ${r.iterationKey || "top level"}`}
+                          onClick={() => setSelectedLazyRow(selectedLazyRow === lazyKey ? null : lazyKey)}>
+                          Recorded fields
+                        </button>
+                      )}
                     </div>
-                    <RunRowDetail row={r} />
+                    {(!lazyKey || selectedLazyRow === lazyKey) && <RunRowDetail row={r} />}
                   </div>
                 );
               })}
@@ -74,20 +90,25 @@ export function ReceiptFooter({ status, rows, title, labelSlot }: NodeFooterProp
  */
 export function RunRowDetail({ row }: { row: WorkflowRunNodeSummary }) {
   const onOpenRun = useContext(RunOpenContext);
+  const lazyFieldRead = workflowRunLazyFieldRead(row);
   const hasOut = hasRunContent(row.outputs);
   const hasIn = hasRunContent(row.inputs);
-  const bare = !row.error && !hasOut && !hasIn && !row.agentRunId && !row.childRunId;
+  const bare = !lazyFieldRead && !row.error && !hasOut && !hasIn && !row.agentRunId && !row.childRunId;
 
   return (
     <>
-      {row.error && <pre className="wf-rf-result-err">{row.error}</pre>}
-      {hasOut && (
+      {lazyFieldRead ? (
+        <Suspense fallback={<div className="wf-rf-result-empty">Loading recorded-field controls…</div>}>
+          <LazyWorkflowRunCellFields read={lazyFieldRead} />
+        </Suspense>
+      ) : row.error && <pre className="wf-rf-result-err">{row.error}</pre>}
+      {!lazyFieldRead && hasOut && (
         <div className="wf-rf-result-block">
           <div className="wf-rf-result-block-h">Output</div>
           <JsonView data={row.outputs} />
         </div>
       )}
-      {hasIn && (
+      {!lazyFieldRead && hasIn && (
         <div className="wf-rf-result-block">
           <div className="wf-rf-result-block-h">Input</div>
           <JsonView data={row.inputs} />
@@ -111,7 +132,7 @@ export function RunRowDetail({ row }: { row: WorkflowRunNodeSummary }) {
 
 /** A row earns the expand caret when it carries anything inspectable — output, input, error, an agent run, or a child run. */
 export function isRowExpandable(row: WorkflowRunNodeSummary): boolean {
-  return hasRunContent(row.outputs) || !!row.error || hasRunContent(row.inputs) || !!row.agentRunId || !!row.childRunId;
+  return workflowRunLazyFieldRead(row) !== null || hasRunContent(row.outputs) || !!row.error || hasRunContent(row.inputs) || !!row.agentRunId || !!row.childRunId;
 }
 
 /** The status glyph in the result bar — mirrors the corner badge's tone vocabulary. */

@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { WorkflowRunDetail } from "@/api/workflows";
+import type { WorkflowRunViewMetadata } from "@/api/workflowRunViewMetadataApi";
 import { RoomRunPane } from "./RoomRunPane";
 
 /**
@@ -10,11 +10,12 @@ import { RoomRunPane } from "./RoomRunPane";
  * header reads "Canvas · Turn {N}" with the live status, the canvas gets the run's pinned definition/nodes/status,
  * and close fires the callback. RunCanvas is ReactFlow-heavy, so it's stubbed to echo the props it receives.
  */
-const { useWorkflowRunMock } = vi.hoisted(() => ({ useWorkflowRunMock: vi.fn() }));
+const { legacyRunDetail, useIdentity, useViewMetadata } = vi.hoisted(() => ({ legacyRunDetail: vi.fn(), useIdentity: vi.fn(), useViewMetadata: vi.fn() }));
 
 // RunTrace reads a bounded raw-ledger window — mock it so the real trace surface renders without a fetch.
 vi.mock("@/hooks/use-workflows", () => ({
-  useWorkflowRun: (runId: string) => useWorkflowRunMock(runId),
+  useWorkflowRun: (runId: string) => legacyRunDetail(runId),
+  useWorkflowRunIdentity: (runId: string, enabled: boolean) => useIdentity(runId, enabled),
   useNodeManifests: () => ({ data: [] }),
   useRunRecordWindow: () => ({
     records: [{ sequence: 1, recordType: "run.started", nodeId: null, iterationKey: "", occurredAt: "2026-07-13T00:00:00Z", payloadJson: "{}" }],
@@ -28,29 +29,37 @@ vi.mock("@/hooks/use-workflows", () => ({
   }),
 }));
 
+vi.mock("@/hooks/use-workflow-run-view-metadata", () => ({
+  useWorkflowRunViewMetadata: (runId: string, enabled: boolean) => useViewMetadata(runId, enabled),
+}));
+
 vi.mock("@/components/workflows/RunCanvas", () => ({
   RunCanvas: ({ runId, runStatus, focusNodeId }: { runId?: string; runStatus?: string; focusNodeId?: string }) => (
     <div data-testid="run-canvas" data-run-id={runId} data-run-status={runStatus} data-focus-node-id={focusNodeId} />
   ),
 }));
 
-function detail(over: Partial<WorkflowRunDetail>): WorkflowRunDetail {
+function detail(over: Partial<WorkflowRunViewMetadata>): WorkflowRunViewMetadata {
   return {
-    id: "run-1", runNumber: 7, workflowId: "w", workflowVersion: 1, sourceType: "manual",
-    normalizedPayload: {}, status: "Running", error: null, startedAt: null, completedAt: null,
-    createdDate: "2026-07-13T00:00:00Z", nodes: [], outputs: {}, pendingWait: null,
-    definition: { schemaVersion: 1, nodes: [], edges: [] },
+    runId: "run-1", runNumber: 7, workflowId: null, workflowVersion: 1, sourceType: "manual", parentRunId: null,
+    status: "Running", hasError: false, startedAt: null, completedAt: null, createdDate: "2026-07-13T00:00:00Z",
+    scope: "LineageMerged", cellsAvailability: "Available", linksAvailability: "Available", cells: [],
+    topologyAvailability: "Available", topology: { nodes: [], edges: [] },
     ...over,
   };
 }
 
-const ok = (data: WorkflowRunDetail) => ({ isLoading: false, error: null, data });
+const ok = (data: WorkflowRunViewMetadata) => ({ isLoading: false, error: null, data });
 
-beforeEach(() => { useWorkflowRunMock.mockReset(); });
+beforeEach(() => {
+  legacyRunDetail.mockReset();
+  useIdentity.mockReset().mockReturnValue({ isLoading: false, error: null, data: { id: "run-1", runNumber: 7, status: "Running" } });
+  useViewMetadata.mockReset().mockReturnValue(ok(detail({})));
+});
 
 describe("RoomRunPane", () => {
   it("renders the turn title + status pill and mounts the canvas with the run's props", () => {
-    useWorkflowRunMock.mockReturnValue(ok(detail({ id: "run-1", status: "Running" })));
+    useViewMetadata.mockReturnValue(ok(detail({ runId: "run-1", status: "Running" })));
 
     render(<RoomRunPane runId="run-1" turn={3} onClose={vi.fn()} />);
 
@@ -60,10 +69,12 @@ describe("RoomRunPane", () => {
     const canvas = screen.getByTestId("run-canvas");
     expect(canvas).toHaveAttribute("data-run-id", "run-1");
     expect(canvas).toHaveAttribute("data-run-status", "Running");
+    expect(useIdentity).toHaveBeenCalledExactlyOnceWith("run-1", false);
+    expect(useViewMetadata).toHaveBeenCalledExactlyOnceWith("run-1", true);
   });
 
   it("threads the D3 focusNodeId to the canvas (the ?node= deep-link a journal jump set)", () => {
-    useWorkflowRunMock.mockReturnValue(ok(detail({ id: "run-1" })));
+    useViewMetadata.mockReturnValue(ok(detail({ runId: "run-1" })));
 
     render(<RoomRunPane runId="run-1" turn={2} focusNodeId="map-1" onClose={vi.fn()} />);
 
@@ -71,7 +82,7 @@ describe("RoomRunPane", () => {
   });
 
   it("calls onClose from the close button", () => {
-    useWorkflowRunMock.mockReturnValue(ok(detail({})));
+    useViewMetadata.mockReturnValue(ok(detail({})));
     const onClose = vi.fn();
 
     render(<RoomRunPane runId="run-1" turn={1} onClose={onClose} />);
@@ -81,16 +92,16 @@ describe("RoomRunPane", () => {
   });
 
   it("shows a graph-snapshot notice (not the canvas) when the run has no pinned definition", () => {
-    useWorkflowRunMock.mockReturnValue(ok(detail({ definition: null })));
+    useViewMetadata.mockReturnValue(ok(detail({ topologyAvailability: "Unavailable", topology: null })));
 
     render(<RoomRunPane runId="run-1" turn={2} onClose={vi.fn()} />);
 
     expect(screen.queryByTestId("run-canvas")).toBeNull();
-    expect(screen.getByText("This run has no flow snapshot to show.")).toBeInTheDocument();
+    expect(screen.getByText("Execution graph was not recorded.")).toBeInTheDocument();
   });
 
   it("shows the back button only as an affordance the narrow-screen overlay reveals (also closes)", () => {
-    useWorkflowRunMock.mockReturnValue(ok(detail({})));
+    useViewMetadata.mockReturnValue(ok(detail({})));
     const onClose = vi.fn();
 
     render(<RoomRunPane runId="run-1" turn={1} onClose={onClose} />);
@@ -102,7 +113,7 @@ describe("RoomRunPane", () => {
   // ─── D5 mini-tabs (Canvas / Changes / Trace) ───
 
   it("renders the three mini-tabs with Canvas selected by default (uncontrolled)", () => {
-    useWorkflowRunMock.mockReturnValue(ok(detail({})));
+    useViewMetadata.mockReturnValue(ok(detail({})));
 
     render(<RoomRunPane runId="run-1" turn={1} onClose={vi.fn()} />);
 
@@ -113,7 +124,7 @@ describe("RoomRunPane", () => {
   });
 
   it("switches to the RunTrace surface when Trace is clicked, and aria-selected tracks it", () => {
-    useWorkflowRunMock.mockReturnValue(ok(detail({})));
+    useViewMetadata.mockReturnValue(ok(detail({})));
 
     const { container } = render(<RoomRunPane runId="run-1" turn={1} onClose={vi.fn()} />);
 
@@ -123,10 +134,12 @@ describe("RoomRunPane", () => {
     expect(screen.queryByTestId("run-canvas")).toBeNull();               // the canvas is gone
     expect(screen.getByRole("tab", { name: "Trace" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("tab", { name: "Canvas" })).toHaveAttribute("aria-selected", "false");
+    expect(useIdentity).toHaveBeenLastCalledWith("run-1", true);
+    expect(useViewMetadata).toHaveBeenLastCalledWith("run-1", false);
   });
 
   it("shows the coming-soon placeholder when Changes is clicked", () => {
-    useWorkflowRunMock.mockReturnValue(ok(detail({})));
+    useViewMetadata.mockReturnValue(ok(detail({})));
 
     render(<RoomRunPane runId="run-1" turn={1} onClose={vi.fn()} />);
 
@@ -137,8 +150,16 @@ describe("RoomRunPane", () => {
     expect(screen.getByRole("tab", { name: "Changes" })).toHaveAttribute("aria-selected", "true");
   });
 
+  it.each(["changes", "trace"] as const)("does not fetch the legacy full run detail for the %s companion view", (view) => {
+    render(<RoomRunPane runId="run-1" turn={1} view={view} onClose={vi.fn()} />);
+
+    expect(legacyRunDetail).not.toHaveBeenCalled();
+    expect(useIdentity).toHaveBeenCalledExactlyOnceWith("run-1", true);
+    expect(useViewMetadata).toHaveBeenCalledExactlyOnceWith("run-1", false);
+  });
+
   it("is controlled by `view` and reports clicks via onViewChange (URL-driven mode)", () => {
-    useWorkflowRunMock.mockReturnValue(ok(detail({})));
+    useViewMetadata.mockReturnValue(ok(detail({})));
     const onViewChange = vi.fn();
 
     render(<RoomRunPane runId="run-1" turn={1} view="trace" onViewChange={onViewChange} onClose={vi.fn()} />);
@@ -156,7 +177,7 @@ describe("RoomRunPane", () => {
   // ─── D2 follow/pin toggle + jump-to-latest chip ───
 
   it("shows the follow toggle label in follow mode and the Following hint, and fires onToggleBind", () => {
-    useWorkflowRunMock.mockReturnValue(ok(detail({})));
+    useViewMetadata.mockReturnValue(ok(detail({})));
     const onToggleBind = vi.fn();
 
     render(<RoomRunPane runId="run-1" turn={5} mode="follow" onToggleBind={onToggleBind} onClose={vi.fn()} />);
@@ -168,7 +189,7 @@ describe("RoomRunPane", () => {
   });
 
   it("shows the pinned toggle label in pinned mode (no Following hint), and fires onToggleBind", () => {
-    useWorkflowRunMock.mockReturnValue(ok(detail({})));
+    useViewMetadata.mockReturnValue(ok(detail({})));
     const onToggleBind = vi.fn();
 
     render(<RoomRunPane runId="run-1" turn={2} mode="pinned" onToggleBind={onToggleBind} onClose={vi.fn()} />);
@@ -179,7 +200,7 @@ describe("RoomRunPane", () => {
   });
 
   it("hides the follow/pin toggle when no mode is supplied (standalone)", () => {
-    useWorkflowRunMock.mockReturnValue(ok(detail({})));
+    useViewMetadata.mockReturnValue(ok(detail({})));
 
     render(<RoomRunPane runId="run-1" turn={1} onClose={vi.fn()} />);
 
@@ -188,7 +209,7 @@ describe("RoomRunPane", () => {
   });
 
   it("renders the jump-to-latest chip only when jumpToLatest is set, and fires its handler", () => {
-    useWorkflowRunMock.mockReturnValue(ok(detail({})));
+    useViewMetadata.mockReturnValue(ok(detail({})));
     const onJumpToLatest = vi.fn();
 
     const { rerender } = render(<RoomRunPane runId="run-1" turn={2} mode="pinned" jumpToLatest={7} onJumpToLatest={onJumpToLatest} onClose={vi.fn()} />);

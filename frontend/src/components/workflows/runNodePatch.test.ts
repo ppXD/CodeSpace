@@ -36,6 +36,14 @@ describe("nodeRunFingerprint", () => {
     const hot = node("n1", { runStatus: "Running", hot: true });
     expect(nodeRunFingerprint(cold)).not.toBe(nodeRunFingerprint(hot));
   });
+
+  it("changes when an exact lazy cell observation is replaced even if its status and timestamps match", () => {
+    const lazy = { requestedRunId: "r", scope: "LineageMerged", sourceRunId: "s", nodeId: "n", iterationKey: "", observationKey: "v1" } as const;
+    const previous = node("n1", { runRows: [row({ ...({ lazyFieldRead: lazy } as object) })] });
+    const replacement = node("n1", { runRows: [row({ ...({ lazyFieldRead: { ...lazy, observationKey: "v2" } } as object) })] });
+
+    expect(nodeRunFingerprint(previous)).not.toBe(nodeRunFingerprint(replacement));
+  });
 });
 
 describe("patchNodes", () => {

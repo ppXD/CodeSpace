@@ -1,9 +1,11 @@
 import { useMemo, useState, type PointerEvent as ReactPointerEvent } from "react";
 
+import { adaptWorkflowRunViewToCanvas, type WorkflowRunViewAvailability } from "@/api/workflowRunViewMetadataApi";
 import { RunCanvas } from "@/components/workflows/RunCanvas";
 import { RunStatusBadge } from "@/components/workflows/RunStatusBadge";
 import { RunTrace } from "@/components/workflows/RunTrace";
-import { useNodeManifests, useWorkflowRun } from "@/hooks/use-workflows";
+import { useWorkflowRunViewMetadata } from "@/hooks/use-workflow-run-view-metadata";
+import { useNodeManifests, useWorkflowRunIdentity } from "@/hooks/use-workflows";
 
 /** Which surface the companion pane shows — the canvas (execution graph), the change set, or the raw ledger. */
 export type PaneView = "canvas" | "changes" | "trace";
@@ -21,9 +23,8 @@ const PANE_TABS: readonly [PaneView, string][] = [["canvas", "Canvas"], ["change
  * set, an honest coming-soon placeholder until its projector ships) / Trace (the run's raw append-only
  * {@link RunTrace} ledger). The `view` is controlled (SessionRoomView drives it from `?pane=` for deep-links);
  * when the caller omits `view`/`onViewChange` the pane manages it internally, defaulting to Canvas. RunCanvas's
- * props are assembled exactly as RunDetailView does (useWorkflowRun for the pinned definition + nodes + status,
- * the node manifests for the icons) so the pane and the full-page run canvas never drift; `onOpenRun` is threaded
- * through unchanged, so a sub-workflow drill still uses the existing full-page/modal path.
+ * Canvas reads the body-blind run view: narrow frozen topology plus exact cell metadata. Field descriptors and bytes
+ * remain user-expanded, bounded reads. The full legacy detail stays on the session-less/nested surfaces.
  */
 export function RoomRunPane({ runId, turn, view, mode, onToggleBind, jumpToLatest, onJumpToLatest, onViewChange, onClose, onOpenRun, onGripPointerDown, focusNodeId }: {
   runId: string;
@@ -50,21 +51,18 @@ export function RoomRunPane({ runId, turn, view, mode, onToggleBind, jumpToLates
    *  consumes it; the other tabs ignore it. Undefined leaves the canvas at fitView. */
   focusNodeId?: string;
 }) {
-  const run = useWorkflowRun(runId);
-  // The canvas paints the run's OWN version-pinned definition snapshot (run.definition), never the workflow's
-  // current graph, so it stays faithful to how the run ran. Manifests drive the node icons/kinds. Assembled
-  // exactly as RunDetailView does — replicated (three lines) rather than a shared hook, which would couple the
-  // two views for no gain.
-  const manifests = useNodeManifests();
-  const manifestByType = useMemo(() => new Map((manifests.data ?? []).map((m) => [m.typeKey, m])), [manifests.data]);
-
   // Controlled/uncontrolled hybrid: a caller that drives `view` (SessionRoomView, from the URL) wins; otherwise the
   // pane keeps its own state so tab-switching works standalone (and in unit tests) without URL wiring.
   const [internalView, setInternalView] = useState<PaneView>(view ?? "canvas");
   const activeView = view ?? internalView;
   const selectView = (next: PaneView) => (onViewChange ? onViewChange(next) : setInternalView(next));
 
-  const r = run.data;
+  const identity = useWorkflowRunIdentity(runId, activeView !== "canvas");
+  const viewMetadata = useWorkflowRunViewMetadata(runId, activeView === "canvas");
+  const manifests = useNodeManifests();
+  const manifestByType = useMemo(() => new Map((manifests.data ?? []).map((m) => [m.typeKey, m])), [manifests.data]);
+  const canvas = useMemo(() => viewMetadata.data ? adaptWorkflowRunViewToCanvas(viewMetadata.data) : null, [viewMetadata.data]);
+  const status = activeView === "canvas" ? viewMetadata.data?.status : identity.data?.status;
 
   return (
     <aside className="room-pane" aria-label={`Execution canvas for turn ${turn}`}>
@@ -92,7 +90,7 @@ export function RoomRunPane({ runId, turn, view, mode, onToggleBind, jumpToLates
             Latest: Turn {jumpToLatest} Running →
           </button>
         )}
-        {r && <RunStatusBadge status={r.status} />}
+        {status && <RunStatusBadge status={status} />}
         <button className="room-pane-close" onClick={onClose} title="Close canvas" aria-label="Close canvas">✕</button>
       </div>
 
@@ -115,14 +113,20 @@ export function RoomRunPane({ runId, turn, view, mode, onToggleBind, jumpToLates
 
       {activeView === "canvas" ? (
         <div className="room-pane-body room-pane-canvas">
-          {run.isLoading ? (
+          {viewMetadata.isLoading ? (
             <div className="room-pane-empty">Loading execution graph…</div>
-          ) : !r ? (
+          ) : viewMetadata.error ? (
+            <div className="room-pane-empty">Could not safely load bounded execution metadata.</div>
+          ) : !viewMetadata.data ? (
             <div className="room-pane-empty">Execution record not found.</div>
-          ) : r.definition ? (
-            <RunCanvas definition={r.definition} runNodes={r.nodes} runStatus={r.status} manifestByType={manifestByType} runId={runId} onOpenRun={onOpenRun} focusNodeId={focusNodeId} />
+          ) : canvas ? (
+            <>
+              <RunViewAvailabilityNotice label="Cell status" availability={viewMetadata.data.cellsAvailability} />
+              <RunViewAvailabilityNotice label="Agent/sub-workflow links" availability={viewMetadata.data.linksAvailability} />
+              <RunCanvas definition={canvas.definition} runNodes={canvas.rows} runStatus={viewMetadata.data.status} manifestByType={manifestByType} runId={runId} onOpenRun={onOpenRun} focusNodeId={focusNodeId} />
+            </>
           ) : (
-            <div className="room-pane-empty">This run has no flow snapshot to show.</div>
+            <RunViewAvailabilityNotice label="Execution graph" availability={viewMetadata.data.topologyAvailability} always />
           )}
         </div>
       ) : activeView === "trace" ? (
@@ -136,6 +140,16 @@ export function RoomRunPane({ runId, turn, view, mode, onToggleBind, jumpToLates
       )}
     </aside>
   );
+}
+
+function RunViewAvailabilityNotice({ label, availability, always = false }: { label: string; availability: WorkflowRunViewAvailability; always?: boolean }) {
+  if (!always && availability === "Available") return null;
+  const detail = availability === "Truncated" ? "is a trustworthy bounded prefix; more observations exist"
+    : availability === "TooLarge" ? "exceeds the safe display bound"
+      : availability === "Corrupt" ? "is malformed and was not treated as empty"
+        : availability === "Unavailable" ? "was not recorded"
+          : "is available";
+  return <div className="room-pane-empty" role="status">{label} {detail}.</div>;
 }
 
 /**

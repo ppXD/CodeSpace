@@ -33,6 +33,12 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe("useWorkflowRunIdentity", () => {
+  it("issues no identity request while the Canvas metadata query owns status", async () => {
+    renderHook(() => useWorkflowRunIdentity("42", false), { wrapper: wrapper(new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity } } })) });
+    await settle();
+    expect(getRunIdentity).not.toHaveBeenCalled();
+  });
+
   it("polls only the identity endpoint while active and stops on the terminal identity", async () => {
     getRunIdentity
       .mockResolvedValueOnce({ id: "11111111-1111-1111-1111-111111111111", runNumber: 42, status: "Running" })
