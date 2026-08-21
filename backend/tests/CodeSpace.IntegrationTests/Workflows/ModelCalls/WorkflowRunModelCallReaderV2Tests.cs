@@ -43,6 +43,7 @@ public sealed class WorkflowRunModelCallReaderV2Tests
         metadata.CaptureCompleteness.ShouldBe(WorkflowRunCaptureCompleteness.Partial);
         metadata.Attempts.Select(value => value.AttemptOrdinal).ShouldBe([1, 2]);
         metadata.Attempts[0].Status.ShouldBe("Failed");
+        metadata.Attempts[0].CaptureCompleteness.ShouldBe(WorkflowRunCaptureCompleteness.Corrupt);
         metadata.Attempts[0].SourceEvidence.ShouldBe(WorkflowRunModelCallSourceEvidence.StartedAndTerminal);
         metadata.Attempts[0].Bodies.Single(value => value.Body == WorkflowRunModelCallBody.AttemptError).ReferenceState
             .ShouldBe(WorkflowRunModelCallBodyReferenceState.Corrupt);
@@ -54,9 +55,15 @@ public sealed class WorkflowRunModelCallReaderV2Tests
             ModelCallFigures.CostAmount,
             ModelCallFigures.ReasoningTokens,
         ]);
-        metadata.Attempts[1].Bodies.Single(value => value.Body == WorkflowRunModelCallBody.AttemptResponse).ReferenceState
-            .ShouldBe(WorkflowRunModelCallBodyReferenceState.Referenced);
+        var missingResponse = metadata.Attempts[1].Bodies.Single(value => value.Body == WorkflowRunModelCallBody.AttemptResponse);
+        missingResponse.ReferenceState.ShouldBe(WorkflowRunModelCallBodyReferenceState.Referenced);
+        missingResponse.CaptureHealth.ShouldBe(WorkflowRunModelCallBodyCaptureHealth.Available,
+            "stable metadata reports durable capture state without reading the deliberately missing object bytes");
+        missingResponse.MaterializationFormat.ShouldBe(WorkflowRunModelCallBodyMaterializationFormats.ExternalArtifact);
         metadata.Bodies.Single().ReferenceState.ShouldBe(WorkflowRunModelCallBodyReferenceState.Partial);
+        metadata.Bodies.Concat(metadata.Attempts.SelectMany(value => value.Bodies)).Where(value => value != missingResponse).ShouldAllBe(value =>
+            value.CaptureHealth == null && value.MaterializationFormat == null,
+            "stable bodies without durable capture intents must not invent materializer health or format");
 
         var compatibility = await reader.ReadMetadataAsync(world.RunId, world.TerminalSequence, world.TeamId, CancellationToken.None);
         compatibility.ShouldNotBeNull();
@@ -236,6 +243,29 @@ public sealed class WorkflowRunModelCallReaderV2Tests
                 StartedAt = started2.OccurredAt,
                 CompletedAt = terminal2.OccurredAt,
             });
+        db.WorkflowRunModelCallBodyCapture.Add(new WorkflowRunModelCallBodyCapture
+        {
+            Id = Guid.NewGuid(),
+            TeamId = teamId,
+            WorkflowRunId = runId,
+            ModelCallId = callId,
+            ModelCallAttemptId = succeededAttemptId,
+            BodyKind = WorkflowRunModelCallBodyKind.AttemptResponse,
+            SourceKind = WorkflowRunModelCallProjector.SourceKind,
+            SourceRecordId = terminal2.Id,
+            SourceProperty = "output",
+            State = WorkflowRunModelCallBodyCaptureState.Available,
+            ArtifactId = missingArtifactId,
+            SourceSha256 = new string('a', 64),
+            SizeBytes = 200_000,
+            ContentType = "application/json",
+            MaterializationFormat = WorkflowRunModelCallBodyMaterializationFormats.ExternalArtifact,
+            NextMaterializationAt = terminal2.OccurredAt,
+            Revision = 1,
+            CreatedAt = terminal2.OccurredAt,
+            LastModifiedAt = terminal2.OccurredAt,
+            TerminalAt = terminal2.OccurredAt,
+        });
         await db.SaveChangesAsync();
         return new ReaderWorld
         {

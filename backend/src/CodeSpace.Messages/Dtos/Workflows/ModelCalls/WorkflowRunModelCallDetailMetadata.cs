@@ -87,6 +87,10 @@ public sealed record WorkflowRunModelCallBodyDescriptor
     public Guid? ArtifactId { get; init; }
     public required WorkflowRunModelCallBodyReferenceState ReferenceState { get; init; }
     public required WorkflowRunCaptureCompleteness CaptureCompleteness { get; init; }
+    /// <summary>Closed materializer health when this body is owned by the durable capture plane; null for other capture sources.</summary>
+    public WorkflowRunModelCallBodyCaptureHealth? CaptureHealth { get; init; }
+    /// <summary>Durable body decoding format. Present only after an Available capture settles.</summary>
+    public string? MaterializationFormat { get; init; }
 }
 
 public enum WorkflowRunModelCallBody
@@ -110,6 +114,19 @@ public enum WorkflowRunModelCallBodyReferenceState
     Unavailable = 4,
     Corrupt = 5,
     LegacyUnknown = 6,
+}
+
+/// <summary>
+/// Operational body-capture health only. This never participates in execution, completion, or terminal authority.
+/// </summary>
+public enum WorkflowRunModelCallBodyCaptureHealth
+{
+    Pending = 0,
+    Materializing = 1,
+    Retry = 2,
+    Available = 3,
+    Failed = 4,
+    Abandoned = 5,
 }
 
 public enum WorkflowRunModelCallSourceEvidence

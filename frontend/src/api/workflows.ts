@@ -676,6 +676,7 @@ export interface WorkflowRunModelCallPartPage {
 
 export type WorkflowRunModelCallBody = "LogicalRequest" | "AttemptRequest" | "AttemptResponse" | "AttemptError";
 export type WorkflowRunModelCallBodyReferenceState = "Referenced" | "NotRecorded" | "Redacted" | "Partial" | "Unavailable" | "Corrupt" | "LegacyUnknown";
+export type WorkflowRunModelCallBodyCaptureHealth = "Pending" | "Materializing" | "Retry" | "Available" | "Failed" | "Abandoned";
 export type WorkflowRunModelCallSourceEvidence = "Native" | "TerminalOnly" | "StartedAndTerminal" | "LateStartAttached";
 
 export interface WorkflowRunModelCallBodyDescriptor {
@@ -684,6 +685,8 @@ export interface WorkflowRunModelCallBodyDescriptor {
   artifactId?: string | null;
   referenceState: WorkflowRunModelCallBodyReferenceState;
   captureCompleteness: WorkflowRunCaptureCompleteness;
+  captureHealth?: WorkflowRunModelCallBodyCaptureHealth | null;
+  materializationFormat?: string | null;
 }
 
 export interface WorkflowRunModelCallUsageMetadata {
