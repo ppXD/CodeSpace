@@ -262,9 +262,10 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
 
         var agentIds = phases.SelectMany(p => p.Agents).Select(a => a.AgentRunId).Distinct().ToList();
 
-        // The turn's agent results (latest fold per agent) — the one read drives the changed-file list, the per-agent
-        // card summaries, and the lead fallback (no stop summary → compose from these).
-        var agentResults = decisions
+        // The turn's ACTIVE-GENERATION agent results (latest fold per agent) — the one read drives the changed-file
+        // list, the per-agent card summaries, and the lead fallback (no stop summary → compose from these). Earlier
+        // plan generations remain in rounds as audit history, but cannot be repackaged as current final delivery.
+        var agentResults = SupervisorPlanWindow.Read(decisions.Select(ToPriorDecision).ToList()).Decisions
             .Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind))
             .SelectMany(d => SupervisorOutcome.ReadAgentResults(d.OutcomeJson))
             .GroupBy(r => r.AgentRunId).Select(g => g.Last())
@@ -512,6 +513,17 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
 
         return rows.Select(r => SupervisorOutcome.ProjectCompact(r.Id, r.Status.ToString(), r.Error, r.ResultJson)).ToList();
     }
+
+    private static SupervisorPriorDecision ToPriorDecision(SupervisorDecisionRecord decision) => new()
+    {
+        Id = decision.Id,
+        Sequence = decision.Sequence,
+        DecisionKind = decision.DecisionKind,
+        Status = decision.Status,
+        PayloadJson = decision.PayloadJson,
+        OutcomeJson = decision.OutcomeJson,
+        Error = decision.Error,
+    };
 
     /// <summary>Project one compact result into clickable file identities. Per-repository results are authoritative whenever present; top-level paths are the legacy/single-repo fallback only.</summary>
     private static IEnumerable<RoomFileIdentity> FileIdentities(SupervisorAgentResult result)

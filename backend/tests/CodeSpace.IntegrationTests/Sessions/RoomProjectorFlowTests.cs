@@ -248,6 +248,26 @@ public class RoomProjectorFlowTests
     }
 
     [Fact]
+    public async Task A_replan_never_presents_the_superseded_generations_files_as_final_delivery()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Replanned files");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Edit the right file", resultSummary: "Done.");
+
+        await SeedPlanDecisionAsync(teamId, run, "Old approach");
+        await SeedSpawnDecisionAsync(teamId, run, (Guid.NewGuid(), new[] { "superseded.cs" }));
+        await SeedPlanDecisionAsync(teamId, run, "Replacement approach");
+        await SeedSpawnDecisionAsync(teamId, run, (Guid.NewGuid(), new[] { "current.cs" }));
+
+        var turn = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
+        var files = turn.Blocks.OfType<StatBlock>().Single(block => block.Kind == "files");
+        var attachments = turn.Blocks.OfType<FinalAnswerBlock>().Single().Attachments.Where(attachment => attachment.Kind == AnswerAttachmentKind.FileLink).ToList();
+
+        files.Items.Select(item => item.Text).ShouldBe(new[] { "current.cs" }, "the old generation remains audit history, not the current reviewable file set");
+        attachments.Select(attachment => attachment.Label).ShouldBe(new[] { "current.cs" }, "a superseded output must not be repackaged as a final deliverable");
+    }
+
+    [Fact]
     public async Task A_multi_repo_turn_keeps_same_path_files_distinct_and_carries_exact_identity_to_every_click_surface()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
