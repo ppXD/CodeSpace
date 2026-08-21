@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Api.Http;
 using CodeSpace.Core.Services.Tasks.Trace;
 using CodeSpace.Messages.Commands.Tasks;
 using CodeSpace.Messages.Commands.Workflows;
@@ -220,6 +221,34 @@ public class WorkflowRunsController : ControllerBase
         }, cancellationToken).ConfigureAwait(false);
 
         return result == null ? NotFound() : Ok(result);
+    }
+
+    /// <summary>One exact, bounded UTF-8 byte range from a raw ledger record's canonical JSONB text.</summary>
+    [HttpGet("{runId:guid}/records/{recordId:guid}/payload")]
+    public async Task<IActionResult> ReadRecordPayload([FromRoute] Guid runId, [FromRoute] Guid recordId,
+        [FromQuery] ReadRunRecordPayloadRangeQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query with { RunId = runId, RecordId = recordId }, cancellationToken).ConfigureAwait(false);
+        if (result == null) return NotFound();
+        if (result.Availability != RunRecordPayloadReadAvailability.Available)
+        {
+            return BadRequest(new RunRecordPayloadReadProblem
+            {
+                RunId = result.RunId, RecordId = result.RecordId, Sequence = result.Sequence, Availability = result.Availability,
+                Code = result.ProblemCode ?? result.Availability.ToString(), IsRetryable = result.IsRetryable,
+            });
+        }
+
+        Response.Headers.Append(RunRecordPayloadHttpHeaders.RunId, result.RunId.ToString());
+        Response.Headers.Append(RunRecordPayloadHttpHeaders.RecordId, result.RecordId.ToString());
+        Response.Headers.Append(RunRecordPayloadHttpHeaders.Sequence, result.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Response.Headers.Append(RunRecordPayloadHttpHeaders.Offset, result.OffsetBytes.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        if (result.NextOffsetBytes is { } next) Response.Headers.Append(RunRecordPayloadHttpHeaders.NextOffset, next.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Response.Headers.Append(RunRecordPayloadHttpHeaders.TotalBytes, result.TotalBytes!.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Response.Headers.Append(RunRecordPayloadHttpHeaders.ContentType, result.ContentType!);
+        Response.Headers.Append("Cache-Control", "private, no-store");
+        Response.Headers.Append("X-Content-Type-Options", "nosniff");
+        return File(result.Content, "application/octet-stream");
     }
 
     /// <summary>Live SSE tail of the run's ledger — every workflow_run_record row beyond <c>?after={sequence}</c> as it lands (interaction.delta + lifecycle), so the Room streams live instead of re-polling. <c>id:</c> = Sequence (for Last-Event-ID / <c>?after=</c> gapless resume), <c>event:</c> = the record type. Ends at a terminal run record or on client disconnect. Team-scoped; a foreign run streams nothing. The 2s poll (GET /records) stays the fallback.</summary>
