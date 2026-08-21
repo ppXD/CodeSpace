@@ -47,7 +47,7 @@ public sealed class WorkflowNodePhaseSource : IRunPhaseSource, IScopedDependency
         // ONE team-scoped read of the real AgentRun rows + tool ledger gives BOTH the ground-truth status AND the
         // per-agent metrics (duration / tokens / tool count / model), so a plain agent.run / map agent now carries the
         // SAME rollup the supervisor source folds from its ledger — not just status.
-        var metricsById = await _metrics.ReadAsync(context.TeamId, AgentRunIdsOf(run.Nodes), DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false);
+        var metricsById = await _metrics.ReadForWorkflowRunAsync(context.TeamId, context.RunId, AgentRunIdsOf(run.Nodes), DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false);
 
         var agentStatusById = metricsById.ToDictionary(kv => kv.Key, kv => kv.Value.Status);
 
