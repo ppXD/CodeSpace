@@ -6,8 +6,11 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
 using CodeSpace.Core.Services.Workflows.Artifacts.Routing;
+using CodeSpace.Core.Services.Workflows.Display;
 using CodeSpace.Messages.Commands.Storage;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Storage;
+using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
@@ -89,6 +92,33 @@ public sealed class ArtifactProviderSwitchFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task Cell_field_range_follows_the_artifacts_recorded_profile_revision_after_a_route_switch()
+    {
+        var world = await SeedAsync();
+        var json = Encoding.UTF8.GetBytes($"\"{new string('r', OffloadedSize)}\"");
+        var artifactId = await PutJsonAsync(world.TeamId, json);
+        var records = await SeedWorkflowCellAsync(world, artifactId, json.LongLength);
+        await AssertOffloadedAsync(world.TeamId, artifactId);
+        await RepointRouteAsync(world, world.ProfileBId);
+
+        using var scope = _fixture.BeginScope();
+        var page = await scope.Resolve<IWorkflowRunCellFieldRangeReader>().ReadAsync(new WorkflowRunCellFieldRangeReadRequest
+        {
+            TeamId = world.TeamId, RequestedRunId = records.RunId, Scope = WorkflowRunViewScope.AttemptOnly,
+            SourceRunId = records.RunId, NodeId = "work", IterationKey = string.Empty,
+            Records = new WorkflowRunCellRecordIdentity(records.StateId, records.StateSequence,
+                records.StartedId, records.StartedSequence),
+            Section = WorkflowRunCellFieldSection.Output, Name = "stored", LimitBytes = 64 * 1024,
+        }, CancellationToken.None);
+
+        page.ShouldNotBeNull();
+        page!.Availability.ShouldBe(WorkflowRunCellFieldRangeAvailability.Available);
+        page.Source.ShouldBe(WorkflowRunCellFieldRangeSource.Artifact);
+        page.Text.ShouldBe(Encoding.UTF8.GetString(json));
+        FileCountUnder(_rootB).ShouldBe(0, "the field read must not reinterpret the old artifact through today's route");
+    }
+
+    [Fact]
     public async Task A_pre_switch_artifact_survives_its_provider_being_retired_after_the_switch()
     {
         // The realistic decommission order: switch the route away, then wind the old profile down. Reads of everything it
@@ -149,6 +179,59 @@ public sealed class ArtifactProviderSwitchFlowTests : IDisposable
         using var scope = _fixture.BeginScope();
 
         return await scope.Resolve<IArtifactStore>().PutAsync(teamId, bytes, "application/octet-stream", CancellationToken.None);
+    }
+
+    private async Task<Guid> PutJsonAsync(Guid teamId, byte[] bytes)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IArtifactStore>().PutAsync(teamId, bytes, "application/json", CancellationToken.None);
+    }
+
+    private async Task<CellRecords> SeedWorkflowCellAsync(World world, Guid artifactId, long sizeBytes)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var requestId = Guid.NewGuid();
+        var runId = Guid.NewGuid();
+        db.WorkflowRunRequest.Add(new WorkflowRunRequest
+        {
+            Id = requestId, TeamId = world.TeamId, SourceType = WorkflowRunSourceTypes.Snapshot,
+            ActorType = "user", ActorId = world.ActorId, NormalizedPayloadJson = "{}", RequestMetadataJson = "{}",
+            Status = WorkflowRunRequestStatus.Consumed, ReceivedAt = now, VerifiedAt = now, NormalizedAt = now,
+        });
+        db.WorkflowRun.Add(new WorkflowRun
+        {
+            Id = runId, TeamId = world.TeamId, RunRequestId = requestId, SourceType = WorkflowRunSourceTypes.Snapshot,
+            DefinitionSnapshotJson = "{\"nodes\":[],\"edges\":[]}", DefinitionSnapshotHash = "sha256:test",
+            Status = WorkflowRunStatus.Success, OutputsJson = "{}", CreatedDate = now, CreatedBy = world.ActorId,
+            LastModifiedDate = now, LastModifiedBy = world.ActorId,
+        });
+        var started = new WorkflowRunRecord
+        {
+            Id = Guid.NewGuid(), RunId = runId, RecordType = WorkflowRunRecordTypes.NodeStarted,
+            NodeId = "work", IterationKey = string.Empty, OccurredAt = now, PayloadJson = "{\"inputs\":{}}",
+        };
+        db.WorkflowRunRecord.Add(started);
+        await db.SaveChangesAsync();
+        var state = new WorkflowRunRecord
+        {
+            Id = Guid.NewGuid(), RunId = runId, RecordType = WorkflowRunRecordTypes.NodeCompleted,
+            NodeId = "work", IterationKey = string.Empty, OccurredAt = now,
+            PayloadJson = JsonSerializer.Serialize(new
+            {
+                outputs = new Dictionary<string, object?>
+                {
+                    ["stored"] = new Dictionary<string, object?>
+                    {
+                        ["$artifact_ref"] = new { id = artifactId, size_bytes = sizeBytes, content_type = "application/json" },
+                    },
+                },
+            }),
+        };
+        db.WorkflowRunRecord.Add(state);
+        await db.SaveChangesAsync();
+        return new CellRecords(runId, started.Id, started.Sequence, state.Id, state.Sequence);
     }
 
     private async Task<byte[]> GetBytesAsync(Guid teamId, Guid artifactId)
@@ -259,4 +342,5 @@ public sealed class ArtifactProviderSwitchFlowTests : IDisposable
     }
 
     private sealed record World(Guid TeamId, Guid ActorId, Guid ProfileAId, Guid ProfileBId, Guid RouteId);
+    private sealed record CellRecords(Guid RunId, Guid StartedId, long StartedSequence, Guid StateId, long StateSequence);
 }
