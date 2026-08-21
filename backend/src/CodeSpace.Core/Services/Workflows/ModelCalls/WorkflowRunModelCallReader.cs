@@ -86,16 +86,116 @@ public sealed class WorkflowRunModelCallReader : IWorkflowRunModelCallReader, IS
 
         if (request.OffsetBytes < 0)
             return BodyUnavailable(request, WorkflowRunModelCallPartAvailability.InvalidOffset, "The byte offset is invalid.", source);
+        var materialization = await ReadMaterializationAsync(request, source.ArtifactId, cancellationToken).ConfigureAwait(false);
+        if (materialization.Ambiguous)
+            return BodyUnavailable(request, WorkflowRunModelCallPartAvailability.IntegrityFailure,
+                "The body reference has conflicting materialization identities.", source);
         if (source.ArtifactId is null)
-            return BodyUnavailable(request, MissingAvailability(source.CaptureCompleteness), MissingMessage(source.CaptureCompleteness), source);
+            return BodyUnavailable(request, MissingAvailability(materialization.State, source.CaptureCompleteness),
+                MissingMessage(materialization.State, source.CaptureCompleteness), source);
 
         var limit = Math.Clamp(request.LimitBytes, MinPageBytes, MaxPageBytes);
+        if (materialization.Format is WorkflowRunModelCallBodyMaterializationFormats.Utf8StringEnvelope
+            or WorkflowRunModelCallBodyMaterializationFormats.JsonEnvelope)
+            return await ReadEnvelopeBodyAsync(request, source, materialization.Format, limit, cancellationToken).ConfigureAwait(false);
+        if (materialization.Format is not (null or WorkflowRunModelCallBodyMaterializationFormats.ExternalArtifact))
+            return BodyUnavailable(request, WorkflowRunModelCallPartAvailability.IntegrityFailure,
+                "The body uses an unsupported materialization format.", source);
         var read = await _artifacts.ReadRangeAsync(request.TeamId, source.ArtifactId.Value, request.OffsetBytes, limit + Utf8LookaheadBytes, cancellationToken).ConfigureAwait(false);
         if (read.State != ArtifactRangeReadState.Available)
             return BodyUnavailable(request, Map(read.State), Message(read.State), source, new BodyMetadata(read.TotalLength, read.ContentType));
 
         return PageBodyUtf8(request, new BodyContent(source, read.Bytes!, read.TotalLength!.Value, read.ContentType!, read.IntegrityVerified), limit);
     }
+
+    private async Task<BodyMaterialization> ReadMaterializationAsync(WorkflowRunModelCallBodyReadRequest request, Guid? artifactId,
+        CancellationToken cancellationToken)
+    {
+        var kind = request.Body switch
+        {
+            WorkflowRunModelCallBody.LogicalRequest => WorkflowRunModelCallBodyKind.LogicalRequest,
+            WorkflowRunModelCallBody.AttemptResponse => WorkflowRunModelCallBodyKind.AttemptResponse,
+            WorkflowRunModelCallBody.AttemptError => WorkflowRunModelCallBodyKind.AttemptError,
+            _ => (WorkflowRunModelCallBodyKind?)null,
+        };
+        if (kind is null) return BodyMaterialization.None;
+
+        var query = _db.WorkflowRunModelCallBodyCapture.AsNoTracking().Where(value => value.TeamId == request.TeamId
+            && value.WorkflowRunId == request.RunId && value.ModelCallId == request.ModelCallId && value.BodyKind == kind);
+        if (request.Body == WorkflowRunModelCallBody.LogicalRequest)
+        {
+            if (artifactId is not null) query = query.Where(value => value.ArtifactId == artifactId);
+        }
+        else
+            query = query.Where(value => value.ModelCallAttemptId == request.AttemptId);
+
+        var rows = await query.Select(value => new BodyMaterializationRow(value.State, value.MaterializationFormat))
+            .Distinct().Take(2).ToListAsync(cancellationToken).ConfigureAwait(false);
+        return rows.Count switch
+        {
+            0 => BodyMaterialization.None,
+            1 => new BodyMaterialization(rows[0].State, rows[0].Format, false),
+            _ when request.Body == WorkflowRunModelCallBody.LogicalRequest && artifactId is null => BodyMaterialization.None,
+            _ => new BodyMaterialization(null, null, true),
+        };
+    }
+
+    private async Task<WorkflowRunModelCallBodyPage> ReadEnvelopeBodyAsync(WorkflowRunModelCallBodyReadRequest request, BodyRow source,
+        string format, int limit, CancellationToken cancellationToken)
+    {
+        if (request.OffsetBytes > long.MaxValue - WorkflowRunModelCallBodyMaterializationFormats.EnvelopeHeaderLength)
+            return BodyUnavailable(request, WorkflowRunModelCallPartAvailability.InvalidOffset,
+                "The byte offset is outside the stored body's addressable range.", source);
+        var artifactId = source.ArtifactId!.Value;
+        var expectedHeader = WorkflowRunModelCallBodyMaterializationFormats.Header(format).ToArray();
+        var rawOffset = request.OffsetBytes + WorkflowRunModelCallBodyMaterializationFormats.EnvelopeHeaderLength;
+        ArtifactRangeReadResult read;
+        if (request.OffsetBytes == 0)
+        {
+            read = await _artifacts.ReadRangeAsync(request.TeamId, artifactId, 0,
+                limit + Utf8LookaheadBytes + WorkflowRunModelCallBodyMaterializationFormats.EnvelopeHeaderLength, cancellationToken).ConfigureAwait(false);
+            if (read.State != ArtifactRangeReadState.Available)
+                return EnvelopeUnavailable(request, source, read);
+            if (read.TotalLength < WorkflowRunModelCallBodyMaterializationFormats.EnvelopeHeaderLength
+                || read.Bytes!.Length < WorkflowRunModelCallBodyMaterializationFormats.EnvelopeHeaderLength
+                || !read.Bytes.AsSpan(0, expectedHeader.Length).SequenceEqual(expectedHeader))
+                return BodyUnavailable(request, WorkflowRunModelCallPartAvailability.IntegrityFailure,
+                    "The stored body envelope does not match its declared format.", source, LogicalMetadata(read, format));
+            read = ArtifactRangeReadResult.Available(read.Bytes[expectedHeader.Length..],
+                read.TotalLength!.Value - expectedHeader.Length, read.Sha256!, LogicalContentType(format), read.IntegrityVerified);
+        }
+        else
+        {
+            var header = await _artifacts.ReadRangeAsync(request.TeamId, artifactId, 0,
+                WorkflowRunModelCallBodyMaterializationFormats.EnvelopeHeaderLength, cancellationToken).ConfigureAwait(false);
+            if (header.State != ArtifactRangeReadState.Available)
+                return EnvelopeUnavailable(request, source, header);
+            if (header.TotalLength < WorkflowRunModelCallBodyMaterializationFormats.EnvelopeHeaderLength
+                || header.Bytes!.Length != WorkflowRunModelCallBodyMaterializationFormats.EnvelopeHeaderLength
+                || !header.Bytes.AsSpan().SequenceEqual(expectedHeader))
+                return BodyUnavailable(request, WorkflowRunModelCallPartAvailability.IntegrityFailure,
+                    "The stored body envelope does not match its declared format.", source, LogicalMetadata(header, format));
+            read = await _artifacts.ReadRangeAsync(request.TeamId, artifactId, rawOffset, limit + Utf8LookaheadBytes, cancellationToken).ConfigureAwait(false);
+            if (read.State != ArtifactRangeReadState.Available)
+                return EnvelopeUnavailable(request, source, read, format);
+            read = ArtifactRangeReadResult.Available(read.Bytes!, read.TotalLength!.Value - expectedHeader.Length,
+                read.Sha256!, LogicalContentType(format), read.IntegrityVerified);
+        }
+
+        return PageBodyUtf8(request, new BodyContent(source, read.Bytes!, read.TotalLength!.Value,
+            read.ContentType!, read.IntegrityVerified), limit);
+    }
+
+    private static WorkflowRunModelCallBodyPage EnvelopeUnavailable(WorkflowRunModelCallBodyReadRequest request, BodyRow source,
+        ArtifactRangeReadResult read, string? format = null) => BodyUnavailable(request, Map(read.State), Message(read.State), source,
+        format is null ? new BodyMetadata(read.TotalLength, read.ContentType) : LogicalMetadata(read, format));
+
+    private static BodyMetadata LogicalMetadata(ArtifactRangeReadResult read, string format) => new(
+        read.TotalLength is { } total ? Math.Max(0, total - WorkflowRunModelCallBodyMaterializationFormats.EnvelopeHeaderLength) : null,
+        LogicalContentType(format));
+
+    private static string LogicalContentType(string format) => format == WorkflowRunModelCallBodyMaterializationFormats.Utf8StringEnvelope
+        ? "text/plain; charset=utf-8" : "application/json";
 
     public async Task<WorkflowRunModelCallMetadata?> ReadMetadataAsync(Guid runId, long sequence, Guid teamId, CancellationToken cancellationToken)
     {
@@ -233,6 +333,17 @@ public sealed class WorkflowRunModelCallReader : IWorkflowRunModelCallReader, IS
         _ => WorkflowRunModelCallPartAvailability.LegacyUnknown,
     };
 
+    private static WorkflowRunModelCallPartAvailability MissingAvailability(WorkflowRunModelCallBodyCaptureState? state,
+        WorkflowRunCaptureCompleteness completeness) => state switch
+    {
+        WorkflowRunModelCallBodyCaptureState.Pending => WorkflowRunModelCallPartAvailability.CapturePartial,
+        WorkflowRunModelCallBodyCaptureState.NotRecorded => WorkflowRunModelCallPartAvailability.NotRecorded,
+        WorkflowRunModelCallBodyCaptureState.Corrupt => WorkflowRunModelCallPartAvailability.CaptureCorrupt,
+        WorkflowRunModelCallBodyCaptureState.CaptureFailed => WorkflowRunModelCallPartAvailability.CaptureUnavailable,
+        WorkflowRunModelCallBodyCaptureState.ExternalStateIndeterminate => WorkflowRunModelCallPartAvailability.CaptureUnavailable,
+        _ => MissingAvailability(completeness),
+    };
+
     private static string MissingMessage(WorkflowRunCaptureCompleteness completeness) => completeness switch
     {
         WorkflowRunCaptureCompleteness.Exact => "This body was not recorded.",
@@ -241,6 +352,16 @@ public sealed class WorkflowRunModelCallReader : IWorkflowRunModelCallReader, IS
         WorkflowRunCaptureCompleteness.Unavailable => "The body capture is unavailable.",
         WorkflowRunCaptureCompleteness.Corrupt => "The captured body reference is corrupt or unstatable.",
         _ => "Legacy capture did not establish a body reference.",
+    };
+
+    private static string MissingMessage(WorkflowRunModelCallBodyCaptureState? state, WorkflowRunCaptureCompleteness completeness) => state switch
+    {
+        WorkflowRunModelCallBodyCaptureState.Pending => "This body is awaiting durable materialization.",
+        WorkflowRunModelCallBodyCaptureState.NotRecorded => "The exact source field was not recorded.",
+        WorkflowRunModelCallBodyCaptureState.Corrupt => "The exact source field or body reference is corrupt.",
+        WorkflowRunModelCallBodyCaptureState.CaptureFailed => "The body could not be persisted after bounded retries.",
+        WorkflowRunModelCallBodyCaptureState.ExternalStateIndeterminate => "The referenced external body could not be proven available.",
+        _ => MissingMessage(completeness),
     };
 
     public async Task<WorkflowRunModelCallPartPage?> ReadPartAsync(WorkflowRunModelCallPartReadRequest request, CancellationToken cancellationToken)
@@ -528,6 +649,13 @@ public sealed class WorkflowRunModelCallReader : IWorkflowRunModelCallReader, IS
     private sealed record BodyRow(Guid? ArtifactId, WorkflowRunCaptureCompleteness CaptureCompleteness);
 
     private sealed record BodyMetadata(long? TotalBytes, string? ContentType);
+
+    private sealed record BodyMaterialization(WorkflowRunModelCallBodyCaptureState? State, string? Format, bool Ambiguous)
+    {
+        public static BodyMaterialization None { get; } = new(null, null, false);
+    }
+
+    private sealed record BodyMaterializationRow(WorkflowRunModelCallBodyCaptureState State, string? Format);
 
     private sealed record BodyContent(BodyRow Source, byte[] Bytes, long TotalBytes, string ContentType, bool IntegrityVerified)
     {

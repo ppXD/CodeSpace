@@ -214,6 +214,7 @@ public sealed class WorkflowRunModelCallProjector : IWorkflowRunModelCallProject
         capture.SourceSha256 = artifact.Sha256;
         capture.SizeBytes = artifact.SizeBytes;
         capture.ContentType = artifact.ContentType;
+        capture.MaterializationFormat = WorkflowRunModelCallBodyMaterializationFormats.ExternalArtifact;
         capture.TerminalAt = now;
         return capture;
     }

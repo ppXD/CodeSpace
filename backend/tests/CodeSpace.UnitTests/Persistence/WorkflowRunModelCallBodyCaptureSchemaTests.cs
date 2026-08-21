@@ -21,6 +21,7 @@ public sealed class WorkflowRunModelCallBodyCaptureSchemaTests
 
         entity.ShouldNotBeNull();
         entity.GetTableName().ShouldBe(WorkflowRunDataNames.ModelCallBodyCapture);
+        entity.FindProperty(nameof(WorkflowRunModelCallBodyCapture.MaterializationFormat))!.GetMaxLength().ShouldBe(64);
         entity.FindProperty(nameof(WorkflowRunModelCallBodyCapture.Revision))!.IsConcurrencyToken.ShouldBeTrue();
         entity.GetIndexes().Single(index => index.GetDatabaseName() == "ux_workflow_run_model_call_body_capture_identity").IsUnique.ShouldBeTrue();
         entity.GetIndexes().ShouldContain(index => index.GetDatabaseName() == "ix_workflow_run_model_call_body_capture_pending");
@@ -28,5 +29,26 @@ public sealed class WorkflowRunModelCallBodyCaptureSchemaTests
             .ShouldContain(index => index.GetDatabaseName() == "ix_workflow_run_model_call_attempt_body_capture"
                 && index.GetFilter() == "source_terminal_record_id IS NOT NULL");
         WorkflowRunDataNames.All.ShouldContain(WorkflowRunDataNames.ModelCallBodyCapture);
+    }
+
+    [Fact]
+    public void Materialization_transition_is_database_fenced_and_available_metadata_is_exact()
+    {
+        var migration = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Persistence", "DbUpFiles",
+            "0152_workflow_run_model_call_body_materialization.sql"));
+
+        migration.ShouldContain("OLD.next_materialization_at > now_at");
+        migration.ShouldContain("NEW.lease_fence <> OLD.lease_fence + 1");
+        migration.ShouldContain("settlement_owner_id IS DISTINCT FROM OLD.lease_owner_id");
+        migration.ShouldContain("settlement_fence IS DISTINCT FROM OLD.lease_fence");
+        migration.ShouldContain("OLD.lease_expires_at <= now_at");
+        migration.ShouldContain("model-call body reference update cannot rewrite projected attempt facts");
+        migration.ShouldContain("artifact_team_id IS DISTINCT FROM NEW.team_id");
+        migration.ShouldContain("NEW.source_sha256 IS DISTINCT FROM artifact_sha256");
+        migration.ShouldContain("target_artifact_id IS DISTINCT FROM NEW.artifact_id");
+        migration.ShouldContain("application/vnd.codespace.workflow-model-call-body");
+        migration.ShouldContain("SET materialization_format = 'external-artifact/v1'");
+        migration.ShouldContain("IF OLD.state <> 'Pending' THEN",
+            customMessage: "the Available rows backfilled as external must make format immutable with their terminal outcome");
     }
 }
