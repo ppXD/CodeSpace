@@ -109,6 +109,18 @@ public class WorkflowRunsController : ControllerBase
         return result == null ? NotFound() : Ok(result);
     }
 
+    /// <summary>
+    /// One bounded, body-blind field-descriptor page for an exact cell coordinate returned by view-metadata. Artifact
+    /// ids, field bytes, node configuration and whole record payloads are deliberately absent.
+    /// </summary>
+    [HttpGet("{runId:guid}/cells/fields")]
+    public async Task<IActionResult> GetCellFields([FromRoute] Guid runId, [FromQuery] GetWorkflowRunCellFieldsQuery query,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await _mediator.Send(query with { RunId = runId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
     /// <summary>Bounded metadata-only view of producer-recorded data completeness; it never synthesizes a run-wide verdict.</summary>
     [HttpGet("{runId:guid}/data-completeness")]
     public async Task<IActionResult> GetDataCompleteness([FromRoute] Guid runId, CancellationToken cancellationToken)

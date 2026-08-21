@@ -206,6 +206,8 @@ public class WorkflowRunViewMetadataReaderFlowTests
         {
             await using var command = new NpgsqlCommand("EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) " + WorkflowRunViewMetadataReader.CellMetadataSql, connection);
             command.Parameters.AddWithValue("run_ids", new[] { runId });
+            command.Parameters.Add("node_id", NpgsqlTypes.NpgsqlDbType.Text).Value = DBNull.Value;
+            command.Parameters.Add("iteration_key", NpgsqlTypes.NpgsqlDbType.Text).Value = DBNull.Value;
             command.Parameters.AddWithValue("take", WorkflowRunViewMetadataReader.MaximumCells + 1);
             command.Parameters.AddWithValue("max_identity_chars", WorkflowRunViewMetadataReader.MaximumIdentityCharacters);
             var lines = new List<string>();
