@@ -3,10 +3,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PhaseAgentRef } from "@/api/workflows";
 
-const { useAgentRunMock, useAgentRunEventsMock, useCellAttemptsMock } = vi.hoisted(() => ({
+const { useAgentRunMock, useAgentRunEventsMock, useCellAttemptsMock, eventPayloadMock } = vi.hoisted(() => ({
   useAgentRunMock: vi.fn(),
   useAgentRunEventsMock: vi.fn(),
   useCellAttemptsMock: vi.fn(),
+  eventPayloadMock: vi.fn(({ agentRunId, eventSequence, dataArtifactId }: { agentRunId: string; eventSequence: number; dataArtifactId: string }) => <div data-testid="event-payload">{agentRunId}:{eventSequence}:{dataArtifactId}</div>),
 }));
 vi.mock("@/hooks/use-agents", () => ({
   useAgentRun: (id: string) => useAgentRunMock(id),
@@ -22,15 +23,19 @@ vi.mock("./AgentToolCalls", () => ({
 vi.mock("./AgentRunLogs", () => ({
   AgentRunLogs: ({ agentRunId }: { agentRunId: string }) => <div data-testid="run-logs">logs:{agentRunId}</div>,
 }));
+vi.mock("./AgentRunEventPayload", () => ({
+  AgentRunEventPayload: (props: { agentRunId: string; eventSequence: number; dataArtifactId: string }) => eventPayloadMock(props),
+}));
 
 import { AgentTerminal } from "./AgentTerminal";
 
 function termAgent(o: Partial<PhaseAgentRef> & { agentRunId: string }): PhaseAgentRef {
   return { status: "Running", ...o };
 }
-const evt = (sequence: number, kind: string, text: string) => ({ sequence, kind, text, data: null, occurredAt: "2026-06-23T00:00:00Z" });
+const evt = (sequence: number, kind: string, text: string, dataArtifactId: string | null = null) => ({ sequence, kind, text, data: null, dataArtifactId, occurredAt: "2026-06-23T00:00:00Z" });
 
 beforeEach(() => {
+  eventPayloadMock.mockClear();
   useAgentRunMock.mockReturnValue({ data: { status: "Running" } });
   useAgentRunEventsMock.mockReturnValue({ data: [], isLoading: false });
   useCellAttemptsMock.mockReturnValue({ data: { attempts: [] } });   // single-cell default → no switcher
@@ -100,6 +105,35 @@ describe("AgentTerminal", () => {
     expect(rows).toHaveLength(3);
     expect(rows[0].dataset.kind).toBe("command");
     expect(rows[2].dataset.kind).toBe("error");
+  });
+
+  it("mounts exact offloaded data for a non-tool event only while its disclosure is open", () => {
+    useAgentRunEventsMock.mockReturnValue({ data: [evt(7, "Progress", "Indexed workspace", "artifact-progress")], isLoading: false });
+
+    render(<AgentTerminal agent={termAgent({ agentRunId: "a1" })} onClose={vi.fn()} />);
+
+    expect(screen.getByText("Indexed workspace")).toBeInTheDocument();
+    expect(eventPayloadMock).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("event-payload")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /expand offloaded event data for progress/i }));
+    expect(screen.getByTestId("event-payload")).toHaveTextContent("a1:7:artifact-progress");
+    expect(eventPayloadMock).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: /collapse offloaded event data for progress/i }));
+    expect(screen.queryByTestId("event-payload")).toBeNull();
+  });
+
+  it("leaves inline and ToolCall events on their existing zero-disclosure paths", () => {
+    useAgentRunEventsMock.mockReturnValue({ data: [
+      { ...evt(1, "Progress", "inline"), data: "{\"step\":1}" },
+      evt(2, "ToolCall", "WebSearch", "artifact-tool"),
+    ], isLoading: false });
+
+    render(<AgentTerminal agent={termAgent({ agentRunId: "a1" })} onClose={vi.fn()} />);
+
+    expect(screen.queryByRole("button", { name: /offloaded event data/i })).toBeNull();
+    expect(eventPayloadMock).not.toHaveBeenCalled();
   });
 
   it("shows a connecting state while the first events load", () => {
