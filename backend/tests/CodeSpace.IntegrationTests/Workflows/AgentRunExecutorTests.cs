@@ -823,10 +823,11 @@ public class AgentRunExecutorTests
     }
 
     [Fact]
-    public async Task A_secondary_repo_capture_failure_drops_only_that_repo_and_keeps_the_change_set()
+    public async Task A_secondary_repo_capture_failure_is_durable_without_failing_the_agent_run()
     {
-        // The per-repo capture-isolation fix: a SECONDARY repo's capture hiccup drops only that repo — it must never
-        // abort the whole change set (which would silently degrade a multi-repo run to look single-repo) nor fail the run.
+        // A secondary capture fault remains shadow to the agent outcome, but the writable repo must stay in the
+        // durable change-set facts. Dropping it makes an incomplete set indistinguishable from a complete one and lets
+        // downstream integration silently ship only the captured siblings.
         if (OperatingSystem.IsWindows()) return;
 
         var teamId = await SeedTeamAsync();
@@ -845,7 +846,20 @@ public class AgentRunExecutorTests
         run.Status.ShouldBe(AgentRunStatus.Succeeded, "a secondary repo's capture hiccup never fails the run");
 
         var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
-        result.RepositoryResults.Select(r => r.Alias).ShouldBe(new[] { "web" }, "the failed 'api' repo is dropped; the captured 'web' repo is kept");
+        result.RepositoryResults.Select(r => r.Alias).ShouldBe(new[] { "web", "api" }, "every writable repo remains represented even when one capture failed");
+        result.RepositoryResults.Single(r => r.Alias == "web").CaptureError.ShouldBeNull();
+        var failedRepo = result.RepositoryResults.Single(r => r.Alias == "api");
+        failedRepo.CaptureError.ShouldBe(AgentRunExecutor.RepositoryCaptureUnavailableCode);
+        failedRepo.RepositoryId.ShouldNotBeNull("the failed fact still carries stable repository identity");
+        failedRepo.Patch.ShouldBeEmpty();
+        failedRepo.PatchArtifactId.ShouldBeNull();
+
+        var warnings = await scope.Resolve<CodeSpaceDbContext>().AgentRunEvent.AsNoTracking()
+            .Where(e => e.AgentRunId == runId && e.Kind == AgentEventKind.Warning)
+            .Select(e => e.Text)
+            .ToListAsync(CancellationToken.None);
+        warnings.ShouldContain(text => text.Contains("api", StringComparison.Ordinal) && text.Contains("capture", StringComparison.OrdinalIgnoreCase),
+            "the operator-facing timeline carries the same durable gap without persisting provider exception text");
         result.ChangeSetId.ShouldBe(AgentRunExecutor.ChangeSetIdFor(runId), "the change set is still stamped — the run is NOT degraded to look single-repo");
     }
 

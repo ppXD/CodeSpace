@@ -199,7 +199,7 @@ public sealed partial class RealSupervisorActionExecutor
         agent.Status,
         agent.Summary,
         agent.RepositoryResults.Count > 0
-            ? agent.RepositoryResults.Where(repo => !IsUntouched(repo)).Select(repo => new SupervisorSynthesisDiff(repo.Alias, repo.Patch)).ToList()
+            ? agent.RepositoryResults.Where(HasCapturedWork).Select(repo => new SupervisorSynthesisDiff(repo.Alias, repo.Patch)).ToList()
             : new[] { new SupervisorSynthesisDiff(null, agent.Patch) });
 
     // ── Facet (a): the model-free on-disk integration ───────────────────────────────
@@ -359,21 +359,25 @@ public sealed partial class RealSupervisorActionExecutor
         return repos;
     }
 
-    /// <summary>Synthetic Skipped blocks for per-repo work whose repository id is NULL (a degraded capture) — grouped by alias, naming the agents whose work remains on their branches. A vacuous untouched null-id entry is dropped (nothing to combine); a real one is NAMED so the aggregate never silently omits uncombined work. Skipped (not Conflicted) — a missing spec is a degraded state, not a merge conflict.</summary>
+    /// <summary>Synthetic blocks for per-repo facts whose repository id is NULL — grouped by alias and naming the affected agents. A vacuous untouched entry is dropped; ordinary unresolvable work is Skipped, while an explicit capture gap is Partial so the aggregate cannot become Clean.</summary>
     private static IEnumerable<(string Status, object Block)> UnresolvableRepoBlocks(IReadOnlyList<MergedAgent> merged) =>
         merged
             .SelectMany(agent => agent.RepositoryResults.Where(r => r.RepositoryId is null && !IsUntouched(r)).Select(r => (agent, r)))
             .GroupBy(x => x.r.Alias)
-            .Select(g => ("Skipped", (object)new
+            .Select(g =>
             {
-                repositoryId = (Guid?)null,
-                alias = g.Key,
-                status = "Skipped",
-                reason = "no resolvable repository id for this repo — the agents' work remains on their branches",
-                excludedAgents = g.Select(x => x.agent.AgentRunId.ToString()).Distinct().ToList(),
-            }));
+                var status = HasCaptureFailure(g.Select(x => x.r)) ? "Partial" : "Skipped";
+                return (status, (object)new
+                {
+                    repositoryId = (Guid?)null,
+                    alias = g.Key,
+                    status,
+                    reason = status == "Partial" ? "repository capture was unavailable — the change set is incomplete" : "no resolvable repository id for this repo — the agents' work remains on their branches",
+                    excludedAgents = g.Select(x => x.agent.AgentRunId.ToString()).Distinct().ToList(),
+                });
+            });
 
-    /// <summary>Integrate ONE repo's per-repo contributions, returning its (status, block) pair. Mirrors the single-repo <see cref="IntegrateMergedAsync"/> fail-safe — unresolvable repo / no base → Skipped, git failure → Failed — scoped to this repo's per-repo patches + base. A repo an agent never TOUCHED (the capture layer still emits a vacuous entry) is dropped from the contributions so a disjoint fan-out doesn't spuriously conflict. <paramref name="baseBranch"/> is the repo's PR base (the ref it was rooted at), threaded onto the block so the node output binds verbatim into git.open_change_set (S7-E).</summary>
+    /// <summary>Integrate ONE repo's per-repo contributions, returning its (status, block) pair. Mirrors the single-repo <see cref="IntegrateMergedAsync"/> fail-safe — capture unavailable → Partial, unresolvable repo / no base → Skipped, git failure → Failed — scoped to this repo's per-repo patches + base. A repo an agent never TOUCHED (the capture layer still emits a vacuous entry) is dropped from the contributions so a disjoint fan-out doesn't spuriously conflict. <paramref name="baseBranch"/> is the repo's PR base, threaded onto the block so the node output binds verbatim into git.open_change_set.</summary>
     private async Task<(string Status, object Block)> IntegrateOneRepoAsync((Guid RepositoryId, string Alias) repo, SupervisorTurnContext context, IReadOnlyList<MergedAgent> merged, string baseBranch, CancellationToken cancellationToken)
     {
         // This repo's REAL contributions: each agent's per-repo entry that ACTUALLY changed it. The capture layer emits
@@ -386,6 +390,10 @@ public sealed partial class RealSupervisorActionExecutor
             .Where(x => x.repoResult is { } rr && !IsUntouched(rr))
             .Select(x => (x.agent, RepoResult: x.repoResult!))
             .ToList();
+
+        var captureFailures = touched.Where(x => !string.IsNullOrEmpty(x.RepoResult.CaptureError)).Select(x => x.agent.AgentRunId.ToString()).Distinct().ToList();
+        if (captureFailures.Count > 0)
+            return ("Partial", RepoSkipBlock(repo, "Partial", "repository capture was unavailable — the change set is incomplete", captureFailures));
 
         var eligible = touched.Where(x => !string.IsNullOrEmpty(x.RepoResult.BaseSha)).ToList();
         var excluded = touched.Where(x => string.IsNullOrEmpty(x.RepoResult.BaseSha)).Select(x => x.agent.AgentRunId.ToString()).ToList();
@@ -438,9 +446,16 @@ public sealed partial class RealSupervisorActionExecutor
         return map;
     }
 
-    /// <summary>A per-repo entry the agent never actually CHANGED — no diff (inline empty AND no offload ref) AND no pushed branch. The capture layer emits one <see cref="RepositoryRunResult"/> per writable repo even for an untouched one; integrating its vacuous "no patch, no branch" entry would make the integrator refuse the whole repo set, so it is dropped from the contributions — there is nothing to combine, and it is not lost work.</summary>
-    private static bool IsUntouched(RepositoryRunResult repo) =>
-        string.IsNullOrEmpty(repo.Patch) && repo.PatchArtifactId is null && string.IsNullOrEmpty(repo.ProducedBranch);
+    /// <summary>A per-repo entry the agent never actually CHANGED — no capture error, diff (inline or offloaded), or pushed branch. A capture-error entry is deliberately NOT untouched: it reaches the integration aggregate as a non-Clean axis so an incomplete change set can never be published as Clean.</summary>
+    internal static bool IsUntouched(RepositoryRunResult repo) =>
+        string.IsNullOrEmpty(repo.CaptureError) && string.IsNullOrEmpty(repo.Patch) && repo.PatchArtifactId is null && string.IsNullOrEmpty(repo.ProducedBranch);
+
+    /// <summary>Whether a set contains a durable repository-capture gap. Shared by exact-id and degraded null-id integration so both produce a non-Clean Partial block.</summary>
+    internal static bool HasCaptureFailure(IEnumerable<RepositoryRunResult> repos) => repos.Any(repo => !string.IsNullOrEmpty(repo.CaptureError));
+
+    /// <summary>Actual captured work suitable for synthesis input. Capture-failure facts are authority signals, not empty diffs.</summary>
+    private static bool HasCapturedWork(RepositoryRunResult repo) =>
+        !string.IsNullOrEmpty(repo.Patch) || repo.PatchArtifactId is not null || !string.IsNullOrEmpty(repo.ProducedBranch);
 
     private static IntegrationRequest BuildPerRepoIntegrationRequest(Guid repoId, SupervisorTurnContext context, WorkspaceRequest workspace, string baseSha, IReadOnlyList<(MergedAgent Agent, RepositoryRunResult RepoResult)> eligible) => new()
     {

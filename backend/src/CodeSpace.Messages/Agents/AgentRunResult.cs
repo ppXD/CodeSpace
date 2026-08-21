@@ -230,6 +230,10 @@ public sealed record RepositoryRunResult
     /// <summary>The repo's access in the workspace (always <see cref="WorkspaceAccess.Write"/> for an entry that produced an outcome).</summary>
     public WorkspaceAccess Access { get; init; } = WorkspaceAccess.Write;
 
+    /// <summary>Stable, non-sensitive reason code when CodeSpace could not capture this writable repository's git facts. The entry remains in the change set so downstream integration fails closed instead of mistaking an incomplete capture for an untouched repository. Null on healthy and legacy entries.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? CaptureError { get; init; }
+
     /// <summary>Mirrors <see cref="AgentRunResult.PublishError"/> for this repo — set ONLY when this repo's non-empty diff failed to push after retries.</summary>
     public string? PublishError { get; init; }
 
