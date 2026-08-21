@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { WorkflowRunCaptureCompleteness, WorkflowRunModelCallAttemptMetadata, WorkflowRunModelCallBodyCaptureHealth, WorkflowRunModelCallBodyReferenceState, WorkflowRunModelCallDetailMetadata } from "@/api/workflows";
@@ -9,6 +9,7 @@ import { WorkflowRunModelCallContent, type WorkflowRunModelCallTab } from "./Wor
 const callId = "11111111-1111-1111-1111-111111111111";
 const firstAttemptId = "22222222-2222-2222-2222-222222222222";
 const activeAttemptId = "33333333-3333-3333-3333-333333333333";
+const capturePollingMs = 3_000;
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -127,10 +128,20 @@ function renderContent(handler: FetchHandler, tab: WorkflowRunModelCallTab = "re
     rerenderTab(next: WorkflowRunModelCallTab) {
       view.rerender(<QueryClientProvider client={client}><WorkflowRunModelCallContent runId="run-1" sequence={42} tab={next} /></QueryClientProvider>);
     },
+    rerenderIdentity(runId: string, sequence: number, nextTab: WorkflowRunModelCallTab = tab) {
+      view.rerender(<QueryClientProvider client={client}><WorkflowRunModelCallContent runId={runId} sequence={sequence} tab={nextTab} /></QueryClientProvider>);
+    },
   };
 }
 
-afterEach(() => vi.unstubAllGlobals());
+async function advancePollingClock(milliseconds: number) {
+  await act(async () => { await vi.advanceTimersByTimeAsync(milliseconds); });
+}
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 describe("WorkflowRunModelCallContent", () => {
   it("uses the stable id reader, keeps bounded body pages local, and selects the latest physical attempt", async () => {
@@ -198,6 +209,224 @@ describe("WorkflowRunModelCallContent", () => {
     expect(screen.getByText(retryability)).toBeInTheDocument();
     expect(screen.getByText(format)).toBeInTheDocument();
     await waitFor(() => expect(vi.mocked(globalThis.fetch)).toHaveBeenCalledTimes(2));
+  });
+
+  it("polls active stable capture metadata, then reads the selected body once without resetting it when capture becomes available", async () => {
+    vi.useFakeTimers();
+    const health: WorkflowRunModelCallBodyCaptureHealth[] = ["Pending", "Materializing", "Retry", "Available"];
+    let stableReads = 0;
+    let bodyReads = 0;
+    renderContent((url) => {
+      if (url.pathname === "/api/workflows/runs/run-1/model-calls/42") return json(projectedMetadata());
+      if (url.pathname === `/api/workflows/runs/run-1/model-calls/${callId}`) {
+        const detail = stableDetail();
+        const response = activeResponse(detail);
+        const readIndex = stableReads;
+        response.captureHealth = health[Math.min(readIndex, health.length - 1)];
+        response.materializationFormat = response.captureHealth === "Available" ? "external-artifact/v1" : null;
+        detail.bodies[0].captureHealth = readIndex === 3 ? "Pending" : readIndex > 3 ? "Abandoned" : null;
+        detail.bodies[0].materializationFormat = null;
+        stableReads++;
+        return json(detail);
+      }
+      if (url.pathname.endsWith("/bodies/AttemptResponse")) {
+        bodyReads++;
+        return json({
+          body: "AttemptResponse", attemptId: activeAttemptId, captureCompleteness: "Exact", availability: "Available",
+          text: "materialized once", offsetBytes: 0, returnedBytes: 17, totalBytes: 17, nextOffsetBytes: null,
+          contentType: "application/json", artifactId: "55555555-5555-5555-5555-555555555555", integrityVerified: true, message: null,
+        });
+      }
+      return json({ message: `Unexpected ${url.pathname}` }, 500);
+    });
+
+    await vi.waitFor(() => expect(screen.getByText("Capture pending")).toBeInTheDocument());
+    expect(stableReads).toBe(1);
+    expect(bodyReads).toBe(0);
+    await advancePollingClock(capturePollingMs);
+    await vi.waitFor(() => expect(screen.getByText("Capture materializing")).toBeInTheDocument());
+    await advancePollingClock(capturePollingMs);
+    await vi.waitFor(() => expect(screen.getByText("Capture retry scheduled")).toBeInTheDocument());
+    await advancePollingClock(capturePollingMs);
+    await vi.waitFor(() => expect(screen.getByText("materialized once")).toBeInTheDocument());
+    expect(stableReads).toBe(4);
+    expect(bodyReads).toBe(1);
+    await advancePollingClock(capturePollingMs);
+    await vi.waitFor(() => expect(stableReads).toBe(5));
+    expect(bodyReads).toBe(1);
+    expect(screen.getByText("materialized once")).toBeInTheDocument();
+
+    await advancePollingClock(10 * capturePollingMs);
+    expect(stableReads).toBe(5);
+    expect(bodyReads).toBe(1);
+    expect(screen.getByText("materialized once")).toBeInTheDocument();
+    expect(screen.queryByText("Loading stable model-call metadata…")).toBeNull();
+  });
+
+  it("keeps an already-loaded selected body visible when an active metadata poll fails", async () => {
+    vi.useFakeTimers();
+    let stableReads = 0;
+    let bodyReads = 0;
+    const detail = stableDetail();
+    activeResponse(detail).captureHealth = "Available";
+    activeResponse(detail).materializationFormat = "external-artifact/v1";
+    detail.bodies[0].captureHealth = "Pending";
+    detail.bodies[0].materializationFormat = null;
+    renderContent((url) => {
+      if (url.pathname === "/api/workflows/runs/run-1/model-calls/42") return json(projectedMetadata());
+      if (url.pathname === `/api/workflows/runs/run-1/model-calls/${callId}`) {
+        stableReads++;
+        return stableReads === 1 ? json(detail) : json({ code: "invalid_request", message: "metadata poll failed" }, 400);
+      }
+      if (url.pathname.endsWith("/bodies/AttemptResponse")) {
+        bodyReads++;
+        return json({
+          body: "AttemptResponse", attemptId: activeAttemptId, captureCompleteness: "Exact", availability: "Available",
+          text: "preserved body", offsetBytes: 0, returnedBytes: 14, totalBytes: 14, nextOffsetBytes: null,
+          contentType: "application/json", artifactId: "55555555-5555-5555-5555-555555555555", integrityVerified: true, message: null,
+        });
+      }
+      return json({ message: `Unexpected ${url.pathname}` }, 500);
+    });
+
+    await vi.waitFor(() => expect(screen.getByText("preserved body")).toBeInTheDocument());
+    await advancePollingClock(capturePollingMs);
+    await vi.waitFor(() => expect(stableReads).toBe(2));
+    expect(screen.getByText("preserved body")).toBeInTheDocument();
+    expect(bodyReads).toBe(1);
+    expect(screen.queryByText(/Couldn't load stable model-call metadata/i)).toBeNull();
+  });
+
+  it.each([
+    ["Available", "external-artifact/v1"],
+    ["Failed", null],
+    ["Abandoned", null],
+    [null, null],
+    ["FutureCaptureState", null],
+    ["Pending", "future-envelope/v2"],
+  ])("does not poll closed or unknown stable capture metadata %s/%s", async (health, materializationFormat) => {
+    vi.useFakeTimers();
+    let stableReads = 0;
+    const detail = stableDetail(health === "Available" ? "NotRecorded" : "Referenced");
+    const response = activeResponse(detail);
+    response.captureHealth = health as WorkflowRunModelCallBodyCaptureHealth | null;
+    response.materializationFormat = materializationFormat;
+    renderContent((url) => {
+      if (url.pathname === "/api/workflows/runs/run-1/model-calls/42") return json(projectedMetadata());
+      if (url.pathname === `/api/workflows/runs/run-1/model-calls/${callId}`) {
+        stableReads++;
+        return json(detail);
+      }
+      return json({ message: `Unexpected ${url.pathname}` }, 500);
+    });
+
+    await vi.waitFor(() => expect(stableReads).toBe(1));
+    await advancePollingClock(10 * capturePollingMs);
+    expect(stableReads).toBe(1);
+  });
+
+  it("fails closed and stops polling when any descriptor has unknown capture metadata", async () => {
+    vi.useFakeTimers();
+    let stableReads = 0;
+    const detail = stableDetail();
+    activeResponse(detail).captureHealth = "Pending";
+    detail.bodies[0].captureHealth = "FutureCaptureState" as WorkflowRunModelCallBodyCaptureHealth;
+    renderContent((url) => {
+      if (url.pathname === "/api/workflows/runs/run-1/model-calls/42") return json(projectedMetadata());
+      if (url.pathname === `/api/workflows/runs/run-1/model-calls/${callId}`) {
+        stableReads++;
+        return json(detail);
+      }
+      return json({ message: `Unexpected ${url.pathname}` }, 500);
+    });
+
+    await vi.waitFor(() => expect(screen.getByText("Capture pending")).toBeInTheDocument());
+    await advancePollingClock(10 * capturePollingMs);
+    expect(stableReads).toBe(1);
+  });
+
+  it("cancels an in-flight capture metadata poll when the drawer closes", async () => {
+    vi.useFakeTimers();
+    let stableReads = 0;
+    let pollingSignal: AbortSignal | undefined;
+    const detail = stableDetail();
+    activeResponse(detail).captureHealth = "Pending";
+    const { unmount } = renderContent((url, init) => {
+      if (url.pathname === "/api/workflows/runs/run-1/model-calls/42") return json(projectedMetadata());
+      if (url.pathname === `/api/workflows/runs/run-1/model-calls/${callId}`) {
+        stableReads++;
+        if (stableReads === 1) return json(detail);
+        pollingSignal = init.signal as AbortSignal;
+        return new Promise<Response>(() => undefined);
+      }
+      return json({ message: `Unexpected ${url.pathname}` }, 500);
+    });
+
+    await vi.waitFor(() => expect(screen.getByText("Capture pending")).toBeInTheDocument());
+    await advancePollingClock(capturePollingMs);
+    await vi.waitFor(() => expect(pollingSignal).toBeInstanceOf(AbortSignal));
+    unmount();
+    expect(pollingSignal?.aborted).toBe(true);
+    await advancePollingClock(10 * capturePollingMs);
+    expect(stableReads).toBe(2);
+  });
+
+  it("cancels an old capture metadata poll when the drawer switches model-call identity", async () => {
+    vi.useFakeTimers();
+    let oldStableReads = 0;
+    let oldPollingSignal: AbortSignal | undefined;
+    const oldDetail = stableDetail();
+    activeResponse(oldDetail).captureHealth = "Retry";
+    const nextDetail = stableDetail("NotRecorded");
+    nextDetail.runId = "run-2";
+    activeResponse(nextDetail).captureHealth = "Failed";
+    const { rerenderIdentity } = renderContent((url, init) => {
+      if (url.pathname === "/api/workflows/runs/run-1/model-calls/42") return json(projectedMetadata());
+      if (url.pathname === `/api/workflows/runs/run-1/model-calls/${callId}`) {
+        oldStableReads++;
+        if (oldStableReads === 1) return json(oldDetail);
+        oldPollingSignal = init.signal as AbortSignal;
+        return new Promise<Response>(() => undefined);
+      }
+      if (url.pathname === "/api/workflows/runs/run-2/model-calls/43") return json({ ...projectedMetadata(), runId: "run-2", sequence: 43 });
+      if (url.pathname === `/api/workflows/runs/run-2/model-calls/${callId}`) return json(nextDetail);
+      return json({ message: `Unexpected ${url.pathname}` }, 500);
+    });
+
+    await vi.waitFor(() => expect(screen.getByText("Capture retry scheduled")).toBeInTheDocument());
+    await advancePollingClock(capturePollingMs);
+    await vi.waitFor(() => expect(oldPollingSignal).toBeInstanceOf(AbortSignal));
+    rerenderIdentity("run-2", 43);
+    await vi.waitFor(() => expect(oldPollingSignal?.aborted).toBe(true));
+    await vi.waitFor(() => expect(screen.getByText("Capture failed")).toBeInTheDocument());
+    await advancePollingClock(10 * capturePollingMs);
+    expect(oldStableReads).toBe(2);
+  });
+
+  it("does not add stable metadata polling to legacy sequence reads", async () => {
+    vi.useFakeTimers();
+    let routeReads = 0;
+    let partReads = 0;
+    renderContent((url) => {
+      if (url.pathname === "/api/workflows/runs/run-1/model-calls/42") {
+        routeReads++;
+        return json({ ...projectedMetadata(), workflowRunModelCallId: null, projectionState: "LegacyFallback", captureCompleteness: "LegacyUnknown" });
+      }
+      if (url.pathname.endsWith("/parts/Result")) {
+        partReads++;
+        return json({
+          part: "Result", availability: "Available", text: "legacy stays static", offsetBytes: 0, returnedBytes: 19,
+          totalBytes: 19, nextOffsetBytes: null, contentType: "text/plain", artifactId: null, integrityVerified: true, message: null,
+        });
+      }
+      return json({ message: `Unexpected ${url.pathname}` }, 500);
+    });
+
+    await vi.waitFor(() => expect(screen.getByText("legacy stays static")).toBeInTheDocument());
+    await advancePollingClock(10 * capturePollingMs);
+    expect(routeReads).toBe(1);
+    expect(partReads).toBe(1);
+    expect(vi.mocked(globalThis.fetch).mock.calls.some(([input]) => String(input).includes(callId))).toBe(false);
   });
 
   it.each([
