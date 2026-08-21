@@ -2822,6 +2822,10 @@ textarea:-webkit-autofill {
 .acs-root .agent-terminal-attempt-glyph[data-tone="failed"] { color: #9E3535; }
 .acs-root .agent-terminal-attempt-glyph[data-tone="live"] { color: #2F6FE0; }
 .acs-root .agent-terminal-body { max-height: 360px; overflow-y: auto; }
+.acs-root .agent-terminal-window-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 9px; padding: 6px 12px; color: var(--muted); background: var(--panel-2); border-bottom: 1px solid var(--line); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.acs-root .agent-terminal-window-controls > button { appearance: none; padding: 2px 7px; color: var(--ink-2); background: var(--panel); border: 1px solid var(--line); border-radius: 5px; font: inherit; cursor: pointer; }
+.acs-root .agent-terminal-window-controls > button:disabled { cursor: default; opacity: .55; }
+.acs-root .agent-terminal-window-controls > [role="status"] { color: #A8590E; }
 .acs-root .agent-terminal-empty { padding: 16px 14px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--muted); }
 .acs-root .agent-run-logs { min-height: 130px; }
 .acs-root .agent-run-log-streams { display: flex; align-items: stretch; gap: 5px; padding: 7px 10px; overflow-x: auto; border-bottom: 1px solid var(--line); background: var(--panel-2); }

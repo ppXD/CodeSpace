@@ -3,15 +3,22 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PhaseAgentRef } from "@/api/workflows";
 
-const { useAgentRunMock, useAgentRunEventsMock, useCellAttemptsMock, eventPayloadMock } = vi.hoisted(() => ({
+const { useAgentRunMock, useAgentRunEventsMock, useCellAttemptsMock, eventPayloadMock, loadOlderMock, returnToLatestMock } = vi.hoisted(() => ({
   useAgentRunMock: vi.fn(),
   useAgentRunEventsMock: vi.fn(),
   useCellAttemptsMock: vi.fn(),
+  loadOlderMock: vi.fn(),
+  returnToLatestMock: vi.fn(),
   eventPayloadMock: vi.fn(({ agentRunId, eventSequence, dataArtifactId }: { agentRunId: string; eventSequence: number; dataArtifactId: string }) => <div data-testid="event-payload">{agentRunId}:{eventSequence}:{dataArtifactId}</div>),
 }));
 vi.mock("@/hooks/use-agents", () => ({
   useAgentRun: (id: string) => useAgentRunMock(id),
-  useAgentRunEvents: (id: string) => useAgentRunEventsMock(id),
+  useAgentRunEventWindow: (id: string, active: boolean) => ({
+    data: [], isLoading: false, isLoadingOlder: false, error: null, hasOlder: false,
+    olderEventsOmitted: false, newerEventsOmitted: false, atLatest: true,
+    loadOlder: loadOlderMock, returnToLatest: returnToLatestMock,
+    ...useAgentRunEventsMock(id, active),
+  }),
 }));
 vi.mock("@/hooks/use-workflows", () => ({
   useCellAttempts: () => useCellAttemptsMock(),
@@ -36,8 +43,10 @@ const evt = (sequence: number, kind: string, text: string, dataArtifactId: strin
 
 beforeEach(() => {
   eventPayloadMock.mockClear();
+  loadOlderMock.mockReset();
+  returnToLatestMock.mockReset();
   useAgentRunMock.mockReturnValue({ data: { status: "Running" } });
-  useAgentRunEventsMock.mockReturnValue({ data: [], isLoading: false });
+  useAgentRunEventsMock.mockReturnValue({ data: [], isLoading: false, isLoadingOlder: false, error: null, hasOlder: false, olderEventsOmitted: false, newerEventsOmitted: false, atLatest: true, loadOlder: loadOlderMock, returnToLatest: returnToLatestMock });
   useCellAttemptsMock.mockReturnValue({ data: { attempts: [] } });   // single-cell default → no switcher
 });
 
@@ -55,7 +64,7 @@ describe("AgentTerminal", () => {
     expect(pills[1].getAttribute("aria-selected")).toBe("true");   // the latest (the ref's agent run) is selected by default
 
     fireEvent.click(screen.getByRole("tab", { name: /attempt 1/i }));
-    expect(useAgentRunEventsMock).toHaveBeenCalledWith("ag1");      // the earlier (failed) attempt's record is now streamed
+    expect(useAgentRunEventsMock).toHaveBeenCalledWith("ag1", true); // the earlier (failed) attempt's record is now streamed
   });
 
   it("shows the SELECTED attempt's own metrics (tokens · time · model) when looking back at an earlier attempt", () => {
@@ -105,6 +114,30 @@ describe("AgentTerminal", () => {
     expect(rows).toHaveLength(3);
     expect(rows[0].dataset.kind).toBe("command");
     expect(rows[2].dataset.kind).toBe("error");
+  });
+
+  it("exposes bounded window omissions and returns historical output to a fresh tail", () => {
+    useAgentRunEventsMock.mockReturnValue({
+      data: [evt(10, "Progress", "bounded")],
+      isLoading: false,
+      isLoadingOlder: false,
+      error: null,
+      hasOlder: true,
+      olderEventsOmitted: true,
+      newerEventsOmitted: true,
+      atLatest: false,
+      loadOlder: loadOlderMock,
+      returnToLatest: returnToLatestMock,
+    });
+
+    render(<AgentTerminal agent={termAgent({ agentRunId: "a1" })} onClose={vi.fn()} />);
+
+    expect(screen.getByText("Earlier events omitted.")).toBeInTheDocument();
+    expect(screen.getByText("Newer events omitted.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Load earlier events" }));
+    fireEvent.click(screen.getByRole("button", { name: "Return to latest" }));
+    expect(loadOlderMock).toHaveBeenCalledTimes(1);
+    expect(returnToLatestMock).toHaveBeenCalledTimes(1);
   });
 
   it("mounts exact offloaded data for a non-tool event only while its disclosure is open", () => {

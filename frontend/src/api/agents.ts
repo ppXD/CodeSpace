@@ -159,6 +159,34 @@ export interface AgentRunEventDto {
   occurredAt: string;
 }
 
+export type AgentRunEventPageMode = "Tail" | "Older" | "Newer";
+
+export interface AgentRunEventPageRequest {
+  mode: AgentRunEventPageMode;
+  cursor?: string;
+  limit: number;
+}
+
+/** One validated page plus the exact request identity that selected it; raw event payload strings/refs are never rewritten. */
+export interface AgentRunEventPageResponse {
+  agentRunId: string;
+  mode: AgentRunEventPageMode;
+  requestCursor: string | null;
+  items: AgentRunEventDto[];
+  hasOlder: boolean;
+  hasNewer: boolean;
+  nextOlderCursor: string | null;
+  nextNewerCursor: string;
+}
+
+/** A non-retryable page-contract violation; transport/backend failures remain separately retryable. */
+export class InvalidAgentRunEventPageError extends Error {
+  constructor() {
+    super("Invalid Agent Run event page response.");
+    this.name = "InvalidAgentRunEventPageError";
+  }
+}
+
 export type AgentRunEventDataReadAvailability = "NotReferenced" | "InvalidRange" | "MetadataMissing" | "PhysicalObjectMissing" | "IntegrityFailure" | "BackendUnavailable" | "AccessDenied";
 
 export interface AgentRunEventDataRangeAvailable {
@@ -392,6 +420,13 @@ export const agentsApi = {
   getRun: (agentRunId: string) => fetchJson<AgentRunSummary>(`/api/agents/runs/${agentRunId}`),
   listRunEvents: (agentRunId: string, after = 0) =>
     fetchJson<AgentRunEventDto[]>(`/api/agents/runs/${agentRunId}/events?after=${after}`),
+  pageRunEvents: async (agentRunId: string, request: AgentRunEventPageRequest, signal?: AbortSignal): Promise<AgentRunEventPageResponse> => {
+    ensureValidEventPageRequest(request);
+    const params = new URLSearchParams({ direction: request.mode, limit: String(request.limit) });
+    if (request.cursor !== undefined) params.set("cursor", request.cursor);
+    const value = await fetchJson<unknown>(`/api/agents/runs/${encodeURIComponent(agentRunId)}/events/page?${params}`, { signal });
+    return decodeAgentRunEventPage(value, agentRunId, request);
+  },
   readRunEventDataRange: async (agentRunId: string, eventSequence: number, dataArtifactId: string, offsetBytes: number, limitBytes: number, signal?: AbortSignal): Promise<AgentRunEventDataRangeResult> => {
     const path = `/api/agents/runs/${encodeURIComponent(agentRunId)}/events/${eventSequence}/data?offsetBytes=${offsetBytes}&limitBytes=${limitBytes}`;
     try {
@@ -459,8 +494,70 @@ export const agentsApi = {
 
 const LOG_READ_AVAILABILITIES = new Set<AgentRunLogReadAvailability>(["InvalidRange", "PhysicalObjectMissing", "IntegrityFailure", "BackendUnavailable", "AccessDenied", "ProviderTimeout", "Unsupported"]);
 const EVENT_DATA_READ_AVAILABILITIES = new Set<AgentRunEventDataReadAvailability>(["NotReferenced", "InvalidRange", "MetadataMissing", "PhysicalObjectMissing", "IntegrityFailure", "BackendUnavailable", "AccessDenied"]);
+const AGENT_EVENT_KINDS = new Set(["Queued", "Started", "AssistantMessage", "Reasoning", "PlanUpdate", "ToolCall", "CommandExecuted", "FileChanged", "TestOutput", "ApprovalRequested", "ApprovalResolved", "Warning", "Error", "FinalSummary", "Completed"]);
 const LOG_STATUSES = new Set<AgentRunLogStatus>(["Open", "Completed", "Truncated", "Unavailable", "Corrupt", "CaptureFailed"]);
 const LOG_RETENTIONS = new Set(["Ephemeral", "Run", "Team", "Compliance", "Permanent"]);
+
+function ensureValidEventPageRequest(request: AgentRunEventPageRequest): void {
+  const cursor = request.cursor === undefined ? null : exactEventCursor(request.cursor, request.mode === "Older");
+  const validMode = request.mode === "Tail" || request.mode === "Older" || request.mode === "Newer";
+  const validCursorShape = request.mode === "Tail" ? request.cursor === undefined : cursor !== null;
+  if (!validMode || !validCursorShape || !Number.isSafeInteger(request.limit) || request.limit < 1 || request.limit > 500)
+    throw new Error("Invalid Agent Run event page request.");
+}
+
+function decodeAgentRunEventPage(value: unknown, agentRunId: string, request: AgentRunEventPageRequest): AgentRunEventPageResponse {
+  const requestCursor = request.cursor ?? null;
+  if (!isRecord(value) || value.agentRunId !== agentRunId || value.mode !== request.mode || value.requestCursor !== requestCursor
+    || !Array.isArray(value.items) || value.items.length > request.limit || typeof value.hasOlder !== "boolean" || typeof value.hasNewer !== "boolean"
+    || !(value.nextOlderCursor === null || typeof value.nextOlderCursor === "string") || typeof value.nextNewerCursor !== "string")
+    throw new InvalidAgentRunEventPageError();
+
+  const cursor = requestCursor === null ? null : exactEventCursor(requestCursor, request.mode === "Older");
+  const items: AgentRunEventDto[] = [];
+  let previousSequence = 0;
+  for (const candidate of value.items) {
+    if (!isRecord(candidate) || !Number.isSafeInteger(candidate.sequence) || Number(candidate.sequence) <= 0 || Number(candidate.sequence) <= previousSequence
+      || typeof candidate.kind !== "string" || !AGENT_EVENT_KINDS.has(candidate.kind) || typeof candidate.text !== "string"
+      || !(candidate.data === null || typeof candidate.data === "string")
+      || !(candidate.dataArtifactId === null || (typeof candidate.dataArtifactId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(candidate.dataArtifactId)))
+      || typeof candidate.occurredAt !== "string" || !Number.isFinite(Date.parse(candidate.occurredAt)))
+      throw new InvalidAgentRunEventPageError();
+
+    const sequence = Number(candidate.sequence);
+    if ((request.mode === "Older" && (cursor === null || sequence >= cursor)) || (request.mode === "Newer" && (cursor === null || sequence <= cursor)))
+      throw new InvalidAgentRunEventPageError();
+
+    items.push({ sequence, kind: candidate.kind, text: candidate.text, data: candidate.data, dataArtifactId: candidate.dataArtifactId, occurredAt: candidate.occurredAt });
+    previousSequence = sequence;
+  }
+
+  const first = items[0]?.sequence;
+  const last = items.at(-1)?.sequence;
+  const nextOlder = value.nextOlderCursor === null ? null : exactEventCursor(value.nextOlderCursor, true);
+  const nextNewer = exactEventCursor(value.nextNewerCursor, false);
+  const expectedOlder = value.hasOlder ? first ?? (request.mode === "Newer" ? cursor : null) : null;
+  const expectedNewer = last ?? (request.mode === "Older" && cursor !== null ? cursor - 1 : cursor ?? 0);
+  if (nextOlder !== expectedOlder || nextNewer !== expectedNewer || (value.hasOlder && expectedOlder === null) || (value.hasNewer && items.length === 0) || (request.mode === "Tail" && value.hasNewer))
+    throw new InvalidAgentRunEventPageError();
+
+  return {
+    agentRunId,
+    mode: request.mode,
+    requestCursor,
+    items,
+    hasOlder: value.hasOlder,
+    hasNewer: value.hasNewer,
+    nextOlderCursor: nextOlder === null ? null : String(nextOlder),
+    nextNewerCursor: String(nextNewer),
+  };
+}
+
+function exactEventCursor(value: unknown, positive: boolean): number | null {
+  if (typeof value !== "string" || !/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= (positive ? 1 : 0) && String(parsed) === value ? parsed : null;
+}
 
 function isLogReadAvailability(value: unknown): value is AgentRunLogReadAvailability {
   return typeof value === "string" && LOG_READ_AVAILABILITIES.has(value as AgentRunLogReadAvailability);

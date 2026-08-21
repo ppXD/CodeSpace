@@ -21,8 +21,8 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Agents;
 
 /// <summary>
-/// Backend-only paging foundation for the append-only Agent Run event plane. There is deliberately no UI consumer in
-/// this slice: the legacy whole-log endpoint remains byte-for-byte available while callers migrate to this bounded API.
+/// Paging contract for the append-only Agent Run event plane. The terminal consumes this bounded API while the legacy
+/// whole-log endpoint remains byte-for-byte available to compact preview callers.
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -66,6 +66,9 @@ public sealed class AgentRunEventPageFlowTests
             all.Add(await AppendAsync(runId, $"event-{i}", i == 6 ? """{"inline":true}""" : null, i == 7 ? artifactId : null));
 
         var tail = (await ReadAsync(userId, teamId, runId, AgentRunEventPageDirection.Tail, null, 3))!;
+        tail.AgentRunId.ShouldBe(runId);
+        tail.Mode.ShouldBe(nameof(AgentRunEventPageDirection.Tail));
+        tail.RequestCursor.ShouldBeNull();
         tail.Items.Select(item => item.Sequence).ShouldBe(all.Skip(4).Select(item => item.Sequence));
         tail.Items.Select(item => item.Sequence).ShouldBeInOrder(SortDirection.Ascending);
         tail.Items[1].Data.ShouldBe("""{"inline": true}""", "JSONB's existing string semantics must survive the projection");
@@ -77,12 +80,18 @@ public sealed class AgentRunEventPageFlowTests
         tail.NextNewerCursor.ShouldBe(all[6].Sequence.ToString());
 
         var older = (await ReadAsync(userId, teamId, runId, AgentRunEventPageDirection.Older, tail.NextOlderCursor, 3))!;
+        older.AgentRunId.ShouldBe(runId);
+        older.Mode.ShouldBe(nameof(AgentRunEventPageDirection.Older));
+        older.RequestCursor.ShouldBe(tail.NextOlderCursor);
         older.Items.Select(item => item.Sequence).ShouldBe(all.Skip(1).Take(3).Select(item => item.Sequence));
         older.Items.Select(item => item.Sequence).ShouldBeInOrder(SortDirection.Ascending);
         older.HasOlder.ShouldBeTrue();
         older.HasNewer.ShouldBeTrue();
 
         var newer = (await ReadAsync(userId, teamId, runId, AgentRunEventPageDirection.Newer, older.NextNewerCursor, 3))!;
+        newer.AgentRunId.ShouldBe(runId);
+        newer.Mode.ShouldBe(nameof(AgentRunEventPageDirection.Newer));
+        newer.RequestCursor.ShouldBe(older.NextNewerCursor);
         newer.Items.Select(item => item.Sequence).ShouldBe(all.Skip(4).Select(item => item.Sequence));
         newer.Items.Select(item => item.Sequence).ShouldBeInOrder(SortDirection.Ascending);
         newer.HasOlder.ShouldBeTrue();
