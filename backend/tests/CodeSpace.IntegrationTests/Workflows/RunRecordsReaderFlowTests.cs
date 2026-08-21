@@ -7,7 +7,9 @@ using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Queries.Tasks;
 using CodeSpace.Messages.Tasks.Trace;
+using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
@@ -145,6 +147,56 @@ public sealed class RunRecordsReaderFlowTests
         result.ShouldBeNull();
     }
 
+    [Fact]
+    public async Task Exact_record_payload_is_losslessly_reconstructed_through_bounded_utf8_ranges()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId);
+        var payload = JsonSerializer.Serialize(new { text = string.Concat(Enumerable.Repeat("界", 50_000)), sentinel = "END" });
+        var recordId = Guid.NewGuid();
+        await SeedRecordAsync(runId, recordId, payload);
+        var expected = await ReadStoredPayloadAsync(recordId);
+
+        using var output = new MemoryStream();
+        long offset = 0;
+        do
+        {
+            var page = await ReadPayloadAsync(userId, teamId, runId, recordId, offset, 64 * 1024);
+            page.ShouldNotBeNull();
+            page!.Availability.ShouldBe(RunRecordPayloadReadAvailability.Available);
+            page.RunId.ShouldBe(runId);
+            page.RecordId.ShouldBe(recordId);
+            page.OffsetBytes.ShouldBe(offset);
+            page.ReturnedBytes.ShouldBeInRange(1, 64 * 1024);
+            page.TotalBytes.ShouldBe(System.Text.Encoding.UTF8.GetByteCount(expected));
+            page.ContentType.ShouldBe("application/json");
+            await output.WriteAsync(page.Content);
+            offset = page.NextOffsetBytes ?? page.TotalBytes!.Value;
+        } while (offset < System.Text.Encoding.UTF8.GetByteCount(expected));
+
+        System.Text.Encoding.UTF8.GetString(output.ToArray()).ShouldBe(expected);
+    }
+
+    [Fact]
+    public async Task Record_payload_identity_is_exact_team_run_and_record_scoped()
+    {
+        var (ownerTeam, ownerUser) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (foreignTeam, foreignUser) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var ownerRun = await SeedRunAsync(ownerTeam);
+        var siblingRun = await SeedRunAsync(ownerTeam);
+        var recordId = Guid.NewGuid();
+        await SeedRecordAsync(ownerRun, recordId, "{\"secret\":true}");
+
+        (await ReadPayloadAsync(ownerUser, ownerTeam, siblingRun, recordId, 0, 1024)).ShouldBeNull("a record id cannot be borrowed by another run in the same tenant");
+        (await ReadPayloadAsync(foreignUser, foreignTeam, ownerRun, recordId, 0, 1024)).ShouldBeNull("foreign and absent identities remain 404-conflated");
+        (await ReadPayloadAsync(ownerUser, ownerTeam, ownerRun, Guid.NewGuid(), 0, 1024)).ShouldBeNull();
+
+        var invalid = await ReadPayloadAsync(ownerUser, ownerTeam, ownerRun, recordId, long.MaxValue, 1);
+        invalid!.Availability.ShouldBe(RunRecordPayloadReadAvailability.InvalidRange);
+        invalid.Content.ShouldBeEmpty();
+        invalid.IsRetryable.ShouldBeFalse();
+    }
+
     private async Task<RunRecordsResponse?> ReadAsync(Guid userId, Guid teamId, Guid runId)
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
@@ -155,6 +207,33 @@ public sealed class RunRecordsReaderFlowTests
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
         return await scope.Resolve<IRunRecordPageReader>().ReadAsync(request, CancellationToken.None);
+    }
+
+    private async Task<RunRecordPayloadRangeRead?> ReadPayloadAsync(Guid userId, Guid teamId, Guid runId, Guid recordId, long offsetBytes, int limitBytes)
+    {
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        return await scope.Resolve<IMediator>().Send(new ReadRunRecordPayloadRangeQuery
+        {
+            RunId = runId, RecordId = recordId, OffsetBytes = offsetBytes, LimitBytes = limitBytes,
+        });
+    }
+
+    private async Task SeedRecordAsync(Guid runId, Guid recordId, string payload)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.WorkflowRunRecord.Add(new WorkflowRunRecord
+        {
+            Id = recordId, RunId = runId, RecordType = "test.payload", OccurredAt = DateTimeOffset.UtcNow, PayloadJson = payload,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    private async Task<string> ReadStoredPayloadAsync(Guid recordId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().WorkflowRunRecord.AsNoTracking()
+            .Where(record => record.Id == recordId).Select(record => record.PayloadJson).SingleAsync();
     }
 
     private async Task SeedManyRecordsAsync(Guid runId, int count)
