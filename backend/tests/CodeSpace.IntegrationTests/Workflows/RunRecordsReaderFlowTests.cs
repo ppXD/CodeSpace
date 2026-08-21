@@ -8,6 +8,7 @@ using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks.Trace;
+using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows;
@@ -82,10 +83,90 @@ public sealed class RunRecordsReaderFlowTests
         result!.Records.ShouldBeEmpty();
     }
 
+    [Fact]
+    public async Task Bounded_tail_older_and_newer_pages_cover_a_large_ledger_without_overlap_or_gaps()
+    {
+        const int total = 10_003;
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId);
+        await SeedManyRecordsAsync(runId, total);
+
+        var tail = await ReadPageAsync(userId, teamId, new RunRecordPageRequest(runId, teamId, null, null, 500));
+        tail.ShouldNotBeNull();
+        tail!.Mode.ShouldBe(RunRecordPageModes.Tail);
+        tail.Records.Count.ShouldBe(500);
+        tail.Records.Select(row => row.Sequence).ShouldBeInOrder();
+        tail.NextBeforeSequence.ShouldBe(tail.Records[0].Sequence);
+        tail.NextAfterSequence.ShouldBeNull();
+
+        var seen = tail.Records.Select(row => row.Sequence).ToHashSet();
+        var before = tail.NextBeforeSequence;
+        while (before != null)
+        {
+            var page = await ReadPageAsync(userId, teamId, new RunRecordPageRequest(runId, teamId, before, null, 500));
+            page.ShouldNotBeNull();
+            page!.Mode.ShouldBe(RunRecordPageModes.Older);
+            page.Records.Select(row => row.Sequence).ShouldBeInOrder();
+            page.Records.All(row => row.Sequence < before).ShouldBeTrue();
+            foreach (var row in page.Records) seen.Add(row.Sequence).ShouldBeTrue("keyset pages must never overlap");
+            before = page.NextBeforeSequence;
+        }
+
+        seen.Count.ShouldBe(total, "walking bounded older pages reconstructs the full append-only ledger");
+
+        var priorHead = tail.Records[^1].Sequence;
+        await SeedManyRecordsAsync(runId, 3);
+
+        var newer1 = await ReadPageAsync(userId, teamId, new RunRecordPageRequest(runId, teamId, null, priorHead, 2));
+        newer1.ShouldNotBeNull();
+        newer1!.Mode.ShouldBe(RunRecordPageModes.Newer);
+        newer1.Records.Count.ShouldBe(2);
+        newer1.Records.Select(row => row.Sequence).ShouldBeInOrder();
+        newer1.NextAfterSequence.ShouldBe(newer1.Records[^1].Sequence);
+        newer1.NextBeforeSequence.ShouldBeNull();
+
+        var newer2 = await ReadPageAsync(userId, teamId, new RunRecordPageRequest(runId, teamId, null, newer1.NextAfterSequence, 2));
+        newer2.ShouldNotBeNull();
+        newer2!.Records.Count.ShouldBe(1);
+        newer2.NextAfterSequence.ShouldBeNull();
+        newer1.Records.Concat(newer2.Records).Select(row => row.Sequence).ShouldBeInOrder();
+    }
+
+    [Fact]
+    public async Task Bounded_page_conflates_a_foreign_run_with_missing()
+    {
+        var (ownerTeam, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(ownerTeam);
+        await SeedManyRecordsAsync(runId, 1);
+        var (foreignTeam, foreignUser) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var result = await ReadPageAsync(foreignUser, foreignTeam, new RunRecordPageRequest(runId, foreignTeam, null, null, 10));
+
+        result.ShouldBeNull();
+    }
+
     private async Task<RunRecordsResponse?> ReadAsync(Guid userId, Guid teamId, Guid runId)
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
         return await scope.Resolve<IRunRecordReader>().ReadAsync(runId, teamId, CancellationToken.None);
+    }
+
+    private async Task<RunRecordPageResponse?> ReadPageAsync(Guid userId, Guid teamId, RunRecordPageRequest request)
+    {
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        return await scope.Resolve<IRunRecordPageReader>().ReadAsync(request, CancellationToken.None);
+    }
+
+    private async Task SeedManyRecordsAsync(Guid runId, int count)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        await db.Database.ExecuteSqlInterpolatedAsync($$"""
+            INSERT INTO workflow_run_record (id, run_id, record_type, iteration_key, occurred_at, payload_json)
+            SELECT gen_random_uuid(), {{runId}}, 'test.record', '', NOW(), jsonb_build_object('ordinal', n)
+              FROM generate_series(1, {{count}}) AS n
+            """);
     }
 
     private async Task<Guid> SeedRunAsync(Guid teamId)

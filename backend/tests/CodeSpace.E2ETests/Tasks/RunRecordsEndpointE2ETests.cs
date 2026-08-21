@@ -67,6 +67,35 @@ public sealed class RunRecordsEndpointE2ETests : IClassFixture<TaskLaunchApiFact
     }
 
     [Fact]
+    public async Task Get_record_page_exposes_bounded_tail_and_older_keysets_and_rejects_ambiguous_cursors()
+    {
+        var (userId, teamId) = await SeedTeamMembershipAsync();
+        var runId = await SeedRunWithRecordsAsync(teamId);
+
+        var tailResponse = await SendAsync(HttpMethod.Get, $"/api/workflows/runs/{runId}/records/page?limit=2", userId, teamId);
+        tailResponse.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(tailResponse));
+        var tail = await tailResponse.Content.ReadFromJsonAsync<RunRecordPageResponse>();
+
+        tail.ShouldNotBeNull();
+        tail!.Mode.ShouldBe(RunRecordPageModes.Tail);
+        tail.Records.Select(row => row.RecordType).ShouldBe(new[] { WorkflowRunRecordTypes.NodeStarted, WorkflowRunRecordTypes.RunFailed });
+        tail.NextBeforeSequence.ShouldBe(tail.Records[0].Sequence);
+        tail.NextAfterSequence.ShouldBeNull();
+
+        var olderResponse = await SendAsync(HttpMethod.Get, $"/api/workflows/runs/{runId}/records/page?beforeSequence={tail.NextBeforeSequence}&limit=2", userId, teamId);
+        olderResponse.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(olderResponse));
+        var older = await olderResponse.Content.ReadFromJsonAsync<RunRecordPageResponse>();
+
+        older.ShouldNotBeNull();
+        older!.Mode.ShouldBe(RunRecordPageModes.Older);
+        older.Records.Select(row => row.RecordType).ShouldBe(new[] { WorkflowRunRecordTypes.ScopeResolved, WorkflowRunRecordTypes.Log });
+        older.NextBeforeSequence.ShouldNotBeNull();
+
+        var invalid = await SendAsync(HttpMethod.Get, $"/api/workflows/runs/{runId}/records/page?beforeSequence=1&afterSequence=1", userId, teamId);
+        invalid.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+    }
+
+    [Fact]
     public async Task Get_records_stream_tails_the_ledger_as_server_sent_events_and_ends_at_the_terminal_record()
     {
         var (userId, teamId) = await SeedTeamMembershipAsync();
