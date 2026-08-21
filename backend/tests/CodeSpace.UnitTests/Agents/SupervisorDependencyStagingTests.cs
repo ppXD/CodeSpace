@@ -21,6 +21,16 @@ namespace CodeSpace.UnitTests.Agents;
 [Trait("Category", "Unit")]
 public class SupervisorDependencyStagingTests
 {
+    [Theory]
+    [InlineData(null, SupervisorLane.DefaultMaxTotalSpawns)]
+    [InlineData(7, 7)]
+    [InlineData(0, 1)]
+    [InlineData(5000, SupervisorLane.MaxTotalSpawnsCeiling)]
+    public void Manifest_batch_bound_is_derived_from_the_active_runs_real_spawn_plan(int? configured, int expected)
+    {
+        RealSupervisorActionExecutor.DependencyManifestReadLimit(new SupervisorTurnContext { MaxTotalSpawns = configured }).ShouldBe(expected);
+    }
+
     // ── An empty staging verb is REFUSED, unless the server emptied it ──────────────────
 
     /// <summary>

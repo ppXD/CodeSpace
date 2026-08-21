@@ -54,6 +54,14 @@ public interface IPublishManifestStore
     /// <summary>Every manifest row for one agent run (one per writable repository), team-scoped.</summary>
     Task<IReadOnlyList<PublishManifest>> ListForAgentRunAsync(Guid agentRunId, Guid teamId, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Every manifest row for a bounded set of agent-run owners in one query, grouped by the exact owner id and
+    /// team-scoped. Duplicate requested ids are folded before the bound and SQL admission checks. Owners with no
+    /// visible rows are absent. <paramref name="maxAgentRunIds"/> is the caller's already-resolved workload bound;
+    /// exceeding it fails before touching the database rather than degrading to N single reads.
+    /// </summary>
+    Task<IReadOnlyDictionary<Guid, IReadOnlyList<PublishManifest>>> ListForAgentRunsAsync(IReadOnlyCollection<Guid> agentRunIds, Guid teamId, int maxAgentRunIds, CancellationToken cancellationToken);
+
     /// <summary>Every manifest row (agent + integration) for one workflow run, newest first, team-scoped — the room / decider / session-fold read path.</summary>
     Task<IReadOnlyList<PublishManifest>> ListForWorkflowRunAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken);
 
@@ -260,6 +268,30 @@ public sealed class PublishManifestStore : IPublishManifestStore, IScopedDepende
             .OrderBy(m => m.RepositoryAlias)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
+    public async Task<IReadOnlyDictionary<Guid, IReadOnlyList<PublishManifest>>> ListForAgentRunsAsync(IReadOnlyCollection<Guid> agentRunIds, Guid teamId, int maxAgentRunIds, CancellationToken cancellationToken)
+    {
+        if (maxAgentRunIds < 1) throw new ArgumentOutOfRangeException(nameof(maxAgentRunIds), maxAgentRunIds, "The manifest owner read bound must be positive.");
+
+        var uniqueOwnerIds = new HashSet<Guid>();
+        foreach (var agentRunId in agentRunIds)
+        {
+            if (!uniqueOwnerIds.Add(agentRunId)) continue;
+            if (uniqueOwnerIds.Count > maxAgentRunIds) throw new ArgumentOutOfRangeException(nameof(agentRunIds), uniqueOwnerIds.Count, $"The manifest owner read exceeds its {maxAgentRunIds} owner bound.");
+        }
+
+        if (uniqueOwnerIds.Count == 0) return EmptyByAgentRun;
+
+        var ownerIds = uniqueOwnerIds.ToArray();
+
+        var rows = await _db.PublishManifest.AsNoTracking()
+            .Where(m => m.AgentRunId != null && ownerIds.Contains(m.AgentRunId.Value) && m.TeamId == teamId)
+            .OrderBy(m => m.AgentRunId)
+            .ThenBy(m => m.RepositoryAlias)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return rows.GroupBy(m => m.AgentRunId!.Value).ToDictionary(group => group.Key, group => (IReadOnlyList<PublishManifest>)group.ToList());
+    }
+
     public async Task<IReadOnlyList<PublishManifest>> ListForWorkflowRunAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken) =>
         await _db.PublishManifest.AsNoTracking()
             .Where(m => m.WorkflowRunId == workflowRunId && m.TeamId == teamId)
@@ -279,6 +311,7 @@ public sealed class PublishManifestStore : IPublishManifestStore, IScopedDepende
     }
 
     private static readonly IReadOnlyDictionary<Guid, IReadOnlyList<PublishManifest>> EmptyByRun = new Dictionary<Guid, IReadOnlyList<PublishManifest>>();
+    private static readonly IReadOnlyDictionary<Guid, IReadOnlyList<PublishManifest>> EmptyByAgentRun = new Dictionary<Guid, IReadOnlyList<PublishManifest>>();
 
     private static bool IsUniqueViolation(DbUpdateException ex) =>
         ex.InnerException is Npgsql.PostgresException { SqlState: "23505" };

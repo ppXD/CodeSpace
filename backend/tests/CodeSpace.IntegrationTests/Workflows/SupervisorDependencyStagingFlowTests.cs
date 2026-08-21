@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
@@ -20,6 +21,7 @@ using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
@@ -382,7 +384,11 @@ public sealed class SupervisorDependencyStagingFlowTests
             plan: Plan(("small", null), ("large", null), ("dependent", new[] { "small", "large" })),
             priorSpawns: await SucceededSpawn(teamId, ("small", small), ("large", large)));
 
-        await ExecuteSpawnAsync(context, "dependent");
+        var manifestReads = new PublishManifestReadRecorder();
+
+        await ExecuteSpawnAsync(context, "dependent", dbInterceptor: manifestReads);
+
+        manifestReads.Commands.Count.ShouldBe(1, "all dependency producers are loaded by one team-scoped manifest query, never one query per producer");
 
         var task = await SingleStagedTaskAsync(runId);
         var integratedRef = task.Workspace!.Repositories.Single().Ref!;
@@ -674,14 +680,19 @@ public sealed class SupervisorDependencyStagingFlowTests
     // ─── Drive the real executor ──────────────────────────────────────────────────
 
     /// <summary>Execute a Spawn decision through the real executor, returning it as a TERMINAL <see cref="SupervisorPriorDecision"/> — ready to both inspect (OutcomeJson) and feed back in as a later turn's prior tape (e.g. for resolve to read its conflict).</summary>
-    private Task<SupervisorPriorDecision> ExecuteSpawnAsync(SupervisorTurnContext context, string subtaskId, IReadOnlyList<SupervisorAgentDispatch>? agents = null, IAgentPatchReader? patchReader = null) => ExecuteSpawnAsync(context, new[] { subtaskId }, agents, patchReader);
+    private Task<SupervisorPriorDecision> ExecuteSpawnAsync(SupervisorTurnContext context, string subtaskId, IReadOnlyList<SupervisorAgentDispatch>? agents = null, IAgentPatchReader? patchReader = null, DbCommandInterceptor? dbInterceptor = null) => ExecuteSpawnAsync(context, new[] { subtaskId }, agents, patchReader, dbInterceptor);
 
     /// <summary>The K-at-once shape: ONE turn's spawn fanning out over several subtask ids — the only way to exercise what two dependents staged in the SAME turn do to each other.</summary>
-    private async Task<SupervisorPriorDecision> ExecuteSpawnAsync(SupervisorTurnContext context, IReadOnlyList<string> subtaskIds, IReadOnlyList<SupervisorAgentDispatch>? agents = null, IAgentPatchReader? patchReader = null)
+    private async Task<SupervisorPriorDecision> ExecuteSpawnAsync(SupervisorTurnContext context, IReadOnlyList<string> subtaskIds, IReadOnlyList<SupervisorAgentDispatch>? agents = null, IAgentPatchReader? patchReader = null, DbCommandInterceptor? dbInterceptor = null)
     {
-        using var scope = patchReader is null
-            ? _fixture.BeginScope()
-            : _fixture.BeginScope(builder => builder.RegisterInstance(patchReader).As<IAgentPatchReader>());
+        using var scope = _fixture.BeginScope(builder =>
+        {
+            if (patchReader is not null) builder.RegisterInstance(patchReader).As<IAgentPatchReader>();
+            if (dbInterceptor is null) return;
+
+            var options = new DbContextOptionsBuilder<CodeSpaceDbContext>().UseNpgsql(_fixture.ConnectionString).UseSnakeCaseNamingConvention().AddInterceptors(dbInterceptor).Options;
+            builder.RegisterInstance(options).As<DbContextOptions<CodeSpaceDbContext>>().SingleInstance();
+        });
         var executor = scope.Resolve<ISupervisorActionExecutor>();
 
         var payload = JsonSerializer.Serialize(new SupervisorSpawnPayload { SubtaskIds = subtaskIds, Agents = agents }, AgentJson.Options);
@@ -945,6 +956,28 @@ public sealed class SupervisorDependencyStagingFlowTests
         {
             CallCount++;
             return Task.FromResult("");
+        }
+    }
+
+    private sealed class PublishManifestReadRecorder : DbCommandInterceptor
+    {
+        public List<string> Commands { get; } = [];
+
+        public override InterceptionResult<DbDataReader> ReaderExecuting(DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result)
+        {
+            Record(command);
+            return result;
+        }
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        {
+            Record(command);
+            return ValueTask.FromResult(result);
+        }
+
+        private void Record(DbCommand command)
+        {
+            if (command.CommandText.Contains("publish_manifest", StringComparison.OrdinalIgnoreCase)) Commands.Add(command.CommandText);
         }
     }
 
