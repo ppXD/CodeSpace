@@ -32,6 +32,9 @@ public interface IAgentPatchReader
 {
     /// <summary>Resolve one producer's diff: the offloaded artifact when <see cref="AgentPatchSource.PatchArtifactId"/> is set (team-scoped, fail-closed), else the producing run's inline patch. Never both — the two carriers are mutually exclusive by construction.</summary>
     Task<string> ReadAsync(Guid teamId, AgentPatchSource source, CancellationToken cancellationToken);
+
+    /// <summary>Observation-only batch used by the staging empty-carrier guard. Returns one boolean per input, in input order, without materializing result documents or patch bytes. Every source must name the inline carrier (no artifact id).</summary>
+    Task<IReadOnlyList<bool>> HasInlinePatchesAsync(Guid teamId, IReadOnlyList<AgentPatchSource> sources, int maxSources, CancellationToken cancellationToken);
 }
 
 public sealed class AgentPatchReader : IAgentPatchReader, IScopedDependency
@@ -54,6 +57,9 @@ public sealed class AgentPatchReader : IAgentPatchReader, IScopedDependency
 
         return AgentInlinePatch.From(resultJson, source.RepositoryAlias);
     }
+
+    public Task<IReadOnlyList<bool>> HasInlinePatchesAsync(Guid teamId, IReadOnlyList<AgentPatchSource> sources, int maxSources, CancellationToken cancellationToken) =>
+        AgentInlinePatchObservation.ReadAsync(_db, teamId, sources, maxSources, cancellationToken);
 
     /// <summary>The producing run's recorded terminal result, TEAM-SCOPED (defense in depth, mirroring the merge read) — a cross-team or absent run resolves to nothing rather than another team's diff.</summary>
     private async Task<string?> ReadResultJsonAsync(Guid teamId, Guid? agentRunId, CancellationToken cancellationToken)

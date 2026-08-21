@@ -652,6 +652,29 @@ public sealed class SupervisorDependencyStagingFlowTests
     }
 
     [Fact]
+    public async Task Multiple_inline_candidates_use_one_bounded_observation_call_in_producer_order_never_K_required_reads()
+    {
+        var teamId = await SeedTeamAsync();
+        var repoId = Guid.NewGuid();
+        var runId = await SeedSupervisorRunAsync(teamId);
+        var first = Guid.NewGuid();
+        var second = Guid.NewGuid();
+        await SeedAnomalousManifestAsync(teamId, first, repoId);
+        await SeedAnomalousManifestAsync(teamId, second, repoId);
+        var reader = new CountingPatchReader();
+        var context = ContextWith(runId, teamId, repoId,
+            plan: Plan(("first", null), ("second", null), ("dependent", new[] { "first", "second" })),
+            priorSpawns: await SucceededSpawn(teamId, ("first", first), ("second", second)));
+
+        await ExecuteSpawnAsync(context, "dependent", patchReader: reader);
+
+        reader.ObservationCallCount.ShouldBe(1, "the guard is one batch regardless of producer count");
+        reader.ObservedSources.Select(source => source.AgentRunId).ShouldBe(new Guid?[] { first, second },
+            "batching preserves the active dependency producer order established by the manifest resolver");
+        reader.CallCount.ShouldBe(0, "the empty guard never materializes required patch bytes; integration remains the only required-read consumer");
+    }
+
+    [Fact]
     public async Task A_base_subtask_id_dispatch_override_narrows_a_multi_dependency_subtask_to_one_producer()
     {
         if (!await GitAvailableAsync()) return;
@@ -951,11 +974,20 @@ public sealed class SupervisorDependencyStagingFlowTests
     private sealed class CountingPatchReader : IAgentPatchReader
     {
         public int CallCount { get; private set; }
+        public int ObservationCallCount { get; private set; }
+        public IReadOnlyList<AgentPatchSource> ObservedSources { get; private set; } = [];
 
         public Task<string> ReadAsync(Guid teamId, AgentPatchSource source, CancellationToken cancellationToken)
         {
             CallCount++;
             return Task.FromResult("");
+        }
+
+        public Task<IReadOnlyList<bool>> HasInlinePatchesAsync(Guid teamId, IReadOnlyList<AgentPatchSource> sources, int maxSources, CancellationToken cancellationToken)
+        {
+            ObservationCallCount++;
+            ObservedSources = sources.ToList();
+            return Task.FromResult<IReadOnlyList<bool>>(Enumerable.Repeat(false, sources.Count).ToList());
         }
     }
 

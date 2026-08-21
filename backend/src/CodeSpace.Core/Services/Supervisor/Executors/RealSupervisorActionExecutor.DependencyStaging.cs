@@ -45,7 +45,7 @@ public sealed partial class RealSupervisorActionExecutor
 
         if (producers.Count == 0) return NoStaging(dependsOn, repoId, producerAgentRunIds.Count, 0, context);   // every producer made no changes to THIS repo — nothing to hand off
 
-        var missing = await ProducersWithNothingToHandOffAsync(producers, context.TeamId, cancellationToken).ConfigureAwait(false);
+        var missing = await ProducersWithNothingToHandOffAsync(producers, context.TeamId, producerReadLimit, cancellationToken).ConfigureAwait(false);
 
         if (missing.Count > 0)
             return BlockedStaging($"producer(s) {string.Join(", ", missing.Select(m => m.AgentRunId))} recorded a diff but captured no branch, no patch artifact and no inline patch — the handoff cannot proceed silently", context);
@@ -67,16 +67,16 @@ public sealed partial class RealSupervisorActionExecutor
     /// every sub-threshold handoff while reporting it as a data-integrity violation. Only a producer whose inline
     /// carrier is ALSO empty has nothing to hand off, and only that one blocks the spawn.
     /// </summary>
-    private async Task<IReadOnlyList<Persistence.Entities.PublishManifest>> ProducersWithNothingToHandOffAsync(IReadOnlyList<Persistence.Entities.PublishManifest> producers, Guid teamId, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<Persistence.Entities.PublishManifest>> ProducersWithNothingToHandOffAsync(IReadOnlyList<Persistence.Entities.PublishManifest> producers, Guid teamId, int producerReadLimit, CancellationToken cancellationToken)
     {
+        var candidates = producers.Where(m => string.IsNullOrEmpty(m.Branch) && m.PatchArtifactId is null).ToList();
+        if (candidates.Count == 0) return [];
+
+        var sources = candidates.Select(PatchSourceFor).ToList();
+        var hasInlinePatches = await _patches.HasInlinePatchesAsync(teamId, sources, producerReadLimit, cancellationToken).ConfigureAwait(false);
         var empty = new List<Persistence.Entities.PublishManifest>();
-
-        foreach (var producer in producers.Where(m => string.IsNullOrEmpty(m.Branch) && m.PatchArtifactId is null))
-        {
-            var inline = await _patches.ReadAsync(teamId, PatchSourceFor(producer), cancellationToken).ConfigureAwait(false);
-
-            if (string.IsNullOrWhiteSpace(inline)) empty.Add(producer);
-        }
+        for (var i = 0; i < candidates.Count; i++)
+            if (!hasInlinePatches[i]) empty.Add(candidates[i]);
 
         return empty;
     }
