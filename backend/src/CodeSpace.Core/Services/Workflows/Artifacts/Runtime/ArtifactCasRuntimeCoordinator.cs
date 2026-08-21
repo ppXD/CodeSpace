@@ -458,9 +458,9 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
     /// gains a provider round-trip. Deliberately not a provider head: the answer has to be right for a purge that is
     /// still mid-flight, and only the database knows that.</para>
     ///
-    /// <para><b>No production writer moves a committed location off <c>Available</c> yet.</b> Nothing purges routed
-    /// bytes in this build, so on every reachable path this returns exactly what the content-identity check alone
-    /// returned before. It is the precondition a routed purge needs, landed ahead of it.</para>
+    /// <para>The retention reaper now exercises this fence: its short physical claim moves the location to
+    /// <c>Deleting</c> before provider I/O, so an overlapping writer gets a typed refusal instead of the id whose bytes
+    /// are being removed.</para>
     ///
     /// <para>A refusal here is not a dead end for <c>Purged</c>: <see cref="IdempotencyKeyAsync"/> spends that
     /// generation and the next attempt arrives on a fresh intent that can re-upload and revive the row. For every

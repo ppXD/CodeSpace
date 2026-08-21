@@ -53,7 +53,6 @@ public sealed class ArtifactRetentionDecisionTests
 
     [Theory]
     [InlineData(ArtifactPurgePath.LocalBlobShared, "artifact-blob-shared")]              // another row names the same physical file
-    [InlineData(ArtifactPurgePath.Routed, "artifact-routed-storage")]                    // 0150 made a purged location re-writable; no writer removes routed bytes yet
     [InlineData(ArtifactPurgePath.BackendCannotPurge, "artifact-blob-backend-cannot-purge")]   // the transport offers no removal at all
     public void An_artifact_whose_bytes_have_no_purge_path_is_kept_and_says_which_one_is_missing(ArtifactPurgePath purge, string expectedCode)
     {
@@ -79,6 +78,13 @@ public sealed class ArtifactRetentionDecisionTests
     {
         // The lane's whole point: bytes outside the row are not automatically unreapable — only unreapable bytes are.
         ArtifactRetentionDecision.Decide(Rule, Collectable() with { Purge = ArtifactPurgePath.LocalBlobExclusive })
+            .Action.ShouldBe(ArtifactRetentionAction.Collect);
+    }
+
+    [Fact]
+    public void A_routed_artifact_is_collectable_because_its_recorded_location_has_a_fenced_purge_lifecycle()
+    {
+        ArtifactRetentionDecision.Decide(Rule, Collectable() with { Purge = ArtifactPurgePath.Routed })
             .Action.ShouldBe(ArtifactRetentionAction.Collect);
     }
 

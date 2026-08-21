@@ -1,6 +1,8 @@
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using CodeSpace.Messages.Artifacts;
+using CodeSpace.Messages.Constants;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
@@ -23,17 +25,25 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts.Retention;
 ///
 /// <para><b>Offloaded bytes.</b> An artifact past the inline threshold is collected too, but only on the local blob
 /// backend and only when no other <c>workflow_artifact</c> row points at the same physical file — that path is addressed
-/// by SHA alone and is NOT tenant-scoped, so one file can be shared by rows in different teams. Routed bytes are
-/// refused; <see cref="ArtifactRetentionDecision.RefuseUnpurgeable"/> states why.</para>
+/// by SHA alone and is NOT tenant-scoped, so one file can be shared by rows in different teams. Routed bytes use their
+/// durable CAS location lifecycle: claim and provider I/O happen outside the metadata transaction, then the final
+/// transaction revalidates references and removes the pointing row.</para>
 ///
 /// <para><b>Order across the two media, and what a crash leaves.</b> The bytes go first and the row's DELETE commits
-/// last, both inside one transaction. A crash before the commit therefore leaves bytes gone and the row plus its
-/// declaration intact — which the NEXT sweep finishes, because an absent blob is reported as success. The opposite
-/// order would leak bytes no surviving row remembers, so nothing could ever finish it. Nothing can legitimately read
-/// the artifact during that window: it is collectable precisely because the oracle found no reference to it, twice,
-/// the second time inside this transaction. What this does NOT provide is a phase in which the bytes are unreachable
-/// but still recoverable — <c>workflow_artifact</c> rejects UPDATE outright (migration 0016), so a purge-phase marker
-/// on the row is not representable, and the quarantine window is spent with the artifact fully intact.</para>
+/// last. Local blob removal happens inside that final transaction; routed provider I/O cannot, so its Deleting/Purged
+/// location revisions are the recoverable physical phase. A crash before the metadata commit leaves bytes gone and
+/// the row plus its declaration intact — the next sweep observes Missing or Purged and finishes the row. The opposite
+/// order would leak bytes no surviving row remembers. <c>workflow_artifact</c> itself remains immutable (migration
+/// 0016); the purge lifecycle lives on the CAS location, never on that pointing row.</para>
+///
+/// <para><b>The routed soft-reference window.</b> The final oracle check is not allowed to make a late reference to
+/// already-purged bytes look safe. The admission barrier is earlier: Deleting is not a reusable CAS location, so a
+/// producer cannot obtain this artifact id from Put/dedup after the physical claim. Retention candidates have one
+/// production minting caller, <c>ArtifactManifestStore</c>; it obtains the id through <c>PutDeclaredAsync</c>, consumes
+/// it immediately in the oracle-visible manifest row, and does not return it. A later recapture goes through Put again
+/// and either revokes the declaration before the claim or is refused while Deleting. The production-caller inventory
+/// and the post-claim mutation are pinned by tests; adding a caller that directly reuses a candidate id would invalidate
+/// this protocol and must add equivalent admission before it can mint declarations.</para>
 /// </summary>
 public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
 {
@@ -45,21 +55,24 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
 
     /// <summary>The blob backend's optional removal capability, feature-detected once (Rule 7). Null is a supported state: every offloaded declaration the sweep claims then settles as a terminal keep instead.</summary>
     private readonly IArtifactBlobPurge? _purge;
+    private readonly IArtifactCasPurgeCoordinator _routedPurge;
 
     private readonly ILogger<ArtifactRetentionReaper> _logger;
     private readonly ArtifactRetentionReaperOptions _options;
 
-    public ArtifactRetentionReaper(DbContextOptions<CodeSpaceDbContext> dbOptions, IArtifactReferenceOracle oracle, IArtifactBlobBackend blobs, ILogger<ArtifactRetentionReaper> logger) : this(dbOptions, oracle, blobs, logger, Defaults) { }
+    public ArtifactRetentionReaper(DbContextOptions<CodeSpaceDbContext> dbOptions, IArtifactReferenceOracle oracle, IArtifactBlobBackend blobs,
+        IArtifactCasPurgeCoordinator routedPurge, ILogger<ArtifactRetentionReaper> logger) : this(new ArtifactRetentionReaperServices(dbOptions, oracle, blobs, routedPurge, logger), Defaults) { }
 
-    internal ArtifactRetentionReaper(DbContextOptions<CodeSpaceDbContext> dbOptions, IArtifactReferenceOracle oracle, IArtifactBlobBackend blobs, ILogger<ArtifactRetentionReaper> logger, ArtifactRetentionReaperOptions options)
+    internal ArtifactRetentionReaper(ArtifactRetentionReaperServices services, ArtifactRetentionReaperOptions options)
     {
         if (options.BatchSize is <= 0 or > 2000 || options.ClaimSize is <= 0 || options.ClaimSize > options.BatchSize || options.MaxAttempts <= 0
             || options.LeaseDuration <= options.OperationTimeout || options.OperationTimeout <= TimeSpan.Zero || options.RetryDelay <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(options));
-        _dbOptions = dbOptions;
-        _oracle = oracle;
-        _purge = blobs as IArtifactBlobPurge;
-        _logger = logger;
+        _dbOptions = services.DbOptions;
+        _oracle = services.Oracle;
+        _purge = services.Blobs as IArtifactBlobPurge;
+        _routedPurge = services.RoutedPurge;
+        _logger = services.Logger;
         _options = options;
     }
 
@@ -91,11 +104,10 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
     /// cannot starve the others, the <c>LIMIT</c> on the locking select so <c>SKIP LOCKED</c> can backfill from later
     /// tenants, and <c>cutoff</c> frozen at sweep start so a settled row cannot be re-read within the same sweep.
     ///
-    /// <para>Two of the safety properties are enforced HERE, in SQL, not downstream: <c>created_at</c> below the policy's
-    /// smallest age floor is never claimed (the exact per-class floor is re-checked per row), and a ROUTED artifact is
-    /// never claimed at all. Excluding routed rows here rather than settling them downstream is deliberate: a settled
-    /// refusal is terminal, so it would foreclose a later build that CAN purge routed bytes, while an unclaimed row
-    /// stays live with its revision untouched.</para>
+    /// <para>The coarse <c>created_at</c> guard lives HERE, in SQL: a row below the policy's smallest age floor is never
+    /// claimed, and the exact per-class floor is re-checked per row. Placement is deliberately not a queue predicate;
+    /// routed artifacts now have a fenced purge lifecycle, and an unsupported physical shape is classified only after
+    /// its declaration is owned.</para>
     /// </summary>
     private async Task<IReadOnlyList<SweepClaim>> ClaimBatchAsync(Guid ownerId, DateTimeOffset cutoff, int limit, CancellationToken cancellationToken)
     {
@@ -108,8 +120,8 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
         // this sweep saw as Declared but a concurrent transaction settled terminally before the lock was granted
         // comes back anyway — and the claim then writes an owner and a lease onto a terminal row, which the state
         // CHECK refuses, killing the whole sweep rather than skipping one row. The artifact-side guards are not
-        // repeated because neither created_at nor cas_artifact_object_id can change under this row: workflow_artifact
-        // rejects UPDATE outright (migration 0016).
+        // repeated because created_at cannot change under this row: workflow_artifact rejects UPDATE outright
+        // (migration 0016).
         var rows = await db.WorkflowArtifactRetention.FromSqlInterpolated($$"""
             WITH fair AS MATERIALIZED (
                 SELECT DISTINCT ON (retention.team_id) retention.artifact_id, retention.team_id, retention.next_sweep_at
@@ -119,7 +131,6 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
                   AND retention.next_sweep_at <= {{cutoff}}
                   AND (retention.lease_expires_at IS NULL OR retention.lease_expires_at <= clock_timestamp())
                   AND artifact.created_at <= {{ageCeiling}}
-                  AND artifact.cas_artifact_object_id IS NULL
                 ORDER BY retention.team_id, retention.next_sweep_at, retention.artifact_id
             )
             SELECT retention.*, retention.xmin FROM workflow_artifact_retention retention
@@ -151,30 +162,33 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
     /// <summary>One claim, start to finish: bounded evaluation outside any long transaction, then a settlement that proves it still owns the lease.</summary>
     private async Task<SweepSettlement> SweepClaimAsync(SweepClaim claim, CancellationToken cancellationToken)
     {
-        ArtifactRetentionDecision outcome;
+        SweepEvaluation evaluation;
         using var operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         operation.CancelAfter(_options.OperationTimeout);
 
         try
         {
-            outcome = await EvaluateAsync(claim, operation.Token).ConfigureAwait(false);
+            evaluation = await EvaluateAsync(claim, operation.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (OperationCanceledException) when (operation.IsCancellationRequested)
         {
-            outcome = ArtifactRetentionDecision.Retry("sweep-operation-timeout", "The bounded retention evaluation timed out.");
+            evaluation = new SweepEvaluation(ArtifactRetentionDecision.Retry("sweep-operation-timeout", "The bounded retention evaluation timed out."), null);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Artifact {ArtifactId}: retention evaluation raised an unexpected error; the artifact is kept", claim.ArtifactId);
-            outcome = ArtifactRetentionDecision.Retry("sweep-operation-exception", "The retention evaluation raised an unexpected error.");
+            evaluation = new SweepEvaluation(ArtifactRetentionDecision.Retry("sweep-operation-exception", "The retention evaluation raised an unexpected error."), null);
         }
+
+        if (evaluation.Outcome.Action == ArtifactRetentionAction.Collect && evaluation.RoutedObjectId is { } routedObjectId)
+            return await SweepRoutedClaimAsync(claim, routedObjectId, cancellationToken).ConfigureAwait(false);
 
         using var settlement = new CancellationTokenSource(_options.OperationTimeout);
 
         try
         {
-            return await SettleAsync(claim, outcome, settlement.Token).ConfigureAwait(false);
+            return await SettleAsync(claim, evaluation.Outcome, settlement.Token).ConfigureAwait(false);
         }
         catch (Exception) when (!cancellationToken.IsCancellationRequested) { return SweepSettlement.Lost; }
     }
@@ -183,19 +197,152 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
     /// Gathers what one decision depends on and hands it to <see cref="ArtifactRetentionDecision.Decide"/>. Reads only:
     /// nothing here deletes, so a timeout or a throw costs only a re-queue.
     /// </summary>
-    private async Task<ArtifactRetentionDecision> EvaluateAsync(SweepClaim claim, CancellationToken cancellationToken)
+    private async Task<SweepEvaluation> EvaluateAsync(SweepClaim claim, CancellationToken cancellationToken)
     {
         await using var db = CreateDb();
         var placement = await PlacementAsync(db, claim, cancellationToken).ConfigureAwait(false);
 
-        if (placement is null) return ArtifactRetentionDecision.Retry("artifact-vanished", "The declared artifact was not readable at evaluation time.");
+        if (placement is null)
+            return new SweepEvaluation(ArtifactRetentionDecision.Retry("artifact-vanished", "The declared artifact was not readable at evaluation time."), null);
 
         var now = await DatabaseClockAsync(db, cancellationToken).ConfigureAwait(false);
         var verdict = await _oracle.ClassifyAsync(db, claim.ArtifactId, cancellationToken).ConfigureAwait(false);
         var observation = new ArtifactRetentionObservation(claim.State, placement.CreatedAt, placement.Purge, claim.QuarantinedAt, verdict, now);
 
-        return ArtifactRetentionDecision.Decide(ArtifactRetentionPolicy.For(claim.RetentionClass), observation);
+        return new SweepEvaluation(ArtifactRetentionDecision.Decide(ArtifactRetentionPolicy.For(claim.RetentionClass), observation), placement.RoutedObjectId);
     }
+
+    /// <summary>
+    /// Runs the routed two-phase delete without holding a database transaction over provider I/O. The CAS claim is the
+    /// physical fence; the retention claim is independently revalidated once after that fence and once after Purged,
+    /// in the same transaction that removes <c>workflow_artifact</c> and its cascading declaration.
+    /// </summary>
+    private async Task<SweepSettlement> SweepRoutedClaimAsync(SweepClaim claim, Guid objectId, CancellationToken cancellationToken)
+    {
+        ArtifactCasPurgeClaimResult physical;
+        try
+        {
+            physical = await _routedPurge.ClaimAsync(new ArtifactCasPurgeRequest
+            {
+                TeamId = claim.TeamId, ArtifactObjectId = objectId, ActorId = SystemUsers.SeederId, OperationTimeout = _options.OperationTimeout,
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Artifact {ArtifactId}: routed purge claim failed; the live declaration will retry", claim.ArtifactId);
+            return await SettleRoutedAsync(claim, RoutedWait("artifact-routed-claim-exception", "The routed location claim failed before a delete result was available."), cancellationToken).ConfigureAwait(false);
+        }
+
+        if (physical is ArtifactCasPurgeClaimResult.Purged)
+            return await SettleRoutedAsync(claim, ArtifactRetentionDecision.Collect(), cancellationToken).ConfigureAwait(false);
+
+        if (physical is ArtifactCasPurgeClaimResult.Rejected rejected)
+            return await SettleRoutedAsync(claim, ClaimRejection(rejected.Problem), cancellationToken).ConfigureAwait(false);
+
+        var claimed = ((ArtifactCasPurgeClaimResult.Claimed)physical).Claim;
+        return await SweepClaimedRoutedAsync(claim, objectId, claimed, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<SweepSettlement> SweepClaimedRoutedAsync(SweepClaim claim, Guid objectId, ArtifactCasPurgeClaim physical, CancellationToken cancellationToken)
+    {
+        RoutedAuthorization authorization;
+        try
+        {
+            using var verify = new CancellationTokenSource(_options.OperationTimeout);
+            authorization = await AuthorizeRoutedDeleteAsync(claim, objectId, verify.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex, "Artifact {ArtifactId}: post-claim reference verification failed; provider delete was not attempted", claim.ArtifactId);
+            var released = await ReleaseRoutedAsync(physical).ConfigureAwait(false);
+            return await SettleRoutedAsync(claim, released
+                ? ArtifactRetentionDecision.Retry("artifact-routed-pre-delete-verification", "The post-claim reference verification failed before provider I/O.")
+                : RoutedWait("artifact-routed-release-race", "The physical claim changed while the safe release was attempted."), cancellationToken).ConfigureAwait(false);
+        }
+
+        if (authorization.LostLease)
+        {
+            await ReleaseRoutedAsync(physical).ConfigureAwait(false);
+            return SweepSettlement.Lost;
+        }
+
+        if (authorization.Outcome.Action != ArtifactRetentionAction.Collect)
+        {
+            var released = await ReleaseRoutedAsync(physical).ConfigureAwait(false);
+            return await SettleRoutedAsync(claim, released ? authorization.Outcome
+                : RoutedWait("artifact-routed-release-race", "The physical claim changed while a stopped delete was being released."), cancellationToken).ConfigureAwait(false);
+        }
+
+        ArtifactCasPurgeResult deletion;
+        try
+        {
+            deletion = await _routedPurge.DeleteAsync(physical, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Artifact {ArtifactId}: routed provider delete has an uncertain result; the durable Deleting claim will be reconciled", claim.ArtifactId);
+            return await SettleRoutedAsync(claim, RoutedWait("artifact-routed-delete-exception", "The provider delete result is uncertain; a later sweep will reconcile the durable physical claim."), cancellationToken).ConfigureAwait(false);
+        }
+
+        if (deletion is ArtifactCasPurgeResult.Purged)
+            return await SettleRoutedAsync(claim, ArtifactRetentionDecision.Collect(), cancellationToken).ConfigureAwait(false);
+
+        var failed = (ArtifactCasPurgeResult.Rejected)deletion;
+        if (failed.EffectMayHaveOccurred)
+            return await SettleRoutedAsync(claim, RoutedWait("artifact-routed-delete-uncertain", $"The provider delete returned '{failed.Problem.Code}' after an effect may have occurred; a later sweep will reconcile it."), cancellationToken).ConfigureAwait(false);
+
+        var safeRelease = await ReleaseRoutedAsync(physical).ConfigureAwait(false);
+        return await SettleRoutedAsync(claim, safeRelease
+            ? ArtifactRetentionDecision.Retry("artifact-routed-delete-refused", $"The provider refused routed deletion with '{failed.Problem.Code}' before any effect; the location was released.")
+            : RoutedWait("artifact-routed-release-race", "The physical claim changed before a no-effect delete could release it."), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>The post-location-claim gate. Its transaction ends before the provider call; no provider I/O can inherit this row lock.</summary>
+    private async Task<RoutedAuthorization> AuthorizeRoutedDeleteAsync(SweepClaim claim, Guid objectId, CancellationToken cancellationToken)
+    {
+        await using var db = CreateDb();
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        var row = await db.WorkflowArtifactRetention.FromSqlInterpolated(
+            $"SELECT workflow_artifact_retention.*, xmin FROM workflow_artifact_retention WHERE artifact_id = {claim.ArtifactId} FOR UPDATE")
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        var now = await DatabaseClockAsync(db, cancellationToken).ConfigureAwait(false);
+        if (!StillOwned(row, claim, now)) return RoutedAuthorization.Lost;
+
+        var placement = await PlacementAsync(db, claim, cancellationToken).ConfigureAwait(false);
+        var outcome = placement?.RoutedObjectId == objectId
+            ? await ReverifyAsync(db, claim, cancellationToken).ConfigureAwait(false)
+            : ArtifactRetentionDecision.Retry("artifact-routed-placement-changed", "The pointing row no longer names the object claimed for routed deletion.");
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return new RoutedAuthorization(outcome, false);
+    }
+
+    private async Task<SweepSettlement> SettleRoutedAsync(SweepClaim claim, ArtifactRetentionDecision outcome, CancellationToken cancellationToken)
+    {
+        using var settlement = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        settlement.CancelAfter(_options.OperationTimeout);
+        try { return await SettleAsync(claim, outcome, settlement.Token).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception) { return SweepSettlement.Lost; }
+    }
+
+    private async Task<bool> ReleaseRoutedAsync(ArtifactCasPurgeClaim claim)
+    {
+        using var cleanup = new CancellationTokenSource(_options.OperationTimeout);
+        try { return await _routedPurge.ReleaseAsync(claim, cleanup.Token).ConfigureAwait(false); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Routed location {LocationId}: release failed; a later sweep will reconcile Deleting", claim.LocationId);
+            return false;
+        }
+    }
+
+    private ArtifactRetentionDecision RoutedWait(string code, string message) => ArtifactRetentionDecision.WaitForRetry(code, message);
+
+    private static ArtifactRetentionDecision ClaimRejection(ArtifactCasProblem problem) => problem.Code == ArtifactCasProblemCode.MultipleLocationsUnsupported
+        ? ArtifactRetentionDecision.Indeterminate("artifact-routed-multiple-locations", "The object has multiple physical locations; this reaper version refuses all partial replica deletion.")
+        : ArtifactRetentionDecision.Retry("artifact-routed-claim-refused", $"The routed location claim was refused with '{problem.Code}'.");
 
     /// <summary>
     /// Where the artifact's bytes are and whether they can be removed, read through <paramref name="db"/> so the
@@ -217,24 +364,24 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
     {
         var artifact = await db.WorkflowArtifact.AsNoTracking()
             .Where(row => row.Id == claim.ArtifactId && row.TeamId == claim.TeamId)
-            .Select(row => new { row.CreatedAt, row.StorageUrl, Routed = row.CasArtifactObjectId != null })
+            .Select(row => new { row.CreatedAt, row.StorageUrl, row.CasArtifactObjectId })
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
         if (artifact is null) return null;
-        if (artifact.Routed) return new ArtifactPlacement(artifact.CreatedAt, ArtifactPurgePath.Routed, null);
+        if (artifact.CasArtifactObjectId is { } objectId) return new ArtifactPlacement(artifact.CreatedAt, ArtifactPurgePath.Routed, null, objectId);
 
         // Neither routed nor a storage_url means the bytes are in the row: 0016's storage xor was validated when it
         // required exactly one of inline_bytes/storage_url, so a row with no destination at all cannot exist.
-        if (artifact.StorageUrl is not { } storageUrl) return new ArtifactPlacement(artifact.CreatedAt, ArtifactPurgePath.Inline, null);
+        if (artifact.StorageUrl is not { } storageUrl) return new ArtifactPlacement(artifact.CreatedAt, ArtifactPurgePath.Inline, null, null);
 
-        if (_purge is null) return new ArtifactPlacement(artifact.CreatedAt, ArtifactPurgePath.BackendCannotPurge, null);
+        if (_purge is null) return new ArtifactPlacement(artifact.CreatedAt, ArtifactPurgePath.BackendCannotPurge, null, null);
 
         var shared = await db.WorkflowArtifact.AsNoTracking()
             .AnyAsync(other => other.StorageUrl == storageUrl && other.Id != claim.ArtifactId, cancellationToken).ConfigureAwait(false);
 
         return shared
-            ? new ArtifactPlacement(artifact.CreatedAt, ArtifactPurgePath.LocalBlobShared, null)
-            : new ArtifactPlacement(artifact.CreatedAt, ArtifactPurgePath.LocalBlobExclusive, storageUrl);
+            ? new ArtifactPlacement(artifact.CreatedAt, ArtifactPurgePath.LocalBlobShared, null, null)
+            : new ArtifactPlacement(artifact.CreatedAt, ArtifactPurgePath.LocalBlobExclusive, storageUrl, null);
     }
 
     /// <summary>
@@ -392,13 +539,20 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
         public static SweepSettlement Lost { get; } = new(ArtifactRetentionAction.Retry, true);
     }
 
+    private sealed record SweepEvaluation(ArtifactRetentionDecision Outcome, Guid? RoutedObjectId);
+
+    private sealed record RoutedAuthorization(ArtifactRetentionDecision Outcome, bool LostLease)
+    {
+        public static RoutedAuthorization Lost { get; } = new(ArtifactRetentionDecision.Retry("retention-lease-lost", "The retention claim was no longer owned."), true);
+    }
+
     /// <summary>
     /// One artifact's storage facts as one read saw them. <c>StorageUrl</c> is non-null for
     /// <see cref="ArtifactPurgePath.LocalBlobExclusive"/> and nothing else, which is what makes it safe to read as
     /// "there are bytes here to delete, and a backend that will delete them" — every other placement carries null
     /// however its bytes are actually stored.
     /// </summary>
-    private sealed record ArtifactPlacement(DateTimeOffset CreatedAt, ArtifactPurgePath Purge, string? StorageUrl);
+    private sealed record ArtifactPlacement(DateTimeOffset CreatedAt, ArtifactPurgePath Purge, string? StorageUrl, Guid? RoutedObjectId);
 
     /// <summary>
     /// The claimed row AS CLAIMED — an in-memory snapshot, never re-read. Settlement compares a freshly loaded row
@@ -446,5 +600,8 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
         };
     }
 }
+
+internal sealed record ArtifactRetentionReaperServices(DbContextOptions<CodeSpaceDbContext> DbOptions, IArtifactReferenceOracle Oracle,
+    IArtifactBlobBackend Blobs, IArtifactCasPurgeCoordinator RoutedPurge, ILogger<ArtifactRetentionReaper> Logger);
 
 internal sealed record ArtifactRetentionReaperOptions(int BatchSize, int ClaimSize, int MaxAttempts, TimeSpan LeaseDuration, TimeSpan OperationTimeout, TimeSpan RetryDelay);

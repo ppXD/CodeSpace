@@ -12,9 +12,8 @@ public interface IArtifactRetentionWriter : IScopedDependency
 {
     /// <summary>
     /// Store <paramref name="request"/>'s bytes exactly as <c>IArtifactStore.PutAsync</c> would, and — only when this
-    /// call is the write that INSERTED the artifact row, and only when the bytes went somewhere the reaper can remove
-    /// them from (inline in the row, or the local blob backend, but never a routed storage profile) — mint the retention
-    /// declaration in the same transaction as that insert.
+    /// call is the write that INSERTED the artifact row — mint the retention declaration in the same transaction as
+    /// that insert. Inline, local-blob and routed placements each have a positive purge path.
     ///
     /// <para>Atomic-with-the-insert is what makes the declaration sound: nothing can dedup against a row that has not
     /// committed, so no other writer can already be holding this id when the declaration appears. A dedup hit declares
@@ -31,8 +30,5 @@ public interface IArtifactRetentionWriter : IScopedDependency
 /// </summary>
 public sealed record ArtifactRetentionWriteRequest(Guid TeamId, ReadOnlyMemory<byte> Bytes, string ContentType, ArtifactRetentionClass RetentionClass, string HolderKind, Guid HolderId);
 
-/// <summary>
-/// The stored artifact plus whether a declaration was actually minted. <paramref name="Declared"/> false is the normal,
-/// safe outcome for a dedup hit or a routed write — the bytes are simply never reapable.
-/// </summary>
+/// <summary>The stored artifact plus whether a declaration was actually minted. <paramref name="Declared"/> false is the normal, safe outcome for a dedup hit.</summary>
 public sealed record ArtifactRetentionWrite(Guid ArtifactId, bool Declared);

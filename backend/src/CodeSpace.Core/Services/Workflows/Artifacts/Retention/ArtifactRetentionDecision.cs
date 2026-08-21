@@ -41,7 +41,7 @@ public enum ArtifactPurgePath
     /// <summary>Bytes are a local blob file that another <c>workflow_artifact</c> row also points at. Not removable: unlinking it would take that row's bytes too, and whether THAT row is collectable is a question this build does not ask.</summary>
     LocalBlobShared,
 
-    /// <summary>Bytes were placed through a configured storage profile. No writer in this build removes them — see <see cref="ArtifactRetentionDecision.RefuseUnpurgeable"/>.</summary>
+    /// <summary>Bytes were placed through a configured storage profile and are removable through their recorded CAS location lifecycle.</summary>
     Routed,
 
     /// <summary>The backend holding the bytes offers no removal at all (it does not implement <c>IArtifactBlobPurge</c>).</summary>
@@ -105,21 +105,16 @@ internal sealed record ArtifactRetentionDecision(ArtifactRetentionAction Action,
     /// reaper, which re-asks the same question inside its deleting transaction — one function so the two answers cannot
     /// disagree.
     ///
-    /// <para><c>Routed</c> is refused because nothing in this build removes routed bytes, which is unfinished work
-    /// rather than a correctness barrier. Both CAS-side barriers that used to make it one are gone:
-    /// <c>ArtifactCasRuntimeCoordinator</c>'s <c>ReusableProblemAsync</c> stopped handing a later writer an object
-    /// whose bytes are gone, and its <c>Revivable</c> plus the <c>Purged</c> state (0150) let the same content be
-    /// stored again afterwards, onto the one location row <c>ux_artifact_location_profile_object_key</c> allows. What
-    /// is missing is the writer: no code claims a location with <c>Deleting</c>, asks the driver to delete, and records
-    /// <c>Purged</c>. Until that exists, a routed artifact has no purge path and is kept.</para>
+    /// <para><c>Routed</c> is removable because the reaper delegates its physical phase to
+    /// <c>IArtifactCasPurgeCoordinator</c>, which advances the recorded location through Deleting and Purged without
+    /// consulting current routing policy. The pure decision only admits that placement; the reaper still owns the
+    /// reference checks, retention fence and pointing-row transaction.</para>
     /// </summary>
     public static ArtifactRetentionDecision? RefuseUnpurgeable(ArtifactPurgePath purge) => purge switch
     {
-        ArtifactPurgePath.Inline or ArtifactPurgePath.LocalBlobExclusive => null,
+        ArtifactPurgePath.Inline or ArtifactPurgePath.LocalBlobExclusive or ArtifactPurgePath.Routed => null,
         ArtifactPurgePath.LocalBlobShared => Indeterminate("artifact-blob-shared",
             "Another artifact row points at the same physical blob, so removing the bytes would take that row's content too and they are kept."),
-        ArtifactPurgePath.Routed => Indeterminate("artifact-routed-storage",
-            "The artifact's bytes were placed through a configured storage profile, and nothing in this build claims a storage location and removes them, so they are kept."),
         ArtifactPurgePath.BackendCannotPurge => Indeterminate("artifact-blob-backend-cannot-purge",
             "The blob backend holding the artifact's bytes offers no removal, so the row is kept with them."),
         _ => Retry("artifact-placement-indeterminate", "Where the artifact's bytes live could not be established, so the artifact is kept for now."),
@@ -130,5 +125,6 @@ internal sealed record ArtifactRetentionDecision(ArtifactRetentionAction Action,
     public static ArtifactRetentionDecision Referenced() => new(ArtifactRetentionAction.Referenced, null, null, null);
     public static ArtifactRetentionDecision Indeterminate(string code, string message) => new(ArtifactRetentionAction.Indeterminate, code, message, null);
     public static ArtifactRetentionDecision Wait(DateTimeOffset until, string code, string message) => new(ArtifactRetentionAction.Wait, code, message, until);
+    public static ArtifactRetentionDecision WaitForRetry(string code, string message) => new(ArtifactRetentionAction.Wait, code, message, null);
     public static ArtifactRetentionDecision Retry(string code, string message) => new(ArtifactRetentionAction.Retry, code, message, null);
 }
