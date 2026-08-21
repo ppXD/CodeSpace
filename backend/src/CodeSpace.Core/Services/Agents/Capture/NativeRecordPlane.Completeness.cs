@@ -51,9 +51,11 @@ namespace CodeSpace.Core.Services.Agents.Capture;
 /// check refuses before it reaches the database also leaves no gap: that is a writer defect rather than a shortfall the
 /// source suffered.</para>
 ///
-/// <para><b>Nothing READS either table in production today, and this slice adds no reader.</b> That is deliberate
-/// sequencing: wiring the terminal verdict to the manifest before a producer existed would park every run, because a
-/// facet with no row and a row written before this producer are both indeterminate. What would consume it is the
+/// <para><b>No authority reads either table.</b> A bounded, team-scoped Agent Run operator summary observes exactly
+/// attributed capture gaps, failure-contained from the authoritative run summary. It neither reads the manifest nor
+/// changes completion, terminal, planning, oracle or routing behavior. That sequencing remains deliberate: wiring a
+/// terminal verdict to the manifest while most facets have no producer would park every run, because a facet with no
+/// row and a row written before this producer are both indeterminate. What would consume it authoritatively is the
 /// per-run completeness fold — and, later still and separately, terminal authority — plus the audit query
 /// <c>ix_workflow_run_data_manifest_incomplete</c> exists for: whose record is not complete.</para>
 /// </summary>

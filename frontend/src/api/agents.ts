@@ -94,6 +94,42 @@ export interface AgentRunHarnessExecutionSummary {
   attemptsTruncated: boolean;
 }
 
+export type AgentRunCaptureGapReadAvailability = "Available" | "BackendUnavailable";
+
+/** One known-missing span exactly attributed to this Agent Run and frozen harness process attempt. */
+export interface AgentRunCaptureGapSummary {
+  id: string;
+  agentRunId: string;
+  harnessExecutionId: string;
+  harnessProcessAttemptId: string;
+  attemptWorkerFenceEpoch: number;
+  subjectKind: string;
+  subjectId: string | null;
+  streamId: string | null;
+  channel: string | null;
+  rangeKind: string;
+  rangeStart: number | null;
+  rangeEnd: number | null;
+  rangeStartedAt: string | null;
+  rangeEndedAt: string | null;
+  reason: string;
+  reasonDetail: string | null;
+  captureSource: string;
+  noticedAt: string;
+  resolution: string;
+  recoveredAt: string | null;
+  recoveredByKind: string | null;
+  recoveredById: string | null;
+}
+
+/** Bounded newest-first observation; BackendUnavailable is distinct from an available empty page. */
+export interface AgentRunCaptureGapObservation {
+  availability: AgentRunCaptureGapReadAvailability;
+  items: AgentRunCaptureGapSummary[];
+  truncated: boolean;
+  errorCode: string | null;
+}
+
 /** Mirrors backend `AgentRunSummary` — one agent run's live status + timing (no secret). */
 export interface AgentRunSummary {
   id: string;
@@ -108,6 +144,8 @@ export interface AgentRunSummary {
   createdDate: string;
   /** Observation-only durable harness/process facts; absent when capture was unavailable. */
   harnessExecution?: AgentRunHarnessExecutionSummary | null;
+  /** Observation-only known-missing spans; unavailable never means no gaps. */
+  captureGaps?: AgentRunCaptureGapObservation | null;
 }
 
 /** Mirrors backend `AgentRunEventDto` — one step in the run's append-only live log. */

@@ -736,8 +736,97 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
             CompletedAt = run.CompletedAt,
             CreatedDate = run.CreatedDate,
             HarnessExecution = await ReadHarnessExecutionAsync(runId, teamId, cancellationToken).ConfigureAwait(false),
+            CaptureGaps = await ReadCaptureGapsAsync(runId, teamId, cancellationToken).ConfigureAwait(false),
         };
     }
+
+    /// <summary>
+    /// Read only gaps whose producer admission proved this exact Agent Run/process coordinate. Legacy workflow-only
+    /// gaps are deliberately absent: assigning those here would recreate the path/native-row inference 0155 removed.
+    /// A failed observation is typed unavailable and cannot hide or change the authoritative Agent Run summary.
+    /// </summary>
+    private async Task<AgentRunCaptureGapObservation> ReadCaptureGapsAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var rows = await _db.WorkflowRunCaptureGap.AsNoTracking()
+                .Where(candidate => candidate.TeamId == teamId && candidate.AgentRunId == runId)
+                .OrderByDescending(candidate => candidate.NoticedAt)
+                .ThenByDescending(candidate => candidate.Id)
+                .Take(MaxObservedCaptureGaps + 1)
+                .Select(candidate => new
+                {
+                    candidate.Id,
+                    candidate.AgentRunId,
+                    candidate.HarnessExecutionId,
+                    candidate.HarnessProcessAttemptId,
+                    candidate.AttemptWorkerFenceEpoch,
+                    candidate.SubjectKind,
+                    candidate.SubjectId,
+                    candidate.StreamId,
+                    candidate.Channel,
+                    candidate.RangeKind,
+                    candidate.RangeStart,
+                    candidate.RangeEnd,
+                    candidate.RangeStartedAt,
+                    candidate.RangeEndedAt,
+                    candidate.Reason,
+                    candidate.ReasonDetail,
+                    candidate.CaptureSource,
+                    candidate.NoticedAt,
+                    candidate.Resolution,
+                    candidate.RecoveredAt,
+                    candidate.RecoveredByKind,
+                    candidate.RecoveredById,
+                })
+                .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+            return new AgentRunCaptureGapObservation
+            {
+                Availability = AgentRunCaptureGapReadAvailability.Available,
+                Items = rows.Take(MaxObservedCaptureGaps).Select(row => new AgentRunCaptureGapSummary
+                {
+                    Id = row.Id,
+                    AgentRunId = row.AgentRunId!.Value,
+                    HarnessExecutionId = row.HarnessExecutionId!.Value,
+                    HarnessProcessAttemptId = row.HarnessProcessAttemptId!.Value,
+                    AttemptWorkerFenceEpoch = row.AttemptWorkerFenceEpoch!.Value,
+                    SubjectKind = row.SubjectKind,
+                    SubjectId = row.SubjectId,
+                    StreamId = row.StreamId,
+                    Channel = row.Channel?.ToString(),
+                    RangeKind = row.RangeKind.ToString(),
+                    RangeStart = row.RangeStart,
+                    RangeEnd = row.RangeEnd,
+                    RangeStartedAt = row.RangeStartedAt,
+                    RangeEndedAt = row.RangeEndedAt,
+                    Reason = row.Reason.ToString(),
+                    ReasonDetail = row.ReasonDetail,
+                    CaptureSource = row.CaptureSource,
+                    NoticedAt = row.NoticedAt,
+                    Resolution = row.Resolution.ToString(),
+                    RecoveredAt = row.RecoveredAt,
+                    RecoveredByKind = row.RecoveredByKind,
+                    RecoveredById = row.RecoveredById,
+                }).ToList(),
+                Truncated = rows.Count > MaxObservedCaptureGaps,
+            };
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(exception, "Capture-gap observation could not be read for agent run {RunId}; the authoritative Agent Run summary remains available", runId);
+
+            return new AgentRunCaptureGapObservation
+            {
+                Availability = AgentRunCaptureGapReadAvailability.BackendUnavailable,
+                Items = Array.Empty<AgentRunCaptureGapSummary>(),
+                Truncated = false,
+                ErrorCode = "capture-gap.read-failed",
+            };
+        }
+    }
+
+    private const int MaxObservedCaptureGaps = 50;
 
     /// <summary>
     /// Read the latest durable harness execution and a bounded attempt window for the operator drawer. This plane is

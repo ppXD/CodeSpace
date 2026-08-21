@@ -230,11 +230,14 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
 
     /// <summary>
     /// The isolation that still holds, checked rather than asserted in prose: TWO production producers, both in the
-    /// capture plane, and ONE observation-only manifest reader. The only files in <c>backend/src</c> that may mention
+    /// capture plane, and TWO observation-only bounded readers. The only files in <c>backend/src</c> that may mention
     /// either table are the two entities, their two configurations, the DbContext that registers them, the shared
-    /// completeness writer and bounded reader, and the capture plane's two completeness partials — the
+    /// completeness writer, the Workflow Run manifest reader, the Agent Run exact-gap reader, and the capture plane's
+    /// two completeness partials — the
     /// native-record facet and the harness-process-attempt facet, each of which states its own facet, records a gap for
-    /// its own refused write, and reads neither table for any decision. In particular nothing in completion, terminal
+    /// its own refused write, and reads neither table for any decision. The summary reader observes only exact,
+    /// team-scoped attribution, orders it deterministically, and takes one more than its display bound to state
+    /// truncation without a count or unbounded materialization. In particular nothing in completion, terminal
     /// decision, planner, oracle, critic or routing may read the manifest: making terminal authority answer to it is a
     /// separate, later, deliberate cutover, and this test is what turns that step into a visible red rather than a quiet
     /// import.
@@ -243,7 +246,7 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
     /// message below is the number a reader can trust without grepping.</para>
     /// </summary>
     [Fact]
-    public void Only_the_capture_planes_two_producers_and_observation_reader_touch_either_table()
+    public void Only_the_capture_planes_two_producers_and_two_bounded_operator_readers_touch_either_table()
     {
         var sourceRoot = ProductionSourceRoot();
 
@@ -255,6 +258,7 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
 
         mentions.ShouldBe(new[]
         {
+            "AgentRunService.cs",
             "CodeSpaceDbContext.cs",
             "IRunDataCompletenessReader.cs",
             "IRunDataCompletenessWriter.cs",
@@ -265,12 +269,13 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
             "WorkflowRunCaptureGapConfiguration.cs",
             "WorkflowRunDataManifest.cs",
             "WorkflowRunDataManifestConfiguration.cs",
-        }, customMessage: "a production file other than the shared completeness writer, bounded observation reader, " +
-                          "and capture plane's two completeness partials now reads or writes the capture-gap / " +
-                          "data-manifest plane. Exactly two producers exist — the native-record facet and the " +
-                          "harness-process-attempt facet — and the only reader reports recorded facets without a " +
-                          "run-wide verdict. No reducer or terminal authority consults the manifest. Any additional " +
-                          "producer or reader is a deliberate step that updates this list — not a silent one.");
+        }, customMessage: "a production file other than the shared completeness writer, the Workflow Run manifest " +
+                          "reader, the Agent Run exact-gap reader, and the capture plane's two completeness partials " +
+                          "now touches the capture-gap / data-manifest plane. Exactly two producers exist — the " +
+                          "native-record facet and the harness-process-attempt facet — and exactly two bounded, " +
+                          "observation-only readers exist. No reducer folds a gap and terminal authority does not " +
+                          "consult the manifest. Any new producer or reader is a deliberate step that updates this " +
+                          "list — not a silent one.");
     }
 
     /// <summary>

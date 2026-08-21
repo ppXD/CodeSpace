@@ -13,6 +13,7 @@ using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Commands.Workflows;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Contracts;
+using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Dtos.Workflows;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -128,6 +129,19 @@ public sealed class NativeRecordCompletenessFlowTests
         statement.KnownMissingCount.ShouldBe(1);
         statement.PresentRecordCount.ShouldBe(2, customMessage: "the refused frames never landed, so they were never present");
         statement.ExpectedRecordCount.ShouldBe(4, customMessage: "the plane undertook four frames and two of them are not here — the shortfall must be visible in the counts too, not only in the gap");
+
+        var observed = (await scope.Resolve<IAgentRunService>().GetSummaryForTeamAsync(run.AgentRunId, run.TeamId, CancellationToken.None))!.CaptureGaps;
+        observed.Availability.ShouldBe(AgentRunCaptureGapReadAvailability.Available);
+        observed.Truncated.ShouldBeFalse();
+        var item = observed.Items.ShouldHaveSingleItem();
+        item.Id.ShouldBe(gap.Id);
+        item.HarnessExecutionId.ShouldBe(handle.ExecutionId);
+        item.HarnessProcessAttemptId.ShouldBe(handle.AttemptId);
+        item.AttemptWorkerFenceEpoch.ShouldBe(handle.WorkerFenceEpoch);
+        item.SubjectKind.ShouldBe(WorkflowRunDataOwnerKinds.NativeRecord);
+        item.Reason.ShouldBe(nameof(CaptureGapReason.WriteRefused));
+        item.RangeKind.ShouldBe(nameof(CaptureGapRangeKind.Ordinal));
+        item.RangeStart.ShouldBe(1);
     }
 
     [Fact]
@@ -183,6 +197,43 @@ public sealed class NativeRecordCompletenessFlowTests
         gap.HarnessProcessAttemptId.ShouldBe(launched.AttemptId);
         gap.AttemptWorkerFenceEpoch.ShouldBe(launched.WorkerFenceEpoch);
         gap.AttemptWorkerFenceEpoch.ShouldNotBe(reattachFence);
+    }
+
+    [Fact]
+    public async Task Capture_gap_observation_is_newest_first_team_scoped_and_bounded()
+    {
+        var run = await SeedWorkflowBoundRunAsync();
+        var plane = Plane(out var planeScope);
+        using var _ = planeScope;
+        var handle = await OpenAsync(plane, run);
+        var start = DateTimeOffset.UtcNow.AddMinutes(-2);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.WorkflowRunCaptureGap.AddRange(Enumerable.Range(0, 51).Select(index => AttributedGap(handle, start.AddSeconds(index), index)));
+            var legacy = AttributedGap(handle, start.AddHours(1), 999);
+            legacy.AgentRunId = null;
+            legacy.HarnessExecutionId = null;
+            legacy.HarnessProcessAttemptId = null;
+            legacy.AttemptWorkerFenceEpoch = null;
+            db.WorkflowRunCaptureGap.Add(legacy);
+            await db.SaveChangesAsync();
+        }
+
+        using var read = _fixture.BeginScope();
+        var runs = read.Resolve<IAgentRunService>();
+        var observed = (await runs.GetSummaryForTeamAsync(run.AgentRunId, run.TeamId, CancellationToken.None))!.CaptureGaps;
+
+        observed.Availability.ShouldBe(AgentRunCaptureGapReadAvailability.Available);
+        observed.Items.Count.ShouldBe(50);
+        observed.Truncated.ShouldBeTrue();
+        observed.Items.Select(item => item.RangeStart).ShouldBe(Enumerable.Range(1, 50).Reverse().Select(index => (long?)index),
+            customMessage: "the bounded page keeps the newest 50 observations and leaves the oldest outside the window");
+        observed.Items.ShouldNotContain(item => item.RangeStart == 999,
+            customMessage: "a newer workflow-only legacy gap has no provable Agent Run coordinate and must not be inferred into this summary");
+        (await runs.GetSummaryForTeamAsync(run.AgentRunId, Guid.NewGuid(), CancellationToken.None)).ShouldBeNull(
+            customMessage: "the owning Agent Run gate runs before the gap query, so a foreign team learns neither the run nor its gaps");
     }
 
     /// <summary>
@@ -397,17 +448,7 @@ public sealed class NativeRecordCompletenessFlowTests
 
     private async Task RejectsAttributedGapAsync(NativeRecordCaptureHandle handle, Action<WorkflowRunCaptureGap> forge, string expected)
     {
-        var now = DateTimeOffset.UtcNow;
-        var gap = new WorkflowRunCaptureGap
-        {
-            Id = Guid.NewGuid(), TeamId = handle.TeamId, WorkflowRunId = handle.WorkflowRunId!.Value,
-            AgentRunId = handle.AgentRunId, HarnessExecutionId = handle.ExecutionId,
-            HarnessProcessAttemptId = handle.AttemptId, AttemptWorkerFenceEpoch = handle.WorkerFenceEpoch,
-            SubjectKind = WorkflowRunDataOwnerKinds.NativeRecord, StreamId = handle.StreamId, Channel = handle.Channel,
-            RangeKind = CaptureGapRangeKind.Ordinal, RangeStart = 0, Reason = CaptureGapReason.WriteRefused,
-            CaptureSource = NativeRecordPlane.CompletenessCaptureSource, NoticedAt = now,
-            Resolution = CaptureGapResolution.Open, SchemaVersion = WorkflowRunDataContract.CurrentVersion, CreatedAt = now,
-        };
+        var gap = AttributedGap(handle, DateTimeOffset.UtcNow, 0);
         forge(gap);
 
         using var scope = _fixture.BeginScope();
@@ -416,6 +457,17 @@ public sealed class NativeRecordCompletenessFlowTests
         var rejected = await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
         rejected.InnerException?.Message.ShouldContain(expected);
     }
+
+    private static WorkflowRunCaptureGap AttributedGap(NativeRecordCaptureHandle handle, DateTimeOffset noticedAt, long rangeStart) => new()
+    {
+        Id = Guid.NewGuid(), TeamId = handle.TeamId, WorkflowRunId = handle.WorkflowRunId!.Value,
+        AgentRunId = handle.AgentRunId, HarnessExecutionId = handle.ExecutionId,
+        HarnessProcessAttemptId = handle.AttemptId, AttemptWorkerFenceEpoch = handle.WorkerFenceEpoch,
+        SubjectKind = WorkflowRunDataOwnerKinds.NativeRecord, StreamId = handle.StreamId, Channel = handle.Channel,
+        RangeKind = CaptureGapRangeKind.Ordinal, RangeStart = rangeStart, Reason = CaptureGapReason.WriteRefused,
+        CaptureSource = NativeRecordPlane.CompletenessCaptureSource, NoticedAt = noticedAt,
+        Resolution = CaptureGapResolution.Open, SchemaVersion = WorkflowRunDataContract.CurrentVersion, CreatedAt = noticedAt,
+    };
 
     private static NativeRecordV1 Frame(NativeRecordCaptureHandle handle, long ordinal, NativeRecordRedaction redaction = NativeRecordRedaction.None)
     {

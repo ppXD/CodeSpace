@@ -237,12 +237,52 @@ describe("AgentTerminal", () => {
         }],
         attemptsTruncated: false,
       },
+      captureGaps: {
+        availability: "Available",
+        items: [{
+          id: "gap-1",
+          harnessExecutionId: "execution-1",
+          harnessProcessAttemptId: "attempt-1",
+          attemptWorkerFenceEpoch: 1,
+          subjectKind: "native-record",
+          subjectId: null,
+          streamId: "stream-1",
+          channel: "Stdout",
+          rangeKind: "Ordinal",
+          rangeStart: 7,
+          rangeEnd: null,
+          rangeStartedAt: null,
+          rangeEndedAt: null,
+          reason: "WriteRefused",
+          reasonDetail: "the write was refused",
+          captureSource: "native-record-plane/v1",
+          noticedAt: "2026-06-23T00:00:30Z",
+          resolution: "Open",
+          recoveredAt: null,
+        }],
+        truncated: false,
+        errorCode: null,
+      },
     } });
 
     render(<AgentTerminal agent={termAgent({ agentRunId: "a1", status: "TimedOut" })} onClose={vi.fn()} />);
 
     expect(screen.getByText("process lost (capture.exit-unobserved) · 1 attempt · native capture")).toBeInTheDocument();
+    expect(screen.getByText("1 open capture gap · write refused")).toBeInTheDocument();
     expect(screen.getByText("timed out")).toBeInTheDocument();
+  });
+
+  it("keeps the agent outcome visible when capture-gap observation is unavailable", () => {
+    useAgentRunMock.mockReturnValue({ data: {
+      status: "Succeeded",
+      harness: "codex-cli",
+      captureGaps: { availability: "BackendUnavailable", items: [], truncated: false, errorCode: "capture-gap.read-failed" },
+    } });
+
+    render(<AgentTerminal agent={termAgent({ agentRunId: "a1", status: "Succeeded" })} onClose={vi.fn()} />);
+
+    expect(screen.getByText("capture gaps unavailable")).toBeInTheDocument();
+    expect(screen.getByText("succeeded")).toBeInTheDocument();
   });
 
   it("omits an identity part that is absent (no harness/model/tools/time → no strip)", () => {
