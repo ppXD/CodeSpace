@@ -61,17 +61,18 @@ public sealed partial class RealSupervisorActionExecutor
     };
 
     /// <summary>
-    /// Collect the agent-run ids recorded by EVERY prior spawn/retry decision (in order) — the merge folds all prior
-    /// Attempt results — MINUS any unit a per-unit acceptance grade objectively REJECTED (loopability slice 4,
+    /// Collect the agent-run ids recorded by EVERY spawn/retry decision in the active Plan generation (in order) — the
+    /// merge folds that generation's Attempt results — MINUS any unit a per-unit acceptance grade objectively REJECTED (loopability slice 4,
     /// "局部綠≠整合綠"): a unit that failed its OWN definition-of-done must NOT be integrated into the reviewable head,
     /// even if the model merges. The verdict (<see cref="SupervisorAgentResult.AcceptancePassed"/>) rides each spawn
     /// outcome's <c>agentResults</c> by agent-run id; a unit re-RUN after a rejection has a fresh id, so its retry
     /// (passing or ungraded) integrates while the rejected original is withheld. A unit with NO verdict (ungraded — no
-    /// per-unit contract, the pre-slice case) integrates exactly as before (byte-identical).
+    /// per-unit contract, the pre-slice case) integrates exactly as before (byte-identical). A plan-less legacy tape
+    /// retains the old whole-tape fold.
     /// </summary>
     internal static IReadOnlyList<Guid> ResolveAgentRunIdsToMerge(SupervisorTurnContext context)
     {
-        var staging = context.PriorDecisions
+        var staging = SupervisorPlanWindow.Read(context.PriorDecisions).Decisions
             .Where(d => d.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry)
             .ToList();
 

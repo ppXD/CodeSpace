@@ -615,13 +615,14 @@ public static class SupervisorOutcome
     public static bool IsWaived(SupervisorAgentResult result) => result.AcceptanceVerdict == Messages.Contracts.VerificationDisposition.Waived;
 
     /// <summary>
-    /// EVERY agent-run id this run's staging (spawn/retry/resolve) decisions folded a WITHHELD
-    /// (<see cref="IsWithheldFromHead"/> — rejected or waived) result for, across the WHOLE tape — DC-3's
-    /// ledger-direct branch resolver needs the run-wide set (not one frontier's), since it can surface a
-    /// contributor from any earlier round that never went through a later merge. Pure + replay-deterministic.
+    /// EVERY agent-run id the active Plan generation's staging (spawn/retry/resolve) decisions folded a WITHHELD
+    /// (<see cref="IsWithheldFromHead"/> — rejected or waived) result for. DC-3's ledger-direct branch resolver needs
+    /// the generation-wide set (not one frontier's), since it can surface a contributor from any earlier round in
+    /// that generation that never went through a later merge. Plan-less legacy tapes retain their whole-tape fold.
+    /// Pure + replay-deterministic.
     /// </summary>
     public static IReadOnlySet<Guid> WithheldAgentRunIds(IReadOnlyList<SupervisorPriorDecision> priorDecisions) =>
-        priorDecisions
+        SupervisorPlanWindow.Read(priorDecisions).Decisions
             .Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind))
             .SelectMany(d => ReadAgentResults(d.OutcomeJson))
             .Where(IsWithheldFromHead)
@@ -803,6 +804,8 @@ public static class SupervisorOutcome
     /// </summary>
     public static SupervisorPriorDecision? FindConflictDecision(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
     {
+        priorDecisions = SupervisorPlanWindow.Read(priorDecisions).Decisions;
+
         for (var i = priorDecisions.Count - 1; i >= 0; i--)
         {
             var prior = priorDecisions[i];
@@ -1165,6 +1168,8 @@ public static class SupervisorOutcome
     /// </summary>
     public static IReadOnlyList<SupervisorConflictedRepo> ReadConflictedRepos(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
     {
+        priorDecisions = SupervisorPlanWindow.Read(priorDecisions).Decisions;
+
         for (var i = priorDecisions.Count - 1; i >= 0; i--)
         {
             var decision = priorDecisions[i];
