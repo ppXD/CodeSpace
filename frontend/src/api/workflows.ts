@@ -9,6 +9,20 @@ export type NodeStatus = "Pending" | "Running" | "Success" | "Failure" | "Skippe
 // Suspended = paused on a node waiting for a timer / approval / callback; resumes on the signal.
 export type WorkflowRunStatus = "Pending" | "Enqueued" | "Running" | "Success" | "Failure" | "Cancelled" | "Suspended";
 
+/** Bounded canonical route identity; deliberately excludes graph, outputs, cells, waits and artifacts. */
+export interface WorkflowRunIdentity {
+  id: string;
+  runNumber: number;
+  status: WorkflowRunStatus;
+}
+
+export class InvalidWorkflowRunIdentityError extends Error {
+  constructor() {
+    super("Invalid Workflow Run identity response.");
+    this.name = "InvalidWorkflowRunIdentityError";
+  }
+}
+
 /** The result of a hard-stop. `cancelled` is true when this call won the flip; false (with the existing terminal `status`) when the run had already finished. `agentRunsCancelled` is how many in-flight agents the kill-wave stopped. */
 export interface CancelRunOutcome {
   cancelled: boolean;
@@ -950,6 +964,14 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function decodeWorkflowRunIdentity(value: unknown): WorkflowRunIdentity {
+  if (!isJsonObject(value) || Object.keys(value).sort().join(",") !== "id,runNumber,status" || !isGuid(value.id) || !isSafeCount(value.runNumber, true) || !WORKFLOW_RUN_STATUSES.has(value.status as WorkflowRunStatus)) {
+    throw new InvalidWorkflowRunIdentityError();
+  }
+
+  return { id: value.id, runNumber: value.runNumber, status: value.status as WorkflowRunStatus };
+}
+
 function isSafeCount(value: unknown, positive = false): value is number {
   return Number.isSafeInteger(value) && (positive ? Number(value) > 0 : Number(value) >= 0);
 }
@@ -1307,6 +1329,9 @@ export const workflowsApi = {
 
   /** Resolve one run by ref — its team-scoped run number (clean URL) or GUID (legacy link). */
   getRun: (ref: string) => fetchJson<WorkflowRunDetail>(`/api/workflows/runs/${encodeURIComponent(ref)}`),
+
+  /** Resolve only the canonical identity needed by the run route; never loads execution detail or artifact bytes. */
+  getRunIdentity: async (ref: string, signal?: AbortSignal) => decodeWorkflowRunIdentity(await fetchJson<unknown>(`/api/workflows/runs/${encodeURIComponent(ref)}/identity`, { signal })),
 
   /** Bounded producer statements only; no record/blob read and no synthesized run-wide verdict. */
   getRunDataCompleteness: async (runId: string, signal?: AbortSignal): Promise<WorkflowRunDataCompletenessView | null> => {
