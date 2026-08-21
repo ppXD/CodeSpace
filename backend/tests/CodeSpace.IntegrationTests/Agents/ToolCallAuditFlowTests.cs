@@ -8,6 +8,7 @@ using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Queries.Agents;
 using MediatR;
+using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Agents;
@@ -19,7 +20,7 @@ namespace CodeSpace.IntegrationTests.Agents;
 ///
 /// <para>Proves the operator-facing contract: an owning team reads its run's governed tool calls back in
 /// chronological order with every audit field including the approval trail (ApprovedByUserId / ApprovedAt);
-/// a FOREIGN team reads an empty list — the tenancy proof (<c>GetForRunAsync</c> filters <c>TeamId == teamId</c>,
+/// a FOREIGN team reads an empty list — the tenancy proof (the audit projection filters <c>TeamId == teamId</c>,
 /// and AgentRunId is a soft link with no FK, so a foreign / unknown run is indistinguishable from empty, no
 /// existence leak); and read-only tools NEVER appear because they skip the ledger entirely (only side-effecting
 /// calls get a row — documented + asserted by their absence in the seeded set).</para>
@@ -43,7 +44,7 @@ public class ToolCallAuditFlowTests
 
         // Three side-effecting rows, OLDEST first by CreatedDate: a Succeeded write, a Failed write, and one that
         // was approved-then-recorded (carries the approval trail). Inserted in reverse to prove the handler re-orders
-        // ascending (GetForRunAsync returns newest-first; ListToolCallsQueryHandler flips it to chronological).
+        // ascending (the body-free audit projection orders in PostgreSQL, rather than materializing full entities).
         var baseTime = DateTimeOffset.UtcNow.AddMinutes(-10);
         var approvedAt = baseTime.AddMinutes(2).AddSeconds(30);
         await SeedLedgerRowAsync(runId, teamId, "git.open_pr", ToolCallLedgerStatus.Succeeded, error: null, createdAt: baseTime, approvedByUserId: null, approvedAt: null);
@@ -86,7 +87,7 @@ public class ToolCallAuditFlowTests
         using (var owner = _fixture.BeginScopeAs(ownerUser, ownerTeam, Roles.Admin))
             (await owner.Resolve<IMediator>().Send(new ListToolCallsQuery { AgentRunId = runId })).ShouldHaveSingleItem();
 
-        // …a FOREIGN team reading the SAME run id sees nothing — GetForRunAsync filters TeamId, so a cross-team
+        // …a FOREIGN team reading the SAME run id sees nothing — the audit projection filters TeamId, so a cross-team
         // (or simply unknown) run is indistinguishable from empty. The tenancy proof.
         using (var foreign = _fixture.BeginScopeAs(foreignUser, foreignTeam, Roles.Admin))
             (await foreign.Resolve<IMediator>().Send(new ListToolCallsQuery { AgentRunId = runId }))
@@ -101,6 +102,29 @@ public class ToolCallAuditFlowTests
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
         (await scope.Resolve<IMediator>().Send(new ListToolCallsQuery { AgentRunId = Guid.NewGuid() }))
             .ShouldBeEmpty("a run with no ledger rows (unknown / never made a governed call) reads empty, never errors");
+    }
+
+    [Fact]
+    public async Task A_large_terminal_result_does_not_change_the_body_free_audit_contract()
+    {
+        var (teamId, userId) = await SeedTeamAsync();
+        var runId = Guid.NewGuid();
+        var largeResult = "{\"payload\":\"" + new string('x', 2 * 1024 * 1024) + "\"}";
+
+        await SeedLedgerRowAsync(runId, teamId, "storage.export", ToolCallLedgerStatus.Succeeded, error: null, createdAt: DateTimeOffset.UtcNow, approvedByUserId: null, approvedAt: null);
+        using (var seed = _fixture.BeginScope())
+        {
+            var db = seed.Resolve<CodeSpaceDbContext>();
+            await db.ToolCallLedger.Where(row => row.AgentRunId == runId && row.TeamId == teamId)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(row => row.ResultJson, largeResult));
+        }
+
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        var call = (await scope.Resolve<IMediator>().Send(new ListToolCallsQuery { AgentRunId = runId })).ShouldHaveSingleItem();
+
+        call.ToolKind.ShouldBe("storage.export");
+        call.Status.ShouldBe(ToolCallLedgerStatus.Succeeded);
+        call.Error.ShouldBeNull();
     }
 
     [Fact]
