@@ -84,7 +84,8 @@ public sealed partial class NativeRecordPlane : INativeRecordExecutionPlane
             Handle = new NativeRecordCaptureHandle
             {
                 TeamId = request.TeamId, AgentRunId = request.AgentRunId, ExecutionId = live.ExecutionId,
-                AttemptId = live.AttemptId, StreamId = Guid.NewGuid(), Channel = request.Channel,
+                AttemptId = live.AttemptId, WorkerFenceEpoch = live.WorkerFenceEpoch,
+                StreamId = Guid.NewGuid(), Channel = request.Channel,
                 WorkflowRunId = live.WorkflowRunId,
             },
             SourceHead = request.ResumeSourceOffset,
@@ -140,7 +141,7 @@ public sealed partial class NativeRecordPlane : INativeRecordExecutionPlane
                join execution in db.WorkflowRunHarnessExecution.AsNoTracking() on attempt.ExecutionId equals execution.Id
                where attempt.TeamId == teamId && attempt.AgentRunId == agentRunId && attempt.State == HarnessProcessAttemptState.Running
                orderby attempt.AttemptOrdinal descending
-               select new LiveProcess(attempt.ExecutionId, attempt.Id, execution.WorkflowRunId))
+               select new LiveProcess(attempt.ExecutionId, attempt.Id, attempt.WorkerFenceEpoch, execution.WorkflowRunId))
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
     /// <summary>
@@ -237,7 +238,7 @@ public sealed partial class NativeRecordPlane : INativeRecordExecutionPlane
             .ConfigureAwait(false);
     }
 
-    private sealed record LiveProcess(Guid ExecutionId, Guid AttemptId, Guid? WorkflowRunId);
+    private sealed record LiveProcess(Guid ExecutionId, Guid AttemptId, long WorkerFenceEpoch, Guid? WorkflowRunId);
 
     private sealed record LiveExecution(Guid ExecutionId, int AttemptCount, Guid? WorkflowRunId);
 

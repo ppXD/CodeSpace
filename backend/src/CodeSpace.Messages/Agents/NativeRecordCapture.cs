@@ -101,6 +101,14 @@ public sealed record NativeRecordCaptureHandle
     public required Guid AgentRunId { get; init; }
     public required Guid ExecutionId { get; init; }
     public required Guid AttemptId { get; init; }
+
+    /// <summary>
+    /// Immutable worker fence that launched <see cref="AttemptId"/>. A resumed observer carries this frozen value,
+    /// never the Agent Run's newer claim fence, so any gap it notices remains attributable to the process that
+    /// actually produced the source bytes.
+    /// </summary>
+    public required long WorkerFenceEpoch { get; init; }
+
     public required Guid StreamId { get; init; }
     public required NativeRecordChannel Channel { get; init; }
 

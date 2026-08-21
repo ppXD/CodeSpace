@@ -13,6 +13,7 @@ public sealed class WorkflowRunCaptureGapConfiguration : IEntityTypeConfiguratio
         {
             table.HasCheckConstraint("ck_workflow_run_capture_gap_bounds", "schema_version > 0");
             table.HasCheckConstraint("ck_workflow_run_capture_gap_channel", "channel IS NULL OR channel IN ('Stdout', 'Stderr', 'Protocol', 'Control', 'SessionState', 'ModelWire', 'ToolWire', 'Hook', 'Metric', 'Debug')");
+            table.HasCheckConstraint("ck_workflow_run_capture_gap_attempt_attribution", "(agent_run_id IS NULL AND harness_execution_id IS NULL AND harness_process_attempt_id IS NULL AND attempt_worker_fence_epoch IS NULL) OR (agent_run_id IS NOT NULL AND harness_execution_id IS NOT NULL AND harness_process_attempt_id IS NOT NULL AND attempt_worker_fence_epoch IS NOT NULL AND attempt_worker_fence_epoch > 0)");
 
             // Four exhaustive, mutually exclusive coordinate systems, so no combination of bounds means nothing. Every
             // comparison on a nullable column carries its own IS NOT NULL: a PostgreSQL CHECK admits a row that
@@ -43,12 +44,16 @@ public sealed class WorkflowRunCaptureGapConfiguration : IEntityTypeConfiguratio
         builder.HasOne<Team>().WithMany().HasForeignKey(gap => gap.TeamId).OnDelete(DeleteBehavior.Restrict);
         builder.HasOne<WorkflowRun>().WithMany().HasForeignKey(gap => new { gap.TeamId, gap.WorkflowRunId })
             .HasPrincipalKey(run => new { run.TeamId, run.Id }).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne(gap => gap.HarnessProcessAttempt).WithMany().HasForeignKey(gap => gap.HarnessProcessAttemptId)
+            .OnDelete(DeleteBehavior.Restrict).HasConstraintName("fk_workflow_run_capture_gap_harness_process_attempt");
 
         // The manifest's probe, and the reason a verdict costs a lookup rather than a scan. Partial so it does not grow
         // with recovered spans; the subject suffix makes the per-facet count the same index walk as the run-wide one.
         builder.HasIndex(gap => new { gap.TeamId, gap.WorkflowRunId, gap.SubjectKind }).HasDatabaseName("ix_workflow_run_capture_gap_open").HasFilter("resolution = 'Open'");
         builder.HasIndex(gap => new { gap.WorkflowRunId, gap.NoticedAt, gap.Id }).HasDatabaseName("ix_workflow_run_capture_gap_run_noticed");
         builder.HasIndex(gap => new { gap.TeamId, gap.NoticedAt, gap.Id }).HasDatabaseName("ix_workflow_run_capture_gap_team_noticed");
+        builder.HasIndex(gap => new { gap.TeamId, gap.AgentRunId, gap.NoticedAt, gap.Id })
+            .HasDatabaseName("ix_workflow_run_capture_gap_agent_run_noticed").HasFilter("agent_run_id IS NOT NULL");
         builder.HasIndex(gap => new { gap.StreamId, gap.RangeStart }).HasDatabaseName("ix_workflow_run_capture_gap_stream").HasFilter("stream_id IS NOT NULL");
     }
 }

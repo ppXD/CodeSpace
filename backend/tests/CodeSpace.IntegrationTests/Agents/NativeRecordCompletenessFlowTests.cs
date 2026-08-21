@@ -112,6 +112,11 @@ public sealed class NativeRecordCompletenessFlowTests
         gap.RangeKind.ShouldBe(CaptureGapRangeKind.Ordinal);
         gap.StreamId.ShouldBe(handle.StreamId, customMessage: "an ordinal with no stream to be an ordinal IN is a coordinate nobody can locate");
         gap.Channel.ShouldBe(handle.Channel);
+        gap.AgentRunId.ShouldBe(handle.AgentRunId);
+        gap.HarnessExecutionId.ShouldBe(handle.ExecutionId);
+        gap.HarnessProcessAttemptId.ShouldBe(handle.AttemptId);
+        gap.AttemptWorkerFenceEpoch.ShouldBe(run.FenceEpoch,
+            customMessage: "the gap cites the immutable launch fence of the exact process attempt; it must never be inferred later from a missing native row or from the Agent Run's current fence");
         gap.RangeStart.ShouldBe(1, customMessage: "the first frame of the refused batch is where this stream's records stop");
         gap.RangeEnd.ShouldBeNull(customMessage: "capture stops for the round on a refusal, so 'from here on, and I do not know how much' is the honest extent");
         gap.Resolution.ShouldBe(CaptureGapResolution.Open);
@@ -123,6 +128,61 @@ public sealed class NativeRecordCompletenessFlowTests
         statement.KnownMissingCount.ShouldBe(1);
         statement.PresentRecordCount.ShouldBe(2, customMessage: "the refused frames never landed, so they were never present");
         statement.ExpectedRecordCount.ShouldBe(4, customMessage: "the plane undertook four frames and two of them are not here — the shortfall must be visible in the counts too, not only in the gap");
+    }
+
+    [Fact]
+    public async Task An_attributed_gap_is_refused_when_any_tenant_run_execution_attempt_or_frozen_fence_coordinate_disagrees()
+    {
+        var run = await SeedWorkflowBoundRunAsync();
+        var plane = Plane(out var planeScope);
+        using var _ = planeScope;
+        var handle = await OpenAsync(plane, run);
+
+        await RejectsAttributedGapAsync(handle, gap => gap.AgentRunId = null, "all-or-none");
+        await RejectsAttributedGapAsync(handle, gap => gap.TeamId = Guid.NewGuid(), "does not match one frozen harness process attempt");
+        await RejectsAttributedGapAsync(handle, gap => gap.AgentRunId = Guid.NewGuid(), "does not match one frozen harness process attempt");
+        await RejectsAttributedGapAsync(handle, gap => gap.HarnessExecutionId = Guid.NewGuid(), "does not match one frozen harness process attempt");
+        await RejectsAttributedGapAsync(handle, gap => gap.HarnessProcessAttemptId = Guid.NewGuid(), "does not match one frozen harness process attempt");
+        await RejectsAttributedGapAsync(handle, gap => gap.AttemptWorkerFenceEpoch++, "does not match one frozen harness process attempt");
+    }
+
+    [Fact]
+    public async Task A_reattached_gap_keeps_the_process_attempts_frozen_launch_fence_not_the_agent_runs_new_fence()
+    {
+        var run = await SeedWorkflowBoundRunAsync();
+        var plane = Plane(out var planeScope);
+        using var _ = planeScope;
+        var launched = await OpenAsync(plane, run);
+
+        long reattachFence;
+        using (var scope = _fixture.BeginScope())
+        {
+            var runs = scope.Resolve<IAgentRunService>();
+            (await runs.ReclaimForReattachAsync(run.AgentRunId, CancellationToken.None)).ShouldBeTrue();
+            reattachFence = (await runs.GetAsync(run.AgentRunId, CancellationToken.None)).FenceEpoch;
+        }
+        reattachFence.ShouldBeGreaterThan(launched.WorkerFenceEpoch);
+
+        var resumed = await ((INativeRecordExecutionPlane)plane).ReopenAsync(new NativeRecordCaptureRequest
+        {
+            TeamId = run.TeamId, AgentRunId = run.AgentRunId, HarnessTypeKey = "unused-on-resume/v1",
+            RunnerKind = "unused", RunnerLocatorJson = "{}", WorkerFenceEpoch = reattachFence,
+            Channel = NativeRecordChannel.Stdout, Resume = true, ResumeSourceOffset = 0,
+        }, CancellationToken.None);
+        var handle = resumed.ShouldNotBeNull().Handle;
+        handle.AttemptId.ShouldBe(launched.AttemptId);
+        handle.WorkerFenceEpoch.ShouldBe(launched.WorkerFenceEpoch,
+            customMessage: "reattach observes the process launched by the older fence; replacing it with the current Agent Run fence would manufacture a different process identity");
+
+        await Should.ThrowAsync<DbUpdateException>(() =>
+            plane.WriteAsync(Batch(handle, Frame(handle, 0), Frame(handle, 0)), CancellationToken.None));
+
+        using var read = _fixture.BeginScope();
+        var gap = await read.Resolve<CodeSpaceDbContext>().WorkflowRunCaptureGap.AsNoTracking()
+            .SingleAsync(candidate => candidate.WorkflowRunId == run.WorkflowRunId);
+        gap.HarnessProcessAttemptId.ShouldBe(launched.AttemptId);
+        gap.AttemptWorkerFenceEpoch.ShouldBe(launched.WorkerFenceEpoch);
+        gap.AttemptWorkerFenceEpoch.ShouldNotBe(reattachFence);
     }
 
     /// <summary>
@@ -334,6 +394,28 @@ public sealed class NativeRecordCompletenessFlowTests
         Records = frames.Select(frame => new NativeRecordCapture { Frame = frame, Normalization = NativeRecordNormalization.Projected }).ToList(),
         Events = Array.Empty<AgentSemanticEventV1>(),
     };
+
+    private async Task RejectsAttributedGapAsync(NativeRecordCaptureHandle handle, Action<WorkflowRunCaptureGap> forge, string expected)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var gap = new WorkflowRunCaptureGap
+        {
+            Id = Guid.NewGuid(), TeamId = handle.TeamId, WorkflowRunId = handle.WorkflowRunId!.Value,
+            AgentRunId = handle.AgentRunId, HarnessExecutionId = handle.ExecutionId,
+            HarnessProcessAttemptId = handle.AttemptId, AttemptWorkerFenceEpoch = handle.WorkerFenceEpoch,
+            SubjectKind = WorkflowRunDataOwnerKinds.NativeRecord, StreamId = handle.StreamId, Channel = handle.Channel,
+            RangeKind = CaptureGapRangeKind.Ordinal, RangeStart = 0, Reason = CaptureGapReason.WriteRefused,
+            CaptureSource = NativeRecordPlane.CompletenessCaptureSource, NoticedAt = now,
+            Resolution = CaptureGapResolution.Open, SchemaVersion = WorkflowRunDataContract.CurrentVersion, CreatedAt = now,
+        };
+        forge(gap);
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.WorkflowRunCaptureGap.Add(gap);
+        var rejected = await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
+        rejected.InnerException?.Message.ShouldContain(expected);
+    }
 
     private static NativeRecordV1 Frame(NativeRecordCaptureHandle handle, long ordinal, NativeRecordRedaction redaction = NativeRecordRedaction.None)
     {
