@@ -8,9 +8,10 @@ namespace CodeSpace.Messages.Agents;
 /// The normalized OUTPUT contract of an agent run — what the harness produces at the end, regardless
 /// of which CLI ran. Stable + versioned so a consumer (the agent.run node, audit, the UI) reads one
 /// shape for every harness. B0.3 persists this alongside the run as <c>result_jsonb</c>. A small unified
-/// diff stays INLINE in <see cref="Patch"/>; a large diff (D2) is offloaded to the artifact store and
-/// <see cref="Patch"/> is cleared, with <see cref="PatchArtifactId"/> holding the reference — so the
-/// <c>result_jsonb</c> row stays bounded and the full diff is fetched on demand.
+/// diff stays INLINE in <see cref="Patch"/>. During executor-side capture, a large diff may temporarily carry both
+/// a bounded inline compatibility copy and the authoritative full <see cref="PatchArtifactId"/> so pre-completion
+/// consumers can operate. <c>AgentRunService</c> clears that copy before persisting <c>result_jsonb</c>. At either
+/// stage, a non-null artifact id is authoritative; the adjacent inline text must never mask unavailable full bytes.
 /// </summary>
 public sealed record AgentRunResult
 {
@@ -33,10 +34,10 @@ public sealed record AgentRunResult
     /// </summary>
     public IReadOnlyList<FileDiffStat> FileStats { get; init; } = Array.Empty<FileDiffStat>();
 
-    /// <summary>Unified diff (git format) of everything the agent changed vs the cloned base. Empty when there was no workspace or nothing changed, OR when the diff was large enough to offload — in that case <see cref="PatchArtifactId"/> is set and the full diff is fetched from the artifact store. The artefact a downstream PR-open step consumes.</summary>
+    /// <summary>Unified diff (git format) of everything the agent changed vs the cloned base. Authoritative only when <see cref="PatchArtifactId"/> is null. Executor-side capture may retain a bounded compatibility copy beside a full artifact until completion; normal terminal persistence clears that copy. Empty when there was no workspace or nothing changed. The artefact a downstream PR-open step consumes.</summary>
     public string Patch { get; init; } = "";
 
-    /// <summary>When the diff was offloaded (D2: larger than the artifact inline threshold), the artifact-store id holding the full unified diff; <see cref="Patch"/> is then empty. Null when the diff is inline (small) or absent.</summary>
+    /// <summary>When non-null, the artifact-store id holding the authoritative full unified diff. Any adjacent <see cref="Patch"/> is only a bounded executor-side compatibility copy and must not be used as fallback; normal terminal persistence clears it. Null when the diff is inline (small) or absent.</summary>
     public Guid? PatchArtifactId { get; init; }
 
     /// <summary>DC-4: how many DECLARED deliverable files this attempt's capture minted typed artifact-manifest rows for (a non-TestsPass acceptance's path list). 0-omitted — a git-only run serializes byte-identical; the capture promise's facts read this so a typed capture is never recorded as "empty".</summary>
@@ -201,13 +202,13 @@ public sealed record RepositoryRunResult
     /// <summary>
     /// The inline unified diff (git format) of this repo's changes vs its <see cref="BaseSha"/> — the durable,
     /// base-anchored input a per-repo on-disk integration consumes (the same role the top-level <see cref="AgentRunResult.Patch"/>
-    /// plays for a single-repo run). Empty when this repo changed nothing OR when the diff was large enough to offload
-    /// (then <see cref="PatchArtifactId"/> holds the ref). Capped inline like the top-level patch so a many-repo run's
-    /// result row stays bounded.
+    /// plays for a single-repo run). Authoritative only when <see cref="PatchArtifactId"/> is null. Executor-side
+    /// capture may retain a bounded compatibility copy beside a full artifact until completion; normal terminal
+    /// persistence clears that copy. Empty when this repo changed nothing. Capped inline like the top-level patch.
     /// </summary>
     public string Patch { get; init; } = "";
 
-    /// <summary>When this repo's diff was offloaded (larger than the artifact inline threshold), the artifact-store id holding the full unified diff; <see cref="Patch"/> is then empty. Null when the diff is inline (small) or absent. Mirrors the top-level <see cref="AgentRunResult.PatchArtifactId"/>.</summary>
+    /// <summary>When non-null, the artifact-store id holding this repo's authoritative full unified diff. Any adjacent <see cref="Patch"/> is only a bounded executor-side compatibility copy and must not be used as fallback; normal terminal persistence clears it. Null when the diff is inline (small) or absent. Mirrors the top-level <see cref="AgentRunResult.PatchArtifactId"/>.</summary>
     public Guid? PatchArtifactId { get; init; }
 
     /// <summary>The branch this repo's changes were pushed to (the per-repo PR-open handoff), or null when nothing was pushed / it had no changes.</summary>

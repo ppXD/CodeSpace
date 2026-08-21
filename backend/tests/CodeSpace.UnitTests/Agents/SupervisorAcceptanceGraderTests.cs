@@ -215,10 +215,11 @@ public class SupervisorAcceptanceGraderTests
         var runners = new ScriptedApplyRunnerRegistry(applySucceeds: true);
         var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: runners, offloader: offloader);
 
-        var grade = await grader.GradePatchAsync(Guid.NewGuid(), teamId, "base", "", artifactId, Spec(), 30, CancellationToken.None);
+        var grade = await grader.GradePatchAsync(Guid.NewGuid(), teamId, "base", "truncated compatibility copy", artifactId, Spec(), 30, CancellationToken.None);
 
         grade.Passed.ShouldBeTrue();
         offloader.Resolved.ShouldContain((teamId, (Guid?)artifactId), "the offloaded patch is resolved under the SAME team the grade runs for");
+        offloader.InlineInputs.ShouldHaveSingleItem().ShouldBeNullOrEmpty("the grader must not let a truncated inline copy mask the authoritative artifact");
     }
 
     [Fact]
@@ -512,8 +513,8 @@ public class SupervisorAcceptanceGraderTests
     {
         // The literal is the wire value on durable receipts — a rename/bump is a re-qualification decision, not
         // an invisible refactor. Bump in the SAME PR as any grading-semantics change.
-        // v2 (P5-2): evidence capture emits the inline tail + multi-repo failure receipts gain EvidenceRef.
-        SupervisorAcceptanceGrader.EvaluatorVersion.ShouldBe("supervisor-acceptance/v2");
+        // v3: a pre-completion full patch artifact is authoritative over its bounded inline compatibility copy.
+        SupervisorAcceptanceGrader.EvaluatorVersion.ShouldBe("supervisor-acceptance/v3");
     }
 
     [Fact]
@@ -770,12 +771,14 @@ public class SupervisorAcceptanceGraderTests
     {
         private readonly Dictionary<Guid, (Guid Team, string Text)> _store = new();
         public List<(Guid Team, Guid? ArtifactId)> Resolved { get; } = new();
+        public List<string?> InlineInputs { get; } = new();
 
         public void Store(Guid artifactId, Guid team, string text) => _store[artifactId] = (team, text);
 
         public Task<string> ResolveAsync(Guid teamId, string? inline, Guid? artifactId, CancellationToken cancellationToken)
         {
             Resolved.Add((teamId, artifactId));
+            InlineInputs.Add(inline);
 
             if (artifactId is null) return Task.FromResult(inline ?? "");
 
