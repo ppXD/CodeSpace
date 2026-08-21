@@ -7,6 +7,7 @@ using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Plans;
 using CodeSpace.Core.Services.Sessions.Room;
 using CodeSpace.Core.Services.Supervisor;
+using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
@@ -510,6 +511,84 @@ public class RoomProjectorFlowTests
         answer.Attachments.ShouldContain(x => x.Label == "out.txt", "the agent's changed file rides the RESULT as an attachment");
 
         turn.Summary.ShouldBe("Printed PONG.", "the turn headline falls back to the sole agent's summary when there is no supervisor tape");
+    }
+
+    [Fact]
+    public async Task Tool_histogram_hydrates_a_bounded_offloaded_payload_and_tolerates_an_unavailable_one()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Large tools");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Use the tools", resultSummary: null);
+        await SeedAgentNodeAsync(teamId, run, summary: "Done.", changedFiles: Array.Empty<string>());
+
+        Guid agentId;
+        using (var scope = _fixture.BeginScope())
+            agentId = await scope.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().Where(a => a.WorkflowRunId == run).Select(a => a.Id).SingleAsync();
+
+        var largePayload = JsonSerializer.SerializeToElement(new { name = "WebSearch", query = "artifact-backed", body = new string('x', ArtifactStoreConfig.DefaultInlineThresholdBytes + 500) });
+        Guid corruptArtifactId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var inline = await scope.Resolve<IAgentRunService>().AppendEventAsync(agentId, new AgentEvent { Kind = AgentEventKind.ToolCall, Text = "read", Data = JsonSerializer.SerializeToElement(new { name = "Read", path = "README.md" }) }, CancellationToken.None);
+            inline.DataJson.ShouldNotBeNull("the healthy inline path remains on its existing carrier");
+
+            var appended = await scope.Resolve<IAgentRunService>().AppendEventAsync(agentId, new AgentEvent { Kind = AgentEventKind.ToolCall, Text = "searched", Data = largePayload }, CancellationToken.None);
+            appended.DataArtifactId.ShouldNotBeNull("the fixture must exercise the offloaded carrier, not the inline parser");
+
+            var corruptPayload = JsonSerializer.SerializeToElement(new { name = "Write", path = "report.md", body = new string('y', ArtifactStoreConfig.DefaultInlineThresholdBytes + 700) });
+            var corrupt = await scope.Resolve<IAgentRunService>().AppendEventAsync(agentId, new AgentEvent { Kind = AgentEventKind.ToolCall, Text = "wrote", Data = corruptPayload }, CancellationToken.None);
+            corruptArtifactId = corrupt.DataArtifactId!.Value;
+        }
+
+        string corruptStorageUrl;
+        using (var scope = _fixture.BeginScope())
+            corruptStorageUrl = (await scope.Resolve<CodeSpaceDbContext>().WorkflowArtifact.AsNoTracking().SingleAsync(a => a.Id == corruptArtifactId)).StorageUrl!;
+        await File.WriteAllBytesAsync(new Uri(corruptStorageUrl).LocalPath, new byte[100]);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            scope.Resolve<CodeSpaceDbContext>().AgentRunEvent.Add(new AgentRunEvent
+            {
+                Id = Guid.NewGuid(), AgentRunId = agentId, Kind = AgentEventKind.ToolCall, Text = "unavailable",
+                DataArtifactId = Guid.NewGuid(),
+            });
+            await scope.Resolve<CodeSpaceDbContext>().SaveChangesAsync();
+        }
+
+        var turn = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single();
+        var tools = turn.Blocks.OfType<StatBlock>().Single(s => s.Kind == "tools");
+
+        tools.Detail.ShouldBe("4 calls");
+        tools.Items.Single(i => i.Text == "Read").Detail.ShouldBe("1", "the pre-existing inline tool-name path is byte-compatible");
+        tools.Items.Single(i => i.Text == "WebSearch").Detail.ShouldBe("1", "the bounded prefix read recovers data.name from an offloaded payload");
+        tools.Items.Single(i => i.Text == "tool (payload corrupt)").Detail.ShouldBe("1", "a failed range-integrity check remains typed display data rather than a false tool name");
+        tools.Items.Single(i => i.Text == "tool (payload missing)").Detail.ShouldBe("1", "an unavailable UI artifact remains a typed display bucket; projection does not fail or erase the call");
+    }
+
+    [Fact]
+    public async Task Tool_histogram_caps_distinct_artifact_hydration_without_dropping_calls()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Many large tools");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Use many tools", resultSummary: null);
+        await SeedAgentNodeAsync(teamId, run, summary: "Done.", changedFiles: Array.Empty<string>());
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var agentId = await db.AgentRun.AsNoTracking().Where(a => a.WorkflowRunId == run).Select(a => a.Id).SingleAsync();
+            db.AgentRunEvent.AddRange(Enumerable.Range(0, 129).Select(i => new AgentRunEvent
+            {
+                Id = Guid.NewGuid(), AgentRunId = agentId, Kind = AgentEventKind.ToolCall, Text = $"tool-{i}", DataArtifactId = Guid.NewGuid(),
+            }));
+            await db.SaveChangesAsync();
+        }
+
+        var tools = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single().Blocks.OfType<StatBlock>().Single(s => s.Kind == "tools");
+
+        tools.Detail.ShouldBe("129 calls", "the display total comes from the full event count, never the hydrate budget");
+        tools.Items.Single(i => i.Text == "tool (payload missing)").Detail.ShouldBe("128", "at most 128 distinct artifact prefixes are inspected per turn");
+        tools.Items.Single(i => i.Text == "tool (payload not inspected)").Detail.ShouldBe("1", "calls beyond the hydrate budget stay visible and explicitly classified");
     }
 
     /// <summary>Seed a plain single-agent (non-supervisor) run: a node.started/completed ledger pair for the "agent" node (the workflow_run_node view surfaces it), the AgentRun wait that links the node to its run, and the AgentRun row whose persisted AgentRunResult carries the summary + changed files. No supervisor decisions.</summary>

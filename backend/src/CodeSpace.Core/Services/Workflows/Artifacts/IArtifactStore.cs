@@ -42,7 +42,16 @@ public interface IArtifactStore
 public interface IArtifactRangeReader
 {
     Task<ArtifactRangeReadResult> ReadRangeAsync(Guid teamId, Guid artifactId, long offset, int length, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Read the same bounded range from a set of artifacts. Implementations batch metadata discovery so a summary
+    /// projection does not issue one database lookup per referenced object; every distinct requested id has a typed
+    /// result, including missing/unavailable objects.
+    /// </summary>
+    Task<IReadOnlyDictionary<Guid, ArtifactRangeReadResult>> ReadRangesAsync(ArtifactRangesReadRequest request, CancellationToken cancellationToken);
 }
+
+public sealed record ArtifactRangesReadRequest(Guid TeamId, IReadOnlyCollection<Guid> ArtifactIds, long Offset, int Length);
 
 public enum ArtifactRangeReadState
 {

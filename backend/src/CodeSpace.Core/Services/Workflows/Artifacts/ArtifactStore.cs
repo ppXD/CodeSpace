@@ -230,11 +230,40 @@ public sealed partial class ArtifactStore : IArtifactStore, IArtifactRangeReader
 
         var row = await _db.WorkflowArtifact.AsNoTracking()
             .Where(a => a.Id == artifactId && a.TeamId == teamId)
-            .Select(a => new { a.Sha256, a.ContentType, a.SizeBytes, a.InlineBytes, a.StorageUrl, a.CasArtifactObjectId })
+            .Select(a => new ArtifactRangeRow(a.Id, a.Sha256, a.ContentType, a.SizeBytes, a.InlineBytes, a.StorageUrl, a.CasArtifactObjectId))
             .SingleOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false);
 
         if (row is null) return ArtifactRangeReadResult.Failed(ArtifactRangeReadState.MetadataMissing);
+        return await ReadRangeCoreAsync(teamId, row, offset, length, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyDictionary<Guid, ArtifactRangeReadResult>> ReadRangesAsync(ArtifactRangesReadRequest request, CancellationToken cancellationToken)
+    {
+        var ids = request.ArtifactIds.Distinct().ToArray();
+        if (ids.Length == 0) return new Dictionary<Guid, ArtifactRangeReadResult>();
+
+        if (request.Offset < 0 || request.Length <= 0)
+            return ids.ToDictionary(id => id, _ => ArtifactRangeReadResult.Failed(ArtifactRangeReadState.InvalidOffset));
+
+        var rows = await _db.WorkflowArtifact.AsNoTracking()
+            .Where(a => a.TeamId == request.TeamId && ids.Contains(a.Id))
+            .Select(a => new ArtifactRangeRow(a.Id, a.Sha256, a.ContentType, a.SizeBytes, a.InlineBytes, a.StorageUrl, a.CasArtifactObjectId))
+            .ToDictionaryAsync(a => a.Id, cancellationToken).ConfigureAwait(false);
+
+        var results = new Dictionary<Guid, ArtifactRangeReadResult>(ids.Length);
+        foreach (var id in ids)
+        {
+            results[id] = rows.TryGetValue(id, out var row)
+                ? await ReadRangeCoreAsync(request.TeamId, row, request.Offset, request.Length, cancellationToken).ConfigureAwait(false)
+                : ArtifactRangeReadResult.Failed(ArtifactRangeReadState.MetadataMissing);
+        }
+
+        return results;
+    }
+
+    private async Task<ArtifactRangeReadResult> ReadRangeCoreAsync(Guid teamId, ArtifactRangeRow row, long offset, int length, CancellationToken cancellationToken)
+    {
         if (offset > row.SizeBytes)
             return ArtifactRangeReadResult.Failed(ArtifactRangeReadState.InvalidOffset, row.SizeBytes, row.Sha256, row.ContentType);
 
@@ -257,7 +286,7 @@ public sealed partial class ArtifactStore : IArtifactStore, IArtifactRangeReader
             {
                 var range = row.StorageUrl is { } url
                     ? await _blobs.ReadRangeAsync(url, offset, length, cancellationToken).ConfigureAwait(false)
-                    : await ReadRoutedRangeAsync(RoutedReadFor(teamId, artifactId, row.CasArtifactObjectId), offset, length, cancellationToken).ConfigureAwait(false);
+                    : await ReadRoutedRangeAsync(RoutedReadFor(teamId, row.Id, row.CasArtifactObjectId), offset, length, cancellationToken).ConfigureAwait(false);
                 bytes = range.Bytes;
                 observedLength = range.TotalLength;
             }
@@ -318,6 +347,8 @@ public sealed partial class ArtifactStore : IArtifactStore, IArtifactRangeReader
 
     private static ArtifactRangeReadResult Unavailable(ArtifactRangeReadState state, long totalLength, string sha256, string contentType) =>
         ArtifactRangeReadResult.Failed(state, totalLength, sha256, contentType);
+
+    private sealed record ArtifactRangeRow(Guid Id, string Sha256, string ContentType, long SizeBytes, byte[]? InlineBytes, string? StorageUrl, Guid? CasArtifactObjectId);
 
     private static RoutedRead RoutedReadFor(Guid teamId, Guid artifactId, Guid? artifactObjectId) =>
         new(teamId, artifactId, artifactObjectId ?? throw new InvalidOperationException("Artifact storage locator is missing."));
