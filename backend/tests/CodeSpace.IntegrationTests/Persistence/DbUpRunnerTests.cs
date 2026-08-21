@@ -150,6 +150,7 @@ public class DbUpRunnerTests
     [InlineData("ux_supervisor_decision_run_observation_revision", "0161_supervisor_decision_observation_cursor.sql")] // observation change keyset
     [InlineData("idx_are_run_kind_sequence", "0158_agent_run_event_kind_sequence_index.sql")]              // exact-kind Agent Run event page: (agent_run_id, kind, sequence)
     [InlineData("idx_tool_call_ledger_run_created_id", "0159_tool_call_ledger_run_created_index.sql")]       // bounded governed audit: (agent_run_id, created_date, id)
+    [InlineData("idx_workflow_run_session_run_number", "0162_workflow_run_session_run_number_index.sql")]    // immutable session-membership keyset: (session_id, run_number)
     public async Task Index_exists_after_migration(string indexName, string addedBy)
     {
         var exists = await IndexExistsAsync(indexName).ConfigureAwait(false);

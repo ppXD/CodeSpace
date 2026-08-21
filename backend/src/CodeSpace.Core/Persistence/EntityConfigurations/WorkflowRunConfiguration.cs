@@ -39,6 +39,10 @@ public class WorkflowRunConfiguration : IEntityTypeConfiguration<WorkflowRun>
         // stays tiny while session adoption is sparse; keep in sync with the migration.
         builder.HasIndex(r => new { r.SessionId, r.SessionTurnIndex }).HasFilter("session_id IS NOT NULL");
 
+        // Additive metadata-page keyset (migration 0162). RunNumber is immutable + team-scoped; SessionId narrows the
+        // membership set and the backward index scan serves Tail/Older without OFFSET or an explicit sort.
+        builder.HasIndex(r => new { r.SessionId, r.RunNumber }).HasDatabaseName("idx_workflow_run_session_run_number").HasFilter("session_id IS NOT NULL");
+
         // Npgsql xmin concurrency token. EF appends WHERE xmin = $loaded to every UPDATE; second
         // writer racing the same run gets DbUpdateConcurrencyException and the engine skips.
         // PostgreSQL stamps xmin automatically on every INSERT/UPDATE, so we map it via
