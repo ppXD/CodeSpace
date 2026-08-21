@@ -116,8 +116,34 @@ export interface AgentRunEventDto {
   kind: string;
   text: string;
   data: string | null;
+  /** Metadata-only ref for a large, already-redacted harness-native payload. Bytes are fetched only from the exact run/event reader. */
+  dataArtifactId?: string | null;
   occurredAt: string;
 }
+
+export type AgentRunEventDataReadAvailability = "NotReferenced" | "InvalidRange" | "MetadataMissing" | "PhysicalObjectMissing" | "IntegrityFailure" | "BackendUnavailable" | "AccessDenied";
+
+export interface AgentRunEventDataRangeAvailable {
+  availability: "Available";
+  bytes: Uint8Array;
+  agentRunId: string;
+  eventSequence: number;
+  dataArtifactId: string;
+  offsetBytes: number;
+  nextOffsetBytes: number | null;
+  totalBytes: number;
+  sha256: string;
+  contentType: string;
+  integrityVerified: boolean;
+}
+
+export interface AgentRunEventDataRangeProblem {
+  availability: AgentRunEventDataReadAvailability | "Missing" | "InvalidResponse";
+  code: string;
+  isRetryable: boolean;
+}
+
+export type AgentRunEventDataRangeResult = AgentRunEventDataRangeAvailable | AgentRunEventDataRangeProblem;
 
 export type AgentRunLogStatus = "Open" | "Completed" | "Truncated" | "Unavailable" | "Corrupt" | "CaptureFailed";
 
@@ -328,6 +354,18 @@ export const agentsApi = {
   getRun: (agentRunId: string) => fetchJson<AgentRunSummary>(`/api/agents/runs/${agentRunId}`),
   listRunEvents: (agentRunId: string, after = 0) =>
     fetchJson<AgentRunEventDto[]>(`/api/agents/runs/${agentRunId}/events?after=${after}`),
+  readRunEventDataRange: async (agentRunId: string, eventSequence: number, dataArtifactId: string, offsetBytes: number, limitBytes: number, signal?: AbortSignal): Promise<AgentRunEventDataRangeResult> => {
+    const path = `/api/agents/runs/${encodeURIComponent(agentRunId)}/events/${eventSequence}/data?offsetBytes=${offsetBytes}&limitBytes=${limitBytes}`;
+    try {
+      const response = await fetchResponse(path, { signal, headers: { Accept: "application/octet-stream" } });
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      return validEventDataRange(response.headers, bytes, { agentRunId, eventSequence, dataArtifactId, offsetBytes, limitBytes });
+    } catch (error) {
+      if (!(error instanceof ApiError)) throw error;
+      if (error.status === 404) return { availability: "Missing", code: error.code, isRetryable: false };
+      return validEventDataProblem(error.body, { agentRunId, eventSequence, dataArtifactId });
+    }
+  },
   listRunLogs: async (agentRunId: string, cursor: string | null, limit = 25, signal?: AbortSignal): Promise<AgentRunLogPage | null> => {
     const normalizedLimit = Math.min(Math.max(Number.isSafeInteger(limit) ? limit : 25, 1), 100);
     const params = new URLSearchParams({ limit: String(normalizedLimit) });
@@ -382,6 +420,7 @@ export const agentsApi = {
 };
 
 const LOG_READ_AVAILABILITIES = new Set<AgentRunLogReadAvailability>(["InvalidRange", "PhysicalObjectMissing", "IntegrityFailure", "BackendUnavailable", "AccessDenied", "ProviderTimeout", "Unsupported"]);
+const EVENT_DATA_READ_AVAILABILITIES = new Set<AgentRunEventDataReadAvailability>(["NotReferenced", "InvalidRange", "MetadataMissing", "PhysicalObjectMissing", "IntegrityFailure", "BackendUnavailable", "AccessDenied"]);
 const LOG_STATUSES = new Set<AgentRunLogStatus>(["Open", "Completed", "Truncated", "Unavailable", "Corrupt", "CaptureFailed"]);
 const LOG_RETENTIONS = new Set(["Ephemeral", "Run", "Team", "Compliance", "Permanent"]);
 
@@ -411,6 +450,52 @@ function validLogRange(headers: Headers, bytes: Uint8Array, requestedOffset: num
     contentType,
     contentEncoding: headers.get("X-CodeSpace-Log-Content-Encoding"),
   };
+}
+
+interface ExpectedEventDataIdentity {
+  agentRunId: string;
+  eventSequence: number;
+  dataArtifactId: string;
+  offsetBytes?: number;
+  limitBytes?: number;
+}
+
+function validEventDataRange(headers: Headers, bytes: Uint8Array, expected: Required<ExpectedEventDataIdentity>): AgentRunEventDataRangeResult {
+  const agentRunId = headers.get("X-CodeSpace-Agent-Run-Id");
+  const eventSequence = exactIntegerHeader(headers, "X-CodeSpace-Agent-Event-Sequence");
+  const dataArtifactId = headers.get("X-CodeSpace-Agent-Event-Data-Artifact-Id");
+  const offsetBytes = exactIntegerHeader(headers, "X-CodeSpace-Agent-Event-Data-Offset");
+  const nextOffsetRaw = headers.get("X-CodeSpace-Agent-Event-Data-Next-Offset");
+  const nextOffsetBytes = nextOffsetRaw == null ? null : exactIntegerHeader(headers, "X-CodeSpace-Agent-Event-Data-Next-Offset");
+  const totalBytes = exactIntegerHeader(headers, "X-CodeSpace-Agent-Event-Data-Total-Bytes");
+  const sha256 = headers.get("X-CodeSpace-Agent-Event-Data-Sha256");
+  const contentType = headers.get("X-CodeSpace-Agent-Event-Data-Content-Type");
+  const integrityRaw = headers.get("X-CodeSpace-Agent-Event-Data-Integrity-Verified");
+  const computedNext = offsetBytes == null ? null : offsetBytes + bytes.byteLength;
+  const hasMore = computedNext != null && totalBytes != null && computedNext < totalBytes;
+  const valid = agentRunId === expected.agentRunId && eventSequence === expected.eventSequence
+    && dataArtifactId?.toLowerCase() === expected.dataArtifactId.toLowerCase() && offsetBytes === expected.offsetBytes
+    && bytes.byteLength <= expected.limitBytes && computedNext != null && Number.isSafeInteger(computedNext) && totalBytes != null && computedNext <= totalBytes
+    && !(bytes.byteLength === 0 && offsetBytes < totalBytes) && (hasMore ? nextOffsetRaw != null && nextOffsetBytes === computedNext : nextOffsetRaw == null)
+    && typeof sha256 === "string" && /^[0-9a-f]{64}$/i.test(sha256) && typeof contentType === "string" && contentType.split(";", 1)[0].trim().toLowerCase() === "application/json"
+    && (integrityRaw === "true" || integrityRaw === "false") && !(integrityRaw === "true" && (offsetBytes !== 0 || computedNext !== totalBytes));
+  if (!valid) return { availability: "InvalidResponse", code: "invalid_event_data_range_headers", isRetryable: false };
+  return {
+    availability: "Available", bytes, agentRunId, eventSequence, dataArtifactId, offsetBytes, nextOffsetBytes,
+    totalBytes, sha256, contentType, integrityVerified: integrityRaw === "true",
+  };
+}
+
+function validEventDataProblem(value: unknown, expected: Pick<ExpectedEventDataIdentity, "agentRunId" | "eventSequence" | "dataArtifactId">): AgentRunEventDataRangeProblem {
+  const availability = isRecord(value) && typeof value.availability === "string" ? value.availability : null;
+  if (!isRecord(value) || value.agentRunId !== expected.agentRunId || value.eventSequence !== expected.eventSequence
+    || typeof value.dataArtifactId !== "string" || value.dataArtifactId.toLowerCase() !== expected.dataArtifactId.toLowerCase()
+    || availability == null || !EVENT_DATA_READ_AVAILABILITIES.has(availability as AgentRunEventDataReadAvailability)
+    || typeof value.code !== "string" || value.code.length === 0 || typeof value.isRetryable !== "boolean"
+    || value.isRetryable !== (availability === "BackendUnavailable")) {
+    return { availability: "InvalidResponse", code: "invalid_event_data_problem", isRetryable: false };
+  }
+  return { availability: availability as AgentRunEventDataReadAvailability, code: value.code, isRetryable: value.isRetryable };
 }
 
 function exactIntegerHeader(headers: Headers, name: string): number | null {

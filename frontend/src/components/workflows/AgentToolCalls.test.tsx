@@ -1,5 +1,5 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ToolCallView } from "@/api/agents";
 import type { TeamMemberSummary } from "@/api/teams";
@@ -8,7 +8,7 @@ import { AgentToolCalls } from "./AgentToolCalls";
 const state = vi.hoisted(() => ({
   run: { status: "Succeeded" as string },
   toolCalls: [] as ToolCallView[],
-  events: [] as { sequence: number; kind: string; text: string; data: string | null; occurredAt: string }[],
+  events: [] as { sequence: number; kind: string; text: string; data: string | null; dataArtifactId?: string | null; occurredAt: string }[],
   isLoading: false,
   eventsLoading: false,
   identities: new Map<string, TeamMemberSummary>(),
@@ -34,6 +34,31 @@ const call = (over: Partial<ToolCallView>): ToolCallView => ({
   approvedAt: null,
   ...over,
 });
+
+const runId = "11111111-1111-1111-1111-111111111111";
+const artifactId = "22222222-2222-2222-2222-222222222222";
+
+function payloadResponse(text: string, offset: number, total: number, next: number | null) {
+  const bytes = new TextEncoder().encode(text);
+  return new Response(bytes.buffer, { headers: {
+    "Content-Type": "application/octet-stream",
+    "X-CodeSpace-Agent-Run-Id": runId,
+    "X-CodeSpace-Agent-Event-Sequence": "7",
+    "X-CodeSpace-Agent-Event-Data-Artifact-Id": artifactId,
+    "X-CodeSpace-Agent-Event-Data-Offset": String(offset),
+    ...(next == null ? {} : { "X-CodeSpace-Agent-Event-Data-Next-Offset": String(next) }),
+    "X-CodeSpace-Agent-Event-Data-Total-Bytes": String(total),
+    "X-CodeSpace-Agent-Event-Data-Sha256": "a".repeat(64),
+    "X-CodeSpace-Agent-Event-Data-Content-Type": "application/json",
+    "X-CodeSpace-Agent-Event-Data-Integrity-Verified": offset === 0 && next == null && bytes.byteLength === total ? "true" : "false",
+  } });
+}
+
+function offloadedEvent() {
+  return { sequence: 7, kind: "ToolCall", text: "WebSearch", data: null, dataArtifactId: artifactId, occurredAt: "2026-06-11T11:15:00Z" };
+}
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe("AgentToolCalls", () => {
   it("lists each governed tool call with its tool, status badge, and a chronological timestamp", () => {
@@ -109,6 +134,8 @@ describe("AgentToolCalls", () => {
   });
 
   it("renders a tool call's name + args, and makes long args a click-to-expand block (no lossy ellipsis)", () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
     const longPath = "/private/var/folders/z7/qrtkqj255vs6dg3wjfkgcn380000gn/T/codespace/really/long/ai-coding-agents-research-report.md";
     state.run = { status: "Succeeded" };
     state.isLoading = false;
@@ -126,6 +153,7 @@ describe("AgentToolCalls", () => {
     expect(details).not.toBeNull();   // long args → a disclosure, not a hard-cut
     const full = container.querySelector(".tc-args-full");
     expect(full?.textContent).toContain(longPath);   // the FULL value is present, expandable — never truncated away
+    expect(fetchMock).not.toHaveBeenCalled();       // inline payloads keep their original zero-I/O path
   });
 
   it("shows the empty state when there are no tool calls at all", () => {
@@ -152,5 +180,100 @@ describe("AgentToolCalls", () => {
     const { container } = render(<AgentToolCalls agentRunId="r1" />);
 
     expect(container).toBeEmptyDOMElement();
+  });
+
+  it("keeps offloaded bytes local and unread until the user expands that exact native event", async () => {
+    const requests: Array<{ url: URL; signal: AbortSignal }> = [];
+    const raw = '{"name":"WebSearch","input":{"query":"bounded payload"}}';
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init: RequestInit = {}) => {
+      requests.push({ url: new URL(String(input), "http://test.local"), signal: init.signal as AbortSignal });
+      return payloadResponse(raw, 0, raw.length, null);
+    }));
+    state.run = { status: "Succeeded" };
+    state.toolCalls = [];
+    state.events = [offloadedEvent()];
+    state.isLoading = false;
+    state.eventsLoading = false;
+
+    render(<AgentToolCalls agentRunId={runId} />);
+
+    expect(requests).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: /expand offloaded payload for websearch/i }));
+    expect(await screen.findByText(/bounded payload/i)).toBeInTheDocument();
+    expect(requests).toHaveLength(1);
+    expect(requests[0].url.pathname).toBe(`/api/agents/runs/${runId}/events/7/data`);
+    expect(requests[0].url.searchParams.get("offsetBytes")).toBe("0");
+    expect(requests[0].url.searchParams.get("limitBytes")).toBe(String(64 * 1024));
+    expect(requests[0].signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("aborts an in-flight payload on run identity switch and on disclosure close", async () => {
+    const signals: AbortSignal[] = [];
+    vi.stubGlobal("fetch", vi.fn((_input: RequestInfo | URL, init: RequestInit = {}) => {
+      signals.push(init.signal as AbortSignal);
+      return new Promise<Response>(() => undefined);
+    }));
+    state.run = { status: "Succeeded" };
+    state.toolCalls = [];
+    state.events = [offloadedEvent()];
+    state.isLoading = false;
+    state.eventsLoading = false;
+
+    const view = render(<AgentToolCalls agentRunId={runId} />);
+    fireEvent.click(screen.getByRole("button", { name: /expand offloaded payload for websearch/i }));
+    await waitFor(() => expect(signals).toHaveLength(1));
+
+    const nextRunId = "33333333-3333-3333-3333-333333333333";
+    view.rerender(<AgentToolCalls agentRunId={nextRunId} />);
+    await waitFor(() => expect(signals).toHaveLength(2));
+    expect(signals[0].aborted).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: /collapse offloaded payload for websearch/i }));
+    expect(signals[1].aborted).toBe(true);
+  });
+
+  it("keeps at most eight 64 KiB pages visible while the user advances a large payload", async () => {
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://test.local");
+      const offset = Number(url.searchParams.get("offsetBytes"));
+      const next = offset < 8 ? offset + 1 : null;
+      return payloadResponse(String(offset), offset, 9, next);
+    }));
+    state.run = { status: "Succeeded" };
+    state.toolCalls = [];
+    state.events = [offloadedEvent()];
+    state.isLoading = false;
+    state.eventsLoading = false;
+
+    const { container } = render(<AgentToolCalls agentRunId={runId} />);
+    fireEvent.click(screen.getByRole("button", { name: /expand offloaded payload for websearch/i }));
+    await screen.findByText(/^0$/);
+    for (let offset = 1; offset < 9; offset++) {
+      fireEvent.click(screen.getByRole("button", { name: /load next payload range/i }));
+      await screen.findByText(new RegExp(`^${offset}$`));
+    }
+
+    expect(container.querySelectorAll(".tc-payload-chunk").length).toBeLessThanOrEqual(8);
+    expect(screen.queryByText(/^0$/)).toBeNull();
+    expect(screen.getByText(/Earlier payload bytes were removed/i)).toBeInTheDocument();
+  });
+
+  it("shows closed typed storage health and offers retry only when the backend declares it retryable", async () => {
+    const problem = { agentRunId: runId, eventSequence: 7, dataArtifactId: artifactId, availability: "BackendUnavailable", code: "BackendUnavailable", isRetryable: true };
+    const raw = '{"name":"WebSearch","input":{"query":"recovered"}}';
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(problem), { status: 503, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(payloadResponse(raw, 0, raw.length, null)));
+    state.run = { status: "Succeeded" };
+    state.toolCalls = [];
+    state.events = [offloadedEvent()];
+    state.isLoading = false;
+    state.eventsLoading = false;
+
+    render(<AgentToolCalls agentRunId={runId} />);
+    fireEvent.click(screen.getByRole("button", { name: /expand offloaded payload for websearch/i }));
+    expect(await screen.findByText(/Storage backend unavailable/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /retry payload range/i }));
+    expect(await screen.findByText(/recovered/i)).toBeInTheDocument();
   });
 });

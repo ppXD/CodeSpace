@@ -1,7 +1,10 @@
+import { useState } from "react";
+
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { isAgentRunActive, type ToolCallLedgerStatus } from "@/api/agents";
 import { useAgentRun, useAgentRunEvents, useToolCalls } from "@/hooks/use-agents";
 import { useTeamMemberIdentityMap } from "@/hooks/use-team-members";
+import { AgentRunEventPayload } from "./AgentRunEventPayload";
 
 /**
  * The tool-call view for one agent run. It prefers the GOVERNED ledger — every side-effecting MCP tool call with its
@@ -73,13 +76,27 @@ export function AgentToolCalls({ agentRunId, hideHeader }: { agentRunId: string;
                   <span className="tc-tool">{call?.name ?? e.text ?? "tool"}</span>
                   <span className="tc-when">{new Date(e.occurredAt).toLocaleTimeString()}</span>
                 </div>
-                <ToolCallArgs value={call ? call.args : e.text} />
+                {e.dataArtifactId
+                  ? <OffloadedToolCallArgs agentRunId={agentRunId} eventSequence={e.sequence} dataArtifactId={e.dataArtifactId} toolName={call?.name ?? e.text ?? "tool"} />
+                  : <ToolCallArgs value={call ? call.args : e.text} />}
               </li>
             );
           })}
         </ol>
       )}
     </div>
+  );
+}
+
+function OffloadedToolCallArgs({ agentRunId, eventSequence, dataArtifactId, toolName }: { agentRunId: string; eventSequence: number; dataArtifactId: string; toolName: string }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <details className="tc-argbox tc-payload-disclosure" onToggle={(event) => setExpanded(event.currentTarget.open)}>
+      <summary role="button" className="tc-args" aria-label={`${expanded ? "Collapse" : "Expand"} offloaded payload for ${toolName}`}>
+        Payload offloaded · {expanded ? "collapse" : "expand"}
+      </summary>
+      {expanded && <AgentRunEventPayload agentRunId={agentRunId} eventSequence={eventSequence} dataArtifactId={dataArtifactId} />}
+    </details>
   );
 }
 
