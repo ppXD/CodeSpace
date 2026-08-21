@@ -473,6 +473,44 @@ public class SupervisorResolverTests
     public void ResolvedBranch_is_null_for_a_verified_resolve_that_pushed_no_branch() =>
         SupervisorOutcome.ResolvedBranch(Decision(SupervisorDecisionKinds.Resolve, 1, ResolveOutcomeWithBranch("Succeeded", VerifiedSummary, null))).ShouldBeNull();
 
+    [Fact]
+    public void Resolve_contributor_integrity_withholds_an_otherwise_verified_branch()
+    {
+        var outcome = SupervisorOutcome.AppendResolveContributorIntegrity(
+            ResolveOutcomeWithBranch("Succeeded", VerifiedSummary, "codespace/resolve/untrusted"),
+            new SupervisorResolveContributorIntegrity { AgentRunId = Guid.NewGuid(), Kind = SupervisorResolveContributorIssueKind.MissingRow });
+
+        var resolve = Decision(SupervisorDecisionKinds.Resolve, 2, outcome);
+
+        SupervisorOutcome.ReadResolutionVerdict(outcome).ShouldBe(SupervisorResolutionVerdict.Unverified);
+        SupervisorOutcome.ResolvedBranch(resolve).ShouldBeNull();
+        SupervisorOutcome.ReadFinalIntegratedBranch(new[] { Plan(1, ValidPlanPayload()), resolve }).ShouldBeNull();
+    }
+
+    [Fact]
+    public void Resolve_contributor_integrity_withholds_every_multi_repo_branch()
+    {
+        var outcome = SupervisorOutcome.AppendResolveContributorIntegrity(
+            ResolveOutcomeWithRepos("Succeeded", VerifiedSummary, ("web", Guid.NewGuid(), "codespace/resolve/web"), ("api", Guid.NewGuid(), "codespace/resolve/api")),
+            new SupervisorResolveContributorIntegrity { AgentRunId = Guid.NewGuid(), Kind = SupervisorResolveContributorIssueKind.MalformedResult });
+        var resolve = Decision(SupervisorDecisionKinds.Resolve, 2, outcome);
+
+        SupervisorOutcome.ResolvedRepositoryBranches(resolve).ShouldBeEmpty();
+        SupervisorOutcome.ReadFinalRepositoryBranches(new[] { Plan(1, ValidPlanPayload()), resolve }).ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void Resolve_contributor_integrity_is_an_active_plan_barrier_but_planless_legacy_is_not()
+    {
+        var outcome = SupervisorOutcome.AppendResolveContributorIntegrity(
+            ResolveOutcomeWithBranch("Succeeded", VerifiedSummary, "codespace/resolve/untrusted"),
+            new SupervisorResolveContributorIntegrity { AgentRunId = Guid.NewGuid(), Kind = SupervisorResolveContributorIssueKind.CrossTeam });
+        var resolve = Decision(SupervisorDecisionKinds.Resolve, 2, outcome);
+
+        SupervisorOutcome.HasActiveResolveContributorIntegrityBarrier(new[] { Plan(1, ValidPlanPayload()), resolve }).ShouldBeTrue();
+        SupervisorOutcome.HasActiveResolveContributorIntegrityBarrier(new[] { resolve }).ShouldBeFalse("plan-less legacy tapes never enter the new publication barrier");
+    }
+
     // ── S7-D1: per-repo node output (ReadFinalRepositoryBranches) — the MULTI-repo complement of ReadFinalIntegratedBranch ──
 
     /// <summary>A MULTI-repo merge outcome: the aggregate status + a per-repo <c>repositories[]</c> array, each block its own status/integratedBranch.</summary>
