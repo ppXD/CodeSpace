@@ -1,6 +1,7 @@
+import { useCallback, useEffect, useRef, useState } from "react";
 import { keepPreviousData, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { buildRunListParams, workflowsApi, type AnswerDecisionInput, type CreateWorkflowInput, type RunListFilterInput, type UpdateWorkflowInput, type WorkflowRunStatus } from "@/api/workflows";
+import { buildRunListParams, InvalidWorkflowRunRecordPageError, workflowsApi, type AnswerDecisionInput, type CreateWorkflowInput, type RunListFilterInput, type RunRecordView, type UpdateWorkflowInput, type WorkflowRunStatus } from "@/api/workflows";
 
 /**
  * Hooks for the workflows engine surface. Same shape as the repository hooks —
@@ -257,18 +258,208 @@ export function useRunTimeline(runId: string | null) {
   });
 }
 
-/** The run's RAW event ledger — the Trace audit. Polls every 2s while the run is non-terminal, then stops. */
+/** Legacy full-ledger compatibility reader. Trace uses useRunRecordWindow; this endpoint is never auto-polled. */
 export function useRunRecords(runId: string | null) {
   return useQuery({
     queryKey: ["run-records", runId],
     queryFn: () => workflowsApi.getRunRecords(runId!),
     enabled: runId != null,
-    refetchInterval: (q) => {
-      const data = q.state.data;
-      if (!data) return false;
-      return isRunActive(data.runStatus) ? 2000 : false;
-    },
   });
+}
+
+export const RUN_RECORD_PAGE_LIMIT = 128;
+export const RUN_RECORD_WINDOW_LIMIT = 512;
+export const RUN_RECORD_WINDOW_POLL_MS = 2000;
+export const RUN_RECORD_WINDOW_MAX_POLL_MS = 16000;
+
+export interface RunRecordWindow {
+  records: RunRecordView[];
+  runStatus: WorkflowRunStatus | undefined;
+  isLoading: boolean;
+  isLoadingOlder: boolean;
+  error: Error | null;
+  hasOlder: boolean;
+  olderRecordsOmitted: boolean;
+  newerRecordsOmitted: boolean;
+  atLatest: boolean;
+  loadOlder: () => Promise<void>;
+  returnToLatest: () => void;
+}
+
+interface RunRecordWindowState extends Omit<RunRecordWindow, "loadOlder" | "returnToLatest"> {
+  runId: string | null;
+}
+
+function emptyRunRecordWindow(runId: string | null, isLoading: boolean): RunRecordWindowState {
+  return {
+    runId,
+    records: [],
+    runStatus: undefined,
+    isLoading,
+    isLoadingOlder: false,
+    error: null,
+    hasOlder: false,
+    olderRecordsOmitted: false,
+    newerRecordsOmitted: false,
+    atLatest: true,
+  };
+}
+
+function isAbort(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+/**
+ * A fixed-size local window over the raw ledger. Pages deliberately bypass React Query: no body page is retained in
+ * the global cache, and both the component state and rendered DOM are capped at RUN_RECORD_WINDOW_LIMIT records.
+ */
+export function useRunRecordWindow(runId: string | null): RunRecordWindow {
+  const [state, setState] = useState<RunRecordWindowState>(() => emptyRunRecordWindow(runId, runId != null));
+  const [tailRevision, setTailRevision] = useState(0);
+  const [pollRevision, setPollRevision] = useState(0);
+  const generationRef = useRef(0);
+  const tailControllerRef = useRef<AbortController | null>(null);
+  const olderControllerRef = useRef<AbortController | null>(null);
+  const newerControllerRef = useRef<AbortController | null>(null);
+  const pollingBlockedRef = useRef(false);
+  const transientPollFailuresRef = useRef(0);
+
+  useEffect(() => {
+    const generation = ++generationRef.current;
+    tailControllerRef.current?.abort();
+    olderControllerRef.current?.abort();
+    newerControllerRef.current?.abort();
+    pollingBlockedRef.current = false;
+    transientPollFailuresRef.current = 0;
+    setState(emptyRunRecordWindow(runId, runId != null));
+    if (runId == null) return;
+
+    const controller = new AbortController();
+    tailControllerRef.current = controller;
+    void workflowsApi.getRunRecordPage(runId, { limit: RUN_RECORD_PAGE_LIMIT }, controller.signal).then((page) => {
+      if (generationRef.current !== generation || controller.signal.aborted) return;
+      setState({
+        runId,
+        records: page.records,
+        runStatus: page.runStatus,
+        isLoading: false,
+        isLoadingOlder: false,
+        error: null,
+        hasOlder: page.nextBeforeSequence !== null,
+        olderRecordsOmitted: page.nextBeforeSequence !== null,
+        newerRecordsOmitted: false,
+        atLatest: true,
+      });
+    }).catch((error: unknown) => {
+      if (generationRef.current !== generation || controller.signal.aborted || isAbort(error)) return;
+      setState({ ...emptyRunRecordWindow(runId, false), error: error instanceof Error ? error : new Error("Could not load the Workflow Run record window.") });
+    });
+
+    return () => {
+      controller.abort();
+      if (tailControllerRef.current === controller) tailControllerRef.current = null;
+    };
+  }, [runId, tailRevision]);
+
+  const visible = state.runId === runId ? state : emptyRunRecordWindow(runId, runId != null);
+  const newestSequence = visible.records.at(-1)?.sequence ?? 0;
+
+  useEffect(() => {
+    if (runId == null || visible.isLoading || visible.isLoadingOlder || !visible.atLatest || visible.runStatus == null || !isRunActive(visible.runStatus) || pollingBlockedRef.current) return;
+
+    const generation = generationRef.current;
+    const delay = Math.min(RUN_RECORD_WINDOW_POLL_MS * 2 ** transientPollFailuresRef.current, RUN_RECORD_WINDOW_MAX_POLL_MS);
+    const timer = window.setTimeout(() => {
+      const controller = new AbortController();
+      newerControllerRef.current?.abort();
+      newerControllerRef.current = controller;
+      void workflowsApi.getRunRecordPage(runId, { afterSequence: newestSequence, limit: RUN_RECORD_PAGE_LIMIT }, controller.signal).then((page) => {
+        if (generationRef.current !== generation || controller.signal.aborted) return;
+        transientPollFailuresRef.current = 0;
+        setState((previous) => {
+          if (previous.runId !== runId) return previous;
+          const combined = [...previous.records, ...page.records];
+          const overflow = Math.max(0, combined.length - RUN_RECORD_WINDOW_LIMIT);
+          const terminalBacklog = !isRunActive(page.runStatus) && page.nextAfterSequence !== null;
+          return {
+            ...previous,
+            records: overflow === 0 ? combined : combined.slice(overflow),
+            runStatus: page.runStatus,
+            error: null,
+            hasOlder: previous.hasOlder || overflow > 0,
+            olderRecordsOmitted: previous.olderRecordsOmitted || overflow > 0,
+            newerRecordsOmitted: previous.newerRecordsOmitted || terminalBacklog,
+            atLatest: previous.atLatest && !terminalBacklog,
+          };
+        });
+        setPollRevision((revision) => revision + 1);
+      }).catch((error: unknown) => {
+        if (generationRef.current !== generation || controller.signal.aborted || isAbort(error)) return;
+        if (error instanceof InvalidWorkflowRunRecordPageError) pollingBlockedRef.current = true;
+        else transientPollFailuresRef.current = Math.min(transientPollFailuresRef.current + 1, 3);
+        setState((previous) => previous.runId === runId ? { ...previous, error: error instanceof Error ? error : new Error("Could not refresh the Workflow Run record window.") } : previous);
+        if (!(error instanceof InvalidWorkflowRunRecordPageError)) setPollRevision((revision) => revision + 1);
+      }).finally(() => {
+        if (newerControllerRef.current === controller) newerControllerRef.current = null;
+      });
+    }, delay);
+
+    return () => {
+      window.clearTimeout(timer);
+      newerControllerRef.current?.abort();
+      newerControllerRef.current = null;
+    };
+  }, [newestSequence, pollRevision, runId, visible.atLatest, visible.isLoading, visible.isLoadingOlder, visible.runStatus]);
+
+  const loadOlder = useCallback(async () => {
+    if (runId == null || visible.isLoading || visible.isLoadingOlder || !visible.hasOlder || visible.records.length === 0 || olderControllerRef.current !== null) return;
+    newerControllerRef.current?.abort();
+    newerControllerRef.current = null;
+    const generation = generationRef.current;
+    const beforeSequence = visible.records[0].sequence;
+    const controller = new AbortController();
+    olderControllerRef.current = controller;
+    setState((previous) => previous.runId === runId ? { ...previous, isLoadingOlder: true, error: null } : previous);
+
+    try {
+      const page = await workflowsApi.getRunRecordPage(runId, { beforeSequence, limit: RUN_RECORD_PAGE_LIMIT }, controller.signal);
+      if (generationRef.current !== generation || controller.signal.aborted) return;
+      setState((previous) => {
+        if (previous.runId !== runId) return previous;
+        const combined = [...page.records, ...previous.records];
+        const overflow = Math.max(0, combined.length - RUN_RECORD_WINDOW_LIMIT);
+        return {
+          ...previous,
+          records: overflow === 0 ? combined : combined.slice(0, RUN_RECORD_WINDOW_LIMIT),
+          runStatus: page.runStatus,
+          isLoadingOlder: false,
+          error: null,
+          hasOlder: page.nextBeforeSequence !== null,
+          olderRecordsOmitted: page.nextBeforeSequence !== null,
+          newerRecordsOmitted: previous.newerRecordsOmitted || overflow > 0,
+          atLatest: previous.atLatest && overflow === 0,
+        };
+      });
+    } catch (error) {
+      if (generationRef.current !== generation || controller.signal.aborted || isAbort(error)) return;
+      setState((previous) => previous.runId === runId ? { ...previous, isLoadingOlder: false, error: error instanceof Error ? error : new Error("Could not load older Workflow Run records.") } : previous);
+    } finally {
+      if (olderControllerRef.current === controller) olderControllerRef.current = null;
+    }
+  }, [runId, visible.hasOlder, visible.isLoading, visible.isLoadingOlder, visible.records]);
+
+  const returnToLatest = useCallback(() => {
+    ++generationRef.current;
+    tailControllerRef.current?.abort();
+    olderControllerRef.current?.abort();
+    newerControllerRef.current?.abort();
+    pollingBlockedRef.current = false;
+    transientPollFailuresRef.current = 0;
+    setState((previous) => previous.runId === runId ? { ...previous, isLoading: runId != null, isLoadingOlder: false, error: null } : previous);
+    setTailRevision((revision) => revision + 1);
+  }, [runId]);
+
+  return { ...visible, loadOlder, returnToLatest };
 }
 
 /**

@@ -1,13 +1,17 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { RunRecordsResponse, RunRecordView, WorkflowRunDataCompletenessView } from "@/api/workflows";
+import type { RunRecordView, WorkflowRunDataCompletenessView } from "@/api/workflows";
 
 // Drive the records through the hook; stub JsonView so the test asserts "the raw payload is shown" without its tree.
-const recordsMock: { data: RunRecordsResponse | undefined; isLoading: boolean } = { data: undefined, isLoading: false };
+const recordsMock = {
+  records: [] as RunRecordView[], runStatus: undefined, isLoading: false, isLoadingOlder: false, error: null as Error | null,
+  hasOlder: false, olderRecordsOmitted: false, newerRecordsOmitted: false, atLatest: true,
+  loadOlder: vi.fn(), returnToLatest: vi.fn(),
+};
 const completenessMock: { data: WorkflowRunDataCompletenessView | null | undefined; isLoading: boolean; error: Error | null } = { data: undefined, isLoading: false, error: null };
 vi.mock("@/hooks/use-workflows", () => ({
-  useRunRecords: () => recordsMock,
+  useRunRecordWindow: () => recordsMock,
   useRunDataCompleteness: () => completenessMock,
 }));
 vi.mock("./JsonView", () => ({
@@ -21,7 +25,7 @@ function record(o: Partial<RunRecordView>): RunRecordView {
 }
 
 function withRecords(records: RunRecordView[] | undefined, isLoading = false) {
-  recordsMock.data = records && { runId: "r1", runStatus: "Running", records };
+  recordsMock.records = records ?? [];
   recordsMock.isLoading = isLoading;
 }
 
@@ -30,8 +34,16 @@ function completeness(facets: WorkflowRunDataCompletenessView["facets"]): Workfl
 }
 
 beforeEach(() => {
-  recordsMock.data = undefined;
+  recordsMock.records = [];
   recordsMock.isLoading = false;
+  recordsMock.isLoadingOlder = false;
+  recordsMock.error = null;
+  recordsMock.hasOlder = false;
+  recordsMock.olderRecordsOmitted = false;
+  recordsMock.newerRecordsOmitted = false;
+  recordsMock.atLatest = true;
+  recordsMock.loadOlder.mockReset();
+  recordsMock.returnToLatest.mockReset();
   completenessMock.data = completeness([]);
   completenessMock.isLoading = false;
   completenessMock.error = null;
@@ -48,6 +60,16 @@ describe("RunTrace", () => {
     withRecords([], false);
     render(<RunTrace runId="r1" />);
     expect(screen.getByText(/no records yet/i)).toBeInTheDocument();
+  });
+
+  it("fails closed instead of rendering an invalid first page as an empty ledger", () => {
+    withRecords([], false);
+    recordsMock.error = new Error("Invalid Workflow Run record page response.");
+
+    render(<RunTrace runId="r1" />);
+
+    expect(screen.getByText(/couldn't load the event ledger/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no records yet/i)).toBeNull();
   });
 
   it("shows recorded facets independently and never presents them as a run-wide verdict", () => {
@@ -144,5 +166,33 @@ describe("RunTrace", () => {
 
     const tones = Array.from(container.querySelectorAll<HTMLElement>(".run-trace-row")).map((n) => n.dataset.tone);
     expect(tones).toEqual(["error", "error", undefined]);
+  });
+
+  it("makes bounded truncation explicit and offers Older without pretending the count is total", () => {
+    withRecords([record({ sequence: 8 }), record({ sequence: 9 })]);
+    recordsMock.hasOlder = true;
+    recordsMock.olderRecordsOmitted = true;
+
+    render(<RunTrace runId="r1" />);
+
+    expect(screen.getByText(/showing 2 records/i)).toBeInTheDocument();
+    expect(screen.getByText(/earlier records are outside this bounded window/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /load older/i }));
+    expect(recordsMock.loadOlder).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers Return to latest for a historical window and preserves valid rows on refresh failure", () => {
+    withRecords([record({ sequence: 1 })]);
+    recordsMock.atLatest = false;
+    recordsMock.newerRecordsOmitted = true;
+    recordsMock.error = new Error("poll failed");
+
+    render(<RunTrace runId="r1" active />);
+
+    expect(screen.getByText(/newer records are outside this historical window/i)).toBeInTheDocument();
+    expect(screen.getByText(/last refresh failed/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /return to latest/i }));
+    expect(recordsMock.returnToLatest).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("run.started")).toBeInTheDocument();
   });
 });

@@ -12,13 +12,14 @@ import { RoomRunPane } from "./RoomRunPane";
  */
 const { useWorkflowRunMock } = vi.hoisted(() => ({ useWorkflowRunMock: vi.fn() }));
 
-// RunTrace (the Trace tab) reads the raw ledger via useRunRecords — mock it so the real trace surface renders without a fetch.
+// RunTrace reads a bounded raw-ledger window — mock it so the real trace surface renders without a fetch.
 vi.mock("@/hooks/use-workflows", () => ({
   useWorkflowRun: (runId: string) => useWorkflowRunMock(runId),
   useNodeManifests: () => ({ data: [] }),
-  useRunRecords: () => ({
-    isLoading: false,
-    data: { records: [{ sequence: 1, recordType: "run.started", nodeId: null, occurredAt: "2026-07-13T00:00:00Z", payloadJson: "{}" }] },
+  useRunRecordWindow: () => ({
+    records: [{ sequence: 1, recordType: "run.started", nodeId: null, iterationKey: "", occurredAt: "2026-07-13T00:00:00Z", payloadJson: "{}" }],
+    isLoading: false, isLoadingOlder: false, error: null, hasOlder: false, olderRecordsOmitted: false, newerRecordsOmitted: false, atLatest: true,
+    loadOlder: vi.fn(), returnToLatest: vi.fn(),
   }),
   useRunDataCompleteness: () => ({
     isLoading: false,
