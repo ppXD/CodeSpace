@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ToolCallView } from "@/api/agents";
 import type { TeamMemberSummary } from "@/api/teams";
@@ -10,14 +10,26 @@ const state = vi.hoisted(() => ({
   toolCalls: [] as ToolCallView[],
   events: [] as { sequence: number; kind: string; text: string; data: string | null; dataArtifactId?: string | null; occurredAt: string }[],
   isLoading: false,
+  ledgerResolved: true,
   eventsLoading: false,
+  hasOlder: false,
+  olderEventsOmitted: false,
+  newerEventsOmitted: false,
+  atLatest: true,
+  eventError: null as Error | null,
   identities: new Map<string, TeamMemberSummary>(),
+  eventWindowArgs: vi.fn(),
+  loadOlder: vi.fn(),
+  returnToLatest: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-agents", () => ({
   useAgentRun: () => ({ data: state.run }),
-  useToolCalls: () => ({ data: state.toolCalls, isLoading: state.isLoading }),
-  useAgentRunEvents: () => ({ data: state.events, isLoading: state.eventsLoading }),
+  useToolCalls: () => ({ data: state.toolCalls, isLoading: state.isLoading, isSuccess: state.ledgerResolved }),
+  useAgentRunEventWindow: (id: string | undefined, active: boolean, kindFilter?: string) => {
+    state.eventWindowArgs(id, active, kindFilter);
+    return { data: state.events, isLoading: state.eventsLoading, isLoadingOlder: false, error: state.eventError, hasOlder: state.hasOlder, olderEventsOmitted: state.olderEventsOmitted, newerEventsOmitted: state.newerEventsOmitted, atLatest: state.atLatest, loadOlder: state.loadOlder, returnToLatest: state.returnToLatest };
+  },
 }));
 
 vi.mock("@/hooks/use-team-members", () => ({
@@ -58,6 +70,24 @@ function offloadedEvent() {
   return { sequence: 7, kind: "ToolCall", text: "WebSearch", data: null, dataArtifactId: artifactId, occurredAt: "2026-06-11T11:15:00Z" };
 }
 
+beforeEach(() => {
+  state.run = { status: "Succeeded" };
+  state.toolCalls = [];
+  state.events = [];
+  state.isLoading = false;
+  state.ledgerResolved = true;
+  state.eventsLoading = false;
+  state.hasOlder = false;
+  state.olderEventsOmitted = false;
+  state.newerEventsOmitted = false;
+  state.atLatest = true;
+  state.eventError = null;
+  state.identities = new Map();
+  state.eventWindowArgs.mockReset();
+  state.loadOlder.mockReset();
+  state.returnToLatest.mockReset();
+});
+
 afterEach(() => vi.unstubAllGlobals());
 
 describe("AgentToolCalls", () => {
@@ -83,6 +113,7 @@ describe("AgentToolCalls", () => {
     const failed = screen.getByText("Failed");
     expect(failed.className).toContain("wf-status-err");
     expect(screen.getByText("Succeeded").className).toContain("wf-status-ok");
+    expect(state.eventWindowArgs).toHaveBeenCalledWith(undefined, true, "ToolCall");
   });
 
   it("resolves the approver id to a display name and shows when it was approved", () => {
@@ -121,7 +152,6 @@ describe("AgentToolCalls", () => {
     state.toolCalls = [];
     state.events = [
       { sequence: 1, kind: "ToolCall", text: "WebSearch", data: '{"id":"c1","name":"WebSearch","query":"ai coding agents"}', occurredAt: "2026-06-11T11:15:00Z" },
-      { sequence: 2, kind: "Reasoning", text: "thinking", data: null, occurredAt: "2026-06-11T11:15:01Z" },
       { sequence: 3, kind: "ToolCall", text: "Read", data: '{"id":"c2","name":"Read","path":"src/app.ts"}', occurredAt: "2026-06-11T11:15:02Z" },
     ];
 
@@ -129,8 +159,34 @@ describe("AgentToolCalls", () => {
 
     expect(screen.getByText("WebSearch")).toBeInTheDocument();
     expect(screen.getByText("Read")).toBeInTheDocument();
-    expect(screen.queryByText("thinking")).toBeNull();   // a non-tool event is excluded
     expect(screen.getByText(/"query":"ai coding agents"/)).toBeInTheDocument();   // the arg preview, minus id/name
+    expect(state.eventWindowArgs).toHaveBeenCalledWith("r1", false, "ToolCall");
+  });
+
+  it("exposes bounded native history controls and never calls the filtered reader while governance is unresolved", () => {
+    state.run = { status: "Running" };
+    state.isLoading = true;
+    state.ledgerResolved = false;
+    const view = render(<AgentToolCalls agentRunId="r1" />);
+    expect(state.eventWindowArgs).toHaveBeenLastCalledWith(undefined, true, "ToolCall");
+
+    state.isLoading = false;
+    state.ledgerResolved = true;
+    state.events = [{ sequence: 10, kind: "ToolCall", text: "Read", data: null, occurredAt: "2026-06-11T11:15:00Z" }];
+    state.hasOlder = true;
+    state.olderEventsOmitted = true;
+    state.newerEventsOmitted = true;
+    state.atLatest = false;
+    state.eventError = new Error("filtered page unavailable");
+    view.rerender(<AgentToolCalls agentRunId="r1" />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Load earlier tool calls" }));
+    fireEvent.click(screen.getByRole("button", { name: "Return to latest tool calls" }));
+    expect(screen.getByText("Earlier tool calls omitted.")).toBeInTheDocument();
+    expect(screen.getByText("Newer tool calls omitted.")).toBeInTheDocument();
+    expect(screen.getByText("filtered page unavailable")).toBeInTheDocument();
+    expect(state.loadOlder).toHaveBeenCalledOnce();
+    expect(state.returnToLatest).toHaveBeenCalledOnce();
   });
 
   it("renders a tool call's name + args, and makes long args a click-to-expand block (no lossy ellipsis)", () => {
@@ -169,9 +225,32 @@ describe("AgentToolCalls", () => {
     expect(screen.getByText("No tool calls for this run")).toBeInTheDocument();
   });
 
+  it("does not claim an empty audit while matching older rows or a typed read error remain", () => {
+    state.hasOlder = true;
+    state.olderEventsOmitted = true;
+    const view = render(<AgentToolCalls agentRunId="r1" />);
+    expect(screen.queryByText("No tool calls for this run")).toBeNull();
+    expect(screen.getByRole("button", { name: "Load earlier tool calls" })).toBeInTheDocument();
+
+    state.hasOlder = false;
+    state.olderEventsOmitted = false;
+    state.eventError = new Error("audit unavailable");
+    view.rerender(<AgentToolCalls agentRunId="r1" />);
+    expect(screen.queryByText("No tool calls for this run")).toBeNull();
+    expect(screen.getByText("audit unavailable")).toBeInTheDocument();
+
+    state.eventError = null;
+    state.newerEventsOmitted = true;
+    state.atLatest = false;
+    view.rerender(<AgentToolCalls agentRunId="r1" />);
+    expect(screen.queryByText("No tool calls for this run")).toBeNull();
+    expect(screen.getByRole("button", { name: "Return to latest tool calls" })).toBeInTheDocument();
+  });
+
   it("renders nothing while the audit is still loading (the timeline already carries the live state)", () => {
     state.run = { status: "Running" };
     state.isLoading = true;
+    state.ledgerResolved = false;
     state.eventsLoading = false;
     state.identities = new Map();
     state.toolCalls = [];
@@ -180,6 +259,7 @@ describe("AgentToolCalls", () => {
     const { container } = render(<AgentToolCalls agentRunId="r1" />);
 
     expect(container).toBeEmptyDOMElement();
+    expect(state.eventWindowArgs).toHaveBeenCalledWith(undefined, true, "ToolCall");
   });
 
   it("keeps offloaded bytes local and unread until the user expands that exact native event", async () => {

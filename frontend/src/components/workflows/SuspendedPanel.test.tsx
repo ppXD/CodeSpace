@@ -29,8 +29,7 @@ vi.mock("@/hooks/use-agents", () => ({
   useAgentRun: () => ({ data: undefined }),
   useAgentRunEventPreview: () => ({ data: [] }),
   useAgentRunEventWindow: () => ({ data: [], isLoading: false, isLoadingOlder: false, error: null, hasOlder: false, olderEventsOmitted: false, newerEventsOmitted: false, atLatest: true, loadOlder: vi.fn(), returnToLatest: vi.fn() }),
-  useAgentRunEvents: () => ({ data: [] }),
-  useToolCalls: () => ({ data: [], isLoading: false }),
+  useToolCalls: () => ({ data: [], isLoading: false, isSuccess: true }),
 }));
 
 function approvalWait(prompt: string): WorkflowRunWaitInfo {

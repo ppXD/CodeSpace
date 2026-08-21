@@ -14,6 +14,7 @@ function page(over: Record<string, unknown> = {}): Record<string, unknown> {
     agentRunId: runId,
     mode: "Tail",
     requestCursor: null,
+    kindFilter: null,
     items: [event(8), event(9)],
     hasOlder: true,
     hasNewer: false,
@@ -54,6 +55,30 @@ describe("Agent Run event page API", () => {
     expect(tail).toMatchObject({ agentRunId: runId, mode: "Tail", requestCursor: null });
     expect(tail.items[0].data).toBe(" {\"raw\":true} ");
     expect(tail.items[0].dataArtifactId).toBe(artifactId);
+  });
+
+  it("sends and verifies the exact open kind filter", async () => {
+    let request!: URL;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      request = new URL(String(input), "http://test.local");
+      return json(page({ kindFilter: "ToolCall" }));
+    }));
+
+    const result = await agentsApi.pageRunEvents(runId, { mode: "Tail", limit: 128, kindFilter: "ToolCall" });
+
+    expect(request.searchParams.get("kindFilter")).toBe("ToolCall");
+    expect(result.kindFilter).toBe("ToolCall");
+  });
+
+  it("fails closed when the response omits or changes the requested kind identity", async () => {
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(json(page()))
+      .mockResolvedValueOnce(json(page({ kindFilter: "Reasoning" })))
+      .mockResolvedValueOnce(json(page({ kindFilter: "ToolCall", items: [{ ...event(8), kind: "Reasoning" }] }))));
+
+    await expect(agentsApi.pageRunEvents(runId, { mode: "Tail", limit: 128, kindFilter: "ToolCall" })).rejects.toBeInstanceOf(InvalidAgentRunEventPageError);
+    await expect(agentsApi.pageRunEvents(runId, { mode: "Tail", limit: 128, kindFilter: "ToolCall" })).rejects.toBeInstanceOf(InvalidAgentRunEventPageError);
+    await expect(agentsApi.pageRunEvents(runId, { mode: "Tail", limit: 128, kindFilter: "ToolCall" })).rejects.toBeInstanceOf(InvalidAgentRunEventPageError);
   });
 
   it("fails closed on descending/duplicate/unsafe events and malformed event fields", async () => {
@@ -105,6 +130,9 @@ describe("Agent Run event page API", () => {
     await expect(agentsApi.pageRunEvents(runId, { mode: "Older", cursor: "0", limit: 128 })).rejects.toThrow(/invalid Agent Run event page request/i);
     await expect(agentsApi.pageRunEvents(runId, { mode: "Newer", cursor: " 1", limit: 128 })).rejects.toThrow(/invalid Agent Run event page request/i);
     await expect(agentsApi.pageRunEvents(runId, { mode: "Tail", limit: 501 })).rejects.toThrow(/invalid Agent Run event page request/i);
+    await expect(agentsApi.pageRunEvents(runId, { mode: "Tail", limit: 128, kindFilter: "" })).rejects.toThrow(/invalid Agent Run event page request/i);
+    await expect(agentsApi.pageRunEvents(runId, { mode: "Tail", limit: 128, kindFilter: " " })).rejects.toThrow(/invalid Agent Run event page request/i);
+    await expect(agentsApi.pageRunEvents(runId, { mode: "Tail", limit: 128, kindFilter: "x".repeat(129) })).rejects.toThrow(/invalid Agent Run event page request/i);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

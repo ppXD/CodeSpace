@@ -9,6 +9,9 @@ public sealed record AgentRunEventPage
     /// <summary>The exact validated request cursor. Null only for Tail.</summary>
     public string? RequestCursor { get; init; }
 
+    /// <summary>The exact validated kind discriminator from the request; null means the unfiltered event plane.</summary>
+    public string? KindFilter { get; init; }
+
     public required IReadOnlyList<AgentRunEventDto> Items { get; init; }
     public required bool HasOlder { get; init; }
     public required bool HasNewer { get; init; }
