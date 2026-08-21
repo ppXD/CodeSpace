@@ -140,6 +140,35 @@ public class SupervisorDependencyGateTests
     }
 
     [Fact]
+    public void A_replanned_subtask_id_must_be_satisfied_again_in_the_active_generation()
+    {
+        var oldSpawn = Spawn(("a", "Succeeded", true));
+        var ctx = Context(
+            Plan(("a", null), ("b", new[] { "a" })),
+            oldSpawn,
+            Plan(("a", null), ("b", new[] { "a" })));
+
+        var (ready, deferred) = SupervisorDependencyGate.Partition(ctx, new[] { "b" });
+
+        ready.ShouldBeEmpty("the same plan-local id in a new generation is new work, not proof that its old incarnation succeeded");
+        deferred.ShouldBe(new[] { "b" });
+        SupervisorDependencyGate.LatestSucceededAgentRunIds(ctx, new[] { "a" }).ShouldBeEmpty("an old producer cannot become the new generation's handoff");
+        SupervisorDependencyGate.LatestAgentRunId(ctx, "a").ShouldBeNull("a retry in the new generation cannot resume the superseded generation's workspace");
+    }
+
+    [Fact]
+    public void Empty_or_invalid_plan_records_do_not_hide_the_active_dependency_graph()
+    {
+        var ctx = Context(
+            Plan(("a", null), ("b", new[] { "a" })),
+            Prior(SupervisorDecisionKinds.Plan, """{"goal":"g","subtasks":[]}""", "{}"),
+            Prior(SupervisorDecisionKinds.Plan, "not-json", "{}"),
+            Plan(("dangling", new[] { "missing" })));
+
+        SupervisorDependencyGate.Partition(ctx, new[] { "b" }).Deferred.ShouldBe(new[] { "b" }, "rejected Plan records neither cut the generation nor replace its valid graph");
+    }
+
+    [Fact]
     public void Multiple_dependencies_resolve_order_preserving_skipping_unsatisfied_ones()
     {
         var ctx = Context(Plan(("a", null), ("b", null), ("c", null)),
@@ -185,6 +214,15 @@ public class SupervisorDependencyGateTests
         var retryRunId = SupervisorOutcome.ReadAgentResults(ctx.PriorDecisions[2].OutcomeJson).Single().AgentRunId;
 
         SupervisorDependencyGate.LatestAgentRunId(ctx, "a").ShouldBe(retryRunId, "the LATEST attempt is always the retry target, regardless of its own outcome");
+    }
+
+    [Fact]
+    public void A_plan_less_legacy_tape_keeps_its_result_fold()
+    {
+        var spawn = Spawn(("legacy", "Failed", null));
+        var legacyRunId = SupervisorOutcome.ReadAgentResults(spawn.OutcomeJson).Single().AgentRunId;
+
+        SupervisorDependencyGate.LatestAgentRunId(Context(spawn), "legacy").ShouldBe(legacyRunId);
     }
 
     // ── Frontier: the decider's guidance ───────────────────────────────────────────────
