@@ -109,6 +109,94 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
         (await scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, artifactId, CancellationToken.None))!.Bytes.ShouldBe(content);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_large_reopenable_stream_uses_bounded_reads_and_preserves_each_destinations_exact_shape(bool routed)
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var routedRoot = NewRoot();
+        if (routed) await SeedRouteAsync(teamId, await SeedProfileAsync(teamId, routedRoot));
+        var content = Encoding.UTF8.GetBytes(new string(routed ? 'r' : 'l', 600_000));
+        var sha = ArtifactStore.ComputeSha256Hex(content);
+        var source = new ReopenableByteSource(content);
+
+        var artifactId = await PutStreamAsync(teamId, source);
+
+        source.OpenCount.ShouldBe(2, "one bounded identity pass and one placement pass are sufficient on a healthy destination");
+        source.LargestReadRequest.ShouldBeLessThanOrEqualTo(128 * 1024,
+            "neither routing arm may turn the stream back into one payload-sized read request");
+        var row = await RowAsync(artifactId);
+        if (routed)
+        {
+            row.CasArtifactObjectId.ShouldNotBeNull();
+            row.StorageUrl.ShouldBeNull();
+            File.Exists(ObjectPath(routedRoot, sha)).ShouldBeTrue();
+        }
+        else
+        {
+            row.CasArtifactObjectId.ShouldBeNull();
+            row.StorageUrl.ShouldBe(LocalUrlFor(sha), "the additive contract must keep the legacy local locator byte-identical");
+        }
+
+        using var scope = _fixture.BeginScope();
+        (await scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, artifactId, CancellationToken.None))!.Bytes.ShouldBe(content);
+    }
+
+    [Fact]
+    public async Task A_small_reopenable_stream_stays_inline_and_is_opened_only_for_identity_admission()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var content = Encoding.UTF8.GetBytes("small stream remains in the workflow_artifact row");
+        var source = new ReopenableByteSource(content);
+
+        var row = await RowAsync(await PutStreamAsync(teamId, source));
+
+        source.OpenCount.ShouldBe(1);
+        row.InlineBytes.ShouldBe(content);
+        row.StorageUrl.ShouldBeNull();
+        row.CasArtifactObjectId.ShouldBeNull();
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(1)]
+    public async Task A_reopenable_stream_with_a_false_declared_length_is_refused_before_routing_or_metadata(int lengthDelta)
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var content = Encoding.UTF8.GetBytes(new string('x', 300_000));
+        var source = new ReopenableByteSource(content, content.LongLength + lengthDelta);
+
+        await Should.ThrowAsync<InvalidDataException>(() => PutStreamAsync(teamId, source));
+
+        using var scope = _fixture.BeginScope();
+        (await scope.Resolve<CodeSpaceDbContext>().WorkflowArtifact.CountAsync(candidate => candidate.TeamId == teamId)).ShouldBe(0);
+        (await scope.Resolve<CodeSpaceDbContext>().ArtifactTransferIntent.CountAsync(candidate => candidate.TeamId == teamId)).ShouldBe(0,
+            "identity admission must finish before destination resolution or a CAS effect intent");
+    }
+
+    [Fact]
+    public async Task A_deferred_routed_stream_reopens_fresh_content_for_each_attempt_and_finishes_the_same_intent()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var root = NewRoot();
+        var profileId = await SeedProfileAsync(teamId, root);
+        await SeedRouteAsync(teamId, profileId);
+        var content = Encoding.UTF8.GetBytes(new string('w', 300_000));
+        var source = new ReopenableByteSource(content);
+        var intentId = await SeedLeasedIntentAsync(teamId, profileId, content, TimeSpan.FromSeconds(1));
+
+        var artifactId = await PutStreamAsync(teamId, source);
+
+        source.OpenCount.ShouldBeGreaterThan(2,
+            "the identity pass is one open; every deferred/claimed transfer attempt must own a newly opened stream rather than seek or retain an earlier one");
+        (await RowAsync(artifactId)).CasArtifactObjectId.ShouldNotBeNull();
+        using var scope = _fixture.BeginScope();
+        var intent = await scope.Resolve<CodeSpaceDbContext>().ArtifactTransferIntent.AsNoTracking().SingleAsync(candidate => candidate.TeamId == teamId);
+        intent.Id.ShouldBe(intentId);
+        intent.State.ShouldBe(ArtifactTransferState.Committed);
+    }
+
     [Fact]
     public async Task A_read_resolves_the_location_it_recorded_even_after_the_route_is_repointed()
     {
@@ -721,6 +809,12 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
         return await scope.Resolve<IArtifactStore>().PutAsync(teamId, content, "text/plain", CancellationToken.None);
     }
 
+    private async Task<Guid> PutStreamAsync(Guid teamId, IArtifactWriteSource source)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IArtifactStreamStore>().PutAsync(new ArtifactStreamWriteRequest(teamId, "text/plain", source), CancellationToken.None);
+    }
+
     /// <summary>
     /// Stages "another worker is mid-transfer of these exact bytes" the ONLY way the schema allows. The BEFORE INSERT
     /// arm of <c>artifact_cas_transfer_guard</c> admits a first revision of 1 in state Intended and unclaimed, and
@@ -1062,6 +1156,66 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
         }
 
         public Task<ArtifactCasPurgeResult> PurgeAsync(ArtifactCasPurgeRequest request, CancellationToken cancellationToken) => _inner.PurgeAsync(request, cancellationToken);
+    }
+
+    private sealed class ReopenableByteSource : IArtifactWriteSource
+    {
+        private readonly byte[] _bytes;
+
+        public ReopenableByteSource(byte[] bytes, long? declaredLength = null)
+        {
+            _bytes = bytes;
+            LengthBytes = declaredLength ?? bytes.LongLength;
+        }
+
+        public long LengthBytes { get; }
+        public int OpenCount { get; private set; }
+        public int LargestReadRequest { get; private set; }
+
+        public ValueTask<Stream> OpenReadAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            OpenCount++;
+            return ValueTask.FromResult<Stream>(new ObservedReadStream(_bytes, requested => LargestReadRequest = Math.Max(LargestReadRequest, requested)));
+        }
+    }
+
+    private sealed class ObservedReadStream : Stream
+    {
+        private readonly MemoryStream _inner;
+        private readonly Action<int> _observe;
+
+        public ObservedReadStream(byte[] bytes, Action<int> observe)
+        {
+            _inner = new MemoryStream(bytes, writable: false);
+            _observe = observe;
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+        public override int Read(Span<byte> buffer)
+        {
+            _observe(buffer.Length);
+            return _inner.Read(buffer);
+        }
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            _observe(buffer.Length);
+            return _inner.ReadAsync(buffer, cancellationToken);
+        }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) _inner.Dispose();
+            base.Dispose(disposing);
+        }
     }
 
     public void Dispose()

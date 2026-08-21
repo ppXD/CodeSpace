@@ -1,3 +1,5 @@
+using System.Buffers;
+using System.Security.Cryptography;
 using CodeSpace.Core.DependencyInjection;
 
 namespace CodeSpace.Core.Services.Workflows.Artifacts.Backends;
@@ -14,8 +16,9 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts.Backends;
 /// no-op. Reads validate the url resolves to a path UNDER the configured root (defence-in-depth against a tampered
 /// <c>storage_url</c>) before touching the filesystem.</para>
 /// </summary>
-public sealed class LocalFileArtifactBlobBackend : IArtifactBlobBackend, IArtifactBlobPurge, ISingletonDependency
+public sealed class LocalFileArtifactBlobBackend : IArtifactBlobBackend, IArtifactBlobStreamWriter, IArtifactBlobPurge, ISingletonDependency
 {
+    private const int CopyBufferBytes = 128 * 1024;
     private readonly string _root;
 
     /// <summary>Roots the store at <c>Artifacts:StoreDirectory</c> when configured, else where <see cref="CodeSpace.Core.Settings.DurableRoots"/> puts it — the path the container image already creates, or a per-user one off a container. Never the temp dir: artifacts outlive the rows that reference them only if the bytes do.</summary>
@@ -57,6 +60,58 @@ public sealed class LocalFileArtifactBlobBackend : IArtifactBlobBackend, IArtifa
         {
             TryDelete(tmp);
             throw;
+        }
+
+        return ToUrl(path);
+    }
+
+    public async Task<string> WriteStreamAsync(string sha256, Stream content, long contentLength, CancellationToken cancellationToken)
+    {
+        ValidateWrite(sha256, content, contentLength);
+        var path = PathFor(sha256);
+        if (File.Exists(path)) return ToUrl(path);
+
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var tmp = path + ".tmp-" + Guid.NewGuid().ToString("N");
+        var buffer = ArrayPool<byte>.Shared.Rent(CopyBufferBytes);
+        try
+        {
+            using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            await using (var output = new FileStream(tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None, CopyBufferBytes, FileOptions.Asynchronous | FileOptions.SequentialScan))
+            {
+                long observed = 0;
+                while (true)
+                {
+                    var read = await content.ReadAsync(buffer.AsMemory(0, CopyBufferBytes), cancellationToken).ConfigureAwait(false);
+                    if (read == 0) break;
+                    observed += read;
+                    if (observed > contentLength) throw LengthMismatch(contentLength, observed);
+                    digest.AppendData(buffer, 0, read);
+                    await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+                }
+
+                if (observed != contentLength) throw LengthMismatch(contentLength, observed);
+                await output.FlushAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            var observedSha = Convert.ToHexStringLower(digest.GetHashAndReset());
+            if (!string.Equals(observedSha, sha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException($"Artifact stream digest mismatch: expected {sha256}, observed {observedSha}.");
+
+            File.Move(tmp, path, overwrite: false);
+        }
+        catch (IOException) when (File.Exists(path))
+        {
+            TryDelete(tmp);
+        }
+        catch
+        {
+            TryDelete(tmp);
+            throw;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
         }
 
         return ToUrl(path);
@@ -155,4 +210,16 @@ public sealed class LocalFileArtifactBlobBackend : IArtifactBlobBackend, IArtifa
     {
         try { if (File.Exists(path)) File.Delete(path); } catch { /* best-effort temp cleanup */ }
     }
+
+    private static void ValidateWrite(string sha256, Stream content, long contentLength)
+    {
+        if (sha256 is not { Length: 64 } || !sha256.All(Uri.IsHexDigit))
+            throw new ArgumentException("sha256 must be a 64-char hex digest.", nameof(sha256));
+        ArgumentNullException.ThrowIfNull(content);
+        if (!content.CanRead) throw new ArgumentException("Artifact content stream must be readable.", nameof(content));
+        ArgumentOutOfRangeException.ThrowIfNegative(contentLength);
+    }
+
+    private static InvalidDataException LengthMismatch(long expected, long observed) =>
+        new($"Artifact stream length mismatch: expected {expected} bytes, observed {observed}.");
 }
