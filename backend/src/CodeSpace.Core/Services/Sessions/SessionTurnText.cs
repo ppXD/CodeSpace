@@ -3,10 +3,9 @@ using System.Text.Json;
 namespace CodeSpace.Core.Services.Sessions;
 
 /// <summary>
-/// The ONE place a prior turn's CLEAN text is read from its persisted run (Rule 7) — shared by the digest builder
-/// (<see cref="SessionContextBuilder"/>, which renders the recent verbatim turns) and the summarizer
-/// (<c>SessionSummarizer</c>, which renders the older scrolled-out turns as distillation input). Reading the result
-/// in one place keeps both halves of the thread context on the SAME source-of-truth + projection-shape contract.
+/// The established lowercase JSON-leaf and 600-UTF-16-unit clipping semantics for session text. Production
+/// intelligence reads project the same contract through <see cref="SessionIntelligenceTurnReader"/> without moving
+/// complete JSON roots into CLR; these pure helpers remain the compatibility oracle for other projections and tests.
 /// </summary>
 internal static class SessionTurnText
 {

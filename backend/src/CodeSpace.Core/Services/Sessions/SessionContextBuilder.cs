@@ -10,10 +10,10 @@ namespace CodeSpace.Core.Services.Sessions;
 /// <summary>
 /// Default <see cref="ISessionContextBuilder"/>. Reads the session's prior top-level turns' EFFECTIVE attempts
 /// (<see cref="SessionTurnAttempts"/> — a rerun that fixed a failed original wins) from CLEAN sources only — each
-/// turn's launch goal (the request payload's <c>goal</c>) and its declared result (<c>OutputsJson</c>, read
-/// generically across projection shapes via <see cref="SessionTurnText.ReadResult"/>, plus a produced branch —
+/// turn's launch goal and its declared result, read as narrow lowercase JSON leaves by
+/// <see cref="ISessionIntelligenceTurnReader"/> without transporting either persisted JSON root, plus a produced branch —
 /// preferring the run's <see cref="PublishManifest"/> row (I2's single source of truth) over the raw
-/// <c>OutputsJson.branch</c> guess, via the same <see cref="SessionManifestBranches"/> choke point
+/// legacy <c>OutputsJson.branch</c> compatibility leaf, via the same <see cref="SessionManifestBranches"/> choke point
 /// <see cref="SessionProjection"/>/<see cref="SessionBranchResolver"/> use, so the branch injected into the NEXT
 /// turn's own prompt never disagrees with what the room displays or what a CONTINUE clones from) — so the digest
 /// never contains a previously-injected grounding block (no recursion). Renders the most recent
@@ -27,6 +27,7 @@ public sealed class SessionContextBuilder : ISessionContextBuilder, IScopedDepen
 {
     private readonly CodeSpaceDbContext _db;
     private readonly IPublishManifestStore _manifests;
+    private readonly ISessionIntelligenceTurnReader _turns;
 
     /// <summary>Cap the VERBATIM window to the most recent N top-level turns — recent work is rendered in full; older turns roll into the distilled <see cref="WorkSession.Summary"/>. The summarizer's watermark uses this same window size, so summary + window are contiguous.</summary>
     internal const int MaxTurns = 8;
@@ -35,22 +36,20 @@ public sealed class SessionContextBuilder : ISessionContextBuilder, IScopedDepen
     {
         _db = db;
         _manifests = manifests;
+        _turns = new SessionIntelligenceTurnReader(db);
     }
 
     public async Task<string?> BuildAsync(Guid sessionId, Guid teamId, CancellationToken cancellationToken)
     {
-        // The session's WHOLE lineage (a rerun/replay attempt inherits the SessionId with a NULL turn index) — each
-        // turn's EFFECTIVE attempt (SessionTurnAttempts) is resolved before windowing, so a superseded original never
-        // shadows its own successful rerun in the digest. One query — EF joins the request for the goal payload.
-        var lineage = await _db.WorkflowRun.AsNoTracking()
-            .Where(r => r.SessionId == sessionId && r.TeamId == teamId)
-            .Select(r => new { r.Id, r.RootRunId, r.SessionTurnIndex, r.Status, r.CreatedDate, r.OutputsJson, Payload = r.RunRequest.NormalizedPayloadJson })
-            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        // The session's WHOLE narrow lineage (a rerun/replay attempt inherits the SessionId with a NULL turn index) —
+        // each turn's EFFECTIVE attempt (SessionTurnAttempts) is resolved before windowing, so a superseded original
+        // never shadows its own successful rerun. The shared reader extracts only prompt leaves, never the JSON roots.
+        var lineage = await _turns.ListAsync(sessionId, teamId, cancellationToken).ConfigureAwait(false);
 
         var window = lineage.GroupBy(r => r.RootRunId ?? r.Id)
             .Where(g => g.Any(r => r.SessionTurnIndex != null))
             .Select(g => new { Turn = g.First(r => r.SessionTurnIndex != null).SessionTurnIndex, EffectiveId = SessionTurnAttempts.ResolveEffectiveId(g.Select(r => new SessionTurnAttempts.AttemptRow(r.Id, r.Status, r.CreatedDate))) })
-            .Join(lineage, t => t.EffectiveId, r => r.Id, (t, r) => new { t.Turn, r.Id, r.Status, r.OutputsJson, r.Payload })
+            .Join(lineage, t => t.EffectiveId, r => r.Id, (t, r) => new { t.Turn, r.Id, r.Status, r.Goal, r.Result, r.LegacyBranch })
             .OrderByDescending(r => r.Turn)
             .Take(MaxTurns)
             .ToList();
@@ -102,13 +101,11 @@ public sealed class SessionContextBuilder : ISessionContextBuilder, IScopedDepen
             sb.AppendLine();
             sb.AppendLine($"## Turn {row.Turn} ({row.Status})");
 
-            var goal = SessionTurnText.ReadString(row.Payload, "goal");
-            if (goal != null) sb.AppendLine($"Asked: {SessionTurnText.Clip(goal)}");
+            if (row.Goal != null) sb.AppendLine($"Asked: {SessionTurnText.Clip(row.Goal)}");
 
-            var result = SessionTurnText.ReadResult(row.OutputsJson);
-            if (result != null) sb.AppendLine($"Result: {SessionTurnText.Clip(result)}");
+            if (row.Result != null) sb.AppendLine($"Result: {SessionTurnText.Clip(row.Result)}");
 
-            var branch = SessionManifestBranches.ResolveSingleRepoBranch(manifestsByRunId.GetValueOrDefault(row.Id))?.Branch ?? SessionTurnText.ReadString(row.OutputsJson, "branch");
+            var branch = SessionManifestBranches.ResolveSingleRepoBranch(manifestsByRunId.GetValueOrDefault(row.Id))?.Branch ?? row.LegacyBranch;
             if (branch != null) sb.AppendLine($"Produced branch: {branch}");
 
             if (assessmentsByRunId.TryGetValue(row.Id, out var recorded) && RenderCompletion(recorded.AssessmentJson, recorded.WouldBeTerminalDecision) is { } completion)

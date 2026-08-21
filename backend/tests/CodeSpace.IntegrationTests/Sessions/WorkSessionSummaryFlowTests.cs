@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
@@ -12,6 +13,7 @@ using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
@@ -60,6 +62,33 @@ public class WorkSessionSummaryFlowTests
         capture.LastUserPrompt!.ShouldContain("goal-1", Case.Sensitive, "the oldest scrolled-out turn is in the distillation input");
         capture.LastUserPrompt.ShouldContain("goal-4", Case.Sensitive, "through the watermark turn");
         capture.LastUserPrompt.ShouldNotContain("goal-5", Case.Sensitive, "a turn still inside the recent window is NOT folded");
+    }
+
+    [Fact]
+    public async Task Summarizer_does_not_transport_complete_json_roots_for_bounded_distillation_text()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "claude-test");
+        var sessionId = await SeedSessionAsync(teamId);
+        var baggage = new string('x', 2 * 1024 * 1024);
+        await SeedTurnJsonAsync(teamId, sessionId, 1,
+            JsonSerializer.Serialize(new { goal = new string('g', 605), unrelated = baggage }),
+            JsonSerializer.Serialize(new { summary = new string('r', 605), unrelated = baggage }));
+        for (var t = 2; t <= 9; t++) await SeedTurnAsync(teamId, sessionId, t, $"goal-{t}", $"result-{t}");
+
+        var recorder = new ReadCommandRecorder();
+        var capture = new CapturingLlmClient();
+        await RunSummarizerAsync(teamId, sessionId, capture, interceptor: recorder);
+
+        capture.LastUserPrompt.ShouldNotBeNull();
+        capture.LastUserPrompt!.ShouldContain($"Asked: {new string('g', 600)}…", Case.Sensitive);
+        capture.LastUserPrompt.ShouldContain($"Result: {new string('r', 600)}…", Case.Sensitive);
+
+        var lineageSql = recorder.Commands.Single(command => command.Contains("workflow_run", StringComparison.OrdinalIgnoreCase)
+            && command.Contains("session_id", StringComparison.OrdinalIgnoreCase)
+            && command.Contains("normalized_payload_json", StringComparison.OrdinalIgnoreCase));
+        lineageSql.ShouldNotContain("outputs_jsonb AS", Case.Insensitive, "the 2 MiB OutputsJson root must not cross DB/CLR");
+        lineageSql.ShouldNotContain("normalized_payload_json AS", Case.Insensitive, "the 2 MiB request root must not cross DB/CLR");
     }
 
     [Fact]
@@ -317,9 +346,14 @@ public class WorkSessionSummaryFlowTests
         }, CancellationToken.None);
     }
 
-    private async Task RunSummarizerAsync(Guid teamId, Guid sessionId, ILLMClient client, IModelPoolSelector? selector = null)
+    private async Task RunSummarizerAsync(Guid teamId, Guid sessionId, ILLMClient client, IModelPoolSelector? selector = null, DbCommandInterceptor? interceptor = null)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = interceptor is null ? _fixture.BeginScope() : _fixture.BeginScope(builder =>
+        {
+            var options = new DbContextOptionsBuilder<CodeSpaceDbContext>().UseNpgsql(_fixture.ConnectionString)
+                .UseSnakeCaseNamingConvention().AddInterceptors(interceptor).Options;
+            builder.RegisterInstance(options).As<DbContextOptions<CodeSpaceDbContext>>().SingleInstance();
+        });
         var db = scope.Resolve<CodeSpaceDbContext>();
         var summarizer = new SessionSummarizer(db, scope.Resolve<Core.Services.Agents.Publish.IPublishManifestStore>(), new LLMClientRegistry(new[] { client }), selector ?? scope.Resolve<IModelPoolSelector>(), NullLogger<SessionSummarizer>.Instance);
 
@@ -431,7 +465,10 @@ public class WorkSessionSummaryFlowTests
     }
 
     /// <summary>Stage a finished top-level turn: a run bound to the session at <paramref name="turn"/>, its launch goal in the request payload + its result in OutputsJson — the SAME clean sources the digest + summarizer read.</summary>
-    private async Task SeedTurnAsync(Guid teamId, Guid sessionId, int turn, string goal, string result)
+    private Task SeedTurnAsync(Guid teamId, Guid sessionId, int turn, string goal, string result) =>
+        SeedTurnJsonAsync(teamId, sessionId, turn, JsonSerializer.Serialize(new { goal }), JsonSerializer.Serialize(new { summary = result }));
+
+    private async Task SeedTurnJsonAsync(Guid teamId, Guid sessionId, int turn, string payloadJson, string outputsJson)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -442,18 +479,29 @@ public class WorkSessionSummaryFlowTests
         db.WorkflowRunRequest.Add(new WorkflowRunRequest
         {
             Id = requestId, TeamId = teamId, SourceType = WorkflowRunSourceTypes.Snapshot, ActorType = "user",
-            ActorId = SystemUsers.SeederId, NormalizedPayloadJson = JsonSerializer.Serialize(new { goal }),
+            ActorId = SystemUsers.SeederId, NormalizedPayloadJson = payloadJson,
             Status = WorkflowRunRequestStatus.Consumed, ReceivedAt = now, VerifiedAt = now, NormalizedAt = now,
         });
         db.WorkflowRun.Add(new WorkflowRun
         {
             Id = Guid.NewGuid(), TeamId = teamId, RunRequestId = requestId, SourceType = WorkflowRunSourceTypes.Snapshot,
             Status = WorkflowRunStatus.Success, SessionId = sessionId, SessionTurnIndex = turn,
-            OutputsJson = JsonSerializer.Serialize(new { summary = result }),
+            OutputsJson = outputsJson,
             CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
         });
 
         await db.SaveChangesAsync();
+    }
+
+    private sealed class ReadCommandRecorder : DbCommandInterceptor
+    {
+        public List<string> Commands { get; } = [];
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        {
+            Commands.Add(command.CommandText);
+            return ValueTask.FromResult(result);
+        }
     }
 
     /// <summary>A capturing stand-in LLM client: records the user prompt + returns a canned summary, so the fold/persist/watermark + prompt-shaping run without a live model. Provider matches the seeded Anthropic pool credential so SelectAsync routes to it.</summary>
