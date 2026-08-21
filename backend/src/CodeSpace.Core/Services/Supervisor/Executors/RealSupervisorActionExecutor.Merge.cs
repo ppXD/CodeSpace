@@ -28,7 +28,8 @@ public sealed partial class RealSupervisorActionExecutor
 
         var agentRunIds = ResolveAgentRunIdsToMerge(context);
 
-        var merged = await ReadMergedAgentsAsync(agentRunIds, context.TeamId, cancellationToken).ConfigureAwait(false);
+        var contributors = await ReadMergeContributorsAsync(agentRunIds, context.TeamId, cancellationToken).ConfigureAwait(false);
+        var merged = contributors.Agents;
 
         // The deterministic fold — byte-identical to pre-SOTA-#3: an ordered dictionary whose first three keys
         // serialize exactly as the old anonymous { merged, count, synthesisInstruction }. The optional integration +
@@ -40,7 +41,9 @@ public sealed partial class RealSupervisorActionExecutor
             ["synthesisInstruction"] = merge.SynthesisInstruction,
         };
 
-        await AugmentWithIntegrationAndSynthesisAsync(outcome, context, merged, merge, cancellationToken).ConfigureAwait(false);
+        if (contributors.Integrity is not null) outcome["contributorIntegrity"] = contributors.Integrity;
+
+        await AugmentWithIntegrationAndSynthesisAsync(outcome, context, contributors, merge, cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation("Supervisor merged {Count} prior agent result(s)", merged.Count);
 
@@ -88,34 +91,89 @@ public sealed partial class RealSupervisorActionExecutor
             .ToList();
     }
 
-    /// <summary>Load each agent run's FULL terminal result by id, TEAM-SCOPED (defense-in-depth — the ids are this run's own recorded spawns, but a cross-team id never resolves) into the typed <see cref="MergedAgent"/> the merged-array projection AND the integrate step both consume (one read). A missing / non-terminal run contributes its status, not a crash. Preserves spawn order.</summary>
-    private async Task<IReadOnlyList<MergedAgent>> ReadMergedAgentsAsync(IReadOnlyList<Guid> agentRunIds, Guid teamId, CancellationToken cancellationToken)
+    /// <summary>
+    /// Load every recorded active-generation contributor id without dropping holes. The one query reads cross-team
+    /// rows only as identity + tenant scope (their error/result columns are SQL-CASEd to null), then materializes
+    /// trustworthy same-team terminal results in spawn order. Missing/cross-team/non-terminal/malformed/contradictory
+    /// ids become a bounded <see cref="SupervisorMergeContributorIntegrity"/> fact; database failures still throw as
+    /// infrastructure failures, and required artifact reads retain their existing typed exception.
+    /// </summary>
+    private async Task<MergeContributorRead> ReadMergeContributorsAsync(IReadOnlyList<Guid> agentRunIds, Guid teamId, CancellationToken cancellationToken)
     {
-        if (agentRunIds.Count == 0) return Array.Empty<MergedAgent>();
+        if (agentRunIds.Count == 0) return new MergeContributorRead(Array.Empty<MergedAgent>(), null);
 
-        var runs = await _db.AgentRun.AsNoTracking()
-            .Where(r => agentRunIds.Contains(r.Id) && r.TeamId == teamId)
-            .Select(r => new { r.Id, r.Status, r.Error, r.ResultJson })
+        var loaded = await _db.AgentRun.AsNoTracking()
+            .Where(r => agentRunIds.Contains(r.Id))
+            .Select(r => new
+            {
+                r.Id,
+                r.TeamId,
+                r.Status,
+                Error = r.TeamId == teamId ? r.Error : null,
+                ResultJson = r.TeamId == teamId ? r.ResultJson : null,
+            })
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
 
-        var byId = runs.ToDictionary(r => r.Id);
+        var byId = loaded.ToDictionary(r => r.Id, r => new MergeContributorRow(r.Id, r.TeamId, r.Status, r.Error, r.ResultJson));
+        var merged = new List<MergedAgent>(agentRunIds.Count);
+        var issues = new List<SupervisorMergeContributorIssue>();
 
-        var ordered = agentRunIds.Where(byId.ContainsKey).Select(id => byId[id]).ToList();
+        foreach (var agentRunId in agentRunIds)
+        {
+            if (!byId.TryGetValue(agentRunId, out var row))
+            {
+                issues.Add(Issue(agentRunId, SupervisorMergeContributorIssueKind.MissingRow));
+                continue;
+            }
 
-        var merged = new List<MergedAgent>(ordered.Count);
-        foreach (var r in ordered)
-            merged.Add(await ProjectMergedAgentAsync(r.Id, r.Status, r.Error, r.ResultJson, teamId, cancellationToken).ConfigureAwait(false));
+            if (row.TeamId != teamId)
+            {
+                issues.Add(Issue(agentRunId, SupervisorMergeContributorIssueKind.CrossTeam));
+                continue;
+            }
 
-        return merged;
+            if (ReadIntegrityIssue(row, out var result) is { } kind)
+            {
+                issues.Add(Issue(agentRunId, kind));
+                continue;
+            }
+
+            merged.Add(await ProjectMergedAgentAsync(row, result, teamId, cancellationToken).ConfigureAwait(false));
+        }
+
+        var integrity = issues.Count == 0
+            ? null
+            : new SupervisorMergeContributorIntegrity { ExpectedCount = agentRunIds.Count, MaterializedCount = merged.Count, Issues = issues };
+
+        return new MergeContributorRead(merged, integrity);
     }
 
-    /// <summary>Project ONE agent run into the typed <see cref="MergedAgent"/> — the compact fields from the SHARED <see cref="SupervisorOutcome.ProjectCompact"/> (one source of truth the decider-visibility fold also uses, so they can't drift; it folds the ROW error for a cancelled/abandoned agent whose result is null) PLUS the resolved (offloaded-aware) patch + the recorded base SHA (the integrate anchor). A missing / unparseable result still contributes its status.</summary>
-    private async Task<MergedAgent> ProjectMergedAgentAsync(Guid agentRunId, Messages.Enums.AgentRunStatus status, string? rowError, string? resultJson, Guid teamId, CancellationToken cancellationToken)
-    {
-        var compact = SupervisorOutcome.ProjectCompact(agentRunId, status.ToString(), rowError, resultJson);
+    private static SupervisorMergeContributorIssue Issue(Guid agentRunId, SupervisorMergeContributorIssueKind kind) => new() { AgentRunId = agentRunId, Kind = kind };
 
-        var result = string.IsNullOrWhiteSpace(resultJson) ? null : Deserialize<AgentRunResult>(resultJson);
+    /// <summary>Pure row/result consistency check. Failure kinds are stable enums, never exception strings or model-capability labels.</summary>
+    private static SupervisorMergeContributorIssueKind? ReadIntegrityIssue(MergeContributorRow row, out AgentRunResult? result)
+    {
+        result = null;
+
+        if (!AgentRunStateMachine.IsTerminal(row.Status)) return SupervisorMergeContributorIssueKind.NonTerminalRow;
+
+        if (string.IsNullOrWhiteSpace(row.ResultJson))
+            return row.Status is Messages.Enums.AgentRunStatus.Succeeded or Messages.Enums.AgentRunStatus.NeedsReview
+                ? SupervisorMergeContributorIssueKind.MissingRequiredResult
+                : null;
+
+        try { result = JsonSerializer.Deserialize<AgentRunResult>(row.ResultJson, AgentJson.Options); }
+        catch (JsonException) { return SupervisorMergeContributorIssueKind.MalformedResult; }
+
+        if (result is null) return SupervisorMergeContributorIssueKind.MalformedResult;
+        return result.Status != row.Status ? SupervisorMergeContributorIssueKind.ResultStatusMismatch : null;
+    }
+
+    /// <summary>Project ONE validated agent run into the typed <see cref="MergedAgent"/> — the compact fields from the SHARED <see cref="SupervisorOutcome.ProjectCompact"/> PLUS the offloaded-aware patch + recorded base SHA. Validation happens before any artifact fetch, while a required artifact failure still propagates unchanged.</summary>
+    private async Task<MergedAgent> ProjectMergedAgentAsync(MergeContributorRow row, AgentRunResult? result, Guid teamId, CancellationToken cancellationToken)
+    {
+        var compact = SupervisorOutcome.ProjectCompact(row.Id, row.Status.ToString(), row.Error, row.ResultJson);
 
         var patch = await ResolvePatchAsync(result, teamId, cancellationToken).ConfigureAwait(false);
 
@@ -123,7 +181,7 @@ public sealed partial class RealSupervisorActionExecutor
 
         return new MergedAgent
         {
-            AgentRunId = compact.AgentRunId,
+            AgentRunId = row.Id,
             Status = compact.Status,
             Summary = compact.Summary,
             ChangedFiles = compact.ChangedFiles,
@@ -180,4 +238,8 @@ public sealed partial class RealSupervisorActionExecutor
         /// <summary>This agent's PER-REPO work products (multi-repo run), each with its diff RESOLVED (offloaded fetched back) — what the per-repo integrate (<c>.Integrate.cs</c>) feeds the integrator one repo at a time. Empty for a single-repo agent (its one outcome is the top-level <see cref="Patch"/>/<see cref="BaseSha"/>/<see cref="ProducedBranch"/>).</summary>
         public IReadOnlyList<RepositoryRunResult> RepositoryResults { get; init; } = Array.Empty<RepositoryRunResult>();
     }
+
+    private sealed record MergeContributorRead(IReadOnlyList<MergedAgent> Agents, SupervisorMergeContributorIntegrity? Integrity);
+
+    private sealed record MergeContributorRow(Guid Id, Guid TeamId, Messages.Enums.AgentRunStatus Status, string? Error, string? ResultJson);
 }

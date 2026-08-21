@@ -83,8 +83,86 @@ public sealed class SupervisorMergeWithholdFlowTests
 
         var merge = await RunMergeTurnAsync(runId, teamId);
 
-        JsonDocument.Parse(merge!).RootElement.GetProperty("count").GetInt32()
-            .ShouldBe(2, "no per-unit verdicts → every unit folds, exactly as before the slice");
+        var outcome = JsonDocument.Parse(merge!).RootElement;
+        outcome.GetProperty("count").GetInt32().ShouldBe(2, "no per-unit verdicts → every unit folds, exactly as before the slice");
+        outcome.TryGetProperty("contributorIntegrity", out _).ShouldBeFalse("a healthy merge keeps the pre-integrity outcome byte shape");
+    }
+
+    [Fact]
+    public async Task A_recorded_missing_agent_is_bounded_evidence_and_forced_integration_is_partial()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var present = Guid.NewGuid();
+        var missing = Guid.NewGuid();
+        await SeedSpawnAsync(runId, teamId, sequence: 1, Unit(present, "codespace/agent/present", null), Unit(missing, "codespace/agent/missing", null));
+        await SeedAgentRunAsync(present, teamId, runId, "codespace/agent/present");
+
+        var outcome = JsonDocument.Parse((await RunMergeTurnAsync(runId, teamId, forcedByPublishGate: true))!).RootElement;
+
+        outcome.GetProperty("count").GetInt32().ShouldBe(1);
+        var integrity = outcome.GetProperty("contributorIntegrity");
+        integrity.GetProperty("status").GetString().ShouldBe("NeedsReview");
+        integrity.GetProperty("expectedCount").GetInt32().ShouldBe(2);
+        integrity.GetProperty("materializedCount").GetInt32().ShouldBe(1);
+        var issue = integrity.GetProperty("issues").EnumerateArray().ShouldHaveSingleItem();
+        issue.GetProperty("agentRunId").GetGuid().ShouldBe(missing);
+        issue.GetProperty("kind").GetString().ShouldBe("MissingRow");
+        outcome.GetProperty("integration").GetProperty("status").GetString().ShouldBe("Partial", "a subset must never integrate Clean when a recorded contributor is absent");
+    }
+
+    [Fact]
+    public async Task A_cross_team_agent_id_is_named_without_reading_its_result_into_the_merge()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (otherTeamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var crossTeamId = Guid.NewGuid();
+        await SeedSpawnAsync(runId, teamId, sequence: 1, Unit(crossTeamId, "codespace/agent/foreign", null));
+        await SeedAgentRunAsync(crossTeamId, otherTeamId, runId, "codespace/agent/foreign");
+
+        var raw = (await RunMergeTurnAsync(runId, teamId))!;
+        var outcome = JsonDocument.Parse(raw).RootElement;
+
+        outcome.GetProperty("merged").GetArrayLength().ShouldBe(0);
+        var issue = outcome.GetProperty("contributorIntegrity").GetProperty("issues").EnumerateArray().ShouldHaveSingleItem();
+        issue.GetProperty("agentRunId").GetGuid().ShouldBe(crossTeamId);
+        issue.GetProperty("kind").GetString().ShouldBe("CrossTeam");
+        raw.ShouldNotContain("codespace/agent/foreign", customMessage: "the bounded fact never copies a foreign tenant's result payload");
+        outcome.GetProperty("integration").GetProperty("status").GetString().ShouldBe("Partial");
+    }
+
+    [Fact]
+    public async Task Malformed_non_terminal_missing_success_and_status_mismatch_rows_are_never_silently_dropped()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var malformed = Guid.NewGuid();
+        var nonTerminal = Guid.NewGuid();
+        var missingSuccess = Guid.NewGuid();
+        var mismatch = Guid.NewGuid();
+        await SeedSpawnAsync(runId, teamId, sequence: 1,
+            Unit(malformed, "b-malformed", null), Unit(nonTerminal, "b-running", null), Unit(missingSuccess, "b-missing", null), Unit(mismatch, "b-mismatch", null));
+        await SeedAgentRunRawAsync(malformed, teamId, runId, AgentRunStatus.Succeeded, """{"status":"notAStatus","exitReason":"x"}""");
+        await SeedAgentRunRawAsync(nonTerminal, teamId, runId, AgentRunStatus.Running, null);
+        await SeedAgentRunRawAsync(missingSuccess, teamId, runId, AgentRunStatus.Succeeded, null);
+        await SeedAgentRunRawAsync(mismatch, teamId, runId, AgentRunStatus.Succeeded, ResultJson(AgentRunStatus.Failed));
+
+        var raw = (await RunMergeTurnAsync(runId, teamId))!;
+        var outcome = JsonDocument.Parse(raw).RootElement;
+        var issues = outcome.GetProperty("contributorIntegrity").GetProperty("issues").EnumerateArray()
+            .ToDictionary(i => i.GetProperty("agentRunId").GetGuid(), i => i.GetProperty("kind").GetString());
+
+        issues.ShouldBe(new Dictionary<Guid, string?>
+        {
+            [malformed] = "MalformedResult",
+            [nonTerminal] = "NonTerminalRow",
+            [missingSuccess] = "MissingRequiredResult",
+            [mismatch] = "ResultStatusMismatch",
+        });
+        outcome.GetProperty("count").GetInt32().ShouldBe(0);
+        outcome.GetProperty("integration").GetProperty("status").GetString().ShouldBe("Partial");
+        raw.ShouldNotContain("notAStatus", customMessage: "the integrity outcome carries only bounded enum facts, never malformed result bodies");
     }
 
     [Fact]
@@ -115,13 +193,13 @@ public sealed class SupervisorMergeWithholdFlowTests
     private static SupervisorAgentResult Unit(Guid agentRunId, string producedBranch, bool? acceptancePassed) =>
         new() { AgentRunId = agentRunId, Status = "Succeeded", Summary = "did it", ProducedBranch = producedBranch, AcceptancePassed = acceptancePassed };
 
-    private async Task<string?> RunMergeTurnAsync(Guid runId, Guid teamId)
+    private async Task<string?> RunMergeTurnAsync(Guid runId, Guid teamId, bool forcedByPublishGate = false)
     {
         using (var scope = _fixture.BeginScope())
         {
             var service = new SupervisorTurnService(
                 scope.Resolve<ISupervisorDecisionLog>(),
-                new MergeDecider(),
+                new MergeDecider(forcedByPublishGate),
                 scope.Resolve<ISupervisorActionExecutor>(),
                 scope.Resolve<CodeSpaceDbContext>(),
                 scope.Resolve<ISupervisorAcceptanceGrader>(),
@@ -179,6 +257,20 @@ public sealed class SupervisorMergeWithholdFlowTests
         await db.SaveChangesAsync();
     }
 
+    private async Task SeedAgentRunRawAsync(Guid agentRunId, Guid teamId, Guid runId, AgentRunStatus status, string? resultJson)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.AgentRun.Add(new AgentRun
+        {
+            Id = agentRunId, TeamId = teamId, WorkflowRunId = runId, NodeId = NodeId, Harness = "codex-cli",
+            Status = status, TaskJson = "{}", ResultJson = resultJson,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    private static string ResultJson(AgentRunStatus status) => JsonSerializer.Serialize(new AgentRunResult { Status = status, ExitReason = "test" }, AgentJson.Options);
+
     private static SupervisorGoalConfig GoalConfig() => new() { Goal = Goal, AgentProfile = new SupervisorAgentProfile { RepositoryId = Guid.NewGuid() } };
 
     private async Task<Guid> SeedSupervisorRunAsync(Guid teamId, Guid userId)
@@ -215,13 +307,13 @@ public sealed class SupervisorMergeWithholdFlowTests
     }
 
     /// <summary>A decider that emits a single MERGE decision — drives the real merge executor over the seeded prior spawn.</summary>
-    private sealed class MergeDecider : ISupervisorDecider
+    private sealed class MergeDecider(bool forcedByPublishGate) : ISupervisorDecider
     {
         public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken) =>
             Task.FromResult(new SupervisorDecision
             {
                 Kind = SupervisorDecisionKinds.Merge,
-                PayloadJson = JsonSerializer.Serialize(new SupervisorMergePayload { SynthesisInstruction = "combine" }, AgentJson.Options),
+                PayloadJson = JsonSerializer.Serialize(new SupervisorMergePayload { SynthesisInstruction = "combine", ForcedByPublishGate = forcedByPublishGate }, AgentJson.Options),
             });
     }
 }

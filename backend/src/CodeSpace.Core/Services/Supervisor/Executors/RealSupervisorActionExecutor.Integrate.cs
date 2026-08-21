@@ -29,12 +29,25 @@ namespace CodeSpace.Core.Services.Supervisor.Executors;
 public sealed partial class RealSupervisorActionExecutor
 {
     /// <summary>Layer the integration + synthesis keys onto the fold outcome — ONLY when the gate is on AND there are agents to combine. A no-op (returns immediately) keeps the gate-OFF path byte-identical. <see cref="SupervisorMergePayload.ForcedByPublishGate"/> (I3) bypasses the operator's integrate opt-in entirely — a correctness floor is never left off — and skips synthesis (the server is trying to PUBLISH, not narrate; no LLM call the operator didn't ask for).</summary>
-    private async Task AugmentWithIntegrationAndSynthesisAsync(Dictionary<string, object?> outcome, SupervisorTurnContext context, IReadOnlyList<MergedAgent> merged, SupervisorMergePayload merge, CancellationToken cancellationToken)
+    private async Task AugmentWithIntegrationAndSynthesisAsync(Dictionary<string, object?> outcome, SupervisorTurnContext context, MergeContributorRead contributors, SupervisorMergePayload merge, CancellationToken cancellationToken)
     {
         var profile = context.AgentProfile;
         var forcedByPublishGate = merge.ForcedByPublishGate == true;
 
+        if (contributors.Integrity is not null)
+        {
+            outcome["integration"] = new
+            {
+                status = "Partial",
+                integratedBranch = (string?)null,
+                reason = $"{contributors.Integrity.Issues.Count} of {contributors.Integrity.ExpectedCount} recorded contributors could not be read faithfully; human review is required",
+            };
+            return;
+        }
+
         if (!forcedByPublishGate && !AgentRunExecutor.ShouldIntegrate(profile?.IntegrateBranches)) return;
+
+        var merged = contributors.Agents;
         if (merged.Count == 0) return;
 
         if (!forcedByPublishGate)
