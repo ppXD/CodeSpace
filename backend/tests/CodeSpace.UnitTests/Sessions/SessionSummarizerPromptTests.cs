@@ -15,9 +15,7 @@ namespace CodeSpace.UnitTests.Sessions;
 public class SessionSummarizerPromptTests
 {
     private static SessionSummarizer.TurnRow Turn(int n, string goal, string result, string? branch = null) =>
-        new(Guid.NewGuid(), n, "Success",
-            branch is null ? $$"""{"summary":"{{result}}"}""" : $$"""{"summary":"{{result}}","branch":"{{branch}}"}""",
-            $$"""{"goal":"{{goal}}"}""");
+        new(Guid.NewGuid(), n, "Success", goal, result, branch);
 
     [Fact]
     public void First_distillation_asks_to_summarise_the_turns_and_renders_their_fields()

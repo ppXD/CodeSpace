@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
@@ -14,6 +15,7 @@ using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks;
 using CodeSpace.Messages.Tasks.Effort;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Sessions;
@@ -202,6 +204,89 @@ public class WorkSessionContextFlowTests
     }
 
     [Fact]
+    public async Task Builder_does_not_transport_complete_json_roots_for_bounded_context_text()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId);
+        var baggage = new string('x', 2 * 1024 * 1024);
+        await SeedTurnPayloadAsync(teamId, sessionId, turn: 1,
+            JsonSerializer.Serialize(new { goal = new string('g', 605), unrelated = baggage }),
+            JsonSerializer.Serialize(new { summary = new string('r', 605), unrelated = baggage }));
+
+        var recorder = new ReadCommandRecorder();
+        using var scope = ReadScope(recorder);
+        var context = await scope.Resolve<ISessionContextBuilder>().BuildAsync(sessionId, teamId, CancellationToken.None);
+
+        context.ShouldNotBeNull();
+        context!.ShouldContain($"Asked: {new string('g', 600)}…", Case.Sensitive);
+        context.ShouldContain($"Result: {new string('r', 600)}…", Case.Sensitive);
+
+        var lineageSql = recorder.Commands.Single(command => command.Contains("workflow_run", StringComparison.OrdinalIgnoreCase)
+            && command.Contains("session_id", StringComparison.OrdinalIgnoreCase)
+            && command.Contains("normalized_payload_json", StringComparison.OrdinalIgnoreCase));
+        lineageSql.ShouldNotContain("outputs_jsonb AS", Case.Insensitive, "the 2 MiB OutputsJson root must not cross DB/CLR");
+        lineageSql.ShouldNotContain("normalized_payload_json AS", Case.Insensitive, "the 2 MiB request root must not cross DB/CLR");
+    }
+
+    [Fact]
+    public async Task Narrow_leaf_read_preserves_lowercase_type_precedence_and_astral_clip_bytes()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId);
+        var astral = new string('a', 599) + "🚀tail";
+
+        await SeedTurnPayloadAsync(teamId, sessionId, turn: 1,
+            JsonSerializer.Serialize(new Dictionary<string, object?> { ["goal"] = astral, ["Goal"] = "Pascal must not override" }),
+            JsonSerializer.Serialize(new Dictionary<string, object?> { ["summary"] = 42, ["Summary"] = "Pascal must not override", ["combined"] = astral }));
+
+        var context = await BuildContextAsync(sessionId, teamId);
+        var expected = $"""
+            # Earlier turns in this work thread
+            You are continuing an existing thread. Build on the work below — do not redo it.
+
+            ## Turn 1 (Success)
+            Asked: {SessionTurnText.Clip(astral)}
+            Result: {SessionTurnText.Clip(astral)}
+            """;
+
+        context.ShouldBe(expected, "601 PostgreSQL scalars must preserve the established 600 UTF-16-unit clip, including an astral boundary");
+        context.ShouldNotContain("Pascal must not override", Case.Sensitive);
+    }
+
+    [Fact]
+    public async Task Narrow_leaf_read_keeps_first_nonblank_result_even_when_its_bounded_prefix_is_whitespace()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId);
+        var lateText = new string(' ', SessionIntelligenceTurnReader.TextReadCharacters) + "summary-tail";
+        await SeedTurnPayloadAsync(teamId, sessionId, turn: 1, "{}", JsonSerializer.Serialize(new { summary = lateText, combined = "WRONG_FALLBACK" }));
+
+        var context = await BuildContextAsync(sessionId, teamId);
+
+        context.ShouldNotBeNull();
+        context!.ShouldContain($"Result: {SessionTurnText.Clip(lateText)}", Case.Sensitive);
+        context.ShouldNotContain("WRONG_FALLBACK", Case.Sensitive, "summary remains first-present based on the whole leaf, not only its transported prefix");
+    }
+
+    [Fact]
+    public async Task Narrow_leaf_read_ignores_non_objects_wrong_types_and_pascal_only_keys()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId);
+        await SeedTurnPayloadAsync(teamId, sessionId, turn: 1, "[]", "[]");
+        await SeedTurnPayloadAsync(teamId, sessionId, turn: 2,
+            """{"goal":42,"Goal":"PASCAL_GOAL"}""",
+            """{"summary":42,"Summary":"PASCAL_SUMMARY","combined":"lowercase-result"}""");
+
+        var context = await BuildContextAsync(sessionId, teamId);
+
+        context.ShouldNotBeNull();
+        context!.ShouldNotContain("PASCAL_GOAL", Case.Sensitive);
+        context.ShouldNotContain("PASCAL_SUMMARY", Case.Sensitive);
+        context.ShouldContain("Result: lowercase-result", Case.Sensitive, "a wrong-type summary continues to the lowercase combined fallback");
+    }
+
+    [Fact]
     public async Task Builder_is_team_scoped_and_ignores_another_teams_session()
     {
         // Defence in depth: even handed a real session id, the builder only reads runs of the CALLING team.
@@ -359,6 +444,13 @@ public class WorkSessionContextFlowTests
         TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
         TaskText = text, ContinueSessionId = sessionId, RequestedEffort = TaskEffortModes.Quick, Autonomy = "Confined",
     };
+
+    private ILifetimeScope ReadScope(DbCommandInterceptor interceptor) => _fixture.BeginScope(builder =>
+    {
+        var options = new DbContextOptionsBuilder<CodeSpaceDbContext>().UseNpgsql(_fixture.ConnectionString)
+            .UseSnakeCaseNamingConvention().AddInterceptors(interceptor).Options;
+        builder.RegisterInstance(options).As<DbContextOptions<CodeSpaceDbContext>>().SingleInstance();
+    });
 
     private async Task<string?> BuildContextAsync(Guid sessionId, Guid teamId)
     {
@@ -532,7 +624,10 @@ public class WorkSessionContextFlowTests
     }
 
     /// <summary>Stage a finished turn with an arbitrary OutputsJson shape (a projection other than single-agent surfaces different result keys).</summary>
-    private async Task SeedTurnAsync(Guid teamId, Guid sessionId, int? turn, string goal, string outputsJson)
+    private Task SeedTurnAsync(Guid teamId, Guid sessionId, int? turn, string goal, string outputsJson) =>
+        SeedTurnPayloadAsync(teamId, sessionId, turn, JsonSerializer.Serialize(new { goal }), outputsJson);
+
+    private async Task SeedTurnPayloadAsync(Guid teamId, Guid sessionId, int? turn, string payloadJson, string outputsJson)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -543,7 +638,7 @@ public class WorkSessionContextFlowTests
         db.WorkflowRunRequest.Add(new WorkflowRunRequest
         {
             Id = requestId, TeamId = teamId, SourceType = WorkflowRunSourceTypes.Snapshot, ActorType = "user",
-            ActorId = SystemUsers.SeederId, NormalizedPayloadJson = JsonSerializer.Serialize(new { goal }),
+            ActorId = SystemUsers.SeederId, NormalizedPayloadJson = payloadJson,
             Status = WorkflowRunRequestStatus.Consumed, ReceivedAt = now, VerifiedAt = now, NormalizedAt = now,
         });
         db.WorkflowRun.Add(new WorkflowRun
@@ -555,6 +650,17 @@ public class WorkSessionContextFlowTests
         });
 
         await db.SaveChangesAsync();
+    }
+
+    private sealed class ReadCommandRecorder : DbCommandInterceptor
+    {
+        public List<string> Commands { get; } = [];
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        {
+            Commands.Add(command.CommandText);
+            return ValueTask.FromResult(result);
+        }
     }
 
     private IDisposable PauseAutoExecute()

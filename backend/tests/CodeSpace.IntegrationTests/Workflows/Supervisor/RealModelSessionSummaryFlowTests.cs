@@ -1,4 +1,3 @@
-using System.Text.Json;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Sessions;
 using CodeSpace.Core.Services.Workflows.Llm;
@@ -50,8 +49,9 @@ public sealed class RealModelSessionSummaryFlowTests
 
             var turns = OlderTurns.Select((t, i) => new SessionSummarizer.TurnRow(
                 Guid.NewGuid(), i + 1, "Success",
-                JsonSerializer.Serialize(new { summary = t.Result }),
-                JsonSerializer.Serialize(new { goal = t.Goal }))).ToList();
+                t.Goal,
+                t.Result,
+                LegacyBranch: null)).ToList();
 
             var noManifests = new Dictionary<Guid, IReadOnlyList<Core.Persistence.Entities.PublishManifest>>();
             var summary = await summarizer.TryDistillAsync(Guid.NewGuid(), existingSummary: null, turns, noManifests, CancellationToken.None);

@@ -22,6 +22,7 @@ public sealed class SessionSummarizer : ISessionSummarizer, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
     private readonly IPublishManifestStore _manifests;
+    private readonly ISessionIntelligenceTurnReader _turns;
     private readonly ILLMClientRegistry _clientRegistry;
     private readonly IModelPoolSelector _modelSelector;
     private readonly ILogger<SessionSummarizer> _logger;
@@ -30,6 +31,7 @@ public sealed class SessionSummarizer : ISessionSummarizer, IScopedDependency
     {
         _db = db;
         _manifests = manifests;
+        _turns = new SessionIntelligenceTurnReader(db);
         _clientRegistry = clientRegistry;
         _modelSelector = modelSelector;
         _logger = logger;
@@ -37,13 +39,9 @@ public sealed class SessionSummarizer : ISessionSummarizer, IScopedDependency
 
     public async Task EnsureSummaryUpToDateAsync(Guid sessionId, Guid teamId, CancellationToken cancellationToken)
     {
-        // The session's WHOLE lineage (a rerun/replay attempt inherits the SessionId with a NULL turn index) — each
-        // turn's EFFECTIVE attempt (SessionTurnAttempts) is resolved before windowing, so a superseded original never
-        // shadows its own successful rerun in the folded summary.
-        var lineage = await _db.WorkflowRun.AsNoTracking()
-            .Where(r => r.SessionId == sessionId && r.TeamId == teamId)
-            .Select(r => new { r.Id, r.RootRunId, r.SessionTurnIndex, r.Status, r.CreatedDate, r.OutputsJson, Payload = r.RunRequest.NormalizedPayloadJson })
-            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        // The session's WHOLE narrow lineage (a rerun/replay attempt inherits the SessionId with a NULL turn index) —
+        // each turn's EFFECTIVE attempt is resolved before windowing. JSON roots never cross into this model path.
+        var lineage = await _turns.ListAsync(sessionId, teamId, cancellationToken).ConfigureAwait(false);
 
         // The turns OLDER than the recent verbatim window = ALL BUT the most recent MaxTurns turns (by turn index).
         // ROW-based (Skip), NOT value-based (latest − MaxTurns), so it stays exactly complementary to BuildAsync's
@@ -53,7 +51,7 @@ public sealed class SessionSummarizer : ISessionSummarizer, IScopedDependency
         var olderTurns = lineage.GroupBy(r => r.RootRunId ?? r.Id)
             .Where(g => g.Any(r => r.SessionTurnIndex != null))
             .Select(g => new { Turn = g.First(r => r.SessionTurnIndex != null).SessionTurnIndex, EffectiveId = SessionTurnAttempts.ResolveEffectiveId(g.Select(r => new SessionTurnAttempts.AttemptRow(r.Id, r.Status, r.CreatedDate))) })
-            .Join(lineage, t => t.EffectiveId, r => r.Id, (t, r) => new TurnRow(r.Id, t.Turn, r.Status.ToString(), r.OutputsJson, r.Payload))
+            .Join(lineage, t => t.EffectiveId, r => r.Id, (t, r) => new TurnRow(r.Id, t.Turn, r.Status.ToString(), r.Goal, r.Result, r.LegacyBranch))
             .OrderByDescending(t => t.Turn)
             .Skip(SessionContextBuilder.MaxTurns)
             .ToList();
@@ -149,13 +147,11 @@ public sealed class SessionSummarizer : ISessionSummarizer, IScopedDependency
             sb.AppendLine();
             sb.AppendLine($"Turn {t.Turn} ({t.Status}):");
 
-            var goal = SessionTurnText.ReadString(t.Payload, "goal");
-            if (goal != null) sb.AppendLine($"  Asked: {SessionTurnText.Clip(goal)}");
+            if (t.Goal != null) sb.AppendLine($"  Asked: {SessionTurnText.Clip(t.Goal)}");
 
-            var result = SessionTurnText.ReadResult(t.OutputsJson);
-            if (result != null) sb.AppendLine($"  Result: {SessionTurnText.Clip(result)}");
+            if (t.Result != null) sb.AppendLine($"  Result: {SessionTurnText.Clip(t.Result)}");
 
-            var branch = SessionManifestBranches.ResolveSingleRepoBranch(manifestsByRunId?.GetValueOrDefault(t.Id))?.Branch ?? SessionTurnText.ReadString(t.OutputsJson, "branch");
+            var branch = SessionManifestBranches.ResolveSingleRepoBranch(manifestsByRunId?.GetValueOrDefault(t.Id))?.Branch ?? t.LegacyBranch;
             if (branch != null) sb.AppendLine($"  Produced branch: {branch}");
         }
 
@@ -169,5 +165,5 @@ public sealed class SessionSummarizer : ISessionSummarizer, IScopedDependency
         "it. Keep it tight (a few short paragraphs at most). Output ONLY the updated summary prose, no preamble.";
 
     /// <summary>One older turn's clean fields for distillation (the same source-of-truth the digest reads).</summary>
-    internal sealed record TurnRow(Guid Id, int? Turn, string Status, string OutputsJson, string Payload);
+    internal sealed record TurnRow(Guid Id, int? Turn, string Status, string? Goal, string? Result, string? LegacyBranch);
 }
