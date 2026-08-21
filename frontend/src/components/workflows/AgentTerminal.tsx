@@ -173,7 +173,18 @@ function harnessExecutionFact(execution?: AgentRunHarnessExecutionSummary | null
     : `execution ${execution.state.toLowerCase()}`;
   const attempts = `${execution.attemptCount} ${execution.attemptCount === 1 ? "attempt" : "attempts"}`;
   const capture = execution.hasCapturedNativeRecords ? "native capture" : "no native frames";
-  return `${process} · ${attempts} · ${capture}`;
+  return `${process} · ${attempts} · ${capture} · ${modelCallObservationFact(execution.modelCallObservationCoverage)}`;
+}
+
+/** Closed display vocabulary: an absent legacy token or unknown future token never upgrades itself into a known coverage claim. */
+function modelCallObservationFact(coverage?: string | null): string {
+  switch (coverage) {
+    case "PerResponseMetadata": return "model-call source: per-response metadata";
+    case "CumulativeAggregate": return "model-call source: cumulative aggregate only";
+    case "Unavailable": return "model-call source: unavailable";
+    case "LegacyUnknown": return "model-call source: coverage unknown";
+    default: return "model-call source: coverage unknown";
+  }
 }
 
 /** Known-missing capture is an observation beside the run verdict, never a replacement for it. */

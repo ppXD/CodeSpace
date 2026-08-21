@@ -21,7 +21,7 @@ namespace CodeSpace.Core.Services.Agents.Harnesses.Claude;
 /// (surfaced, never dropped) and pure setup lines return null — so a CLI version bump degrades gracefully; the
 /// normalization shape tested here is the stable contract, calibrated against real output when execution is wired.</para>
 /// </summary>
-public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessContractGeneration, IAgentHarnessRunFactKeys, IModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, IAgentGroundedFrameReader, IAgentModelCallFrameReader, ISingletonDependency
+public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessContractGeneration, IAgentHarnessRunFactKeys, IAgentHarnessModelCallObservation, IModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, IAgentGroundedFrameReader, IAgentModelCallFrameReader, ISingletonDependency
 {
     public const string HarnessKind = "claude-code";
 
@@ -102,6 +102,9 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessContractGene
     /// <c>AgentNativeRecordPumpTests.Every_shipped_adapter_keys_its_rows_under_the_generation_it_declares</c>.
     /// </summary>
     public int ContractGeneration => 2;
+
+    /// <summary>The stream exposes response id, effective model and usage on each assistant response frame; this does not claim provider request/body or timing capture.</summary>
+    public HarnessModelCallObservationCoverage ModelCallObservationCoverage => HarnessModelCallObservationCoverage.PerResponseMetadata;
 
     /// <summary>
     /// Where Claude Code's <c>stream-json</c> output spells the three run facts, confirmed against real claude v2.1.x

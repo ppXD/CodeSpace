@@ -290,6 +290,7 @@ describe("AgentTerminal", () => {
         runnerKind: "local",
         state: "Exited",
         attemptCount: 1,
+        modelCallObservationCoverage: "PerResponseMetadata",
         hasCapturedNativeRecords: true,
         terminalAt: "2026-06-23T00:01:00Z",
         attempts: [{
@@ -334,9 +335,31 @@ describe("AgentTerminal", () => {
 
     render(<AgentTerminal agent={termAgent({ agentRunId: "a1", status: "TimedOut" })} onClose={vi.fn()} />);
 
-    expect(screen.getByText("process lost (capture.exit-unobserved) · 1 attempt · native capture")).toBeInTheDocument();
+    expect(screen.getByText("process lost (capture.exit-unobserved) · 1 attempt · native capture · model-call source: per-response metadata")).toBeInTheDocument();
     expect(screen.getByText("1 open capture gap · write refused")).toBeInTheDocument();
     expect(screen.getByText("timed out")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["CumulativeAggregate", "model-call source: cumulative aggregate only"],
+    ["Unavailable", "model-call source: unavailable"],
+    ["LegacyUnknown", "model-call source: coverage unknown"],
+    ["FutureProviderTrace", "model-call source: coverage unknown"],
+    [null, "model-call source: coverage unknown"],
+  ])("decodes model-call observation coverage closed (%s)", (coverage, expected) => {
+    useAgentRunMock.mockReturnValue({ data: {
+      status: "Running",
+      harness: "future-harness",
+      harnessExecution: {
+        id: "execution-1", generation: 1, harnessTypeKey: "future-harness/v1", runnerKind: "local",
+        state: "Running", attemptCount: 0, modelCallObservationCoverage: coverage,
+        hasCapturedNativeRecords: false, terminalAt: null, attempts: [], attemptsTruncated: false,
+      },
+    } });
+
+    render(<AgentTerminal agent={termAgent({ agentRunId: "a1" })} />);
+
+    expect(screen.getByText(new RegExp(expected))).toBeInTheDocument();
   });
 
   it("keeps the agent outcome visible when capture-gap observation is unavailable", () => {

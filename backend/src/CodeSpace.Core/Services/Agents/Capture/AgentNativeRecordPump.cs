@@ -144,6 +144,20 @@ internal sealed class AgentNativeRecordPump
     }
 
     /// <summary>
+    /// The adapter's closed model-call observation declaration, snapshotted onto the execution at launch. An absent
+    /// declaration or an undefined enum value fails closed to LegacyUnknown; neither is evidence of Unavailable.
+    /// Returning the wire string deliberately keeps EF and the read model open to a future value an older UI must
+    /// reject, rather than enum-materializing it into an invented known mode.
+    /// </summary>
+    internal static string ModelCallObservationCoverageOf(IAgentHarness harness)
+    {
+        if (harness is not IAgentHarnessModelCallObservation declaration || !Enum.IsDefined(declaration.ModelCallObservationCoverage))
+            return nameof(HarnessModelCallObservationCoverage.LegacyUnknown);
+
+        return declaration.ModelCallObservationCoverage.ToString();
+    }
+
+    /// <summary>
     /// Opens a capture stream — a new process's, or the RESUMED stream of one already recorded when
     /// <see cref="NativeRecordCaptureRequest.Resume"/> is set — and resumes the execution's reduction behind it.
     /// Degrades to a parse-only pump when the plane is absent, cannot open, or has no live process to resume: the same

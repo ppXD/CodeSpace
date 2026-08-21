@@ -94,6 +94,43 @@ public sealed class WorkflowRunHarnessExecutionPersistenceTests
     }
 
     [Fact]
+    public async Task Model_call_observation_is_a_nullable_legacy_snapshot_open_to_future_tokens_but_immutable_once_written()
+    {
+        var world = await SeedWorldAsync();
+        var legacy = await SeedExecutionAsync(world, generation: 1);
+
+        using (var read = _fixture.BeginScope())
+            (await read.Resolve<CodeSpaceDbContext>().WorkflowRunHarnessExecution.AsNoTracking().SingleAsync(candidate => candidate.Id == legacy.Id))
+                .ModelCallObservationCoverage.ShouldBeNull("migration 0160 must not reinterpret an old run through today's adapter");
+
+        await AbandonAsync(world, legacy);
+
+        var future = Execution(world, generation: 2);
+        future.ModelCallObservationCoverage = "FutureProviderTrace";
+        using (var write = _fixture.BeginScope())
+        {
+            write.Resolve<CodeSpaceDbContext>().WorkflowRunHarnessExecution.Add(future);
+            await write.Resolve<CodeSpaceDbContext>().SaveChangesAsync();
+        }
+
+        using (var read = _fixture.BeginScope())
+            (await read.Resolve<CodeSpaceDbContext>().WorkflowRunHarnessExecution.AsNoTracking().SingleAsync(candidate => candidate.Id == future.Id))
+                .ModelCallObservationCoverage.ShouldBe("FutureProviderTrace", "storage remains open while older readers fail closed on this token");
+
+        using (var mutation = _fixture.BeginScope())
+        {
+            var db = mutation.Resolve<CodeSpaceDbContext>();
+            var stored = await db.WorkflowRunHarnessExecution.SingleAsync(candidate => candidate.Id == future.Id);
+            stored.ModelCallObservationCoverage = nameof(CodeSpace.Messages.Agents.HarnessModelCallObservationCoverage.CumulativeAggregate);
+            stored.Revision++;
+            stored.LastModifiedAt = DateTimeOffset.UtcNow;
+
+            var rejected = await Should.ThrowAsync<DbUpdateException>(() => db.SaveChangesAsync());
+            rejected.GetBaseException().Message.ShouldContain("model-call observation coverage is immutable");
+        }
+    }
+
+    [Fact]
     public async Task Generations_start_at_one_are_contiguous_and_cannot_open_over_a_live_predecessor()
     {
         var world = await SeedWorldAsync();

@@ -40,6 +40,9 @@ public sealed record NativeRecordCaptureRequest
     /// <summary>The adapter identity that is running, as <c>&lt;kind&gt;/v&lt;major&gt;</c> — snapshotted onto the execution so a row read a year later is interpretable against the adapter that produced it.</summary>
     public required string HarnessTypeKey { get; init; }
 
+    /// <summary>The adapter's model-call observation granularity at launch. A nullable/open wire string keeps legacy or future values honest; shared code never infers it from <see cref="HarnessTypeKey"/>.</summary>
+    public string? ModelCallObservationCoverage { get; init; }
+
     /// <summary>Runner backend that owns the process, and the only interpreter of <see cref="RunnerLocatorJson"/>.</summary>
     public required string RunnerKind { get; init; }
 

@@ -15,6 +15,7 @@ public sealed class WorkflowRunHarnessExecutionConfiguration : IEntityTypeConfig
             table.HasCheckConstraint("ck_workflow_run_harness_execution_head", "generation > 0 AND attempt_count >= 0 AND next_attempt_ordinal = attempt_count + 1 AND runner_locator_schema_version > 0 AND revision > 0");
             table.HasCheckConstraint("ck_workflow_run_harness_execution_identity", "harness_type_key ~ '^[a-z0-9][a-z0-9._-]{0,126}/v[1-9][0-9]*$' AND runner_kind ~ '^[a-z0-9][a-z0-9._-]{0,63}$' AND (runner_host_affinity IS NULL OR btrim(runner_host_affinity) <> '')");
             table.HasCheckConstraint("ck_workflow_run_harness_execution_lease", "lease_fence >= 0 AND ((lease_owner_id IS NULL AND lease_expires_at IS NULL) OR (lease_owner_id IS NOT NULL AND lease_fence > 0 AND lease_expires_at IS NOT NULL))");
+            table.HasCheckConstraint("ck_workflow_run_harness_execution_model_call_observation", "model_call_observation_coverage IS NULL OR model_call_observation_coverage ~ '^[A-Z][A-Za-z0-9]{0,47}$'");
             table.HasCheckConstraint("ck_workflow_run_harness_execution_state", "state IN ('Pending', 'Running', 'Exited', 'Abandoned')");
             table.HasCheckConstraint("ck_workflow_run_harness_execution_terminal", "(state IN ('Pending', 'Running') AND terminal_at IS NULL AND error_code IS NULL) OR (state = 'Exited' AND terminal_at IS NOT NULL AND attempt_count > 0) OR (state = 'Abandoned' AND terminal_at IS NOT NULL AND error_code IS NOT NULL)");
             table.HasCheckConstraint("ck_workflow_run_harness_execution_terminal_lease", "state IN ('Pending', 'Running') OR (lease_owner_id IS NULL AND lease_expires_at IS NULL)");
@@ -27,6 +28,7 @@ public sealed class WorkflowRunHarnessExecutionConfiguration : IEntityTypeConfig
         builder.HasAlternateKey(execution => new { execution.TeamId, execution.Id, execution.AgentRunId }).HasName("ak_workflow_run_harness_execution_scope");
 
         builder.Property(execution => execution.HarnessTypeKey).HasMaxLength(160);
+        builder.Property(execution => execution.ModelCallObservationCoverage).HasMaxLength(48);
         builder.Property(execution => execution.RunnerKind).HasMaxLength(64);
         builder.Property(execution => execution.RunnerHostAffinity).HasMaxLength(255);
         builder.Property(execution => execution.State).HasConversion<string>().HasMaxLength(24);

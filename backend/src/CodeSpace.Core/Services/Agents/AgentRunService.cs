@@ -848,6 +848,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
                     candidate.RunnerKind,
                     candidate.State,
                     candidate.AttemptCount,
+                    candidate.ModelCallObservationCoverage,
                     candidate.TerminalAt,
                     HasCapturedNativeRecords = _db.WorkflowRunNativeRecord.Any(record => record.TeamId == teamId && record.ExecutionId == candidate.Id),
                 })
@@ -880,6 +881,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
                 RunnerKind = execution.RunnerKind,
                 State = execution.State.ToString(),
                 AttemptCount = execution.AttemptCount,
+                ModelCallObservationCoverage = execution.ModelCallObservationCoverage,
                 HasCapturedNativeRecords = execution.HasCapturedNativeRecords,
                 TerminalAt = execution.TerminalAt,
                 Attempts = rows.Take(MaxObservedHarnessAttempts).Select(row => new AgentRunHarnessProcessAttemptSummary

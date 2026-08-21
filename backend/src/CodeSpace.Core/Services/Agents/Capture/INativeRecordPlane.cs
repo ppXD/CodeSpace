@@ -248,7 +248,7 @@ public sealed partial class NativeRecordPlane : INativeRecordPlane, IScopedDepen
         return new WorkflowRunHarnessExecution
         {
             Id = Guid.NewGuid(), TeamId = request.TeamId, AgentRunId = request.AgentRunId, WorkflowRunId = run.WorkflowRunId,
-            Generation = generation, HarnessTypeKey = request.HarnessTypeKey, RunnerKind = request.RunnerKind,
+            Generation = generation, HarnessTypeKey = request.HarnessTypeKey, ModelCallObservationCoverage = request.ModelCallObservationCoverage, RunnerKind = request.RunnerKind,
             RunnerLocatorSchemaVersion = 1, State = HarnessExecutionState.Pending, AttemptCount = 0,
             NextAttemptOrdinal = 1, LeaseFence = 0, Revision = 1, CreatedAt = now, LastModifiedAt = now,
         };

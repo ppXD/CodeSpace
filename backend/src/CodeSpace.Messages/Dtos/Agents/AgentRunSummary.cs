@@ -85,6 +85,9 @@ public sealed record AgentRunHarnessExecutionSummary
 
     public required int AttemptCount { get; init; }
 
+    /// <summary>Open persisted model-call observation vocabulary. NULL is a legacy row; consumers must fail closed on any value they do not know. For a standalone Agent Run this remains source-coverage truth only; only a workflow-bound execution has an identity that can contribute workflow-run model-call rows.</summary>
+    public string? ModelCallObservationCoverage { get; init; }
+
     /// <summary>Whether at least one native frame was durably captured. Deliberately an indexed existence probe rather than an unbounded per-poll count.</summary>
     public required bool HasCapturedNativeRecords { get; init; }
 
