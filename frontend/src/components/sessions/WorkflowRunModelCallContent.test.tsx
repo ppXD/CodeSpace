@@ -2,6 +2,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { WorkflowRunCaptureCompleteness, WorkflowRunModelCallAttemptMetadata, WorkflowRunModelCallBodyReferenceState, WorkflowRunModelCallDetailMetadata } from "@/api/workflows";
+
 import { WorkflowRunModelCallContent, type WorkflowRunModelCallTab } from "./WorkflowRunModelCallContent";
 
 const callId = "11111111-1111-1111-1111-111111111111";
@@ -25,8 +27,9 @@ function projectedMetadata() {
   };
 }
 
-function stableDetail(responseReferenceState = "Referenced", responseCompleteness = "Exact") {
-  const attempt = (attemptId: string, attemptOrdinal: number, model: string, status: string) => ({
+function stableDetail(responseReferenceState: WorkflowRunModelCallBodyReferenceState = "Referenced",
+  responseCompleteness: WorkflowRunCaptureCompleteness = "Exact"): WorkflowRunModelCallDetailMetadata {
+  const attempt = (attemptId: string, attemptOrdinal: number, model: string, status: string): WorkflowRunModelCallAttemptMetadata => ({
     attemptId,
     attemptOrdinal,
     effectiveProvider: "anthropic-compatible",
@@ -45,6 +48,7 @@ function stableDetail(responseReferenceState = "Referenced", responseCompletenes
     sourceStartedRecordId: null,
     sourceTerminalRecordId: null,
     sourceEvidenceRevision: 1,
+    unavailableFigures: [],
     usage: { inputTokens: 10, outputTokens: attemptOrdinal * 20, cacheReadTokens: 3, cacheWriteTokens: 0, reasoningTokens: 5 },
     costAmount: attemptOrdinal === 2 ? 0.42 : 0.12,
     costCurrency: "USD",
@@ -330,5 +334,38 @@ describe("WorkflowRunModelCallContent", () => {
     rerenderTab("usage");
     await waitFor(() => expect(bodySignal?.aborted).toBe(true));
     expect(await screen.findByText("50 tokens")).toBeInTheDocument();
+  });
+
+  it("renders declared-unavailable and unstated usage figures without inventing zeroes", async () => {
+    const detail = stableDetail();
+    detail.attempts[1].unavailableFigures = ["cache_read_tokens", "reasoning_tokens", "cost_amount", "provider_request_id", "first_token_at", "completed_at"];
+    detail.attempts[1].usage.inputTokens = null;
+    detail.attempts[1].usage.cacheReadTokens = null;
+    detail.attempts[1].usage.reasoningTokens = null;
+    detail.attempts[1].costAmount = null;
+    detail.attempts[1].costCurrency = null;
+    detail.attempts[1].pricingVersion = null;
+    detail.attempts[1].providerRequestId = null;
+    detail.attempts[1].firstTokenAt = null;
+    detail.attempts[1].completedAt = null;
+    const { rerenderTab } = renderContent((url) => {
+      if (url.pathname === "/api/workflows/runs/run-1/model-calls/42") return json(projectedMetadata());
+      if (url.pathname === `/api/workflows/runs/run-1/model-calls/${callId}`) return json(detail);
+      return json({ message: `Unexpected ${url.pathname}` }, 500);
+    }, "usage");
+
+    expect(await screen.findByText(/Logical #7/i)).toBeInTheDocument();
+    expect(screen.getByText("Input").nextElementSibling).toHaveTextContent("not recorded");
+    expect(screen.getByText("Cache read").nextElementSibling).toHaveTextContent("unavailable");
+    expect(screen.getByText("Cache write").nextElementSibling).toHaveTextContent("0 tokens");
+    expect(screen.getByText("Reasoning").nextElementSibling).toHaveTextContent("unavailable");
+    expect(screen.getByText("Total").nextElementSibling).toHaveTextContent("not recorded");
+    expect(screen.getByText("Cost").nextElementSibling).toHaveTextContent("unavailable");
+
+    rerenderTab("trace");
+    expect(await screen.findByText("Provider request")).toBeInTheDocument();
+    expect(screen.getByText("Provider request").nextElementSibling).toHaveTextContent("unavailable");
+    expect(screen.getByText("First token").nextElementSibling).toHaveTextContent("unavailable");
+    expect(screen.getByText("Completed at").nextElementSibling).toHaveTextContent("unavailable");
   });
 });
