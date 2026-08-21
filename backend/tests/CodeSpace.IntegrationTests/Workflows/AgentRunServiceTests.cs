@@ -100,6 +100,40 @@ public class AgentRunServiceTests
     }
 
     [Fact]
+    public async Task AppendEventAsync_offloads_a_large_data_json_payload_using_the_batch_contract()
+    {
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+            await svc.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        var payload = JsonSerializer.SerializeToElement(new { tag = "single-large-tool-result", blob = new string('x', ArtifactStoreConfig.DefaultInlineThresholdBytes + 500), end = "SENTINEL" });
+        AgentRunEvent appended;
+        using (var scope = _fixture.BeginScope())
+            appended = await scope.Resolve<IAgentRunService>().AppendEventAsync(runId, new AgentEvent { Kind = AgentEventKind.ToolCall, Text = "large-single", Data = payload }, CancellationToken.None);
+
+        appended.DataJson.ShouldBeNull("single-row append must apply the same bounded-row contract as batched append");
+        appended.DataArtifactId.ShouldNotBeNull("the event row retains the durable payload reference");
+
+        using var verify = _fixture.BeginScope();
+        var persisted = await verify.Resolve<CodeSpaceDbContext>().AgentRunEvent.AsNoTracking().SingleAsync(e => e.Id == appended.Id);
+        persisted.DataJson.ShouldBeNull();
+        persisted.DataArtifactId.ShouldBe(appended.DataArtifactId);
+
+        var artifact = await verify.Resolve<IArtifactStore>().GetBytesAsync(teamId, appended.DataArtifactId!.Value, CancellationToken.None);
+        artifact.ShouldNotBeNull();
+        artifact!.ContentType.ShouldBe("application/json");
+        var recovered = System.Text.Encoding.UTF8.GetString(artifact.Bytes);
+        JsonDocument.Parse(recovered).RootElement.GetProperty("tag").GetString().ShouldBe("single-large-tool-result");
+        recovered.ShouldContain("SENTINEL", customMessage: "the single-row path preserves the complete structured payload");
+    }
+
+    [Fact]
     public async Task AppendEventsAsync_persists_a_batch_in_strict_emission_order()
     {
         // D1: the buffered writer flushes many events in ONE batched call. The per-run BIGSERIAL `sequence`
