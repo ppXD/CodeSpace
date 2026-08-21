@@ -28,10 +28,11 @@ namespace CodeSpace.Core.Services.Supervisor.Executors;
 /// </summary>
 public sealed partial class RealSupervisorActionExecutor
 {
-    /// <summary>Layer the integration + synthesis keys onto the fold outcome — ONLY when the gate is on AND there are agents to combine. A no-op (returns immediately) keeps the gate-OFF path byte-identical. <paramref name="forcedByPublishGate"/> (I3) bypasses the operator's integrate opt-in entirely — a correctness floor is never left off — and skips synthesis (the server is trying to PUBLISH, not narrate; no LLM call the operator didn't ask for).</summary>
-    private async Task AugmentWithIntegrationAndSynthesisAsync(Dictionary<string, object?> outcome, SupervisorTurnContext context, IReadOnlyList<MergedAgent> merged, bool forcedByPublishGate, CancellationToken cancellationToken)
+    /// <summary>Layer the integration + synthesis keys onto the fold outcome — ONLY when the gate is on AND there are agents to combine. A no-op (returns immediately) keeps the gate-OFF path byte-identical. <see cref="SupervisorMergePayload.ForcedByPublishGate"/> (I3) bypasses the operator's integrate opt-in entirely — a correctness floor is never left off — and skips synthesis (the server is trying to PUBLISH, not narrate; no LLM call the operator didn't ask for).</summary>
+    private async Task AugmentWithIntegrationAndSynthesisAsync(Dictionary<string, object?> outcome, SupervisorTurnContext context, IReadOnlyList<MergedAgent> merged, SupervisorMergePayload merge, CancellationToken cancellationToken)
     {
         var profile = context.AgentProfile;
+        var forcedByPublishGate = merge.ForcedByPublishGate == true;
 
         if (!forcedByPublishGate && !AgentRunExecutor.ShouldIntegrate(profile?.IntegrateBranches)) return;
         if (merged.Count == 0) return;
@@ -39,7 +40,7 @@ public sealed partial class RealSupervisorActionExecutor
         if (!forcedByPublishGate)
             // Synthesis (facet b) reads the diffs — no repo needed; runs whenever the gate is on. Best-effort: a model
             // failure degrades to a note, NEVER crashing the merge turn (which would strand the decision row Running).
-            outcome["synthesis"] = await TrySynthesizeAsync(context, merged, cancellationToken).ConfigureAwait(false);
+            outcome["synthesis"] = await TrySynthesizeAsync(context, merged, merge.SynthesisInstruction, cancellationToken).ConfigureAwait(false);
 
         // Integration (facet a) writes a branch — only with a resolvable repository. EXCEPT when the conflict was
         // already RESOLVED: a VERIFIED resolver's own tested branch IS the reconciled merge, so re-running the
@@ -149,11 +150,11 @@ public sealed partial class RealSupervisorActionExecutor
     // ── Facet (b): the model synthesis reduce over the K real diffs ──────────────────
 
     /// <summary>Best-effort wrapper: synthesis is a non-essential enrichment, so ANY failure (a model 4xx/5xx, a missing pool model, a transport / serialization fault) degrades to a note — it must never escape and strand the turn. Cancellation still propagates.</summary>
-    private async Task<object> TrySynthesizeAsync(SupervisorTurnContext context, IReadOnlyList<MergedAgent> merged, CancellationToken cancellationToken)
+    private async Task<object> TrySynthesizeAsync(SupervisorTurnContext context, IReadOnlyList<MergedAgent> merged, string? synthesisInstruction, CancellationToken cancellationToken)
     {
         try
         {
-            return await SynthesizeAsync(context, merged, cancellationToken).ConfigureAwait(false);
+            return await SynthesizeAsync(context, merged, synthesisInstruction, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -162,7 +163,7 @@ public sealed partial class RealSupervisorActionExecutor
         }
     }
 
-    private async Task<object> SynthesizeAsync(SupervisorTurnContext context, IReadOnlyList<MergedAgent> merged, CancellationToken cancellationToken)
+    private async Task<object> SynthesizeAsync(SupervisorTurnContext context, IReadOnlyList<MergedAgent> merged, string? synthesisInstruction, CancellationToken cancellationToken)
     {
         // The synthesis is a plain-TEXT reduce, so it prefers a dedicated text-completion provider (the established
         // synth seam) and falls back to any registered client — in production the structured-capable provider also
@@ -179,7 +180,7 @@ public sealed partial class RealSupervisorActionExecutor
 
         if (pick is null) return new { note = $"no pool model available for synthesis on provider '{client.Provider}'" };
 
-        var projection = SupervisorSynthesisPrompt.Project(context.Goal, merged.Select(ToSynthesisSource).ToList(), context.SynthesisPromptBudgetChars);
+        var projection = SupervisorSynthesisPrompt.Project(context.Goal, synthesisInstruction, merged.Select(ToSynthesisSource).ToList(), context.SynthesisPromptBudgetChars);
         var request = new LLMCompletionRequest
         {
             Model = pick.ModelId,

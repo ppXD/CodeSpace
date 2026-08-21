@@ -13,20 +13,28 @@ internal static class SupervisorSynthesisPrompt
     private const int MinPartChars = 400;
 
     public static SupervisorSynthesisProjection Project(string goal, IReadOnlyList<SupervisorSynthesisSource> agents, int authoredBudgetChars)
+        => Project(goal, synthesisInstruction: null, agents, authoredBudgetChars);
+
+    public static SupervisorSynthesisProjection Project(string goal, string? synthesisInstruction, IReadOnlyList<SupervisorSynthesisSource> agents, int authoredBudgetChars)
     {
         var budgetChars = SupervisorSynthesisBudget.Normalize(authoredBudgetChars);
-        var whole = RenderWhole(goal, agents);
+        var directive = RenderDirective(goal, synthesisInstruction);
+        var whole = RenderWhole(directive, agents);
         var sources = RoundRobinSources(agents);
 
         if (whole.Length <= budgetChars) return Whole(whole, sources.Count, budgetChars);
 
-        return Excerpt(goal, sources, budgetChars);
+        return Excerpt(directive, sources, budgetChars);
     }
 
-    private static string RenderWhole(string goal, IReadOnlyList<SupervisorSynthesisSource> agents)
+    private static string RenderDirective(string goal, string? synthesisInstruction) => string.IsNullOrWhiteSpace(synthesisInstruction)
+        ? $"Goal: {goal}\n\n"
+        : $"Goal: {goal}\n\nSynthesis instruction:\n{synthesisInstruction}\n\n";
+
+    private static string RenderWhole(string directive, IReadOnlyList<SupervisorSynthesisSource> agents)
     {
         var text = new StringBuilder();
-        text.Append("Goal: ").Append(goal).Append("\n\n");
+        text.Append(directive);
 
         foreach (var agent in agents)
         {
@@ -40,14 +48,13 @@ internal static class SupervisorSynthesisPrompt
         return text.ToString();
     }
 
-    private static SupervisorSynthesisProjection Excerpt(string goal, IReadOnlyList<SupervisorSynthesisPart> sources, int budgetChars)
+    private static SupervisorSynthesisProjection Excerpt(string directive, IReadOnlyList<SupervisorSynthesisPart> sources, int budgetChars)
     {
         var noticeBudget = WidestNoticeWidth(sources.Count) + 1;
         var payloadBudget = Math.Max(0, budgetChars - noticeBudget);
         var availableSlots = payloadBudget / MinPartChars;
         var shown = Math.Min(sources.Count, Math.Max(0, availableSlots - 1));
-        var goalPart = $"Goal: {goal}\n\n";
-        var selected = sources.Take(shown).Select(RenderPart).Prepend(goalPart).ToList();
+        var selected = sources.Take(shown).Select(RenderPart).Prepend(directive).ToList();
         var slices = FairShares(selected.Select(part => part.Length).ToList(), payloadBudget);
         var rendered = selected.Select((part, index) => Slice(part, slices[index])).ToList();
         var shortenedSources = Enumerable.Range(1, rendered.Count - 1).Count(index => !string.Equals(rendered[index], selected[index], StringComparison.Ordinal));

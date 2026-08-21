@@ -132,6 +132,26 @@ public class SupervisorTurnServiceTests
         result.TerminalReason.ShouldBe(SupervisorStopReasons.CostCapReached);
     }
 
+    [Fact]
+    public async Task A_merge_executor_runs_under_its_own_recorded_and_budgeted_synthesis_scope()
+    {
+        var ledger = new FakeSupervisorDecisionLog();
+        var executor = new ScopeObservingExecutor();
+        var service = new SupervisorTurnService(ledger, new MergeDecider(), executor, db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
+
+        await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: null, goalConfig: null, CancellationToken.None);
+
+        executor.Scope.ShouldNotBeNull("the merge synthesis model call must not run after the supervisor decision scope has already been disposed");
+        executor.Scope!.RunId.ShouldBe(_runId);
+        executor.Scope.TeamId.ShouldBe(_teamId);
+        executor.Scope.NodeId.ShouldBe("sup");
+        executor.Scope.IterationKey.ShouldBe("sup#turn0");
+        executor.Scope.Kind.ShouldBe(SupervisorTurnService.SupervisorSynthesisCallKind);
+        executor.Scope.Budget.ShouldNotBeNull();
+        executor.Scope.CapUsd.ShouldBeNull("the common uncapped run records the call without inventing a cap; Rehydrate separately pins an authored cap onto the context");
+        CodeSpace.Core.Services.Workflows.Llm.LlmCallContext.Current.ShouldBeNull("the nested execution scope is restored after the merge");
+    }
+
     // ── A FORCED stop is still a stop: the publish/delivery gates apply to it exactly as to a model-authored one.
     //    Live evidence (run 29131608121's delivery-gate E2E): a no-progress forced stop under an operator-required
     //    PR contract terminalized Success with publishes=0/gateCards=0 — the exact vacuous success H1 kills. ──
@@ -1104,6 +1124,23 @@ public class SupervisorTurnServiceTests
     {
         public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken) =>
             throw new CodeSpace.Core.Services.Workflows.Llm.LlmBudgetExceededException("supervisor.decision", committedUsd: 4.9m, capUsd: 5m);
+    }
+
+    private sealed class MergeDecider : ISupervisorDecider
+    {
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken) =>
+            Task.FromResult(new SupervisorDecision { Kind = SupervisorDecisionKinds.Merge, PayloadJson = "{}" });
+    }
+
+    private sealed class ScopeObservingExecutor : ISupervisorActionExecutor
+    {
+        public CodeSpace.Core.Services.Workflows.Llm.LlmCallScope? Scope { get; private set; }
+
+        public Task<SupervisorExecution> ExecuteAsync(SupervisorDecision decision, SupervisorTurnContext context, CancellationToken cancellationToken)
+        {
+            Scope = CodeSpace.Core.Services.Workflows.Llm.LlmCallContext.Current;
+            return Task.FromResult(SupervisorExecution.Synchronous("{}"));
+        }
     }
 
     private sealed class AlwaysPlanDecider : ISupervisorDecider

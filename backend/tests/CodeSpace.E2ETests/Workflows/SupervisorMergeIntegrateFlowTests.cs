@@ -96,6 +96,7 @@ public sealed class SupervisorMergeIntegrateFlowTests : IDisposable
         // The synthesis reduce READ the real diffs: the deterministic fake echoes its prompt, so a real hunk body line proves the diffs (not just summaries) were threaded in.
         var synthesis = outcome.GetProperty("synthesis");
         var synthesisText = synthesis.GetProperty("text").GetString();
+        synthesisText.ShouldContain("Synthesis instruction:\ncombine both branches", customMessage: "the decider's persisted instruction must guide the model reduce, not only be echoed into the merge outcome");
         synthesisText.ShouldContain("agent-a-edited-LINE", customMessage: "the synthesis prompt carried agent A's real diff hunk body, not just its summary");
         synthesisText.ShouldContain("+agent-b-edited-LINE", customMessage: "the synthesis prompt carried agent B's real unified-diff add line");
         synthesis.GetProperty("model").GetString().ShouldBe(WorkflowsTestSeed.PoolModelIdFor(DeterministicSynthLlmClient.ProviderTag),

@@ -20,6 +20,9 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// </summary>
 public sealed partial class SupervisorTurnService : ISupervisorTurnService, IScopedDependency
 {
+    /// <summary>The open model-call kind for the optional multi-agent merge reduce; shared by recording, cost attribution, and UI metadata.</summary>
+    public const string SupervisorSynthesisCallKind = "supervisor.synthesis";
+
     private readonly ISupervisorDecisionLog _ledger;
     private readonly Workflows.Budget.IBudgetLedger _budget;
     private readonly ISupervisorDecider _decider;
@@ -694,6 +697,13 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     {
         try
         {
+            if (decision.Kind == SupervisorDecisionKinds.Merge)
+            {
+                var iterationKey = SupervisorOutcome.SelfAdvanceWaitKey(context.NodeId, context.TurnNumber);
+                using (Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(context.SupervisorRunId, context.TeamId, context.NodeId, iterationKey, SupervisorSynthesisCallKind, _recordLogger, _offloader, _budget, context.MaxCostUsd)))
+                    return await _executor.ExecuteAsync(decision, context, cancellationToken).ConfigureAwait(false);
+            }
+
             return await _executor.ExecuteAsync(decision, context, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is AgentDefinitionResolutionException or SupervisorRepoAccessException or SupervisorModelAccessException or SupervisorAgentAccessException or Workflows.Artifacts.Exceptions.ArtifactContentUnavailableException)
