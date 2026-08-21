@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { InvalidAgentRunEventPageError, type AgentRunEventDto, type AgentRunEventPageResponse } from "@/api/agents";
+import { ApiError } from "@/api/request";
 
 const { getPage } = vi.hoisted(() => ({ getPage: vi.fn() }));
 vi.mock("@/api/agents", async (importOriginal) => {
@@ -103,6 +104,47 @@ describe("useAgentRunEventPreview", () => {
     await act(() => vi.advanceTimersByTimeAsync(AGENT_EVENT_PREVIEW_POLL_MS * 4));
 
     expect(getPage).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [404, "not_found"],
+    [403, "access_denied"],
+  ])("stops active polling after a non-transient %i response", async (status, code) => {
+    getPage.mockResolvedValueOnce(page("run-1", [event(1)])).mockRejectedValueOnce(new ApiError(status, code, "not available"));
+    const { result } = renderHook(() => useAgentRunEventPreview("run-1", true), { wrapper: wrapper(createClient()) });
+    await settle();
+
+    await act(() => vi.advanceTimersByTimeAsync(AGENT_EVENT_PREVIEW_POLL_MS));
+    await act(() => vi.advanceTimersByTimeAsync(AGENT_EVENT_PREVIEW_POLL_MS * 8));
+
+    expect(result.current.data?.map(({ sequence }) => sequence)).toEqual([1]);
+    expect(result.current.error).toMatchObject({ status, code });
+    expect(getPage).toHaveBeenCalledTimes(2);
+  });
+
+  it("bounds transient retries and resumes its later poll after a 500 recovers", async () => {
+    const unavailable = new ApiError(500, "backend_unavailable", "try again");
+    getPage
+      .mockResolvedValueOnce(page("run-1", [event(1)]))
+      .mockRejectedValueOnce(unavailable)
+      .mockRejectedValueOnce(unavailable)
+      .mockRejectedValueOnce(unavailable)
+      .mockResolvedValueOnce(page("run-1", [event(2)]));
+    const { result, rerender } = renderHook(({ active }) => useAgentRunEventPreview("run-1", active), { initialProps: { active: true }, wrapper: wrapper(createClient()) });
+    await settle();
+
+    await act(() => vi.advanceTimersByTimeAsync(AGENT_EVENT_PREVIEW_POLL_MS + 1500));
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    expect(getPage).toHaveBeenCalledTimes(4);
+    expect(result.current.data?.map(({ sequence }) => sequence)).toEqual([1]);
+    expect(result.current.error).toMatchObject({ status: 500 });
+
+    await act(() => vi.advanceTimersByTimeAsync(AGENT_EVENT_PREVIEW_POLL_MS));
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    expect(getPage).toHaveBeenCalledTimes(5);
+    expect(result.current.data?.map(({ sequence }) => sequence)).toEqual([2]);
+
+    rerender({ active: false });
   });
 
   it("aborts an in-flight Tail read on run switch and unmount", async () => {
