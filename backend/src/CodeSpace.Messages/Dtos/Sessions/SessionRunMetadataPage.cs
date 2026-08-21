@@ -11,6 +11,7 @@ public sealed record SessionRunMetadataPage
 
     public required SessionRunMetadataPageDirection Direction { get; init; }
     public string? RequestCursor { get; init; }
+    public required int Limit { get; init; }
 
     /// <summary>
     /// Highest immutable RunNumber admitted to this page family. It freezes membership only: mutable status, error,

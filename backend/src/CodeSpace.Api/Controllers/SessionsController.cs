@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Commands.Sessions;
+using CodeSpace.Messages.Dtos.Sessions;
 using CodeSpace.Messages.Queries.Sessions;
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
@@ -33,6 +34,22 @@ public class SessionsController : ControllerBase
     public async Task<IActionResult> Get([FromRoute] Guid sessionId, CancellationToken cancellationToken)
     {
         var result = await _mediator.Send(new GetSessionDetailQuery { SessionId = sessionId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
+    /// <summary>A bounded membership metadata page. The opaque cursor freezes membership only; mutable row state is observed fresh.</summary>
+    [HttpGet("{sessionId:guid}/runs/page")]
+    public async Task<IActionResult> PageSessionRuns([FromRoute] Guid sessionId, [FromQuery] SessionRunMetadataPageDirection direction = SessionRunMetadataPageDirection.Tail, [FromQuery] string? cursor = null, [FromQuery] int limit = PageSessionRunMetadataQuery.DefaultPageSize, CancellationToken cancellationToken = default)
+    {
+        var result = await _mediator.Send(new PageSessionRunMetadataQuery { SessionId = sessionId, Direction = direction, Cursor = cursor, Limit = limit }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
+    /// <summary>The same bounded membership page admitted through an exact team-owned run anchor.</summary>
+    [HttpGet("by-run/{runId:guid}/runs/page")]
+    public async Task<IActionResult> PageSessionRunsByAnchor([FromRoute] Guid runId, [FromQuery] SessionRunMetadataPageDirection direction = SessionRunMetadataPageDirection.Tail, [FromQuery] string? cursor = null, [FromQuery] int limit = PageSessionRunMetadataQuery.DefaultPageSize, CancellationToken cancellationToken = default)
+    {
+        var result = await _mediator.Send(new PageSessionRunMetadataQuery { RunAnchorId = runId, Direction = direction, Cursor = cursor, Limit = limit }, cancellationToken).ConfigureAwait(false);
         return result == null ? NotFound() : Ok(result);
     }
 
