@@ -11,6 +11,11 @@ const state = vi.hoisted(() => ({
   events: [] as { sequence: number; kind: string; text: string; data: string | null; dataArtifactId?: string | null; occurredAt: string }[],
   isLoading: false,
   ledgerResolved: true,
+  governedHasOlder: false,
+  governedOlderOmitted: false,
+  governedNewerOmitted: false,
+  governedAtLatest: true,
+  governedError: null as Error | null,
   eventsLoading: false,
   hasOlder: false,
   olderEventsOmitted: false,
@@ -18,6 +23,9 @@ const state = vi.hoisted(() => ({
   atLatest: true,
   eventError: null as Error | null,
   identities: new Map<string, TeamMemberSummary>(),
+  toolWindowArgs: vi.fn(),
+  loadOlderGoverned: vi.fn(),
+  returnGovernedToLatest: vi.fn(),
   eventWindowArgs: vi.fn(),
   loadOlder: vi.fn(),
   returnToLatest: vi.fn(),
@@ -25,7 +33,10 @@ const state = vi.hoisted(() => ({
 
 vi.mock("@/hooks/use-agents", () => ({
   useAgentRun: () => ({ data: state.run }),
-  useToolCalls: () => ({ data: state.toolCalls, isLoading: state.isLoading, isSuccess: state.ledgerResolved }),
+  useToolCallWindow: (id: string | undefined, active: boolean) => {
+    state.toolWindowArgs(id, active);
+    return { data: state.toolCalls, hasLoaded: state.ledgerResolved, isLoading: state.isLoading, isLoadingOlder: false, error: state.governedError, hasOlder: state.governedHasOlder, olderItemsOmitted: state.governedOlderOmitted, newerItemsOmitted: state.governedNewerOmitted, atLatest: state.governedAtLatest, loadOlder: state.loadOlderGoverned, returnToLatest: state.returnGovernedToLatest };
+  },
   useAgentRunEventWindow: (id: string | undefined, active: boolean, kindFilter?: string) => {
     state.eventWindowArgs(id, active, kindFilter);
     return { data: state.events, isLoading: state.eventsLoading, isLoadingOlder: false, error: state.eventError, hasOlder: state.hasOlder, olderEventsOmitted: state.olderEventsOmitted, newerEventsOmitted: state.newerEventsOmitted, atLatest: state.atLatest, loadOlder: state.loadOlder, returnToLatest: state.returnToLatest };
@@ -76,6 +87,11 @@ beforeEach(() => {
   state.events = [];
   state.isLoading = false;
   state.ledgerResolved = true;
+  state.governedHasOlder = false;
+  state.governedOlderOmitted = false;
+  state.governedNewerOmitted = false;
+  state.governedAtLatest = true;
+  state.governedError = null;
   state.eventsLoading = false;
   state.hasOlder = false;
   state.olderEventsOmitted = false;
@@ -83,6 +99,9 @@ beforeEach(() => {
   state.atLatest = true;
   state.eventError = null;
   state.identities = new Map();
+  state.toolWindowArgs.mockReset();
+  state.loadOlderGoverned.mockReset();
+  state.returnGovernedToLatest.mockReset();
   state.eventWindowArgs.mockReset();
   state.loadOlder.mockReset();
   state.returnToLatest.mockReset();
@@ -113,7 +132,28 @@ describe("AgentToolCalls", () => {
     const failed = screen.getByText("Failed");
     expect(failed.className).toContain("wf-status-err");
     expect(screen.getByText("Succeeded").className).toContain("wf-status-ok");
+    expect(state.toolWindowArgs).toHaveBeenCalledWith("r1", true);
     expect(state.eventWindowArgs).toHaveBeenCalledWith(undefined, true, "ToolCall");
+  });
+
+  it("browses governed history within the bounded window and never unions native rows", () => {
+    state.toolCalls = [call({ toolKind: "git.open_pr" })];
+    state.governedHasOlder = true;
+    state.governedOlderOmitted = true;
+    state.governedNewerOmitted = true;
+    state.governedAtLatest = false;
+    state.events = [{ sequence: 1, kind: "ToolCall", text: "native-must-not-render", data: null, occurredAt: "2026-06-11T11:15:00Z" }];
+
+    render(<AgentToolCalls agentRunId="r1" />);
+    fireEvent.click(screen.getByRole("button", { name: "Load earlier governed calls" }));
+    fireEvent.click(screen.getByRole("button", { name: "Return to latest governed calls" }));
+
+    expect(screen.getByText("Earlier governed calls omitted.")).toBeInTheDocument();
+    expect(screen.getByText("Newer governed calls omitted.")).toBeInTheDocument();
+    expect(screen.queryByText("native-must-not-render")).toBeNull();
+    expect(state.loadOlderGoverned).toHaveBeenCalledOnce();
+    expect(state.returnGovernedToLatest).toHaveBeenCalledOnce();
+    expect(state.eventWindowArgs).toHaveBeenCalledWith(undefined, false, "ToolCall");
   });
 
   it("resolves the approver id to a display name and shows when it was approved", () => {

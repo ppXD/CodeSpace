@@ -18,7 +18,7 @@ const agentState = vi.hoisted(() => ({
 vi.mock("@/hooks/use-agents", () => ({
   useAgentRun: () => ({ data: agentState.status ? { status: agentState.status, filesChanged: agentState.filesChanged } : undefined }),
   useAgentRunEventPreview: () => ({ data: agentState.events }),
-  useToolCalls: () => ({ data: agentState.tools }),
+  useToolCallWindow: () => ({ data: agentState.tools }),
 }));
 afterEach(() => { agentState.status = undefined; agentState.filesChanged = undefined; agentState.events = []; agentState.tools = []; });
 

@@ -68,6 +68,8 @@ public class ListToolCallsQueryHandlerTests
             LastTeamId = teamId;
             return Task.FromResult(_rows);
         }
+
+        public Task<ToolCallPage?> PageForRunAsync(PageToolCallsQuery request, Guid teamId, CancellationToken cancellationToken) => throw new NotImplementedException();
     }
 
     private sealed class StubCurrentTeam : ICurrentTeam

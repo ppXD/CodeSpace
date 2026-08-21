@@ -1,4 +1,7 @@
 using Autofac;
+using CodeSpace.Api.Controllers;
+using CodeSpace.Core.Services.Agents.Exceptions;
+using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -9,7 +12,10 @@ using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Queries.Agents;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.Mvc;
+using Npgsql;
 using Shouldly;
+using System.Reflection;
 
 namespace CodeSpace.IntegrationTests.Agents;
 
@@ -146,6 +152,89 @@ public class ToolCallAuditFlowTests
             customMessage: "only the side-effecting call is in the ledger — read-only tools skip it, so they never appear in the audit surface");
     }
 
+    [Fact]
+    public void Bounded_page_is_additive_and_the_legacy_whole_list_route_remains()
+    {
+        var methods = typeof(AgentsController).GetMethods(BindingFlags.Instance | BindingFlags.Public);
+
+        methods.Single(method => method.Name == nameof(AgentsController.ListToolCalls)).GetCustomAttribute<HttpGetAttribute>()!.Template.ShouldBe("runs/{agentRunId:guid}/tool-calls");
+        methods.Single(method => method.Name == nameof(AgentsController.PageToolCalls)).GetCustomAttribute<HttpGetAttribute>()!.Template.ShouldBe("runs/{agentRunId:guid}/tool-calls/page");
+    }
+
+    [Fact]
+    public async Task Tail_and_older_are_bounded_chronological_and_include_legacy_null_ordinal_history()
+    {
+        var (teamId, userId) = await SeedTeamAsync();
+        var runId = await SeedRunAsync(teamId);
+        var start = DateTimeOffset.UtcNow.AddHours(-1);
+        await SeedLegacyLedgerRowAsync(runId, teamId, "legacy.tool", start);
+        for (var i = 2; i <= 7; i++)
+            await SeedLedgerRowAsync(runId, teamId, $"tool.{i}", ToolCallLedgerStatus.Succeeded, null, start.AddMinutes(i), null, null);
+
+        var tail = (await PageAsync(userId, teamId, new PageToolCallsQuery { AgentRunId = runId, Direction = ToolCallPageDirection.Tail, Limit = 3 }))!;
+        tail.AgentRunId.ShouldBe(runId);
+        tail.Mode.ShouldBe(nameof(ToolCallPageDirection.Tail));
+        tail.RequestCursor.ShouldBeNull();
+        tail.Items.Select(row => row.ToolKind).ShouldBe(["tool.5", "tool.6", "tool.7"]);
+        tail.HasOlder.ShouldBeTrue();
+        tail.NextOlderCursor.ShouldNotBeNull();
+
+        var middle = (await PageAsync(userId, teamId, new PageToolCallsQuery { AgentRunId = runId, Direction = ToolCallPageDirection.Older, Cursor = tail.NextOlderCursor, Limit = 3 }))!;
+        middle.RequestCursor.ShouldBe(tail.NextOlderCursor);
+        middle.Items.Select(row => row.ToolKind).ShouldBe(["tool.2", "tool.3", "tool.4"]);
+        middle.HasOlder.ShouldBeTrue();
+
+        var oldest = (await PageAsync(userId, teamId, new PageToolCallsQuery { AgentRunId = runId, Direction = ToolCallPageDirection.Older, Cursor = middle.NextOlderCursor, Limit = 3 }))!;
+        oldest.Items.Select(row => row.ToolKind).ShouldBe(["legacy.tool"]);
+        oldest.HasOlder.ShouldBeFalse("legacy rows with NULL AdmissionOrdinal remain truthful audit history");
+        oldest.NextOlderCursor.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task Page_requires_exact_owned_AgentRun_and_malformed_cursor_fails_closed()
+    {
+        var (ownerTeam, ownerUser) = await SeedTeamAsync();
+        var (foreignTeam, foreignUser) = await SeedTeamAsync();
+        var runId = await SeedRunAsync(ownerTeam);
+        await SeedLedgerRowAsync(runId, ownerTeam, "git.open_pr", ToolCallLedgerStatus.Succeeded, null, DateTimeOffset.UtcNow, null, null);
+
+        (await PageAsync(ownerUser, ownerTeam, new PageToolCallsQuery { AgentRunId = runId, Limit = 10 })).ShouldNotBeNull();
+        (await PageAsync(foreignUser, foreignTeam, new PageToolCallsQuery { AgentRunId = runId, Limit = 10 })).ShouldBeNull();
+        (await PageAsync(ownerUser, ownerTeam, new PageToolCallsQuery { AgentRunId = Guid.NewGuid(), Limit = 10 })).ShouldBeNull();
+        await Should.ThrowAsync<ToolCallPageRequestException>(() => PageAsync(ownerUser, ownerTeam, new PageToolCallsQuery { AgentRunId = runId, Direction = ToolCallPageDirection.Older, Cursor = "not-a-cursor", Limit = 10 }));
+    }
+
+    [Fact]
+    public async Task Ten_thousand_row_page_projects_no_execution_secrets_and_uses_run_created_index_without_scan_or_sort()
+    {
+        var (teamId, userId) = await SeedTeamAsync();
+        var runId = await SeedRunAsync(teamId);
+        await InsertLegacyFloodAsync(runId, teamId, 10_050);
+
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var sql = ToolCallAuditReader.PageRowsQuery(db, runId, teamId, cursor: null, take: 129).ToQueryString();
+        sql.ShouldContain("LIMIT");
+        sql.ShouldNotContain("OFFSET");
+        sql.ShouldNotContain("COUNT(");
+        sql.ShouldNotContain("result_jsonb");
+        sql.ShouldNotContain("decision_envelope_jsonb");
+        sql.ShouldNotContain("approval_token");
+        sql.ShouldNotContain("idempotency_key");
+        sql.ShouldNotContain("input_hash");
+
+        var page = (await PageAsync(userId, teamId, new PageToolCallsQuery { AgentRunId = runId, Limit = 128 }))!;
+        page.Items.Count.ShouldBe(128);
+        page.Items.Select(row => row.CreatedDate).ShouldBeInOrder(SortDirection.Ascending);
+        page.HasOlder.ShouldBeTrue();
+
+        var plan = await ExplainPageAsync(runId, teamId);
+        plan.ShouldContain("Limit");
+        plan.ShouldContain("idx_tool_call_ledger_run_created_id");
+        plan.ShouldNotContain("Seq Scan on tool_call_ledger");
+        plan.ShouldNotContain("Sort");
+    }
+
     private async Task SeedLedgerRowAsync(Guid runId, Guid teamId, string toolKind, ToolCallLedgerStatus status, string? error, DateTimeOffset createdAt, Guid? approvedByUserId, DateTimeOffset? approvedAt)
     {
         using var scope = _fixture.BeginScope();
@@ -184,5 +273,103 @@ public class ToolCallAuditFlowTests
 
         await db.SaveChangesAsync();
         return (teamId, userId);
+    }
+
+    private async Task<Guid> SeedRunAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var run = new AgentRun { Id = Guid.NewGuid(), TeamId = teamId, Harness = "codex-cli", Status = AgentRunStatus.Running };
+        db.AgentRun.Add(run);
+        await db.SaveChangesAsync();
+        return run.Id;
+    }
+
+    private async Task<ToolCallPage?> PageAsync(Guid userId, Guid teamId, PageToolCallsQuery request)
+    {
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        return await scope.Resolve<IMediator>().Send(request);
+    }
+
+    private async Task SeedLegacyLedgerRowAsync(Guid runId, Guid teamId, string toolKind, DateTimeOffset createdAt)
+    {
+        await using var connection = new NpgsqlConnection(_fixture.ConnectionString);
+        await connection.OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using (var disable = new NpgsqlCommand("ALTER TABLE tool_call_ledger DISABLE TRIGGER trg_tool_call_ledger_assign_admission_ordinal", connection, transaction))
+            await disable.ExecuteNonQueryAsync();
+        await using (var insert = new NpgsqlCommand("""
+            INSERT INTO tool_call_ledger
+                (id, team_id, agent_run_id, tool_kind, idempotency_key, input_hash, status, result_jsonb,
+                 decision_envelope_jsonb, approval_token, created_date, created_by, last_modified_date, last_modified_by)
+            VALUES (@id, @team, @run, @kind, @key, @hash, 'Succeeded', '{"secret":"body"}',
+                    '{"secret":"decision"}', 'bearer-must-not-project', @created, @actor, @created, @actor)
+            """, connection, transaction))
+        {
+            insert.Parameters.AddWithValue("id", Guid.NewGuid());
+            insert.Parameters.AddWithValue("team", teamId);
+            insert.Parameters.AddWithValue("run", runId);
+            insert.Parameters.AddWithValue("kind", toolKind);
+            insert.Parameters.AddWithValue("key", $"legacy:{Guid.NewGuid():N}");
+            insert.Parameters.AddWithValue("hash", InputHash);
+            insert.Parameters.AddWithValue("created", createdAt);
+            insert.Parameters.AddWithValue("actor", Guid.Empty);
+            await insert.ExecuteNonQueryAsync();
+        }
+        await using (var enable = new NpgsqlCommand("ALTER TABLE tool_call_ledger ENABLE TRIGGER trg_tool_call_ledger_assign_admission_ordinal", connection, transaction))
+            await enable.ExecuteNonQueryAsync();
+        await transaction.CommitAsync();
+    }
+
+    private async Task InsertLegacyFloodAsync(Guid runId, Guid teamId, int count)
+    {
+        await using var connection = new NpgsqlConnection(_fixture.ConnectionString);
+        await connection.OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using (var disable = new NpgsqlCommand("ALTER TABLE tool_call_ledger DISABLE TRIGGER trg_tool_call_ledger_assign_admission_ordinal", connection, transaction))
+            await disable.ExecuteNonQueryAsync();
+        await using (var insert = new NpgsqlCommand("""
+            INSERT INTO tool_call_ledger
+                (id, team_id, agent_run_id, tool_kind, idempotency_key, input_hash, status, result_jsonb,
+                 decision_envelope_jsonb, approval_token, created_date, created_by, last_modified_date, last_modified_by)
+            SELECT md5(value::text || @run::text)::uuid, @team, @run, 'bulk.' || value, 'bulk:' || value,
+                   repeat('0', 64), 'Succeeded', '{"secret":"body"}', '{"secret":"decision"}',
+                   'bearer-must-not-project', @created + value * interval '1 microsecond', @actor,
+                   @created + value * interval '1 microsecond', @actor
+            FROM generate_series(1, @count) AS value
+            """, connection, transaction))
+        {
+            insert.Parameters.AddWithValue("team", teamId);
+            insert.Parameters.AddWithValue("run", runId);
+            insert.Parameters.AddWithValue("count", count);
+            insert.Parameters.AddWithValue("created", DateTimeOffset.UtcNow.AddDays(-1));
+            insert.Parameters.AddWithValue("actor", Guid.Empty);
+            await insert.ExecuteNonQueryAsync();
+        }
+        await using (var enable = new NpgsqlCommand("ALTER TABLE tool_call_ledger ENABLE TRIGGER trg_tool_call_ledger_assign_admission_ordinal", connection, transaction))
+            await enable.ExecuteNonQueryAsync();
+        await transaction.CommitAsync();
+        await using var analyze = new NpgsqlCommand("ANALYZE tool_call_ledger", connection);
+        await analyze.ExecuteNonQueryAsync();
+    }
+
+    private async Task<string> ExplainPageAsync(Guid runId, Guid teamId)
+    {
+        await using var connection = new NpgsqlConnection(_fixture.ConnectionString);
+        await connection.OpenAsync();
+        await using (var disableSeqScan = new NpgsqlCommand("SET enable_seqscan = off", connection))
+            await disableSeqScan.ExecuteNonQueryAsync();
+        await using var command = new NpgsqlCommand("""
+            EXPLAIN SELECT id, tool_kind, status, created_date, last_modified_date, error, approved_by_user_id, approved_at
+            FROM tool_call_ledger
+            WHERE agent_run_id = @run AND team_id = @team
+            ORDER BY created_date DESC, id DESC LIMIT 129
+            """, connection);
+        command.Parameters.AddWithValue("run", runId);
+        command.Parameters.AddWithValue("team", teamId);
+        var lines = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync()) lines.Add(reader.GetString(0));
+        return string.Join('\n', lines);
     }
 }

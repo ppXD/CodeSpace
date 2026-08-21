@@ -289,6 +289,30 @@ export interface ToolCallView {
   approvedAt: string | null;
 }
 
+export type ToolCallPageMode = "Tail" | "Older";
+
+export interface ToolCallPageRequest {
+  mode: ToolCallPageMode;
+  cursor?: string;
+  limit: number;
+}
+
+export interface ToolCallPageResponse {
+  agentRunId: string;
+  mode: ToolCallPageMode;
+  requestCursor: string | null;
+  items: ToolCallView[];
+  hasOlder: boolean;
+  nextOlderCursor: string | null;
+}
+
+export class InvalidToolCallPageError extends Error {
+  constructor() {
+    super("Invalid governed ToolCall page response.");
+    this.name = "InvalidToolCallPageError";
+  }
+}
+
 /**
  * Mirrors backend `HarnessScore` — the success + latency rollup for one harness (or, with harness `"(all)"`,
  * across every harness). `total` counts only TERMINAL runs (Succeeded / Failed / Cancelled / TimedOut); a
@@ -482,6 +506,13 @@ export const agentsApi = {
   },
   listToolCalls: (agentRunId: string) =>
     fetchJson<ToolCallView[]>(`/api/agents/runs/${agentRunId}/tool-calls`),
+  pageToolCalls: async (agentRunId: string, request: ToolCallPageRequest, signal?: AbortSignal): Promise<ToolCallPageResponse> => {
+    ensureValidToolCallPageRequest(request);
+    const params = new URLSearchParams({ direction: request.mode, limit: String(request.limit) });
+    if (request.cursor !== undefined) params.set("cursor", request.cursor);
+    const value = await fetchJson<unknown>(`/api/agents/runs/${encodeURIComponent(agentRunId)}/tool-calls/page?${params}`, { signal });
+    return decodeToolCallPage(value, agentRunId, request);
+  },
   getScorecard: (filters: ScorecardFilters = {}) => {
     const params = new URLSearchParams();
     if (filters.since) params.set("since", filters.since);
@@ -565,6 +596,49 @@ function exactEventCursor(value: unknown, positive: boolean): number | null {
   if (typeof value !== "string" || !/^\d+$/.test(value)) return null;
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed >= (positive ? 1 : 0) && String(parsed) === value ? parsed : null;
+}
+
+const TOOL_CALL_STATUSES = new Set<ToolCallLedgerStatus>(["Pending", "Succeeded", "Failed", "Denied", "AwaitingApproval", "Running", "Expired"]);
+const TOOL_CALL_VIEW_KEYS = ["approvedAt", "approvedByUserId", "createdDate", "error", "lastModifiedDate", "status", "toolKind"];
+
+function ensureValidToolCallPageRequest(request: ToolCallPageRequest): void {
+  const validMode = request.mode === "Tail" || request.mode === "Older";
+  const validCursor = request.mode === "Tail"
+    ? request.cursor === undefined
+    : typeof request.cursor === "string" && request.cursor.trim().length > 0 && request.cursor.length <= 256;
+  if (!validMode || !validCursor || !Number.isSafeInteger(request.limit) || request.limit < 1 || request.limit > 500)
+    throw new Error("Invalid governed ToolCall page request.");
+}
+
+function decodeToolCallPage(value: unknown, agentRunId: string, request: ToolCallPageRequest): ToolCallPageResponse {
+  const requestCursor = request.cursor ?? null;
+  if (!isRecord(value) || value.agentRunId !== agentRunId || value.mode !== request.mode || value.requestCursor !== requestCursor
+    || !Array.isArray(value.items) || value.items.length > request.limit || typeof value.hasOlder !== "boolean"
+    || !(value.nextOlderCursor === null || (typeof value.nextOlderCursor === "string" && value.nextOlderCursor.length > 0 && value.nextOlderCursor.length <= 256)))
+    throw new InvalidToolCallPageError();
+
+  if (value.hasOlder !== (value.nextOlderCursor !== null) || (value.hasOlder && value.items.length === 0)) throw new InvalidToolCallPageError();
+
+  const items: ToolCallView[] = [];
+  let previousCreatedAt = Number.NEGATIVE_INFINITY;
+  for (const candidate of value.items) {
+    if (!isRecord(candidate) || Object.keys(candidate).sort().join("\n") !== TOOL_CALL_VIEW_KEYS.join("\n")
+      || typeof candidate.toolKind !== "string" || candidate.toolKind.length === 0
+      || typeof candidate.status !== "string" || !TOOL_CALL_STATUSES.has(candidate.status as ToolCallLedgerStatus)
+      || typeof candidate.createdDate !== "string" || !Number.isFinite(Date.parse(candidate.createdDate))
+      || typeof candidate.lastModifiedDate !== "string" || !Number.isFinite(Date.parse(candidate.lastModifiedDate))
+      || !(candidate.error === null || typeof candidate.error === "string")
+      || !(candidate.approvedByUserId === null || (typeof candidate.approvedByUserId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(candidate.approvedByUserId)))
+      || !(candidate.approvedAt === null || (typeof candidate.approvedAt === "string" && Number.isFinite(Date.parse(candidate.approvedAt)))))
+      throw new InvalidToolCallPageError();
+
+    const createdAt = Date.parse(candidate.createdDate);
+    if (createdAt < previousCreatedAt || Date.parse(candidate.lastModifiedDate) < createdAt) throw new InvalidToolCallPageError();
+    items.push({ toolKind: candidate.toolKind, status: candidate.status as ToolCallLedgerStatus, createdDate: candidate.createdDate, lastModifiedDate: candidate.lastModifiedDate, error: candidate.error, approvedByUserId: candidate.approvedByUserId, approvedAt: candidate.approvedAt });
+    previousCreatedAt = createdAt;
+  }
+
+  return { agentRunId, mode: request.mode, requestCursor, items, hasOlder: value.hasOlder, nextOlderCursor: value.nextOlderCursor };
 }
 
 function isLogReadAvailability(value: unknown): value is AgentRunLogReadAvailability {

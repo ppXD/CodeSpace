@@ -158,6 +158,14 @@ public class AgentsController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>Hard-bounded Tail/Older keyset page over the governed tool-call metadata audit. The legacy whole-list endpoint remains available.</summary>
+    [HttpGet("runs/{agentRunId:guid}/tool-calls/page")]
+    public async Task<IActionResult> PageToolCalls([FromRoute] Guid agentRunId, [FromQuery] PageToolCallsQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query with { AgentRunId = agentRunId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
     /// <summary>The team's agent-run scorecard — per-harness + overall success rate and latency (P50/P95) over its terminal runs. Optional since/harness filters narrow the window. Team-scoped (the team is the X-Team-Id header, never the query string).</summary>
     [HttpGet("scorecard")]
     public async Task<IActionResult> GetScorecard([FromQuery] GetAgentScorecardQuery query, CancellationToken cancellationToken)

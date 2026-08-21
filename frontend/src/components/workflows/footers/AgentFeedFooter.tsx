@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { isAgentRunActive, type AgentRunEventDto, type ToolCallView } from "@/api/agents";
 import type { WorkflowRunNodeSummary } from "@/api/workflows";
-import { useAgentRun, useAgentRunEventPreview, useToolCalls } from "@/hooks/use-agents";
+import { useAgentRun, useAgentRunEventPreview, useToolCallWindow } from "@/hooks/use-agents";
 
 import { parseTurnKey } from "../mapBranches";
 import { formatTokens, formatUsd } from "../runActivity";
@@ -14,7 +14,7 @@ import type { NodeFooterProps } from "./index";
 /**
  * The flagship live footer for the two Agent nodes (`agent.run`, `agent.supervisor`). Its source is the
  * bound agent run (`rows[0].agentRunId`), read through the agent-run hooks: {@link useAgentRun} for status,
- * {@link useAgentRunEventPreview} for a bounded recent feed, {@link useToolCalls} for the governed tool-call
+ * {@link useAgentRunEventPreview} for a bounded recent feed, {@link useToolCallWindow} for the governed tool-call
  * ledger. It reads in three moods:
  *
  *  - WORKING — while the run is active (or the node paints Running), a compact tail of the last 3 events
@@ -38,7 +38,7 @@ export function AgentFeedFooter(props: NodeFooterProps) {
   const run = useAgentRun(agentRunId ?? undefined);
   const active = isAgentRunActive(run.data?.status);
   const events = useAgentRunEventPreview(agentRunId ?? undefined, active);
-  const tools = useToolCalls(agentRunId ?? undefined, active);
+  const tools = useToolCallWindow(agentRunId ?? undefined, active);
 
   if (props.status === "Pending") return null;   // not reached yet → no footer (matches ReceiptFooter)
 
@@ -105,7 +105,7 @@ function FeedBar({ events, metricsSource, supervisor, rows }: { events: AgentRun
  * The amber "the agent needs a human decision" state — a governed tool call is parked in `AwaitingApproval`.
  *
  * TODO(B3-followup): wire the approve/deny buttons to the governed tool-call decision endpoint. Today the
- * ledger row ({@link ToolCallView} from {@link useToolCalls}) is read-only and carries no decision id or the
+ * ledger row ({@link ToolCallView} from {@link useToolCallWindow}) is read-only and carries no decision id or the
  * call's arguments, and {@link "../AgentToolCalls".AgentToolCalls} exposes no decision mutation to reuse — so
  * these are affordances, not yet a live API call (the task's "render an affordance, don't duplicate an API
  * call" branch). The tool name is shown; the call args aren't in the DTO, so no `{short arg}` is available.

@@ -2,7 +2,7 @@ import { useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { isAgentRunActive, type ToolCallLedgerStatus } from "@/api/agents";
-import { useAgentRun, useAgentRunEventWindow, useToolCalls } from "@/hooks/use-agents";
+import { useAgentRun, useAgentRunEventWindow, useToolCallWindow } from "@/hooks/use-agents";
 import { useTeamMemberIdentityMap } from "@/hooks/use-team-members";
 import { AgentRunEventPayload } from "./AgentRunEventPayload";
 
@@ -20,9 +20,9 @@ export function AgentToolCalls({ agentRunId, hideHeader }: { agentRunId: string;
   const run = useAgentRun(agentRunId);
   const active = isAgentRunActive(run.data?.status);
 
-  const toolCalls = useToolCalls(agentRunId, active);
-  const governed = toolCalls.data ?? [];
-  const nativeEnabled = toolCalls.isSuccess && governed.length === 0;
+  const toolCalls = useToolCallWindow(agentRunId, active);
+  const governed = toolCalls.data;
+  const nativeEnabled = toolCalls.hasLoaded && governed.length === 0;
 
   // Governance is authoritative when present. Only a successfully-read empty ledger enables the separate native
   // audit, whose server-side exact filter + local window preserve full browseability without loading other events.
@@ -31,7 +31,15 @@ export function AgentToolCalls({ agentRunId, hideHeader }: { agentRunId: string;
 
   const identities = useTeamMemberIdentityMap();
 
-  if (!nativeEnabled && governed.length === 0) return null;
+  if (!toolCalls.hasLoaded && governed.length === 0) {
+    if (toolCalls.isLoading || toolCalls.error === null) return null;
+    return (
+      <div className="tc-panel" data-flush={hideHeader || undefined}>
+        {!hideHeader && <div className="tc-panel-head"><Ic.Command size={12} /> Tool calls</div>}
+        <div className="tc-window-error" role="status">{toolCalls.error.message}</div>
+      </div>
+    );
+  }
 
   if (nativeEnabled && native.length === 0 && !events.hasOlder && !events.olderEventsOmitted && !events.newerEventsOmitted && events.atLatest && events.error === null) {
     // Only an exact ToolCall page with no matching older range proves emptiness. A ledger/page error or an omitted
@@ -49,30 +57,34 @@ export function AgentToolCalls({ agentRunId, hideHeader }: { agentRunId: string;
     <div className="tc-panel" data-flush={hideHeader || undefined}>
       {!hideHeader && <div className="tc-panel-head"><Ic.Command size={12} /> Tool calls</div>}
       {governed.length > 0 ? (
-        <ol className="tc-list">
-          {governed.map((c, i) => {
-            const approverName = c.approvedByUserId ? identities.get(c.approvedByUserId)?.name ?? "Unknown" : null;
+        <>
+          <GovernedWindowControls window={toolCalls} />
+          <ol className="tc-list">
+            {governed.map((c, i) => {
+              const approverName = c.approvedByUserId ? identities.get(c.approvedByUserId)?.name ?? "Unknown" : null;
 
-            return (
-              <li key={i} className="tc-row" data-status={c.status}>
-                <div className="tc-row-head">
-                  <span className="tc-tool">{c.toolKind}</span>
-                  <ToolCallStatusBadge status={c.status} />
-                  <span className="tc-when">{new Date(c.createdDate).toLocaleString()}</span>
-                </div>
-                {approverName && (
-                  <div className="tc-approver">
-                    <Ic.Check size={11} /> approved by {approverName}
-                    {c.approvedAt && <span className="tc-approver-at"> · {new Date(c.approvedAt).toLocaleString()}</span>}
+              return (
+                <li key={i} className="tc-row" data-status={c.status}>
+                  <div className="tc-row-head">
+                    <span className="tc-tool">{c.toolKind}</span>
+                    <ToolCallStatusBadge status={c.status} />
+                    <span className="tc-when">{new Date(c.createdDate).toLocaleString()}</span>
                   </div>
-                )}
-                {c.error && <pre className="wf-json wf-json-err tc-error">{c.error}</pre>}
-              </li>
-            );
-          })}
-        </ol>
+                  {approverName && (
+                    <div className="tc-approver">
+                      <Ic.Check size={11} /> approved by {approverName}
+                      {c.approvedAt && <span className="tc-approver-at"> · {new Date(c.approvedAt).toLocaleString()}</span>}
+                    </div>
+                  )}
+                  {c.error && <pre className="wf-json wf-json-err tc-error">{c.error}</pre>}
+                </li>
+              );
+            })}
+          </ol>
+        </>
       ) : (
         <>
+          {toolCalls.error && <div className="tc-window-error" role="status">Governed audit refresh: {toolCalls.error.message}</div>}
           <NativeWindowControls events={events} />
           {native.length > 0 && (
             <ol className="tc-list">
@@ -95,6 +107,26 @@ export function AgentToolCalls({ agentRunId, hideHeader }: { agentRunId: string;
         </>
       )}
     </div>
+  );
+}
+
+function GovernedWindowControls({ window }: { window: ReturnType<typeof useToolCallWindow> }) {
+  return (
+    <>
+      {(window.olderItemsOmitted || window.hasOlder) && (
+        <div className="tc-window-notice">
+          <span>{window.olderItemsOmitted ? "Earlier governed calls omitted." : "Earlier governed calls are available."}</span>
+          {window.hasOlder && <button type="button" onClick={() => void window.loadOlder()} disabled={window.isLoadingOlder}>{window.isLoadingOlder ? "Loading…" : "Load earlier governed calls"}</button>}
+        </div>
+      )}
+      {(window.newerItemsOmitted || !window.atLatest) && (
+        <div className="tc-window-notice">
+          <span>{window.newerItemsOmitted ? "Newer governed calls omitted." : "Live refresh paused while browsing history."}</span>
+          <button type="button" onClick={window.returnToLatest}>Return to latest governed calls</button>
+        </div>
+      )}
+      {window.error && <div className="tc-window-error" role="status">{window.error.message}</div>}
+    </>
   );
 }
 
