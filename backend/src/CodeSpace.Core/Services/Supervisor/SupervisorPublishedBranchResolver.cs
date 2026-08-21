@@ -49,14 +49,15 @@ public sealed class SupervisorPublishedBranchResolver : ISupervisorPublishedBran
 
     public async Task<IReadOnlyList<SupervisorRepositoryBranch>> ResolveAsync(Guid workflowRunId, Guid teamId, IReadOnlyList<SupervisorPriorDecision> priorDecisions, Guid? primaryRepositoryId, CancellationToken cancellationToken)
     {
-        var repositoryBranches = SupervisorOutcome.ReadFinalRepositoryBranches(priorDecisions);
+        var window = SupervisorPlanWindow.Read(priorDecisions);
+        var repositoryBranches = SupervisorOutcome.ReadFinalRepositoryBranches(window.Decisions);
 
         if (repositoryBranches.Count > 0) return repositoryBranches;
 
-        var integratedBranch = SupervisorOutcome.ReadFinalIntegratedBranch(priorDecisions);
+        var integratedBranch = SupervisorOutcome.ReadFinalIntegratedBranch(window.Decisions);
 
         return string.IsNullOrEmpty(integratedBranch)
-            ? await ResolveLedgerDirectAsync(workflowRunId, teamId, priorDecisions, cancellationToken).ConfigureAwait(false)
+            ? await ResolveLedgerDirectAsync(workflowRunId, teamId, window, cancellationToken).ConfigureAwait(false)
             : await ResolveSingleIntegratedBranchAsync(workflowRunId, teamId, integratedBranch, primaryRepositoryId, cancellationToken).ConfigureAwait(false);
     }
 
@@ -81,11 +82,17 @@ public sealed class SupervisorPublishedBranchResolver : ISupervisorPublishedBran
     /// wrote to the same alias across different rounds. Repository ids come DIRECTLY off each manifest row (populated
     /// at agent-completion time, independent of run terminality) — no OutputsJson dependency at all.
     /// </summary>
-    private async Task<IReadOnlyList<SupervisorRepositoryBranch>> ResolveLedgerDirectAsync(Guid workflowRunId, Guid teamId, IReadOnlyList<SupervisorPriorDecision> priorDecisions, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<SupervisorRepositoryBranch>> ResolveLedgerDirectAsync(Guid workflowRunId, Guid teamId, SupervisorPlanWindowSlice window, CancellationToken cancellationToken)
     {
         var manifests = await _manifests.ListForWorkflowRunAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false);
 
-        var agentManifests = manifests.Where(m => m.Kind == PublishManifestKind.Agent && m.AgentRunId is not null).ToList();
+        var activeAgentRunIds = window.IsPlanBounded
+            ? window.Decisions.Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind)).SelectMany(d => SupervisorOutcome.ReadStagedAgentRunIds(d.OutcomeJson)).ToHashSet()
+            : null;
+
+        var agentManifests = manifests
+            .Where(m => m.Kind == PublishManifestKind.Agent && m.AgentRunId is not null && (activeAgentRunIds is null || activeAgentRunIds.Contains(m.AgentRunId.Value)))
+            .ToList();
 
         if (agentManifests.Count == 0) return Array.Empty<SupervisorRepositoryBranch>();
 
@@ -95,7 +102,7 @@ public sealed class SupervisorPublishedBranchResolver : ISupervisorPublishedBran
             .Select(g => g.Key)
             .ToHashSet();
 
-        var rejected = SupervisorOutcome.WithheldAgentRunIds(priorDecisions);
+        var rejected = SupervisorOutcome.WithheldAgentRunIds(window.Decisions);
 
         var eligible = agentManifests
             .Where(m => publishedAgentIds.Contains(m.AgentRunId!.Value) && !rejected.Contains(m.AgentRunId!.Value) && !string.IsNullOrEmpty(m.Branch))

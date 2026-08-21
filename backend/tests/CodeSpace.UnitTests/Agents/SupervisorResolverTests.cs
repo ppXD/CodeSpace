@@ -221,6 +221,11 @@ public class SupervisorResolverTests
     private static SupervisorPriorDecision Decision(string kind, long seq, string? outcomeJson) =>
         new() { Id = Guid.NewGuid(), Sequence = seq, DecisionKind = kind, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = outcomeJson };
 
+    private static SupervisorPriorDecision Plan(long seq, string payloadJson) =>
+        new() { Id = Guid.NewGuid(), Sequence = seq, DecisionKind = SupervisorDecisionKinds.Plan, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = payloadJson, OutcomeJson = "{}" };
+
+    private static string ValidPlanPayload(string id = "s1") => $$"""{"goal":"g","subtasks":[{"id":"{{id}}","title":"{{id}}","instruction":"do {{id}}"}]}""";
+
     private static readonly string VerifiedSummary = $"reconciled cleanly. {SupervisorResolverRecipe.TestsPassedMarker}";
 
     [Fact]
@@ -301,6 +306,35 @@ public class SupervisorResolverTests
         };
 
         SupervisorOutcome.ReadFinalIntegratedBranch(tape).ShouldBe("codespace/integration/wave2");
+    }
+
+    [Fact]
+    public void ReadFinalIntegratedBranch_does_not_surface_an_old_merge_after_a_new_plan_stops_without_staging()
+    {
+        var tape = new[]
+        {
+            Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome("Clean", "codespace/integration/old")),
+            Plan(3, ValidPlanPayload("replacement")),
+            Decision(SupervisorDecisionKinds.Stop, 4, "{}"),
+        };
+
+        SupervisorOutcome.ReadFinalIntegratedBranch(tape)
+            .ShouldBeNull("a new valid plan supersedes the prior generation's head even before its first unit is staged");
+    }
+
+    [Fact]
+    public void ReadFinalIntegratedBranch_keeps_the_old_merge_past_an_empty_or_invalid_plan_record()
+    {
+        var tape = new[]
+        {
+            Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome("Clean", "codespace/integration/old")),
+            Plan(3, """{"goal":"g","subtasks":[]}"""),
+            Plan(4, "not-json"),
+            Plan(5, """{"goal":"g","subtasks":[{"id":"s2","title":"S2","instruction":"do","dependsOn":["missing"]}]}"""),
+        };
+
+        SupervisorOutcome.ReadFinalIntegratedBranch(tape)
+            .ShouldBe("codespace/integration/old", "a rejected/invalid plan never supersedes the last real generation");
     }
 
     [Theory]
@@ -399,6 +433,19 @@ public class SupervisorResolverTests
         var tape = new[] { Decision(SupervisorDecisionKinds.Spawn, 1, "{}"), Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome("Conflicted", null)), latest };
 
         SupervisorOutcome.FindUnpublishedFrontier(tape).ShouldBe(latest, "the MOST RECENT unconsolidated staging decision is the frontier, not an earlier one");
+    }
+
+    [Fact]
+    public void FindUnpublishedFrontier_does_not_reuse_an_old_spawn_after_a_new_plan()
+    {
+        var tape = new[]
+        {
+            Decision(SupervisorDecisionKinds.Spawn, 1, "{}"),
+            Plan(2, ValidPlanPayload("replacement")),
+        };
+
+        SupervisorOutcome.FindUnpublishedFrontier(tape)
+            .ShouldBeNull("the new plan has not produced work yet, so the old generation cannot become its unpublished frontier");
     }
 
     // ── The SHARED verified-resolution-branch predicate (Part A + Part B call this one helper — Rule 7) ──
