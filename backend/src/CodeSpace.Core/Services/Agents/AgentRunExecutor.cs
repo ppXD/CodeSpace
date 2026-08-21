@@ -11,6 +11,7 @@ using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Review;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Artifacts;
+using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
 using CodeSpace.Core.Services.Workflows.Lifecycle;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Planning.Planners;
@@ -405,7 +406,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // never fabricated.
             result = AttachMcpEvidence(result, effectiveTask, mcp, mcpWiring);
 
-            result = await AttachTranscriptAsync(result, run.TeamId, transcript, cancellationToken).ConfigureAwait(false);
+            result = await AttachTranscriptAsync(_artifacts, result, run.TeamId, transcript, cancellationToken).ConfigureAwait(false);
 
             // The capture sequence ran to its persist (a CONFIRMED empty included) — commit the promise with the
             // observed facts before the terminal CAS, so a crash between the two replays as re-verify + idempotent
@@ -639,7 +640,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         ReportUnestablishedFacts(context.Harness, facts, context.RunId);
 
-        var result = await AttachTranscriptAsync(MapSandboxResult(sandbox, folder, facts), context.TeamId, transcript, cancellationToken).ConfigureAwait(false);
+        var result = await AttachTranscriptAsync(_artifacts, MapSandboxResult(sandbox, folder, facts), context.TeamId, transcript, cancellationToken).ConfigureAwait(false);
 
         // Capture the resumable session transcript here too — a run that completes via durable re-attach (worker restart
         // mid-run) is exactly the durability case continuity serves; the config home still lives under the handle's spool.
@@ -1547,20 +1548,22 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private const string TranscriptContentType = "text/plain";
 
     /// <summary>
-    /// The transcript's ONE materialization point (G0). A spool still inside its budget becomes the inline string —
+    /// The transcript's terminal attachment point (G0). A spool still inside its budget becomes the inline string —
     /// byte-identical to the whole-run <c>StringBuilder</c> it replaced, and small enough that
     /// <c>AgentRunService.OffloadLargeTranscriptAsync</c> keeps it inline exactly as before. A SPILLED spool is
     /// content that offloader was always going to move out, so it goes straight to the artifact store here and the
     /// result carries the same <c>("" + ref)</c> shape the offloader would have produced — the content-addressed
     /// store dedups by sha, so the very same bytes even land on the very same artifact id. Either way the persisted
-    /// <c>result_jsonb</c> is unchanged; what changes is that the full string never has to exist.
+    /// <c>result_jsonb</c> is unchanged; what changes is that neither the full string nor a full byte array has to exist.
     /// </summary>
-    private async Task<AgentRunResult> AttachTranscriptAsync(AgentRunResult result, Guid teamId, AgentTranscriptSpool transcript, CancellationToken cancellationToken)
+    internal static async Task<AgentRunResult> AttachTranscriptAsync(IArtifactStore artifacts, AgentRunResult result, Guid teamId, AgentTranscriptSpool transcript, CancellationToken cancellationToken)
     {
         if (!transcript.Spilled) return result with { Transcript = transcript.RetainedText() };
 
-        var bytes = await transcript.ReadAllAsync(cancellationToken).ConfigureAwait(false);
-        var artifactId = await _artifacts.PutAsync(teamId, bytes, TranscriptContentType, cancellationToken).ConfigureAwait(false);
+        if (artifacts is not IArtifactStreamStore streams)
+            throw new ArtifactStreamingWriteUnavailableException(artifacts?.GetType() ?? typeof(IArtifactStore), typeof(IArtifactStreamStore));
+        await transcript.SealAsync(cancellationToken).ConfigureAwait(false);
+        var artifactId = await streams.PutAsync(new ArtifactStreamWriteRequest(teamId, TranscriptContentType, transcript), cancellationToken).ConfigureAwait(false);
 
         return result with { Transcript = "", TranscriptArtifactId = artifactId };
     }
@@ -2330,7 +2333,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         // Events are already redacted, so a result the harness folds from them (summary / error) is redacted too. The
         // faithful raw transcript is NOT attached here: it belongs to the whole run (every revise round streams into
-        // the same spool) and is materialized once, at the end, by AttachTranscriptAsync.
+        // the same spool) and is sealed/reopened through bounded storage streams at the end by AttachTranscriptAsync.
         return MapSandboxResult(sandbox, folder, facts);
     }
 

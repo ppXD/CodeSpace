@@ -7,7 +7,18 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
 public sealed class ArtifactStreamingWriteUnavailableException : NotSupportedException
 {
     public ArtifactStreamingWriteUnavailableException(Type backendType)
-        : base($"Artifact blob backend '{backendType.FullName}' does not implement the required streaming write capability; refusing a whole-payload fallback.") => BackendType = backendType;
+        : this(backendType, typeof(IArtifactBlobStreamWriter)) { }
 
-    public Type BackendType { get; }
+    public ArtifactStreamingWriteUnavailableException(Type componentType, Type requiredCapability)
+        : base($"Artifact component '{componentType.FullName}' does not implement required streaming write capability '{requiredCapability.FullName}'; refusing a whole-payload fallback.")
+    {
+        ComponentType = componentType;
+        RequiredCapability = requiredCapability;
+    }
+
+    public Type ComponentType { get; }
+    public Type RequiredCapability { get; }
+
+    /// <summary>Compatibility alias for the original legacy-backend caller.</summary>
+    public Type BackendType => ComponentType;
 }

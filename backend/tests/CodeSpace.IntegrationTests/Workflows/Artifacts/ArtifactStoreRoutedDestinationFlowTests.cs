@@ -3,6 +3,7 @@ using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
 using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
@@ -184,12 +185,73 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
         await SeedRouteAsync(teamId, profileId);
         var content = Encoding.UTF8.GetBytes(new string('w', 300_000));
         var source = new ReopenableByteSource(content);
-        var intentId = await SeedLeasedIntentAsync(teamId, profileId, content, TimeSpan.FromSeconds(1));
+        var intentId = await SeedLeasedIntentAsync(teamId, profileId, content, TimeSpan.FromSeconds(3));
 
         var artifactId = await PutStreamAsync(teamId, source);
 
         source.OpenCount.ShouldBeGreaterThan(2,
             "the identity pass is one open; every deferred/claimed transfer attempt must own a newly opened stream rather than seek or retain an earlier one");
+        (await RowAsync(artifactId)).CasArtifactObjectId.ShouldNotBeNull();
+        using var scope = _fixture.BeginScope();
+        var intent = await scope.Resolve<CodeSpaceDbContext>().ArtifactTransferIntent.AsNoTracking().SingleAsync(candidate => candidate.TeamId == teamId);
+        intent.Id.ShouldBe(intentId);
+        intent.State.ShouldBe(ArtifactTransferState.Committed);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_sealed_agent_transcript_streams_to_local_or_routed_storage_with_the_same_identity(bool routed)
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var routedRoot = NewRoot();
+        if (routed) await SeedRouteAsync(teamId, await SeedProfileAsync(teamId, routedRoot));
+        var line = new string(routed ? 't' : 's', 300_000);
+        var expected = Encoding.UTF8.GetBytes(line + Environment.NewLine);
+        await using var transcript = new AgentTranscriptSpool(NewRoot(), 16);
+        await transcript.AppendLineAsync(line, CancellationToken.None);
+        await transcript.SealAsync(CancellationToken.None);
+
+        var artifactId = await PutStreamAsync(teamId, transcript);
+
+        transcript.OpenReadCount.ShouldBe(2, "one identity open and one healthy placement open are sufficient for the sealed spill");
+        var row = await RowAsync(artifactId);
+        row.Sha256.ShouldBe(ArtifactStore.ComputeSha256Hex(expected));
+        row.SizeBytes.ShouldBe(expected.LongLength);
+        if (routed)
+        {
+            row.CasArtifactObjectId.ShouldNotBeNull();
+            row.StorageUrl.ShouldBeNull();
+            File.Exists(ObjectPath(routedRoot, row.Sha256)).ShouldBeTrue();
+        }
+        else
+        {
+            row.CasArtifactObjectId.ShouldBeNull();
+            row.StorageUrl.ShouldBe(LocalUrlFor(row.Sha256));
+        }
+
+        using var scope = _fixture.BeginScope();
+        (await scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, artifactId, CancellationToken.None))!.Bytes.ShouldBe(expected);
+    }
+
+    [Fact]
+    public async Task A_deferred_routed_agent_transcript_reopens_its_sealed_spill_for_every_attempt()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var root = NewRoot();
+        var profileId = await SeedProfileAsync(teamId, root);
+        await SeedRouteAsync(teamId, profileId);
+        var line = new string('f', 300_000);
+        var expected = Encoding.UTF8.GetBytes(line + Environment.NewLine);
+        await using var transcript = new AgentTranscriptSpool(NewRoot(), 16);
+        await transcript.AppendLineAsync(line, CancellationToken.None);
+        await transcript.SealAsync(CancellationToken.None);
+        var intentId = await SeedLeasedIntentAsync(teamId, profileId, expected, TimeSpan.FromSeconds(3));
+
+        var artifactId = await PutStreamAsync(teamId, transcript);
+
+        transcript.OpenReadCount.ShouldBeGreaterThan(2,
+            "the sealed file source must return a fresh stream after each Deferred result; retaining or seeking one handle is not retry-safe");
         (await RowAsync(artifactId)).CasArtifactObjectId.ShouldNotBeNull();
         using var scope = _fixture.BeginScope();
         var intent = await scope.Resolve<CodeSpaceDbContext>().ArtifactTransferIntent.AsNoTracking().SingleAsync(candidate => candidate.TeamId == teamId);

@@ -1,5 +1,6 @@
 using System.Text;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Workflows.Artifacts;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents;
@@ -137,13 +138,58 @@ public sealed class AgentTranscriptSpoolTests : IDisposable
         recovered.ShouldContain($"transcript line {lines - 1:D6} padding");
     }
 
-    // ─── Containment: reclaimable on disk, loud when dead ─────────────────────
+    [Fact]
+    public async Task A_spilled_source_flushes_and_seals_before_each_open_replays_the_exact_same_bytes()
+    {
+        await using var spool = new AgentTranscriptSpool(NewSpillDirectory(), 16);
+        foreach (var round in MultiRoundStream)
+        {
+            if (spool.LengthBytes > 0) spool.MarkSeam(Seam);
+            foreach (var line in round) await spool.AppendLineAsync(line, CancellationToken.None);
+        }
+        var expected = Encoding.UTF8.GetBytes(FrozenTranscript(MultiRoundStream)!);
+        var source = (IArtifactWriteSource)spool;
+
+        await Should.ThrowAsync<InvalidOperationException>(async () => await source.OpenReadAsync(CancellationToken.None),
+            "opening before seal could expose buffered or still-mutating bytes to identity admission");
+
+        await spool.SealAsync(CancellationToken.None);
+        var first = await ReadSourceAsync(source);
+        var second = await ReadSourceAsync(source);
+
+        first.ShouldBe(expected);
+        second.ShouldBe(expected, "storage identity admission and placement each receive a fresh stream over identical sealed bytes");
+        source.LengthBytes.ShouldBe(expected.LongLength);
+        spool.OpenReadCount.ShouldBe(2);
+        await Should.ThrowAsync<InvalidOperationException>(() => spool.AppendLineAsync("too late", CancellationToken.None).AsTask());
+    }
 
     [Fact]
-    public async Task Disposing_a_spilled_transcript_removes_its_file()
+    public async Task A_cancelled_seal_does_not_claim_the_source_is_stable_or_prevent_a_later_clean_seal()
+    {
+        await using var spool = new AgentTranscriptSpool(NewSpillDirectory(), 8);
+        await spool.AppendLineAsync("long enough to spill", CancellationToken.None);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Should.ThrowAsync<OperationCanceledException>(() => spool.SealAsync(cancellation.Token));
+        await Should.ThrowAsync<InvalidOperationException>(async () => await ((IArtifactWriteSource)spool).OpenReadAsync(CancellationToken.None));
+
+        await spool.AppendLineAsync("still writable after refused seal", CancellationToken.None);
+        await spool.SealAsync(CancellationToken.None);
+        Encoding.UTF8.GetString(await ReadSourceAsync(spool)).ShouldEndWith($"still writable after refused seal{Environment.NewLine}");
+    }
+
+    // ─── Containment: reclaimable on disk, loud when dead ─────────────────────
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Disposing_a_live_or_sealed_spilled_transcript_removes_its_file(bool isSealed)
     {
         await using var spool = new AgentTranscriptSpool(NewSpillDirectory(), 16);
         await spool.AppendLineAsync("long enough to spill this transcript", CancellationToken.None);
+        if (isSealed) await spool.SealAsync(CancellationToken.None);
 
         var path = spool.SpillPath.ShouldNotBeNull();
         File.Exists(path).ShouldBeTrue();
@@ -200,6 +246,8 @@ public sealed class AgentTranscriptSpoolTests : IDisposable
         Should.Throw<ObjectDisposedException>(() => spool.RetainedText())
             .Message.ShouldContain("disposed", customMessage: "the guard whose whole purpose is to stop a caller persisting a TRUNCATED transcript must not stop guarding at the moment it would go silent");
         await Should.ThrowAsync<ObjectDisposedException>(() => spool.ReadAllAsync(CancellationToken.None));
+        if (spilled)
+            await Should.ThrowAsync<ObjectDisposedException>(async () => await ((IArtifactWriteSource)spool).OpenReadAsync(CancellationToken.None));
     }
 
     // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -237,6 +285,14 @@ public sealed class AgentTranscriptSpoolTests : IDisposable
         }
 
         return await spool.ReadAllAsync(CancellationToken.None);
+    }
+
+    private static async Task<byte[]> ReadSourceAsync(IArtifactWriteSource source)
+    {
+        await using var content = await source.OpenReadAsync(CancellationToken.None);
+        using var output = new MemoryStream();
+        await content.CopyToAsync(output);
+        return output.ToArray();
     }
 
     /// <summary>
