@@ -1,10 +1,10 @@
 import { useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
-import type { RunRecordView, WorkflowRunDataCompletenessView } from "@/api/workflows";
+import type { RunRecordPageItem, WorkflowRunDataCompletenessView } from "@/api/workflows";
 import { useRunDataCompleteness, useRunRecordWindow } from "@/hooks/use-workflows";
 
-import { JsonView } from "./JsonView";
+import { RunRecordPayload } from "./RunRecordPayload";
 
 /**
  * The Trace tab — a bounded window over the run's RAW append-only event ledger (GET /records/page): the audit truth beside the Activity
@@ -42,7 +42,7 @@ export function RunTrace({ runId, active = false }: { runId: string; active?: bo
         <>
           <div className="run-trace-head"><Ic.Code size={12} aria-hidden="true" /> Event ledger · showing {rows.length} records</div>
           <ol className="run-trace-list">
-            {rows.map((r) => <TraceRow key={r.sequence} record={r} />)}
+            {rows.map((r) => <TraceRow key={`${runId}:${r.recordId}`} runId={runId} record={r} />)}
           </ol>
         </>
       )}
@@ -78,53 +78,27 @@ function RunDataCompleteness({ view, loading, failed }: { view: WorkflowRunDataC
   );
 }
 
-function TraceRow({ record }: { record: RunRecordView }) {
+function TraceRow({ runId, record }: { runId: string; record: RunRecordPageItem }) {
   const [open, setOpen] = useState(false);
-  const payload = parsePayload(record.payloadJson);
-  const expandable = payload !== null;
 
-  // Only an expandable row is an interactive button; a flat (empty-payload) row is a plain div so a keyboard user
-  // doesn't tab onto a focusable control that announces as a button but does nothing.
+  // The metadata page deliberately does not inspect PayloadJson, so every row can reveal its exact payload on demand.
   const content = (
     <>
       <span className="run-trace-time">{new Date(record.occurredAt).toLocaleTimeString()}</span>
       <span className="run-trace-type">{record.recordType}</span>
       {record.nodeId && <span className="run-trace-node">{record.nodeId}</span>}
-      {expandable && <span className="run-trace-caret" aria-hidden="true"><Ic.ChevronDown size={12} /></span>}
+      <span className="run-trace-caret" aria-hidden="true"><Ic.ChevronDown size={12} /></span>
     </>
   );
 
   return (
     <li className="run-trace-row" data-tone={toneFor(record.recordType)} data-open={open || undefined}>
-      {expandable ? (
-        <button type="button" className="run-trace-bar" data-expandable aria-expanded={open} onClick={() => setOpen((v) => !v)}>
-          {content}
-        </button>
-      ) : (
-        <div className="run-trace-bar">{content}</div>
-      )}
-      {open && expandable && <div className="run-trace-payload"><JsonView data={payload} /></div>}
+      <button type="button" className="run-trace-bar" data-expandable aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+        {content}
+      </button>
+      {open && <div className="run-trace-payload"><RunRecordPayload runId={runId} record={record} /></div>}
     </li>
   );
-}
-
-/**
- * Parse a record's raw payload for display — returns the parsed value ONLY for a non-empty object/array (the thing
- * worth an expand row); null for "{}" / an empty object or array / a bare scalar / unparseable input, so the row stays
- * flat. (jsonb payloads are objects in practice; the scalar + unparseable guards are defensive.)
- */
-function parsePayload(payloadJson: string): unknown {
-  if (!payloadJson || payloadJson === "{}") return null;
-
-  try {
-    const value = JSON.parse(payloadJson);
-
-    if (value === null || typeof value !== "object") return null;   // a bare scalar / null isn't worth an expand row
-
-    return Object.keys(value).length === 0 ? null : value;          // empty object / array → flat
-  } catch {
-    return null;
-  }
 }
 
 /** A subtle row tone — only failures/cancellations stand out; everything else stays neutral (raw audit, not a story). */

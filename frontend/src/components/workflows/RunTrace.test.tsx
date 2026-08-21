@@ -1,11 +1,17 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { RunRecordView, WorkflowRunDataCompletenessView } from "@/api/workflows";
+import type { RunRecordPageItem, WorkflowRunDataCompletenessView } from "@/api/workflows";
+
+const payloadApiMock = vi.hoisted(() => vi.fn());
+vi.mock("@/api/workflows", async () => {
+  const actual = await vi.importActual<typeof import("@/api/workflows")>("@/api/workflows");
+  return { ...actual, workflowsApi: { ...actual.workflowsApi, readRunRecordPayloadRange: payloadApiMock } };
+});
 
 // Drive the records through the hook; stub JsonView so the test asserts "the raw payload is shown" without its tree.
 const recordsMock = {
-  records: [] as RunRecordView[], runStatus: undefined, isLoading: false, isLoadingOlder: false, error: null as Error | null,
+  records: [] as RunRecordPageItem[], runStatus: undefined, isLoading: false, isLoadingOlder: false, error: null as Error | null,
   hasOlder: false, olderRecordsOmitted: false, newerRecordsOmitted: false, atLatest: true,
   loadOlder: vi.fn(), returnToLatest: vi.fn(),
 };
@@ -20,11 +26,11 @@ vi.mock("./JsonView", () => ({
 
 import { RunTrace } from "./RunTrace";
 
-function record(o: Partial<RunRecordView>): RunRecordView {
-  return { sequence: 1, recordType: "run.started", nodeId: null, iterationKey: "", occurredAt: "2026-06-23T10:00:00Z", payloadJson: "{}", ...o };
+function record(o: Partial<RunRecordPageItem>): RunRecordPageItem {
+  return { recordId: "11111111-1111-4111-8111-111111111111", sequence: 1, recordType: "run.started", nodeId: null, iterationKey: "", occurredAt: "2026-06-23T10:00:00Z", payloadState: "Deferred", payloadContentType: "application/json", correlationId: null, parentRecordId: null, ...o };
 }
 
-function withRecords(records: RunRecordView[] | undefined, isLoading = false) {
+function withRecords(records: RunRecordPageItem[] | undefined, isLoading = false) {
   recordsMock.records = records ?? [];
   recordsMock.isLoading = isLoading;
 }
@@ -47,6 +53,11 @@ beforeEach(() => {
   completenessMock.data = completeness([]);
   completenessMock.isLoading = false;
   completenessMock.error = null;
+  payloadApiMock.mockReset();
+  payloadApiMock.mockResolvedValue({
+    availability: "Available", bytes: new TextEncoder().encode("{}"), runId: "r1", recordId: "11111111-1111-4111-8111-111111111111",
+    sequence: 1, offsetBytes: 0, nextOffsetBytes: null, totalBytes: 2, contentType: "application/json",
+  });
 });
 
 describe("RunTrace", () => {
@@ -128,34 +139,125 @@ describe("RunTrace", () => {
     expect(screen.getByText(/4 records/)).toBeInTheDocument();
   });
 
-  it("expands a record with a non-trivial payload to its raw JSON", () => {
-    withRecords([record({ sequence: 1, recordType: "node.failed", payloadJson: '{"error":"boom"}' })]);
+  it("fetches no payload until expansion, then renders the exact bounded body", async () => {
+    const bytes = new TextEncoder().encode('{"error":"boom"}');
+    payloadApiMock.mockResolvedValueOnce({ availability: "Available", bytes, runId: "r1", recordId: "11111111-1111-4111-8111-111111111111", sequence: 1, offsetBytes: 0, nextOffsetBytes: null, totalBytes: bytes.byteLength, contentType: "application/json" });
+    withRecords([record({ sequence: 1, recordType: "node.failed" })]);
     render(<RunTrace runId="r1" />);
 
+    expect(payloadApiMock).not.toHaveBeenCalled();
     expect(screen.queryByTestId("jsonview")).toBeNull();
     fireEvent.click(screen.getByRole("button"));
 
-    expect(screen.getByTestId("jsonview")).toHaveTextContent('"error":"boom"');
+    expect(await screen.findByTestId("jsonview")).toHaveTextContent('"error":"boom"');
+    expect(payloadApiMock).toHaveBeenCalledWith("r1", "11111111-1111-4111-8111-111111111111", 1, 0, 64 * 1024, expect.any(AbortSignal));
   });
 
-  it("does not make an empty-payload record expandable, and renders it as a non-interactive row", () => {
-    withRecords([record({ sequence: 1, recordType: "run.started", payloadJson: "{}" })]);
-    const { container } = render(<RunTrace runId="r1" />);
+  it("never JSON-parses a small body until the complete zero-to-EOF range is present", async () => {
+    payloadApiMock.mockResolvedValueOnce({
+      availability: "Available", bytes: new TextEncoder().encode('{"a":'), runId: "r1", recordId: "11111111-1111-4111-8111-111111111111",
+      sequence: 1, offsetBytes: 0, nextOffsetBytes: 5, totalBytes: 7, contentType: "application/json",
+    }).mockResolvedValueOnce({
+      availability: "Available", bytes: new TextEncoder().encode("1}"), runId: "r1", recordId: "11111111-1111-4111-8111-111111111111",
+      sequence: 1, offsetBytes: 5, nextOffsetBytes: null, totalBytes: 7, contentType: "application/json",
+    });
+    withRecords([record({ sequence: 1 })]);
+    render(<RunTrace runId="r1" />);
 
-    expect(container.querySelector(".run-trace-caret")).toBeNull();
-    expect(container.querySelector(".run-trace-bar[data-expandable]")).toBeNull();
-    expect(container.querySelector("button")).toBeNull();   // a flat row is a div, not a focusable no-op button
+    fireEvent.click(screen.getByRole("button"));
+    const more = await screen.findByRole("button", { name: /load more payload/i });
+    expect(screen.queryByTestId("jsonview")).toBeNull();
+    fireEvent.click(more);
+
+    expect(await screen.findByTestId("jsonview")).toHaveTextContent('"a":1');
   });
 
-  it("treats a bare-scalar payload as flat (only structured object/array payloads expand)", () => {
-    withRecords([
-      record({ sequence: 1, recordType: "llm.token", payloadJson: "42" }),
-      record({ sequence: 2, recordType: "node.skipped", payloadJson: '"reason"' }),
-    ]);
-    const { container } = render(<RunTrace runId="r1" />);
+  it("aborts and releases local payload bytes when the row closes", async () => {
+    let signal: AbortSignal | undefined;
+    payloadApiMock.mockImplementationOnce((_runId, _recordId, _sequence, _offset, _limit, observed: AbortSignal) => {
+      signal = observed;
+      return new Promise(() => {});
+    });
+    withRecords([record({ sequence: 1 })]);
+    render(<RunTrace runId="r1" />);
 
-    expect(container.querySelector(".run-trace-caret")).toBeNull();
-    expect(container.querySelector("button")).toBeNull();
+    fireEvent.click(screen.getByRole("button"));
+    await waitFor(() => expect(payloadApiMock).toHaveBeenCalledTimes(1));
+    expect(signal?.aborted).toBe(false);
+    fireEvent.click(screen.getByRole("button"));
+
+    expect(signal?.aborted).toBe(true);
+  });
+
+  it("offers manual retry for transient transport but not for invalid wire", async () => {
+    payloadApiMock.mockResolvedValueOnce({ availability: "BackendUnavailable", code: "transport_unavailable", isRetryable: true })
+      .mockResolvedValueOnce({ availability: "InvalidResponse", code: "invalid_record_payload_range_headers", isRetryable: false });
+    withRecords([record({ sequence: 1 })]);
+    render(<RunTrace runId="r1" />);
+
+    fireEvent.click(screen.getByRole("button"));
+    expect(await screen.findByText(/payload is temporarily unavailable/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /retry payload/i }));
+
+    expect(await screen.findByText(/payload response was invalid/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /retry payload/i })).toBeNull();
+    expect(payloadApiMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("caps one local payload window at eight 64 KiB pages and makes continuation explicit", async () => {
+    let call = 0;
+    payloadApiMock.mockImplementation(async (_runId, _recordId, _sequence, offset: number) => {
+      call += 1;
+      const chunk = new Uint8Array(64 * 1024).fill(120);
+      if (call === 8) chunk[chunk.length - 1] = 0xe7;
+      if (call === 9) {
+        chunk[0] = 0x95;
+        chunk[1] = 0x8c;
+      }
+      return {
+        availability: "Available", bytes: chunk, runId: "r1", recordId: "11111111-1111-4111-8111-111111111111", sequence: 1,
+        offsetBytes: offset, nextOffsetBytes: offset + chunk.byteLength, totalBytes: 1024 * 1024, contentType: "application/json",
+      };
+    });
+    withRecords([record({ sequence: 1 })]);
+    render(<RunTrace runId="r1" />);
+
+    fireEvent.click(screen.getByRole("button"));
+    for (let page = 1; page < 8; page += 1) {
+      await screen.findByRole("button", { name: /load more payload/i });
+      fireEvent.click(screen.getByRole("button", { name: /load more payload/i }));
+    }
+
+    expect(await screen.findByText(/bounded preview window/i)).toBeInTheDocument();
+    expect(payloadApiMock).toHaveBeenCalledTimes(8);
+    fireEvent.click(screen.getByRole("button", { name: /next payload window/i }));
+    await waitFor(() => expect(payloadApiMock).toHaveBeenLastCalledWith("r1", "11111111-1111-4111-8111-111111111111", 1, 512 * 1024, 64 * 1024, expect.any(AbortSignal)));
+    expect(payloadApiMock).toHaveBeenCalledTimes(9);
+    expect(await screen.findByText(/界/)).toBeInTheDocument();
+    expect(screen.getByText(/continuation begun before this window/i)).toBeInTheDocument();
+    expect(screen.queryByText(/�/)).toBeNull();
+  });
+
+  it("does not JSON-parse a partial body and decodes split UTF-8 without replacement characters", async () => {
+    const totalBytes = 1024 * 1024;
+    payloadApiMock.mockResolvedValueOnce({
+      availability: "Available", bytes: new Uint8Array([0xe7]), runId: "r1", recordId: "11111111-1111-4111-8111-111111111111",
+      sequence: 1, offsetBytes: 0, nextOffsetBytes: 1, totalBytes, contentType: "application/json",
+    }).mockResolvedValueOnce({
+      availability: "Available", bytes: new Uint8Array([0x95, 0x8c]), runId: "r1", recordId: "11111111-1111-4111-8111-111111111111",
+      sequence: 1, offsetBytes: 1, nextOffsetBytes: 3, totalBytes, contentType: "application/json",
+    });
+    withRecords([record({ sequence: 1 })]);
+    render(<RunTrace runId="r1" />);
+
+    fireEvent.click(screen.getByRole("button"));
+    const more = await screen.findByRole("button", { name: /load more payload/i });
+    expect(screen.queryByTestId("jsonview")).toBeNull();
+    fireEvent.click(more);
+
+    expect(await screen.findByText("界")).toBeInTheDocument();
+    expect(screen.queryByText(/�/)).toBeNull();
+    expect(screen.queryByTestId("jsonview")).toBeNull();
   });
 
   it("tones failure / cancel records for scanning, leaving others neutral", () => {

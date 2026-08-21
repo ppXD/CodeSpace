@@ -4,12 +4,14 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Claims;
 using System.Text;
+using CodeSpace.Api.Http;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.E2ETests.Infrastructure;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks.Trace;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.IdentityModel.Tokens;
 using Shouldly;
@@ -79,6 +81,8 @@ public sealed class RunRecordsEndpointE2ETests : IClassFixture<TaskLaunchApiFact
         tail.ShouldNotBeNull();
         tail!.Mode.ShouldBe(RunRecordPageModes.Tail);
         tail.Records.Select(row => row.RecordType).ShouldBe(new[] { WorkflowRunRecordTypes.NodeStarted, WorkflowRunRecordTypes.RunFailed });
+        tail.Records.ShouldAllBe(row => row.RecordId != Guid.Empty && row.PayloadState == RunRecordPagePayloadStates.Deferred && row.PayloadContentType == "application/json");
+        typeof(RunRecordPageItem).GetProperty("PayloadJson").ShouldBeNull("the bounded page wire must be structurally body-free");
         tail.NextBeforeSequence.ShouldBe(tail.Records[0].Sequence);
         tail.NextAfterSequence.ShouldBeNull();
 
@@ -93,6 +97,47 @@ public sealed class RunRecordsEndpointE2ETests : IClassFixture<TaskLaunchApiFact
 
         var invalid = await SendAsync(HttpMethod.Get, $"/api/workflows/runs/{runId}/records/page?beforeSequence=1&afterSequence=1", userId, teamId);
         invalid.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+    }
+
+    [Fact]
+    public async Task Read_record_payload_exposes_exact_identity_and_lossless_bounded_canonical_jsonb_bytes()
+    {
+        var (userId, teamId) = await SeedTeamMembershipAsync();
+        var runId = await SeedRunWithRecordsAsync(teamId);
+        Guid recordId;
+        long sequence;
+        string expected;
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var source = await scope.ServiceProvider.GetRequiredService<CodeSpaceDbContext>().WorkflowRunRecord.AsNoTracking()
+                .Where(record => record.RunId == runId && record.RecordType == WorkflowRunRecordTypes.Log)
+                .Select(record => new { record.Id, record.Sequence, record.PayloadJson }).SingleAsync();
+            recordId = source.Id;
+            sequence = source.Sequence;
+            expected = source.PayloadJson;
+        }
+
+        using var output = new MemoryStream();
+        long offset = 0;
+        do
+        {
+            var response = await SendAsync(HttpMethod.Get, $"/api/workflows/runs/{runId}/records/{recordId}/payload?offsetBytes={offset}&limitBytes=4", userId, teamId);
+            response.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(response));
+            response.Content.Headers.ContentType!.MediaType.ShouldBe("application/octet-stream");
+            response.Headers.GetValues(RunRecordPayloadHttpHeaders.RunId).ShouldHaveSingleItem().ShouldBe(runId.ToString());
+            response.Headers.GetValues(RunRecordPayloadHttpHeaders.RecordId).ShouldHaveSingleItem().ShouldBe(recordId.ToString());
+            response.Headers.GetValues(RunRecordPayloadHttpHeaders.Sequence).ShouldHaveSingleItem().ShouldBe(sequence.ToString());
+            response.Headers.GetValues(RunRecordPayloadHttpHeaders.Offset).ShouldHaveSingleItem().ShouldBe(offset.ToString());
+            response.Headers.GetValues(RunRecordPayloadHttpHeaders.ContentType).ShouldHaveSingleItem().ShouldBe("application/json");
+            response.Headers.GetValues(RunRecordPayloadHttpHeaders.TotalBytes).ShouldHaveSingleItem().ShouldBe(Encoding.UTF8.GetByteCount(expected).ToString());
+
+            var bytes = await response.Content.ReadAsByteArrayAsync();
+            bytes.Length.ShouldBeInRange(1, 4);
+            await output.WriteAsync(bytes);
+            offset += bytes.Length;
+        } while (offset < Encoding.UTF8.GetByteCount(expected));
+
+        Encoding.UTF8.GetString(output.ToArray()).ShouldBe(expected);
     }
 
     [Fact]

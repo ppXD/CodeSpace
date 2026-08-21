@@ -30,7 +30,7 @@ public sealed record RunRecordPageResponse
     public required Guid RunId { get; init; }
     public required string RunStatus { get; init; }
     public required string Mode { get; init; }
-    public required IReadOnlyList<RunRecordView> Records { get; init; }
+    public required IReadOnlyList<RunRecordPageItem> Records { get; init; }
     public long? NextBeforeSequence { get; init; }
     public long? NextAfterSequence { get; init; }
 }
