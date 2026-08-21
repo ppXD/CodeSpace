@@ -52,6 +52,14 @@ public class AgentsController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>Hard-bounded keyset page over one run's events: newest tail, older history, or newer/live delta. Additive v2 foundation; the legacy whole-log endpoint remains available.</summary>
+    [HttpGet("runs/{agentRunId:guid}/events/page")]
+    public async Task<IActionResult> PageRunEvents([FromRoute] Guid agentRunId, [FromQuery] PageAgentRunEventsQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query with { AgentRunId = agentRunId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
     /// <summary>One bounded byte range from an exact Agent Run event's offloaded structured payload.</summary>
     [HttpGet("runs/{agentRunId:guid}/events/{eventSequence:long}/data")]
     public async Task<IActionResult> ReadRunEventData([FromRoute] Guid agentRunId, [FromRoute] long eventSequence,
