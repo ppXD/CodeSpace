@@ -67,6 +67,33 @@ export interface HarnessSummary {
 
 export type AgentRunStatus = "Queued" | "Running" | "Succeeded" | "Failed" | "TimedOut" | "Cancelled" | "NeedsReview";
 
+/** Bounded, observation-only process history for one durable harness execution. */
+export interface AgentRunHarnessProcessAttemptSummary {
+  id: string;
+  attemptOrdinal: number;
+  state: string;
+  startedAt: string;
+  lastObservedAt: string;
+  exitedAt: string | null;
+  exitCode: number | null;
+  errorCode: string | null;
+}
+
+/** Latest durable harness execution. Its state is physical-process truth, never the Agent Run verdict. */
+export interface AgentRunHarnessExecutionSummary {
+  id: string;
+  generation: number;
+  harnessTypeKey: string;
+  runnerKind: string;
+  state: string;
+  attemptCount: number;
+  /** Indexed existence observation; the drawer never performs an unbounded count over a long native stream. */
+  hasCapturedNativeRecords: boolean;
+  terminalAt: string | null;
+  attempts: AgentRunHarnessProcessAttemptSummary[];
+  attemptsTruncated: boolean;
+}
+
 /** Mirrors backend `AgentRunSummary` — one agent run's live status + timing (no secret). */
 export interface AgentRunSummary {
   id: string;
@@ -79,6 +106,8 @@ export interface AgentRunSummary {
   heartbeatAt: string | null;
   completedAt: string | null;
   createdDate: string;
+  /** Observation-only durable harness/process facts; absent when capture was unavailable. */
+  harnessExecution?: AgentRunHarnessExecutionSummary | null;
 }
 
 /** Mirrors backend `AgentRunEventDto` — one step in the run's append-only live log. */

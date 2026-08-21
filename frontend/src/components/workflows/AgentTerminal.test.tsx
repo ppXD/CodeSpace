@@ -212,6 +212,39 @@ describe("AgentTerminal", () => {
     expect(screen.getByText("3 files")).toBeInTheDocument();       // the git-truth ref count (3), NOT the 5 FileChanged events
   });
 
+  it("shows the durable process observation without treating it as the agent outcome", () => {
+    useAgentRunMock.mockReturnValue({ data: {
+      status: "TimedOut",
+      harness: "claude-code",
+      harnessExecution: {
+        id: "execution-1",
+        generation: 1,
+        harnessTypeKey: "claude-code/v2",
+        runnerKind: "local",
+        state: "Exited",
+        attemptCount: 1,
+        hasCapturedNativeRecords: true,
+        terminalAt: "2026-06-23T00:01:00Z",
+        attempts: [{
+          id: "attempt-1",
+          attemptOrdinal: 1,
+          state: "Lost",
+          startedAt: "2026-06-23T00:00:00Z",
+          lastObservedAt: "2026-06-23T00:01:00Z",
+          exitedAt: "2026-06-23T00:01:00Z",
+          exitCode: null,
+          errorCode: "capture.exit-unobserved",
+        }],
+        attemptsTruncated: false,
+      },
+    } });
+
+    render(<AgentTerminal agent={termAgent({ agentRunId: "a1", status: "TimedOut" })} onClose={vi.fn()} />);
+
+    expect(screen.getByText("process lost (capture.exit-unobserved) · 1 attempt · native capture")).toBeInTheDocument();
+    expect(screen.getByText("timed out")).toBeInTheDocument();
+  });
+
   it("omits an identity part that is absent (no harness/model/tools/time → no strip)", () => {
     useAgentRunMock.mockReturnValue({ data: { status: "Running" } });   // no harness
     render(<AgentTerminal agent={termAgent({ agentRunId: "a1" })} onClose={vi.fn()} />);

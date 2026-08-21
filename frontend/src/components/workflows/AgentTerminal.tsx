@@ -1,7 +1,7 @@
 import { useContext, useState, type ReactNode } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
-import type { AgentRunEventDto } from "@/api/agents";
+import type { AgentRunEventDto, AgentRunHarnessExecutionSummary } from "@/api/agents";
 import type { RoomFileIdentity } from "@/api/sessions";
 import type { CellAttempt, NodeStatus, PhaseAgentRef } from "@/api/workflows";
 import { useAgentRun, useAgentRunEvents } from "@/hooks/use-agents";
@@ -71,6 +71,7 @@ export function AgentTerminal({ agent, onClose, rerun, onOpenFile }: { agent: Ph
     m.model,
     m.toolCount != null && `${m.toolCount} ${m.toolCount === 1 ? "tool" : "tools"}`,
     m.durationMs != null && formatDuration(m.durationMs),
+    harnessExecutionFact(run.data?.harnessExecution),
   ].filter(Boolean) as string[];
 
   return (
@@ -140,6 +141,19 @@ export function AgentTerminal({ agent, onClose, rerun, onOpenFile }: { agent: Ph
       </div>
     </div>
   );
+}
+
+/** Compact physical-process truth for operators. Keep it visibly separate from the Agent Run status/verdict. */
+function harnessExecutionFact(execution?: AgentRunHarnessExecutionSummary | null): string | null {
+  if (!execution) return null;
+
+  const latest = execution.attempts[execution.attempts.length - 1];
+  const process = latest
+    ? `process ${latest.state.toLowerCase()}${latest.errorCode ? ` (${latest.errorCode})` : ""}`
+    : `execution ${execution.state.toLowerCase()}`;
+  const attempts = `${execution.attemptCount} ${execution.attemptCount === 1 ? "attempt" : "attempts"}`;
+  const capture = execution.hasCapturedNativeRecords ? "native capture" : "no native frames";
+  return `${process} · ${attempts} · ${capture}`;
 }
 
 function Scrollback({ events, loading, error }: { events: AgentRunEventDto[]; loading: boolean; error: string | null }) {
