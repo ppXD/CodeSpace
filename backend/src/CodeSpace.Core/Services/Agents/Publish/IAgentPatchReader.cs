@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Services.Agents.Publish.Exceptions;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Messages.Agents;
 using Microsoft.EntityFrameworkCore;
@@ -22,9 +23,10 @@ namespace CodeSpace.Core.Services.Agents.Publish;
 /// result and resolves the top-level diff plus every per-repo diff through the SAME offloader primitive
 /// (<c>.Merge.cs</c>). Alias SELECTION is what a manifest-driven consumer needs and a whole-result consumer does not.</para>
 ///
-/// <para>Fail-closed, never fail-quiet: a MISSING offloaded artifact throws (the caller must not treat lost bytes as
-/// an empty diff), while an absent/unparseable result row resolves to empty — the integrator then names that
-/// contribution unintegrable rather than this layer guessing.</para>
+/// <para>Fail-closed, never fail-quiet: a MISSING offloaded artifact, a multi-repo alias mismatch, or a result/manifest
+/// carrier mismatch throws (the caller must not treat lost or misbound bytes as an empty diff). An absent/unparseable
+/// result row still resolves to empty — the integrator then names that contribution unintegrable rather than this
+/// layer guessing.</para>
 /// </summary>
 public interface IAgentPatchReader
 {
@@ -69,7 +71,7 @@ public sealed class AgentPatchReader : IAgentPatchReader, IScopedDependency
 /// <summary>The PURE half of <see cref="IAgentPatchReader"/> — the inline-carrier rule on its own, so the callers that already hold a result row (the run-sourced contribution mapping) apply the identical rule without a database.</summary>
 public static class AgentInlinePatch
 {
-    /// <summary>The inline diff the manifest doesn't carry: the result's top-level patch (single-repo run), else the matching per-repo entry's (multi-repo run). Empty when the result is absent/unparseable — the integrator then names the contribution unintegrable instead of this layer guessing.</summary>
+    /// <summary>The inline diff the manifest doesn't carry: exact alias first whenever per-repository results exist; top-level fallback only for a legacy/single-repo result. Structural alias/carrier mismatches fail closed; an absent/unparseable result remains empty so the integrator can name it unintegrable.</summary>
     public static string From(string? resultJson, string repositoryAlias)
     {
         if (string.IsNullOrWhiteSpace(resultJson)) return "";
@@ -79,13 +81,35 @@ public static class AgentInlinePatch
             var result = JsonSerializer.Deserialize<AgentRunResult>(resultJson, AgentJson.Options);
 
             if (result is null) return "";
-            if (result.Patch is { Length: > 0 } patch) return patch;
+            if (result.RepositoryResults is not { Count: > 0 } repositoryResults)
+                return InlineCarrier(result.Patch, result.PatchArtifactId, repositoryAlias);
 
-            return result.RepositoryResults?.FirstOrDefault(r => string.Equals(r.Alias, repositoryAlias, StringComparison.Ordinal))?.Patch ?? "";
+            RepositoryRunResult? match = null;
+            foreach (var repository in repositoryResults)
+            {
+                if (repository is null || !string.Equals(repository.Alias, repositoryAlias, StringComparison.Ordinal)) continue;
+                if (match is not null)
+                    throw new AgentInlinePatchResolutionException(repositoryAlias, AgentInlinePatchResolutionKind.RepositoryAliasAmbiguous);
+
+                match = repository;
+            }
+
+            if (match is null)
+                throw new AgentInlinePatchResolutionException(repositoryAlias, AgentInlinePatchResolutionKind.RepositoryAliasMissing);
+
+            return InlineCarrier(match.Patch, match.PatchArtifactId, repositoryAlias);
         }
         catch (JsonException)
         {
             return "";
         }
+    }
+
+    private static string InlineCarrier(string? patch, Guid? artifactId, string repositoryAlias)
+    {
+        if (artifactId is { } id)
+            throw new AgentInlinePatchResolutionException(repositoryAlias, AgentInlinePatchResolutionKind.UnexpectedArtifactReference, id);
+
+        return patch ?? "";
     }
 }
