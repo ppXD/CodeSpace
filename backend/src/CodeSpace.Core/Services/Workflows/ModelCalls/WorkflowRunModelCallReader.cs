@@ -102,20 +102,13 @@ public sealed class WorkflowRunModelCallReader : IWorkflowRunModelCallReader, IS
         var call = await FindAsync(runId, sequence, teamId, cancellationToken).ConfigureAwait(false);
         if (call is null) return null;
 
-        var projection = await (from attempt in _db.WorkflowRunModelCallAttempt.AsNoTracking()
-                                join modelCall in _db.WorkflowRunModelCall.AsNoTracking() on attempt.ModelCallId equals modelCall.Id
-                                where attempt.SourceTerminalRecordId == call.Completed.Id
-                                      && attempt.WorkflowRunId == runId && attempt.TeamId == teamId
-                                      && modelCall.WorkflowRunId == runId && modelCall.TeamId == teamId
-                                select new { modelCall.Id, modelCall.CaptureCompleteness })
-            .SingleOrDefaultAsync(cancellationToken)
-            .ConfigureAwait(false);
+        var projection = call.Projection;
 
         return new WorkflowRunModelCallMetadata
         {
             RunId = runId,
             Sequence = sequence,
-            WorkflowRunModelCallId = projection?.Id,
+            WorkflowRunModelCallId = projection?.ModelCallId,
             ProjectionState = projection is null ? WorkflowRunModelCallProjectionState.LegacyFallback : WorkflowRunModelCallProjectionState.Projected,
             CaptureCompleteness = projection?.CaptureCompleteness ?? WorkflowRunCaptureCompleteness.LegacyUnknown,
             CorrelationId = call.Completed.CorrelationId,
@@ -280,10 +273,26 @@ public sealed class WorkflowRunModelCallReader : IWorkflowRunModelCallReader, IS
             .ConfigureAwait(false);
         if (completed is null || completed.RecordType is not (WorkflowRunRecordTypes.InteractionCompleted or WorkflowRunRecordTypes.InteractionFailed)) return null;
 
-        var started = completed.CorrelationId is not { } correlationId ? null : await _db.WorkflowRunRecord.AsNoTracking()
-            .FirstOrDefaultAsync(r => r.RunId == runId && r.CorrelationId == correlationId && r.RecordType == WorkflowRunRecordTypes.InteractionStarted, cancellationToken)
+        var projection = await (from attempt in _db.WorkflowRunModelCallAttempt.AsNoTracking()
+                                join modelCall in _db.WorkflowRunModelCall.AsNoTracking() on attempt.ModelCallId equals modelCall.Id
+                                where attempt.SourceTerminalRecordId == completed.Id && attempt.WorkflowRunId == runId && attempt.TeamId == teamId
+                                      && modelCall.WorkflowRunId == runId && modelCall.TeamId == teamId
+                                      && modelCall.SourceKind == WorkflowRunModelCallProjector.SourceKind
+                                select new ProjectedSource(modelCall.Id, modelCall.CaptureCompleteness, attempt.SourceStartedRecordId))
+            .SingleOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false);
-        return new CallRecords(started, completed);
+
+        WorkflowRunRecord? started = null;
+        if (projection?.SourceStartedRecordId is { } startedRecordId)
+            started = await _db.WorkflowRunRecord.AsNoTracking().SingleOrDefaultAsync(r => r.Id == startedRecordId && r.RunId == runId
+                && r.NodeId == completed.NodeId && r.IterationKey == completed.IterationKey && r.CorrelationId == completed.CorrelationId
+                && r.RecordType == WorkflowRunRecordTypes.InteractionStarted, cancellationToken).ConfigureAwait(false);
+        else if (projection is null && completed.CorrelationId is { } correlationId)
+            started = await _db.WorkflowRunRecord.AsNoTracking().Where(r => r.RunId == runId && r.NodeId == completed.NodeId
+                    && r.IterationKey == completed.IterationKey && r.CorrelationId == correlationId && r.RecordType == WorkflowRunRecordTypes.InteractionStarted)
+                .OrderBy(r => r.Sequence).ThenBy(r => r.Id).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        return new CallRecords(started, completed, projection);
     }
 
     private static PartSource SourceFor(CallRecords call, WorkflowRunModelCallPart part) => part switch
@@ -293,6 +302,7 @@ public sealed class WorkflowRunModelCallReader : IWorkflowRunModelCallReader, IS
         WorkflowRunModelCallPart.UserPrompt => PromptSource(call.Started?.PayloadJson, "user"),
         WorkflowRunModelCallPart.Usage => TextSource(PrettyField(call.Completed.PayloadJson, "usage"), "application/json", WorkflowRunModelCallPartSource.Synthesized),
         WorkflowRunModelCallPart.Trace => TextSource(BuildTrace(call.Started, call.Completed), "application/json", WorkflowRunModelCallPartSource.Synthesized),
+        WorkflowRunModelCallPart.Error => FieldSource(call.Completed.PayloadJson, "error"),
         _ => PartSource.NotRecorded,
     };
 
@@ -511,7 +521,9 @@ public sealed class WorkflowRunModelCallReader : IWorkflowRunModelCallReader, IS
 
     private static bool IsContinuation(byte value) => (value & 0b1100_0000) == 0b1000_0000;
 
-    private sealed record CallRecords(WorkflowRunRecord? Started, WorkflowRunRecord Completed);
+    private sealed record CallRecords(WorkflowRunRecord? Started, WorkflowRunRecord Completed, ProjectedSource? Projection);
+
+    private sealed record ProjectedSource(Guid ModelCallId, WorkflowRunCaptureCompleteness CaptureCompleteness, Guid? SourceStartedRecordId);
 
     private sealed record BodyRow(Guid? ArtifactId, WorkflowRunCaptureCompleteness CaptureCompleteness);
 

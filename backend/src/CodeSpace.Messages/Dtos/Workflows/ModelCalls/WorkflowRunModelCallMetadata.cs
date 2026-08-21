@@ -39,6 +39,7 @@ public enum WorkflowRunModelCallPart
     UserPrompt = 2,
     Usage = 3,
     Trace = 4,
+    Error = 5,
 }
 
 public enum WorkflowRunModelCallPartSource

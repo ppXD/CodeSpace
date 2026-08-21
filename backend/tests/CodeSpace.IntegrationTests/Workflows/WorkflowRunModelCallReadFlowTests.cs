@@ -112,7 +112,41 @@ public sealed class WorkflowRunModelCallReadFlowTests
         (await reader.ReadPartAsync(new WorkflowRunModelCallPartReadRequest(seeded.RunId, seeded.Sequence + 1, seeded.TeamId, WorkflowRunModelCallPart.Result), CancellationToken.None)).ShouldBeNull();
     }
 
-    private async Task<(Guid RunId, Guid TeamId, long Sequence)> SeedCallAsync(bool includeMissingSystemPrompt, string result)
+    [Fact]
+    public async Task Failed_interaction_exposes_its_error_as_an_independent_bounded_part()
+    {
+        var seeded = await SeedFailedCallAsync("provider exploded inline");
+        using var scope = _fixture.BeginScope();
+        var reader = scope.Resolve<IWorkflowRunModelCallReader>();
+
+        var error = await reader.ReadPartAsync(new WorkflowRunModelCallPartReadRequest(seeded.RunId, seeded.Sequence, seeded.TeamId, WorkflowRunModelCallPart.Error)
+        {
+            LimitBytes = 4096,
+        }, CancellationToken.None);
+
+        error.ShouldNotBeNull();
+        error!.Availability.ShouldBe(WorkflowRunModelCallPartAvailability.Available);
+        error.Text.ShouldBe("provider exploded inline");
+        error.ReturnedBytes.ShouldBeLessThanOrEqualTo(4096);
+        error.NextOffsetBytes.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task Projected_part_read_never_substitutes_a_different_started_record_with_the_same_correlation()
+    {
+        var seeded = await SeedCallAsync(includeMissingSystemPrompt: false, result: "RESULT", earlierForeignPrompt: "WRONG SOURCE");
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<IWorkflowRunModelCallProjector>().SweepAsync(50, CancellationToken.None);
+
+        var part = await scope.Resolve<IWorkflowRunModelCallReader>().ReadPartAsync(
+            new WorkflowRunModelCallPartReadRequest(seeded.RunId, seeded.Sequence, seeded.TeamId, WorkflowRunModelCallPart.UserPrompt), CancellationToken.None);
+
+        part.ShouldNotBeNull();
+        part!.Availability.ShouldBe(WorkflowRunModelCallPartAvailability.Available);
+        part.Text.ShouldBe("USER", "the projected attempt's exact started row wins over an earlier row that reused the correlation in another source scope");
+    }
+
+    private async Task<(Guid RunId, Guid TeamId, long Sequence)> SeedCallAsync(bool includeMissingSystemPrompt, string result, string? earlierForeignPrompt = null)
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var workflowId = await CreateWorkflowAsync(teamId, userId);
@@ -150,9 +184,42 @@ public sealed class WorkflowRunModelCallReadFlowTests
             PayloadJson = JsonSerializer.Serialize(new { kind = "supervisor.decision", provider = "test", model = "test-model", usage = new { inputTokens = 12, outputTokens = 8, finishReason = "stop" }, output }),
         };
 
+        if (earlierForeignPrompt is not null)
+            db.WorkflowRunRecord.Add(new WorkflowRunRecord
+            {
+                Id = Guid.NewGuid(), RunId = runId, RecordType = WorkflowRunRecordTypes.InteractionStarted,
+                NodeId = "foreign-node", IterationKey = "foreign#turn1", CorrelationId = correlationId,
+                PayloadJson = JsonSerializer.Serialize(new { kind = "supervisor.decision", provider = "test", model = "test-model", prompt = new { user = earlierForeignPrompt } }),
+            });
         db.WorkflowRunRecord.AddRange(started, completed);
         await db.SaveChangesAsync();
         return (runId, teamId, completed.Sequence);
+    }
+
+    private async Task<(Guid RunId, Guid TeamId, long Sequence)> SeedFailedCallAsync(string error)
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        var correlationId = Guid.NewGuid();
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.WorkflowRunRecord.AddRange(
+            new WorkflowRunRecord
+            {
+                Id = Guid.NewGuid(), RunId = runId, RecordType = WorkflowRunRecordTypes.InteractionStarted,
+                NodeId = "sup", IterationKey = "sup#turn1", CorrelationId = correlationId,
+                PayloadJson = JsonSerializer.Serialize(new { kind = "supervisor.decision", provider = "test", model = "test-model", prompt = "USER" }),
+            },
+            new WorkflowRunRecord
+            {
+                Id = Guid.NewGuid(), RunId = runId, RecordType = WorkflowRunRecordTypes.InteractionFailed,
+                NodeId = "sup", IterationKey = "sup#turn1", CorrelationId = correlationId,
+                PayloadJson = JsonSerializer.Serialize(new { kind = "supervisor.decision", provider = "test", error, category = "Transport", failureKind = "provider" }),
+            });
+        await db.SaveChangesAsync();
+        var terminal = await db.WorkflowRunRecord.AsNoTracking().SingleAsync(value => value.RunId == runId && value.RecordType == WorkflowRunRecordTypes.InteractionFailed);
+        return (runId, teamId, terminal.Sequence);
     }
 
     private static async Task<Guid> SeedMissingArtifactAsync(CodeSpaceDbContext db, Guid teamId)
