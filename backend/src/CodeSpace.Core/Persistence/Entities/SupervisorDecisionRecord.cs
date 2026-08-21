@@ -39,6 +39,19 @@ public class SupervisorDecisionRecord : IEntity<Guid>, IAuditable
     /// <summary>Per-run BIGSERIAL cursor — the replay tape's natural ordering. DB-assigned on insert (value-generated).</summary>
     public long Sequence { get; set; }
 
+    /// <summary>
+    /// Immutable observation story order. New rows receive this only after the database acquires the run-scoped
+    /// transaction admission lock; legacy rows retain their deterministic <see cref="Sequence"/> allocation order.
+    /// Observation-only: execution and rehydrate continue to use <see cref="Sequence"/>.
+    /// </summary>
+    public long StoryOrder { get; set; }
+
+    /// <summary>
+    /// Database-owned observation watermark. It advances on insert and every accepted update under the same run-scoped
+    /// transaction lock, so a reader can distinguish later status/outcome enrichments without moving <see cref="StoryOrder"/>.
+    /// </summary>
+    public long ObservationRevision { get; set; }
+
     /// <summary>The kind of decision, e.g. "plan" / "spawn" / "retry" / "ask_human" / "merge" / "stop". OPEN string (stored as text) so a new decision kind adds zero schema churn.</summary>
     public string DecisionKind { get; set; } = default!;
 

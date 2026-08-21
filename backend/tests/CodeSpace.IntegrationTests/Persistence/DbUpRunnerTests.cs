@@ -112,6 +112,8 @@ public class DbUpRunnerTests
     [InlineData("supervisor_decision", "payload_jsonb", "0053_supervisor_decision.sql")]           // the emitted decision — a frozen-at-insert JOURNAL field (the immutability trigger protects it)
     [InlineData("supervisor_decision", "outcome_jsonb", "0053_supervisor_decision.sql")]           // the execution result — the deliberately-mutable CAS path
     [InlineData("supervisor_decision", "sequence", "0053_supervisor_decision.sql")]                // per-run BIGSERIAL replay cursor
+    [InlineData("supervisor_decision", "story_order", "0161_supervisor_decision_observation_cursor.sql")] // immutable, commit-admitted observation story order
+    [InlineData("supervisor_decision", "observation_revision", "0161_supervisor_decision_observation_cursor.sql")] // advances on every observation-relevant update
     [InlineData("workflow_run", "definition_snapshot_jsonb", "0056_workflow_run_definition_snapshot.sql")] // dynamic-WF substrate: the inline frozen definition a snapshot run walks (NULL for authored runs)
     [InlineData("workflow_run", "definition_snapshot_hash", "0056_workflow_run_definition_snapshot.sql")]  // SHA-256 of the snapshot — same tamper-check as workflow_version.definition_hash
     public async Task Column_exists_after_migration(string tableName, string columnName, string addedBy)
@@ -144,6 +146,8 @@ public class DbUpRunnerTests
     [InlineData("ux_supervisor_decision_run_key", "0053_supervisor_decision.sql")]                       // PR-E E1: the exactly-once invariant — UNIQUE (supervisor_run_id, idempotency_key)
     [InlineData("idx_supervisor_decision_run_sequence", "0053_supervisor_decision.sql")]                 // the replay tape — (supervisor_run_id, sequence)
     [InlineData("idx_supervisor_decision_pending_created", "0053_supervisor_decision.sql")]              // the reaper's partial index — created_date WHERE status='Pending'
+    [InlineData("ux_supervisor_decision_run_story_order", "0161_supervisor_decision_observation_cursor.sql")] // immutable observation story keyset
+    [InlineData("ux_supervisor_decision_run_observation_revision", "0161_supervisor_decision_observation_cursor.sql")] // observation change keyset
     [InlineData("idx_are_run_kind_sequence", "0158_agent_run_event_kind_sequence_index.sql")]              // exact-kind Agent Run event page: (agent_run_id, kind, sequence)
     [InlineData("idx_tool_call_ledger_run_created_id", "0159_tool_call_ledger_run_created_index.sql")]       // bounded governed audit: (agent_run_id, created_date, id)
     public async Task Index_exists_after_migration(string indexName, string addedBy)
