@@ -145,6 +145,7 @@ public class DbUpRunnerTests
     [InlineData("idx_supervisor_decision_run_sequence", "0053_supervisor_decision.sql")]                 // the replay tape — (supervisor_run_id, sequence)
     [InlineData("idx_supervisor_decision_pending_created", "0053_supervisor_decision.sql")]              // the reaper's partial index — created_date WHERE status='Pending'
     [InlineData("idx_are_run_kind_sequence", "0158_agent_run_event_kind_sequence_index.sql")]              // exact-kind Agent Run event page: (agent_run_id, kind, sequence)
+    [InlineData("idx_tool_call_ledger_run_created_id", "0159_tool_call_ledger_run_created_index.sql")]       // bounded governed audit: (agent_run_id, created_date, id)
     public async Task Index_exists_after_migration(string indexName, string addedBy)
     {
         var exists = await IndexExistsAsync(indexName).ConfigureAwait(false);

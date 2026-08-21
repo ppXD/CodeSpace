@@ -32,12 +32,12 @@ vi.mock("@/hooks/use-workflows", () => ({
 
 // RunNodeRow reads the agent run's live status for its badge (and AgentRunTimeline streams it); mock the
 // hooks so the row renders without a QueryClient. Default: no agent run → badge falls back to node status.
-// AgentToolCalls (embedded peer of the timeline) also reads useToolCalls — default to an empty audit.
+// AgentToolCalls (embedded peer of the timeline) also reads the governed window — default to an exact empty audit.
 vi.mock("@/hooks/use-agents", () => ({
   useAgentRun: (id?: string) => useAgentRunMock(id),
   useAgentRunEventPreview: () => ({ data: [] }),
   useAgentRunEventWindow: () => ({ data: [], isLoading: false, isLoadingOlder: false, error: null, hasOlder: false, olderEventsOmitted: false, newerEventsOmitted: false, atLatest: true, loadOlder: vi.fn(), returnToLatest: vi.fn() }),
-  useToolCalls: () => ({ data: [], isLoading: false, isSuccess: true }),
+  useToolCallWindow: () => ({ data: [], hasLoaded: true, isLoading: false, isLoadingOlder: false, error: null, hasOlder: false, olderItemsOmitted: false, newerItemsOmitted: false, atLatest: true, loadOlder: vi.fn(), returnToLatest: vi.fn() }),
 }));
 
 // AgentToolCalls resolves an approver id → name via the member-identity map; no approver in these tests.

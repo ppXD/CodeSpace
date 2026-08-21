@@ -18,7 +18,7 @@ const agentHook = vi.hoisted(() => ({ status: undefined as string | undefined })
 vi.mock("@/hooks/use-agents", () => ({
   useAgentRun: () => ({ data: agentHook.status ? { status: agentHook.status } : undefined }),
   useAgentRunEventPreview: () => ({ data: [] }),
-  useToolCalls: () => ({ data: [] }),
+  useToolCallWindow: () => ({ data: [] }),
 }));
 afterEach(() => { agentHook.status = undefined; });
 

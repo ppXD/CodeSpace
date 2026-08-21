@@ -1,7 +1,7 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { agentsApi, InvalidAgentRunEventPageError, isAgentRunActive, type AgentDefinitionInput, type AgentRunEventDto, type AgentRunEventPageMode, type AgentRunEventPageRequest, type ScorecardFilters } from "@/api/agents";
+import { agentsApi, InvalidAgentRunEventPageError, InvalidToolCallPageError, isAgentRunActive, type AgentDefinitionInput, type AgentRunEventDto, type AgentRunEventPageMode, type AgentRunEventPageRequest, type ScorecardFilters, type ToolCallView } from "@/api/agents";
 import { ApiError } from "@/api/request";
 
 /**
@@ -386,24 +386,180 @@ export function useAgentRunEventWindow(agentRunId: string | undefined, active: b
 }
 
 /**
- * One agent run's governed tool-call audit — the durable ledger of every side-effecting MCP tool call it
- * made (what tool, the outcome, when, who approved). Unlike the event log this is a small whole-list audit
- * with no incremental cursor, so each tick re-pulls the full list; it polls every ~2s while the run is in
- * flight (a new call lands mid-run) and stops once terminal. Read-only + team-scoped at the source.
+ * One agent run's governed tool-call audit — a local hard-bounded keyset window over safe metadata only.
+ * Tail refresh replaces the live window; Older is explicit and pauses polling, so neither network bytes nor
+ * DOM state grows with a long-lived run. Read-only and exact team/run-scoped at the source.
  */
-export function useToolCalls(agentRunId: string | undefined, active: boolean) {
-  return useQuery({
-    queryKey: ["agent-run-tool-calls", agentRunId],
-    queryFn: () => agentsApi.listToolCalls(agentRunId!),
-    enabled: !!agentRunId,
-    refetchInterval: active ? 2000 : false,
-  });
+export const TOOL_CALL_PAGE_LIMIT = 128;
+export const TOOL_CALL_WINDOW_LIMIT = 512;
+export const TOOL_CALL_WINDOW_POLL_MS = 2000;
+export const TOOL_CALL_WINDOW_MAX_POLL_MS = 8000;
+
+export interface ToolCallWindow {
+  data: ToolCallView[];
+  hasLoaded: boolean;
+  isLoading: boolean;
+  isLoadingOlder: boolean;
+  error: Error | null;
+  hasOlder: boolean;
+  olderItemsOmitted: boolean;
+  newerItemsOmitted: boolean;
+  atLatest: boolean;
+  loadOlder: () => Promise<void>;
+  returnToLatest: () => void;
+}
+
+interface ToolCallWindowState extends Omit<ToolCallWindow, "loadOlder" | "returnToLatest"> {
+  agentRunId: string | undefined;
+  nextOlderCursor: string | null;
+}
+
+function emptyToolCallWindow(agentRunId: string | undefined): ToolCallWindowState {
+  return { agentRunId, data: [], hasLoaded: false, isLoading: agentRunId !== undefined, isLoadingOlder: false, error: null, hasOlder: false, olderItemsOmitted: false, newerItemsOmitted: false, atLatest: true, nextOlderCursor: null };
+}
+
+function isTransientToolCallPageError(error: unknown): boolean {
+  if (error instanceof InvalidToolCallPageError || isAbort(error)) return false;
+  if (error instanceof ApiError) return error.status === 408 || error.status === 429 || error.status >= 500;
+  return true;
+}
+
+/** A React-local hard-bounded window over governed ToolCall metadata. It never enters React Query's global cache. */
+export function useToolCallWindow(agentRunId: string | undefined, active: boolean): ToolCallWindow {
+  const [state, setState] = useState<ToolCallWindowState>(() => emptyToolCallWindow(agentRunId));
+  const [tailRevision, setTailRevision] = useState(0);
+  const [pollRevision, setPollRevision] = useState(0);
+  const generationRef = useRef(0);
+  const tailControllerRef = useRef<AbortController | null>(null);
+  const olderControllerRef = useRef<AbortController | null>(null);
+  const pollControllerRef = useRef<AbortController | null>(null);
+  const pollingBlockedRef = useRef(false);
+  const transientPollFailuresRef = useRef(0);
+
+  useEffect(() => () => {
+    ++generationRef.current;
+    tailControllerRef.current?.abort();
+    olderControllerRef.current?.abort();
+    pollControllerRef.current?.abort();
+  }, []);
+
+  useEffect(() => {
+    const generation = ++generationRef.current;
+    tailControllerRef.current?.abort();
+    olderControllerRef.current?.abort();
+    pollControllerRef.current?.abort();
+    pollingBlockedRef.current = false;
+    transientPollFailuresRef.current = 0;
+    setState(emptyToolCallWindow(agentRunId));
+    if (agentRunId === undefined) return;
+
+    let retryTimer: number | undefined;
+    let failures = 0;
+    const loadTail = () => {
+      const controller = new AbortController();
+      tailControllerRef.current?.abort();
+      tailControllerRef.current = controller;
+      void agentsApi.pageToolCalls(agentRunId, { mode: "Tail", limit: TOOL_CALL_PAGE_LIMIT }, controller.signal).then((page) => {
+        if (generationRef.current !== generation || controller.signal.aborted) return;
+        setState({ agentRunId, data: page.items, hasLoaded: true, isLoading: false, isLoadingOlder: false, error: null, hasOlder: page.hasOlder, olderItemsOmitted: page.hasOlder, newerItemsOmitted: false, atLatest: true, nextOlderCursor: page.nextOlderCursor });
+      }).catch((error: unknown) => {
+        if (generationRef.current !== generation || controller.signal.aborted || isAbort(error)) return;
+        setState((previous) => previous.agentRunId === agentRunId ? { ...previous, error: asEventPageError(error, "Could not load the governed ToolCall audit.") } : previous);
+        if (isTransientToolCallPageError(error)) {
+          failures = Math.min(failures + 1, 2);
+          retryTimer = window.setTimeout(loadTail, Math.min(TOOL_CALL_WINDOW_POLL_MS * 2 ** failures, TOOL_CALL_WINDOW_MAX_POLL_MS));
+        } else {
+          setState((previous) => previous.agentRunId === agentRunId ? { ...previous, isLoading: false } : previous);
+        }
+      });
+    };
+    loadTail();
+
+    return () => {
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+      tailControllerRef.current?.abort();
+      if (tailControllerRef.current?.signal.aborted) tailControllerRef.current = null;
+    };
+  }, [agentRunId, tailRevision]);
+
+  const visible = state.agentRunId === agentRunId ? state : emptyToolCallWindow(agentRunId);
+
+  useEffect(() => {
+    if (agentRunId === undefined || !active || !visible.hasLoaded || visible.isLoading || visible.isLoadingOlder || !visible.atLatest || pollingBlockedRef.current) return;
+    const generation = generationRef.current;
+    const delay = Math.min(TOOL_CALL_WINDOW_POLL_MS * 2 ** transientPollFailuresRef.current, TOOL_CALL_WINDOW_MAX_POLL_MS);
+    const timer = window.setTimeout(() => {
+      const controller = new AbortController();
+      pollControllerRef.current?.abort();
+      pollControllerRef.current = controller;
+      void agentsApi.pageToolCalls(agentRunId, { mode: "Tail", limit: TOOL_CALL_PAGE_LIMIT }, controller.signal).then((page) => {
+        if (generationRef.current !== generation || controller.signal.aborted) return;
+        transientPollFailuresRef.current = 0;
+        setState((previous) => previous.agentRunId === agentRunId ? { ...previous, data: page.items, error: null, hasOlder: page.hasOlder, olderItemsOmitted: page.hasOlder, newerItemsOmitted: false, nextOlderCursor: page.nextOlderCursor } : previous);
+        setPollRevision((revision) => revision + 1);
+      }).catch((error: unknown) => {
+        if (generationRef.current !== generation || controller.signal.aborted || isAbort(error)) return;
+        if (isTransientToolCallPageError(error)) {
+          transientPollFailuresRef.current = Math.min(transientPollFailuresRef.current + 1, 2);
+          setPollRevision((revision) => revision + 1);
+        } else pollingBlockedRef.current = true;
+        setState((previous) => previous.agentRunId === agentRunId ? { ...previous, error: asEventPageError(error, "Could not refresh the governed ToolCall audit.") } : previous);
+      }).finally(() => {
+        if (pollControllerRef.current === controller) pollControllerRef.current = null;
+      });
+    }, delay);
+
+    return () => {
+      window.clearTimeout(timer);
+      pollControllerRef.current?.abort();
+      pollControllerRef.current = null;
+    };
+  }, [active, agentRunId, pollRevision, visible.atLatest, visible.hasLoaded, visible.isLoading, visible.isLoadingOlder]);
+
+  const loadOlder = useCallback(async () => {
+    if (agentRunId === undefined || visible.isLoading || visible.isLoadingOlder || !visible.hasOlder || visible.nextOlderCursor === null || olderControllerRef.current !== null) return;
+    pollControllerRef.current?.abort();
+    pollControllerRef.current = null;
+    const generation = generationRef.current;
+    const controller = new AbortController();
+    olderControllerRef.current = controller;
+    setState((previous) => previous.agentRunId === agentRunId ? { ...previous, isLoadingOlder: true, error: null, atLatest: false } : previous);
+
+    try {
+      const page = await agentsApi.pageToolCalls(agentRunId, { mode: "Older", cursor: visible.nextOlderCursor, limit: TOOL_CALL_PAGE_LIMIT }, controller.signal);
+      if (generationRef.current !== generation || controller.signal.aborted) return;
+      setState((previous) => {
+        if (previous.agentRunId !== agentRunId) return previous;
+        const combined = [...page.items, ...previous.data];
+        const overflow = Math.max(0, combined.length - TOOL_CALL_WINDOW_LIMIT);
+        return { ...previous, data: overflow === 0 ? combined : combined.slice(0, TOOL_CALL_WINDOW_LIMIT), isLoadingOlder: false, error: null, hasOlder: page.hasOlder, olderItemsOmitted: page.hasOlder, newerItemsOmitted: previous.newerItemsOmitted || overflow > 0, atLatest: false, nextOlderCursor: page.nextOlderCursor };
+      });
+    } catch (error) {
+      if (generationRef.current !== generation || controller.signal.aborted || isAbort(error)) return;
+      setState((previous) => previous.agentRunId === agentRunId ? { ...previous, isLoadingOlder: false, error: asEventPageError(error, "Could not load older governed ToolCalls.") } : previous);
+    } finally {
+      if (olderControllerRef.current === controller) olderControllerRef.current = null;
+    }
+  }, [agentRunId, visible.hasOlder, visible.isLoading, visible.isLoadingOlder, visible.nextOlderCursor]);
+
+  const returnToLatest = useCallback(() => {
+    ++generationRef.current;
+    tailControllerRef.current?.abort();
+    olderControllerRef.current?.abort();
+    pollControllerRef.current?.abort();
+    pollingBlockedRef.current = false;
+    transientPollFailuresRef.current = 0;
+    setState(emptyToolCallWindow(agentRunId));
+    setTailRevision((revision) => revision + 1);
+  }, [agentRunId]);
+
+  return { ...visible, loadOlder, returnToLatest };
 }
 
 /**
  * The team's agent-run scorecard — per-harness + overall success rate and latency over its terminal runs.
  * Team-scoped at the source (the X-Team-Id header), so it's keyed only by the filters; switching team
- * invalidates the whole cache (see useToolCalls / useAgentDefinitions). A short staleTime keeps an operator's
+ * invalidates the whole cache (see useAgentDefinitions). A short staleTime keeps an operator's
  * repeated visits cheap without going stale across a working session.
  */
 export function useAgentScorecard(filters: ScorecardFilters = {}) {
