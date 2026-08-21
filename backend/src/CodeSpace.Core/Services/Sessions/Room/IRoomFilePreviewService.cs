@@ -10,5 +10,9 @@ namespace CodeSpace.Core.Services.Sessions.Room;
 /// </summary>
 public interface IRoomFilePreviewService
 {
+    /// <summary>Legacy single-repo/path-only read. Preserved byte-for-byte when the path identifies one repository; ambiguous multi-repo paths return a typed unavailable preview.</summary>
     Task<RoomFilePreview?> PreviewAsync(Guid runId, string path, Guid teamId, Guid? agentRunId, CancellationToken cancellationToken);
+
+    /// <summary>Identity-aware read used by multi-repo room rows.</summary>
+    Task<RoomFilePreview?> PreviewAsync(Guid runId, RoomFileIdentity identity, Guid teamId, CancellationToken cancellationToken);
 }

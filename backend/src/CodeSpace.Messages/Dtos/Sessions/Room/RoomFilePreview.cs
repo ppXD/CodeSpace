@@ -1,6 +1,19 @@
 namespace CodeSpace.Messages.Dtos.Sessions.Room;
 
 /// <summary>
+/// Stable identity of one changed file. A repo-relative path is not globally unique in a multi-repository workspace;
+/// repository id/alias bind it to the correct repo and agent-run id binds it to the producing attempt. The three
+/// optional coordinates are null on legacy single-repo/path-only rows, which remain readable when unambiguous.
+/// </summary>
+public sealed record RoomFileIdentity
+{
+    public required string Path { get; init; }
+    public Guid? AgentRunId { get; init; }
+    public Guid? RepositoryId { get; init; }
+    public string? RepositoryAlias { get; init; }
+}
+
+/// <summary>
 /// A GENERIC preview of ONE file a turn produced — the backend resolves the file from the producing agent's captured
 /// diff (durable, offline, any repo) and hands the frontend a rendered-by-<see cref="Kind"/> view. The frontend owns
 /// no resolution logic: it renders text, a diff, a binary notice, or an unavailable notice by <see cref="Kind"/>, so
@@ -11,6 +24,9 @@ public sealed record RoomFilePreview
 {
     /// <summary>The repo-relative path previewed (echoes the request).</summary>
     public required string Path { get; init; }
+
+    /// <summary>The exact file identity resolved, or the requested partial identity when resolution was unavailable.</summary>
+    public RoomFileIdentity? Identity { get; init; }
 
     /// <summary>How the frontend renders this: <c>text</c> (full content) · <c>diff</c> (unified-diff section) · <c>binary</c> (notice) · <c>unavailable</c> (notice + optional source link).</summary>
     public required string Kind { get; init; }
@@ -41,6 +57,7 @@ public sealed record RoomFilePreview
 public enum RoomFileUnavailableReason
 {
     NotInChangeSet,
+    AmbiguousRepository,
     MetadataMissing,
     PhysicalObjectMissing,
     IntegrityFailure,

@@ -22,6 +22,7 @@ namespace CodeSpace.Core.Services.Sessions.Room;
 public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDependency
 {
     private const int MaxAgentsScanned = 200;
+    private const int MaxManifestMatches = 4000;
     private const int MaxPreviewBytes = 512 * 1024;
 
     private readonly CodeSpaceDbContext _db;
@@ -33,33 +34,39 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
         _offloader = offloader;
     }
 
-    public async Task<RoomFilePreview?> PreviewAsync(Guid runId, string path, Guid teamId, Guid? agentRunId, CancellationToken cancellationToken)
+    public Task<RoomFilePreview?> PreviewAsync(Guid runId, string path, Guid teamId, Guid? agentRunId, CancellationToken cancellationToken) =>
+        PreviewAsync(runId, new RoomFileIdentity { Path = path, AgentRunId = agentRunId }, teamId, cancellationToken);
+
+    public async Task<RoomFilePreview?> PreviewAsync(Guid runId, RoomFileIdentity identity, Guid teamId, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(path)) return null;
+        if (string.IsNullOrWhiteSpace(identity.Path)) return null;
 
         var owned = await _db.WorkflowRun.AsNoTracking().AnyAsync(r => r.Id == runId && r.TeamId == teamId, cancellationToken).ConfigureAwait(false);
         if (!owned) return null;   // foreign / missing run — indistinguishable not-found
 
-        var target = path.Trim();
+        var requested = identity with { Path = identity.Path.Trim(), RepositoryAlias = string.IsNullOrEmpty(identity.RepositoryAlias) ? null : identity.RepositoryAlias };
         var sourceUrl = await DeliveryUrlAsync(runId, cancellationToken).ConfigureAwait(false);
 
-        var patchRef = await LocateFilePatchAsync(runId, teamId, target, agentRunId, cancellationToken).ConfigureAwait(false);
-        if (patchRef is null) return Unavailable(target, sourceUrl, RoomFileUnavailableReason.NotInChangeSet, "This file isn't part of the turn's change set.");
+        var location = await LocateFilePatchAsync(runId, teamId, requested, cancellationToken).ConfigureAwait(false);
+        if (location is FileLocation.Ambiguous)
+            return Unavailable(requested, sourceUrl, RoomFileUnavailableReason.AmbiguousRepository, "More than one repository changed this path. Open the file from a repository-attributed row.");
+        if (location is not FileLocation.Found found)
+            return Unavailable(requested, sourceUrl, RoomFileUnavailableReason.NotInChangeSet, "This file isn't part of the selected repository's change set.");
 
-        var patch = await ResolvePatchAsync(teamId, patchRef.Value, cancellationToken).ConfigureAwait(false);
+        var patch = await ResolvePatchAsync(teamId, found.Candidate.Patch, cancellationToken).ConfigureAwait(false);
         if (patch is PatchResolution.Unavailable unavailable)
-            return Unavailable(target, sourceUrl, Reason(unavailable.Kind), StorageNote(unavailable.Kind, sourceUrl != null));
+            return Unavailable(found.Candidate.Identity, sourceUrl, Reason(unavailable.Kind), StorageNote(unavailable.Kind, sourceUrl != null));
 
-        var view = UnifiedPatchReader.Read(((PatchResolution.Found)patch).Text, target);
+        var view = UnifiedPatchReader.Read(((PatchResolution.Found)patch).Text, requested.Path);
         if (view is null)
-            return Unavailable(target, sourceUrl, RoomFileUnavailableReason.ReconstructionUnavailable, WithSourceFallback("This file's saved change cannot be reconstructed for a safe inline preview.", sourceUrl != null));
+            return Unavailable(found.Candidate.Identity, sourceUrl, RoomFileUnavailableReason.ReconstructionUnavailable, WithSourceFallback("This file's saved change cannot be reconstructed for a safe inline preview.", sourceUrl != null));
 
-        return Project(view, sourceUrl);
+        return Project(view, found.Candidate.Identity, sourceUrl);
     }
 
     /// <summary>
-    /// Return the patch reference of the repo that changed <paramref name="path"/>. <paramref name="agentRunId"/> is a
-    /// PREFERRED scope (per-agent attribution — open an agent, preview ITS file, any terminal status): try that agent's
+    /// Return the patch reference of the repo that changed the requested path. <see cref="RoomFileIdentity.AgentRunId"/> is a
+    /// preferred scope for a legacy path-only read and an exact scope when repository identity is present: try that agent's
     /// own version first. But a RESULT-card attribution is a last-writer-wins guess from a separately-capped per-agent
     /// map, so it can point at an agent whose durable change set doesn't carry the path — when the scoped lookup MISSES,
     /// fall through (never give up on a legitimately-produced file). The fallback scans the turn's ACCEPTED agent runs
@@ -67,26 +74,71 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
     /// (a retry supersedes the original); newest-first also keeps the <see cref="MaxAgentsScanned"/> window on the
     /// LATEST agents, so a late agent's file isn't sliced off.
     /// </summary>
-    private async Task<PatchRef?> LocateFilePatchAsync(Guid runId, Guid teamId, string path, Guid? agentRunId, CancellationToken cancellationToken)
+    private async Task<FileLocation> LocateFilePatchAsync(Guid runId, Guid teamId, RoomFileIdentity requested, CancellationToken cancellationToken)
     {
         var query = _db.AgentRun.AsNoTracking()
             .Where(r => r.WorkflowRunId == runId && r.TeamId == teamId && r.ResultJson != null);
 
-        if (agentRunId is { } id
-            && MatchFile(Deserialize(await query.Where(r => r.Id == id).Select(r => r.ResultJson!).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false) ?? ""), path) is { } scoped)
-            return scoped;
+        if (requested.AgentRunId is { } id)
+        {
+            var scoped = await query.Where(r => r.Id == id)
+                .Select(r => new AgentResultRow(r.Id, r.ResultJson!))
+                .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+            if (scoped is not null)
+            {
+                var manifests = await ReadManifestMatchesAsync(new[] { id }, requested, cancellationToken).ConfigureAwait(false);
+                if (manifests.Truncated) return new FileLocation.Ambiguous();
+
+                var selected = Select(Candidates(scoped, manifests.Rows, requested.Path), requested);
+                if (selected is not FileLocation.Missing) return selected;
+            }
+
+            // A repository-attributed click is an exact identity, not a hint. Never fall through to a sibling agent.
+            if (HasRepositoryScope(requested)) return new FileLocation.Missing();
+        }
 
         var results = await query
             .Where(r => r.Status == AgentRunStatus.Succeeded || r.Status == AgentRunStatus.NeedsReview)
             .OrderByDescending(r => r.CreatedDate).ThenByDescending(r => r.Id)
-            .Select(r => r.ResultJson!)
+            .Select(r => new AgentResultRow(r.Id, r.ResultJson!))
             .Take(MaxAgentsScanned)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        foreach (var json in results)
-            if (MatchFile(Deserialize(json), path) is { } patchRef) return patchRef;
+        var manifestMatches = await ReadManifestMatchesAsync(results.Select(r => r.AgentRunId).ToList(), requested, cancellationToken).ConfigureAwait(false);
+        if (manifestMatches.Truncated) return new FileLocation.Ambiguous();
 
-        return null;
+        var manifestsByAgent = manifestMatches.Rows.ToLookup(m => m.AgentRunId);
+        var candidates = results.SelectMany(row => Candidates(row, manifestsByAgent[row.AgentRunId].ToList(), requested.Path)).ToList();
+
+        // Preserve the legacy attribution-hint contract: when a path-only scoped agent did not actually carry the
+        // file, search the accepted turn without that stale agent hint. Repository-attributed requests returned above.
+        var fallback = HasRepositoryScope(requested) ? requested : requested with { AgentRunId = null };
+        return Select(candidates, fallback);
+    }
+
+    /// <summary>One bounded manifest query for every candidate agent; the selected patch alone is hydrated later.</summary>
+    private async Task<ManifestMatches> ReadManifestMatchesAsync(IReadOnlyCollection<Guid> agentRunIds, RoomFileIdentity requested, CancellationToken cancellationToken)
+    {
+        if (agentRunIds.Count == 0) return new ManifestMatches(Array.Empty<ManifestMatch>(), false);
+
+        var pathNeedle = JsonSerializer.Serialize(new[] { requested.Path }, AgentJson.Options);
+        var query = _db.PublishManifest.AsNoTracking()
+            .Where(m => m.Kind == PublishManifestKind.Agent && m.AgentRunId != null && agentRunIds.Contains(m.AgentRunId.Value)
+                && m.ChangedFilesJson != null && EF.Functions.JsonContains(m.ChangedFilesJson, pathNeedle));
+
+        if (requested.RepositoryId is { } repositoryId) query = query.Where(m => m.RepositoryId == repositoryId);
+        if (requested.RepositoryAlias is { Length: > 0 } alias) query = query.Where(m => m.RepositoryAlias == alias);
+
+        var rows = await query
+            .OrderByDescending(m => m.LastModifiedDate).ThenBy(m => m.Id)
+            .Select(m => new ManifestMatch(m.AgentRunId!.Value, m.RepositoryId, m.RepositoryAlias, m.PatchArtifactId))
+            .Take(MaxManifestMatches + 1)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return rows.Count > MaxManifestMatches
+            ? new ManifestMatches(rows.Take(MaxManifestMatches).ToList(), true)
+            : new ManifestMatches(rows, false);
     }
 
     private static AgentRunResult? Deserialize(string json)
@@ -115,22 +167,85 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
         }
     }
 
-    /// <summary>The patch reference (inline text or offloaded id) of the result's repo that changed <paramref name="path"/> — per-repo first, then the single-repo top level.</summary>
-    private static PatchRef? MatchFile(AgentRunResult? result, string path)
+    /// <summary>Build identity-bearing candidates per agent. Per-repo results always win; top-level is legacy/single-repo only.</summary>
+    private static IReadOnlyList<FileCandidate> Candidates(AgentResultRow row, IReadOnlyList<ManifestMatch> manifests, string path)
     {
-        if (result is null) return null;
+        var result = Deserialize(row.ResultJson);
+        var candidates = new List<FileCandidate>();
 
-        foreach (var repo in result.RepositoryResults)
-            if (repo.ChangedFiles.Contains(path, StringComparer.Ordinal))
-                return new PatchRef(repo.Patch, repo.PatchArtifactId);
+        if (result?.RepositoryResults is { Count: > 0 } repositories)
+        {
+            var consumed = new HashSet<ManifestMatch>();
 
-        return result.ChangedFiles.Contains(path, StringComparer.Ordinal) ? new PatchRef(result.Patch, result.PatchArtifactId) : null;
+            foreach (var repository in repositories.Where(repository => repository.ChangedFiles.Contains(path, StringComparer.Ordinal)))
+            {
+                var matches = manifests.Where(manifest => string.Equals(manifest.RepositoryAlias, repository.Alias, StringComparison.Ordinal)
+                    && (manifest.RepositoryId is null || repository.RepositoryId is null || manifest.RepositoryId == repository.RepositoryId)).ToList();
+                var manifest = matches.Count == 1 ? matches[0] : null;
+                if (manifest is not null) consumed.Add(manifest);
+
+                candidates.Add(new FileCandidate(
+                    new RoomFileIdentity { Path = path, AgentRunId = row.AgentRunId, RepositoryId = repository.RepositoryId ?? manifest?.RepositoryId, RepositoryAlias = repository.Alias },
+                    PatchFrom(repository.Patch, repository.PatchArtifactId, manifest)));
+            }
+
+            foreach (var manifest in manifests.Where(manifest => !consumed.Contains(manifest)))
+                candidates.Add(ManifestCandidate(row.AgentRunId, path, manifest));
+
+            return candidates;
+        }
+
+        if (result?.ChangedFiles.Contains(path, StringComparer.Ordinal) == true)
+        {
+            if (manifests.Count == 0)
+                candidates.Add(new FileCandidate(new RoomFileIdentity { Path = path, AgentRunId = row.AgentRunId }, new PatchRef(result.Patch, result.PatchArtifactId)));
+            else
+                candidates.AddRange(manifests.Select(manifest => new FileCandidate(
+                    Identity(row.AgentRunId, path, manifest), PatchFrom(result.Patch, result.PatchArtifactId, manifest))));
+        }
+        else
+        {
+            candidates.AddRange(manifests.Select(manifest => ManifestCandidate(row.AgentRunId, path, manifest)));
+        }
+
+        return candidates;
     }
 
-    private RoomFilePreview Project(PatchFileView view, string? sourceUrl)
+    private static FileCandidate ManifestCandidate(Guid agentRunId, string path, ManifestMatch manifest) =>
+        new(Identity(agentRunId, path, manifest), new PatchRef("", manifest.PatchArtifactId));
+
+    private static RoomFileIdentity Identity(Guid agentRunId, string path, ManifestMatch manifest) =>
+        new() { Path = path, AgentRunId = agentRunId, RepositoryId = manifest.RepositoryId, RepositoryAlias = manifest.RepositoryAlias };
+
+    private static PatchRef PatchFrom(string? inline, Guid? artifactId, ManifestMatch? manifest) =>
+        manifest?.PatchArtifactId is { } manifestArtifactId ? new PatchRef("", manifestArtifactId) : new PatchRef(inline, artifactId);
+
+    private static FileLocation Select(IReadOnlyList<FileCandidate> candidates, RoomFileIdentity requested)
+    {
+        var matches = candidates.Where(candidate =>
+            string.Equals(candidate.Identity.Path, requested.Path, StringComparison.Ordinal)
+            && (requested.AgentRunId is null || candidate.Identity.AgentRunId == requested.AgentRunId)
+            && (requested.RepositoryId is null || candidate.Identity.RepositoryId == requested.RepositoryId)
+            && (requested.RepositoryAlias is null || string.Equals(candidate.Identity.RepositoryAlias, requested.RepositoryAlias, StringComparison.Ordinal)))
+            .ToList();
+
+        if (matches.Count == 0) return new FileLocation.Missing();
+
+        // One agent cannot truthfully own two carriers for the same repository/path identity. Across DIFFERENT
+        // agents, however, the rows are versions and their newest-first query order deliberately picks the latest.
+        if (matches.GroupBy(candidate => new CandidateIdentity(candidate.Identity.AgentRunId, candidate.Identity.RepositoryId, candidate.Identity.RepositoryAlias)).Any(group => group.Count() > 1))
+            return new FileLocation.Ambiguous();
+
+        var locations = matches.Select(candidate => new RepositoryLocation(candidate.Identity.RepositoryId, candidate.Identity.RepositoryAlias)).Distinct().Take(2).Count();
+        return locations > 1 ? new FileLocation.Ambiguous() : new FileLocation.Found(matches[0]);
+    }
+
+    private static bool HasRepositoryScope(RoomFileIdentity identity) => identity.RepositoryId is not null || identity.RepositoryAlias is { Length: > 0 };
+
+    private RoomFilePreview Project(PatchFileView view, RoomFileIdentity identity, string? sourceUrl)
     {
         if (view.IsBinary)
-            return new RoomFilePreview { Path = view.Path, Kind = "binary", ChangeKind = view.Change.ToString(), SourceUrl = sourceUrl, Note = WithSourceFallback("Binary file — inline preview isn't available.", sourceUrl != null) };
+            return new RoomFilePreview { Path = view.Path, Identity = identity, Kind = "binary", ChangeKind = view.Change.ToString(), SourceUrl = sourceUrl, Note = WithSourceFallback("Binary file — inline preview isn't available.", sourceUrl != null) };
 
         var isContent = view.Change == PatchFileChange.Added && view.PostImage != null;
         var (text, size, truncated) = Cap(isContent ? view.PostImage! : view.DiffText);
@@ -138,6 +253,7 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
         return new RoomFilePreview
         {
             Path = view.Path,
+            Identity = identity,
             Kind = isContent ? "text" : "diff",
             ChangeKind = view.Change.ToString(),
             Text = text,
@@ -159,8 +275,8 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
         return (capped, bytes, capped.Length < body.Length);
     }
 
-    private static RoomFilePreview Unavailable(string path, string? sourceUrl, RoomFileUnavailableReason reason, string note) =>
-        new() { Path = path, Kind = "unavailable", SourceUrl = sourceUrl, Note = note, UnavailableReason = reason };
+    private static RoomFilePreview Unavailable(RoomFileIdentity identity, string? sourceUrl, RoomFileUnavailableReason reason, string note) =>
+        new() { Path = identity.Path, Identity = identity, Kind = "unavailable", SourceUrl = sourceUrl, Note = note, UnavailableReason = reason };
 
     private static RoomFileUnavailableReason Reason(ArtifactContentUnavailableKind kind) => kind switch
     {
@@ -194,6 +310,20 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
     }
 
     private readonly record struct PatchRef(string? Inline, Guid? ArtifactId);
+    private sealed record AgentResultRow(Guid AgentRunId, string ResultJson);
+    private sealed record ManifestMatch(Guid AgentRunId, Guid? RepositoryId, string RepositoryAlias, Guid? PatchArtifactId);
+    private sealed record ManifestMatches(IReadOnlyList<ManifestMatch> Rows, bool Truncated);
+    private sealed record FileCandidate(RoomFileIdentity Identity, PatchRef Patch);
+    private sealed record CandidateIdentity(Guid? AgentRunId, Guid? RepositoryId, string? RepositoryAlias);
+    private sealed record RepositoryLocation(Guid? RepositoryId, string? RepositoryAlias);
+
+    private abstract record FileLocation
+    {
+        private FileLocation() { }
+        public sealed record Found(FileCandidate Candidate) : FileLocation;
+        public sealed record Missing : FileLocation;
+        public sealed record Ambiguous : FileLocation;
+    }
 
     private abstract record PatchResolution
     {
