@@ -182,27 +182,23 @@ public sealed partial class RealSupervisorActionExecutor
         // synth seam) and falls back to any registered client — in production the structured-capable provider also
         // serves text. This intentionally differs from the decider/planner's structured-first resolution: those NEED
         // structured output; a text reduce does not. A deployment with no LLM provider degrades to a note.
-        var client = _llm.All.FirstOrDefault(c => c is not IStructuredLLMClient) ?? _llm.All.FirstOrDefault();
-
-        if (client is null) return new { note = "no LLM provider available for synthesis" };
-
         // Pure pool-driven (S6b): the model + credential come from the team's pool for the chosen client's provider —
         // the profile's model is a PIN (it must be a qualifying pool model), else the pool's recommended one. A text
         // reduce doesn't need structured output. No pool model → degrade to a note (never an env key, never a default).
-        var pick = await _modelSelector.SelectAsync(context.TeamId, client.Provider, allowedModels: null, pinnedModel: context.AgentProfile?.Model, cancellationToken).ConfigureAwait(false);
+        var resolved = await InProcessTextModel.ResolveAsync(_llm, _modelSelector, context.TeamId, context.AgentProfile?.Model, cancellationToken).ConfigureAwait(false);
 
-        if (pick is null) return new { note = $"no pool model available for synthesis on provider '{client.Provider}'" };
+        if (resolved is not { } model) return new { note = "no registered LLM provider has a qualifying pool model for synthesis" };
 
         var projection = SupervisorSynthesisPrompt.Project(context.Goal, synthesisInstruction, merged.Select(ToSynthesisSource).ToList(), context.SynthesisPromptBudgetChars);
         var request = new LLMCompletionRequest
         {
-            Model = pick.ModelId,
-            Credential = pick.Credential,
+            Model = model.Pick.ModelId,
+            Credential = model.Pick.Credential,
             SystemPrompt = "You are combining the work of several parallel coding agents into ONE coherent change. Each agent's unified diff follows. Produce a concise synthesis: what the combined change does, how the pieces fit, and any overlaps or risks a reviewer should check. Do not invent changes that are not in the diffs.",
             UserPrompt = projection.Text,
         };
 
-        var completion = await client.CompleteAsync(request, cancellationToken).ConfigureAwait(false);
+        var completion = await model.Client.CompleteAsync(request, cancellationToken).ConfigureAwait(false);
 
         return new { text = completion.Text, model = completion.Model, coverage = projection.Coverage };
     }

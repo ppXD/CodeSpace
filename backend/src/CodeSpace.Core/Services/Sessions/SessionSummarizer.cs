@@ -102,18 +102,14 @@ public sealed class SessionSummarizer : ISessionSummarizer, IScopedDependency
         // can throw — ANY of these must leave the summary unchanged rather than fail the launch (the contract).
         try
         {
-            var client = _clientRegistry.All.FirstOrDefault();
+            var resolved = await InProcessTextModel.ResolveAsync(_clientRegistry, _modelSelector, teamId, pinnedModel: null, cancellationToken).ConfigureAwait(false);
 
-            if (client is null) return null;
+            if (resolved is not { } model) return null;   // no registered provider has a credentialed team model — fail open
 
-            var pick = await _modelSelector.SelectAsync(teamId, client.Provider, allowedModels: null, pinnedModel: null, cancellationToken).ConfigureAwait(false);
-
-            if (pick is null) return null;   // no credentialed model in the team's pool — fail open
-
-            var completion = await client.CompleteAsync(new LLMCompletionRequest
+            var completion = await model.Client.CompleteAsync(new LLMCompletionRequest
             {
-                Model = pick.ModelId,
-                Credential = pick.Credential,
+                Model = model.Pick.ModelId,
+                Credential = model.Pick.Credential,
                 SystemPrompt = SystemPrompt,
                 UserPrompt = BuildUserPrompt(existingSummary, newTurns, manifestsByRunId),
                 MaxOutputTokens = 1024,
