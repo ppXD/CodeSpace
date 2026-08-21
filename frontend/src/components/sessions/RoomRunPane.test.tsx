@@ -20,6 +20,11 @@ vi.mock("@/hooks/use-workflows", () => ({
     isLoading: false,
     data: { records: [{ sequence: 1, recordType: "run.started", nodeId: null, occurredAt: "2026-07-13T00:00:00Z", payloadJson: "{}" }] },
   }),
+  useRunDataCompleteness: () => ({
+    isLoading: false,
+    error: null,
+    data: { runId: "run-1", scope: "RecordedFacetsOnly", facets: [], hasStatements: false, runWideVerdict: null, truncated: false },
+  }),
 }));
 
 vi.mock("@/components/workflows/RunCanvas", () => ({
