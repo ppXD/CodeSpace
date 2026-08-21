@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { ApiError } from "@/api/request";
@@ -7,6 +7,7 @@ import {
   type WorkflowRunCaptureCompleteness,
   type WorkflowRunModelCallAttemptMetadata,
   type WorkflowRunModelCallBody,
+  type WorkflowRunModelCallBodyCaptureHealth,
   type WorkflowRunModelCallBodyDescriptor,
   type WorkflowRunModelCallBodyPage,
   type WorkflowRunModelCallBodyReferenceState,
@@ -179,6 +180,76 @@ function referenceLabel(state: WorkflowRunModelCallBodyReferenceState): string {
   }
 }
 
+interface CapturePresentation {
+  state: WorkflowRunModelCallBodyCaptureHealth | "Unreported" | "Invalid";
+  label: string;
+  retryability?: string;
+  format?: string;
+  allowReferencedBody: boolean;
+}
+
+function knownMaterializationFormat(value: unknown): string | null {
+  switch (value) {
+    case "external-artifact/v1": return "format external artifact (external-artifact/v1)";
+    case "utf8-string-envelope/v1": return "format UTF-8 text envelope (utf8-string-envelope/v1)";
+    case "json-envelope/v1": return "format JSON envelope (json-envelope/v1)";
+    default: return null;
+  }
+}
+
+function capturePresentation(descriptor: WorkflowRunModelCallBodyDescriptor): CapturePresentation {
+  const health: unknown = descriptor.captureHealth;
+  const format: unknown = descriptor.materializationFormat;
+  if (health == null) {
+    if (format != null) return { state: "Invalid", label: "Materialization format reported without capture health", allowReferencedBody: false };
+    return {
+      state: "Unreported", label: "Capture health not reported", retryability: "retryability not reported",
+      format: "materialization format not reported", allowReferencedBody: true,
+    };
+  }
+
+  if (health === "Available") {
+    if (format == null) return { state: "Invalid", label: "Available capture is missing its materialization format", allowReferencedBody: false };
+    const knownFormat = knownMaterializationFormat(format);
+    if (knownFormat == null) return { state: "Invalid", label: "Unsupported materialization format", allowReferencedBody: false };
+    return { state: health, label: "Capture available", retryability: "complete", format: knownFormat, allowReferencedBody: true };
+  }
+
+  const active = health === "Pending" || health === "Materializing" || health === "Retry";
+  const terminal = health === "Failed" || health === "Abandoned";
+  if (!active && !terminal) return { state: "Invalid", label: "Unsupported capture health", allowReferencedBody: false };
+  if (format != null) return { state: "Invalid", label: "Non-available capture reported a materialization format", allowReferencedBody: false };
+  switch (health) {
+    case "Pending": return { state: health, label: "Capture pending", retryability: "retryable", format: "materialization format pending", allowReferencedBody: false };
+    case "Materializing": return { state: health, label: "Capture materializing", retryability: "retryable after lease expiry", format: "materialization format pending", allowReferencedBody: false };
+    case "Retry": return { state: health, label: "Capture retry scheduled", retryability: "retryable", format: "materialization format pending", allowReferencedBody: false };
+    case "Failed": return { state: health, label: "Capture failed", retryability: "not retryable (retry exhausted)", format: "materialization format unavailable", allowReferencedBody: false };
+    case "Abandoned": return { state: health, label: "Capture abandoned", retryability: "not retryable", format: "materialization format unavailable", allowReferencedBody: false };
+  }
+}
+
+function StableCaptureState({ presentation }: { presentation: CapturePresentation }) {
+  return (
+    <p className="room-mccapture" data-capture-health={presentation.state}>
+      <strong>{presentation.label}</strong>
+      {presentation.retryability && <><span aria-hidden="true"> · </span><span>{presentation.retryability}</span></>}
+      {presentation.format && <><span aria-hidden="true"> · </span><span>{presentation.format}</span></>}
+    </p>
+  );
+}
+
+function StableLegacyFallback({ descriptor, children }: { descriptor: WorkflowRunModelCallBodyDescriptor; children: ReactNode }) {
+  const capture = capturePresentation(descriptor);
+  return (
+    <>
+      <StableCaptureState presentation={capture} />
+      {capture.state === "Invalid"
+        ? <ReadState availability="IntegrityFailure" message="The capture metadata does not authorize a compatibility body read." completeness={descriptor.captureCompleteness} />
+        : children}
+    </>
+  );
+}
+
 function ReadState({ availability, message, completeness }: { availability: WorkflowRunModelCallPartAvailability; message?: string | null; completeness?: WorkflowRunCaptureCompleteness }) {
   return (
     <p className="room-para room-muted" data-state={availability}>
@@ -237,14 +308,24 @@ function LegacyTab({ runId, sequence, tab }: { runId: string; sequence: number; 
 }
 
 function StableBody({ metadata, descriptor, heading, emptyLabel }: { metadata: WorkflowRunModelCallDetailMetadata; descriptor?: WorkflowRunModelCallBodyDescriptor; heading?: string; emptyLabel: string }) {
-  const read = useMemo<BoundedRead | null>(() => descriptor?.referenceState === "Referenced"
+  const capture = descriptor == null ? null : capturePresentation(descriptor);
+  const read = useMemo<BoundedRead | null>(() => descriptor?.referenceState === "Referenced" && capture?.allowReferencedBody === true
     ? { kind: "stable", runId: metadata.runId, modelCallId: metadata.workflowRunModelCallId, body: descriptor.body, attemptId: descriptor.attemptId }
-    : null, [descriptor, metadata.runId, metadata.workflowRunModelCallId]);
+    : null, [capture?.allowReferencedBody, descriptor, metadata.runId, metadata.workflowRunModelCallId]);
   const pages = useLocalBoundedPages(read);
 
   if (descriptor == null) return <>{heading && <div className="room-mcpart-title">{heading}</div>}<ReadState availability="MetadataMissing" message="No body descriptor was projected." /></>;
-  if (descriptor.referenceState !== "Referenced") return <>{heading && <div className="room-mcpart-title">{heading}</div>}<p className="room-para room-muted" data-state={descriptor.referenceState}><strong>{referenceLabel(descriptor.referenceState)}</strong>{` · capture ${descriptor.captureCompleteness.toLowerCase()}`}</p></>;
-  return <BoundedBodyView pages={pages} heading={heading} emptyLabel={emptyLabel} />;
+  return (
+    <>
+      {heading && <div className="room-mcpart-title">{heading}</div>}
+      <StableCaptureState presentation={capture!} />
+      {descriptor.referenceState !== "Referenced"
+        ? <p className="room-para room-muted" data-state={descriptor.referenceState}><strong>{referenceLabel(descriptor.referenceState)}</strong>{` · capture ${descriptor.captureCompleteness.toLowerCase()}`}</p>
+        : !capture!.allowReferencedBody
+          ? <ReadState availability="IntegrityFailure" message="The capture metadata does not authorize reading this body reference." completeness={descriptor.captureCompleteness} />
+          : <BoundedBodyView pages={pages} emptyLabel={emptyLabel} />}
+    </>
+  );
 }
 
 function descriptor(owner: { bodies: WorkflowRunModelCallBodyDescriptor[] }, body: WorkflowRunModelCallBody) {
@@ -309,6 +390,7 @@ function StableUsage({ attempt }: { attempt: WorkflowRunModelCallAttemptMetadata
 
 function StableTrace({ metadata, attempt, legacy }: { metadata: WorkflowRunModelCallDetailMetadata; attempt: WorkflowRunModelCallAttemptMetadata | null; legacy?: { runId: string; sequence: number } }) {
   if (attempt == null) return <ReadState availability="MetadataMissing" message="No physical attempt trace was projected." />;
+  const error = descriptor(attempt, "AttemptError");
   return (
     <>
       <dl className="room-mcusage">
@@ -322,8 +404,8 @@ function StableTrace({ metadata, attempt, legacy }: { metadata: WorkflowRunModel
         <div><dt>Schema</dt><dd>logical {metadata.schemaVersion} · attempt {attempt.schemaVersion}</dd></div>
       </dl>
       {legacy
-        ? <LegacyPart runId={legacy.runId} sequence={legacy.sequence} part="Error" heading="ERROR BODY" emptyLabel="error body" />
-        : <StableBody metadata={metadata} descriptor={descriptor(attempt, "AttemptError")} heading="ERROR BODY" emptyLabel="error body" />}
+        ? <StableLegacyFallback descriptor={error!}><LegacyPart runId={legacy.runId} sequence={legacy.sequence} part="Error" heading="ERROR BODY" emptyLabel="error body" /></StableLegacyFallback>
+        : <StableBody metadata={metadata} descriptor={error} heading="ERROR BODY" emptyLabel="error body" />}
     </>
   );
 }
@@ -350,12 +432,12 @@ function StableCall({ metadata, sequence, tab }: { metadata: WorkflowRunModelCal
       <StableMetadata metadata={metadata} selectedAttemptId={selectedAttempt?.attemptId} onSelectAttempt={setSelectedAttemptId} />
       {tab === "result"
         ? selectedAttempt == null ? <ReadState availability="MetadataMissing" message="No physical attempt response was projected." />
-          : fallbackResponse ? <LegacyPart runId={metadata.runId} sequence={sequence} part="Result" emptyLabel="result" />
+          : fallbackResponse ? <StableLegacyFallback descriptor={response!}><LegacyPart runId={metadata.runId} sequence={sequence} part="Result" emptyLabel="result" /></StableLegacyFallback>
             : <StableBody metadata={metadata} descriptor={response} emptyLabel="result" />
         : tab === "usage" ? <StableUsage attempt={selectedAttempt} />
         : tab === "trace" ? <StableTrace metadata={metadata} attempt={selectedAttempt} legacy={fallbackError ? { runId: metadata.runId, sequence } : undefined} />
         : fallbackPrompt
-          ? <><LegacyPart runId={metadata.runId} sequence={sequence} part="SystemPrompt" heading="SYSTEM" emptyLabel="system prompt" /><LegacyPart runId={metadata.runId} sequence={sequence} part="UserPrompt" heading="USER" emptyLabel="user prompt" /></>
+          ? <StableLegacyFallback descriptor={logicalRequest!}><LegacyPart runId={metadata.runId} sequence={sequence} part="SystemPrompt" heading="SYSTEM" emptyLabel="system prompt" /><LegacyPart runId={metadata.runId} sequence={sequence} part="UserPrompt" heading="USER" emptyLabel="user prompt" /></StableLegacyFallback>
           : <><StableBody metadata={metadata} descriptor={logicalRequest} heading="LOGICAL REQUEST" emptyLabel="logical request" />{selectedAttempt && <StableBody metadata={metadata} descriptor={attemptRequest} heading={`ATTEMPT ${selectedAttempt.attemptOrdinal} REQUEST`} emptyLabel="attempt request" />}</>}
     </>
   );
