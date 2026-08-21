@@ -307,7 +307,7 @@ function StableUsage({ attempt }: { attempt: WorkflowRunModelCallAttemptMetadata
   );
 }
 
-function StableTrace({ metadata, attempt }: { metadata: WorkflowRunModelCallDetailMetadata; attempt: WorkflowRunModelCallAttemptMetadata | null }) {
+function StableTrace({ metadata, attempt, legacy }: { metadata: WorkflowRunModelCallDetailMetadata; attempt: WorkflowRunModelCallAttemptMetadata | null; legacy?: { runId: string; sequence: number } }) {
   if (attempt == null) return <ReadState availability="MetadataMissing" message="No physical attempt trace was projected." />;
   return (
     <>
@@ -321,24 +321,42 @@ function StableTrace({ metadata, attempt }: { metadata: WorkflowRunModelCallDeta
         <div><dt>Evidence</dt><dd>{attempt.sourceEvidence} · revision {attempt.sourceEvidenceRevision}</dd></div>
         <div><dt>Schema</dt><dd>logical {metadata.schemaVersion} · attempt {attempt.schemaVersion}</dd></div>
       </dl>
-      <StableBody metadata={metadata} descriptor={descriptor(attempt, "AttemptError")} heading="ERROR BODY" emptyLabel="error body" />
+      {legacy
+        ? <LegacyPart runId={legacy.runId} sequence={legacy.sequence} part="Error" heading="ERROR BODY" emptyLabel="error body" />
+        : <StableBody metadata={metadata} descriptor={descriptor(attempt, "AttemptError")} heading="ERROR BODY" emptyLabel="error body" />}
     </>
   );
 }
 
-function StableCall({ metadata, tab }: { metadata: WorkflowRunModelCallDetailMetadata; tab: WorkflowRunModelCallTab }) {
+const LEGACY_BODY_STATES: ReadonlySet<WorkflowRunModelCallBodyReferenceState> = new Set(["NotRecorded", "Partial", "LegacyUnknown"]);
+
+function StableCall({ metadata, sequence, tab }: { metadata: WorkflowRunModelCallDetailMetadata; sequence: number; tab: WorkflowRunModelCallTab }) {
   const orderedAttempts = useMemo(() => [...metadata.attempts].sort((left, right) => left.attemptOrdinal - right.attemptOrdinal || left.attemptId.localeCompare(right.attemptId)), [metadata.attempts]);
   const [selectedAttemptId, setSelectedAttemptId] = useState<string>();
   const selectedAttempt = orderedAttempts.find((attempt) => attempt.attemptId === selectedAttemptId) ?? orderedAttempts.at(-1) ?? null;
+  const exactLedgerAttempt = metadata.sourceKind === "workflow-run-record/v1" && orderedAttempts.length === 1
+    && selectedAttempt?.sourceTerminalRecordId != null ? selectedAttempt : null;
+  const response = selectedAttempt == null ? undefined : descriptor(selectedAttempt, "AttemptResponse");
+  const logicalRequest = descriptor(metadata, "LogicalRequest");
+  const attemptRequest = selectedAttempt == null ? undefined : descriptor(selectedAttempt, "AttemptRequest");
+  const error = selectedAttempt == null ? undefined : descriptor(selectedAttempt, "AttemptError");
+  const fallbackResponse = exactLedgerAttempt != null && response != null && LEGACY_BODY_STATES.has(response.referenceState);
+  const fallbackPrompt = exactLedgerAttempt?.sourceStartedRecordId != null && logicalRequest != null && attemptRequest != null
+    && LEGACY_BODY_STATES.has(logicalRequest.referenceState) && LEGACY_BODY_STATES.has(attemptRequest.referenceState);
+  const fallbackError = exactLedgerAttempt?.status === "Failed" && error != null && LEGACY_BODY_STATES.has(error.referenceState);
 
   return (
     <>
       <StableMetadata metadata={metadata} selectedAttemptId={selectedAttempt?.attemptId} onSelectAttempt={setSelectedAttemptId} />
       {tab === "result"
-        ? selectedAttempt == null ? <ReadState availability="MetadataMissing" message="No physical attempt response was projected." /> : <StableBody metadata={metadata} descriptor={descriptor(selectedAttempt, "AttemptResponse")} emptyLabel="result" />
+        ? selectedAttempt == null ? <ReadState availability="MetadataMissing" message="No physical attempt response was projected." />
+          : fallbackResponse ? <LegacyPart runId={metadata.runId} sequence={sequence} part="Result" emptyLabel="result" />
+            : <StableBody metadata={metadata} descriptor={response} emptyLabel="result" />
         : tab === "usage" ? <StableUsage attempt={selectedAttempt} />
-        : tab === "trace" ? <StableTrace metadata={metadata} attempt={selectedAttempt} />
-        : <><StableBody metadata={metadata} descriptor={descriptor(metadata, "LogicalRequest")} heading="LOGICAL REQUEST" emptyLabel="logical request" />{selectedAttempt && <StableBody metadata={metadata} descriptor={descriptor(selectedAttempt, "AttemptRequest")} heading={`ATTEMPT ${selectedAttempt.attemptOrdinal} REQUEST`} emptyLabel="attempt request" />}</>}
+        : tab === "trace" ? <StableTrace metadata={metadata} attempt={selectedAttempt} legacy={fallbackError ? { runId: metadata.runId, sequence } : undefined} />
+        : fallbackPrompt
+          ? <><LegacyPart runId={metadata.runId} sequence={sequence} part="SystemPrompt" heading="SYSTEM" emptyLabel="system prompt" /><LegacyPart runId={metadata.runId} sequence={sequence} part="UserPrompt" heading="USER" emptyLabel="user prompt" /></>
+          : <><StableBody metadata={metadata} descriptor={logicalRequest} heading="LOGICAL REQUEST" emptyLabel="logical request" />{selectedAttempt && <StableBody metadata={metadata} descriptor={attemptRequest} heading={`ATTEMPT ${selectedAttempt.attemptOrdinal} REQUEST`} emptyLabel="attempt request" />}</>}
     </>
   );
 }
@@ -371,5 +389,5 @@ export function WorkflowRunModelCallContent({ runId, sequence, tab }: { runId: s
   if (stable.isError) return <p className="room-para room-muted">Couldn't load stable model-call metadata. {stable.error instanceof ApiError ? `(${stable.error.code})` : ""}</p>;
   if (stable.data == null) return <ReadState availability="MetadataMissing" message="The stable model-call projection is unavailable." completeness={route.data.captureCompleteness} />;
   if (stable.data.runId !== runId || stable.data.workflowRunModelCallId !== stableId) return <ReadState availability="IntegrityFailure" message="Stable model-call identity does not match the requested Workflow Run." completeness={stable.data.captureCompleteness} />;
-  return <StableCall metadata={stable.data} tab={tab} />;
+  return <StableCall metadata={stable.data} sequence={sequence} tab={tab} />;
 }

@@ -96,6 +96,21 @@ function stableDetail(responseReferenceState: WorkflowRunModelCallBodyReferenceS
   };
 }
 
+function exactLedgerDetail(responseReferenceState: WorkflowRunModelCallBodyReferenceState = "Partial") {
+  const detail = stableDetail(responseReferenceState, "Partial");
+  detail.sourceKind = "workflow-run-record/v1";
+  detail.bodies = [{ body: "LogicalRequest", attemptId: null, artifactId: null, referenceState: "Partial", captureCompleteness: "Partial" }];
+  detail.attempts = [detail.attempts[1]];
+  detail.attempts[0].sourceStartedRecordId = "66666666-6666-6666-6666-666666666666";
+  detail.attempts[0].sourceTerminalRecordId = "77777777-7777-7777-7777-777777777777";
+  detail.attempts[0].bodies = [
+    { body: "AttemptRequest", attemptId: activeAttemptId, artifactId: null, referenceState: "Partial", captureCompleteness: "Partial" },
+    { body: "AttemptResponse", attemptId: activeAttemptId, artifactId: null, referenceState: responseReferenceState, captureCompleteness: "Partial" },
+    { body: "AttemptError", attemptId: activeAttemptId, artifactId: null, referenceState: "Partial", captureCompleteness: "Partial" },
+  ];
+  return detail;
+}
+
 type FetchHandler = (url: URL, init: RequestInit) => Response | Promise<Response>;
 
 function renderContent(handler: FetchHandler, tab: WorkflowRunModelCallTab = "result") {
@@ -367,5 +382,99 @@ describe("WorkflowRunModelCallContent", () => {
     expect(screen.getByText("Provider request").nextElementSibling).toHaveTextContent("unavailable");
     expect(screen.getByText("First token").nextElementSibling).toHaveTextContent("unavailable");
     expect(screen.getByText("Completed at").nextElementSibling).toHaveTextContent("unavailable");
+  });
+
+  it("keeps same-source inline result and offloaded prompts readable after stable projection admission", async () => {
+    const parts: string[] = [];
+    const { rerenderTab } = renderContent((url) => {
+      if (url.pathname === "/api/workflows/runs/run-1/model-calls/42") return json(projectedMetadata());
+      if (url.pathname === `/api/workflows/runs/run-1/model-calls/${callId}`) return json(exactLedgerDetail());
+      if (url.pathname.includes("/parts/")) {
+        const part = url.pathname.split("/").at(-1)!;
+        parts.push(part);
+        expect(url.searchParams.get("offsetBytes")).toBe("0");
+        expect(url.searchParams.get("limitBytes")).toBe(String(64 * 1024));
+        return json({
+          part,
+          availability: "Available",
+          text: part === "Result" ? "legacy inline result" : `${part} from recorded artifact`,
+          offsetBytes: 0,
+          returnedBytes: 20,
+          totalBytes: 20,
+          nextOffsetBytes: null,
+          contentType: "text/plain",
+          artifactId: part === "SystemPrompt" ? "88888888-8888-8888-8888-888888888888" : null,
+          integrityVerified: true,
+          message: null,
+        });
+      }
+      return json({ message: `Unexpected ${url.pathname}` }, 500);
+    });
+
+    expect(await screen.findByText("legacy inline result")).toBeInTheDocument();
+    expect(parts).toEqual(["Result"]);
+    expect(vi.mocked(globalThis.fetch).mock.calls.some(([input]) => String(input).includes("/bodies/"))).toBe(false);
+
+    rerenderTab("prompt");
+    expect(await screen.findByText("SystemPrompt from recorded artifact")).toBeInTheDocument();
+    expect(screen.getByText("UserPrompt from recorded artifact")).toBeInTheDocument();
+    expect(parts).toEqual(["Result", "SystemPrompt", "UserPrompt"]);
+  });
+
+  it("uses the exact failed ledger source for a bounded error fallback", async () => {
+    const detail = exactLedgerDetail();
+    detail.attempts[0].status = "Failed";
+    renderContent((url) => {
+      if (url.pathname === "/api/workflows/runs/run-1/model-calls/42") return json(projectedMetadata());
+      if (url.pathname === `/api/workflows/runs/run-1/model-calls/${callId}`) return json(detail);
+      if (url.pathname.endsWith("/parts/Error")) return json({
+        part: "Error", availability: "Available", text: "provider failed inline", offsetBytes: 0, returnedBytes: 22,
+        totalBytes: 22, nextOffsetBytes: null, contentType: "text/plain", artifactId: null, integrityVerified: true, message: null,
+      });
+      return json({ message: `Unexpected ${url.pathname}` }, 500);
+    }, "trace");
+
+    expect(await screen.findByText("provider failed inline")).toBeInTheDocument();
+  });
+
+  it("never mixes a legacy source into harness-native or ambiguous multi-attempt projections", async () => {
+    const harness = exactLedgerDetail();
+    harness.sourceKind = "harness-native-record/v1";
+    const first = renderContent((url) => {
+      if (url.pathname === "/api/workflows/runs/run-1/model-calls/42") return json(projectedMetadata());
+      if (url.pathname === `/api/workflows/runs/run-1/model-calls/${callId}`) return json(harness);
+      return json({ message: "Legacy read must not occur" }, 500);
+    });
+    expect(await screen.findByText(/Body capture partial/i)).toBeInTheDocument();
+    expect(vi.mocked(globalThis.fetch).mock.calls.some(([input]) => String(input).includes("/parts/"))).toBe(false);
+    first.unmount();
+
+    vi.unstubAllGlobals();
+    const ambiguous = stableDetail("Partial", "Partial");
+    ambiguous.sourceKind = "workflow-run-record/v1";
+    renderContent((url) => {
+      if (url.pathname === "/api/workflows/runs/run-1/model-calls/42") return json(projectedMetadata());
+      if (url.pathname === `/api/workflows/runs/run-1/model-calls/${callId}`) return json(ambiguous);
+      return json({ message: "Legacy read must not occur" }, 500);
+    });
+    expect(await screen.findByText(/Body capture partial/i)).toBeInTheDocument();
+    expect(vi.mocked(globalThis.fetch).mock.calls.some(([input]) => String(input).includes("/parts/"))).toBe(false);
+  });
+
+  it("aborts an exact-source legacy body fallback when the tab changes", async () => {
+    let partSignal: AbortSignal | undefined;
+    const { rerenderTab } = renderContent((url, init) => {
+      if (url.pathname === "/api/workflows/runs/run-1/model-calls/42") return json(projectedMetadata());
+      if (url.pathname === `/api/workflows/runs/run-1/model-calls/${callId}`) return json(exactLedgerDetail());
+      if (url.pathname.endsWith("/parts/Result")) {
+        partSignal = init.signal as AbortSignal;
+        return new Promise<Response>(() => undefined);
+      }
+      return json({ message: `Unexpected ${url.pathname}` }, 500);
+    });
+
+    await waitFor(() => expect(partSignal).toBeInstanceOf(AbortSignal));
+    rerenderTab("usage");
+    await waitFor(() => expect(partSignal?.aborted).toBe(true));
   });
 });

@@ -636,7 +636,7 @@ export interface AnswerDecisionResult {
 export type WorkflowRunModelCallStatus = "Completed" | "Failed";
 export type WorkflowRunModelCallProjectionState = "Projected" | "LegacyFallback";
 export type WorkflowRunCaptureCompleteness = "Exact" | "RedactedExact" | "Partial" | "Unavailable" | "Corrupt" | "LegacyUnknown";
-export type WorkflowRunModelCallPart = "Result" | "SystemPrompt" | "UserPrompt" | "Usage" | "Trace";
+export type WorkflowRunModelCallPart = "Result" | "SystemPrompt" | "UserPrompt" | "Usage" | "Trace" | "Error";
 export type WorkflowRunModelCallPartSource = "NotRecorded" | "Inline" | "Artifact" | "Synthesized";
 export type WorkflowRunModelCallPartAvailability = "Available" | "NotRecorded" | "MetadataMissing" | "PhysicalObjectMissing" | "IntegrityFailure" | "BackendUnavailable" | "AccessDenied" | "InvalidOffset" | "Redacted" | "CapturePartial" | "CaptureUnavailable" | "CaptureCorrupt" | "LegacyUnknown" | "InvalidBodyReference";
 
