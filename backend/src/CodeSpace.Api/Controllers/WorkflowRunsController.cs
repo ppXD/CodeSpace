@@ -3,6 +3,7 @@ using CodeSpace.Api.Http;
 using CodeSpace.Core.Services.Tasks.Trace;
 using CodeSpace.Messages.Commands.Tasks;
 using CodeSpace.Messages.Commands.Workflows;
+using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Queries.Sessions;
 using CodeSpace.Messages.Queries.Tasks;
@@ -93,6 +94,18 @@ public class WorkflowRunsController : ControllerBase
     public async Task<IActionResult> Get([FromRoute] string idOrNumber, CancellationToken cancellationToken)
     {
         var result = await _mediator.Send(new GetWorkflowRunByRefQuery { IdOrNumber = idOrNumber }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
+    /// <summary>
+    /// Bounded, metadata-only canvas view. It exposes exact cell coordinates and a narrow frozen topology, never run
+    /// outputs, node inputs/outputs, wait payloads, artifact references, prompts or node configuration.
+    /// </summary>
+    [HttpGet("{runId:guid}/view-metadata")]
+    public async Task<IActionResult> GetViewMetadata([FromRoute] Guid runId, [FromQuery] WorkflowRunViewScope scope = WorkflowRunViewScope.LineageMerged, CancellationToken cancellationToken = default)
+    {
+        if (!Enum.IsDefined(scope)) return BadRequest();
+        var result = await _mediator.Send(new GetWorkflowRunViewMetadataQuery { RunId = runId, Scope = scope }, cancellationToken).ConfigureAwait(false);
         return result == null ? NotFound() : Ok(result);
     }
 
