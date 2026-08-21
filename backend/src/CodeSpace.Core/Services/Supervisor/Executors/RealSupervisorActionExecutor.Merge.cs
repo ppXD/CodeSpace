@@ -40,7 +40,7 @@ public sealed partial class RealSupervisorActionExecutor
             ["synthesisInstruction"] = merge.SynthesisInstruction,
         };
 
-        await AugmentWithIntegrationAndSynthesisAsync(outcome, context, merged, forcedByPublishGate: merge.ForcedByPublishGate == true, cancellationToken).ConfigureAwait(false);
+        await AugmentWithIntegrationAndSynthesisAsync(outcome, context, merged, merge, cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation("Supervisor merged {Count} prior agent result(s)", merged.Count);
 

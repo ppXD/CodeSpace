@@ -23,6 +23,31 @@ public sealed class SupervisorSynthesisPromptTests
     }
 
     [Fact]
+    public void An_authored_synthesis_instruction_reaches_the_bounded_prompt_without_changing_the_legacy_null_path()
+    {
+        var sources = new[] { Source("11111111-1111-1111-1111-111111111111", "web", 'a') };
+
+        var legacy = SupervisorSynthesisPrompt.Project("ship it", sources, SupervisorSynthesisBudget.DefaultChars);
+        var instructed = SupervisorSynthesisPrompt.Project("ship it", "Emphasize compatibility and migration risk.", sources, SupervisorSynthesisBudget.DefaultChars);
+
+        legacy.Text.ShouldStartWith("Goal: ship it\n\n=== Agent", customMessage: "an absent instruction stays byte-compatible with the pre-slice prompt");
+        legacy.Text.ShouldNotContain("Synthesis instruction:");
+        instructed.Text.ShouldStartWith("Goal: ship it\n\nSynthesis instruction:\nEmphasize compatibility and migration risk.\n\n=== Agent");
+    }
+
+    [Fact]
+    public void A_large_synthesis_instruction_is_inside_the_same_hard_prompt_budget()
+    {
+        var sources = new[] { Source("11111111-1111-1111-1111-111111111111", "web", 'a') };
+
+        var projection = SupervisorSynthesisPrompt.Project("ship it", new string('i', 20_000), sources, SupervisorSynthesisBudget.MinChars);
+
+        projection.Text.Length.ShouldBeLessThanOrEqualTo(SupervisorSynthesisBudget.MinChars);
+        projection.Coverage.Complete.ShouldBeFalse();
+        projection.Coverage.GoalShortened.ShouldBeTrue("the directive shares the bounded goal/directive projection; it never creates an unbounded side channel");
+    }
+
+    [Fact]
     public void An_over_budget_prompt_is_bounded_and_fair_across_agents_and_repositories()
     {
         var sources = new[]
