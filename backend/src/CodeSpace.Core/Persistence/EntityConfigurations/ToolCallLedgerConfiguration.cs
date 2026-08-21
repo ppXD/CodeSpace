@@ -40,6 +40,12 @@ public class ToolCallLedgerConfiguration : IEntityTypeConfiguration<ToolCallLedg
             .HasFilter("admission_ordinal IS NOT NULL")
             .IsUnique();
 
+        // Global bounded projector discovery. The predicate excludes facts without a truthful source order,
+        // decision traffic, and live rows still owned by the ledger/reapers; included metadata keeps bodies off-read.
+        builder.HasIndex(l => new { l.CreatedDate, l.Id }).HasDatabaseName("ix_tool_call_ledger_projection_candidate")
+            .HasFilter("admission_ordinal IS NOT NULL AND tool_kind <> 'decision.request' AND status IN ('Succeeded', 'Failed', 'Denied', 'Expired')")
+            .IncludeProperties(l => new { l.TeamId, l.AgentRunId, l.AdmissionOrdinal, l.ToolKind, l.Status, l.LastModifiedDate });
+
         // Npgsql xmin concurrency token — see WorkflowRunConfiguration for the rationale.
         builder.Property(l => l.Xmin)
             .HasColumnName("xmin")

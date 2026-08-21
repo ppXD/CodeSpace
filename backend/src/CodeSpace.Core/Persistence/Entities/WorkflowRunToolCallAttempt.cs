@@ -15,7 +15,7 @@ namespace CodeSpace.Core.Persistence.Entities;
 /// own is refused for the same reason: the call's head is DERIVED and no delete walks it back, so pruning happens at
 /// the call and cascades from there.</para>
 ///
-/// <para>Schema-only in this slice. <see cref="Status"/> is the OBSERVED outcome of this try:
+/// <para><see cref="Status"/> is the OBSERVED outcome of this try:
 /// <see cref="ToolCallAttemptStatus.Denied"/> belongs here because nothing executed, which is a fact about the
 /// invocation — whereas the approval states remain in <c>tool_call_ledger</c>, which owns the governance state
 /// machine and exactly-once. This plane records what happened; it decides nothing.</para>
