@@ -839,8 +839,7 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     /// <summary>Re-read the (already-recorded) terminal row for this (run, ledger) and rebuild its wire result — a success replays the verbatim stored wire JSON, anything else rebuilds an isError result from its redacted error. Mirrors <see cref="ReplayPriorResult"/>.</summary>
     private async Task<JsonElement> ReplayRecordedTerminalAsync(Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
     {
-        var rows = await _ledger!.GetForRunAsync(_runId, teamId, cancellationToken).ConfigureAwait(false);
-        var row = rows.FirstOrDefault(r => r.Id == ledgerId);
+        var row = await _ledger!.ReadTerminalForReplayAsync(ledgerId, _runId, teamId, cancellationToken).ConfigureAwait(false);
 
         return row is { Status: ToolCallLedgerStatus.Succeeded, ResultJson: { Length: > 0 } stored }
             ? JsonDocument.Parse(stored).RootElement.Clone()

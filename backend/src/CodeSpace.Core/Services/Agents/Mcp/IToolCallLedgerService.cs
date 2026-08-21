@@ -52,6 +52,13 @@ public interface IToolCallLedgerService
     Task<ToolCallApprovalState?> ReadApprovalStateAsync(Guid ledgerId, Guid teamId, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Exact team/run/ledger-scoped read of the terminal replay authority after a terminal CAS is lost. Returns only
+    /// {Status, ResultJson, Error}; null for missing, wrong-run or foreign rows. This must remain K=1: a replay of one
+    /// call must never materialize every result body in the run.
+    /// </summary>
+    Task<ToolCallTerminalReplayState?> ReadTerminalForReplayAsync(Guid ledgerId, Guid agentRunId, Guid teamId, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Record the TYPED answer to a parked agent-grain <c>decision.request</c> (Decision substrate D2): single-winner CAS
     /// <c>AwaitingApproval → Succeeded</c> stamping the serialized <c>DecisionAnswer</c> as <c>ResultJson</c>, team-scoped.
     /// A decision has NO side effect to execute — the answer IS the terminal result — so it resolves straight out of
@@ -272,6 +279,20 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
             .Where(l => l.Id == ledgerId && l.TeamId == teamId)
             .Select(l => new ToolCallApprovalState { Status = l.Status, ApprovedAt = l.ApprovedAt, ResultJson = l.ResultJson, Error = l.Error })
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+    public async Task<ToolCallTerminalReplayState?> ReadTerminalForReplayAsync(Guid ledgerId, Guid agentRunId, Guid teamId, CancellationToken cancellationToken) =>
+        await TerminalReplayQuery(_db, ledgerId, agentRunId, teamId).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// K=1 terminal replay query. All three identities are load-bearing: ledger id selects the one receipt, run id
+    /// prevents a handler from crossing its own run, and team id fails foreign reads closed. Only the three replay
+    /// fields are projected; internal so the generated SQL shape is directly pinned.
+    /// </summary>
+    internal static IQueryable<ToolCallTerminalReplayState> TerminalReplayQuery(CodeSpaceDbContext db, Guid ledgerId, Guid agentRunId, Guid teamId) =>
+        db.ToolCallLedger.AsNoTracking()
+            .Where(row => row.Id == ledgerId && row.AgentRunId == agentRunId && row.TeamId == teamId)
+            .Select(row => new ToolCallTerminalReplayState { Status = row.Status, ResultJson = row.ResultJson, Error = row.Error })
+            .Take(1);
 
     public async Task<bool> TryAnswerDecisionAsync(Guid ledgerId, Guid teamId, string answerJson, CancellationToken cancellationToken)
     {
