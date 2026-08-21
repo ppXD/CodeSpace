@@ -180,6 +180,39 @@ public class ToolCallLedgerServiceTests
     }
 
     [Fact]
+    public async Task Terminal_replay_reads_only_the_exact_tenant_run_and_ledger_among_large_siblings()
+    {
+        var ownerTeam = await SeedTeamAsync();
+        var foreignTeam = await SeedTeamAsync();
+        var runId = Guid.NewGuid();
+        var targetWire = """{"content":[{"type":"text","text":"target"}],"isError":false}""";
+        var largeWire = "{\"content\":[{\"type\":\"text\",\"text\":\"" + new string('x', 2 * 1024 * 1024) + "\"}],\"isError\":false}";
+
+        Guid targetId;
+        using (var seed = _fixture.BeginScope())
+        {
+            var service = Svc(seed);
+            targetId = (await service.TryClaimAsync(runId, ownerTeam, "git.target", "git.target:target", InputHash, 0, CancellationToken.None)).LedgerId;
+            var siblingA = (await service.TryClaimAsync(runId, ownerTeam, "git.sibling_a", "git.sibling_a:a", InputHash, 0, CancellationToken.None)).LedgerId;
+            var siblingB = (await service.TryClaimAsync(runId, ownerTeam, "git.sibling_b", "git.sibling_b:b", InputHash, 0, CancellationToken.None)).LedgerId;
+            await service.RecordTerminalAsync(targetId, ownerTeam, ToolCallLedgerStatus.Succeeded, targetWire, null, CancellationToken.None);
+            await service.RecordTerminalAsync(siblingA, ownerTeam, ToolCallLedgerStatus.Succeeded, largeWire, null, CancellationToken.None);
+            await service.RecordTerminalAsync(siblingB, ownerTeam, ToolCallLedgerStatus.Succeeded, largeWire, null, CancellationToken.None);
+        }
+
+        using var read = _fixture.BeginScope();
+        var serviceUnderTest = Svc(read);
+        var target = await serviceUnderTest.ReadTerminalForReplayAsync(targetId, runId, ownerTeam, CancellationToken.None);
+
+        target.ShouldNotBeNull();
+        target.Status.ShouldBe(ToolCallLedgerStatus.Succeeded);
+        JsonDocument.Parse(target.ResultJson!).RootElement.GetProperty("content")[0].GetProperty("text").GetString().ShouldBe("target");
+        (await serviceUnderTest.ReadTerminalForReplayAsync(targetId, Guid.NewGuid(), ownerTeam, CancellationToken.None)).ShouldBeNull("a wrong run id fails closed");
+        (await serviceUnderTest.ReadTerminalForReplayAsync(targetId, runId, foreignTeam, CancellationToken.None)).ShouldBeNull("a foreign team fails closed");
+        (await serviceUnderTest.ReadTerminalForReplayAsync(Guid.NewGuid(), runId, ownerTeam, CancellationToken.None)).ShouldBeNull("a missing ledger id fails closed");
+    }
+
+    [Fact]
     public async Task A_different_input_is_a_different_key_and_runs_separately()
     {
         var teamId = await SeedTeamAsync();

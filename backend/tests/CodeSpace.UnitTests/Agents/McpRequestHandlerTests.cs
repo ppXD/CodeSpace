@@ -798,8 +798,9 @@ public class McpRequestHandlerTests
         /// <summary>When set, RecordTerminalAsync throws this BEFORE recording — simulating a lost CAS / already-terminal row (FIX 2 replay path).</summary>
         public Func<ToolCallLedgerTransitionException>? OnRecordThrow { get; init; }
 
-        /// <summary>Rows the replay path re-reads via GetForRunAsync after a lost CAS (keyed by the recorded terminal).</summary>
-        public List<Core.Persistence.Entities.ToolCallLedger> Rows { get; } = new();
+        public List<(Guid LedgerId, Guid RunId, Guid TeamId)> TerminalReplayReads { get; } = new();
+        public Func<ToolCallTerminalReplayState?>? TerminalReplayState { get; set; }
+        public Func<Exception>? OnTerminalReplayReadThrow { get; init; }
 
         public Task<ToolCallClaim> TryClaimAsync(Guid agentRunId, Guid teamId, string toolKind, string idempotencyKey, string inputHash, long fenceEpoch, CancellationToken ct)
         {
@@ -843,12 +844,19 @@ public class McpRequestHandlerTests
         public Task<ToolCallApprovalState?> ReadApprovalStateAsync(Guid ledgerId, Guid teamId, CancellationToken ct) =>
             Task.FromResult(ApprovalState?.Invoke());
 
+        public Task<ToolCallTerminalReplayState?> ReadTerminalForReplayAsync(Guid ledgerId, Guid agentRunId, Guid teamId, CancellationToken ct)
+        {
+            TerminalReplayReads.Add((ledgerId, agentRunId, teamId));
+            if (OnTerminalReplayReadThrow is { } make) throw make();
+            return Task.FromResult(TerminalReplayState?.Invoke());
+        }
+
         // Decision answer-CAS + envelope stash — unused by the approval-path handler tests (no decision.request flows here).
         public Task<bool> TryAnswerDecisionAsync(Guid ledgerId, Guid teamId, string answerJson, CancellationToken ct) => Task.FromResult(false);
         public Task SetDecisionEnvelopeAsync(Guid ledgerId, Guid teamId, string envelopeJson, CancellationToken ct) => Task.CompletedTask;
 
         public Task<IReadOnlyList<Core.Persistence.Entities.ToolCallLedger>> GetForRunAsync(Guid agentRunId, Guid teamId, CancellationToken ct) =>
-            Task.FromResult<IReadOnlyList<Core.Persistence.Entities.ToolCallLedger>>(Rows);
+            Task.FromResult<IReadOnlyList<Core.Persistence.Entities.ToolCallLedger>>(Array.Empty<Core.Persistence.Entities.ToolCallLedger>());
 
         // The handler never reaps — the reaper jobs drive ExpireStale*Async, not the request handler.
         public Task<IReadOnlyList<ExpiredToolApproval>> ExpireStaleApprovalsAsync(DateTimeOffset now, CancellationToken ct) =>
@@ -993,16 +1001,63 @@ public class McpRequestHandlerTests
             ClaimResult = () => ToolCallClaim.Proceed(ledgerId),
             OnRecordThrow = () => new ToolCallLedgerTransitionException("a concurrent transition won the race"),
         };
-        ledger.Rows.Add(new Core.Persistence.Entities.ToolCallLedger { Id = ledgerId, Status = ToolCallLedgerStatus.Succeeded, ResultJson = storedWire });
+        ledger.TerminalReplayState = () => new ToolCallTerminalReplayState { Status = ToolCallLedgerStatus.Succeeded, ResultJson = storedWire };
 
         var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true, OnCall = (_, _) => Task.FromResult(AgentToolResult.Ok(Parse("""{"merged":true}"""), 14)) };
 
         var resp = await Respond(GovernedHandler(ledger, governanceEnabled: true, tool), Call("git.merge_pr", "{}"));
+        var duplicateLedger = new SpyLedger { ClaimResult = () => ToolCallClaim.Duplicate(ledgerId, ToolCallLedgerStatus.Succeeded, storedWire, null) };
+        var duplicateWire = await Respond(GovernedHandler(duplicateLedger, governanceEnabled: true, new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true }), Call("git.merge_pr", "{}"));
 
         resp.TryGetProperty("error", out _).ShouldBeFalse("a lost CAS AFTER the side effect committed must NOT surface a JSON-RPC protocol error");
         tool.CallCount.ShouldBe(1, "the side effect ran exactly once (the lost CAS is on the record, not the call)");
+        resp.GetProperty("result").GetRawText().ShouldBe(duplicateWire.GetProperty("result").GetRawText(), "focused CAS-lost replay must stay byte-identical to the established duplicate replay wire");
         resp.GetProperty("result").GetProperty("isError").GetBoolean().ShouldBeFalse();
         resp.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString().ShouldContain("merged", customMessage: "the recorded terminal is re-read and replayed verbatim");
+
+        var replayRead = ledger.TerminalReplayReads.ShouldHaveSingleItem("a lost CAS performs one exact focused replay read");
+        replayRead.LedgerId.ShouldBe(ledgerId);
+        replayRead.RunId.ShouldBe(ledger.Claims.ShouldHaveSingleItem().RunId);
+        replayRead.TeamId.ShouldBe(ledger.Claims.ShouldHaveSingleItem().TeamId);
+    }
+
+    [Fact]
+    public async Task Governance_ON_lost_CAS_with_a_missing_or_foreign_replay_row_fails_closed_with_the_existing_wire()
+    {
+        var ledgerId = Guid.NewGuid();
+        var ledger = new SpyLedger
+        {
+            ClaimResult = () => ToolCallClaim.Proceed(ledgerId),
+            OnRecordThrow = () => new ToolCallLedgerTransitionException("a concurrent transition won the race"),
+            TerminalReplayState = () => null,
+        };
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true, OnCall = (_, _) => Task.FromResult(AgentToolResult.Ok(Parse("""{"merged":true}"""), 14)) };
+
+        var result = (await Respond(GovernedHandler(ledger, governanceEnabled: true, tool), Call("git.merge_pr", "{}"))).GetProperty("result");
+
+        result.GetProperty("isError").GetBoolean().ShouldBeTrue();
+        result.GetProperty("content")[0].GetProperty("text").GetString().ShouldContain("This tool call previously failed.", customMessage: "missing, wrong-run and foreign rows remain indistinguishable and fail closed with the existing wire");
+        tool.CallCount.ShouldBe(1, "the side effect already ran before the record CAS was lost; replay failure must never run it again");
+    }
+
+    [Fact]
+    public async Task Governance_ON_lost_CAS_replay_database_fault_reaches_the_existing_visible_retry_boundary()
+    {
+        var ledger = new SpyLedger
+        {
+            ClaimResult = () => ToolCallClaim.Proceed(Guid.NewGuid()),
+            OnRecordThrow = () => new ToolCallLedgerTransitionException("a concurrent transition won the race"),
+            OnTerminalReplayReadThrow = () => new InvalidOperationException("transient Npgsql connection reset"),
+        };
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true, OnCall = (_, _) => Task.FromResult(AgentToolResult.Ok(Parse("""{"merged":true}"""), 14)) };
+
+        JsonElement response = default;
+        await Should.NotThrowAsync(async () => response = await Respond(GovernedHandler(ledger, governanceEnabled: true, tool), Call("git.merge_pr", "{}")));
+
+        var result = response.GetProperty("result");
+        result.GetProperty("isError").GetBoolean().ShouldBeTrue();
+        result.GetProperty("content")[0].GetProperty("text").GetString().ShouldContain("retry shortly", customMessage: "a DB fault is not misreported as a missing/failed receipt; it reaches the existing visible governance retry boundary");
+        tool.CallCount.ShouldBe(1, "the already-run side effect is never invoked a second time after a replay read fault");
     }
 
     // ── governance defensive boundary (a transient DB/chat fault degrades to a retryable result, never drops the connection) ──
