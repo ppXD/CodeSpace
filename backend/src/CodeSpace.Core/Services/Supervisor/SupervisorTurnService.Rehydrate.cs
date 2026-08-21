@@ -123,6 +123,7 @@ public sealed partial class SupervisorTurnService
         return new SupervisorTurnContext
         {
             Goal = goal,
+            SynthesisPromptBudgetChars = SupervisorSynthesisBudget.Normalize(goalConfig?.SynthesisPromptBudgetChars),
             SupervisorRunId = supervisorRunId,
             TeamId = teamId,
             CompletionRecital = await BuildCompletionRecitalAsync(supervisorRunId, teamId, cancellationToken).ConfigureAwait(false),

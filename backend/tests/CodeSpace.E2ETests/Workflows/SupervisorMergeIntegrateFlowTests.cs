@@ -100,6 +100,35 @@ public sealed class SupervisorMergeIntegrateFlowTests : IDisposable
         synthesisText.ShouldContain("+agent-b-edited-LINE", customMessage: "the synthesis prompt carried agent B's real unified-diff add line");
         synthesis.GetProperty("model").GetString().ShouldBe(WorkflowsTestSeed.PoolModelIdFor(DeterministicSynthLlmClient.ProviderTag),
             customMessage: "S6b: a blank profile model resolves to the team's POOL model for the synth provider — never the literal \"default\", never an env key");
+        synthesis.GetProperty("coverage").GetProperty("complete").GetBoolean().ShouldBeTrue("a small merge reaches synthesis byte-for-byte with complete coverage");
+    }
+
+    [Fact]
+    public async Task Large_parallel_diffs_are_fairly_bounded_with_durable_coverage()
+    {
+        if (!await GitReadyAsync()) return;
+
+        using var remote = new BareRemote();
+        var baseSha = await remote.SeedBaseAsync(new() { ["a.txt"] = "base-a\n", ["b.txt"] = "base-b\n" });
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var patchA = await remote.MakePatchAsync(baseSha, d => File.WriteAllText(Path.Combine(d, "a.txt"), new string('a', 8_000) + "\n"));
+        var patchB = await remote.MakePatchAsync(baseSha, d => File.WriteAllText(Path.Combine(d, "b.txt"), new string('b', 8_000) + "\n"));
+        var idA = await SeedAgentRunAsync(runId, teamId, "alpha", baseSha, patchA, "codespace/agent/a");
+        var idB = await SeedAgentRunAsync(runId, teamId, "beta", baseSha, patchB, "codespace/agent/b");
+
+        var outcome = JsonDocument.Parse(await ExecuteMergeRawWithBudgetAsync(runId, teamId, SupervisorSynthesisBudget.MinChars, idA, idB)).RootElement;
+        var synthesis = outcome.GetProperty("synthesis");
+        var coverage = synthesis.GetProperty("coverage");
+
+        coverage.GetProperty("emittedChars").GetInt32().ShouldBeLessThanOrEqualTo(SupervisorSynthesisBudget.MinChars, "the bound applies to the request; the deterministic fake adds its own response prefix");
+        synthesis.GetProperty("text").GetString().ShouldContain("EXCERPT — NOT the complete supervisor synthesis input");
+        coverage.GetProperty("complete").GetBoolean().ShouldBeFalse();
+        coverage.GetProperty("totalSources").GetInt32().ShouldBe(2);
+        coverage.GetProperty("includedSources").GetInt32().ShouldBe(2, "both agents receive a fair excerpt at the supported minimum budget");
+        coverage.GetProperty("shortenedSources").GetInt32().ShouldBe(2);
+        coverage.GetProperty("budgetChars").GetInt32().ShouldBe(SupervisorSynthesisBudget.MinChars);
     }
 
     [Fact]
@@ -762,6 +791,12 @@ public sealed class SupervisorMergeIntegrateFlowTests : IDisposable
         JsonDocument.Parse(await ExecuteMergeRawAsync(runId, teamId, integrate, agentRunIds)).RootElement.Clone();
 
     private async Task<string> ExecuteMergeRawAsync(Guid runId, Guid teamId, bool integrate, params Guid[] agentRunIds)
+        => await ExecuteMergeRawWithBudgetAsync(runId, teamId, SupervisorSynthesisBudget.DefaultChars, integrate, agentRunIds);
+
+    private async Task<string> ExecuteMergeRawWithBudgetAsync(Guid runId, Guid teamId, int synthesisPromptBudgetChars, params Guid[] agentRunIds) =>
+        await ExecuteMergeRawWithBudgetAsync(runId, teamId, synthesisPromptBudgetChars, integrate: true, agentRunIds);
+
+    private async Task<string> ExecuteMergeRawWithBudgetAsync(Guid runId, Guid teamId, int synthesisPromptBudgetChars, bool integrate, params Guid[] agentRunIds)
     {
         using var scope = _fixture.BeginScope();
         var executor = scope.Resolve<ISupervisorActionExecutor>();
@@ -769,6 +804,7 @@ public sealed class SupervisorMergeIntegrateFlowTests : IDisposable
         var context = new SupervisorTurnContext
         {
             Goal = Goal,
+            SynthesisPromptBudgetChars = synthesisPromptBudgetChars,
             SupervisorRunId = runId,
             TeamId = teamId,
             NodeId = NodeId,

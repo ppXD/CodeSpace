@@ -39,6 +39,15 @@ public class SupervisorGoalConfigParseTests
     }
 
     [Fact]
+    public void A_string_encoded_synthesis_budget_is_preserved_for_replay()
+    {
+        var config = AgentSupervisorNode.ReadGoalConfig(Bag(new { goal = "ship it", synthesisPromptBudgetChars = "64000" }));
+
+        config.ShouldNotBeNull();
+        config!.SynthesisPromptBudgetChars.ShouldBe(64_000);
+    }
+
+    [Fact]
     public void An_absent_review_mode_defaults_to_None()
     {
         var config = AgentSupervisorNode.ReadGoalConfig(Bag(new { goal = "ship it" }));

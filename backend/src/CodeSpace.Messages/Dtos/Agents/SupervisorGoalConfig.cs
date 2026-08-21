@@ -21,6 +21,9 @@ public sealed record SupervisorGoalConfig
     /// <summary>The objective the supervisor pursues across its turns — folded into the LLM decider's prompt. The single thing an operator must author.</summary>
     public string? Goal { get; init; }
 
+    /// <summary>The frozen maximum character count for the optional merge-synthesis model input. New projected runs stamp a resolved value; null/invalid legacy authoring normalizes to <see cref="SupervisorSynthesisBudget.DefaultChars"/>.</summary>
+    public int? SynthesisPromptBudgetChars { get; init; }
+
     /// <summary>Optional allow-list of harness / agent kinds the supervisor may spawn (e.g. <c>["codex-cli"]</c>). Null / empty = no restriction (the harness default). RESERVED — stored + parsed; the spawn-time enforcement gate is a follow-up.</summary>
     public IReadOnlyList<string>? AllowedAgents { get; init; }
 

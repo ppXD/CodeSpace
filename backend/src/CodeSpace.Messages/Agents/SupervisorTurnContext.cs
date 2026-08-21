@@ -21,6 +21,9 @@ public sealed record SupervisorTurnContext
     /// <summary>The run-level goal the supervisor is pursuing (carried from node config).</summary>
     public string Goal { get; init; } = "";
 
+    /// <summary>The replay-frozen bound for the optional merge-synthesis prompt. It limits only the enrichment model input; integration, completion, and the durable decision tape continue to consume their authoritative full data.</summary>
+    public int SynthesisPromptBudgetChars { get; init; } = SupervisorSynthesisBudget.DefaultChars;
+
     /// <summary>
     /// The supervisor run id (the WorkflowRun id) — the executor links spawned agent runs + their AgentRun waits
     /// to it (E3). Carried so the executor stays a pure-of-engine service (Rule 16). <see cref="Guid.Empty"/> in a

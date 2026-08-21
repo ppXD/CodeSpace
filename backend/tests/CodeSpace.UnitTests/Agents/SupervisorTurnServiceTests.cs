@@ -59,6 +59,18 @@ public class SupervisorTurnServiceTests
         context.InFlight!.DecisionKind.ShouldBe(SupervisorDecisionKinds.Stop);
     }
 
+    [Theory]
+    [InlineData(null, SupervisorSynthesisBudget.DefaultChars)]
+    [InlineData(1, SupervisorSynthesisBudget.MinChars)]
+    [InlineData(64000, 64000)]
+    public async Task Rehydrate_carries_the_normalized_synthesis_budget(int? authored, int expected)
+    {
+        var context = await Service(new FakeSupervisorDecisionLog()).RehydrateFromDecisionLogAsync(
+            _runId, _teamId, "sup", "goal", new SupervisorGoalConfig { SynthesisPromptBudgetChars = authored }, CancellationToken.None);
+
+        context.SynthesisPromptBudgetChars.ShouldBe(expected);
+    }
+
     // ── The turn loop: turn 1 plan → park; turn 2 stop → finish ──────────────────────
 
     [Fact]
