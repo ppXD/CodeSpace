@@ -235,6 +235,27 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task Routed_dedup_never_returns_a_row_while_its_only_location_is_claimed_for_deletion()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        await SeedRouteAsync(teamId, await SeedProfileAsync(teamId, NewRoot()));
+        var content = Encoding.UTF8.GetBytes(new string('q', 20_000));
+        var first = await PutAsync(teamId, content);
+        using (var claimScope = _fixture.BeginScope())
+        {
+            var db = claimScope.Resolve<CodeSpaceDbContext>();
+            var location = await db.ArtifactLocation.SingleAsync(value => value.TeamId == teamId);
+            await RecordLocationStateAsync(db, location, ArtifactLocationState.Deleting);
+        }
+
+        var failure = await Should.ThrowAsync<ArtifactStorageDestinationUnavailableException>(() => PutAsync(teamId, content));
+
+        failure.TransferProblem.ShouldNotBeNull("a write may retry after the purge settles, but it must never receive the id whose bytes are being removed");
+        using var verify = _fixture.BeginScope();
+        (await verify.Resolve<CodeSpaceDbContext>().WorkflowArtifact.CountAsync(value => value.TeamId == teamId)).ShouldBe(1);
+    }
+
+    [Fact]
     public async Task A_purged_routed_object_can_be_stored_again_and_read_through_its_recorded_revision()
     {
         // The end-to-end a routed purge needs to exist at all. Reclaiming the bytes without this is data loss with

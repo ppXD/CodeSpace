@@ -9,39 +9,19 @@ public sealed partial class ArtifactCasRuntimeCoordinator
 {
     public async Task<ArtifactCasPurgeResult> PurgeAsync(ArtifactCasPurgeRequest request, CancellationToken cancellationToken)
     {
-        var timeout = Validate(request);
-        var claimed = await ClaimPurgeAsync(request, cancellationToken).ConfigureAwait(false);
-        if (claimed.Problem != null) return new ArtifactCasPurgeResult.Rejected(claimed.Problem);
-        if (claimed.Location!.State == ArtifactLocationState.Purged)
-            return new ArtifactCasPurgeResult.Purged(claimed.Location.Id, claimed.Location.Revision, true);
-
-        var activation = await OpenDriverAsync(new DriverActivationRequest(request.TeamId, claimed.Location.ProfileId,
-            claimed.Location.ProfileRevision, StorageProfileEligibility.Read, timeout, StorageProviderCapabilities.Delete), cancellationToken).ConfigureAwait(false);
-        if (activation.Problem != null) return new ArtifactCasPurgeResult.Rejected(activation.Problem);
-
-        StorageRuntimeDriverLease? lease = activation.Lease!;
-        try
+        var claim = await ClaimAsync(request, cancellationToken).ConfigureAwait(false);
+        return claim switch
         {
-            var deletion = await InvokeAsync(token => lease.Driver.DeleteAsync(new ArtifactStorageDeleteRequest(claimed.Location.ObjectKey)
-            {
-                ExpectedETag = claimed.Location.ProviderETag,
-                ExpectedVersion = claimed.Location.ProviderObjectVersion,
-            }, token), timeout, cancellationToken, lease).ConfigureAwait(false);
-            if (deletion.Problem != null) return new ArtifactCasPurgeResult.Rejected(deletion.Problem);
-            if (deletion.Timeout) return new ArtifactCasPurgeResult.Rejected(Problem(ArtifactCasProblemCode.ProviderTimeout, true));
-            if (deletion.Value?.Error is { Code: not ArtifactStorageErrorCode.Missing } error)
-                return new ArtifactCasPurgeResult.Rejected(Map(error, readMissing: true));
-
-            return await FinalizePurgeAsync(request, claimed.Location, cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            if (lease != null) await DisposeLeaseQuietlyAsync(lease).ConfigureAwait(false);
-        }
+            ArtifactCasPurgeClaimResult.Claimed claimed => await DeleteAsync(claimed.Claim, cancellationToken).ConfigureAwait(false),
+            ArtifactCasPurgeClaimResult.Purged purged => new ArtifactCasPurgeResult.Purged(purged.LocationId, purged.LocationRevision, true),
+            ArtifactCasPurgeClaimResult.Rejected rejected => new ArtifactCasPurgeResult.Rejected(rejected.Problem),
+            _ => new ArtifactCasPurgeResult.Rejected(Problem(ArtifactCasProblemCode.ProviderFailure)),
+        };
     }
 
-    private async Task<PurgeClaim> ClaimPurgeAsync(ArtifactCasPurgeRequest request, CancellationToken cancellationToken)
+    public async Task<ArtifactCasPurgeClaimResult> ClaimAsync(ArtifactCasPurgeRequest request, CancellationToken cancellationToken)
     {
+        var timeout = Validate(request);
         await using var db = CreateDb();
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         var locations = await db.ArtifactLocation.FromSqlInterpolated($"""
@@ -52,47 +32,120 @@ public sealed partial class ArtifactCasRuntimeCoordinator
             FOR UPDATE
             """).ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        if (locations.Count == 0) return Reject(ArtifactCasProblemCode.ArtifactMissing);
-        if (locations.Count != 1) return Reject(ArtifactCasProblemCode.MultipleLocationsUnsupported);
+        if (locations.Count == 0) return ClaimRejected(ArtifactCasProblemCode.ArtifactMissing);
+        if (locations.Count != 1) return ClaimRejected(ArtifactCasProblemCode.MultipleLocationsUnsupported);
         var location = locations[0];
-        if (location.State is not (ArtifactLocationState.Available or ArtifactLocationState.Deleting or ArtifactLocationState.Purged))
-            return Reject(ArtifactCasProblemCode.LocationUnavailable);
+        if (location.State == ArtifactLocationState.Purged)
+            return new ArtifactCasPurgeClaimResult.Purged(location.Id, location.Revision);
+        if (location.State is not (ArtifactLocationState.Available or ArtifactLocationState.Deleting))
+            return ClaimRejected(ArtifactCasProblemCode.LocationUnavailable);
         var profile = await db.StorageProfileRevision.AsNoTracking()
             .Where(value => value.TeamId == request.TeamId && value.Id == location.StorageProfileRevisionId)
             .Select(value => new { value.StorageProfileId, value.Revision })
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-        if (profile == null) return Reject(ArtifactCasProblemCode.ProfileRevisionMissing);
-        if (location.State == ArtifactLocationState.Available)
-        {
-            var now = await DatabaseClockAsync(db, cancellationToken).ConfigureAwait(false);
-            location.State = ArtifactLocationState.Deleting;
-            location.Revision++;
-            location.LastErrorCode = null;
-            location.LastErrorMessage = null;
-            location.LastModifiedDate = now;
-            location.LastModifiedBy = request.ActorId;
-            db.ArtifactLocationEvent.Add(PurgeEvent(location, request.ActorId, now));
-            await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        }
+        if (profile == null) return ClaimRejected(ArtifactCasProblemCode.ProfileRevisionMissing);
 
-        return new PurgeClaim(new PurgeLocation
+        var now = await DatabaseClockAsync(db, cancellationToken).ConfigureAwait(false);
+        location.State = ArtifactLocationState.Deleting;
+        location.Revision++;
+        location.LastErrorCode = null;
+        location.LastErrorMessage = null;
+        location.LastModifiedDate = now;
+        location.LastModifiedBy = request.ActorId;
+        db.ArtifactLocationEvent.Add(PurgeEvent(location, request.ActorId, now));
+        await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+
+        return new ArtifactCasPurgeClaimResult.Claimed(new ArtifactCasPurgeClaim
         {
-            Id = location.Id, ProfileId = profile.StorageProfileId, ProfileRevision = profile.Revision,
+            TeamId = request.TeamId, ArtifactObjectId = request.ArtifactObjectId,
+            LocationId = location.Id, LocationRevision = location.Revision,
+            StorageProfileId = profile.StorageProfileId, StorageProfileRevision = profile.Revision,
             ObjectKey = location.ObjectKey, ProviderETag = location.ProviderETag,
-            ProviderObjectVersion = location.ProviderObjectVersion, State = location.State, Revision = location.Revision,
-        }, null);
+            ProviderObjectVersion = location.ProviderObjectVersion, ActorId = request.ActorId, OperationTimeout = timeout,
+        });
     }
 
-    private async Task<ArtifactCasPurgeResult> FinalizePurgeAsync(ArtifactCasPurgeRequest request, PurgeLocation claimed, CancellationToken cancellationToken)
+    public async Task<ArtifactCasPurgeResult> DeleteAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken)
+    {
+        Validate(claim);
+        if (!await ClaimIsCurrentAsync(claim, cancellationToken).ConfigureAwait(false))
+            return new ArtifactCasPurgeResult.Rejected(Problem(ArtifactCasProblemCode.StaleWorker, true));
+        var activation = await OpenDriverAsync(new DriverActivationRequest(claim.TeamId, claim.StorageProfileId,
+            claim.StorageProfileRevision, StorageProfileEligibility.Read, claim.OperationTimeout, StorageProviderCapabilities.Delete), cancellationToken).ConfigureAwait(false);
+        if (activation.Problem != null) return new ArtifactCasPurgeResult.Rejected(activation.Problem);
+
+        StorageRuntimeDriverLease? lease = activation.Lease!;
+        try
+        {
+            var deletion = await InvokeAsync(token => lease.Driver.DeleteAsync(new ArtifactStorageDeleteRequest(claim.ObjectKey)
+            {
+                ExpectedETag = claim.ProviderETag, ExpectedVersion = claim.ProviderObjectVersion,
+            }, token), claim.OperationTimeout, cancellationToken, lease).ConfigureAwait(false);
+            if (deletion.Problem != null) return new ArtifactCasPurgeResult.Rejected(deletion.Problem);
+            if (deletion.Timeout) return new ArtifactCasPurgeResult.Rejected(Problem(ArtifactCasProblemCode.ProviderTimeout, true));
+            if (deletion.Value?.Error is { Code: not ArtifactStorageErrorCode.Missing } error)
+                return new ArtifactCasPurgeResult.Rejected(Map(error, readMissing: true));
+
+            return await FinalizePurgeAsync(claim, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (lease != null) await DisposeLeaseQuietlyAsync(lease).ConfigureAwait(false);
+        }
+    }
+
+    public async Task<bool> ReleaseAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken)
+    {
+        Validate(claim);
+        await using var db = CreateDb();
+        var location = await db.ArtifactLocation.SingleOrDefaultAsync(value => value.TeamId == claim.TeamId
+            && value.Id == claim.LocationId && value.ArtifactObjectId == claim.ArtifactObjectId
+            && value.ObjectKey == claim.ObjectKey && value.ProviderETag == claim.ProviderETag
+            && value.ProviderObjectVersion == claim.ProviderObjectVersion, cancellationToken).ConfigureAwait(false);
+        if (location == null || location.State != ArtifactLocationState.Deleting || location.Revision != claim.LocationRevision) return false;
+
+        var now = await DatabaseClockAsync(db, cancellationToken).ConfigureAwait(false);
+        location.State = ArtifactLocationState.Available;
+        location.Revision++;
+        location.LastErrorCode = null;
+        location.LastErrorMessage = null;
+        location.LastModifiedDate = now;
+        location.LastModifiedBy = claim.ActorId;
+        db.ArtifactLocationEvent.Add(PurgeEvent(location, claim.ActorId, now));
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (DbUpdateConcurrencyException) { return false; }
+    }
+
+    private async Task<bool> ClaimIsCurrentAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken)
     {
         await using var db = CreateDb();
-        var location = await db.ArtifactLocation.SingleOrDefaultAsync(value => value.TeamId == request.TeamId
-            && value.Id == claimed.Id && value.ArtifactObjectId == request.ArtifactObjectId, cancellationToken).ConfigureAwait(false);
+        var profileRevisionId = await db.StorageProfileRevision.AsNoTracking()
+            .Where(value => value.TeamId == claim.TeamId && value.StorageProfileId == claim.StorageProfileId
+                && value.Revision == claim.StorageProfileRevision)
+            .Select(value => (Guid?)value.Id).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        return profileRevisionId != null && await db.ArtifactLocation.AsNoTracking().AnyAsync(value => value.TeamId == claim.TeamId
+            && value.Id == claim.LocationId && value.ArtifactObjectId == claim.ArtifactObjectId
+            && value.StorageProfileRevisionId == profileRevisionId && value.ObjectKey == claim.ObjectKey
+            && value.ProviderETag == claim.ProviderETag && value.ProviderObjectVersion == claim.ProviderObjectVersion
+            && value.State == ArtifactLocationState.Deleting && value.Revision == claim.LocationRevision, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<ArtifactCasPurgeResult> FinalizePurgeAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken)
+    {
+        await using var db = CreateDb();
+        var location = await db.ArtifactLocation.SingleOrDefaultAsync(value => value.TeamId == claim.TeamId
+            && value.Id == claim.LocationId && value.ArtifactObjectId == claim.ArtifactObjectId
+            && value.ObjectKey == claim.ObjectKey && value.ProviderETag == claim.ProviderETag
+            && value.ProviderObjectVersion == claim.ProviderObjectVersion, cancellationToken).ConfigureAwait(false);
         if (location == null) return new ArtifactCasPurgeResult.Rejected(Problem(ArtifactCasProblemCode.ArtifactMissing));
         if (location.State == ArtifactLocationState.Purged)
             return new ArtifactCasPurgeResult.Purged(location.Id, location.Revision, true);
-        if (location.State != ArtifactLocationState.Deleting || location.Revision != claimed.Revision)
+        if (location.State != ArtifactLocationState.Deleting || location.Revision != claim.LocationRevision)
             return new ArtifactCasPurgeResult.Rejected(Problem(ArtifactCasProblemCode.StaleWorker, true));
 
         var now = await DatabaseClockAsync(db, cancellationToken).ConfigureAwait(false);
@@ -107,8 +160,8 @@ public sealed partial class ArtifactCasRuntimeCoordinator
         location.LastErrorCode = null;
         location.LastErrorMessage = null;
         location.LastModifiedDate = now;
-        location.LastModifiedBy = request.ActorId;
-        db.ArtifactLocationEvent.Add(PurgeEvent(location, request.ActorId, now));
+        location.LastModifiedBy = claim.ActorId;
+        db.ArtifactLocationEvent.Add(PurgeEvent(location, claim.ActorId, now));
         try
         {
             await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
@@ -139,18 +192,15 @@ public sealed partial class ArtifactCasRuntimeCoordinator
         return ValidateTimeout(request.OperationTimeout);
     }
 
-    private static PurgeClaim Reject(ArtifactCasProblemCode code) => new(null, Problem(code));
-
-    private sealed record PurgeClaim(PurgeLocation? Location, ArtifactCasProblem? Problem);
-    private sealed record PurgeLocation
+    private static void Validate(ArtifactCasPurgeClaim claim)
     {
-        public required Guid Id { get; init; }
-        public required Guid ProfileId { get; init; }
-        public required int ProfileRevision { get; init; }
-        public required string ObjectKey { get; init; }
-        public required string? ProviderETag { get; init; }
-        public required string? ProviderObjectVersion { get; init; }
-        public required ArtifactLocationState State { get; init; }
-        public required long Revision { get; init; }
+        ArgumentNullException.ThrowIfNull(claim);
+        if (claim.TeamId == Guid.Empty || claim.ArtifactObjectId == Guid.Empty || claim.LocationId == Guid.Empty
+            || claim.LocationRevision <= 0 || claim.StorageProfileId == Guid.Empty || claim.StorageProfileRevision <= 0
+            || string.IsNullOrWhiteSpace(claim.ObjectKey) || claim.ActorId == Guid.Empty)
+            throw new ArgumentException("A purge claim requires exact team, object, location, revision, profile, key and actor coordinates.", nameof(claim));
+        ValidateTimeout(claim.OperationTimeout);
     }
+
+    private static ArtifactCasPurgeClaimResult ClaimRejected(ArtifactCasProblemCode code) => new ArtifactCasPurgeClaimResult.Rejected(Problem(code));
 }
