@@ -24,6 +24,32 @@ public static class ToolCallTimelineMap
     public const string Key = "tool-calls";
 
     public static RunTimelineEvent ToEvent(ToolCallLedger call, IReadOnlyDictionary<Guid, string?> nodeByAgent) =>
+        ToEvent(new ToolCallTimelineObservation
+        {
+            Id = call.Id,
+            AgentRunId = call.AgentRunId,
+            ToolKind = call.ToolKind,
+            Status = call.Status,
+            Error = call.Error,
+            ResultDetail = ReadResultDetail(call.ResultJson),
+            CreatedDate = call.CreatedDate,
+            NodeId = nodeByAgent.TryGetValue(call.AgentRunId, out var node) ? node : null,
+        });
+
+    internal static RunTimelineEvent ToEvent(ToolCallTimelineRow call) =>
+        ToEvent(new ToolCallTimelineObservation
+        {
+            Id = call.Id,
+            AgentRunId = call.AgentRunId,
+            ToolKind = call.ToolKind,
+            Status = Enum.TryParse<ToolCallLedgerStatus>(call.Status, out var status) ? status : (ToolCallLedgerStatus)int.MaxValue,
+            Error = call.Error,
+            ResultDetail = call.ResultDetail,
+            CreatedDate = call.CreatedDate,
+            NodeId = call.NodeId,
+        });
+
+    private static RunTimelineEvent ToEvent(ToolCallTimelineObservation call) =>
         new()
         {
             Id = $"tool-{call.Id:N}",
@@ -34,7 +60,7 @@ public static class ToolCallTimelineMap
             Level = LevelFor(call.Status),
             OccurredAt = call.CreatedDate,    // the ledger's chronological key (there is no Sequence column)
             Order = 0,                        // no per-row monotonic cursor — the same-tick tie-break falls to Id
-            NodeId = nodeByAgent.TryGetValue(call.AgentRunId, out var node) ? node : null,
+            NodeId = call.NodeId,
             AgentRunId = call.AgentRunId.ToString(),
             SourceKey = Key,
         };
@@ -71,9 +97,9 @@ public static class ToolCallTimelineMap
     }
 
     /// <summary>A failed / denied / expired call surfaces its recorded reason; a landed success surfaces a legible line off its result (the PR ref, the command's summary) when the tool recorded one; everything else carries none.</summary>
-    private static string? SummaryFor(ToolCallLedger call) => call.Status switch
+    private static string? SummaryFor(ToolCallTimelineObservation call) => call.Status switch
     {
-        ToolCallLedgerStatus.Succeeded => ReadResultDetail(call.ResultJson),
+        ToolCallLedgerStatus.Succeeded => call.ResultDetail,
         ToolCallLedgerStatus.Failed or ToolCallLedgerStatus.Denied or ToolCallLedgerStatus.Expired => call.Error,
         _ => null,
     };
@@ -138,4 +164,16 @@ public static class ToolCallTimelineMap
         ToolCallLedgerStatus.Expired => TimelineSeverity.Warning,
         _ => TimelineSeverity.Info,
     };
+
+    private sealed class ToolCallTimelineObservation
+    {
+        public Guid Id { get; init; }
+        public Guid AgentRunId { get; init; }
+        public string ToolKind { get; init; } = default!;
+        public ToolCallLedgerStatus Status { get; init; }
+        public string? Error { get; init; }
+        public string? ResultDetail { get; init; }
+        public DateTimeOffset CreatedDate { get; init; }
+        public string? NodeId { get; init; }
+    }
 }
