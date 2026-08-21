@@ -30,14 +30,11 @@ namespace CodeSpace.Core.Services.Agents;
 /// contributes no seam. <c>AgentTranscriptSpoolTests</c> pins all of this differentially against a frozen
 /// transcription of the pre-change builder + join.</para>
 ///
-/// <para><b>What this does NOT fix.</b> Retention is bounded; the COMPLETION peak is reduced, not removed.
-/// <see cref="IArtifactStore.PutAsync"/> takes whole bytes, so <see cref="ReadAllAsync"/> materializes a spilled
-/// transcript once (and the store's routed write path copies it once more) — ~1–2× at a single instant instead of
-/// ~5× held for the whole run across every concurrent run. A transcript large enough to exhaust the heap in that
-/// one allocation still can; removing it needs a STREAMING put on the artifact plane, which does not exist at any
-/// of its three layers today (<c>IArtifactStore.PutAsync</c>, <c>ArtifactStore.PlaceOffloadedAsync</c>, and
-/// <c>IArtifactBlobBackend.WriteAsync</c> are all whole-payload, and the routed retry loop is written around a
-/// re-readable in-memory payload). That is a change to the storage plane, not to this accumulator.</para>
+/// <para><b>Completion handoff.</b> A spilled spool is sealed before artifact placement: its writer is flushed and
+/// closed, mutation stops, and <see cref="IArtifactWriteSource.OpenReadAsync"/> returns a fresh file handle for the
+/// store's identity pass and every placement retry. The executor therefore never calls <see cref="ReadAllAsync"/>
+/// for spilled content. That whole-byte method remains only as a compatibility/test read, while production completion
+/// stays O(inline threshold + fixed copy buffers) instead of allocating O(transcript length).</para>
 ///
 /// <para><b>Where the spill lives.</b> Inside the RUN'S OWN spool directory (<c>AgentRunExecutor.TranscriptSpillDirectory</c>),
 /// never the system temp directory — and that placement is load-bearing twice over. It is the operator's configured
@@ -55,7 +52,7 @@ namespace CodeSpace.Core.Services.Agents;
 /// <para>Single-threaded by contract: one spool belongs to one run's line-by-line accumulation (the executor's
 /// PersistLineAsync), mirroring the sequential fold and event writer next to it.</para>
 /// </summary>
-public sealed class AgentTranscriptSpool : IAsyncDisposable
+public sealed class AgentTranscriptSpool : IArtifactWriteSource, IAsyncDisposable
 {
     private const int SpillBufferBytes = 64 * 1024;
 
@@ -67,7 +64,9 @@ public sealed class AgentTranscriptSpool : IAsyncDisposable
     private string? _spillPath;
     private FileStream? _spill;
     private bool _spilled;
+    private bool _sealed;
     private bool _disposed;
+    private int _openReadCount;
 
     public AgentTranscriptSpool(string spillDirectory) : this(spillDirectory, ArtifactStoreConfig.InlineThresholdBytes) { }
 
@@ -90,6 +89,9 @@ public sealed class AgentTranscriptSpool : IAsyncDisposable
     /// <summary>The spill file backing this transcript, or null while it is still retained — so a test can prove dispose removes it.</summary>
     internal string? SpillPath => _spillPath;
 
+    /// <summary>Test-visible count of fresh sealed read handles. Production correctness does not depend on it.</summary>
+    internal int OpenReadCount => _openReadCount;
+
     /// <summary>The transcript as text, valid only while it fits the retained budget AND the spool is still alive. Byte-identical to what the pre-change <c>StringBuilder.ToString()</c> produced.</summary>
     public string RetainedText()
     {
@@ -104,6 +106,7 @@ public sealed class AgentTranscriptSpool : IAsyncDisposable
     /// <summary>Append one already-redacted raw line, terminated exactly as <c>StringBuilder.AppendLine</c> terminated it. Emits a pending revise seam first when there is already content for it to separate.</summary>
     public async ValueTask AppendLineAsync(string line, CancellationToken cancellationToken)
     {
+        EnsureWritable();
         if (_pendingSeam is { } seam)
         {
             _pendingSeam = null;
@@ -119,16 +122,69 @@ public sealed class AgentTranscriptSpool : IAsyncDisposable
     /// Deferred rather than written now, because the pre-change join emitted NO seam for a round that produced
     /// nothing — neither before it (nothing yet to separate) nor after it (nothing arrived to separate from).
     /// </summary>
-    public void MarkSeam(string seam) => _pendingSeam = seam;
+    public void MarkSeam(string seam)
+    {
+        EnsureWritable();
+        _pendingSeam = seam;
+    }
 
-    /// <summary>The whole transcript's UTF-8 bytes — what the artifact store stores. The spilled read is the one place the full content is materialized; it happens once, at completion, instead of being held for the run.</summary>
+    /// <summary>
+    /// Flush and close the spill writer, freezing the exact byte range that artifact identity admission may reopen.
+    /// Only spilled spools are stream sources; retained content continues through <see cref="RetainedText"/>.
+    /// </summary>
+    public async Task SealAsync(CancellationToken cancellationToken)
+    {
+        EnsureNotDisposed();
+        if (!_spilled) throw new InvalidOperationException("Only a spilled transcript can be sealed as an artifact stream source.");
+        if (_sealed) return;
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var spill = _spill ?? throw new InvalidOperationException("The spilled transcript has no writable file to seal.");
+        await spill.FlushAsync(cancellationToken).ConfigureAwait(false);
+        if (spill.Length != _lengthBytes)
+            throw new InvalidDataException($"Transcript spill length mismatch before seal: expected {_lengthBytes} bytes, observed {spill.Length}.");
+        await spill.DisposeAsync().ConfigureAwait(false);
+        _spill = null;
+        _sealed = true;
+    }
+
+    /// <summary>Open a new read handle over immutable spilled bytes. Refuses live/unsealed and retained spools.</summary>
+    public ValueTask<Stream> OpenReadAsync(CancellationToken cancellationToken)
+    {
+        EnsureNotDisposed();
+        if (!_spilled) throw new InvalidOperationException("A retained transcript is not an artifact stream source.");
+        if (!_sealed) throw new InvalidOperationException("The spilled transcript must be sealed before it can be opened for artifact storage.");
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var path = _spillPath ?? throw new InvalidOperationException("The sealed transcript has no spill path.");
+        var content = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, SpillBufferBytes, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var observedLength = content.Length;
+        if (observedLength != _lengthBytes)
+        {
+            content.Dispose();
+            throw new InvalidDataException($"Transcript spill length changed after seal: expected {_lengthBytes} bytes, observed {observedLength}.");
+        }
+
+        _openReadCount++;
+        return ValueTask.FromResult<Stream>(content);
+    }
+
+    /// <summary>The whole transcript's UTF-8 bytes for compatibility/tests. Production completion streams a sealed spill through <see cref="IArtifactWriteSource"/> and does not call this method.</summary>
     public async Task<byte[]> ReadAllAsync(CancellationToken cancellationToken)
     {
         EnsureNotDisposed();
 
-        if (_spill is null) return Encoding.UTF8.GetBytes(_retained.ToString());
+        if (!_spilled) return Encoding.UTF8.GetBytes(_retained.ToString());
 
-        await _spill.FlushAsync(cancellationToken).ConfigureAwait(false);
+        if (_sealed)
+        {
+            await using var content = await OpenReadAsync(cancellationToken).ConfigureAwait(false);
+            var sealedBytes = new byte[checked((int)_lengthBytes)];
+            await content.ReadExactlyAsync(sealedBytes, cancellationToken).ConfigureAwait(false);
+            return sealedBytes;
+        }
+
+        await _spill!.FlushAsync(cancellationToken).ConfigureAwait(false);
         _spill.Seek(0, SeekOrigin.Begin);
 
         var bytes = new byte[_spill.Length];
@@ -191,6 +247,12 @@ public sealed class AgentTranscriptSpool : IAsyncDisposable
     private void EnsureNotDisposed()
     {
         if (_disposed)
-            throw new ObjectDisposedException(nameof(AgentTranscriptSpool), $"The transcript spool was disposed; read it with {nameof(RetainedText)}/{nameof(ReadAllAsync)} BEFORE it leaves scope — afterwards its spill file is gone and only a falsely empty transcript is left to return.");
+            throw new ObjectDisposedException(nameof(AgentTranscriptSpool), $"The transcript spool was disposed; attach/read it with {nameof(RetainedText)}/{nameof(SealAsync)}/{nameof(OpenReadAsync)} BEFORE it leaves scope — afterwards its spill file is gone and only a falsely empty transcript is left to return.");
+    }
+
+    private void EnsureWritable()
+    {
+        EnsureNotDisposed();
+        if (_sealed) throw new InvalidOperationException("The transcript spool is sealed and can no longer accept lines or revise seams.");
     }
 }
