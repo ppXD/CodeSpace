@@ -48,8 +48,23 @@ public sealed class WorkflowRunModelCallReader : IWorkflowRunModelCallReader, IS
             .ThenBy(value => value.Id)
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
+        var attemptIds = attempts.Select(value => value.Id).ToArray();
+        var captures = attemptIds.Length == 0 ? [] : await _db.WorkflowRunModelCallBodyCapture.AsNoTracking()
+            .Where(value => attemptIds.Contains(value.ModelCallAttemptId) && value.WorkflowRunId == runId && value.TeamId == teamId)
+            .Select(value => new BodyCaptureStateRow
+            {
+                AttemptId = value.ModelCallAttemptId,
+                BodyKind = value.BodyKind,
+                State = value.State,
+                ArtifactId = value.ArtifactId,
+                MaterializationFormat = value.MaterializationFormat,
+                MaterializationAttemptCount = value.MaterializationAttemptCount,
+                LeaseIsLive = value.LeaseOwnerId != null && value.LeaseExpiresAt > DateTimeOffset.UtcNow,
+                LastErrorCode = value.LastErrorCode,
+            })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        return Detail(call, attempts);
+        return Detail(call, attempts, captures);
     }
 
     public async Task<WorkflowRunModelCallBodyPage?> ReadBodyAsync(WorkflowRunModelCallBodyReadRequest request, CancellationToken cancellationToken)
@@ -217,36 +232,44 @@ public sealed class WorkflowRunModelCallReader : IWorkflowRunModelCallReader, IS
         };
     }
 
-    private static WorkflowRunModelCallDetailMetadata Detail(WorkflowRunModelCall call, IReadOnlyList<WorkflowRunModelCallAttempt> attempts) => new()
+    private static WorkflowRunModelCallDetailMetadata Detail(WorkflowRunModelCall call, IReadOnlyList<WorkflowRunModelCallAttempt> attempts,
+        IReadOnlyList<BodyCaptureStateRow> captures)
     {
-        WorkflowRunModelCallId = call.Id,
-        RunId = call.WorkflowRunId,
-        CallOrdinal = call.CallOrdinal,
-        NodeId = call.NodeId,
-        IterationKey = call.IterationKey,
-        WorkPlanId = call.WorkPlanId,
-        PlanVersion = call.PlanVersion,
-        WorkUnitId = call.WorkUnitId,
-        WorkUnitContractHash = call.WorkUnitContractHash,
-        ExecutionAttemptId = call.ExecutionAttemptId,
-        ExecutionAttemptOrdinal = call.ExecutionAttemptOrdinal,
-        ExecutionGeneration = call.ExecutionGeneration,
-        Purpose = call.Purpose,
-        RequestedProvider = call.RequestedProvider,
-        RequestedModel = call.RequestedModel,
-        RequestedModelRowId = call.RequestedModelRowId,
-        SelectionPolicy = call.SelectionPolicy,
-        SourceKind = call.SourceKind,
-        SourceCorrelationId = call.SourceCorrelationId,
-        CaptureSource = call.CaptureSource,
-        CaptureCompleteness = call.CaptureCompleteness,
-        SchemaVersion = call.SchemaVersion,
-        CreatedAt = call.CreatedDate,
-        Bodies = [Descriptor(WorkflowRunModelCallBody.LogicalRequest, null, call.RequestArtifactId, call.CaptureCompleteness)],
-        Attempts = attempts.Select(Attempt).ToList(),
-    };
+        var projectedCaptures = captures.Select(Project).ToList();
+        var byIdentity = projectedCaptures.ToDictionary(value => new BodyCaptureIdentity(value.AttemptId, value.BodyKind));
+        var logicalCapture = AggregateLogicalRequest(projectedCaptures, call.RequestArtifactId);
+        return new WorkflowRunModelCallDetailMetadata
+        {
+            WorkflowRunModelCallId = call.Id,
+            RunId = call.WorkflowRunId,
+            CallOrdinal = call.CallOrdinal,
+            NodeId = call.NodeId,
+            IterationKey = call.IterationKey,
+            WorkPlanId = call.WorkPlanId,
+            PlanVersion = call.PlanVersion,
+            WorkUnitId = call.WorkUnitId,
+            WorkUnitContractHash = call.WorkUnitContractHash,
+            ExecutionAttemptId = call.ExecutionAttemptId,
+            ExecutionAttemptOrdinal = call.ExecutionAttemptOrdinal,
+            ExecutionGeneration = call.ExecutionGeneration,
+            Purpose = call.Purpose,
+            RequestedProvider = call.RequestedProvider,
+            RequestedModel = call.RequestedModel,
+            RequestedModelRowId = call.RequestedModelRowId,
+            SelectionPolicy = call.SelectionPolicy,
+            SourceKind = call.SourceKind,
+            SourceCorrelationId = call.SourceCorrelationId,
+            CaptureSource = call.CaptureSource,
+            CaptureCompleteness = call.CaptureCompleteness,
+            SchemaVersion = call.SchemaVersion,
+            CreatedAt = call.CreatedDate,
+            Bodies = [Descriptor(WorkflowRunModelCallBody.LogicalRequest, null, call.RequestArtifactId, call.CaptureCompleteness, logicalCapture)],
+            Attempts = attempts.Select(value => Attempt(value, byIdentity)).ToList(),
+        };
+    }
 
-    private static WorkflowRunModelCallAttemptMetadata Attempt(WorkflowRunModelCallAttempt attempt) => new()
+    private static WorkflowRunModelCallAttemptMetadata Attempt(WorkflowRunModelCallAttempt attempt,
+        IReadOnlyDictionary<BodyCaptureIdentity, BodyCaptureProjection> captures) => new()
     {
         AttemptId = attempt.Id,
         AttemptOrdinal = attempt.AttemptOrdinal,
@@ -285,19 +308,84 @@ public sealed class WorkflowRunModelCallReader : IWorkflowRunModelCallReader, IS
         Bodies =
         [
             Descriptor(WorkflowRunModelCallBody.AttemptRequest, attempt.Id, attempt.RequestArtifactId, attempt.CaptureCompleteness),
-            Descriptor(WorkflowRunModelCallBody.AttemptResponse, attempt.Id, attempt.ResponseArtifactId, attempt.CaptureCompleteness),
-            Descriptor(WorkflowRunModelCallBody.AttemptError, attempt.Id, attempt.ErrorArtifactId, attempt.CaptureCompleteness),
+            Descriptor(WorkflowRunModelCallBody.AttemptResponse, attempt.Id, attempt.ResponseArtifactId, attempt.CaptureCompleteness,
+                Capture(captures, attempt.Id, WorkflowRunModelCallBodyKind.AttemptResponse)),
+            Descriptor(WorkflowRunModelCallBody.AttemptError, attempt.Id, attempt.ErrorArtifactId, attempt.CaptureCompleteness,
+                Capture(captures, attempt.Id, WorkflowRunModelCallBodyKind.AttemptError)),
         ],
     };
 
     private static WorkflowRunModelCallBodyDescriptor Descriptor(WorkflowRunModelCallBody body, Guid? attemptId, Guid? artifactId,
-        WorkflowRunCaptureCompleteness completeness) => new()
+        WorkflowRunCaptureCompleteness completeness, BodyCaptureProjection? capture = null) => new()
     {
         Body = body,
         AttemptId = attemptId,
         ArtifactId = artifactId,
-        ReferenceState = ReferenceState(artifactId, completeness),
+        ReferenceState = ReferenceState(artifactId, completeness, capture?.State),
         CaptureCompleteness = completeness,
+        CaptureHealth = capture?.Health,
+        MaterializationFormat = capture?.Format,
+    };
+
+    private static BodyCaptureProjection? Capture(IReadOnlyDictionary<BodyCaptureIdentity, BodyCaptureProjection> captures,
+        Guid attemptId, WorkflowRunModelCallBodyKind bodyKind) => captures.GetValueOrDefault(new BodyCaptureIdentity(attemptId, bodyKind));
+
+    private static BodyCaptureProjection? AggregateLogicalRequest(IReadOnlyList<BodyCaptureProjection> captures, Guid? artifactId)
+    {
+        var candidates = captures.Where(value => value.BodyKind == WorkflowRunModelCallBodyKind.LogicalRequest).ToArray();
+        if (artifactId is not null)
+        {
+            candidates = candidates.Where(value => value.ArtifactId == artifactId).ToArray();
+            if (candidates.Length == 0) return null;
+        }
+        if (candidates.Length == 0) return null;
+
+        var health = candidates.Select(value => value.Health).Distinct()
+            .OrderBy(HealthPrecedence).First();
+        var selected = candidates.Where(value => value.Health == health).ToArray();
+        var states = selected.Select(value => value.State).Distinct().Take(2).ToArray();
+        var formats = selected.Select(value => value.Format).Distinct().Take(2).ToArray();
+        return new BodyCaptureProjection
+        {
+            AttemptId = selected[0].AttemptId,
+            BodyKind = WorkflowRunModelCallBodyKind.LogicalRequest,
+            State = states.Length == 1 ? states[0] : null,
+            ArtifactId = selected.Select(value => value.ArtifactId).FirstOrDefault(),
+            Health = health,
+            Format = formats.Length == 1 ? formats[0] : null,
+        };
+    }
+
+    private static BodyCaptureProjection Project(BodyCaptureStateRow capture) => new()
+    {
+        AttemptId = capture.AttemptId,
+        BodyKind = capture.BodyKind,
+        State = capture.State,
+        ArtifactId = capture.ArtifactId,
+        Health = CaptureHealth(capture),
+        Format = capture.MaterializationFormat,
+    };
+
+    private static WorkflowRunModelCallBodyCaptureHealth CaptureHealth(BodyCaptureStateRow capture) => capture.State switch
+    {
+        WorkflowRunModelCallBodyCaptureState.Pending when capture.LeaseIsLive => WorkflowRunModelCallBodyCaptureHealth.Materializing,
+        WorkflowRunModelCallBodyCaptureState.Pending when capture.MaterializationAttemptCount > 0 || capture.LastErrorCode is not null
+            => WorkflowRunModelCallBodyCaptureHealth.Retry,
+        WorkflowRunModelCallBodyCaptureState.Pending => WorkflowRunModelCallBodyCaptureHealth.Pending,
+        WorkflowRunModelCallBodyCaptureState.Available => WorkflowRunModelCallBodyCaptureHealth.Available,
+        WorkflowRunModelCallBodyCaptureState.CaptureFailed => WorkflowRunModelCallBodyCaptureHealth.Failed,
+        _ => WorkflowRunModelCallBodyCaptureHealth.Abandoned,
+    };
+
+    private static int HealthPrecedence(WorkflowRunModelCallBodyCaptureHealth health) => health switch
+    {
+        WorkflowRunModelCallBodyCaptureHealth.Materializing => 0,
+        WorkflowRunModelCallBodyCaptureHealth.Retry => 1,
+        WorkflowRunModelCallBodyCaptureHealth.Pending => 2,
+        WorkflowRunModelCallBodyCaptureHealth.Available => 3,
+        WorkflowRunModelCallBodyCaptureHealth.Failed => 4,
+        WorkflowRunModelCallBodyCaptureHealth.Abandoned => 5,
+        _ => int.MaxValue,
     };
 
     private static WorkflowRunModelCallSourceEvidence Evidence(WorkflowRunModelCallAttempt attempt)
@@ -309,9 +397,21 @@ public sealed class WorkflowRunModelCallReader : IWorkflowRunModelCallReader, IS
             : WorkflowRunModelCallSourceEvidence.StartedAndTerminal;
     }
 
-    private static WorkflowRunModelCallBodyReferenceState ReferenceState(Guid? artifactId, WorkflowRunCaptureCompleteness completeness)
+    private static WorkflowRunModelCallBodyReferenceState ReferenceState(Guid? artifactId, WorkflowRunCaptureCompleteness completeness,
+        WorkflowRunModelCallBodyCaptureState? captureState = null)
     {
         if (artifactId is not null) return WorkflowRunModelCallBodyReferenceState.Referenced;
+        var materialized = captureState switch
+        {
+            WorkflowRunModelCallBodyCaptureState.Pending => WorkflowRunModelCallBodyReferenceState.Partial,
+            WorkflowRunModelCallBodyCaptureState.Available => WorkflowRunModelCallBodyReferenceState.Corrupt,
+            WorkflowRunModelCallBodyCaptureState.NotRecorded => WorkflowRunModelCallBodyReferenceState.NotRecorded,
+            WorkflowRunModelCallBodyCaptureState.Corrupt => WorkflowRunModelCallBodyReferenceState.Corrupt,
+            WorkflowRunModelCallBodyCaptureState.CaptureFailed => WorkflowRunModelCallBodyReferenceState.Unavailable,
+            WorkflowRunModelCallBodyCaptureState.ExternalStateIndeterminate => WorkflowRunModelCallBodyReferenceState.Unavailable,
+            _ => (WorkflowRunModelCallBodyReferenceState?)null,
+        };
+        if (materialized is { } state) return state;
         return completeness switch
         {
             WorkflowRunCaptureCompleteness.Exact => WorkflowRunModelCallBodyReferenceState.NotRecorded,
@@ -656,6 +756,30 @@ public sealed class WorkflowRunModelCallReader : IWorkflowRunModelCallReader, IS
     }
 
     private sealed record BodyMaterializationRow(WorkflowRunModelCallBodyCaptureState State, string? Format);
+
+    private sealed record BodyCaptureStateRow
+    {
+        public required Guid AttemptId { get; init; }
+        public required WorkflowRunModelCallBodyKind BodyKind { get; init; }
+        public required WorkflowRunModelCallBodyCaptureState State { get; init; }
+        public Guid? ArtifactId { get; init; }
+        public string? MaterializationFormat { get; init; }
+        public required int MaterializationAttemptCount { get; init; }
+        public required bool LeaseIsLive { get; init; }
+        public string? LastErrorCode { get; init; }
+    }
+
+    private sealed record BodyCaptureProjection
+    {
+        public required Guid AttemptId { get; init; }
+        public required WorkflowRunModelCallBodyKind BodyKind { get; init; }
+        public WorkflowRunModelCallBodyCaptureState? State { get; init; }
+        public Guid? ArtifactId { get; init; }
+        public required WorkflowRunModelCallBodyCaptureHealth Health { get; init; }
+        public string? Format { get; init; }
+    }
+
+    private readonly record struct BodyCaptureIdentity(Guid AttemptId, WorkflowRunModelCallBodyKind BodyKind);
 
     private sealed record BodyContent(BodyRow Source, byte[] Bytes, long TotalBytes, string ContentType, bool IntegrityVerified)
     {

@@ -72,6 +72,12 @@ public sealed class WorkflowRunModelCallBodyMaterializerTests
         var captures = await db.WorkflowRunModelCallBodyCapture.AsNoTracking().Where(value => value.ModelCallAttemptId == attempt.Id).ToListAsync();
         captures.ShouldAllBe(value => value.State == WorkflowRunModelCallBodyCaptureState.Available && value.LeaseOwnerId == null
             && value.TerminalAt != null && value.MaterializationFormat == WorkflowRunModelCallBodyMaterializationFormats.Utf8StringEnvelope);
+        var metadata = await scope.Resolve<IWorkflowRunModelCallReader>().ReadByIdAsync(world.RunId, call.Id, world.TeamId, CancellationToken.None);
+        metadata!.Bodies.Single().CaptureHealth.ShouldBe(WorkflowRunModelCallBodyCaptureHealth.Available);
+        metadata.Bodies.Single().MaterializationFormat.ShouldBe(WorkflowRunModelCallBodyMaterializationFormats.Utf8StringEnvelope);
+        var responseDescriptor = metadata.Attempts.Single().Bodies.Single(value => value.Body == WorkflowRunModelCallBody.AttemptResponse);
+        responseDescriptor.CaptureHealth.ShouldBe(WorkflowRunModelCallBodyCaptureHealth.Available);
+        responseDescriptor.MaterializationFormat.ShouldBe(WorkflowRunModelCallBodyMaterializationFormats.Utf8StringEnvelope);
     }
 
     [Theory]
@@ -173,6 +179,19 @@ public sealed class WorkflowRunModelCallBodyMaterializerTests
         states[missing].ShouldBe(WorkflowRunModelCallBodyCaptureState.NotRecorded);
         states[nonObject].ShouldBe(WorkflowRunModelCallBodyCaptureState.Corrupt);
         states[malformedReference].ShouldBe(WorkflowRunModelCallBodyCaptureState.Corrupt);
+        var reader = scope.Resolve<IWorkflowRunModelCallReader>();
+        var nullMetadata = await reader.ReadByIdAsync(world.RunId, calls[nullValue].Id, world.TeamId, CancellationToken.None);
+        var nullDescriptor = nullMetadata!.Attempts.Single().Bodies.Single(value => value.Body == WorkflowRunModelCallBody.AttemptResponse);
+        nullDescriptor.ReferenceState.ShouldBe(WorkflowRunModelCallBodyReferenceState.NotRecorded,
+            "a terminal exact-source NotRecorded outcome must override the older call-wide Partial estimate");
+        nullDescriptor.CaptureHealth.ShouldBe(WorkflowRunModelCallBodyCaptureHealth.Abandoned);
+        nullDescriptor.MaterializationFormat.ShouldBeNull();
+        var corruptMetadata = await reader.ReadByIdAsync(world.RunId, calls[malformedReference].Id, world.TeamId, CancellationToken.None);
+        var corruptDescriptor = corruptMetadata!.Attempts.Single().Bodies.Single(value => value.Body == WorkflowRunModelCallBody.AttemptResponse);
+        corruptDescriptor.ReferenceState.ShouldBe(WorkflowRunModelCallBodyReferenceState.Corrupt,
+            "a terminal exact-source Corrupt outcome must override the older call-wide Corrupt/Partial estimate per body");
+        corruptDescriptor.CaptureHealth.ShouldBe(WorkflowRunModelCallBodyCaptureHealth.Abandoned);
+        corruptDescriptor.MaterializationFormat.ShouldBeNull();
     }
 
     [Fact]
@@ -185,6 +204,16 @@ public sealed class WorkflowRunModelCallBodyMaterializerTests
         await AddRecordsAsync(terminal);
         await ProjectAsync();
         var writer = new ThrowingWriter();
+
+        using (var pendingScope = _fixture.BeginScope())
+        {
+            var pendingDb = pendingScope.Resolve<CodeSpaceDbContext>();
+            var pendingCall = await pendingDb.WorkflowRunModelCall.AsNoTracking().SingleAsync(value => value.SourceCorrelationId == correlationId);
+            var pendingMetadata = await pendingScope.Resolve<IWorkflowRunModelCallReader>()
+                .ReadByIdAsync(world.RunId, pendingCall.Id, world.TeamId, CancellationToken.None);
+            pendingMetadata!.Attempts.Single().Bodies.Single(value => value.Body == WorkflowRunModelCallBody.AttemptResponse)
+                .CaptureHealth.ShouldBe(WorkflowRunModelCallBodyCaptureHealth.Pending);
+        }
 
         var result = await MaterializeAsync(world.RunId, writer);
 
@@ -199,6 +228,11 @@ public sealed class WorkflowRunModelCallBodyMaterializerTests
         capture.LastErrorCode.ShouldBe("artifact-store-failed");
         capture.NextMaterializationAt.ShouldBeGreaterThan(capture.LastModifiedAt);
         (await db.WorkflowRunRecord.AsNoTracking().AnyAsync(value => value.Id == terminal.Id)).ShouldBeTrue("retry never consumes the immutable source");
+        var call = await db.WorkflowRunModelCall.AsNoTracking().SingleAsync(value => value.SourceCorrelationId == correlationId);
+        var metadata = await scope.Resolve<IWorkflowRunModelCallReader>().ReadByIdAsync(world.RunId, call.Id, world.TeamId, CancellationToken.None);
+        var descriptor = metadata!.Attempts.Single().Bodies.Single(value => value.Body == WorkflowRunModelCallBody.AttemptResponse);
+        descriptor.CaptureHealth.ShouldBe(WorkflowRunModelCallBodyCaptureHealth.Retry);
+        descriptor.MaterializationFormat.ShouldBeNull();
     }
 
     [Fact]
@@ -237,6 +271,11 @@ public sealed class WorkflowRunModelCallBodyMaterializerTests
             }, CancellationToken.None);
         page.ShouldNotBeNull();
         page!.Availability.ShouldBe(WorkflowRunModelCallPartAvailability.CaptureUnavailable);
+        var metadata = await scope.Resolve<IWorkflowRunModelCallReader>().ReadByIdAsync(world.RunId, call.Id, world.TeamId, CancellationToken.None);
+        var descriptor = metadata!.Attempts.Single().Bodies.Single(value => value.Body == WorkflowRunModelCallBody.AttemptResponse);
+        descriptor.ReferenceState.ShouldBe(WorkflowRunModelCallBodyReferenceState.Unavailable);
+        descriptor.CaptureHealth.ShouldBe(WorkflowRunModelCallBodyCaptureHealth.Failed);
+        descriptor.MaterializationFormat.ShouldBeNull();
     }
 
     [Fact]
@@ -269,6 +308,12 @@ public sealed class WorkflowRunModelCallBodyMaterializerTests
         leased.LeaseOwnerId.ShouldNotBeNull();
         leased.MaterializationAttemptCount.ShouldBe(1);
         (await db.WorkflowRunRecord.AsNoTracking().AnyAsync(value => value.Id == terminal.Id)).ShouldBeTrue();
+        var call = await db.WorkflowRunModelCall.AsNoTracking().SingleAsync(value => value.SourceCorrelationId == correlationId);
+        var materializing = await scope.Resolve<IWorkflowRunModelCallReader>()
+            .ReadByIdAsync(world.RunId, call.Id, world.TeamId, CancellationToken.None);
+        var materializingDescriptor = materializing!.Attempts.Single().Bodies.Single(value => value.Body == WorkflowRunModelCallBody.AttemptResponse);
+        materializingDescriptor.CaptureHealth.ShouldBe(WorkflowRunModelCallBodyCaptureHealth.Materializing);
+        materializingDescriptor.MaterializationFormat.ShouldBeNull();
 
         await db.Database.ExecuteSqlInterpolatedAsync($$"""
             UPDATE workflow_run_model_call_body_capture SET lease_expires_at = clock_timestamp() - interval '1 millisecond',
@@ -283,6 +328,10 @@ public sealed class WorkflowRunModelCallBodyMaterializerTests
         var settled = await db.WorkflowRunModelCallBodyCapture.AsNoTracking().SingleAsync(value => value.Id == leased.Id);
         settled.State.ShouldBe(WorkflowRunModelCallBodyCaptureState.Available);
         settled.MaterializationAttemptCount.ShouldBe(2);
+        var available = await scope.Resolve<IWorkflowRunModelCallReader>()
+            .ReadByIdAsync(world.RunId, call.Id, world.TeamId, CancellationToken.None);
+        available!.Attempts.Single().Bodies.Single(value => value.Body == WorkflowRunModelCallBody.AttemptResponse)
+            .CaptureHealth.ShouldBe(WorkflowRunModelCallBodyCaptureHealth.Available);
     }
 
     [Fact]
