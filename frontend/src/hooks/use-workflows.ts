@@ -190,11 +190,11 @@ export function useWorkflowRun(runId: string | null) {
 export const WORKFLOW_RUN_IDENTITY_POLL_MS = 2000;
 
 /** Bounded canonical route lookup. Full run detail remains owned by the session-less detail fallback. */
-export function useWorkflowRunIdentity(ref: string | null) {
+export function useWorkflowRunIdentity(ref: string | null, enabled = true) {
   return useQuery({
     queryKey: ["workflow-run-identity", ref],
     queryFn: ({ signal }) => workflowsApi.getRunIdentity(ref!, signal),
-    enabled: ref != null,
+    enabled: enabled && ref != null,
     refetchInterval: (query) => {
       const identity = query.state.data;
       return identity && isRunActive(identity.status) ? WORKFLOW_RUN_IDENTITY_POLL_MS : false;

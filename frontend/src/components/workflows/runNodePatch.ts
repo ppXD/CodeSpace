@@ -1,5 +1,7 @@
 import type { Node } from "@xyflow/react";
 
+import { workflowRunLazyFieldRead } from "@/api/workflowRunViewMetadataApi";
+
 import type { WorkflowNodeData } from "./WorkflowNode";
 
 /**
@@ -19,7 +21,7 @@ import type { WorkflowNodeData } from "./WorkflowNode";
 export function nodeRunFingerprint(node: Node<WorkflowNodeData>): string {
   const d = node.data;
   const rows = d.runRows ?? [];
-  const rowsFp = rows.map((r) => `${r.status}:${r.startedAt ?? ""}:${r.completedAt ?? ""}:${r.error ?? ""}`).join("|");
+  const rowsFp = rows.map((r) => `${r.status}:${r.startedAt ?? ""}:${r.completedAt ?? ""}:${r.error ?? ""}:${workflowRunLazyFieldRead(r)?.observationKey ?? ""}`).join("|");
   const fanFp = d.fanout ? d.fanout.map((r) => `${r.status}:${r.startedAt ?? ""}:${r.completedAt ?? ""}`).join("|") : "";
   return `${d.runStatus ?? ""}#${d.rerunnableFromHere ? 1 : 0}#${node.hidden ? 1 : 0}#${d.hot ? 1 : 0}#${rowsFp}#${fanFp}`;
 }

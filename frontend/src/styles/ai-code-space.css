@@ -3317,6 +3317,28 @@ textarea:-webkit-autofill {
 .acs-root .wf-rf-result-branch-h { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
 .acs-root .wf-rf-result-branch-ix { font-size: 10.5px; font-weight: 700; color: var(--accent); }
 .acs-root .wf-rf-result-branch-st { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.acs-root .wf-rf-result-branch-h > button,
+.acs-root .wf-cell-fields > button,
+.acs-root .wf-rf-result-err > button {
+  margin-left: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2);
+  color: var(--ink-2); padding: 3px 7px; font: inherit; font-size: 10px; font-weight: 600; cursor: pointer;
+}
+.acs-root .wf-rf-result-branch-h > button:hover,
+.acs-root .wf-cell-fields > button:hover,
+.acs-root .wf-rf-result-err > button:hover { border-color: var(--accent); color: var(--accent); }
+.acs-root .wf-cell-fields { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.acs-root .wf-cell-field-descriptor { border: 1px solid var(--line); border-radius: 7px; background: var(--panel-2); overflow: hidden; }
+.acs-root .wf-cell-field-descriptor > button {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; padding: 6px 8px;
+  border: 0; background: transparent; color: var(--ink-2); font: inherit; font-size: 10.5px; text-align: left; cursor: pointer;
+}
+.acs-root .wf-cell-field-descriptor > button > span:last-child { color: var(--muted); font-size: 10px; }
+.acs-root .wf-cell-field-descriptor > button[disabled] { cursor: default; opacity: .7; }
+.acs-root .wf-cell-field-descriptor > span { display: block; padding: 0 8px 6px; color: #9E3535; font-size: 10px; }
+.acs-root .wf-cell-field-content { border-top: 1px solid var(--line); padding: 7px 8px; background: var(--panel); }
+.acs-root .wf-cell-field-content > pre { max-height: 190px; overflow: auto; margin: 0; white-space: pre-wrap; word-break: break-word; font-size: 10px; }
+.acs-root .wf-cell-field-paging { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 9px; margin-top: 6px; color: var(--muted); font-size: 9.5px; }
+.acs-root .wf-cell-field-paging > button { border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); color: var(--ink-2); padding: 3px 7px; font: inherit; cursor: pointer; }
 
 /* ── B1 external-call footer: per-type receipt digest + live-call ring. Reuses the .wf-rf-result* bar/panel above;
    this block only styles the digest text that replaces the plain "Success" label (tinted by outcome tone) and the
