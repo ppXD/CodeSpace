@@ -141,6 +141,11 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             await DriveUntilSettledAsync(runId);
 
             var (outcome, note) = await EvaluateAsync(runId, teamId, FileWritingFakeCli.StubbedHarnessKinds);   // headline arc = FileWritingFakeCli (always patches on success — but ONLY on the harness it arms)
+
+            // D3 (Arc D): a Drove round must ALSO clear the north-star floor — the release gate reads the same
+            // M-1 number the operator's scorecard renders, through the real reducer chain.
+            if (outcome == RealModelOutcome.Drove) await AssertNorthStarClearsFloorAsync(teamId, runId);
+
             return (outcome, $"{Provider} model '{model}' whole-loop — {note}");
         });
     }
@@ -1682,4 +1687,29 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             try { Directory.Delete(_root, recursive: true); } catch { /* best-effort */ }
         }
     }
+
+    /// <summary>
+    /// D3 (Arc D) — the north-star IS the release gate: the SAME M-1 reducer the operator's scorecard renders must
+    /// read the Drove round's WINNING run as unattended-solved-with-delivery. Per-run, deliberately: best-of-N
+    /// seeds a fresh run per attempt on the same team, so a team-level rate would grade the model's earlier
+    /// honest misses, not this round's claim.
+    /// </summary>
+    private async Task AssertNorthStarClearsFloorAsync(Guid teamId, Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        // The scorecard's Solved reads the assessment ledger, which ONLY the shadow sweep writes — an unswept
+        // round would read a false negative. Sweep first.
+        await scope.Resolve<CodeSpace.Core.Services.Completion.ICompletionShadowService>().SweepAsync(batchSize: 50, CancellationToken.None);
+
+        var scorecard = await scope.Resolve<CodeSpace.Core.Services.Agents.Eval.IUnattendedDeliveryScorecardService>().ComputeAsync(teamId, since: null, CancellationToken.None);
+        var run = scorecard.Runs.SingleOrDefault(r => r.WorkflowRunId == runId)
+            ?? throw new AgentExecutionInfraException($"the M-1 instrument is sick — the Drove round's run {runId} never entered the scorecard population ({scorecard.Rollup.TotalRuns} scored); fix the population query, never read this as capability");
+
+        run.UnattendedSolvedWithDelivery.ShouldBeTrue(
+            $"north-star gate: this arc terminalized an unattended Enforced Success with a real delivery, so the SCORECARD must read exactly that for run {runId} — got solved={run.Solved}, delivered={run.Delivered}, humanTouches={run.HumanTouches}; a false reading means the reducer chain (sweep → assessment → M-1) dropped the round");
+
+        Console.WriteLine($"[m1-gate] run {runId}: unattended solve-with-delivery TRUE (solved={run.Solved}, delivered={run.Delivered}, humanTouches={run.HumanTouches}) — the north-star reducer confirms the round");
+    }
+
 }
