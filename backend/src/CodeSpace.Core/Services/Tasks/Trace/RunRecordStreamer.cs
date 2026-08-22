@@ -2,7 +2,7 @@ using System.Runtime.CompilerServices;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Identity;
-using CodeSpace.Core.Services.Workflows;
+using CodeSpace.Core.Services.Workflows.Display;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Tasks.Trace;
 using Microsoft.EntityFrameworkCore;
@@ -13,7 +13,7 @@ namespace CodeSpace.Core.Services.Tasks.Trace;
 /// <summary>
 /// Tails a run's ledger by polling <c>workflow_run_record</c> for rows beyond the cursor on a short interval, with a
 /// FRESH short-lived DbContext PER POLL (never the request-scoped context — a long-lived tail must not pin one
-/// connection / change-tracker for its whole lifetime). Team-prechecks the run ONCE via <see cref="IWorkflowService"/>
+/// connection / change-tracker for its whole lifetime). Team-prechecks the run ONCE via the narrow identity/status bundle
 /// (the same tenancy boundary the snapshot reader uses — a record is the team's iff its run is); a foreign / absent run
 /// yields nothing. Drains a backlog immediately (a full batch re-polls without delay); waits the interval only once
 /// caught up. Ends at a terminal <c>run.*</c> record or on cancellation. The 2s Room poll stays the fallback, so nothing
@@ -25,22 +25,22 @@ public sealed class RunRecordStreamer : IRunRecordStreamer, IScopedDependency
     private const int PollIntervalMs = 400;
     private const int BatchCap = 500;
 
-    private readonly IServiceScopeFactory _scopeFactory;
-    private readonly IWorkflowService _workflows;
+    private readonly IWorkflowRunObservationIdentityBundle _identity;
     private readonly ICurrentTeam _currentTeam;
+    private readonly IServiceScopeFactory _scopeFactory;
 
-    public RunRecordStreamer(IServiceScopeFactory scopeFactory, IWorkflowService workflows, ICurrentTeam currentTeam)
+    public RunRecordStreamer(IWorkflowRunObservationIdentityBundle identity, ICurrentTeam currentTeam, IServiceScopeFactory scopeFactory)
     {
-        _scopeFactory = scopeFactory;
-        _workflows = workflows;
+        _identity = identity;
         _currentTeam = currentTeam;
+        _scopeFactory = scopeFactory;
     }
 
     public async IAsyncEnumerable<RunRecordView> TailAsync(Guid runId, long afterSequence, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         if (_currentTeam.Id is not { } teamId) yield break;   // not team-scoped ⇒ nothing to tail
 
-        var run = await _workflows.GetRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+        var run = await _identity.GetAsync(teamId, runId, cancellationToken).ConfigureAwait(false);
         if (run == null) yield break;   // foreign / absent ⇒ empty (no existence leak)
 
         var cursor = afterSequence;

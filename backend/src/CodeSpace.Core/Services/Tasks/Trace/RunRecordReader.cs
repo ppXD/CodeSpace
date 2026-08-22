@@ -1,31 +1,31 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
-using CodeSpace.Core.Services.Workflows;
+using CodeSpace.Core.Services.Workflows.Display;
 using CodeSpace.Messages.Tasks.Trace;
 using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.Tasks.Trace;
 
 /// <summary>
-/// The Trace reader — team-prechecks the run (via <see cref="IWorkflowService.GetRunAsync"/>, fail-closed) then dumps
+/// The Trace reader — team-prechecks the run through the narrow identity/status bundle (fail-closed) then dumps
 /// its <c>workflow_run_record</c> ledger UNFILTERED in Sequence order. The records carry no TeamId of their own, so the
 /// run precheck IS the tenancy boundary (a record is the team's iff its run is) — the same model the narrative
 /// run-record source uses (read by RunId after the projector's precheck). READ-ONLY — no schema, no engine mutation.
 /// </summary>
 public sealed class RunRecordReader : IRunRecordReader, IScopedDependency
 {
-    private readonly IWorkflowService _workflows;
+    private readonly IWorkflowRunObservationIdentityBundle _identity;
     private readonly CodeSpaceDbContext _db;
 
-    public RunRecordReader(IWorkflowService workflows, CodeSpaceDbContext db)
+    public RunRecordReader(IWorkflowRunObservationIdentityBundle identity, CodeSpaceDbContext db)
     {
-        _workflows = workflows;
+        _identity = identity;
         _db = db;
     }
 
     public async Task<RunRecordsResponse?> ReadAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
     {
-        var run = await _workflows.GetRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+        var run = await _identity.GetAsync(teamId, runId, cancellationToken).ConfigureAwait(false);
 
         if (run == null) return null;
 
