@@ -4,6 +4,8 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Identity;
+using CodeSpace.Core.Services.Tasks.Phases;
+using CodeSpace.Core.Services.Tasks.Phases.Sources.Nodes;
 using CodeSpace.Core.Services.Tasks.Timeline;
 using CodeSpace.Core.Services.Tasks.Timeline.Sources;
 using CodeSpace.Core.Services.Workflows;
@@ -15,6 +17,7 @@ using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Queries.Workflows;
+using CodeSpace.Messages.Tasks.Phases;
 using CodeSpace.Messages.Tasks.Timeline;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
@@ -141,6 +144,119 @@ public class WorkflowRunViewMetadataReaderFlowTests
         JsonSerializer.Serialize(events, new JsonSerializerOptions(JsonSerializerDefaults.Web)).ShouldNotContain(Bomb, Case.Sensitive);
     }
 
+    [Fact]
+    public async Task Node_phase_source_resolved_from_di_reads_only_bounded_error_and_map_output_leaves()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var artifactId = await PutBombArtifactAsync(teamId);
+        var runId = await SeedSnapshotRunAsync(teamId, MapDefinition(), null, null, DateTimeOffset.UtcNow);
+        await SeedCellAsync(runId, "fan", string.Empty, WorkflowRunRecordTypes.NodeCompleted, Guid.NewGuid(), artifactId);
+        await SeedCellAsync(runId, "worker", "fan#0", WorkflowRunRecordTypes.NodeCompleted, Guid.NewGuid(), artifactId);
+        await SeedCellAsync(runId, "failed", string.Empty, WorkflowRunRecordTypes.NodeFailed, Guid.NewGuid(), artifactId);
+        await SeedCellAsync(runId, "plain", string.Empty, WorkflowRunRecordTypes.NodeCompleted, Guid.NewGuid(), artifactId);
+        await AppendStatePayloadAsync(runId, "fan", string.Empty,
+            """{"outputs":{"count":3,"failed":1,"resultsCoverage":{"complete":false,"totalBranches":3,"includedBranches":2,"shortenedBranches":[0]}}}""");
+        await AppendStatePayloadAsync(runId, "failed", string.Empty, JsonSerializer.Serialize(new { error = new string('e', 3_000), outputs = new { } }));
+        await AppendStatePayloadAsync(runId, "plain", string.Empty, JsonSerializer.Serialize(new { outputs = new { baggage = Bomb + new string('x', 2 * 1024 * 1024) } }));
+        var reads = new BodyReadObservation();
+
+        using var scope = _fixture.BeginScope(builder =>
+        {
+            builder.RegisterDecorator<IArtifactStore>((_, _, inner) => new ObservedArtifactStore(inner, reads));
+            builder.RegisterDecorator<IRunNodeOutputInflater>((_, _, inner) => new ObservedOutputInflater(inner, reads));
+        });
+        var observation = await scope.Resolve<IWorkflowRunNodeObservationReader>()
+            .ReadAsync(new WorkflowRunNodeObservationRequest(runId, teamId, WorkflowRunViewScope.LineageMerged), CancellationToken.None);
+        var source = scope.Resolve<IEnumerable<IRunPhaseSource>>().Single(value => value.SourceKey == WorkflowNodePhaseSource.Key);
+        var phases = await source.ContributeAsync(new RunPhaseContext { RunId = runId, TeamId = teamId }, CancellationToken.None);
+
+        observation.ShouldNotBeNull();
+        observation!.Availability.ShouldBe(WorkflowRunViewAvailability.Available);
+        observation.TopLevelLeaves["fan"].MapMetrics!.Count.ShouldBe(3);
+        observation.TopLevelLeaves["fan"].MapMetrics!.Failed.ShouldBe(1);
+        observation.TopLevelLeaves["fan"].MapMetrics!.ResultsCoverageState.ShouldBe(WorkflowRunNodeLeafState.Exact);
+        observation.TopLevelLeaves["failed"].ErrorState.ShouldBe(WorkflowRunNodeLeafState.Truncated);
+        observation.TopLevelLeaves["failed"].ErrorPrefix!.Length.ShouldBe(WorkflowRunNodeObservationReader.MaximumErrorCharacters);
+
+        var map = phases.Single(value => value.Id == "fan");
+        map.Kind.ShouldBe("map");
+        map.Metrics.SucceededCount.ShouldBe(2);
+        map.Metrics.FailedCount.ShouldBe(1);
+        map.Metrics.Extra[WorkflowOutputKeys.MapResultsCoverage].GetProperty("includedBranches").GetInt32().ShouldBe(2);
+        phases.Single(value => value.Id == "failed").Summary.ShouldEndWith("[truncated; the full error remains available in Trace.]");
+        reads.ArtifactReads.ShouldBe(0);
+        reads.InflaterReads.ShouldBe(0);
+        JsonSerializer.Serialize(new { observation, phases }, new JsonSerializerOptions(JsonSerializerDefaults.Web)).ShouldNotContain(Bomb, Case.Sensitive);
+    }
+
+    [Fact]
+    public async Task Oversized_map_coverage_is_explicitly_truncated_and_never_crosses_the_reader_boundary()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var artifactId = await PutBombArtifactAsync(teamId);
+        var runId = await SeedSnapshotRunAsync(teamId, MapDefinition(), null, null, DateTimeOffset.UtcNow);
+        await SeedCellAsync(runId, "fan", string.Empty, WorkflowRunRecordTypes.NodeCompleted, Guid.NewGuid(), artifactId);
+        await SeedCellAsync(runId, "worker", "fan#0", WorkflowRunRecordTypes.NodeCompleted, Guid.NewGuid(), artifactId);
+        await AppendStatePayloadAsync(runId, "fan", string.Empty, JsonSerializer.Serialize(new
+        {
+            outputs = new { count = 1, failed = 0, resultsCoverage = Bomb + new string('c', WorkflowRunNodeObservationReader.MaximumCoverageBytes) },
+        }));
+
+        using var scope = _fixture.BeginScope();
+        var observation = await scope.Resolve<IWorkflowRunNodeObservationReader>()
+            .ReadAsync(new WorkflowRunNodeObservationRequest(runId, teamId, WorkflowRunViewScope.LineageMerged), CancellationToken.None);
+
+        observation.ShouldNotBeNull();
+        var metrics = observation!.TopLevelLeaves["fan"].MapMetrics!;
+        metrics.Count.ShouldBe(1);
+        metrics.Failed.ShouldBe(0);
+        metrics.ResultsCoverageState.ShouldBe(WorkflowRunNodeLeafState.Truncated);
+        metrics.ResultsCoverage.ShouldBeNull();
+        JsonSerializer.Serialize(observation).ShouldNotContain(Bomb, Case.Sensitive);
+    }
+
+    [Fact]
+    public async Task Node_leaf_scope_tracks_the_selected_lineage_attempt_conflates_foreign_and_rejects_a_torn_state()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (foreignTeamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var artifactId = await PutBombArtifactAsync(teamId);
+        var original = await SeedSnapshotRunAsync(teamId, MapDefinition(), null, null, DateTimeOffset.UtcNow.AddMinutes(-1));
+        var latest = await SeedSnapshotRunAsync(teamId, MapDefinition(), original, original, DateTimeOffset.UtcNow);
+        var foreign = await SeedSnapshotRunAsync(foreignTeamId, MapDefinition(), null, null, DateTimeOffset.UtcNow);
+        await SeedCellAsync(original, "fan", string.Empty, WorkflowRunRecordTypes.NodeCompleted, Guid.NewGuid(), artifactId);
+        await SeedCellAsync(original, "worker", "fan#0", WorkflowRunRecordTypes.NodeCompleted, Guid.NewGuid(), artifactId);
+        await SeedCellAsync(latest, "fan", string.Empty, WorkflowRunRecordTypes.NodeCompleted, Guid.NewGuid(), artifactId);
+        await SeedCellAsync(latest, "worker", "fan#0", WorkflowRunRecordTypes.NodeCompleted, Guid.NewGuid(), artifactId);
+        await AppendStatePayloadAsync(original, "fan", string.Empty, """{"outputs":{"count":1,"failed":0}}""");
+        await AppendStatePayloadAsync(latest, "fan", string.Empty, """{"outputs":{"count":2,"failed":1}}""");
+
+        using var scope = _fixture.BeginScope();
+        var reader = scope.Resolve<IWorkflowRunNodeObservationReader>();
+        var merged = await reader.ReadAsync(new WorkflowRunNodeObservationRequest(original, teamId, WorkflowRunViewScope.LineageMerged), CancellationToken.None);
+        var attempt = await reader.ReadAsync(new WorkflowRunNodeObservationRequest(original, teamId, WorkflowRunViewScope.AttemptOnly), CancellationToken.None);
+        var hidden = await reader.ReadAsync(new WorkflowRunNodeObservationRequest(foreign, teamId, WorkflowRunViewScope.AttemptOnly), CancellationToken.None);
+
+        merged!.Metadata.Cells.Single(value => value.NodeId == "fan").SourceRunId.ShouldBe(latest);
+        merged.TopLevelLeaves["fan"].MapMetrics!.Count.ShouldBe(2);
+        merged.TopLevelLeaves["fan"].MapMetrics!.Failed.ShouldBe(1);
+        attempt!.Metadata.Cells.Single(value => value.NodeId == "fan").SourceRunId.ShouldBe(original);
+        attempt.TopLevelLeaves["fan"].MapMetrics!.Count.ShouldBe(1);
+        hidden.ShouldBeNull("missing and foreign requested runs remain intentionally conflated");
+
+        var staleMetadata = attempt.Metadata with
+        {
+            Cells = attempt.Metadata.Cells.Select(value => value.NodeId == "fan"
+                ? value with { Status = NodeStatus.Running, CompletedAt = null }
+                : value).ToList(),
+        };
+        var torn = await new WorkflowRunNodeObservationReader(new FixedMetadataReader(staleMetadata), scope.Resolve<CodeSpaceDbContext>())
+            .ReadAsync(new WorkflowRunNodeObservationRequest(original, teamId, WorkflowRunViewScope.AttemptOnly), CancellationToken.None);
+        torn!.Availability.ShouldBe(WorkflowRunViewAvailability.Unavailable,
+            "a state change between metadata and leaf reads is rejected instead of combining the old status with the new output");
+        torn.TopLevelLeaves.ShouldBeEmpty();
+    }
+
     private async Task<Guid> PutBombArtifactAsync(Guid teamId)
     {
         using var scope = _fixture.BeginScope();
@@ -229,6 +345,20 @@ public class WorkflowRunViewMetadataReaderFlowTests
         await analyze.ExecuteNonQueryAsync().ConfigureAwait(false);
     }
 
+    private async Task AppendStatePayloadAsync(Guid runId, string nodeId, string iterationKey, string payload)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var prior = await db.WorkflowRunRecord.AsNoTracking().Where(value => value.RunId == runId && value.NodeId == nodeId && value.IterationKey == iterationKey)
+            .OrderByDescending(value => value.Sequence).FirstAsync().ConfigureAwait(false);
+        db.WorkflowRunRecord.Add(new WorkflowRunRecord
+        {
+            Id = Guid.NewGuid(), RunId = runId, RecordType = prior.RecordType, NodeId = nodeId, IterationKey = iterationKey,
+            OccurredAt = prior.OccurredAt.AddMilliseconds(1), PayloadJson = payload,
+        });
+        await db.SaveChangesAsync().ConfigureAwait(false);
+    }
+
     private static async Task<string> ExplainCellQueryAsync(CodeSpaceDbContext db, Guid runId)
     {
         var connection = (NpgsqlConnection)db.Database.GetDbConnection();
@@ -270,6 +400,8 @@ public class WorkflowRunViewMetadataReaderFlowTests
         {
             new() { Id = "fan", TypeKey = MapFanout.ContainerKind, Label = "Fan", Config = WorkflowsTestSeed.Json(JsonSerializer.Serialize(new { body = Bomb })), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "worker", TypeKey = "builtin.terminal", ParentId = "fan", Label = "Worker", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "failed", TypeKey = "builtin.terminal", Label = "Failed", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "plain", TypeKey = "builtin.terminal", Label = "Plain", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
         },
         Edges = new List<EdgeDefinition>(),
     };
@@ -299,5 +431,15 @@ public class WorkflowRunViewMetadataReaderFlowTests
         public ObservedOutputInflater(IRunNodeOutputInflater inner, BodyReadObservation observation) { _inner = inner; _observation = observation; }
         public Task<WorkflowRunDetail> InflateAsync(WorkflowRunDetail run, Guid teamId, CancellationToken cancellationToken) { Interlocked.Increment(ref _observation.InflaterReads); return _inner.InflateAsync(run, teamId, cancellationToken); }
         public Task<WorkflowRunDetail> InflateAsync(WorkflowRunDetail run, Guid teamId, IReadOnlySet<string> nodeIds, CancellationToken cancellationToken) { Interlocked.Increment(ref _observation.InflaterReads); return _inner.InflateAsync(run, teamId, nodeIds, cancellationToken); }
+    }
+
+    private sealed class FixedMetadataReader : IWorkflowRunViewMetadataReader
+    {
+        private readonly WorkflowRunViewMetadata _metadata;
+
+        public FixedMetadataReader(WorkflowRunViewMetadata metadata) { _metadata = metadata; }
+
+        public Task<WorkflowRunViewMetadata?> ReadAsync(Guid runId, Guid teamId, WorkflowRunViewScope scope, CancellationToken cancellationToken) =>
+            Task.FromResult<WorkflowRunViewMetadata?>(_metadata);
     }
 }

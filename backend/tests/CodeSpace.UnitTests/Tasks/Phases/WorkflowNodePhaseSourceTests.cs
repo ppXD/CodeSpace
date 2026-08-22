@@ -1,4 +1,9 @@
+using System.Text.Json;
 using CodeSpace.Core.Services.Tasks.Phases.Sources.Nodes;
+using CodeSpace.Core.Services.Workflows;
+using CodeSpace.Core.Services.Workflows.Display;
+using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks.Phases;
 using Shouldly;
@@ -16,6 +21,89 @@ namespace CodeSpace.UnitTests.Tasks.Phases;
 [Trait("Category", "Unit")]
 public class WorkflowNodePhaseSourceTests
 {
+    [Fact]
+    public void Source_uses_the_bounded_node_observation_reader_and_not_full_workflow_detail()
+    {
+        var dependencies = typeof(WorkflowNodePhaseSource).GetConstructors().ShouldHaveSingleItem().GetParameters().Select(value => value.ParameterType).ToList();
+
+        dependencies.ShouldContain(typeof(IWorkflowRunNodeObservationReader));
+        dependencies.ShouldNotContain(typeof(IWorkflowService));
+    }
+
+    [Fact]
+    public void Bounded_observation_preserves_map_metrics_and_marks_a_truncated_error_honestly()
+    {
+        var branchAgent = Guid.NewGuid();
+        var coverage = JsonSerializer.SerializeToElement(new { complete = false, totalBranches = 3, includedBranches = 2, shortenedBranches = new[] { 0 } });
+        var observation = Observation(
+        [
+            Cell("map", string.Empty, NodeStatus.Success),
+            Cell("agent", "map#0", NodeStatus.Success, MapFanout.ContainerKind, branchAgent),
+            Cell("failed", string.Empty, NodeStatus.Failure),
+        ],
+        new Dictionary<string, WorkflowRunNodeLeafObservation>
+        {
+            ["map"] = new()
+            {
+                ErrorState = WorkflowRunNodeLeafState.Missing,
+                MapMetrics = new WorkflowRunMapMetricsObservation { Count = 3, Failed = 1, ResultsCoverageState = WorkflowRunNodeLeafState.Exact, ResultsCoverage = coverage },
+            },
+            ["failed"] = new() { ErrorState = WorkflowRunNodeLeafState.Truncated, ErrorPrefix = "bounded-prefix" },
+        });
+
+        var phases = WorkflowNodePhaseSource.ProjectObservation(observation,
+            new Dictionary<Guid, AgentRunStatus> { [branchAgent] = AgentRunStatus.Succeeded });
+
+        var map = phases.Single(value => value.Id == "map");
+        map.Metrics.AgentCount.ShouldBe(1);
+        map.Metrics.SucceededCount.ShouldBe(2);
+        map.Metrics.FailedCount.ShouldBe(1);
+        map.Metrics.Extra[WorkflowOutputKeys.MapResultsCoverage].GetProperty("includedBranches").GetInt32().ShouldBe(2);
+        phases.Single(value => value.Id == "failed").Summary.ShouldBe("bounded-prefix… [truncated; the full error remains available in Trace.]");
+    }
+
+    [Fact]
+    public void Truncated_map_coverage_is_not_promoted_to_a_normal_results_coverage_fact()
+    {
+        var observation = Observation(
+        [
+            Cell("map", string.Empty, NodeStatus.Success),
+            Cell("worker", "map#0", NodeStatus.Success, MapFanout.ContainerKind),
+        ],
+        new Dictionary<string, WorkflowRunNodeLeafObservation>
+        {
+            ["map"] = new()
+            {
+                ErrorState = WorkflowRunNodeLeafState.Missing,
+                MapMetrics = new WorkflowRunMapMetricsObservation { Count = 1, Failed = 0, ResultsCoverageState = WorkflowRunNodeLeafState.Truncated },
+            },
+        });
+
+        var map = WorkflowNodePhaseSource.ProjectObservation(observation, EmptyStatuses).ShouldHaveSingleItem();
+
+        map.Metrics.Extra.ShouldNotContainKey(WorkflowOutputKeys.MapResultsCoverage);
+        var marker = map.Metrics.Extra["observationCoverage"];
+        marker.GetProperty("field").GetString().ShouldBe(WorkflowOutputKeys.MapResultsCoverage);
+        marker.GetProperty("state").GetString().ShouldBe(nameof(WorkflowRunNodeLeafState.Truncated));
+    }
+
+    [Fact]
+    public void Incomplete_node_observation_becomes_a_visible_coverage_phase()
+    {
+        var observation = Observation([], new Dictionary<string, WorkflowRunNodeLeafObservation>()) with
+        {
+            Availability = WorkflowRunViewAvailability.Truncated,
+        };
+
+        var phase = WorkflowNodePhaseSource.CoveragePhase(observation);
+
+        phase.Id.ShouldBe("node-summary-coverage");
+        phase.Kind.ShouldBe("observation.coverage");
+        phase.Label.ShouldBe("Node phases partially available");
+        phase.Status.ShouldBe(PhaseStatus.Failed);
+        phase.Summary.ShouldContain("may be omitted", Case.Insensitive);
+    }
+
     [Fact]
     public void Rolls_a_map_node_and_its_branches_into_one_fan_out_phase()
     {
@@ -249,4 +337,24 @@ public class WorkflowNodePhaseSourceTests
     }
 
     private static readonly IReadOnlyDictionary<Guid, AgentRunStatus> EmptyStatuses = new Dictionary<Guid, AgentRunStatus>();
+
+    private static WorkflowRunNodeObservation Observation(IReadOnlyList<WorkflowRunCellMetadata> cells,
+        IReadOnlyDictionary<string, WorkflowRunNodeLeafObservation> leaves) => new()
+    {
+        Availability = WorkflowRunViewAvailability.Available,
+        Metadata = new WorkflowRunViewMetadata
+        {
+            RunId = Guid.NewGuid(), RunNumber = 1, SourceType = WorkflowRunSourceTypes.Snapshot, Status = WorkflowRunStatus.Running,
+            HasError = false, CreatedDate = DateTimeOffset.UtcNow, Scope = WorkflowRunViewScope.LineageMerged,
+            CellsAvailability = WorkflowRunViewAvailability.Available, LinksAvailability = WorkflowRunViewAvailability.Available, Cells = cells,
+            TopologyAvailability = WorkflowRunViewAvailability.Available, Topology = new WorkflowRunCanvasTopology { Nodes = [], Edges = [] },
+        },
+        TopLevelLeaves = leaves,
+    };
+
+    private static WorkflowRunCellMetadata Cell(string nodeId, string iterationKey, NodeStatus status, string? containerKind = null, Guid? agentRunId = null) => new()
+    {
+        SourceRunId = Guid.NewGuid(), NodeId = nodeId, IterationKey = iterationKey, ContainerKind = containerKind, Status = status,
+        AgentRunId = agentRunId, RerunnableFromHere = false,
+    };
 }
