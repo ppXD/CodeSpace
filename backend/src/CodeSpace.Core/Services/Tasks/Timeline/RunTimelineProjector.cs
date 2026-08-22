@@ -1,5 +1,5 @@
 using CodeSpace.Core.DependencyInjection;
-using CodeSpace.Core.Services.Workflows;
+using CodeSpace.Core.Services.Workflows.Display;
 using CodeSpace.Messages.Tasks.Timeline;
 using Microsoft.Extensions.Logging;
 
@@ -14,13 +14,13 @@ namespace CodeSpace.Core.Services.Tasks.Timeline;
 /// </summary>
 public sealed class RunTimelineProjector : IRunTimelineProjector, IScopedDependency
 {
-    private readonly IWorkflowService _workflows;
+    private readonly IWorkflowRunObservationIdentityBundle _identity;
     private readonly IEnumerable<IRunTimelineSource> _sources;
     private readonly ILogger<RunTimelineProjector> _logger;
 
-    public RunTimelineProjector(IWorkflowService workflows, IEnumerable<IRunTimelineSource> sources, ILogger<RunTimelineProjector> logger)
+    public RunTimelineProjector(IWorkflowRunObservationIdentityBundle identity, IEnumerable<IRunTimelineSource> sources, ILogger<RunTimelineProjector> logger)
     {
-        _workflows = workflows;
+        _identity = identity;
         _sources = sources;
         _logger = logger;
     }
@@ -38,10 +38,10 @@ public sealed class RunTimelineProjector : IRunTimelineProjector, IScopedDepende
         return Merge(contributed);
     }
 
-    /// <summary>The team-scope precheck — <c>GetRunAsync</c> is team-scoped (foreign / absent → null), so a non-null run is the team's. No existence is leaked: a foreign run is indistinguishable from an absent one.</summary>
+    /// <summary>The exact body-blind team/run precheck. The handler's status envelope reuses the same request-scoped observation, so both checks cost one query without leaking a foreign run's existence.</summary>
     private async Task<bool> RunBelongsToTeamAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
     {
-        var run = await _workflows.GetRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+        var run = await _identity.GetAsync(teamId, runId, cancellationToken).ConfigureAwait(false);
 
         return run != null;
     }

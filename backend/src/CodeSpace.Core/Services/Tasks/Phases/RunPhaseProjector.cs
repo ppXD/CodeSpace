@@ -1,5 +1,5 @@
 using CodeSpace.Core.DependencyInjection;
-using CodeSpace.Core.Services.Workflows;
+using CodeSpace.Core.Services.Workflows.Display;
 using CodeSpace.Messages.Tasks.Phases;
 using Microsoft.Extensions.Logging;
 
@@ -14,20 +14,20 @@ namespace CodeSpace.Core.Services.Tasks.Phases;
 /// </summary>
 public sealed class RunPhaseProjector : IRunPhaseProjector, IScopedDependency
 {
-    private readonly IWorkflowService _workflows;
+    private readonly IWorkflowRunObservationIdentityBundle _identity;
     private readonly IEnumerable<IRunPhaseSource> _sources;
     private readonly ILogger<RunPhaseProjector> _logger;
 
-    public RunPhaseProjector(IWorkflowService workflows, IEnumerable<IRunPhaseSource> sources, ILogger<RunPhaseProjector> logger)
+    public RunPhaseProjector(IWorkflowRunObservationIdentityBundle identity, IEnumerable<IRunPhaseSource> sources, ILogger<RunPhaseProjector> logger)
     {
-        _workflows = workflows;
+        _identity = identity;
         _sources = sources;
         _logger = logger;
     }
 
     public async Task<IReadOnlyList<RunPhase>?> ProjectAsync(Guid runId, Guid teamId, CancellationToken cancellationToken, bool mergeLineage = true)
     {
-        var belongs = await RunBelongsToTeamAsync(runId, teamId, mergeLineage, cancellationToken).ConfigureAwait(false);
+        var belongs = await RunBelongsToTeamAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
 
         if (!belongs) return null;
 
@@ -38,10 +38,10 @@ public sealed class RunPhaseProjector : IRunPhaseProjector, IScopedDependency
         return Merge(contributed);
     }
 
-    /// <summary>The team-scope precheck — <c>GetRunAsync</c> is team-scoped (foreign / absent → null), so a non-null run is the team's. No existence is leaked: a foreign run is indistinguishable from an absent one. Threads <paramref name="mergeLineage"/> so a run-scoped projection doesn't pay the lineage load just to check tenancy.</summary>
-    private async Task<bool> RunBelongsToTeamAsync(Guid runId, Guid teamId, bool mergeLineage, CancellationToken cancellationToken)
+    /// <summary>The exact body-blind team/run precheck. The handler's status envelope reuses the same request-scoped observation, so both checks cost one query without leaking a foreign run's existence. Attempt-only versus lineage-merged remains a source projection concern and never changes identity.</summary>
+    private async Task<bool> RunBelongsToTeamAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
     {
-        var run = await _workflows.GetRunAsync(runId, teamId, cancellationToken, mergeLineage).ConfigureAwait(false);
+        var run = await _identity.GetAsync(teamId, runId, cancellationToken).ConfigureAwait(false);
 
         return run != null;
     }

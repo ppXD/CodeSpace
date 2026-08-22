@@ -88,12 +88,21 @@ public class RunPhaseProjectorTests
             "a source that throws OperationCanceledException for a reason OTHER than our cancellation still degrades gracefully — only OUR cancelled token rethrows");
     }
 
+    [Fact]
+    public async Task Identity_backend_fault_propagates_as_infrastructure_failure()
+    {
+        var identity = new StubWorkflowRunObservationIdentityBundle(RunId, TeamId, WorkflowRunStatus.Running, new IOException("database offline"));
+        var projector = new RunPhaseProjector(identity, Array.Empty<IRunPhaseSource>(), NullLogger<RunPhaseProjector>.Instance);
+
+        var error = await Should.ThrowAsync<IOException>(() => projector.ProjectAsync(RunId, TeamId, CancellationToken.None));
+
+        error.Message.ShouldBe("database offline");
+    }
+
     private static RunPhaseProjector Build(bool runExists, params IRunPhaseSource[] sources)
     {
-        var detail = runExists ? RunDetailFixtures.Run(WorkflowRunStatus.Running) : null;
-        var workflows = new StubWorkflowService(RunId, TeamId, detail);
-
-        return new RunPhaseProjector(workflows, sources, NullLogger<RunPhaseProjector>.Instance);
+        var identity = new StubWorkflowRunObservationIdentityBundle(RunId, TeamId, runExists ? WorkflowRunStatus.Running : null);
+        return new RunPhaseProjector(identity, sources, NullLogger<RunPhaseProjector>.Instance);
     }
 
     private static RunPhase Phase(string id, int order) => new()
