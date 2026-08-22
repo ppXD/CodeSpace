@@ -99,12 +99,21 @@ public class RunTimelineProjectorTests
         events!.Select(e => e.Id).ShouldBe(new[] { "ok" }, "an OCE for a reason OTHER than our cancellation still degrades gracefully");
     }
 
+    [Fact]
+    public async Task Identity_backend_fault_propagates_as_infrastructure_failure()
+    {
+        var identity = new StubWorkflowRunObservationIdentityBundle(RunId, TeamId, WorkflowRunStatus.Running, new IOException("database offline"));
+        var projector = new RunTimelineProjector(identity, Array.Empty<IRunTimelineSource>(), NullLogger<RunTimelineProjector>.Instance);
+
+        var error = await Should.ThrowAsync<IOException>(() => projector.ProjectAsync(RunId, TeamId, CancellationToken.None));
+
+        error.Message.ShouldBe("database offline");
+    }
+
     private static RunTimelineProjector Build(bool runExists, params IRunTimelineSource[] sources)
     {
-        var detail = runExists ? RunDetailFixtures.Run(WorkflowRunStatus.Running) : null;
-        var workflows = new StubWorkflowService(RunId, TeamId, detail);
-
-        return new RunTimelineProjector(workflows, sources, NullLogger<RunTimelineProjector>.Instance);
+        var identity = new StubWorkflowRunObservationIdentityBundle(RunId, TeamId, runExists ? WorkflowRunStatus.Running : null);
+        return new RunTimelineProjector(identity, sources, NullLogger<RunTimelineProjector>.Instance);
     }
 
     private static RunTimelineEvent Ev(string id, DateTimeOffset at, long order = 0) => new()
