@@ -4,6 +4,8 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Identity;
+using CodeSpace.Core.Services.Sessions.Journal;
+using CodeSpace.Core.Services.Sessions.Journal.FactsSources;
 using CodeSpace.Core.Services.Tasks.Phases;
 using CodeSpace.Core.Services.Tasks.Phases.Sources.Nodes;
 using CodeSpace.Core.Services.Tasks.Timeline;
@@ -132,13 +134,16 @@ public class WorkflowRunViewMetadataReaderFlowTests
             builder.RegisterDecorator<IRunNodeOutputInflater>((_, _, inner) => new ObservedOutputInflater(inner, reads));
         });
         var source = scope.Resolve<IEnumerable<IRunTimelineSource>>().Single(value => value.SourceKey == MapDispatchTimelineMap.Key);
+        var cards = scope.Resolve<IEnumerable<IJournalFactsSource>>().Single(value => value is MapAgentCardFactsSource);
 
         var events = await source.ContributeAsync(new RunTimelineContext { RunId = runId, TeamId = teamId }, CancellationToken.None);
+        var facts = await cards.GatherAsync(runId, teamId, CancellationToken.None);
 
         var item = events.ShouldHaveSingleItem();
         item.Id.ShouldBe("map-dispatch-fan");
         item.Title.ShouldBe("Dispatched 1 agent");
         item.Summary.ShouldBeNull();
+        facts.ShouldBeEmpty("the linked agent row is deliberately absent; the bounded source skips it instead of fabricating a card");
         reads.ArtifactReads.ShouldBe(0);
         reads.InflaterReads.ShouldBe(0);
         JsonSerializer.Serialize(events, new JsonSerializerOptions(JsonSerializerDefaults.Web)).ShouldNotContain(Bomb, Case.Sensitive);
