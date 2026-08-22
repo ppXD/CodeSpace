@@ -201,6 +201,16 @@ describe("deriveActivations", () => {
 
     expect(result[0]!.config).toEqual(config);
   });
+
+  it("derives nothing when the manifest map is empty, which is why the editor must not save then", () => {
+    // Not a defect in this function — with no manifests there is genuinely nothing to classify. It is
+    // pinned because it is the reason the editor route fails closed on a manifests error: an empty map
+    // here is indistinguishable from "this workflow has no triggers", and saving that deletes every
+    // activation the workflow had.
+    const definition = buildDefinition([node("on-open", "trigger.pr.opened")]);
+
+    expect(deriveActivations(definition, [{ id: "act-1", typeKey: "trigger.pr.opened", enabled: true, config: {} }], new Map())).toEqual([]);
+  });
 });
 
 // ─── Test fixture helpers ─────────────────────────────────────────────────────

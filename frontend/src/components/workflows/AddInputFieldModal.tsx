@@ -45,6 +45,11 @@ export function AddInputFieldModal({ initial, takenNames, onSave, onClose }: Add
   });
   const [options, setOptions] = useState<string[]>(() => (initial ? schemaOptions(initial.schema) : []));
   // Text/number/select share a string default box; boolean uses a tri-state select.
+  // Whether the operator actually used a default control in this session. The editor's controls
+  // cannot represent every default a workflow can hold -- the plan projector writes an array of
+  // subtask objects, and `resolveDefault` answers `undefined` for anything it cannot round-trip -- so
+  // writing its answer unconditionally erased those. Untouched means untouched: keep what is stored.
+  const [defaultTouched, setDefaultTouched] = useState(false);
   const [defaultText, setDefaultText] = useState(() => (typeof initial?.default === "boolean" ? "" : defaultToString(initial?.default)));
   const [defaultBool, setDefaultBool] = useState<"" | "true" | "false">(() =>
     typeof initial?.default === "boolean" ? (initial.default ? "true" : "false") : "");
@@ -72,16 +77,29 @@ export function AddInputFieldModal({ initial, takenNames, onSave, onClose }: Add
   const optionsError = type === "select" && usableOptions.length === 0 ? "Add at least one option" : null;
   const canSave = nameError === null && optionsError === null;
 
+  const markDefaultTouched = (next: string) => { setDefaultTouched(true); setDefaultText(next); };
+  const markDefaultBoolTouched = (next: "" | "true" | "false") => { setDefaultTouched(true); setDefaultBool(next); };
+
   const save = () => {
     if (!canSave) return;
     const maxLen = maxLength.trim() === "" ? null : Number(maxLength);
-    const schema = buildFieldSchema({ type, maxLength: Number.isFinite(maxLen) ? maxLen : null, options: usableOptions, hidden });
+    // Patch over the stored fragment, not a fresh object: a schema can carry keywords this modal has
+    // no control for (a description, a format, an x-* a planner wrote) and rebuilding from {} deletes
+    // every one of them.
+    const storedSchema = typeof initial?.schema === "object" && initial.schema !== null ? (initial.schema as Record<string, unknown>) : undefined;
+    const schema = buildFieldSchema({ type, maxLength: Number.isFinite(maxLen) ? maxLen : null, options: usableOptions, hidden }, storedSchema);
 
     onSave({
+      // Spread first so a facet this modal does not edit -- today `description` -- survives being
+      // edited through it. The named fields below are the ones it owns.
+      ...initial,
       name: trimmedName,
       label: displayName.trim() === "" ? null : displayName.trim(),
       schema,
-      default: resolveDefault(type, defaultText, defaultBool, usableOptions),
+      // Only when the operator used a default control. Otherwise the stored default stands, whatever
+      // shape it is -- these controls are strings and booleans, and a default can be an array of
+      // objects a planner wrote.
+      default: defaultTouched ? resolveDefault(type, defaultText, defaultBool, usableOptions) : initial?.default,
       required,
     });
   };
@@ -188,7 +206,7 @@ export function AddInputFieldModal({ initial, takenNames, onSave, onClose }: Add
             <div className="wf-form-row">
               <span className="wf-form-label">Default value</span>
               {type === "boolean" ? (
-                <select className="wf-form-input" value={defaultBool} onChange={(e) => setDefaultBool(e.target.value as "" | "true" | "false")}>
+                <select className="wf-form-input" value={defaultBool} onChange={(e) => markDefaultBoolTouched(e.target.value as "" | "true" | "false")}>
                   <option value="">No default</option>
                   <option value="true">Checked</option>
                   <option value="false">Unchecked</option>
@@ -197,7 +215,7 @@ export function AddInputFieldModal({ initial, takenNames, onSave, onClose }: Add
                 <select
                   className="wf-form-input"
                   value={usableOptions.includes(defaultText) ? defaultText : ""}
-                  onChange={(e) => setDefaultText(e.target.value)}
+                  onChange={(e) => markDefaultTouched(e.target.value)}
                 >
                   <option value="">No default</option>
                   {usableOptions.map((o) => <option key={o} value={o}>{o}</option>)}
@@ -207,7 +225,7 @@ export function AddInputFieldModal({ initial, takenNames, onSave, onClose }: Add
                   className="wf-form-input"
                   type={type === "number" ? "number" : "text"}
                   value={defaultText}
-                  onChange={(e) => setDefaultText(e.target.value)}
+                  onChange={(e) => markDefaultTouched(e.target.value)}
                   placeholder="Optional — used when the runner leaves it blank"
                 />
               )}
