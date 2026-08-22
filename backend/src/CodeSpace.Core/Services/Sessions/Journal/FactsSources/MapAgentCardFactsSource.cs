@@ -1,6 +1,8 @@
 using CodeSpace.Core.Services.Tasks.Phases;
 using CodeSpace.Core.Services.Tasks.Timeline.Sources;
 using CodeSpace.Core.Services.Workflows;
+using CodeSpace.Core.Services.Workflows.Display;
+using CodeSpace.Messages.Dtos.Workflows;
 
 namespace CodeSpace.Core.Services.Sessions.Journal.FactsSources;
 
@@ -14,22 +16,24 @@ namespace CodeSpace.Core.Services.Sessions.Journal.FactsSources;
 /// </summary>
 public sealed class MapAgentCardFactsSource : IJournalFactsSource
 {
-    private readonly IWorkflowService _workflows;
+    private readonly IWorkflowRunViewMetadataReader _metadata;
     private readonly AgentMetricsReader _metrics;
 
-    public MapAgentCardFactsSource(IWorkflowService workflows, AgentMetricsReader metrics)
+    public MapAgentCardFactsSource(IWorkflowRunViewMetadataReader metadata, AgentMetricsReader metrics)
     {
-        _workflows = workflows;
+        _metadata = metadata;
         _metrics = metrics;
     }
 
     public async Task<IReadOnlyDictionary<string, JournalStepFacts>> GatherAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
     {
-        var run = await _workflows.GetRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+        var run = await _metadata.ReadAsync(runId, teamId, WorkflowRunViewScope.LineageMerged, cancellationToken).ConfigureAwait(false);
 
         if (run == null) return EmptyFacts;
+        if (run.CellsAvailability != WorkflowRunViewAvailability.Available || run.LinksAvailability != WorkflowRunViewAvailability.Available
+            || run.TopologyAvailability != WorkflowRunViewAvailability.Available) return EmptyFacts;
 
-        var maps = MapFanout.MapNodesOf(run.Nodes);
+        var maps = MapFanout.MapNodesOf(run.Cells);
 
         if (maps.Count == 0) return EmptyFacts;
 
@@ -52,10 +56,8 @@ public sealed class MapAgentCardFactsSource : IJournalFactsSource
         return facts;
     }
 
-    private static IEnumerable<Guid> BranchAgentIds(IEnumerable<Messages.Dtos.Workflows.WorkflowRunNodeSummary> branches) =>
-        branches
-            .Where(b => !string.IsNullOrEmpty(b.AgentRunId) && Guid.TryParse(b.AgentRunId, out _))
-            .Select(b => Guid.Parse(b.AgentRunId!));
+    private static IEnumerable<Guid> BranchAgentIds(IEnumerable<WorkflowRunCellMetadata> branches) =>
+        branches.Where(value => value.AgentRunId is not null).Select(value => value.AgentRunId!.Value);
 
     private static readonly IReadOnlyDictionary<string, JournalStepFacts> EmptyFacts = new Dictionary<string, JournalStepFacts>();
 }
