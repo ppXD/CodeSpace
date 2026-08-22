@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Workflows;
+using CodeSpace.Core.Services.Workflows.Display;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
@@ -9,7 +10,7 @@ using CodeSpace.Messages.Tasks.Phases;
 namespace CodeSpace.Core.Services.Tasks.Phases.Sources.Nodes;
 
 /// <summary>
-/// The STRUCTURAL phase source — it reuses <see cref="IWorkflowService.GetRunAsync"/> (team-scoped) wholesale and
+/// The STRUCTURAL phase source — it reads bounded body-blind cells plus exact bounded display leaves and
 /// projects ONE <see cref="RunPhase"/> per TOP-LEVEL node (a row with an empty <see cref="WorkflowRunNodeSummary.IterationKey"/> —
 /// not a container-internal branch). Map fan-outs roll up: a top-level node whose DIRECT branch rows carry
 /// <c>ContainerKind == "flow.map"</c> and an <c>IterationKey</c> prefixed <c>"&lt;mapNodeId&gt;#"</c> becomes a single
@@ -27,12 +28,14 @@ public sealed class WorkflowNodePhaseSource : IRunPhaseSource, IScopedDependency
 {
     public const string Key = "node-summary";
 
-    private readonly IWorkflowService _workflows;
+    private static readonly JsonElement EmptyJson = JsonSerializer.SerializeToElement(new { });
+
+    private readonly IWorkflowRunNodeObservationReader _observation;
     private readonly AgentMetricsReader _metrics;
 
-    public WorkflowNodePhaseSource(IWorkflowService workflows, AgentMetricsReader metrics)
+    public WorkflowNodePhaseSource(IWorkflowRunNodeObservationReader observation, AgentMetricsReader metrics)
     {
-        _workflows = workflows;
+        _observation = observation;
         _metrics = metrics;
     }
 
@@ -40,27 +43,99 @@ public sealed class WorkflowNodePhaseSource : IRunPhaseSource, IScopedDependency
 
     public async Task<IReadOnlyList<RunPhase>> ContributeAsync(RunPhaseContext context, CancellationToken cancellationToken)
     {
-        var run = await _workflows.GetRunAsync(context.RunId, context.TeamId, cancellationToken, context.MergeLineage).ConfigureAwait(false);
+        var scope = context.MergeLineage ? WorkflowRunViewScope.LineageMerged : WorkflowRunViewScope.AttemptOnly;
+        var run = await _observation.ReadAsync(new WorkflowRunNodeObservationRequest(context.RunId, context.TeamId, scope), cancellationToken).ConfigureAwait(false);
 
         if (run == null) return Array.Empty<RunPhase>();
+        if (run.Availability != WorkflowRunViewAvailability.Available) return new[] { CoveragePhase(run) };
 
         // ONE team-scoped read of the real AgentRun rows + tool ledger gives BOTH the ground-truth status AND the
         // per-agent metrics (duration / tokens / tool count / model), so a plain agent.run / map agent now carries the
         // SAME rollup the supervisor source folds from its ledger — not just status.
-        var metricsById = await _metrics.ReadForWorkflowRunAsync(context.TeamId, context.RunId, AgentRunIdsOf(run.Nodes), DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false);
+        var metricsById = await _metrics.ReadForWorkflowRunAsync(context.TeamId, context.RunId, AgentRunIdsOf(run.Metadata.Cells), DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false);
 
         var agentStatusById = metricsById.ToDictionary(kv => kv.Key, kv => kv.Value.Status);
 
-        return ProjectNodes(run.Nodes, agentStatusById, metricsById);
+        return ProjectObservation(run, agentStatusById, metricsById);
     }
 
-    /// <summary>The distinct agent-run ids referenced by the node rows (a node carrying a parseable <c>AgentRunId</c>) — the id set the metrics read folds over.</summary>
-    private static IReadOnlyList<Guid> AgentRunIdsOf(IReadOnlyList<WorkflowRunNodeSummary> nodes) =>
-        nodes
-            .Where(n => !string.IsNullOrEmpty(n.AgentRunId) && Guid.TryParse(n.AgentRunId, out _))
-            .Select(n => Guid.Parse(n.AgentRunId!))
-            .Distinct()
-            .ToList();
+    /// <summary>Bounded observation projection; kept separate from DB reads so completeness/error rendering stays unit-testable.</summary>
+    public static IReadOnlyList<RunPhase> ProjectObservation(WorkflowRunNodeObservation observation, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById,
+        IReadOnlyDictionary<Guid, AgentRunMetrics>? metricsById = null)
+    {
+        var phases = ProjectNodes(SummariesOf(observation), agentStatusById, metricsById);
+        return phases.Select(phase => WithLeafCoverage(phase, observation.TopLevelLeaves.GetValueOrDefault(phase.Id))).ToList();
+    }
+
+    /// <summary>The distinct linked AgentRun ids in the bounded metadata cells — the id set the metrics read folds over.</summary>
+    private static IReadOnlyList<Guid> AgentRunIdsOf(IReadOnlyList<WorkflowRunCellMetadata> cells) =>
+        cells.Where(value => value.AgentRunId is not null).Select(value => value.AgentRunId!.Value).Distinct().ToList();
+
+    private static IReadOnlyList<WorkflowRunNodeSummary> SummariesOf(WorkflowRunNodeObservation observation) =>
+        observation.Metadata.Cells.Select(cell =>
+        {
+            observation.TopLevelLeaves.TryGetValue(cell.NodeId, out var leaf);
+            return new WorkflowRunNodeSummary
+            {
+                NodeId = cell.NodeId,
+                IterationKey = cell.IterationKey,
+                ContainerKind = cell.ContainerKind,
+                Status = cell.Status,
+                Inputs = EmptyJson,
+                Outputs = OutputsOf(leaf?.MapMetrics),
+                Error = ErrorSummary(cell.Status, leaf),
+                StartedAt = cell.StartedAt,
+                CompletedAt = cell.CompletedAt,
+                ChildRunId = cell.ChildRunId?.ToString(),
+                AgentRunId = cell.AgentRunId?.ToString(),
+                RerunnableFromHere = cell.RerunnableFromHere,
+            };
+        }).ToList();
+
+    private static JsonElement OutputsOf(WorkflowRunMapMetricsObservation? metrics)
+    {
+        if (metrics is null) return EmptyJson;
+        var outputs = new Dictionary<string, JsonElement>
+        {
+            [WorkflowOutputKeys.MapCount] = JsonSerializer.SerializeToElement(metrics.Count),
+            [WorkflowOutputKeys.MapFailed] = JsonSerializer.SerializeToElement(metrics.Failed),
+        };
+        if (metrics.ResultsCoverageState == WorkflowRunNodeLeafState.Exact && metrics.ResultsCoverage is { } coverage)
+            outputs[WorkflowOutputKeys.MapResultsCoverage] = coverage.Clone();
+        return JsonSerializer.SerializeToElement(outputs);
+    }
+
+    private static string? ErrorSummary(NodeStatus status, WorkflowRunNodeLeafObservation? leaf) => leaf?.ErrorState switch
+    {
+        WorkflowRunNodeLeafState.Exact => leaf.ErrorPrefix,
+        WorkflowRunNodeLeafState.Truncated => $"{leaf.ErrorPrefix}… [truncated; the full error remains available in Trace.]",
+        WorkflowRunNodeLeafState.Invalid when status == NodeStatus.Failure => "The node failed; its recorded error is unavailable here. Inspect Trace.",
+        _ => null,
+    };
+
+    private static RunPhase WithLeafCoverage(RunPhase phase, WorkflowRunNodeLeafObservation? leaf)
+    {
+        var state = leaf?.MapMetrics?.ResultsCoverageState;
+        if (state is not (WorkflowRunNodeLeafState.Truncated or WorkflowRunNodeLeafState.Invalid)) return phase;
+        var extra = phase.Metrics.Extra.ToDictionary(value => value.Key, value => value.Value, StringComparer.Ordinal);
+        extra["observationCoverage"] = JsonSerializer.SerializeToElement(new { field = WorkflowOutputKeys.MapResultsCoverage, state = state.ToString(), fullValue = "Trace" });
+        return phase with { Metrics = phase.Metrics with { Extra = extra } };
+    }
+
+    internal static RunPhase CoveragePhase(WorkflowRunNodeObservation observation) => new()
+    {
+        Id = "node-summary-coverage",
+        Label = observation.Availability == WorkflowRunViewAvailability.Truncated ? "Node phases partially available" : "Node phases unavailable",
+        Kind = "observation.coverage",
+        Status = PhaseStatus.Failed,
+        Order = int.MaxValue,
+        SourceKey = Key,
+        Summary = observation.Availability == WorkflowRunViewAvailability.Truncated
+            ? "The bounded cell window was exhausted; one or more phases may be omitted."
+            : "The bounded cell, link, topology, or display-leaf observation could not be read safely; no structural phase was inferred.",
+        StartedAt = observation.Metadata.StartedAt ?? observation.Metadata.CreatedDate,
+        CompletedAt = observation.Metadata.CompletedAt,
+    };
 
     /// <summary>The pure projection step — node summaries + the already-resolved ground-truth agent statuses (and the optional per-agent metrics) → phases. Separated from the DB read so it is unit-testable without a DbContext. <paramref name="metricsById"/> omitted leaves the refs' duration/tokens/tool/model fields null (today's behavior).</summary>
     public static IReadOnlyList<RunPhase> ProjectNodes(IReadOnlyList<WorkflowRunNodeSummary> nodes, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById, IReadOnlyDictionary<Guid, AgentRunMetrics>? metricsById = null)
