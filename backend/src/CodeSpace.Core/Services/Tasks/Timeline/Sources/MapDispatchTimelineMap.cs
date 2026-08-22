@@ -37,6 +37,43 @@ public static class MapDispatchTimelineMap
         SourceKey = Key,
     };
 
+    /// <summary>
+    /// Body-blind dispatch projection. The raw failure error remains on the exact <c>node.failed</c> ledger event and
+    /// Trace; this orchestration beat does not reload an unbounded run body merely to duplicate it.
+    /// </summary>
+    public static RunTimelineEvent ToEvent(WorkflowRunCellMetadata mapNode, int agentCount, DateTimeOffset at) => new()
+    {
+        Id = EventId(mapNode.NodeId),
+        Kind = DispatchKind,
+        Title = agentCount == 0 ? "Dispatched no agents" : $"Dispatched {agentCount} agent{(agentCount == 1 ? "" : "s")}",
+        Summary = agentCount == 0
+            ? "No agent was dispatched — this map fanned out no branch."
+            : mapNode.Status == NodeStatus.Failure ? "The map failed; its recorded error remains available on the node.failed timeline event and Trace." : null,
+        Severity = SeverityFor(mapNode.Status),
+        Level = TimelineLevel.Milestone,
+        OccurredAt = at,
+        Order = 0,
+        NodeId = mapNode.NodeId,
+        SourceKey = Key,
+    };
+
+    /// <summary>A visible fail-safe when the bounded metadata plane cannot prove a complete map-dispatch fold.</summary>
+    public static RunTimelineEvent CoverageEvent(WorkflowRunViewAvailability availability, DateTimeOffset at) => new()
+    {
+        Id = "map-dispatch-coverage",
+        Kind = "observation.coverage",
+        Title = availability == WorkflowRunViewAvailability.Truncated
+            ? "Map dispatch history partially available"
+            : "Map dispatch history unavailable",
+        Summary = availability == WorkflowRunViewAvailability.Truncated
+            ? "The bounded cell window was exhausted; one or more dispatch events may be omitted."
+            : "The bounded cell or topology metadata could not be read safely; no dispatch event was inferred.",
+        Severity = TimelineSeverity.Warning,
+        Level = TimelineLevel.Milestone,
+        OccurredAt = at,
+        SourceKey = Key,
+    };
+
     /// <summary>An empty fan-out explains that nothing ran this round; a FAILED fan-out carries the node's error; a normal dispatch carries none (the agent cards ARE the detail).</summary>
     private static string? SummaryFor(WorkflowRunNodeSummary mapNode, int agentCount) =>
         agentCount == 0 ? "No agent was dispatched — this map fanned out no branch." : mapNode.Status == NodeStatus.Failure ? mapNode.Error : null;

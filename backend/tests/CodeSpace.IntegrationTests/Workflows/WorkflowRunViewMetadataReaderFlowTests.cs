@@ -4,6 +4,8 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Identity;
+using CodeSpace.Core.Services.Tasks.Timeline;
+using CodeSpace.Core.Services.Tasks.Timeline.Sources;
 using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Display;
@@ -13,6 +15,7 @@ using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Queries.Workflows;
+using CodeSpace.Messages.Tasks.Timeline;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
@@ -108,6 +111,34 @@ public class WorkflowRunViewMetadataReaderFlowTests
         plan.ShouldNotContain("Seq Scan on workflow_run_record", Case.Sensitive);
         plan.ShouldNotContain("Sort Method: external", Case.Sensitive, "the bounded metadata sort must remain in memory");
         plan.ShouldNotContain("pg_toast", Case.Insensitive, "the selected columns never dereference payload_json's toasted body");
+    }
+
+    [Fact]
+    public async Task Map_dispatch_source_resolved_from_di_projects_the_real_bounded_metadata_without_body_reads()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var artifactId = await PutBombArtifactAsync(teamId);
+        var runId = await SeedSnapshotRunAsync(teamId, MapDefinition(), null, null, DateTimeOffset.UtcNow);
+        await SeedCellAsync(runId, "fan", string.Empty, WorkflowRunRecordTypes.NodeCompleted, Guid.NewGuid(), artifactId);
+        await SeedCellAsync(runId, "worker", "fan#0", WorkflowRunRecordTypes.NodeCompleted, Guid.NewGuid(), artifactId);
+        var reads = new BodyReadObservation();
+
+        using var scope = _fixture.BeginScope(builder =>
+        {
+            builder.RegisterDecorator<IArtifactStore>((_, _, inner) => new ObservedArtifactStore(inner, reads));
+            builder.RegisterDecorator<IRunNodeOutputInflater>((_, _, inner) => new ObservedOutputInflater(inner, reads));
+        });
+        var source = scope.Resolve<IEnumerable<IRunTimelineSource>>().Single(value => value.SourceKey == MapDispatchTimelineMap.Key);
+
+        var events = await source.ContributeAsync(new RunTimelineContext { RunId = runId, TeamId = teamId }, CancellationToken.None);
+
+        var item = events.ShouldHaveSingleItem();
+        item.Id.ShouldBe("map-dispatch-fan");
+        item.Title.ShouldBe("Dispatched 1 agent");
+        item.Summary.ShouldBeNull();
+        reads.ArtifactReads.ShouldBe(0);
+        reads.InflaterReads.ShouldBe(0);
+        JsonSerializer.Serialize(events, new JsonSerializerOptions(JsonSerializerDefaults.Web)).ShouldNotContain(Bomb, Case.Sensitive);
     }
 
     private async Task<Guid> PutBombArtifactAsync(Guid teamId)
@@ -231,6 +262,16 @@ public class WorkflowRunViewMetadataReaderFlowTests
         Edges = new List<EdgeDefinition> { new() { From = "start", To = "work", Condition = "ok" } },
         Inputs = new[] { new WorkflowVariable { Name = "secret", Schema = WorkflowsTestSeed.Json("""{"type":"string"}""") } },
         Outputs = new[] { new WorkflowVariable { Name = "result", Schema = WorkflowsTestSeed.Json("""{"type":"string"}""") } },
+    };
+
+    private static WorkflowDefinition MapDefinition() => new()
+    {
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "fan", TypeKey = MapFanout.ContainerKind, Label = "Fan", Config = WorkflowsTestSeed.Json(JsonSerializer.Serialize(new { body = Bomb })), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "worker", TypeKey = "builtin.terminal", ParentId = "fan", Label = "Worker", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>(),
     };
 
     private sealed class BodyReadObservation
