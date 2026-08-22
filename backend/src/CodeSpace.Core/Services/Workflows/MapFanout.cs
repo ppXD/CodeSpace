@@ -22,6 +22,14 @@ public static class MapFanout
             .Where(m => m.Branches.Count > 0)
             .ToList();
 
+    /// <summary>The same direct-map rule over the bounded body-blind cell metadata read model.</summary>
+    public static IReadOnlyList<MetadataMapNode> MapNodesOf(IReadOnlyList<WorkflowRunCellMetadata> cells) =>
+        cells
+            .Where(value => string.IsNullOrEmpty(value.IterationKey))
+            .Select(value => new MetadataMapNode(value, BranchesOf(value.NodeId, cells)))
+            .Where(value => value.Branches.Count > 0)
+            .ToList();
+
     /// <summary>The direct element-branch rows of one map node — carrying <c>ContainerKind == "flow.map"</c> and a direct <c>"&lt;nodeId&gt;#&lt;i&gt;"</c> iteration key, ordered by that key.</summary>
     public static IReadOnlyList<WorkflowRunNodeSummary> BranchesOf(string nodeId, IReadOnlyList<WorkflowRunNodeSummary> allRows)
     {
@@ -33,10 +41,24 @@ public static class MapFanout
             .ToList();
     }
 
+    /// <summary>The direct element branches of one map node in the bounded body-blind cell metadata read model.</summary>
+    public static IReadOnlyList<WorkflowRunCellMetadata> BranchesOf(string nodeId, IReadOnlyList<WorkflowRunCellMetadata> cells)
+    {
+        var prefix = nodeId + "#";
+
+        return cells
+            .Where(value => value.ContainerKind == ContainerKind && IsDirectBranch(value.IterationKey, prefix))
+            .OrderBy(value => value.IterationKey, StringComparer.Ordinal)
+            .ToList();
+    }
+
     private static bool IsDirectBranch(string iterationKey, string prefix) =>
         iterationKey.StartsWith(prefix, StringComparison.Ordinal) &&
         iterationKey.AsSpan(prefix.Length).IndexOf('/') < 0;
 
     /// <summary>A top-level map node paired with its direct element branches.</summary>
     public sealed record MapNode(WorkflowRunNodeSummary Node, IReadOnlyList<WorkflowRunNodeSummary> Branches);
+
+    /// <summary>A top-level map node paired with its direct body-blind metadata branches.</summary>
+    public sealed record MetadataMapNode(WorkflowRunCellMetadata Node, IReadOnlyList<WorkflowRunCellMetadata> Branches);
 }
