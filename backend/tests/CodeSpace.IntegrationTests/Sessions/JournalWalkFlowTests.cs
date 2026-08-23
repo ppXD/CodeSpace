@@ -168,6 +168,7 @@ public sealed class JournalWalkFlowTests
         db.WorkflowRun.Add(new WorkflowRun
         {
             Id = runId, WorkflowId = null, WorkflowVersion = null, TeamId = teamId, RunRequestId = requestId,
+            DefinitionSnapshotJson = "{\"nodes\":[],\"edges\":[]}", DefinitionSnapshotHash = "sha256:test",
             SourceType = WorkflowRunSourceTypes.Snapshot, Status = WorkflowRunStatus.Success,
             ScopeRepositoryIds = [], ScopeProjectIds = [], CreatedDate = now,
             CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,

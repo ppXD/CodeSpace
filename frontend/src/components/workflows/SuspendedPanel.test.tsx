@@ -16,11 +16,23 @@ const { mutate, useWorkflowRunMock } = vi.hoisted(() => ({ mutate: vi.fn(), useW
 
 vi.mock("@/hooks/use-workflows", () => ({
   useResumeRun: () => ({ mutate, isPending: false, isError: false }),
+  isRunActive: (status: string) => !["Success", "Failure", "Cancelled"].includes(status),
   // Used by the embedded child RunDetailView for a Subworkflow wait.
   useWorkflowRun: (runId: string) => useWorkflowRunMock(runId),
+  useWorkflowRunDetail: (runId: string) => useWorkflowRunMock(runId),
+  useWorkflowRunPendingWait: (runId: string) => ({ isLoading: false, error: null, data: { runId, wait: { id: "wait-1", nodeId: "review", kind: "Approval", token: "ctok", wakeAt: null, promptState: "Exact", promptPrefix: "Approve the review?" } } }),
   useWorkflow: () => ({ data: undefined, isLoading: false }),
   useNodeManifests: () => ({ data: [] }),
   useRunPhases: () => ({ data: undefined }),   // the embedded child is nested → phases query is disabled anyway
+}));
+
+vi.mock("@/hooks/use-workflow-run-view-metadata", () => ({
+  useWorkflowRunViewMetadata: (runId: string) => ({ isLoading: false, error: null, data: {
+    runId, runNumber: 1, workflowId: "w", workflowVersion: 1, sourceType: "workflow.child", parentRunId: null,
+    status: "Suspended", hasError: false, startedAt: null, completedAt: null, createdDate: "2026-01-01T00:00:00Z",
+    scope: "LineageMerged", cellsAvailability: "Available", linksAvailability: "Available", cells: [],
+    topologyAvailability: "Available", topology: { nodes: [], edges: [] },
+  } }),
 }));
 
 // The embedded child RunDetailView's node rows read each node's agent-run status for their badge; mock the
@@ -90,8 +102,7 @@ describe("SuspendedPanel", () => {
 
     render(<SuspendedPanel runId="parent-1" wait={{ nodeId: "sub", kind: "Subworkflow", token: "child-1", payload: {} }} />);
 
-    // The embedded child's content is visible…
-    expect(screen.getByText("review")).toBeTruthy();              // a child node id
+    // The embedded child's bounded pending action is visible…
     expect(screen.getByText("Approve the review?")).toBeTruthy(); // the child's approval prompt
     // …and approving the child resolves the CHILD run (which the engine then turns into a parent resume).
     fireEvent.click(screen.getByText("Approve"));

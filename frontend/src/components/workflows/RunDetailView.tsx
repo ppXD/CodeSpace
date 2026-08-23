@@ -3,11 +3,11 @@ import { useMemo, useState, type ReactNode } from "react";
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { isAgentRunActive, type AgentRunStatus } from "@/api/agents";
 import { adaptWorkflowRunViewToCanvas, type WorkflowRunViewAvailability, type WorkflowRunViewMetadata } from "@/api/workflowRunViewMetadataApi";
-import type { NodeManifestDto, WorkflowRunIdentity, WorkflowRunNodeSummary, WorkflowRunWaitInfo } from "@/api/workflows";
+import type { NodeManifestDto, WorkflowRunDetail, WorkflowRunIdentity, WorkflowRunNodeSummary, WorkflowRunPendingWait, WorkflowRunWaitInfo } from "@/api/workflows";
 import { ApiError } from "@/api/request";
 import { useAgentRun } from "@/hooks/use-agents";
 import { useWorkflowRunViewMetadata } from "@/hooks/use-workflow-run-view-metadata";
-import { isRunActive, useNodeManifests, useResumeRun, useRunPhases, useWorkflowRun, useWorkflowRunIdentity } from "@/hooks/use-workflows";
+import { isRunActive, useNodeManifests, useResumeRun, useWorkflowRunDetail, useWorkflowRunIdentity, useWorkflowRunPendingWait } from "@/hooks/use-workflows";
 
 import { AgentRunTimeline } from "./AgentRunTimeline";
 import { AgentToolCalls } from "./AgentToolCalls";
@@ -19,7 +19,6 @@ import { RunOpenContext } from "./runOpenContext";
 import { RunCanvas } from "./RunCanvas";
 import { RunStatusBadge } from "./RunStatusBadge";
 import { RunTrace } from "./RunTrace";
-import { dedupRunAgents } from "./runPhases";
 import { groupMapBranches, nodeIterationLabel, type MapRollup } from "./mapBranches";
 import { concurrentNodeKeys, runNodeKey } from "./runConcurrency";
 
@@ -32,9 +31,9 @@ export { RunStatusBadge };
 const MAX_EMBED_DEPTH = 3;
 
 /**
- * Shared run-detail shell. Activity and nested editor/child surfaces retain the authoritative legacy detail needed
- * for run payloads and pending actions. Standalone Canvas, Trace, Changes and Governed tools mount only their bounded
- * metadata readers, and changing surface unmounts the prior owner so its in-flight request is cancelled.
+ * Shared run-detail shell. Every continuously refreshed surface owns only bounded metadata. Activity and nested
+ * editor/child surfaces fetch full input/output and node bodies once, only after an operator opens a raw disclosure;
+ * pending actions use a separate bounded reader whose approval prompt is capped before it crosses the database seam.
  *
  * Rendered both on the standalone run-detail route AND inside the editor's in-page run dialog,
  * so the two never drift. It deliberately uses the `.acs-root`-scoped `.wf-*` styles, so any
@@ -57,14 +56,14 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
   const selectAgent = onSelectAgent ?? setPickedAgent;
 
   if (nested || view === "activity") {
-    return <LegacyRunDetailView runId={runId} nested={nested} depth={depth} onOpenRun={onOpenRun} view={view} setView={setView}
+    return <ActivityRunDetailView runId={runId} nested={nested} depth={depth} onOpenRun={onOpenRun} view={view} setView={setView}
       selectedPhaseId={selectedPhaseId} selectedAgentRunId={selAgent} onSelectAgent={selectAgent} />;
   }
   if (view === "canvas") return <CanvasRunDetailView runId={runId} setView={setView} onOpenRun={onOpenRun} />;
   return <IdentityRunDetailView runId={runId} view={view} setView={setView} />;
 }
 
-function LegacyRunDetailView({ runId, nested, depth, onOpenRun, view, setView, selectedPhaseId, selectedAgentRunId, onSelectAgent }: {
+function ActivityRunDetailView({ runId, nested, depth, onOpenRun, view, setView, selectedPhaseId, selectedAgentRunId, onSelectAgent }: {
   runId: string;
   nested: boolean;
   depth: number;
@@ -75,93 +74,30 @@ function LegacyRunDetailView({ runId, nested, depth, onOpenRun, view, setView, s
   selectedAgentRunId: string | null;
   onSelectAgent: (agentRunId: string | null) => void;
 }) {
-  const run = useWorkflowRun(runId);
-  // The Live-work center is driven by the phase projection (shared ['run-phases', id] cache). Only the framed
-  // route needs it — the embedded (nested) dialog keeps the plain node narrative, so it skips the fetch.
-  const phases = useRunPhases(nested ? null : runId);
-  // Stable context value for Activity's open terminal (non-nested only — the nested dialog never provides it) —
-  // without the memo a fresh object every 2s run poll re-renders every consumer (each open AgentTerminal)
-  // for no change. Keyed on status, not run.data: run.data identity churns every poll, which would defeat the memo.
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- status is the only field read; run.data churns each poll
-  const runActions = useMemo(() => (!nested && run.data ? { runId, isTerminal: !isRunActive(run.data.status) } : null), [nested, runId, run.data?.status]);
+  const metadata = useWorkflowRunViewMetadata(runId, true);
+  const status = metadata.data?.status;
+  const suspended = status === "Suspended";
+  const pendingWait = useWorkflowRunPendingWait(runId, suspended);
+  // Stable context value for Activity's open terminal. Keyed on status because the bounded metadata object changes
+  // identity on every active-run poll even when the terminal admission state has not changed.
+  const runActions = useMemo(() => (!nested && status ? { runId, isTerminal: !isRunActive(status) } : null), [nested, runId, status]);
 
-  if (run.isLoading) {
+  if (metadata.isLoading) {
     return <div className="ct-empty"><div className="ct-empty-h">Loading run…</div></div>;
   }
 
-  if (run.error instanceof ApiError || !run.data) {
+  if (metadata.error || !metadata.data) {
     return (
       <div className="cn-banner cn-banner-err" style={{ margin: 0 }}>
         <div className="cn-banner-h">Run not found</div>
-        <div className="cn-banner-p">{run.error instanceof ApiError ? run.error.message : "It may have been removed."}</div>
+        <div className="cn-banner-p">The bounded run metadata is unavailable.</div>
       </div>
     );
   }
 
-  const r = run.data;
-  // Nodes whose execution overlapped in time — the engine ran them in a parallel wave (top-level or
-  // inside a loop body). Badged in the trace so a concurrent run is legible at a glance.
-  const concurrent = concurrentNodeKeys(r.nodes);
-  // Per-map element-branch rollups parsed from the engine iteration keys. Empty for a non-map run
-  // (every row has an empty iteration key) — so a non-map run renders exactly as before.
-  const mapRollups = groupMapBranches(r.nodes);
-  // The server-gated set of nodes a from-node rerun would ACCEPT — drives the timeline's "Rerun from here" so a
-  // button that would 422 is never offered (the canvas reads the same flag straight off its run-node rows). A plain
-  // derivation (this sits after the loading guard, so it can't be a hook); the filter is cheap over the node rows.
-  const rerunnableNodeIds = new Set(r.nodes.filter((n) => n.rerunnableFromHere).map((n) => n.nodeId));
-
-  // Whether the run has any agents decides the layout below: an agent / supervisor run folds the raw node trace away
-  // (the Activity timeline is the heart), a structural workflow with no agents keeps the node trace primary.
-  const phaseList = phases.data?.phases ?? [];
-  const agents = dedupRunAgents(phaseList);
-  // While the phases query is genuinely loading its FIRST result, optimistically fold the raw input/node trace. An
-  // agent run otherwise renders the node trace EXPANDED (phases not yet known → "no agents") and then collapses it into
-  // a fold the instant agents arrive — that collapse, while the timeline simultaneously fans out above, is the entry
-  // "expand/zoom" reflow. Folding from the start keeps the layout stable through the load. Once loaded, a genuinely
-  // agent-less (structural) run still gets the primary node trace; nested (editor dialog) is unaffected.
-  const phasesLoading = !nested && phases.isLoading;
-
-  const payloadBlock = (
-    <>
-      <section className="wf-section">
-        <h2 className="wf-section-h">Normalized payload</h2>
-        <JsonView data={r.normalizedPayload} />
-      </section>
-      {hasContent(r.outputs) && (
-        <section className="wf-section">
-          <h2 className="wf-section-h">Outputs</h2>
-          <JsonView data={r.outputs} />
-        </section>
-      )}
-    </>
-  );
-
-  const nodeBlock = (
-    <section className="wf-section">
-      <h2 className="wf-section-h">Node execution</h2>
-      {mapRollups.length > 0 && <MapRollups rollups={mapRollups} />}
-      {r.nodes.length === 0 ? (
-        <div className="ct-empty">
-          <div className="ct-empty-h">No nodes executed yet</div>
-          <div className="ct-empty-p">The engine hasn't picked up this run from the outbox yet — refresh in a moment.</div>
-        </div>
-      ) : (
-        <ol className="wf-run-nodes">
-          {r.nodes.map((n) => (
-            <RunNodeRow
-              key={`${n.nodeId}:${n.iterationKey}`}
-              node={n}
-              branch={nodeIterationLabel(n)}
-              parallel={concurrent.has(runNodeKey(n))}
-              suppressChildEmbed={n.childRunId === r.pendingWait?.token}
-              depth={depth}
-              onOpenRun={onOpenRun}
-            />
-          ))}
-        </ol>
-      )}
-    </section>
-  );
+  const r = metadata.data;
+  const rerunnableNodeIds = new Set(r.cells.filter((cell) => cell.rerunnableFromHere).map((cell) => cell.nodeId));
+  const wait = pendingWait.data?.wait ?? null;
 
   return (
     <div className={nested ? "wf-detail-body wf-detail-body-nested" : "wf-detail-body"}>
@@ -185,16 +121,11 @@ function LegacyRunDetailView({ runId, nested, depth, onOpenRun, view, setView, s
         </div>
       ) : <RunViewTabs view={view} setView={setView} />}
 
-      {r.error && (
-        <div className="cn-banner cn-banner-err" style={{ margin: 0 }}>
-          <div className="cn-banner-h">Run failed</div>
-          <div className="cn-banner-p" style={{ fontFamily: "inherit" }}>{r.error}</div>
-        </div>
-      )}
-
-      {r.status === "Suspended" && r.pendingWait && (
-        <SuspendedPanel runId={runId} wait={r.pendingWait} depth={depth} onOpenRun={onOpenRun} />
-      )}
+      {r.hasError && <div className="cn-banner cn-banner-err" style={{ margin: 0 }}><div className="cn-banner-h">Run failed</div><div className="cn-banner-p">Expand Run input &amp; output to read the recorded run-level error.</div></div>}
+      {suspended && pendingWait.isLoading && <div className="wf-run-canvas wf-run-canvas-loading" role="status">Loading pending action…</div>}
+      {suspended && pendingWait.error && <div className="cn-banner cn-banner-err" style={{ margin: 0 }}><div className="cn-banner-h">Pending action unavailable</div><div className="cn-banner-p">The full wait payload was not used as a fallback.</div></div>}
+      {suspended && !pendingWait.isLoading && !pendingWait.error && !wait && <div className="cn-banner" style={{ margin: 0 }}><div className="cn-banner-h">Run suspended</div><div className="cn-banner-p">No pending action is currently recorded.</div></div>}
+      {suspended && wait && <SuspendedPanel runId={runId} wait={wait} depth={depth} onOpenRun={onOpenRun} />}
 
       {/* Activity — the run's execution story as one chronological timeline: milestone events, each phase's agents
           as an inline terminal / tile wave, decisions at their point. The outline scrolls it; Trace has the raw audit. */}
@@ -206,22 +137,40 @@ function LegacyRunDetailView({ runId, nested, depth, onOpenRun, view, setView, s
         </RunActionsContext.Provider>
       )}
 
-      {nested || (!phasesLoading && agents.length === 0) ? (
-        // The editor dialog, or a structural workflow with no agents: the node trace IS the content.
-        <>
-          {payloadBlock}
-          {nodeBlock}
-        </>
-      ) : (
-        // An agent / supervisor run: the Activity timeline above is the heart, so the raw input/output + node
-        // trace fold away (the full raw stream lives in the Trace tab).
-        <>
-          <Fold title="Run input & output">{payloadBlock}</Fold>
-          <Fold title="Workflow nodes">{nodeBlock}</Fold>
-        </>
-      )}
+      <Fold title="Run input & output"><LazyRunPayload runId={runId} /></Fold>
+      <Fold title="Workflow nodes"><LazyWorkflowNodes runId={runId} pendingWaitToken={wait?.token ?? null} depth={depth} onOpenRun={onOpenRun} /></Fold>
     </div>
   );
+}
+
+function LazyRunPayload({ runId }: { runId: string }) {
+  const run = useWorkflowRunDetail(runId, true);
+  if (run.isLoading) return <RunReadLoading />;
+  if (run.error || !run.data) return <BoundedRunReadFailure error={run.error} />;
+  return <>
+    {run.data.error && <div className="cn-banner cn-banner-err" style={{ margin: 0 }}><div className="cn-banner-h">Run failed</div><div className="cn-banner-p" style={{ fontFamily: "inherit" }}>{run.data.error}</div></div>}
+    <section className="wf-section"><h2 className="wf-section-h">Normalized payload</h2><JsonView data={run.data.normalizedPayload} /></section>
+    {hasContent(run.data.outputs) && <section className="wf-section"><h2 className="wf-section-h">Outputs</h2><JsonView data={run.data.outputs} /></section>}
+  </>;
+}
+
+function LazyWorkflowNodes({ runId, pendingWaitToken, depth, onOpenRun }: { runId: string; pendingWaitToken: string | null; depth: number; onOpenRun?: (runId: string) => void }) {
+  const run = useWorkflowRunDetail(runId, true);
+  if (run.isLoading) return <RunReadLoading />;
+  if (run.error || !run.data) return <BoundedRunReadFailure error={run.error} />;
+  return <WorkflowNodesBlock run={run.data} pendingWaitToken={pendingWaitToken} depth={depth} onOpenRun={onOpenRun} />;
+}
+
+function WorkflowNodesBlock({ run, pendingWaitToken, depth, onOpenRun }: { run: WorkflowRunDetail; pendingWaitToken: string | null; depth: number; onOpenRun?: (runId: string) => void }) {
+  const concurrent = concurrentNodeKeys(run.nodes);
+  const mapRollups = groupMapBranches(run.nodes);
+  return <section className="wf-section">
+    <h2 className="wf-section-h">Node execution</h2>
+    {mapRollups.length > 0 && <MapRollups rollups={mapRollups} />}
+    {run.nodes.length === 0 ? <div className="ct-empty"><div className="ct-empty-h">No nodes executed yet</div><div className="ct-empty-p">The engine hasn't picked up this run from the outbox yet.</div></div> : (
+      <ol className="wf-run-nodes">{run.nodes.map((node) => <RunNodeRow key={`${node.nodeId}:${node.iterationKey}`} node={node} branch={nodeIterationLabel(node)} parallel={concurrent.has(runNodeKey(node))} suppressChildEmbed={node.childRunId === pendingWaitToken} depth={depth} onOpenRun={onOpenRun} />)}</ol>
+    )}
+  </section>;
 }
 
 function CanvasRunDetailView({ runId, setView, onOpenRun }: { runId: string; setView: (view: RunView) => void; onOpenRun?: (runId: string) => void }) {
@@ -492,7 +441,7 @@ function hasContent(value: unknown): boolean {
  * child run inline — including ITS resume affordance, so e.g. an approval deep inside the child is
  * operable right here; resolving it completes the child, which auto-resumes this run.
  */
-export function SuspendedPanel({ runId, wait, depth = 0, onOpenRun }: { runId: string; wait: WorkflowRunWaitInfo; depth?: number; onOpenRun?: (runId: string) => void }) {
+export function SuspendedPanel({ runId, wait, depth = 0, onOpenRun }: { runId: string; wait: WorkflowRunWaitInfo | WorkflowRunPendingWait; depth?: number; onOpenRun?: (runId: string) => void }) {
   const resume = useResumeRun(runId);
   const [comment, setComment] = useState("");
 
@@ -502,13 +451,15 @@ export function SuspendedPanel({ runId, wait, depth = 0, onOpenRun }: { runId: s
   }
 
   if (wait.kind === "Approval") {
-    const prompt = readPrompt(wait.payload);
+    const prompt = readPrompt(wait);
     const decide = (approved: boolean) => resume.mutate({ approved, comment: comment.trim() || undefined });
 
     return (
       <section className="wf-section wf-approval">
         <h2 className="wf-section-h">Waiting for approval</h2>
         {prompt && <div className="wf-approval-prompt">{prompt}</div>}
+        {"promptState" in wait && wait.promptState === "Truncated" && <div className="wf-approval-prompt">Prompt truncated to the first 2,048 characters.</div>}
+        {"promptState" in wait && wait.promptState === "Invalid" && <div className="wf-approval-prompt">The recorded prompt is invalid and was not displayed.</div>}
         <textarea
           className="wf-form-input wf-approval-comment"
           rows={2}
@@ -614,7 +565,9 @@ function EmbeddedChildRun({ childRunId, depth, onOpenRun }: { childRunId: string
 }
 
 /** Pull the approver-facing prompt out of a wait's suspend payload, if present. */
-function readPrompt(payload: unknown): string {
+function readPrompt(wait: WorkflowRunWaitInfo | WorkflowRunPendingWait): string {
+  if ("promptPrefix" in wait) return wait.promptPrefix ?? "";
+  const payload = wait.payload;
   if (payload && typeof payload === "object" && "prompt" in payload) {
     const p = (payload as { prompt?: unknown }).prompt;
     return typeof p === "string" ? p : "";

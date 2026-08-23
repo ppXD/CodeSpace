@@ -389,21 +389,18 @@ public sealed class RunTimelineProjectionFlowTests
     }
 
     [Fact]
-    public async Task Excludes_a_tool_call_stamped_to_another_team()
+    public async Task Rejects_a_tool_call_stamped_to_another_team_before_projection()
     {
-        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var (otherTeamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var runId = await SeedRunAsync(teamId);
         var agentId = Guid.NewGuid();
         await SeedAgentRunAsync(runId, teamId, agentId, "code");
 
-        // A tool-call row pointing at this run's agent but stamped to ANOTHER team — the team-scoped ledger read keeps it off.
-        await SeedToolCallsAsync(otherTeamId, agentId, (ToolCallLedgerStatus.Succeeded, "git.open_pr", null, null, DateTimeOffset.UtcNow));
-
-        var events = await ProjectAsync(userId, teamId, runId);
-
-        events.ShouldNotBeNull();
-        events!.ShouldNotContain(e => e.SourceKey == "tool-calls", "a tool call stamped to another team is filtered by the team-scoped ledger read");
+        // The database now prevents this illegal row from existing at all. That is stronger than relying on every
+        // projection reader to filter it after insertion, so the old crafted-row fixture must not bypass the guard.
+        await Should.ThrowAsync<DbUpdateException>(() => SeedToolCallsAsync(otherTeamId, agentId,
+            (ToolCallLedgerStatus.Succeeded, "git.open_pr", null, null, DateTimeOffset.UtcNow)));
     }
 
     private async Task SeedToolCallsAsync(Guid teamId, Guid agentRunId, params (ToolCallLedgerStatus Status, string ToolKind, string? Error, string? DecisionEnvelope, DateTimeOffset At)[] calls)
@@ -502,6 +499,7 @@ public sealed class RunTimelineProjectionFlowTests
         db.WorkflowRun.Add(new WorkflowRun
         {
             Id = runId, WorkflowId = null, WorkflowVersion = null, TeamId = teamId, RunRequestId = requestId,
+            DefinitionSnapshotJson = "{\"nodes\":[],\"edges\":[]}", DefinitionSnapshotHash = "sha256:test",
             SourceType = WorkflowRunSourceTypes.Snapshot, Status = WorkflowRunStatus.Failure,
             ScopeRepositoryIds = [], ScopeProjectIds = [], CreatedDate = now,
             CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,

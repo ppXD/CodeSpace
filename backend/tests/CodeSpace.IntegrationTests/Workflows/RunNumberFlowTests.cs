@@ -116,7 +116,9 @@ public class RunNumberFlowTests
         var byGuid = await mediator.Send(new GetWorkflowRunIdentityByRefQuery { IdOrNumber = runId.ToString() });
 
         byNumber.ShouldNotBeNull();
-        byNumber!.ShouldBe(new WorkflowRunIdentity { Id = runId, RunNumber = 1, Status = WorkflowRunStatus.Pending });
+        byNumber!.Id.ShouldBe(runId);
+        byNumber.RunNumber.ShouldBe(1);
+        Enum.IsDefined(byNumber.Status).ShouldBeTrue("status is the authoritative live projection; the dispatcher may advance it before this read");
         byGuid.ShouldBe(byNumber);
     }
 

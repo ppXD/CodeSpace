@@ -454,6 +454,7 @@ public sealed class JournalProjectorFlowTests
         db.WorkflowRun.Add(new WorkflowRun
         {
             Id = runId, TeamId = teamId, RunRequestId = requestId, SourceType = WorkflowRunSourceTypes.Snapshot,
+            DefinitionSnapshotJson = "{\"nodes\":[],\"edges\":[]}", DefinitionSnapshotHash = "sha256:test",
             Status = status, SessionId = sessionId, SessionTurnIndex = turnIndex, RootRunId = rootRunId, Error = error,
             OutputsJson = "{}", CreatedDate = createdAt, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
         });
@@ -493,6 +494,7 @@ public sealed class JournalProjectorFlowTests
         db.WorkflowRun.Add(new WorkflowRun
         {
             Id = runId, TeamId = teamId, RunRequestId = requestId, SourceType = WorkflowRunSourceTypes.Snapshot,
+            DefinitionSnapshotJson = "{\"nodes\":[],\"edges\":[]}", DefinitionSnapshotHash = "sha256:test",
             Status = WorkflowRunStatus.Success, SessionId = sessionId, SessionTurnIndex = turn,
             OutputsJson = outputs,
             CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
