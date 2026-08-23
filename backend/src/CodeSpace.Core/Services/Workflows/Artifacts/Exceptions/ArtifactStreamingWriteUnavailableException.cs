@@ -1,10 +1,12 @@
+using CodeSpace.Messages.Failures;
+
 namespace CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
 
 /// <summary>
 /// The selected legacy byte backend cannot consume a stream. Streaming writes fail explicitly instead of falling
 /// back to materializing the full payload behind the caller's back.
 /// </summary>
-public sealed class ArtifactStreamingWriteUnavailableException : NotSupportedException
+public sealed class ArtifactStreamingWriteUnavailableException : NotSupportedException, IFailure
 {
     public ArtifactStreamingWriteUnavailableException(Type backendType)
         : this(backendType, typeof(IArtifactBlobStreamWriter)) { }
@@ -21,4 +23,7 @@ public sealed class ArtifactStreamingWriteUnavailableException : NotSupportedExc
 
     /// <summary>Compatibility alias for the original legacy-backend caller.</summary>
     public Type BackendType => ComponentType;
+
+    FailureKind IFailure.Kind => FailureKind.Internal;
+    string IFailure.Code => FailureCodes.Internal;
 }

@@ -3,6 +3,7 @@ using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Failures;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents;
@@ -56,6 +57,8 @@ public sealed class AgentRunExecutorTranscriptAttachmentTests : IDisposable
             AgentRunExecutor.AttachTranscriptAsync(store, Original, Guid.NewGuid(), transcript, CancellationToken.None));
 
         failure.RequiredCapability.ShouldBe(typeof(IArtifactStreamStore));
+        ((IFailure)failure).Kind.ShouldBe(FailureKind.Internal);
+        ((IFailure)failure).Code.ShouldBe(FailureCodes.Internal);
         store.WholePutCalls.ShouldBe(0, "missing capability is explicit; it must not trigger the old ReadAll + whole-byte fallback");
     }
 
