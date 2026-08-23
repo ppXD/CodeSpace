@@ -37,7 +37,7 @@ public sealed class WorkflowRunHarnessExecutionSchemaTests
         entity.GetProperties().Select(property => property.Name).Order().ShouldBe(new[]
         {
             "AgentRunId", "AttemptCount", "CreatedAt", "DeadlineAt", "ErrorCode", "ErrorMessage", "Generation",
-            "HarnessTypeKey", "Id", "LastModifiedAt", "LeaseExpiresAt", "LeaseFence", "LeaseOwnerId",
+            "HarnessTypeKey", "Id", "LastModifiedAt", "LeaseExpiresAt", "LeaseFence", "LeaseOwnerId", "ModelCallObservationCoverage",
             "NextAttemptOrdinal", "Revision", "RunnerHostAffinity", "RunnerKind", "RunnerLocatorSchemaVersion",
             "State", "TeamId", "TerminalAt", "WorkflowRunId", "Xmin",
         }.Order());
@@ -65,6 +65,7 @@ public sealed class WorkflowRunHarnessExecutionSchemaTests
         {
             "ck_workflow_run_harness_execution_error", "ck_workflow_run_harness_execution_head",
             "ck_workflow_run_harness_execution_identity", "ck_workflow_run_harness_execution_lease",
+            "ck_workflow_run_harness_execution_model_call_observation",
             "ck_workflow_run_harness_execution_state", "ck_workflow_run_harness_execution_terminal",
             "ck_workflow_run_harness_execution_terminal_lease", "ck_workflow_run_harness_execution_time",
         }, ignoreOrder: true);
