@@ -30,7 +30,10 @@ describe("Workflow Run record payload API", () => {
 
     const result = await workflowsApi.readRunRecordPayloadRange(runId, recordId, 42, 0, 64 * 1024, controller.signal);
 
-    expect(fetchSpy).toHaveBeenCalledWith(`/api/workflows/runs/${runId}/records/${recordId}/payload?offsetBytes=0&limitBytes=65536`, expect.objectContaining({ signal: controller.signal }));
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [requested, init] = fetchSpy.mock.calls[0];
+    expect(String(requested).endsWith(`/api/workflows/runs/${runId}/records/${recordId}/payload?offsetBytes=0&limitBytes=65536`)).toBe(true);
+    expect(init).toEqual(expect.objectContaining({ signal: controller.signal }));
     expect(result).toMatchObject({ availability: "Available", runId, recordId, sequence: 42, offsetBytes: 0, totalBytes: bytes.byteLength, nextOffsetBytes: null, contentType: "application/json" });
     if (result.availability === "Available") expect(Array.from(result.bytes)).toEqual(Array.from(bytes));
   });

@@ -160,6 +160,7 @@ public static class SessionCorpusSeed
         {
             Id = runId, TeamId = teamId, RunRequestId = requestId, SourceType = WorkflowRunSourceTypes.Snapshot,
             Status = status, SessionId = sessionId, SessionTurnIndex = turn,
+            DefinitionSnapshotJson = "{\"nodes\":[],\"edges\":[]}", DefinitionSnapshotHash = "sha256:test",
             OutputsJson = outputs,
             CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
         });
@@ -185,6 +186,7 @@ public static class SessionCorpusSeed
         {
             Id = runId, TeamId = teamId, RunRequestId = requestId, SourceType = WorkflowRunSourceTypes.Rerun,
             Status = status, SessionId = sessionId, SessionTurnIndex = turnIndex, RootRunId = rootRunId, Error = error,
+            DefinitionSnapshotJson = "{\"nodes\":[],\"edges\":[]}", DefinitionSnapshotHash = "sha256:test",
             OutputsJson = "{}", CreatedDate = createdAt, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
         });
 

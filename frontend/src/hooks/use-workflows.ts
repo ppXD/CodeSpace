@@ -179,11 +179,25 @@ export function useWorkflowRun(runId: string | null) {
     queryKey: ["workflow-run", runId],
     queryFn: ({ signal }) => workflowsApi.getRun(runId!, signal),
     enabled: runId != null,
-    refetchInterval: (q) => {
-      const data = q.state.data;
-      if (!data) return false;
-      return isRunActive(data.status) ? 2000 : false;
-    },
+  });
+}
+
+/** Explicit full-detail read for raw disclosures. Like the compatibility hook above, it never polls. */
+export function useWorkflowRunDetail(runId: string | null, enabled = true) {
+  return useQuery({
+    queryKey: ["workflow-run", runId],
+    queryFn: ({ signal }) => workflowsApi.getRun(runId!, signal),
+    enabled: enabled && runId != null,
+  });
+}
+
+/** Bounded pending-action surface; safe to refresh while the metadata shell remains suspended. */
+export function useWorkflowRunPendingWait(runId: string | null, enabled = true) {
+  return useQuery({
+    queryKey: ["workflow-run-pending-wait", runId],
+    queryFn: ({ signal }) => workflowsApi.getRunPendingWait(runId!, signal),
+    enabled: enabled && runId != null,
+    refetchInterval: enabled ? 2000 : false,
   });
 }
 

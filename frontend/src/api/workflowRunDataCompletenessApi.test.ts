@@ -43,7 +43,7 @@ describe("Workflow Run data completeness API", () => {
 
     const result = await workflowsApi.getRunDataCompleteness(runId);
 
-    expect(requested).toBe(`/api/workflows/runs/${runId}/data-completeness`);
+    expect(requested.endsWith(`/api/workflows/runs/${runId}/data-completeness`)).toBe(true);
     expect(result).toEqual(valid());
   });
 

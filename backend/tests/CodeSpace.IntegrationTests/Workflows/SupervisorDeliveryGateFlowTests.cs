@@ -84,14 +84,14 @@ public sealed class SupervisorDeliveryGateFlowTests
         var repoId = await SeedBoundRepositoryAsync(teamId);
         var runId = await SeedSupervisorRunAsync(teamId, userId);
 
-        var agentRunId = Guid.NewGuid();
-        await SeedSpawnAsync(runId, teamId, agentRunId);
-        await SeedAgentManifestAsync(runId, teamId, agentRunId, repoId, "codespace/agent/fix");
-
         var goalConfig = GoalConfig(repoId, new DeliverySpec { OpenPullRequest = true });
         var decider = new PlansTrueThenStopsDecider();
 
         await RunTurnAsync(runId, teamId, decider, goalConfig);   // turn 1: authors a plan (the operator's contract clamps into its payload)
+
+        var agentRunId = Guid.NewGuid();
+        await SeedSpawnAsync(runId, teamId, agentRunId);
+        await SeedAgentManifestAsync(runId, teamId, agentRunId, repoId, "codespace/agent/fix");
 
         var publish = await RunTurnAsync(runId, teamId, decider, goalConfig);   // turn 2: tries to stop
 
@@ -216,14 +216,14 @@ public sealed class SupervisorDeliveryGateFlowTests
         var repoId = await SeedBoundRepositoryAsync(teamId);
         var runId = await SeedSupervisorRunAsync(teamId, userId);
 
-        var agentRunId = Guid.NewGuid();
-        await SeedSpawnAsync(runId, teamId, agentRunId);
-        await SeedAgentManifestAsync(runId, teamId, agentRunId, repoId, "codespace/agent/fix");
-
         var goalConfig = GoalConfig(repoId, new DeliverySpec { OpenPullRequest = true });
         var decider = new PlansTrueThenStopsDecider("release");
 
         await RunTurnAsync(runId, teamId, decider, goalConfig);   // turn 1: plan proposes TargetBranch "release"
+
+        var agentRunId = Guid.NewGuid();
+        await SeedSpawnAsync(runId, teamId, agentRunId);
+        await SeedAgentManifestAsync(runId, teamId, agentRunId, repoId, "codespace/agent/fix");
 
         var publish = await RunTurnAsync(runId, teamId, decider, goalConfig);   // turn 2: tries to stop
 

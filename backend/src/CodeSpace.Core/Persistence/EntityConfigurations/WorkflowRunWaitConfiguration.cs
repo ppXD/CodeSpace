@@ -18,5 +18,7 @@ public class WorkflowRunWaitConfiguration : IEntityTypeConfiguration<WorkflowRun
         builder.Property(w => w.PayloadJson).HasColumnName("payload_jsonb").HasColumnType("jsonb");
 
         builder.HasIndex(w => new { w.RunId, w.NodeId, w.IterationKey }).IsUnique();
+        builder.HasIndex(w => new { w.RunId, w.CreatedAt, w.Id }).HasDatabaseName("idx_workflow_run_wait_pending_created")
+            .HasFilter("status = 'Pending'").IsDescending(false, true, true);
     }
 }

@@ -109,6 +109,14 @@ public class WorkflowRunsController : ControllerBase
         return result == null ? NotFound() : Ok(result);
     }
 
+    /// <summary>One bounded pending-wait action descriptor. Only a capped prompt prefix crosses the seam; the wait payload and run graph do not.</summary>
+    [HttpGet("{runId:guid}/pending-wait")]
+    public async Task<IActionResult> GetPendingWait([FromRoute] Guid runId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetWorkflowRunPendingWaitObservationQuery { RunId = runId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
     /// <summary>
     /// One bounded, body-blind field-descriptor page for an exact cell coordinate returned by view-metadata. Artifact
     /// ids, field bytes, node configuration and whole record payloads are deliberately absent.

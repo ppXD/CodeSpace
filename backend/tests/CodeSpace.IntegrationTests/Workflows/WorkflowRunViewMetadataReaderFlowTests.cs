@@ -348,6 +348,46 @@ public class WorkflowRunViewMetadataReaderFlowTests
         facts["map-plan-planner"].ObservationCoverage!.ShouldHaveSingleItem().Reason.ShouldBe(CodeSpace.Messages.Dtos.Sessions.Journal.JournalObservationCoverageReason.TruncatedLeaf);
     }
 
+    [Fact]
+    public async Task Pending_wait_observation_returns_only_a_bounded_prompt_and_conflates_foreign_runs()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (foreignTeamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSnapshotRunAsync(teamId, Definition("bounded wait"), null, null, DateTimeOffset.UtcNow);
+        var prefix = new string('p', WorkflowRunPendingWaitObservationReader.MaximumPromptCharacters);
+        var bomb = Bomb + new string('x', 2 * 1024 * 1024);
+        using (var seed = _fixture.BeginScope())
+        {
+            seed.Resolve<CodeSpaceDbContext>().WorkflowRunWait.Add(new CodeSpace.Core.Persistence.Entities.WorkflowRunWait
+            {
+                Id = Guid.NewGuid(), RunId = runId, NodeId = "approval", WaitKind = WorkflowWaitKinds.Approval,
+                Token = Guid.NewGuid().ToString("N"), Status = WorkflowWaitStatuses.Pending, CreatedAt = DateTimeOffset.UtcNow,
+                PayloadJson = JsonSerializer.Serialize(new { prompt = prefix + "tail", baggage = bomb }),
+            });
+            await seed.Resolve<CodeSpaceDbContext>().SaveChangesAsync();
+        }
+        await BulkSeedResolvedWaitsAsync(runId, 10_000);
+
+        using var scope = _fixture.BeginScope();
+        var reader = scope.Resolve<IWorkflowRunPendingWaitObservationReader>();
+        var observed = await reader.ReadAsync(runId, teamId, CancellationToken.None);
+        var hidden = await reader.ReadAsync(runId, foreignTeamId, CancellationToken.None);
+        var plan = await ExplainPendingWaitQueryAsync(scope.Resolve<CodeSpaceDbContext>(), runId, teamId);
+
+        observed.ShouldNotBeNull();
+        observed!.Wait.ShouldNotBeNull();
+        observed.Wait!.PromptState.ShouldBe(WorkflowRunPendingWaitPromptState.Truncated);
+        observed.Wait.PromptPrefix.ShouldBe(prefix);
+        var wire = JsonSerializer.Serialize(observed);
+        wire.ShouldNotContain(Bomb, Case.Sensitive);
+        wire.Length.ShouldBeLessThan(5_000);
+        hidden.ShouldBeNull();
+        plan.ShouldContain("idx_workflow_run_wait_pending_created", Case.Sensitive,
+            "the Suspended UI polls this observation, so resolved history must not be scanned or sorted");
+        plan.ShouldNotContain("Seq Scan on workflow_run_wait", Case.Sensitive);
+        plan.ShouldNotContain("Sort  (", Case.Sensitive);
+    }
+
     private async Task<Guid> PutBombArtifactAsync(Guid teamId)
     {
         using var scope = _fixture.BeginScope();
@@ -457,6 +497,26 @@ public class WorkflowRunViewMetadataReaderFlowTests
         await analyze.ExecuteNonQueryAsync().ConfigureAwait(false);
     }
 
+    private async Task BulkSeedResolvedWaitsAsync(Guid runId, int count)
+    {
+        await using var connection = new NpgsqlConnection(_fixture.ConnectionString);
+        await connection.OpenAsync().ConfigureAwait(false);
+        const string sql = """
+            INSERT INTO workflow_run_wait (id, run_id, node_id, iteration_key, wait_kind, token, status, payload_jsonb, created_at, resolved_at)
+            SELECT gen_random_uuid(), @run_id, 'history', 'map#' || lpad(value::text, 5, '0'), 'Approval', gen_random_uuid()::text,
+                   'Resolved', jsonb_build_object('prompt', @bomb), @created_at - make_interval(secs => value), @created_at
+            FROM generate_series(1, @count) AS value
+            """;
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddWithValue("run_id", runId);
+        command.Parameters.AddWithValue("bomb", Bomb);
+        command.Parameters.AddWithValue("created_at", DateTimeOffset.UtcNow);
+        command.Parameters.AddWithValue("count", count);
+        await command.ExecuteNonQueryAsync().ConfigureAwait(false);
+        await using var analyze = new NpgsqlCommand("ANALYZE workflow_run_wait", connection);
+        await analyze.ExecuteNonQueryAsync().ConfigureAwait(false);
+    }
+
     private async Task AppendStatePayloadAsync(Guid runId, string nodeId, string iterationKey, string payload)
     {
         using var scope = _fixture.BeginScope();
@@ -483,6 +543,28 @@ public class WorkflowRunViewMetadataReaderFlowTests
             command.Parameters.Add("iteration_key", NpgsqlTypes.NpgsqlDbType.Text).Value = DBNull.Value;
             command.Parameters.AddWithValue("take", WorkflowRunViewMetadataReader.MaximumCells + 1);
             command.Parameters.AddWithValue("max_identity_chars", WorkflowRunViewMetadataReader.MaximumIdentityCharacters);
+            var lines = new List<string>();
+            await using var reader = await command.ExecuteReaderAsync().ConfigureAwait(false);
+            while (await reader.ReadAsync().ConfigureAwait(false)) lines.Add(reader.GetString(0));
+            return string.Join('\n', lines);
+        }
+        finally
+        {
+            await connection.CloseAsync().ConfigureAwait(false);
+        }
+    }
+
+    private static async Task<string> ExplainPendingWaitQueryAsync(CodeSpaceDbContext db, Guid runId, Guid teamId)
+    {
+        var connection = (NpgsqlConnection)db.Database.GetDbConnection();
+        await connection.OpenAsync().ConfigureAwait(false);
+        try
+        {
+            await using var command = new NpgsqlCommand("EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) " + WorkflowRunPendingWaitObservationReader.Sql, connection);
+            command.Parameters.AddWithValue("run_id", runId);
+            command.Parameters.AddWithValue("team_id", teamId);
+            command.Parameters.AddWithValue("pending_status", WorkflowWaitStatuses.Pending);
+            command.Parameters.AddWithValue("max_prompt_chars", WorkflowRunPendingWaitObservationReader.MaximumPromptCharacters);
             var lines = new List<string>();
             await using var reader = await command.ExecuteReaderAsync().ConfigureAwait(false);
             while (await reader.ReadAsync().ConfigureAwait(false)) lines.Add(reader.GetString(0));

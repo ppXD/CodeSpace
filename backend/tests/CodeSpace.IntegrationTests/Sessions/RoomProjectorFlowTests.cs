@@ -462,6 +462,7 @@ public class RoomProjectorFlowTests
         {
             Id = runId, TeamId = teamId, RunRequestId = requestId, SourceType = source,
             Status = status, SessionId = sessionId, SessionTurnIndex = turnIndex, RootRunId = rootRunId,
+            DefinitionSnapshotJson = "{\"nodes\":[],\"edges\":[]}", DefinitionSnapshotHash = "sha256:test",
             OutputsJson = "{}", CreatedDate = createdAt, CompletedAt = completedAt, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
         });
         await db.SaveChangesAsync();
@@ -975,6 +976,7 @@ public class RoomProjectorFlowTests
         {
             Id = runId, TeamId = teamId, RunRequestId = requestId, SourceType = WorkflowRunSourceTypes.Snapshot,
             Status = status, SessionId = sessionId, SessionTurnIndex = turn,
+            DefinitionSnapshotJson = "{\"nodes\":[],\"edges\":[]}", DefinitionSnapshotHash = "sha256:test",
             OutputsJson = outputs,
             CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
         });

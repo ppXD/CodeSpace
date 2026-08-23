@@ -12,8 +12,10 @@ import { RunDetailView } from "./RunDetailView";
  *   2. the child run-detail embeds inline, but only once expanded (no eager polling for N steps);
  *   3. with no navigation handler the id is plain text; a non-subworkflow node shows neither.
  */
-const { useWorkflowRunMock, useWorkflowRunIdentityMock, useWorkflowRunViewMetadataMock, useNodeManifestsMock, useAgentRunMock, useRunPhasesMock, governedToolsPanelMock, runCanvasMock } = vi.hoisted(() => ({
+const { useWorkflowRunMock, useWorkflowRunDetailMock, useWorkflowRunPendingWaitMock, useWorkflowRunIdentityMock, useWorkflowRunViewMetadataMock, useNodeManifestsMock, useAgentRunMock, useRunPhasesMock, governedToolsPanelMock, runCanvasMock } = vi.hoisted(() => ({
   useWorkflowRunMock: vi.fn(),
+  useWorkflowRunDetailMock: vi.fn(),
+  useWorkflowRunPendingWaitMock: vi.fn(),
   useWorkflowRunIdentityMock: vi.fn(),
   useWorkflowRunViewMetadataMock: vi.fn(),
   useNodeManifestsMock: vi.fn(),
@@ -27,6 +29,8 @@ vi.mock("@/hooks/use-workflows", () => ({
   useResumeRun: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
   isRunActive: (s: string) => !["Success", "Failure", "Cancelled"].includes(s),
   useWorkflowRun: (runId: string) => useWorkflowRunMock(runId),
+  useWorkflowRunDetail: (runId: string, enabled = true) => useWorkflowRunDetailMock(runId, enabled),
+  useWorkflowRunPendingWait: (runId: string, enabled = true) => useWorkflowRunPendingWaitMock(runId, enabled),
   useWorkflowRunIdentity: (runId: string, enabled = true) => useWorkflowRunIdentityMock(runId, enabled),
   useWorkflow: () => ({ data: undefined, isLoading: false }),
   useNodeManifests: () => useNodeManifestsMock(),
@@ -97,6 +101,10 @@ const missing = { isLoading: false, error: null, data: null };
 
 beforeEach(() => {
   useWorkflowRunMock.mockReset();
+  useWorkflowRunDetailMock.mockReset();
+  useWorkflowRunDetailMock.mockImplementation((runId: string) => useWorkflowRunMock(runId));
+  useWorkflowRunPendingWaitMock.mockReset();
+  useWorkflowRunPendingWaitMock.mockReturnValue({ isLoading: false, error: null, data: { runId: "parent-1", wait: null } });
   useWorkflowRunIdentityMock.mockReset();
   useWorkflowRunIdentityMock.mockReturnValue({ isLoading: false, error: null, data: { id: "parent-1", runNumber: 1, status: "Success" } });
   useWorkflowRunViewMetadataMock.mockReset();
@@ -112,6 +120,7 @@ beforeEach(() => {
 });
 
 const phasesWithAgent = { data: { phases: [{ id: "p", label: "Implement", kind: "agent", status: "Active", order: 0, agents: [{ agentRunId: "ar1", status: "Running", label: "backend-fix" }], metrics: { agentCount: 1, succeededCount: 0, failedCount: 0 }, sourceKey: "supervisor-ledger" }] } };
+const openWorkflowNodes = () => fireEvent.click(screen.getByText("Workflow nodes"));
 
 describe("RunDetailView — sub-workflow step drill-down", () => {
   it("links the step to its child run, and embeds the child inline only once expanded", () => {
@@ -123,6 +132,7 @@ describe("RunDetailView — sub-workflow step drill-down", () => {
     const onOpenRun = vi.fn();
 
     render(<RunDetailView defaultView="activity" runId="parent-1" onOpenRun={onOpenRun} />);
+    openWorkflowNodes();
 
     // The sub-workflow step id is a link → opens the child run full-page.
     fireEvent.click(screen.getByTitle("Open the sub-workflow run"));
@@ -133,6 +143,9 @@ describe("RunDetailView — sub-workflow step drill-down", () => {
 
     // …expanding mounts the live child run-detail inline, with its own step trace.
     fireEvent.click(screen.getByText("Sub-workflow run"));
+    expect(useWorkflowRunViewMetadataMock).toHaveBeenCalledWith("child-1", true);
+    expect(useWorkflowRunMock).not.toHaveBeenCalledWith("child-1");
+    fireEvent.click(screen.getAllByText("Workflow nodes")[1]);
     expect(useWorkflowRunMock).toHaveBeenCalledWith("child-1");
     expect(screen.getByText("child-step")).toBeTruthy();
   });
@@ -142,6 +155,7 @@ describe("RunDetailView — sub-workflow step drill-down", () => {
       runId === "parent-1" ? ok(detail({ nodes: [node({ nodeId: "sub", childRunId: "child-1" })] })) : missing);
 
     render(<RunDetailView defaultView="activity" runId="parent-1" />);
+    openWorkflowNodes();
 
     expect(screen.queryByTitle("Open the sub-workflow run")).toBeNull();
     expect(screen.getByText("sub")).toBeTruthy(); // still shown — just not a link
@@ -151,12 +165,15 @@ describe("RunDetailView — sub-workflow step drill-down", () => {
     useWorkflowRunMock.mockImplementation(() => ok(detail({ nodes: [node({ nodeId: "start" })] })));
 
     render(<RunDetailView defaultView="activity" runId="parent-1" onOpenRun={vi.fn()} />);
+    openWorkflowNodes();
 
     expect(screen.queryByText("Sub-workflow run")).toBeNull();
     expect(screen.queryByTitle("Open the sub-workflow run")).toBeNull();
   });
 
   it("does not double-embed the child the run is suspended on (the suspended panel already shows it)", () => {
+    useWorkflowRunViewMetadataMock.mockImplementation((runId: string) => ({ isLoading: false, error: null, data: viewMetadata({ runId, status: runId === "parent-1" ? "Suspended" : "Success" }) }));
+    useWorkflowRunPendingWaitMock.mockImplementation((runId: string) => ({ isLoading: false, error: null, data: { runId, wait: runId === "parent-1" ? { id: "wait-1", nodeId: "sub", kind: "Subworkflow", token: "child-1", wakeAt: null, promptState: "Missing", promptPrefix: null } : null } }));
     useWorkflowRunMock.mockImplementation((runId: string) => {
       if (runId === "parent-1") return ok(detail({
         status: "Suspended",
@@ -171,6 +188,7 @@ describe("RunDetailView — sub-workflow step drill-down", () => {
 
     // The suspended panel embeds the child at the top…
     expect(screen.getByText("Running a sub-workflow")).toBeTruthy();
+    fireEvent.click(screen.getAllByText("Workflow nodes").at(-1)!);
     // …so the trace row must NOT offer the same child again (no duplicate embed / double-poll).
     expect(screen.queryByText("Sub-workflow run")).toBeNull();
   });
@@ -187,6 +205,7 @@ describe("RunDetailView — live agent-code node badge", () => {
     useAgentRunMock.mockImplementation((id?: string) => ({ data: id === "ar-1" ? { status: "Running" } : undefined }));
 
     render(<RunDetailView defaultView="activity" runId="parent-1" />);
+    openWorkflowNodes();
 
     // The row's status badge reads "Running" (derived from the agent run), with the engine truth on hover.
     const badge = screen.getByTitle(parkedTitle);
@@ -200,6 +219,7 @@ describe("RunDetailView — live agent-code node badge", () => {
     })));
 
     const { container } = render(<RunDetailView defaultView="activity" runId="parent-1" />);
+    openWorkflowNodes();
 
     expect(screen.queryByTitle(parkedTitle)).toBeNull();
     // The node row's own pill keeps "Suspended" (scoped, so it's not the run-summary badge).
@@ -214,6 +234,7 @@ describe("RunDetailView — live agent-code node badge", () => {
     useAgentRunMock.mockImplementation((id?: string) => ({ data: id === "ar-1" ? { status: "Failed" } : undefined }));
 
     render(<RunDetailView defaultView="activity" runId="parent-1" />);
+    openWorkflowNodes();
 
     // Terminal agent status → keep the node's own status (no parked-badge override).
     expect(screen.queryByTitle(parkedTitle)).toBeNull();
@@ -232,6 +253,7 @@ describe("RunDetailView — parallel-wave observability", () => {
     })));
 
     render(<RunDetailView defaultView="activity" runId="parent-1" />);
+    openWorkflowNodes();
     expect(screen.getAllByText("∥ parallel").length).toBe(2);
   });
 
@@ -244,6 +266,7 @@ describe("RunDetailView — parallel-wave observability", () => {
     })));
 
     render(<RunDetailView defaultView="activity" runId="parent-1" />);
+    openWorkflowNodes();
     expect(screen.queryByText("∥ parallel")).toBeNull();
   });
 });
@@ -263,6 +286,7 @@ describe("RunDetailView — map-branch observability", () => {
     })));
 
     render(<RunDetailView defaultView="activity" runId="parent-1" />);
+    openWorkflowNodes();
 
     // Per-element branch badges — three distinct elements of `map`.
     expect(screen.getByText("#0")).toBeTruthy();
@@ -281,6 +305,7 @@ describe("RunDetailView — map-branch observability", () => {
     })));
 
     render(<RunDetailView defaultView="activity" runId="parent-1" />);
+    openWorkflowNodes();
     expect(screen.getByText("#1/#2")).toBeTruthy();
   });
 
@@ -293,6 +318,7 @@ describe("RunDetailView — map-branch observability", () => {
     })));
 
     const { container } = render(<RunDetailView defaultView="activity" runId="parent-1" />);
+    openWorkflowNodes();
     expect(container.querySelector(".wf-run-node-branch")).toBeNull();
     expect(container.querySelector(".wf-map-rollups")).toBeNull();
   });
@@ -303,6 +329,7 @@ describe("RunDetailView — map-branch observability", () => {
     })));
 
     const { container } = render(<RunDetailView defaultView="activity" runId="parent-1" />);
+    openWorkflowNodes();
     expect(container.querySelector(".wf-run-node-branch")).toBeNull();
     expect(container.querySelector(".wf-map-rollups")).toBeNull();
   });
@@ -310,6 +337,17 @@ describe("RunDetailView — map-branch observability", () => {
 
 describe("RunDetailView — run-view tabs", () => {
   beforeEach(() => useWorkflowRunMock.mockImplementation(() => ok(detail({ nodes: [node({ nodeId: "a" })] }))));
+
+  it("keeps Activity on bounded metadata until raw workflow nodes are explicitly expanded", () => {
+    render(<RunDetailView defaultView="activity" runId="parent-1" />);
+
+    expect(useWorkflowRunViewMetadataMock).toHaveBeenLastCalledWith("parent-1", true);
+    expect(useWorkflowRunMock).not.toHaveBeenCalled();
+    expect(useWorkflowRunDetailMock).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByText("Workflow nodes"));
+    expect(useWorkflowRunDetailMock).toHaveBeenLastCalledWith("parent-1", true);
+  });
 
   it("offers the five run views, Activity first", () => {
     render(<RunDetailView runId="parent-1" />);
@@ -341,32 +379,34 @@ describe("RunDetailView — run-view tabs", () => {
     expect(useRunPhasesMock).not.toHaveBeenCalled();
   });
 
-  it("keeps Activity and recursively nested details on the legacy authority reader", () => {
+  it("keeps Activity and recursively nested details on bounded metadata until a raw fold opens", () => {
     const activity = render(<RunDetailView runId="parent-1" defaultView="activity" />);
-    expect(useWorkflowRunMock).toHaveBeenLastCalledWith("parent-1");
+    expect(useWorkflowRunMock).not.toHaveBeenCalled();
     expect(useWorkflowRunIdentityMock).not.toHaveBeenCalled();
-    expect(useWorkflowRunViewMetadataMock).not.toHaveBeenCalled();
+    expect(useWorkflowRunViewMetadataMock).toHaveBeenLastCalledWith("parent-1", true);
     activity.unmount();
 
+    useWorkflowRunViewMetadataMock.mockClear();
     render(<RunDetailView runId="parent-1" nested />);
-    expect(useWorkflowRunMock).toHaveBeenLastCalledWith("parent-1");
+    expect(useWorkflowRunMock).not.toHaveBeenCalled();
     expect(useWorkflowRunIdentityMock).not.toHaveBeenCalled();
-    expect(useWorkflowRunViewMetadataMock).not.toHaveBeenCalled();
+    expect(useWorkflowRunViewMetadataMock).toHaveBeenLastCalledWith("parent-1", true);
   });
 
   it("switches polling ownership between Activity, Canvas and Trace without leaving the old reader enabled", () => {
     render(<RunDetailView runId="parent-1" />);
-    expect(useWorkflowRunMock).toHaveBeenLastCalledWith("parent-1");
-    expect(useWorkflowRunMock).toHaveBeenCalledTimes(1);
+    expect(useWorkflowRunMock).not.toHaveBeenCalled();
+    expect(useWorkflowRunViewMetadataMock).toHaveBeenCalledTimes(1);
 
     fireEvent.click(screen.getByRole("tab", { name: "Canvas" }));
-    expect(useWorkflowRunMock).toHaveBeenCalledTimes(1);
+    expect(useWorkflowRunMock).not.toHaveBeenCalled();
     expect(useWorkflowRunViewMetadataMock).toHaveBeenLastCalledWith("parent-1", true);
+    expect(useWorkflowRunViewMetadataMock).toHaveBeenCalledTimes(2);
     expect(useWorkflowRunIdentityMock).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("tab", { name: "Trace" }));
-    expect(useWorkflowRunMock).toHaveBeenCalledTimes(1);
-    expect(useWorkflowRunViewMetadataMock).toHaveBeenCalledTimes(1);
+    expect(useWorkflowRunMock).not.toHaveBeenCalled();
+    expect(useWorkflowRunViewMetadataMock).toHaveBeenCalledTimes(2);
     expect(useWorkflowRunIdentityMock).toHaveBeenLastCalledWith("parent-1", true);
   });
 
@@ -415,9 +455,10 @@ describe("RunDetailView — run-view tabs", () => {
     expect(useWorkflowRunMock).not.toHaveBeenCalled();
   });
 
-  it("defaults to the Activity narrative (the node trace), not a backend-blocked tab", () => {
+  it("defaults to the bounded Activity narrative with raw nodes available as a disclosure", () => {
     render(<RunDetailView runId="parent-1" />);
-    expect(screen.getByText("Node execution")).toBeInTheDocument();
+    expect(screen.getByText("Workflow nodes")).toBeInTheDocument();
+    expect(screen.queryByText("Node execution")).not.toBeInTheDocument();
     expect(screen.queryByText("Coming soon")).not.toBeInTheDocument();
   });
 
@@ -464,14 +505,16 @@ describe("RunDetailView — Live-work center", () => {
     expect(screen.queryByText("Node execution")).not.toBeInTheDocument(); // …lazy, so unmounted while collapsed
   });
 
-  it("keeps the node trace primary when the run has no agents (a structural workflow)", () => {
+  it("keeps structural-workflow raw nodes lazy as well", () => {
     useWorkflowRunMock.mockImplementation(() => ok(detail({ nodes: [node({ nodeId: "start" })] })));
     useRunPhasesMock.mockReturnValue({ data: { phases: [] } });
 
     render(<RunDetailView runId="parent-1" />);
 
-    expect(screen.getByText("Node execution")).toBeInTheDocument();     // primary, not folded
-    expect(screen.queryByText("Workflow nodes")).not.toBeInTheDocument();
+    expect(screen.getByText("Workflow nodes")).toBeInTheDocument();
+    expect(screen.queryByText("Node execution")).not.toBeInTheDocument();
+    openWorkflowNodes();
+    expect(screen.getByText("Node execution")).toBeInTheDocument();
   });
 
   it("folds the raw detail WHILE phases are still loading, so an agent run never expands the node trace then collapses it", () => {

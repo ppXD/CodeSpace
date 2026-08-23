@@ -23,6 +23,13 @@ export class InvalidWorkflowRunIdentityError extends Error {
   }
 }
 
+export class InvalidWorkflowRunPendingWaitObservationError extends Error {
+  constructor() {
+    super("Invalid Workflow Run pending-wait observation response.");
+    this.name = "InvalidWorkflowRunPendingWaitObservationError";
+  }
+}
+
 /** The result of a hard-stop. `cancelled` is true when this call won the flip; false (with the existing terminal `status`) when the run had already finished. `agentRunsCancelled` is how many in-flight agents the kill-wave stopped. */
 export interface CancelRunOutcome {
   cancelled: boolean;
@@ -389,6 +396,24 @@ export interface WorkflowRunWaitInfo {
   wakeAt?: string | null;
   /** The node's suspend payload (e.g. an approval `prompt`). */
   payload?: unknown;
+}
+
+export type WorkflowRunPendingWaitPromptState = "Missing" | "Exact" | "Truncated" | "Invalid";
+
+/** Bounded action descriptor; the raw wait payload and run graph never cross this read seam. */
+export interface WorkflowRunPendingWaitObservation {
+  runId: string;
+  wait: WorkflowRunPendingWait | null;
+}
+
+export interface WorkflowRunPendingWait {
+  id: string;
+  nodeId: string;
+  kind: string;
+  token: string;
+  wakeAt: string | null;
+  promptState: WorkflowRunPendingWaitPromptState;
+  promptPrefix: string | null;
 }
 
 export interface WorkflowRunDetail {
@@ -951,6 +976,8 @@ export interface WorkflowRunModelCallBodyRead {
 
 const WORKFLOW_RUN_CAPTURE_COMPLETENESS = new Set<WorkflowRunCaptureCompleteness>(["Exact", "RedactedExact", "Partial", "Unavailable", "Corrupt", "LegacyUnknown"]);
 const WORKFLOW_RUN_STATUSES = new Set<WorkflowRunStatus>(["Pending", "Enqueued", "Running", "Success", "Failure", "Cancelled", "Suspended"]);
+const WORKFLOW_RUN_PENDING_WAIT_PROMPT_STATES = new Set<WorkflowRunPendingWaitPromptState>(["Missing", "Exact", "Truncated", "Invalid"]);
+const WORKFLOW_RUN_PENDING_WAIT_PROMPT_MAX = 2048;
 const RUN_RECORD_PAGE_MODES = new Set<RunRecordPageMode>(["Tail", "Older", "Newer"]);
 const WORKFLOW_RUN_TOOL_CALL_EFFECTS = new Set<WorkflowRunToolCallEffectClass>(["ReadOnly", "SideEffecting", "Unknown", "LegacyUnknown", "Corrupt"]);
 const WORKFLOW_RUN_TOOL_CALL_STATES = new Set<WorkflowRunToolCallObservationState>(["Pending", "Running", "Completed", "Abandoned", "LegacyUnknown", "Corrupt"]);
@@ -970,6 +997,24 @@ function decodeWorkflowRunIdentity(value: unknown): WorkflowRunIdentity {
   }
 
   return { id: value.id, runNumber: value.runNumber, status: value.status as WorkflowRunStatus };
+}
+
+function decodeWorkflowRunPendingWaitObservation(value: unknown, expectedRunId: string): WorkflowRunPendingWaitObservation {
+  const invalid = (): never => { throw new InvalidWorkflowRunPendingWaitObservationError(); };
+  if (!isJsonObject(value) || Object.keys(value).sort().join(",") !== "runId,wait" || !sameGuid(value.runId, expectedRunId)) return invalid();
+  if (value.wait === null) return { runId: value.runId, wait: null };
+  const wait = value.wait;
+  if (!isJsonObject(wait) || Object.keys(wait).sort().join(",") !== "id,kind,nodeId,promptPrefix,promptState,token,wakeAt"
+    || !isGuid(wait.id) || typeof wait.nodeId !== "string" || wait.nodeId.length === 0 || wait.nodeId.length > 128
+    || typeof wait.kind !== "string" || wait.kind.length === 0 || wait.kind.length > 24
+    || typeof wait.token !== "string" || wait.token.length === 0 || wait.token.length > 128
+    || !isNullableString(wait.wakeAt) || wait.wakeAt !== null && !Number.isFinite(Date.parse(wait.wakeAt))
+    || !WORKFLOW_RUN_PENDING_WAIT_PROMPT_STATES.has(wait.promptState as WorkflowRunPendingWaitPromptState)
+    || !isNullableString(wait.promptPrefix) || wait.promptPrefix !== null && wait.promptPrefix.length > WORKFLOW_RUN_PENDING_WAIT_PROMPT_MAX) return invalid();
+  const promptState = wait.promptState as WorkflowRunPendingWaitPromptState;
+  if ((promptState === "Missing" || promptState === "Invalid") && wait.promptPrefix !== null || promptState === "Exact" && wait.promptPrefix === null
+    || promptState === "Truncated" && (wait.promptPrefix === null || wait.promptPrefix.length !== WORKFLOW_RUN_PENDING_WAIT_PROMPT_MAX)) return invalid();
+  return { runId: value.runId, wait: { id: wait.id, nodeId: wait.nodeId, kind: wait.kind, token: wait.token, wakeAt: wait.wakeAt, promptState, promptPrefix: wait.promptPrefix } };
 }
 
 function isSafeCount(value: unknown, positive = false): value is number {
@@ -1332,6 +1377,16 @@ export const workflowsApi = {
 
   /** Resolve only the canonical identity needed by the run route; never loads execution detail or artifact bytes. */
   getRunIdentity: async (ref: string, signal?: AbortSignal) => decodeWorkflowRunIdentity(await fetchJson<unknown>(`/api/workflows/runs/${encodeURIComponent(ref)}/identity`, { signal })),
+
+  /** Read only the current pending action and a capped approval-prompt prefix; never materializes the wait payload. */
+  getRunPendingWait: async (runId: string, signal?: AbortSignal): Promise<WorkflowRunPendingWaitObservation | null> => {
+    try {
+      return decodeWorkflowRunPendingWaitObservation(await fetchJson<unknown>(`/api/workflows/runs/${runId}/pending-wait`, { signal }), runId);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null;
+      throw error;
+    }
+  },
 
   /** Bounded producer statements only; no record/blob read and no synthesized run-wide verdict. */
   getRunDataCompleteness: async (runId: string, signal?: AbortSignal): Promise<WorkflowRunDataCompletenessView | null> => {

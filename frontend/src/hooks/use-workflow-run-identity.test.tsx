@@ -75,6 +75,16 @@ describe("useWorkflowRunIdentity", () => {
 });
 
 describe("useWorkflowRun", () => {
+  it("never polls a full-detail response even while the run is active", async () => {
+    getRun.mockResolvedValue({ status: "Running" });
+    renderHook(() => useWorkflowRun("42"), { wrapper: wrapper(new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity } } })) });
+    await settle();
+
+    await act(() => vi.advanceTimersByTimeAsync(10_000));
+
+    expect(getRun).toHaveBeenCalledExactlyOnceWith("42", expect.any(AbortSignal));
+  });
+
   it("passes an AbortSignal and aborts an in-flight full-detail read when its owning surface unmounts", async () => {
     getRun.mockImplementation(() => new Promise(() => {}));
     const { unmount } = renderHook(() => useWorkflowRun("42"), { wrapper: wrapper(new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity } } })) });
