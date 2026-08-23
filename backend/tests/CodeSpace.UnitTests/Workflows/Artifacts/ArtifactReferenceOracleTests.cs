@@ -31,6 +31,7 @@ public sealed class ArtifactReferenceOracleTests
             ("workflow_run_model_call_attempt", "request_artifact_id"),
             ("workflow_run_model_call_attempt", "response_artifact_id"),
             ("workflow_run_model_call_attempt", "error_artifact_id"),
+            ("workflow_run_model_call_body_capture", "artifact_id"),
             ("workflow_run_tool_call", "arguments_artifact_id"),
             ("workflow_run_tool_call_attempt", "result_artifact_id"),
             ("workflow_run_tool_call_attempt", "error_artifact_id"),
