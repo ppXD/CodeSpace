@@ -8,6 +8,40 @@ namespace CodeSpace.UnitTests.Settings;
 public class ShutdownSettingsTests
 {
     [Fact]
+    public async Task Parallel_override_scopes_do_not_replace_each_others_runtime_settings()
+    {
+        var original = RuntimeSettings.Current;
+        var firstEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSecond = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        string? firstObserved = null;
+        string? secondObserved = null;
+
+        var first = Task.Run(async () =>
+        {
+            using var scope = RuntimeSettings.Override(current => current with { AgentRunSpoolDirectory = "/isolated/first" });
+            firstEntered.SetResult();
+            await secondEntered.Task;
+            firstObserved = RuntimeSettings.Current.AgentRunSpoolDirectory;
+            releaseSecond.SetResult();
+        });
+        var second = Task.Run(async () =>
+        {
+            await firstEntered.Task;
+            using var scope = RuntimeSettings.Override(current => current with { AgentRunSpoolDirectory = "/isolated/second" });
+            secondEntered.SetResult();
+            await releaseSecond.Task;
+            secondObserved = RuntimeSettings.Current.AgentRunSpoolDirectory;
+        });
+
+        await Task.WhenAll(first, second);
+
+        firstObserved.ShouldBe("/isolated/first");
+        secondObserved.ShouldBe("/isolated/second");
+        RuntimeSettings.Current.ShouldBeSameAs(original);
+    }
+
+    [Fact]
     public void The_default_is_pinned_to_the_orchestrator_default()
     {
         // A deployment's terminationGracePeriodSeconds has to be at least this, so the number is part of the
