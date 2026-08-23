@@ -2,6 +2,7 @@ using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Workflows;
+using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
@@ -157,7 +158,12 @@ public class RerunFromNodeAgentFlowTests
         using var cli = new SubtaskAwareFakeCli();
         var (teamId, userId, originalRunId) = await RunOriginalChainAsync();
 
-        var artifactId = Guid.NewGuid();
+        Guid artifactId;
+        using (var artifactScope = _fixture.BeginScope())
+        {
+            var transcript = JsonSerializer.Serialize(new { role = "assistant", text = new string('x', ArtifactStoreConfig.InlineThresholdBytes) }) + "\n";
+            artifactId = await artifactScope.Resolve<IArtifactStore>().PutAsync(teamId, System.Text.Encoding.UTF8.GetBytes(transcript), "application/x-ndjson", CancellationToken.None);
+        }
         await SeedCapturedSessionAsync(originalRunId, "b", "sess-b-big", inlineTranscript: "", transcriptArtifactId: artifactId);
 
         var rerunId = await RerunFromNodeAsync(originalRunId, "b", teamId, userId);
