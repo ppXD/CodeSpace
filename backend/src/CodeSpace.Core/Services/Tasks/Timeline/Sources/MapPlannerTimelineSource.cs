@@ -1,5 +1,6 @@
 using CodeSpace.Core.Services.Workflows;
-using CodeSpace.Core.Services.Workflows.Artifacts;
+using CodeSpace.Core.Services.Workflows.Display;
+using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Tasks.Timeline;
 
 namespace CodeSpace.Core.Services.Tasks.Timeline.Sources;
@@ -8,38 +9,38 @@ namespace CodeSpace.Core.Services.Tasks.Timeline.Sources;
 /// The flow.map PLAN timeline source — reads the run and emits ONE orchestration-beat event per map node's planner
 /// ("Planned N subtasks", at the planner's completion), so the journal shows a non-supervisor run's plan the same way it
 /// shows a supervisor's PLAN decision, and BEFORE the dispatch beat. Planner + subtasks come from the shared
-/// <see cref="MapPlan"/>. Feeds BOTH the Activity timeline and the journal (one ordering authority — no separate phase
-/// read). READ-ONLY — a drop-in source the projector fans out automatically.
+/// bounded Map-plan observation bundle. Feeds BOTH the Activity timeline and the journal (one ordering authority — no
+/// separate full-detail read). READ-ONLY — a drop-in source the projector fans out automatically.
 /// </summary>
 public sealed class MapPlannerTimelineSource : IRunTimelineSource
 {
-    private readonly IWorkflowService _workflows;
-    private readonly IRunNodeOutputInflater _inflater;
+    private readonly IWorkflowMapPlanObservationBundle _plans;
 
-    public MapPlannerTimelineSource(IWorkflowService workflows, IRunNodeOutputInflater inflater)
+    public MapPlannerTimelineSource(IWorkflowMapPlanObservationBundle plans)
     {
-        _workflows = workflows;
-        _inflater = inflater;
+        _plans = plans;
     }
 
     public string SourceKey => MapPlannerTimelineMap.Key;
 
     public async Task<IReadOnlyList<RunTimelineEvent>> ContributeAsync(RunTimelineContext context, CancellationToken cancellationToken)
     {
-        var run = await _workflows.GetRunAsync(context.RunId, context.TeamId, cancellationToken).ConfigureAwait(false);
+        var run = await _plans.GetAsync(context.RunId, context.TeamId, cancellationToken).ConfigureAwait(false);
 
         if (run == null) return Array.Empty<RunTimelineEvent>();
+        if (run.Availability != WorkflowRunViewAvailability.Available)
+            return new[] { MapPlannerTimelineMap.CoverageEvent(run.Availability, run.AnchorAt) };
 
-        // A plan big enough to cross the offload threshold lives in the artifact store, with only a ref on the ledger
-        // cell — so the subtask count would read as zero off the bare detail. Inflate the map PRODUCER cells (the only
-        // ones this source reads) and nothing else.
-        var planned = await _inflater.InflateAsync(run, context.TeamId, MapPlan.ProducerNodeIds(run), cancellationToken).ConfigureAwait(false);
-
-        // A planner that hasn't completed hasn't authored its plan yet — skip it (no anchor time). The anchor is the
-        // planner's completion, which precedes the map's start, so the plan beat sorts BEFORE the dispatch beat.
-        return MapPlan.PlannersOf(planned)
-            .Where(p => p.Producer.CompletedAt is not null)
-            .Select(p => MapPlannerTimelineMap.ToEvent(p.Producer, p.Subtasks.GetArrayLength(), p.Producer.CompletedAt!.Value))
-            .ToList();
+        var events = new List<RunTimelineEvent>();
+        foreach (var planner in run.Planners.Where(value => value.CompletedAt is not null))
+        {
+            if (planner.Status == CodeSpace.Messages.Enums.NodeStatus.Failure)
+                events.Add(MapPlannerTimelineMap.ToEvent(planner));
+            else if (planner.SubtasksState == WorkflowMapPlanLeafState.Exact && planner.SubtasksTotalCount > 0)
+                events.Add(MapPlannerTimelineMap.ToEvent(planner));
+            else if (planner.SubtasksState is WorkflowMapPlanLeafState.Truncated or WorkflowMapPlanLeafState.Invalid or WorkflowMapPlanLeafState.Unavailable)
+                events.Add(MapPlannerTimelineMap.CoverageEvent(planner, planner.CompletedAt!.Value));
+        }
+        return events;
     }
 }

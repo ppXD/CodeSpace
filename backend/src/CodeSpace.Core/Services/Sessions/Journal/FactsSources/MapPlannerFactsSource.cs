@@ -2,14 +2,14 @@ using System.Text.Json;
 using CodeSpace.Core.Services.Agents.Cost;
 using CodeSpace.Core.Services.Tasks.Timeline.Sources;
 using CodeSpace.Core.Services.Workflows;
-using CodeSpace.Core.Services.Workflows.Artifacts;
+using CodeSpace.Core.Services.Workflows.Display;
 using CodeSpace.Messages.Dtos.Sessions.Journal;
 
 namespace CodeSpace.Core.Services.Sessions.Journal.FactsSources;
 
 /// <summary>
 /// Enriches each flow.map PLAN beat with the subtasks its planner authored — the plan itself, read off the planner
-/// node's outputs (via the shared <see cref="MapPlan"/>) and keyed by the plan event id
+/// producer's bounded output leaves (via <see cref="IWorkflowMapPlanObservationBundle"/>) and keyed by the plan event id
 /// (<see cref="MapPlannerTimelineMap.EventId"/>, the same id the describer stamps on the beat), so the plan renders
 /// inline under its own PLAN beat exactly like a supervisor plan — the causal spine plan → dispatch → agents. Read-only:
 /// a workflow planner's plan is never up for confirmation, so the frontend renders it as a read-only card. A map whose
@@ -17,44 +17,65 @@ namespace CodeSpace.Core.Services.Sessions.Journal.FactsSources;
 /// </summary>
 public sealed class MapPlannerFactsSource : IJournalFactsSource
 {
-    private readonly IWorkflowService _workflows;
-    private readonly IRunNodeOutputInflater _inflater;
+    private readonly IWorkflowMapPlanObservationBundle _plans;
 
-    public MapPlannerFactsSource(IWorkflowService workflows, IRunNodeOutputInflater inflater)
+    public MapPlannerFactsSource(IWorkflowMapPlanObservationBundle plans)
     {
-        _workflows = workflows;
-        _inflater = inflater;
+        _plans = plans;
     }
 
     public async Task<IReadOnlyDictionary<string, JournalStepFacts>> GatherAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
     {
-        var run = await _workflows.GetRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+        var run = await _plans.GetAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
 
-        if (run == null) return EmptyFacts;
-
-        // The plan itself lives in the producer cell's outputs, and a large one is offloaded to an artifact ref — so
-        // exchange the ref for its bytes on the map PRODUCER cells only, never on every cell of the run.
-        var planned = await _inflater.InflateAsync(run, teamId, MapPlan.ProducerNodeIds(run), cancellationToken).ConfigureAwait(false);
+        if (run == null || run.Availability != CodeSpace.Messages.Dtos.Workflows.WorkflowRunViewAvailability.Available) return EmptyFacts;
 
         var facts = new Dictionary<string, JournalStepFacts>();
 
-        foreach (var planner in MapPlan.PlannersOf(planned))
+        foreach (var planner in run.Planners)
         {
-            var subtasks = ReadSubtasks(planner.Subtasks);
+            var coverage = new List<JournalObservationCoverage>();
+            IReadOnlyList<JournalSubtask>? subtasks = null;
+            if (planner.SubtasksState == WorkflowMapPlanLeafState.Exact && planner.Subtasks is { } exact)
+                subtasks = ReadSubtasks(exact);
+            else if (Incomplete(planner.SubtasksState))
+                coverage.Add(Coverage(planner, JournalObservationCoverageSourceKinds.MapPlanSubtasks, planner.SubtasksState));
 
-            if (subtasks.Count > 0)
-                facts[MapPlannerTimelineMap.EventId(planner.Producer.NodeId)] = new JournalStepFacts
+            JournalModelCall? modelCall = null;
+            if (planner.ModelUsageState == WorkflowMapPlanLeafState.Exact && planner.ModelOutputs is { } model)
+                modelCall = ModelCallFromOutputs(model);
+            else if (Incomplete(planner.ModelUsageState))
+                coverage.Add(Coverage(planner, JournalObservationCoverageSourceKinds.MapPlanModelUsage, planner.ModelUsageState));
+
+            if ((subtasks?.Count ?? 0) > 0 || modelCall is not null || coverage.Count > 0)
+                facts[MapPlannerTimelineMap.EventId(planner.ProducerNodeId)] = new JournalStepFacts
                 {
                     Plan = subtasks,
-                    // The authoring model call (model · tokens · cost) so the plan beat shows HOW it was planned. A flow.map
-                    // planner records these on its OWN node outputs even when no separate interaction record was written, so
-                    // the beat can always attribute the plan — no fold to hunt through.
-                    ModelCall = ModelCallFromOutputs(planner.Producer.Outputs),
+                    ModelCall = modelCall,
+                    ObservationCoverage = coverage.Count == 0 ? null : coverage,
                 };
         }
 
         return facts;
     }
+
+    private static bool Incomplete(WorkflowMapPlanLeafState state) => state is WorkflowMapPlanLeafState.Truncated or WorkflowMapPlanLeafState.Invalid or WorkflowMapPlanLeafState.Unavailable;
+
+    private static JournalObservationCoverage Coverage(WorkflowMapPlannerObservation planner, string sourceKind, WorkflowMapPlanLeafState state) => new()
+    {
+        SourceKind = sourceKind,
+        Reason = state switch
+        {
+            WorkflowMapPlanLeafState.Truncated => JournalObservationCoverageReason.TruncatedLeaf,
+            WorkflowMapPlanLeafState.Invalid => JournalObservationCoverageReason.InvalidLeaf,
+            _ => JournalObservationCoverageReason.UnavailableLeaf,
+        },
+        ObservedCount = 0,
+        OmittedCount = sourceKind == JournalObservationCoverageSourceKinds.MapPlanSubtasks ? planner.SubtasksTotalCount : 1,
+        OmittedCountIsLowerBound = false,
+        DecisionId = planner.StateRecordId,
+        StoryOrder = planner.StateRecordSequence.ToString(System.Globalization.CultureInfo.InvariantCulture),
+    };
 
     /// <summary>The planner's authoring model call, read off the planner node's OWN outputs (model · input/output tokens · cost). A flow.map planner stamps these on its output whether or not a separate interaction record was written, so the plan beat can always show what authored it. Cost prefers the recorded value, else the shared pricing (fail-open null on an unpriced model). Null when the outputs name no model.</summary>
     internal static JournalModelCall? ModelCallFromOutputs(JsonElement outputs)

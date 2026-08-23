@@ -15,6 +15,8 @@ public static class JournalObservationCoverageSourceKinds
     public const string SupervisorPlanSubtasks = "supervisor-plan-subtasks/v1";
     public const string SupervisorPlanModelUsage = "supervisor-plan-model-usage/v1";
     public const string SupervisorPlanMetadata = "supervisor-plan-metadata/v1";
+    public const string MapPlanSubtasks = "map-plan-subtasks/v1";
+    public const string MapPlanModelUsage = "map-plan-model-usage/v1";
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]
@@ -25,6 +27,7 @@ public enum JournalObservationCoverageReason
     TruncatedLeaf,
     CorruptLeaf,
     CorruptDecisionStatus,
+    UnavailableLeaf,
 }
 
 /// <summary>
