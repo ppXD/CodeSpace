@@ -92,7 +92,7 @@ public class UpstreamStageTraceTests
     {
         var tape = new[]
         {
-            Decision(1, SupervisorDecisionKinds.Merge, outcomeJson: """{"integration":{"status":"integrated","repositories":[{"alias":"api","status":"Clean","integratedBranch":"codespace/integration/api"}]}}"""),
+            Decision(1, SupervisorDecisionKinds.Merge, outcomeJson: """{"integration":{"status":"Clean","repositories":[{"alias":"api","status":"Clean","integratedBranch":"codespace/integration/api"}]}}"""),
         };
 
         UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), tape, Array.Empty<AttemptProjection>(), Array.Empty<PublishManifest>())
