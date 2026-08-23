@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Agents.Publish.Exceptions;
+using CodeSpace.Messages.Failures;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
@@ -102,6 +103,8 @@ public class AgentPatchReaderTests
 
         exception.Kind.ShouldBe(AgentInlinePatchResolutionKind.RepositoryAliasMissing);
         exception.RepositoryAlias.ShouldBe("web");
+        ((IFailure)exception).Kind.ShouldBe(FailureKind.Internal);
+        ((IFailure)exception).Code.ShouldBe(FailureCodes.Internal);
     }
 
     [Fact]

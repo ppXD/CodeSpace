@@ -2,6 +2,7 @@ using System.Buffers.Text;
 using System.Text;
 using CodeSpace.Core.Services.Supervisor.Observation;
 using CodeSpace.Core.Services.Supervisor.Observation.Exceptions;
+using CodeSpace.Messages.Failures;
 using CodeSpace.Messages.Dtos.Workflows.Supervisor;
 using Shouldly;
 
@@ -94,6 +95,16 @@ public sealed class SupervisorDecisionObservationMetadataContractTests
         Should.NotThrow(() => new SupervisorDecisionObservationChangePageRequest(teamId, runId, Limit: 500).ValidateShape());
         Should.Throw<SupervisorDecisionObservationReadRequestException>(() => new SupervisorDecisionObservationChangePageRequest(teamId, runId, Limit: 0).ValidateShape());
         Should.Throw<SupervisorDecisionObservationReadRequestException>(() => new SupervisorDecisionObservationChangePageRequest(teamId, runId, Limit: 501).ValidateShape());
+    }
+
+    [Fact]
+    public void Invalid_read_request_declares_a_stable_caller_correctable_failure()
+    {
+        var exception = new SupervisorDecisionObservationReadRequestException(["limit is outside the closed range"]);
+
+        ((IFailure)exception).Kind.ShouldBe(FailureKind.Invalid);
+        ((IFailure)exception).Code.ShouldBe(FailureCodes.InvalidRequest);
+        ((IFailure)exception).Details!["errors"].ShouldBe(exception.Errors);
     }
 
     [Fact]

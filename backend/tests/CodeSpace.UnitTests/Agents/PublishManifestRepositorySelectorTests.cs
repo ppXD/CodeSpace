@@ -1,6 +1,7 @@
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Agents.Publish.Exceptions;
+using CodeSpace.Messages.Failures;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents;
@@ -42,6 +43,8 @@ public sealed class PublishManifestRepositorySelectorTests
 
         exception.RepositoryId.ShouldBe(repositoryId);
         exception.MatchCount.ShouldBe(2);
+        ((IFailure)exception).Kind.ShouldBe(FailureKind.Internal);
+        ((IFailure)exception).Code.ShouldBe(FailureCodes.Internal);
     }
 
     [Fact]

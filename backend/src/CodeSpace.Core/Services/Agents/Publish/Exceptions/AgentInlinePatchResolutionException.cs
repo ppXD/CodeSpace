@@ -1,3 +1,5 @@
+using CodeSpace.Messages.Failures;
+
 namespace CodeSpace.Core.Services.Agents.Publish.Exceptions;
 
 /// <summary>
@@ -5,7 +7,7 @@ namespace CodeSpace.Core.Services.Agents.Publish.Exceptions;
 /// integrity failure, never an empty diff: execution consumers must fail closed instead of applying another
 /// repository's bytes or silently dropping an offloaded patch.
 /// </summary>
-public sealed class AgentInlinePatchResolutionException : Exception
+public sealed class AgentInlinePatchResolutionException : Exception, IFailure
 {
     public AgentInlinePatchResolutionException(string repositoryAlias, AgentInlinePatchResolutionKind kind, Guid? artifactId = null)
         : base(MessageFor(repositoryAlias, kind, artifactId))
@@ -18,6 +20,9 @@ public sealed class AgentInlinePatchResolutionException : Exception
     public string RepositoryAlias { get; }
     public AgentInlinePatchResolutionKind Kind { get; }
     public Guid? ArtifactId { get; }
+
+    FailureKind IFailure.Kind => FailureKind.Internal;
+    string IFailure.Code => FailureCodes.Internal;
 
     private static string MessageFor(string repositoryAlias, AgentInlinePatchResolutionKind kind, Guid? artifactId) => kind switch
     {
