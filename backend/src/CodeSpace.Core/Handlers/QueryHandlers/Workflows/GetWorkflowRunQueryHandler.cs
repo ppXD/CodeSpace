@@ -10,10 +10,9 @@ namespace CodeSpace.Core.Handlers.QueryHandlers.Workflows;
 /// <summary>
 /// The run-detail read. This is the caller that reads EVERY cell's output content — an operator expands a step and
 /// inspects what it produced — so it exchanges the ledger's <c>$artifact_ref</c> pointers for the stored bytes here
-/// rather than having <c>GetRunAsync</c> do it for every cell of every read. The Journal / Room / phase-board
-/// projectors share that read several times per turn and need at most ONE cell's content between them (a map's plan,
-/// which they inflate by naming its producer); the rest of what they read is top-level scalars — a map's count/failed,
-/// a planner's model/tokens/cost — that per-property offload never reaches.
+/// rather than having <c>GetRunAsync</c> do it for every cell of every read. Polling projections use their bounded
+/// metadata/leaf readers; this endpoint remains the explicit operator-owned body authority for normalized payload,
+/// run outputs, pending action payloads and expanded cell content.
 /// </summary>
 public sealed class GetWorkflowRunQueryHandler : IRequestHandler<GetWorkflowRunQuery, WorkflowRunDetail?>
 {

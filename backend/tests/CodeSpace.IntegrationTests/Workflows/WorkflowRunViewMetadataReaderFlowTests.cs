@@ -262,10 +262,117 @@ public class WorkflowRunViewMetadataReaderFlowTests
         torn.TopLevelLeaves.ShouldBeEmpty();
     }
 
+    [Fact]
+    public async Task Map_plan_reader_and_both_consumers_share_exact_bounded_inline_leaves_without_full_detail_or_baggage()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSnapshotRunAsync(teamId, PlannerMapDefinition(), null, null, DateTimeOffset.UtcNow);
+        var artifactId = await PutBombArtifactAsync(teamId);
+        await SeedCellAsync(runId, "planner", string.Empty, WorkflowRunRecordTypes.NodeCompleted, Guid.NewGuid(), artifactId);
+        await SeedCellAsync(runId, "fan", string.Empty, WorkflowRunRecordTypes.NodeCompleted, Guid.NewGuid(), artifactId);
+        await AppendStatePayloadAsync(runId, "planner", string.Empty, JsonSerializer.Serialize(new
+        {
+            outputs = new
+            {
+                json = new { subtasks = new[] { new { id = "a", title = "Research" }, new { id = "b", title = "Write" } }, baggage = Bomb + new string('x', 2 * 1024 * 1024) },
+                model = "metis-coder-max", inputTokens = 7, outputTokens = 11, costUsd = 0.02m,
+            },
+        }));
+
+        using var scope = _fixture.BeginScope();
+        var bundle = scope.Resolve<IWorkflowMapPlanObservationBundle>();
+        var observation = await bundle.GetAsync(runId, teamId, CancellationToken.None);
+        var timeline = scope.Resolve<IEnumerable<IRunTimelineSource>>().Single(value => value.SourceKey == MapPlannerTimelineMap.Key);
+        var factsSource = scope.Resolve<IEnumerable<IJournalFactsSource>>().Single(value => value is MapPlannerFactsSource);
+        var events = await timeline.ContributeAsync(new RunTimelineContext { RunId = runId, TeamId = teamId }, CancellationToken.None);
+        var facts = await factsSource.GatherAsync(runId, teamId, CancellationToken.None);
+
+        var planner = observation!.Planners.ShouldHaveSingleItem();
+        planner.SubtasksState.ShouldBe(WorkflowMapPlanLeafState.Exact);
+        planner.SubtasksTotalCount.ShouldBe(2);
+        planner.ModelUsageState.ShouldBe(WorkflowMapPlanLeafState.Exact);
+        events.ShouldHaveSingleItem().Title.ShouldBe("Planned 2 subtasks");
+        facts["map-plan-planner"].Plan!.Select(value => value.Title).ShouldBe(new[] { "Research", "Write" });
+        facts["map-plan-planner"].ModelCall!.Tokens.ShouldBe(18);
+        var wire = JsonSerializer.Serialize(new { observation, events, facts });
+        wire.ShouldNotContain(Bomb, Case.Sensitive);
+        wire.Length.ShouldBeLessThan(20_000, "the unrelated 2 MiB producer baggage never crosses the observation seam");
+    }
+
+    [Fact]
+    public async Task Map_plan_reader_batch_resolves_verified_artifacts_and_marks_oversized_or_foreign_content_incomplete()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (foreignTeamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var exactBytes = Encoding.UTF8.GetBytes("{\"subtasks\":[\"One\",\"Two\"]}");
+        var oversizedBytes = Encoding.UTF8.GetBytes("{\"subtasks\":[\"" + new string('z', WorkflowMapPlanObservationReader.MaximumLeafBytes) + "\"]}");
+        Guid exactId;
+        Guid oversizedId;
+        Guid foreignId;
+        using (var artifactScope = _fixture.BeginScope())
+        {
+            var store = artifactScope.Resolve<IArtifactStore>();
+            exactId = await store.PutAsync(teamId, exactBytes, "application/json", CancellationToken.None);
+            oversizedId = await store.PutAsync(teamId, oversizedBytes, "application/json", CancellationToken.None);
+            foreignId = await store.PutAsync(foreignTeamId, Encoding.UTF8.GetBytes("{\"subtasks\":[\"secret\"]}"), "application/json", CancellationToken.None);
+        }
+
+        var exactRun = await SeedSnapshotRunAsync(teamId, PlannerMapDefinition(), null, null, DateTimeOffset.UtcNow);
+        var oversizedRun = await SeedSnapshotRunAsync(teamId, PlannerMapDefinition(), null, null, DateTimeOffset.UtcNow);
+        var foreignArtifactRun = await SeedSnapshotRunAsync(teamId, PlannerMapDefinition(), null, null, DateTimeOffset.UtcNow);
+        await SeedPlannerArtifactAsync(exactRun, exactId, exactBytes.Length);
+        await SeedPlannerArtifactAsync(oversizedRun, oversizedId, oversizedBytes.Length);
+        await SeedPlannerArtifactAsync(foreignArtifactRun, foreignId, Encoding.UTF8.GetByteCount("{\"subtasks\":[\"secret\"]}"));
+
+        using var scope = _fixture.BeginScope();
+        var reader = scope.Resolve<IWorkflowMapPlanObservationReader>();
+        var exact = await reader.ReadAsync(new WorkflowMapPlanObservationRequest(exactRun, teamId, WorkflowRunViewScope.AttemptOnly), CancellationToken.None);
+        var oversized = await reader.ReadAsync(new WorkflowMapPlanObservationRequest(oversizedRun, teamId, WorkflowRunViewScope.AttemptOnly), CancellationToken.None);
+        var unavailable = await reader.ReadAsync(new WorkflowMapPlanObservationRequest(foreignArtifactRun, teamId, WorkflowRunViewScope.AttemptOnly), CancellationToken.None);
+        var hidden = await reader.ReadAsync(new WorkflowMapPlanObservationRequest(exactRun, foreignTeamId, WorkflowRunViewScope.AttemptOnly), CancellationToken.None);
+
+        exact!.Planners.ShouldHaveSingleItem().SubtasksState.ShouldBe(WorkflowMapPlanLeafState.Exact);
+        exact.Planners[0].SubtasksTotalCount.ShouldBe(2);
+        oversized!.Planners.ShouldHaveSingleItem().SubtasksState.ShouldBe(WorkflowMapPlanLeafState.Truncated);
+        oversized.Planners[0].Subtasks.ShouldBeNull("an oversized prefix is never promoted to a normal plan");
+        unavailable!.Planners.ShouldHaveSingleItem().SubtasksState.ShouldBe(WorkflowMapPlanLeafState.Unavailable,
+            "missing and cross-team artifacts are conflated and never leak bytes or identity");
+        hidden.ShouldBeNull("foreign and absent run ids remain intentionally conflated");
+
+        var timeline = scope.Resolve<IEnumerable<IRunTimelineSource>>().Single(value => value.SourceKey == MapPlannerTimelineMap.Key);
+        var factsSource = scope.Resolve<IEnumerable<IJournalFactsSource>>().Single(value => value is MapPlannerFactsSource);
+        (await timeline.ContributeAsync(new RunTimelineContext { RunId = oversizedRun, TeamId = teamId }, CancellationToken.None))
+            .ShouldHaveSingleItem().Kind.ShouldBe("observation.coverage");
+        var facts = await factsSource.GatherAsync(oversizedRun, teamId, CancellationToken.None);
+        facts["map-plan-planner"].Plan.ShouldBeNull();
+        facts["map-plan-planner"].ObservationCoverage!.ShouldHaveSingleItem().Reason.ShouldBe(CodeSpace.Messages.Dtos.Sessions.Journal.JournalObservationCoverageReason.TruncatedLeaf);
+    }
+
     private async Task<Guid> PutBombArtifactAsync(Guid teamId)
     {
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<IArtifactStore>().PutAsync(teamId, Encoding.UTF8.GetBytes(Bomb + new string('a', 16 * 1024)), "text/plain", CancellationToken.None);
+    }
+
+    private async Task SeedPlannerArtifactAsync(Guid runId, Guid artifactId, int sizeBytes)
+    {
+        var bombArtifact = await PutBombArtifactAsync(await RunTeamAsync(runId));
+        await SeedCellAsync(runId, "planner", string.Empty, WorkflowRunRecordTypes.NodeCompleted, Guid.NewGuid(), bombArtifact);
+        await SeedCellAsync(runId, "fan", string.Empty, WorkflowRunRecordTypes.NodeCompleted, Guid.NewGuid(), bombArtifact);
+        await AppendStatePayloadAsync(runId, "planner", string.Empty, JsonSerializer.Serialize(new
+        {
+            outputs = new Dictionary<string, object>
+            {
+                ["json"] = new Dictionary<string, object> { ["$artifact_ref"] = new { id = artifactId, size_bytes = sizeBytes, content_type = "application/json" } },
+            },
+        }));
+    }
+
+    private async Task<Guid> RunTeamAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        var teamId = await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.Where(value => value.Id == runId).Select(value => value.TeamId).SingleAsync();
+        return teamId;
     }
 
     private async Task<Guid> SeedSnapshotRunAsync(Guid teamId, WorkflowDefinition definition, Guid? parentRunId, Guid? rootRunId, DateTimeOffset createdAt)
@@ -407,6 +514,17 @@ public class WorkflowRunViewMetadataReaderFlowTests
             new() { Id = "worker", TypeKey = "builtin.terminal", ParentId = "fan", Label = "Worker", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "failed", TypeKey = "builtin.terminal", Label = "Failed", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "plain", TypeKey = "builtin.terminal", Label = "Plain", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>(),
+    };
+
+    private static WorkflowDefinition PlannerMapDefinition() => new()
+    {
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "planner", TypeKey = "llm.complete", Label = "Planner", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "fan", TypeKey = MapFanout.ContainerKind, Label = "Fan", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{"items":"{{nodes.planner.outputs.json.subtasks}}"}""") },
+            new() { Id = "worker", TypeKey = "builtin.terminal", ParentId = "fan", Label = "Worker", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
         },
         Edges = new List<EdgeDefinition>(),
     };

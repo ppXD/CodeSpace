@@ -1,5 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Sessions.Journal.FactsSources;
+using CodeSpace.Core.Services.Workflows;
+using CodeSpace.Core.Services.Workflows.Display;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Sessions.Journal;
@@ -14,6 +16,16 @@ namespace CodeSpace.UnitTests.Sessions.Journal;
 [Trait("Category", "Unit")]
 public class MapPlannerFactsSourceTests
 {
+    [Fact]
+    public void Source_does_not_depend_on_full_workflow_detail_or_output_inflation()
+    {
+        var dependencies = typeof(MapPlannerFactsSource).GetConstructors().ShouldHaveSingleItem().GetParameters().Select(value => value.ParameterType).ToList();
+
+        dependencies.ShouldNotContain(typeof(IWorkflowService));
+        dependencies.ShouldNotContain(typeof(CodeSpace.Core.Services.Workflows.Artifacts.IRunNodeOutputInflater));
+        dependencies.ShouldContain(typeof(IWorkflowMapPlanObservationBundle));
+    }
+
     [Fact]
     public void Reads_object_subtasks_by_id_and_title()
     {

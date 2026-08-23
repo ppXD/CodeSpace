@@ -30,6 +30,7 @@ public sealed class SupervisorPlanFactsCompletenessContractTests
             JournalObservationCoverageReason.TruncatedLeaf,
             JournalObservationCoverageReason.CorruptLeaf,
             JournalObservationCoverageReason.CorruptDecisionStatus,
+            JournalObservationCoverageReason.UnavailableLeaf,
         });
     }
 

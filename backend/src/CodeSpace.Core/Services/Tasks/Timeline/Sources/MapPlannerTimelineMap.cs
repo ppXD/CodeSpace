@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Dtos.Workflows;
+using CodeSpace.Core.Services.Workflows.Display;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks.Timeline;
 
@@ -34,6 +35,49 @@ public static class MapPlannerTimelineMap
         OccurredAt = at,
         Order = 0,
         NodeId = plannerNode.NodeId,
+        SourceKey = Key,
+    };
+
+    public static RunTimelineEvent ToEvent(WorkflowMapPlannerObservation planner) => new()
+    {
+        Id = EventId(planner.ProducerNodeId),
+        Kind = PlanKind,
+        Title = planner.Status == NodeStatus.Failure ? "Planning failed"
+            : planner.SubtasksTotalCount == 0 ? "Planned no subtasks"
+            : $"Planned {planner.SubtasksTotalCount} subtask{(planner.SubtasksTotalCount == 1 ? "" : "s")}",
+        Summary = planner.Status == NodeStatus.Failure ? planner.ErrorPrefix : null,
+        Severity = SeverityFor(planner.Status),
+        Level = TimelineLevel.Milestone,
+        OccurredAt = planner.CompletedAt!.Value,
+        Order = 0,
+        NodeId = planner.ProducerNodeId,
+        SourceKey = Key,
+    };
+
+    public static RunTimelineEvent CoverageEvent(WorkflowMapPlannerObservation planner, DateTimeOffset at) => new()
+    {
+        Id = EventId(planner.ProducerNodeId),
+        Kind = "observation.coverage",
+        Title = "Map plan partially available",
+        Summary = $"The planner completed, but its authored subtasks are {planner.SubtasksState.ToString().ToLowerInvariant()}; no partial plan was presented as complete.",
+        Severity = TimelineSeverity.Warning,
+        Level = TimelineLevel.Milestone,
+        OccurredAt = at,
+        Order = 0,
+        NodeId = planner.ProducerNodeId,
+        SourceKey = Key,
+    };
+
+    public static RunTimelineEvent CoverageEvent(WorkflowRunViewAvailability availability, DateTimeOffset at) => new()
+    {
+        Id = "map-plan-coverage",
+        Kind = "observation.coverage",
+        Title = availability == WorkflowRunViewAvailability.Truncated ? "Map plan history partially available" : "Map plan history unavailable",
+        Summary = "The bounded map-plan observation could not establish complete producer truth; no plan count was inferred.",
+        Severity = TimelineSeverity.Warning,
+        Level = TimelineLevel.Milestone,
+        OccurredAt = at,
+        Order = 0,
         SourceKey = Key,
     };
 
