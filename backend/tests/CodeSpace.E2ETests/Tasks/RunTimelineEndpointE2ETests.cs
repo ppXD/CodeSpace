@@ -122,6 +122,7 @@ public sealed class RunTimelineEndpointE2ETests : IClassFixture<TaskLaunchApiFac
         db.WorkflowRun.Add(new WorkflowRun
         {
             Id = runId, WorkflowId = null, WorkflowVersion = null, TeamId = teamId, RunRequestId = requestId,
+            DefinitionSnapshotJson = "{\"nodes\":[],\"edges\":[]}", DefinitionSnapshotHash = "sha256:test",
             SourceType = WorkflowRunSourceTypes.Snapshot, Status = WorkflowRunStatus.Failure,
             ScopeRepositoryIds = [], ScopeProjectIds = [], CreatedDate = t,
             CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
