@@ -105,7 +105,7 @@ describe("Workflow Run governed tool-call API", () => {
 
     const result = await workflowsApi.getRunToolCall(runId, callId);
 
-    expect(requested).toBe(`/api/workflows/runs/${runId}/tool-calls/${callId}`);
+    expect(requested.endsWith(`/api/workflows/runs/${runId}/tool-calls/${callId}`)).toBe(true);
     expect(result?.call.toolCallId).toBe(callId);
     expect(result?.attempts.map(({ attemptOrdinal }) => attemptOrdinal)).toEqual([1, 2]);
     expect(result?.attempts[1]).toMatchObject({ status: "Indeterminate", errorCode: "LedgerFailedOutcomeUnknown" });

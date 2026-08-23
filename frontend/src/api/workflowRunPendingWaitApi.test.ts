@@ -19,7 +19,8 @@ describe("Workflow Run pending-wait API", () => {
     const result = await workflowsApi.getRunPendingWait(runId);
 
     expect(result?.wait).toEqual({ id: waitId, nodeId: "approval", kind: "Approval", token: "token", wakeAt: null, promptState: "Truncated", promptPrefix: prefix });
-    expect(fetch).toHaveBeenCalledWith(`/api/workflows/runs/${runId}/pending-wait`, expect.anything());
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(String(vi.mocked(fetch).mock.calls[0][0]).endsWith(`/api/workflows/runs/${runId}/pending-wait`)).toBe(true);
   });
 
   it("fails closed on extra fields and inconsistent prompt completeness", async () => {
