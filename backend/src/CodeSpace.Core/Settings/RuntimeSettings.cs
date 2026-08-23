@@ -82,11 +82,14 @@ public sealed record RuntimeSettings
 
     public const int DefaultShutdownDrainSeconds = 30;
 
-    /// <summary>The bound settings. Reads before <see cref="Bind"/> (a unit test constructing a service directly) get the defaults, which are the same values the pre-configuration code fell back to.</summary>
-    public static RuntimeSettings Current { get; private set; } = new();
+    private static readonly AsyncLocal<RuntimeSettings?> ScopedOverride = new();
+    private static RuntimeSettings _bound = new();
+
+    /// <summary>The bound settings, or the current execution context's test override. Reads before <see cref="Bind"/> get the defaults, which are the same values the pre-configuration code fell back to.</summary>
+    public static RuntimeSettings Current => ScopedOverride.Value ?? _bound;
 
     /// <summary>Bind from the application's configuration. Idempotent — called from both startup paths on purpose, since neither covers every way this assembly is hosted.</summary>
-    public static void Bind(IConfiguration configuration) => Current = Read(configuration);
+    public static void Bind(IConfiguration configuration) => _bound = Read(configuration);
 
     /// <summary>Pure read (no static mutation) so the mapping from configuration keys to values is unit-testable directly.</summary>
     public static RuntimeSettings Read(IConfiguration configuration) => new()
@@ -132,10 +135,10 @@ public sealed record RuntimeSettings
 
     private sealed class Scope : IDisposable
     {
-        private readonly RuntimeSettings _previous = Current;
+        private readonly RuntimeSettings? _previous = ScopedOverride.Value;
 
-        public Scope(RuntimeSettings settings) => Current = settings;
+        public Scope(RuntimeSettings settings) => ScopedOverride.Value = settings;
 
-        public void Dispose() => Current = _previous;
+        public void Dispose() => ScopedOverride.Value = _previous;
     }
 }
