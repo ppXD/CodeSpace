@@ -139,4 +139,17 @@ public class SupervisorBoundsRecitationTests
 
         prompt.ShouldContain("resolve attempts: 1 of 2 resolve cap", Case.Sensitive);
     }
+
+    [Fact]
+    public void The_turn_prompt_carries_lesson_lines_and_omits_the_section_when_empty()
+    {
+        var context = new SupervisorTurnContext { Goal = "fix it", SupervisorRunId = Guid.NewGuid(), TeamId = Guid.NewGuid(), LessonLines = new[] { "[broken-acceptance-command] check.sh exits 2 → run restore first" } };
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(context);
+        prompt.ShouldContain("[broken-acceptance-command] check.sh exits 2 → run restore first", customMessage: "the distilled lesson must reach the supervisor brain verbatim — the learning loop's decider lane");
+        prompt.ShouldContain("prior failed runs");
+
+        LlmSupervisorDecider.BuildUserPromptForTest(context with { LessonLines = [] })
+            .ShouldNotContain("prior failed runs", customMessage: "no lessons ⇒ byte-identical prompt — never an empty header");
+    }
 }

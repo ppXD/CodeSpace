@@ -132,7 +132,7 @@ public class SupervisorBoundsServiceTests
         ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Plan, """{"subtasks":[{"id":"a","title":"A","instruction":"do"}]}""", "{}");
 
         var executor = new CountingExecutor();
-        var service = new SupervisorTurnService(ledger, new AlwaysSpawnDecider(), executor, db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(ledger, new AlwaysSpawnDecider(), executor, db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), new NoLessonsReaderStub(), NullLogger<SupervisorTurnService>.Instance);
 
         var result = await service.RunTurnAsync(_runId, _teamId, "sup", "g", null, Config(approvalPolicy: "spawns"), CancellationToken.None);
 
@@ -151,7 +151,7 @@ public class SupervisorBoundsServiceTests
         ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Plan, """{"subtasks":[{"id":"a","title":"A","instruction":"do"}]}""", "{}");
 
         var executor = new CountingExecutor();
-        var service = new SupervisorTurnService(ledger, new AlwaysSpawnDecider(), executor, db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(ledger, new AlwaysSpawnDecider(), executor, db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), new NoLessonsReaderStub(), NullLogger<SupervisorTurnService>.Instance);
 
         var result = await service.RunTurnAsync(_runId, _teamId, "sup", "g", null, Config(approvalPolicy: "none"), CancellationToken.None);
 
@@ -162,7 +162,8 @@ public class SupervisorBoundsServiceTests
     // ─── Helpers ────────────────────────────────────────────────────────────────────
 
     private SupervisorTurnService Service(FakeSupervisorDecisionLog ledger, ISupervisorDecider decider) =>
-        new(ledger, decider, new CountingExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
+        new(ledger, decider, new CountingExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(),
+        new NoLessonsReaderStub(), NullLogger<SupervisorTurnService>.Instance);
 
     private static SupervisorGoalConfig Config(int? maxTotalSpawns = null, int? maxNoProgress = null, string? approvalPolicy = null) =>
         new() { MaxTotalSpawns = maxTotalSpawns, MaxNoProgressDecisions = maxNoProgress, ApprovalPolicy = approvalPolicy };
@@ -202,5 +203,11 @@ public class SupervisorBoundsServiceTests
 
             return Task.FromResult(SupervisorExecution.Synchronous("{}"));
         }
+    }
+
+    private sealed class NoLessonsReaderStub : CodeSpace.Core.Services.Learning.ILessonReader
+    {
+        public Task<IReadOnlyList<CodeSpace.Core.Persistence.Entities.Lesson>> ListCurrentAsync(Guid teamId, Guid? repositoryId, int take, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<CodeSpace.Core.Persistence.Entities.Lesson>>([]);
     }
 }

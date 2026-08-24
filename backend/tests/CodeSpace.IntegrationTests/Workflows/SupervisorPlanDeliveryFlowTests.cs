@@ -194,6 +194,7 @@ public sealed class SupervisorPlanDeliveryFlowTests
         scope.Resolve<Core.Services.Supervisor.ISupervisorPublishedBranchResolver>(),
         scope.Resolve<CodeSpace.Core.Services.Completion.ICompletionAssessmentComposer>(),
         scope.Resolve<CodeSpace.Core.Services.Workflows.Budget.IBudgetLedger>(),
+        scope.Resolve<CodeSpace.Core.Services.Learning.ILessonReader>(),
         scope.Resolve<ILogger<SupervisorTurnService>>());
 
     /// <summary>A decider that always authors a plan with one subtask, proposing the given delivery contract (or none).</summary>

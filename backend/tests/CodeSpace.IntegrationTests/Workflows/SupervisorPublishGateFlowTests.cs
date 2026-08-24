@@ -299,6 +299,7 @@ public sealed class SupervisorPublishGateFlowTests
         scope.Resolve<Core.Services.Supervisor.ISupervisorPublishedBranchResolver>(),
         scope.Resolve<CodeSpace.Core.Services.Completion.ICompletionAssessmentComposer>(),
         scope.Resolve<CodeSpace.Core.Services.Workflows.Budget.IBudgetLedger>(),
+        scope.Resolve<CodeSpace.Core.Services.Learning.ILessonReader>(),
         scope.Resolve<ILogger<SupervisorTurnService>>());
 
     private sealed record SupervisorDecisionRecordSnapshot(string Kind, string PayloadJson, string? OutcomeJson);

@@ -387,6 +387,7 @@ public sealed class SupervisorDeliveryGateFlowTests
         scope.Resolve<ISupervisorPublishedBranchResolver>(),
         scope.Resolve<CodeSpace.Core.Services.Completion.ICompletionAssessmentComposer>(),
         scope.Resolve<CodeSpace.Core.Services.Workflows.Budget.IBudgetLedger>(),
+        scope.Resolve<CodeSpace.Core.Services.Learning.ILessonReader>(),
         scope.Resolve<ILogger<SupervisorTurnService>>());
 
     [Fact]

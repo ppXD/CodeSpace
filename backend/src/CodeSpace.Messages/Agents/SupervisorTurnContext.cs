@@ -21,6 +21,9 @@ public sealed record SupervisorTurnContext
     /// <summary>The run-level goal the supervisor is pursuing (carried from node config).</summary>
     public string Goal { get; init; } = "";
 
+    /// <summary>D2 (cross-run learning, decider lane): pre-rendered lesson lines the turn prompt carries — filled at rehydration from the lesson ledger under the SAME deterministic (team, goal) arm the planner uses; empty when withheld or none exist.</summary>
+    public IReadOnlyList<string> LessonLines { get; init; } = [];
+
     /// <summary>The replay-frozen bound for the optional merge-synthesis prompt. It limits only the enrichment model input; integration, completion, and the durable decision tape continue to consume their authoritative full data.</summary>
     public int SynthesisPromptBudgetChars { get; init; } = SupervisorSynthesisBudget.DefaultChars;
 
