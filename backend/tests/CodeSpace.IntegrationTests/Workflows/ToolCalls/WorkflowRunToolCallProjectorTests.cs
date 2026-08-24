@@ -90,7 +90,10 @@ public sealed class WorkflowRunToolCallProjectorTests
     public async Task Terminal_source_time_is_not_stretched_to_a_later_agent_run_completion()
     {
         var world = await SeedWorldAsync(AgentRunStatus.Succeeded);
-        var admittedAt = DateTimeOffset.UtcNow.AddHours(-2);
+        // Whole-second instants: Postgres timestamptz keeps microseconds, so UtcNow's 100ns tick residue is
+        // truncated on the round-trip and an exact ShouldBe reds intermittently. Second-aligned times survive
+        // the round-trip losslessly while staying now-relative (the sweep windows on recency).
+        var admittedAt = DateTimeOffset.FromUnixTimeSeconds(DateTimeOffset.UtcNow.AddHours(-2).ToUnixTimeSeconds());
         var sourceTerminalAt = admittedAt.AddMinutes(1);
         var ledger = await SeedLedgerAsync(world, ToolCallLedgerStatus.Succeeded, "git.open_pr", new LedgerOptions
         {
