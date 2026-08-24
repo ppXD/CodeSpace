@@ -545,9 +545,22 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         var liveDuplicate = await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "concurrent") with { OperationTimeout = TimeSpan.FromMilliseconds(100) });
         liveDuplicate.ShouldBeOfType<ArtifactCasTransferResult.Deferred>().Problem.Code.ShouldBe(ArtifactCasProblemCode.TransferInProgress);
 
-        await Task.Delay(500);
-        var second = await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "concurrent") with { OperationTimeout = TimeSpan.FromMilliseconds(100) });
-        second.ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        // Poll instead of a fixed delay: the lease expiry is stamped by clock_timestamp() when the FIRST put's claim
+        // lands, and on a slow runner that stamp lands later than this test's timeline assumes — a fixed 500ms wait then
+        // meets a still-live lease and gets Deferred(TransferInProgress), which is a correct answer at that instant, not
+        // the defect. Live-observed on CI (run 32768977365). What the test pins is that the reclaim EVENTUALLY commits
+        // once the lease lapses, so ask until it does, bounded well past any lease this test can mint (100ms timeout →
+        // 100ms + max(100ms, MinimumLeaseMargin) lease).
+        ArtifactCasTransferResult? second = null;
+        var reclaimDeadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(30);
+
+        while (second is null or ArtifactCasTransferResult.Deferred { Problem.Code: ArtifactCasProblemCode.TransferInProgress } && DateTimeOffset.UtcNow < reclaimDeadline)
+        {
+            await Task.Delay(200);
+            second = await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "concurrent") with { OperationTimeout = TimeSpan.FromMilliseconds(100) });
+        }
+
+        second.ShouldBeOfType<ArtifactCasTransferResult.Committed>("the reclaim must commit once the first worker's lease lapses — check worker_lease_expires_at vs clock_timestamp() manually if this times out");
         storage.ReleaseIgnoringCancellationPut.TrySetResult();
         var stale = await first;
         stale.ShouldBeOfType<ArtifactCasTransferResult.Deferred>().Problem.Code.ShouldBe(ArtifactCasProblemCode.StaleWorker);
