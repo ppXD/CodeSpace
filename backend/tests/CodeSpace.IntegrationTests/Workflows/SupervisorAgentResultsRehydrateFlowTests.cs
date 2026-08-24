@@ -403,4 +403,31 @@ public sealed class SupervisorAgentResultsRehydrateFlowTests
             ProducedBranch = producedBranch,
             RepositoryResults = repositoryResults ?? Array.Empty<RepositoryRunResult>(),
         }, AgentJson.Options);
+
+    [Fact]
+    public async Task Rehydrate_threads_current_lessons_under_the_deterministic_arm()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        using (var seed = _fixture.BeginScope())
+        {
+            var db = seed.Resolve<CodeSpaceDbContext>();
+            db.Lesson.Add(new CodeSpace.Core.Persistence.Entities.Lesson
+            {
+                Id = Guid.NewGuid(), TeamId = teamId, Mode = "supervisor", FailureClass = "broken-acceptance-command",
+                WhatFailed = "check.sh exits 2", Why = "unrestored", HowToApply = "run restore before check.sh",
+                SourceRunIds = [Guid.NewGuid()], DistilledByModel = "test-model", ValidFrom = DateTimeOffset.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var context = await RehydrateAsync(runId, teamId);
+
+        // The arm is the SAME pure hash the planner lane uses — the test recomputes it rather than guessing.
+        if (CodeSpace.Core.Services.Learning.LessonArms.Assign(teamId, context.Goal) == CodeSpace.Core.Services.Learning.LessonArms.Injected)
+            context.LessonLines.ShouldHaveSingleItem().ShouldContain("run restore before check.sh", customMessage: "injected arm — the ledger's lesson must reach the turn context");
+        else
+            context.LessonLines.ShouldBeEmpty("withheld arm — deterministically held back, the control");
+    }
 }

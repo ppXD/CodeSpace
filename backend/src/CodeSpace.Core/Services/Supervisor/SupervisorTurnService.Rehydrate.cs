@@ -151,6 +151,7 @@ public sealed partial class SupervisorTurnService
         return new SupervisorTurnContext
         {
             Goal = goal,
+            LessonLines = await BuildLessonLinesAsync(goal, teamId, goalConfig?.AgentProfile?.RepositoryId, cancellationToken).ConfigureAwait(false),
             SynthesisPromptBudgetChars = SupervisorSynthesisBudget.Normalize(goalConfig?.SynthesisPromptBudgetChars),
             SupervisorRunId = supervisorRunId,
             TeamId = teamId,
@@ -1423,4 +1424,14 @@ public sealed partial class SupervisorTurnService
 
     /// <summary>Read the <c>reason</c> from a stop decision's payload for the node's terminal output (best-effort; null when absent/malformed) — delegates to the shared <see cref="SupervisorOutcome.ReadStopReason"/> so the forced-stop reason has ONE reader.</summary>
     private static string? ReadStopReason(SupervisorDecision decision) => SupervisorOutcome.ReadStopReason(decision.PayloadJson);
+
+    /// <summary>Mirrors the workflow planner's cap (top 5, repo-matched first) and its deterministic arm — the SAME task is injected or withheld in BOTH brain lanes, so the A/B stays coherent.</summary>
+    private async Task<IReadOnlyList<string>> BuildLessonLinesAsync(string goal, Guid teamId, Guid? repositoryId, CancellationToken cancellationToken)
+    {
+        var current = await _lessons.ListCurrentAsync(teamId, repositoryId, take: 5, cancellationToken).ConfigureAwait(false);
+
+        if (current.Count == 0 || Learning.LessonArms.Assign(teamId, goal) != Learning.LessonArms.Injected) return [];
+
+        return current.Select(l => $"[{l.FailureClass}] {l.WhatFailed} → {l.HowToApply}").ToList();
+    }
 }

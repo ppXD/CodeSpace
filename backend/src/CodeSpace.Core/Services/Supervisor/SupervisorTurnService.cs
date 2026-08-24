@@ -25,6 +25,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
 
     private readonly ISupervisorDecisionLog _ledger;
     private readonly Workflows.Budget.IBudgetLedger _budget;
+    private readonly Learning.ILessonReader _lessons;
     private readonly ISupervisorDecider _decider;
     private readonly ISupervisorActionExecutor _executor;
     private readonly CodeSpaceDbContext _db;
@@ -40,11 +41,12 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     private readonly Completion.ICompletionAssessmentComposer _completion;
     private readonly ILogger<SupervisorTurnService> _logger;
 
-    public SupervisorTurnService(ISupervisorDecisionLog ledger, ISupervisorDecider decider, ISupervisorActionExecutor executor, CodeSpaceDbContext db, ISupervisorAcceptanceGrader acceptanceGrader, IDecisionQueueService decisionQueue, IDecisionArbiter arbiter, IDecisionAnswerService decisionAnswer, Plans.IWorkPlanService workPlans, Workflows.Lifecycle.IRunRecordLogger recordLogger, Workflows.Artifacts.IArtifactOffloader offloader, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, Completion.ICompletionAssessmentComposer completion, Workflows.Budget.IBudgetLedger budget, ILogger<SupervisorTurnService> logger)
+    public SupervisorTurnService(ISupervisorDecisionLog ledger, ISupervisorDecider decider, ISupervisorActionExecutor executor, CodeSpaceDbContext db, ISupervisorAcceptanceGrader acceptanceGrader, IDecisionQueueService decisionQueue, IDecisionArbiter arbiter, IDecisionAnswerService decisionAnswer, Plans.IWorkPlanService workPlans, Workflows.Lifecycle.IRunRecordLogger recordLogger, Workflows.Artifacts.IArtifactOffloader offloader, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, Completion.ICompletionAssessmentComposer completion, Workflows.Budget.IBudgetLedger budget, Learning.ILessonReader lessons, ILogger<SupervisorTurnService> logger)
     {
         _ledger = ledger;
         _decider = decider;
         _budget = budget;
+        _lessons = lessons;
         _executor = executor;
         _db = db;
         _acceptanceGrader = acceptanceGrader;
