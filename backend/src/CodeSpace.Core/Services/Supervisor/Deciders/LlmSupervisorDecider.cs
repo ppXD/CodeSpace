@@ -617,6 +617,12 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 
         // D2 (cross-run learning, decider lane): the distilled lessons ride the turn prompt — filled at
         // rehydration under the same deterministic arm the planner uses; empty ⇒ byte-identical prompt.
+        if (context.LessonLines is { Count: > 0 } lessonLines)
+        {
+            builder.AppendLine();
+            builder.AppendLine("Lessons distilled from this team's prior failed runs (real post-mortems — apply them where they fit):");
+            foreach (var line in lessonLines) builder.AppendLine($"- {line}");
+        }
 
         // S8 RECITATION (the Manus lesson): restate the CURRENT plan with live per-item states at the prompt TAIL —
         // the recency-biased position — so a long run never loses the plan under a growing prior-decision log.
