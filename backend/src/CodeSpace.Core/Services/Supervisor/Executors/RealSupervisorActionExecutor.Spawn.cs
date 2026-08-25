@@ -91,6 +91,18 @@ public sealed partial class RealSupervisorActionExecutor
             return SupervisorExecution.Synchronous(JsonSerializer.Serialize(BuildUnknownModelSpawnOutcome(unknownModels), AgentJson.Options));
         }
 
+        // The HARNESS twin of the two pre-flights above, and the same defect on the third model-authored axis. An
+        // `agents[].harness` kind the run cannot admit used to reach ApplyDispatchHarnessPool inside the staging loop and
+        // THROW, so an invented CLI name killed the run after the plan and the dependency staging had both succeeded.
+        // ScreenAuthoredHarnesses splits the two things the old single gate said the same sentence about: a kind NO
+        // registered adapter has is a MODEL MISS, rejected re-authorably here; a REGISTERED kind the operator kept out of
+        // this run's pool stays a fail-closed throw (governance, not re-authorable) — raised here, before anything stages.
+        if (ScreenAuthoredHarnesses(spawn, context) is { Count: > 0 } unknownHarnesses)
+        {
+            _logger.LogWarning("Supervisor REJECTED the spawn at turn {Turn} on node {NodeId} — it authored harness kind(s) [{Harnesses}] that no registered coding-agent adapter has", context.TurnNumber, context.NodeId, string.Join(", ", unknownHarnesses));
+            return SupervisorExecution.Synchronous(JsonSerializer.Serialize(BuildUnknownHarnessSpawnOutcome(unknownHarnesses, AdmittedHarnessKinds(context)), AgentJson.Options));
+        }
+
         // Fan out over the subtask ids (already clamped to the dependency-ready frontier when the decision was formed —
         // see SupervisorTurnService.ClampSpawnToDependencyFrontier — so the persisted payload's subtaskIds match the
         // staged agents one-for-one). For each, apply the model-authored per-agent dispatch override (L4 arc B) when the
@@ -230,6 +242,41 @@ public sealed partial class RealSupervisorActionExecutor
         return unresolvable;
     }
 
+    /// <summary>
+    /// Screen every DISTINCT model-authored per-agent HARNESS kind in this spawn UP FRONT — the harness sibling of
+    /// <see cref="UnresolvablePersonaSlugsAsync"/> and <see cref="ScreenAuthoredModelsAsync"/>, and the same two-case
+    /// split. A kind NO registered <see cref="IAgentHarness"/> has is a name the brain invented: RETURNED, for a
+    /// re-authorable rejection. A REGISTERED kind the operator kept out of <see cref="SupervisorTurnContext.AllowedAgentKinds"/>
+    /// is the OPERATOR's boundary, so it THROWS <see cref="SupervisorAgentAccessException"/> (fail-closed, never
+    /// re-authorable) — before any agent stages, so the governance path cannot leave a partial fan-out behind either.
+    /// Returns empty when the spawn authored no harness (the profile's own stands) or every authored kind is admitted.
+    /// <para>Registration is checked against the FULL registry, not the clamped pool, precisely so the two cases stay
+    /// distinguishable: clamping first would report an un-admitted real harness as an invented one.</para>
+    /// </summary>
+    private IReadOnlyList<string> ScreenAuthoredHarnesses(SupervisorSpawnPayload spawn, SupervisorTurnContext context)
+    {
+        var authored = spawn.SubtaskIds.Select(id => NullIfBlank(DispatchFor(spawn, id)?.Harness)).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var unregistered = new List<string>();
+
+        foreach (var kind in authored)
+        {
+            if (!_harnesses.All.Any(h => string.Equals(h.Kind, kind, StringComparison.OrdinalIgnoreCase)))
+            {
+                unregistered.Add(kind);
+                continue;
+            }
+
+            if (context.AllowedAgentKinds is { Count: > 0 } pool && !pool.Contains(kind, StringComparer.OrdinalIgnoreCase))
+                throw new SupervisorAgentAccessException($"agent.supervisor spawn requests harness '{kind}', which is a registered adapter but the operator did not admit to this run's allowed harness pool.");
+        }
+
+        return unregistered;
+    }
+
+    /// <summary>The harness kinds this run may spawn, as the capability catalog renders them (<c>LlmSupervisorDecider</c> clamps the same way) — so a rejection names the SAME universe the brain was shown, never the wider registry.</summary>
+    private IReadOnlyList<string> AdmittedHarnessKinds(SupervisorTurnContext context) =>
+        AgentHarnessPool.Clamp(_harnesses.All, context.AllowedAgentKinds).Select(h => h.Kind).ToList();
+
     private static SupervisorAgentDispatch? DispatchFor(SupervisorSpawnPayload spawn, string subtaskId) =>
         spawn.Agents?.FirstOrDefault(a => a.SubtaskId == subtaskId);
 
@@ -293,6 +340,15 @@ public sealed partial class RealSupervisorActionExecutor
         agentCount = 0,
         spawn = "rejected",
         reason = $"the spawn authored model name(s) no credentialed model of this team has: [{string.Join(", ", unknown)}] — re-author with a model the capability catalog lists, or OMIT model entirely to let the run's own model apply",
+    };
+
+    /// <summary>The rejection outcome for a spawn authoring a harness kind no registered adapter has — re-authorable, unlike the throw it replaced, which killed the run mid fan-out. A REGISTERED but un-admitted kind is NOT routed here: that boundary is the operator's, and stays a fail-closed throw. <paramref name="admitted"/> is the same clamped catalog the brain was shown, so the reason names a universe it can actually pick from.</summary>
+    internal static object BuildUnknownHarnessSpawnOutcome(IReadOnlyList<string> unknown, IReadOnlyList<string> admitted) => new
+    {
+        agentRunIds = Array.Empty<Guid>(),
+        agentCount = 0,
+        spawn = "rejected",
+        reason = $"the spawn authored harness kind(s) no registered coding-agent adapter has: [{string.Join(", ", unknown)}] — re-author with one of [{string.Join(", ", admitted)}], or OMIT harness entirely to let the run's own harness stand",
     };
 
     /// <summary>H2: the rejection outcome for a retry naming an id the current plan never declared — without this the instruction chain fell through to the WHOLE GOAL (a ghost re-run of the entire task under a stale or typo'd id).</summary>
@@ -795,7 +851,7 @@ public sealed partial class RealSupervisorActionExecutor
         // not bypassable via a model-authored slug or the profile default. Empty pool = all team personas; no persona
         // (pure-inline) = no gate. Out of pool → fail-closed (terminalized by the turn service's catch).
         resolved = ApplyDispatchAgentPool(resolved, context);
-        resolved = ApplyDispatchHarnessPool(resolved, context);
+        resolved = ApplyDispatchHarnessPool(resolved, spec, context);
 
         // Stamp the owning TURN cell (<nodeId>#turn{N}) so a supervisor's spawned agents are addressable by the
         // turn that spawned them (D4) — the turn-grain analogue of the per-spawn wait key <nodeId>#turn{N}#{k}.
@@ -869,12 +925,33 @@ public sealed partial class RealSupervisorActionExecutor
         throw new SupervisorAgentAccessException($"agent.supervisor spawn requests persona '{personaId}', which is not in this run's allowed agent pool.");
     }
 
-    /// <summary>Final effective-harness gate. It runs after model reconciliation because that step may legitimately switch the authored harness to one capable of driving the selected provider.</summary>
-    private static AgentTask ApplyDispatchHarnessPool(AgentTask resolved, SupervisorTurnContext context)
+    /// <summary>
+    /// Final effective-harness gate. It runs after model reconciliation because that step may legitimately switch the
+    /// authored harness to one capable of driving the selected provider.
+    /// <para>A MODEL-authored kind outside the pool THROWS — defence in depth behind <see cref="ScreenAuthoredHarnesses"/>,
+    /// which raises the same refusal before anything stages. Any OTHER out-of-pool kind is one NOBODY authored against the
+    /// allow-list: the run profile's harness, or the platform floor <see cref="AgentHarnessDefaults.DefaultHarness"/> that
+    /// stands in when no profile named one. Those are CLAMPED into the pool rather than killing the run — the operator who
+    /// allow-lists only <c>claude-code</c> and leaves the profile harness empty used to lose EVERY spawn of that run to the
+    /// codex floor colliding with their own list, which is a config shape the node schema actively invites.</para>
+    /// <para>The message names the EFFECTIVE harness, which on the throw branch is the authored one verbatim: the only
+    /// step that can move a harness between authoring and here is <see cref="ApplyDispatchModelAsync"/>'s reconcile, and
+    /// that already picks from the pool-clamped registry, so it cannot turn an admitted authored kind into an excluded one.</para>
+    /// </summary>
+    private static AgentTask ApplyDispatchHarnessPool(AgentTask resolved, SupervisorAgentDispatch? spec, SupervisorTurnContext context)
     {
         if (context.AllowedAgentKinds is not { Count: > 0 } pool || pool.Contains(resolved.Harness, StringComparer.OrdinalIgnoreCase)) return resolved;
-        throw new SupervisorAgentAccessException($"agent.supervisor spawn requests harness '{resolved.Harness}', which is not in this run's allowed harness pool.");
+
+        if (NullIfBlank(spec?.Harness) is not null)
+            throw new SupervisorAgentAccessException($"agent.supervisor spawn requests harness '{resolved.Harness}', which is a registered adapter but the operator did not admit to this run's allowed harness pool.");
+
+        return resolved with { Harness = AdmittedSubstitute(pool) };
     }
+
+    /// <summary>The kind that stands in for an unauthored out-of-pool harness: the platform default when the operator admitted it, else the ordinal-first admitted kind — a pure, deterministic pick, so two agents of one spawn can never disagree about it.</summary>
+    private static string AdmittedSubstitute(IReadOnlyList<string> pool) =>
+        pool.FirstOrDefault(kind => string.Equals(kind, AgentHarnessDefaults.DefaultHarness, StringComparison.OrdinalIgnoreCase))
+            ?? pool.OrderBy(kind => kind, StringComparer.Ordinal).First();
 
     /// <summary>
     /// Build the agent task for a subtask id. The GOAL folds the revised instruction (retry) wins, else the
@@ -969,6 +1046,10 @@ public sealed partial class RealSupervisorActionExecutor
         {
             Goal = goal,
             Harness = NullIfBlank(spec?.Harness) ?? HarnessOf(profile),
+            // The operator's harness allow-list rides ALONG to execution, where the run-time reconciler may swap the
+            // harness for one that can drive the model's provider — that swap picks from the registry clamped by this
+            // list, so the run cannot end up on a kind the operator never admitted. Null pool → null → unbounded.
+            AllowedHarnessKinds = context.AllowedAgentKinds is { Count: > 0 } kinds ? kinds : null,
             // Stamp the RAW authored model name (L4 dispatch wins over the profile default). The pool gate runs
             // POST-resolution in CreateResolvedAgentRunAsync — where the EFFECTIVE model (incl. a persona-filled one) is
             // known — so this stays a pure projection. A null name → the harness default (no pool gate; no name).

@@ -175,6 +175,117 @@ public sealed class SupervisorActionRejectionFlowTests
         execution.ParkedAgentWaitCount.ShouldBe(0, "including for 'auth', whose own dispatch was fine — a partial fan-out would desync the positional join");
     }
 
+    // ── A model-authored HARNESS kind no adapter registers is a MODEL miss; a registered out-of-POOL one is governance ──
+
+    [Fact]
+    public async Task A_spawn_authoring_a_harness_kind_no_adapter_registers_rejects_the_spawn()
+    {
+        // The harness sibling of #1535 (persona slug) and #1646 (model name). `agents[].harness` is an advertised,
+        // model-authored field, so a kind the brain invents is a MODEL MISS and must be re-authorable. Before this
+        // screen an invented kind either sailed through to stage an agent no registry can resolve (no allow-list), or —
+        // with an allow-list configured — reached ApplyDispatchHarnessPool inside the staging loop and THREW, killing
+        // the run after the plan and the dependency staging had both already succeeded.
+        using var scope = _fixture.BeginScope();
+
+        var spawn = SpawnWithHarness(new[] { "auth" }, subtaskId: "auth", harness: "claude-cli");
+
+        var execution = await scope.Resolve<ISupervisorActionExecutor>()
+            .ExecuteAsync(spawn, ContextWithPlan("auth", "ui"), CancellationToken.None);
+
+        var outcome = JsonDocument.Parse(execution.OutcomeJson!).RootElement;
+        outcome.GetProperty("spawn").GetString().ShouldBe("rejected");
+        outcome.GetProperty("reason").GetString()!.ShouldContain("claude-cli");
+        outcome.GetProperty("reason").GetString()!.ShouldContain("omit", Case.Insensitive, "telling the brain it may drop the field is what makes the next turn recoverable");
+        execution.ParkedAgentWaitCount.ShouldBe(0, "nothing is staged");
+    }
+
+    [Fact]
+    public async Task A_spawn_authoring_an_unregistered_harness_under_an_allow_list_is_rejected_not_terminalized()
+    {
+        // The run-killing shape itself. With allowedAgents configured, an invented kind is not in the pool either, so
+        // the post-resolution gate threw SupervisorAgentAccessException — the turn service recorded the decision Failed
+        // and RE-THREW, so the node failed and the run terminalized Failure. An invented name must not be able to reach
+        // the OPERATOR's fail-closed channel at all: it is screened as a miss first.
+        using var scope = _fixture.BeginScope();
+
+        var context = ContextWithPlan("auth", "ui") with { AllowedAgentKinds = new[] { "codex-cli" } };
+        var spawn = SpawnWithHarness(new[] { "auth" }, subtaskId: "auth", harness: "claude-cli");
+
+        var execution = await scope.Resolve<ISupervisorActionExecutor>()
+            .ExecuteAsync(spawn, context, CancellationToken.None);
+
+        JsonDocument.Parse(execution.OutcomeJson!).RootElement.GetProperty("spawn").GetString().ShouldBe("rejected");
+        execution.ParkedAgentWaitCount.ShouldBe(0, "nothing is staged");
+    }
+
+    [Fact]
+    public async Task A_spawn_whose_second_dispatch_names_a_bad_harness_stages_no_agent_at_all()
+    {
+        // The other half of why the screen is UP FRONT: resolving harnesses inside the staging loop meant a spawn could
+        // create the first agent and then throw on the second one's harness, leaving a partial fan-out behind a failed run.
+        using var scope = _fixture.BeginScope();
+
+        var spawn = SpawnWithHarness(new[] { "auth", "ui" }, subtaskId: "ui", harness: "gemini-cli");
+
+        var execution = await scope.Resolve<ISupervisorActionExecutor>()
+            .ExecuteAsync(spawn, ContextWithPlan("auth", "ui"), CancellationToken.None);
+
+        JsonDocument.Parse(execution.OutcomeJson!).RootElement.GetProperty("reason").GetString()!.ShouldContain("gemini-cli");
+        execution.ParkedAgentWaitCount.ShouldBe(0, "including for 'auth', whose own dispatch was fine — a partial fan-out would desync the positional join");
+    }
+
+    [Fact]
+    public async Task A_spawn_authoring_a_registered_harness_the_operator_kept_out_of_the_pool_still_fails_closed()
+    {
+        // The governance side, and the distinction this lane rests on. claude-code IS a registered adapter; the OPERATOR
+        // excluded it from this run. That boundary must not become something the brain can re-author its way around, so
+        // it stays a fail-closed throw — raised BEFORE anything stages. The message must say the kind is REGISTERED and
+        // merely un-admitted: the single old gate produced the same "not in this run's allowed harness pool" sentence for
+        // an invented kind too, which is exactly the conflation #1646 had to unpick on the model axis.
+        using var scope = _fixture.BeginScope();
+
+        var context = ContextWithPlan("auth", "ui") with { AllowedAgentKinds = new[] { "codex-cli" } };
+        var spawn = SpawnWithHarness(new[] { "auth" }, subtaskId: "auth", harness: "claude-code");
+
+        var thrown = await Should.ThrowAsync<SupervisorAgentAccessException>(async () =>
+            await scope.Resolve<ISupervisorActionExecutor>().ExecuteAsync(spawn, context, CancellationToken.None));
+
+        thrown.Message.ShouldContain("claude-code");
+        thrown.Message.ShouldContain("registered", Case.Insensitive, "an invented kind and an un-admitted real one must stay distinguishable in the record");
+        thrown.Message.ShouldContain("allowed harness pool", Case.Insensitive);
+    }
+
+    [Fact]
+    public async Task A_spawn_authoring_an_admitted_harness_is_screened_clean()
+    {
+        // The screen must not reject the HAPPY path: a registered, admitted kind falls through to staging. Without this
+        // the rejection tests above would also pass on a screen that refused every authored harness.
+        using var scope = _fixture.BeginScope();
+
+        var context = ContextWithPlan("auth", "ui") with { AllowedAgentKinds = new[] { "codex-cli", "claude-code" } };
+        var spawn = SpawnWithHarness(new[] { "auth" }, subtaskId: "auth", harness: "claude-code");
+
+        // Staging a real agent run needs infrastructure this bare context has none of, so the assertion is the NEGATIVE
+        // that isolates the screen: whatever happens next, it is not this screen's rejection and not its access throw.
+        var outcome = await Record.ExceptionAsync(async () =>
+        {
+            var execution = await scope.Resolve<ISupervisorActionExecutor>().ExecuteAsync(spawn, context, CancellationToken.None);
+            JsonDocument.Parse(execution.OutcomeJson!).RootElement.TryGetProperty("spawn", out _).ShouldBeFalse("an admitted harness must not be rejected");
+        });
+
+        outcome.ShouldNotBeOfType<SupervisorAgentAccessException>("an admitted, registered harness passes the screen");
+    }
+
+    private static SupervisorDecision SpawnWithHarness(string[] subtaskIds, string subtaskId, string harness) => new()
+    {
+        Kind = SupervisorDecisionKinds.Spawn,
+        PayloadJson = JsonSerializer.Serialize(new SupervisorSpawnPayload
+        {
+            SubtaskIds = subtaskIds,
+            Agents = new[] { new SupervisorAgentDispatch { SubtaskId = subtaskId, Harness = harness } },
+        }, AgentJson.Options),
+    };
+
     // ── A model-authored MODEL name nothing credentials is a MODEL miss; an out-of-POOL one is governance ──
 
     [Fact]

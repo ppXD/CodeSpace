@@ -39,6 +39,20 @@ public sealed record AgentTask
     /// <summary>Harness kind to run this task — resolved via <see cref="IAgentHarnessRegistry"/> (e.g. "codex-cli").</summary>
     public required string Harness { get; init; }
 
+    /// <summary>
+    /// The harness kinds this run may execute on, carried so the EXECUTION-time harness choice is bounded by the same
+    /// list that bounded the authoring one. <c>HarnessModelReconciler</c> may swap <see cref="Harness"/> for a registered
+    /// harness that can drive the model's provider; it selects from the registry clamped by THIS list, so a repair can
+    /// never land on a kind the operator did not admit — without it the clamp was authoring-time only and an admitted
+    /// codex-cli agent on an Anthropic-default team was repaired onto claude-code at launch.
+    /// <para>Null / empty (the default, every non-supervisor path, and every task envelope persisted before this field)
+    /// = UNBOUNDED, byte-identical to the prior behaviour. Only the supervisor spawn stamps it, from the operator's
+    /// <c>SupervisorGoalConfig.AllowedAgents</c>. It bounds the repair only — it is not itself the gate that refuses a
+    /// model-authored harness, which the spawn executor decides before anything stages.</para>
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? AllowedHarnessKinds { get; init; }
+
     /// <summary>Model id within the chosen harness's <see cref="IAgentHarness.Models"/> catalog, or null/blank to let the harness pick its own default (the Model=empty rule).</summary>
     public string? Model { get; init; }
 
