@@ -150,7 +150,7 @@ public class PlanMapDynamicDefinitionBuilderTests
         var synth = def.Nodes.Single(n => n.Id == "synth");
 
         synth.TypeKey.ShouldBe("llm.complete");
-        synth.Config.GetProperty("provider").GetString().ShouldBe("Anthropic");
+        synth.Config.TryGetProperty("provider", out _).ShouldBeFalse("omission inherits the team's ranked provider without inventing a pseudo-wire enum member");
 
         // The dynamic variant shares the base's reduce, so it inherits the SAME input bound: the prompt binds the
         // map's budget-bounded projection, never the raw array whose size no one capped.

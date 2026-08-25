@@ -119,6 +119,8 @@ public sealed class WorkflowRunModelCallSchemaTests
         Index(entity, "ux_workflow_run_model_call_attempt_source_terminal").IsUnique.ShouldBeTrue();
         Index(entity, "ix_workflow_run_model_call_attempt_late_start").Properties.Select(p => p.Name)
             .ShouldBe(new[] { "WorkflowRunId", "ModelCallId" });
+        Index(entity, "ix_workflow_run_model_call_attempt_late_terminal").Properties.Select(p => p.Name)
+            .ShouldBe(new[] { "WorkflowRunId", "ModelCallId" });
 
         // One frame evidences at most one attempt — the guard that makes re-projecting a harness's captured frames a
         // no-op even under a writer that did not check first.

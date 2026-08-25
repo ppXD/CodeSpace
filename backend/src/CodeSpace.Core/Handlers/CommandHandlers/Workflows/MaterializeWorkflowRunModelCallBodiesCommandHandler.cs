@@ -1,4 +1,5 @@
 using CodeSpace.Core.Services.Workflows.ModelCalls;
+using System.Diagnostics;
 using CodeSpace.Messages.Commands.Workflows;
 using MediatR;
 
@@ -10,6 +11,11 @@ public sealed class MaterializeWorkflowRunModelCallBodiesCommandHandler : IReque
 
     public MaterializeWorkflowRunModelCallBodiesCommandHandler(IWorkflowRunModelCallBodyMaterializer materializer) => _materializer = materializer;
 
-    public async Task<int> Handle(MaterializeWorkflowRunModelCallBodiesCommand request, CancellationToken cancellationToken) =>
-        (await _materializer.SweepAsync(request.BatchSize, cancellationToken).ConfigureAwait(false)).Settled;
+    public async Task<int> Handle(MaterializeWorkflowRunModelCallBodiesCommand request, CancellationToken cancellationToken)
+    {
+        var started = Stopwatch.GetTimestamp();
+        var result = await _materializer.SweepAsync(request.BatchSize, cancellationToken).ConfigureAwait(false);
+        WorkflowRunModelCallMetrics.RecordMaterialization(result, request.BatchSize, Stopwatch.GetElapsedTime(started));
+        return result.Settled;
+    }
 }

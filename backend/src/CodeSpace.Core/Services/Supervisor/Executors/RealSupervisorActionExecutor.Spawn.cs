@@ -468,11 +468,10 @@ public sealed partial class RealSupervisorActionExecutor
     /// spawn / a retry with no subtask) records a zero-agent SYNCHRONOUS outcome so the node self-advances
     /// rather than parking forever on nothing.
     ///
-    /// <para>IDEMPOTENT under crash recovery (the must-fix): the agent rows are committed one-at-a-time (each
-    /// <c>CreateAsync</c> saves) while the waits flush together at the end, so a crash mid fan-out leaves the
-    /// decision stuck Running with one of two partial states. The turn service re-executes that decision under
-    /// its existing Running claim; this method makes the re-execution land EXACTLY K agents + K waits with no
-    /// double-spawn and no leaked orphan:
+    /// <para>ATOMIC + IDEMPOTENT under crash recovery: requirement stakes, every newly created agent row, and all
+    /// waits commit in one transaction, so a new crash cannot expose a prefix of the fan-out. The recovery reads
+    /// below remain for rows produced before this invariant shipped and for a crash after an older deployment's
+    /// per-agent save. Re-execution under the existing Running claim lands EXACTLY K agents + K waits:
     /// <list type="bullet">
     ///   <item>crash AFTER the waits committed (agents staged, terminal not recorded) → the K waits for this
     ///         turn already exist; we REUSE them verbatim and re-park without staging anything.</item>
@@ -557,6 +556,12 @@ public sealed partial class RealSupervisorActionExecutor
                 },
             }, t.Spec)).ToList();
 
+        // The whole authorization wave is one database commit: requirements, every fresh AgentRun, and every wait.
+        // AgentRunService.CreateAsync deliberately SaveChanges per run, but those flushes stay private inside this
+        // transaction until ALL K slots and waits exist. A cap rejection, resolver fault, or process disconnect rolls
+        // the wave back to zero visible residue; replay never observes a prefix and mistakes it for a complete wave.
+        await using var stagingTransaction = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+
         // P2a-2 (R): the staged units' acceptance obligations become durable requirement rows AT AUTHORIZATION —
         // the composer reads these, never re-derives them from the tape. Upsert-idempotent: a crash-replayed
         // staging lands on the same (run, kind, ref) rows. Model-authored oracles carry ModelProposal authority
@@ -564,6 +569,8 @@ public sealed partial class RealSupervisorActionExecutor
         // Best-effort: a ledger fault must never strand the staging itself.
         if (planRef is not null && contractHashes is { Count: > 0 } && context.SupervisorRunId != Guid.Empty && context.TeamId != Guid.Empty)
         {
+            const string requirementSavepoint = "before_completion_requirements";
+            await stagingTransaction.CreateSavepointAsync(requirementSavepoint, cancellationToken).ConfigureAwait(false);
             var requirements = SupervisorUnitContract.BuildStakedRequirements(tasks
                 .Where(t => !string.IsNullOrEmpty(t.Task.SubtaskId) && contractHashes.ContainsKey(t.Task.SubtaskId!))
                 .Select(t => (t.Task.SubtaskId!, contractHashes[t.Task.SubtaskId!], acceptanceUnits?.Contains(t.Task.SubtaskId!) == true, deliveryUnits?.Contains(t.Task.SubtaskId!) == true)),
@@ -586,6 +593,9 @@ public sealed partial class RealSupervisorActionExecutor
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
+                    // A PostgreSQL statement error aborts the transaction until it rolls back to a savepoint. Restore
+                    // the wave transaction before honoring this store's historical fail-open requirement behavior.
+                    await stagingTransaction.RollbackToSavepointAsync(requirementSavepoint, CancellationToken.None).ConfigureAwait(false);
                     _logger.LogWarning(ex, "Persisting completion requirements failed for run {RunId}; staging proceeds — the composer will read an incomplete obligation set as Unknown", context.SupervisorRunId);
                 }
             }
@@ -614,8 +624,9 @@ public sealed partial class RealSupervisorActionExecutor
             agentRunIds.Add(agentRunId);
         }
 
-        // One SaveChanges for all K wait rows — the agent rows are already persisted (CreateAsync saves each).
+        // One SaveChanges for all K wait rows; prior per-agent flushes are still uncommitted in stagingTransaction.
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        await stagingTransaction.CommitAsync(cancellationToken).ConfigureAwait(false);
 
         // A crash-recovery reclaim reuses the orphan's OWN already-persisted TaskJson verbatim (never re-resolved,
         // see above) — so if THIS pass freshly recomputed an escalation pick, it can drift from what the CRASHED
@@ -784,6 +795,7 @@ public sealed partial class RealSupervisorActionExecutor
         // not bypassable via a model-authored slug or the profile default. Empty pool = all team personas; no persona
         // (pure-inline) = no gate. Out of pool → fail-closed (terminalized by the turn service's catch).
         resolved = ApplyDispatchAgentPool(resolved, context);
+        resolved = ApplyDispatchHarnessPool(resolved, context);
 
         // Stamp the owning TURN cell (<nodeId>#turn{N}) so a supervisor's spawned agents are addressable by the
         // turn that spawned them (D4) — the turn-grain analogue of the per-spawn wait key <nodeId>#turn{N}#{k}.
@@ -835,7 +847,8 @@ public sealed partial class RealSupervisorActionExecutor
         // Authoring-time compatibility clamp (P1): the resolved model runs on a credential of THIS provider, so pin a
         // harness that can drive it — the authored/default harness if it already can, else a registered one that does.
         // The model authored the MODEL; the server makes the harness match it (the run-time reconciler is the backstop).
-        var harness = HarnessModelReconciler.Reconcile(resolved.Harness, dispatch.Provider, _harnesses.All, AgentHarnessDefaults.DefaultHarness).HarnessKind;
+        var allowedHarnesses = AgentHarnessPool.Clamp(_harnesses.All, context.AllowedAgentKinds);
+        var harness = HarnessModelReconciler.Reconcile(resolved.Harness, dispatch.Provider, allowedHarnesses, AgentHarnessDefaults.DefaultHarness).HarnessKind;
 
         return resolved with { Model = dispatch.ModelId, ModelCredentialId = dispatch.ModelCredentialId, Harness = harness };
     }
@@ -854,6 +867,13 @@ public sealed partial class RealSupervisorActionExecutor
         if (context.AllowedAgentDefinitionIds is not { Count: > 0 } pool || pool.Contains(personaId)) return resolved;
 
         throw new SupervisorAgentAccessException($"agent.supervisor spawn requests persona '{personaId}', which is not in this run's allowed agent pool.");
+    }
+
+    /// <summary>Final effective-harness gate. It runs after model reconciliation because that step may legitimately switch the authored harness to one capable of driving the selected provider.</summary>
+    private static AgentTask ApplyDispatchHarnessPool(AgentTask resolved, SupervisorTurnContext context)
+    {
+        if (context.AllowedAgentKinds is not { Count: > 0 } pool || pool.Contains(resolved.Harness, StringComparer.OrdinalIgnoreCase)) return resolved;
+        throw new SupervisorAgentAccessException($"agent.supervisor spawn requests harness '{resolved.Harness}', which is not in this run's allowed harness pool.");
     }
 
     /// <summary>

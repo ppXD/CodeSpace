@@ -48,6 +48,10 @@ public sealed record SupervisorAgentResult
     /// <summary>The git ground-truth repo-relative paths the agent changed (never the diff body). Defaults to empty and NEVER serializes null, so a consumer can always treat it as an array.</summary>
     public IReadOnlyList<string> ChangedFiles { get; init; } = Array.Empty<string>();
 
+    /// <summary>The original changed-file count when <see cref="ChangedFiles"/> was clipped for the durable compact projection. Null means the list is complete.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? TotalChangedFiles { get; init; }
+
     /// <summary>The branch the agent's sandbox pushed (the PR-open handoff), null when it pushed none. In a MULTI-repo run this mirrors the PRIMARY repo's branch (the legacy compat field); the full per-repo set is in <see cref="RepositoryResults"/>.</summary>
     public string? ProducedBranch { get; init; }
 

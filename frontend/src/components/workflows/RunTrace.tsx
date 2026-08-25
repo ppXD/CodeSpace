@@ -54,7 +54,7 @@ function RunDataCompleteness({ view, loading, failed }: { view: WorkflowRunDataC
   return (
     <section className="run-data-completeness" aria-label="Recorded Workflow Run data completeness">
       <div className="run-data-completeness-head">Data completeness</div>
-      <div className="run-data-completeness-scope">Recorded facets only · omitted facets remain indeterminate · no run-wide verdict.</div>
+      <div className="run-data-completeness-scope">Registered producer facets · terminal fold only when every required statement is present.</div>
       {loading && view === undefined ? (
         <div className="run-data-completeness-empty">Loading producer statements…</div>
       ) : view == null ? (
@@ -73,6 +73,8 @@ function RunDataCompleteness({ view, loading, failed }: { view: WorkflowRunDataC
         </ul>
       )}
       {failed && view != null && <div className="run-data-completeness-warning">Last refresh failed; displaying the last valid producer statements.</div>}
+      {view?.runWideVerdict && <div className="run-data-completeness-scope">Terminal run-wide verdict · {view.runWideVerdict}</div>}
+      {view && view.missingFacetStatements.length > 0 && <div className="run-data-completeness-warning">Unstated required facets: {view.missingFacetStatements.join(", ")}.</div>}
       {view?.truncated && <div className="run-data-completeness-warning">Additional recorded facets were omitted by the bounded metadata read.</div>}
     </section>
   );

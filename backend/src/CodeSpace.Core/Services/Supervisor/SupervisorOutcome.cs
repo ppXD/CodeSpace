@@ -19,6 +19,10 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// </summary>
 public static class SupervisorOutcome
 {
+    internal const int CompactTextMaxChars = 4096;
+    internal const int CompactChangedFilesMax = 200;
+    internal const string CompactTruncationMarker = "…(truncated)";
+
     /// <summary>The wait IterationKey for the k-th agent a spawn/retry staged at turn N: <c>&lt;nodeId&gt;#turn{N}#{k}</c> (must-fix #1's full form, mirroring flow.map's <c>&lt;mapId&gt;#&lt;i&gt;</c>). Distinct per (turn, spawn-index) so K waits never collide.</summary>
     public static string AgentWaitKey(string nodeId, int turnNumber, int spawnIndex) => $"{nodeId}#turn{turnNumber}#{spawnIndex}";
 
@@ -510,9 +514,10 @@ public static class SupervisorOutcome
         {
             AgentRunId = agentRunId,
             Status = statusName,
-            Summary = result?.Summary,
-            Error = result?.Error ?? rowError,
-            ChangedFiles = result?.ChangedFiles ?? Array.Empty<string>(),
+            Summary = ClipCompactText(result?.Summary),
+            Error = ClipCompactText(result?.Error ?? rowError),
+            ChangedFiles = CompactChangedFiles(result?.ChangedFiles),
+            TotalChangedFiles = result?.ChangedFiles.Count > CompactChangedFilesMax ? result.ChangedFiles.Count : null,
             ProducedBranch = result?.ProducedBranch,
             // P2b canary finding: the agent's own SERVER-graded acceptance verdict (the shared protected-oracle
             // funnel, graded at agent completion) must SURVIVE the compact fold — the staked acceptance obligation
@@ -521,7 +526,7 @@ public static class SupervisorOutcome
             // NeedsReview under Enforced with zero acceptance receipts. The rehydrate-time re-grade still covers
             // units whose agents carried no verdict; its already-graded guard now correctly skips these.
             AcceptancePassed = result?.AcceptancePassed,
-            AcceptanceDetail = result?.AcceptanceDetail,
+            AcceptanceDetail = ClipCompactText(result?.AcceptanceDetail),
             AcceptanceEvidenceId = result?.AcceptanceEvidenceId,
             // The contradiction stamps the same instant the verdict is folded (the P4-1 doctrine — never re-derived
             // ad-hoc by a renderer), with the same status mapping the rehydrate fold uses.
@@ -658,7 +663,16 @@ public static class SupervisorOutcome
     private static IReadOnlyList<RepositoryRunResult> StripPerRepoPatches(IReadOnlyList<RepositoryRunResult>? repos) =>
         repos is null or { Count: 0 }
             ? Array.Empty<RepositoryRunResult>()
-            : repos.Select(r => r.WithoutDiff()).ToList();
+            : repos.Select(r => r.WithoutDiff() with { ChangedFiles = CompactChangedFiles(r.ChangedFiles) }).ToList();
+
+    private static IReadOnlyList<string> CompactChangedFiles(IReadOnlyList<string>? files) =>
+        files is null or { Count: 0 } ? Array.Empty<string>() : files.Take(CompactChangedFilesMax).ToList();
+
+    private static string? ClipCompactText(string? value)
+    {
+        if (value is null || value.Length <= CompactTextMaxChars) return value;
+        return value[..(CompactTextMaxChars - CompactTruncationMarker.Length)] + CompactTruncationMarker;
+    }
 
     /// <summary>Best-effort deserialize of a persisted <c>AgentRunResult</c> (null on malformed) — the compact projection tolerates a corrupt result the same way the merge path does.</summary>
     private static AgentRunResult? TryDeserializeResult(string resultJson)

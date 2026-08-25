@@ -3,13 +3,15 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Contracts;
+using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.Workflows.ModelCalls;
 
 /// <summary>
-/// Projects terminal interaction facts through source-id anti-joins. A transaction-scoped run lock makes
-/// overlapping sweeps deterministic; the database admission trigger remains the final tenant/scope/source authority.
+/// Projects started and terminal interaction facts through source-id anti-joins. A transaction-scoped run lock makes
+/// overlapping sweeps deterministic, late evidence attaches to the same attempt, and terminal runs settle orphaned
+/// starts as indeterminate. The database admission trigger remains the final tenant/scope/source authority.
 /// This projection is telemetry-only and is not read by model execution, completion, or terminal authority.
 /// </summary>
 public sealed class WorkflowRunModelCallProjector : IWorkflowRunModelCallProjector
@@ -27,11 +29,147 @@ public sealed class WorkflowRunModelCallProjector : IWorkflowRunModelCallProject
         var ownsTransaction = _db.Database.CurrentTransaction == null;
         await using var transaction = ownsTransaction ? await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false) : null;
 
+        var started = await ProjectStartsOnlyAsync(batchSize, cancellationToken).ConfigureAwait(false);
+        var lateTerminals = await AttachLateTerminalsAsync(batchSize, cancellationToken).ConfigureAwait(false);
         var projected = await ProjectTerminalsAsync(batchSize, cancellationToken).ConfigureAwait(false);
         var lateStarts = await AttachLateStartsAsync(batchSize, cancellationToken).ConfigureAwait(false);
-        var bodyCaptures = await DeclareBodyCapturesAsync(batchSize, cancellationToken).ConfigureAwait(false);
+        var orphanedStarts = await SettleOrphanedStartsAsync(batchSize, cancellationToken).ConfigureAwait(false);
+        var bodyCaptures = await DeclareStartedBodyCapturesAsync(batchSize, cancellationToken).ConfigureAwait(false)
+            + await DeclareBodyCapturesAsync(batchSize, cancellationToken).ConfigureAwait(false);
         if (ownsTransaction) await transaction!.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new WorkflowRunModelCallProjectionResult(projected, lateStarts, bodyCaptures);
+        return new WorkflowRunModelCallProjectionResult(projected, lateStarts, bodyCaptures, started, lateTerminals, orphanedStarts);
+    }
+
+    private async Task<int> ProjectStartsOnlyAsync(int batchSize, CancellationToken cancellationToken)
+    {
+        var candidates = await (from record in _db.WorkflowRunRecord.AsNoTracking()
+                                join run in _db.WorkflowRun.AsNoTracking() on record.RunId equals run.Id
+                                where record.CorrelationId != null && record.RecordType == WorkflowRunRecordTypes.InteractionStarted
+                                      && !_db.WorkflowRunModelCallAttempt.Any(attempt => attempt.SourceStartedRecordId == record.Id)
+                                      && !_db.WorkflowRunModelCall.Any(call => call.TeamId == run.TeamId && call.WorkflowRunId == record.RunId
+                                          && call.SourceKind == SourceKind && call.SourceCorrelationId == record.CorrelationId)
+                                      && !_db.WorkflowRunRecord.Any(terminal => terminal.RunId == record.RunId && terminal.CorrelationId == record.CorrelationId
+                                          && terminal.NodeId == record.NodeId && terminal.IterationKey == record.IterationKey
+                                          && (terminal.RecordType == WorkflowRunRecordTypes.InteractionCompleted || terminal.RecordType == WorkflowRunRecordTypes.InteractionFailed))
+                                orderby record.OccurredAt, record.Id
+                                select new StartedCandidate(record.Id, record.Sequence, record.RunId, run.TeamId, run.ActorId ?? run.CreatedBy,
+                                    record.NodeId, record.IterationKey, record.CorrelationId!.Value, record.OccurredAt, record.PayloadJson))
+            .Take(batchSize).ToListAsync(cancellationToken).ConfigureAwait(false);
+        if (candidates.Count == 0) return 0;
+
+        await TakeRunLocksAsync(candidates.Select(value => value.RunId), cancellationToken).ConfigureAwait(false);
+        var runIds = candidates.Select(value => value.RunId).Distinct().ToArray();
+        var correlationIds = candidates.Select(value => value.CorrelationId).Distinct().ToArray();
+        var admitted = (await _db.WorkflowRunModelCall.AsNoTracking().Where(value => value.SourceKind == SourceKind && value.SourceCorrelationId != null
+                && runIds.Contains(value.WorkflowRunId) && correlationIds.Contains(value.SourceCorrelationId.Value))
+            .Select(value => new SourceIdentity(value.TeamId, value.WorkflowRunId, value.SourceCorrelationId!.Value))
+            .ToListAsync(cancellationToken).ConfigureAwait(false)).ToHashSet();
+        candidates = candidates.Where(value => !admitted.Contains(SourceIdentity.For(value)))
+            .GroupBy(SourceIdentity.For).Select(group => group.OrderBy(value => value.OccurredAt).ThenBy(value => value.RecordId).First())
+            .OrderBy(value => value.OccurredAt).ThenBy(value => value.RecordId).ToList();
+        if (candidates.Count == 0) return 0;
+
+        var terminalScopes = (await ReadTerminalsAsync(candidates.Select(SourceScope.For).Distinct().ToArray(), cancellationToken).ConfigureAwait(false)).Keys.ToHashSet();
+        candidates = candidates.Where(value => !terminalScopes.Contains(SourceScope.For(value))).ToList();
+        foreach (var candidate in candidates)
+        {
+            var payload = ParsedPayload.Parse(candidate.PayloadJson);
+            var call = BuildStartedCall(candidate, payload);
+            _db.WorkflowRunModelCall.Add(call);
+            _db.WorkflowRunModelCallAttempt.Add(BuildStartedAttempt(candidate, payload, call.Id));
+        }
+
+        if (candidates.Count > 0) await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        return candidates.Count;
+    }
+
+    private async Task<int> AttachLateTerminalsAsync(int batchSize, CancellationToken cancellationToken)
+    {
+        var candidates = await (from attempt in _db.WorkflowRunModelCallAttempt.AsNoTracking()
+                                join call in _db.WorkflowRunModelCall.AsNoTracking() on attempt.ModelCallId equals call.Id
+                                where call.SourceKind == SourceKind && attempt.SourceStartedRecordId != null && attempt.SourceTerminalRecordId == null
+                                orderby attempt.CreatedDate, attempt.Id
+                                select new LateTerminalCandidate(attempt.Id, attempt.SourceEvidenceRevision, call.Id, call.TeamId,
+                                    call.WorkflowRunId, call.NodeId, call.IterationKey, call.SourceCorrelationId!.Value))
+            .Take(batchSize).ToListAsync(cancellationToken).ConfigureAwait(false);
+        if (candidates.Count == 0) return 0;
+
+        await TakeRunLocksAsync(candidates.Select(value => value.WorkflowRunId), cancellationToken).ConfigureAwait(false);
+        var attemptIds = candidates.Select(value => value.AttemptId).ToArray();
+        var attempts = await _db.WorkflowRunModelCallAttempt.Where(value => attemptIds.Contains(value.Id)).ToDictionaryAsync(value => value.Id, cancellationToken).ConfigureAwait(false);
+        candidates = candidates.Where(value => attempts.TryGetValue(value.AttemptId, out var attempt)
+            && attempt.SourceTerminalRecordId == null && attempt.SourceEvidenceRevision == value.SourceEvidenceRevision).ToList();
+        if (candidates.Count == 0) return 0;
+
+        var callIds = candidates.Select(value => value.ModelCallId).Distinct().ToArray();
+        var calls = await _db.WorkflowRunModelCall.Where(value => callIds.Contains(value.Id)).ToDictionaryAsync(value => value.Id, cancellationToken).ConfigureAwait(false);
+        var startedIds = attempts.Values.Select(value => value.SourceStartedRecordId).OfType<Guid>().Distinct().ToArray();
+        var startedPayloads = await _db.WorkflowRunRecord.AsNoTracking().Where(value => startedIds.Contains(value.Id))
+            .Select(value => new { value.Id, value.PayloadJson }).ToDictionaryAsync(value => value.Id, value => value.PayloadJson, cancellationToken).ConfigureAwait(false);
+        var scopes = candidates.Select(SourceScope.For).Distinct().ToArray();
+        var terminals = await ReadTerminalsAsync(scopes, cancellationToken).ConfigureAwait(false);
+        var terminalIds = terminals.Values.Select(value => value.Id).ToArray();
+        var usedTerminals = terminalIds.Length == 0 ? [] : (await _db.WorkflowRunModelCallAttempt.AsNoTracking()
+            .Where(value => value.SourceTerminalRecordId != null && terminalIds.Contains(value.SourceTerminalRecordId.Value))
+            .Select(value => value.SourceTerminalRecordId!.Value).ToListAsync(cancellationToken).ConfigureAwait(false)).ToHashSet();
+        var artifactIds = terminals.Values.Select(value => ParsedPayload.Parse(value.PayloadJson).OutputArtifactId).OfType<Guid>().Distinct().ToArray();
+        var teamIds = candidates.Select(value => value.TeamId).Distinct().ToArray();
+        var artifacts = artifactIds.Length == 0 ? [] : (await _db.WorkflowArtifact.AsNoTracking().Where(value => teamIds.Contains(value.TeamId) && artifactIds.Contains(value.Id))
+            .Select(value => new ArtifactIdentity(value.TeamId, value.Id)).ToListAsync(cancellationToken).ConfigureAwait(false)).ToHashSet();
+
+        var changed = 0;
+        foreach (var candidate in candidates)
+        {
+            if (!terminals.TryGetValue(SourceScope.For(candidate), out var terminal) || !usedTerminals.Add(terminal.Id)
+                || !attempts.TryGetValue(candidate.AttemptId, out var attempt) || !calls.TryGetValue(candidate.ModelCallId, out var call)
+                || attempt.SourceStartedRecordId is not { } startedId || !startedPayloads.TryGetValue(startedId, out var startedJson)) continue;
+            var startedPayload = ParsedPayload.Parse(startedJson);
+            var terminalPayload = ParsedPayload.Parse(terminal.PayloadJson);
+            var artifactId = terminalPayload.OutputArtifactId is { } id && artifacts.Contains(new ArtifactIdentity(candidate.TeamId, id)) ? id : (Guid?)null;
+            ApplyTerminal(call, attempt, startedPayload, terminal, terminalPayload, artifactId);
+            changed++;
+        }
+
+        if (changed > 0) await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        return changed;
+    }
+
+    private async Task<int> SettleOrphanedStartsAsync(int batchSize, CancellationToken cancellationToken)
+    {
+        var candidates = await (from attempt in _db.WorkflowRunModelCallAttempt.AsNoTracking()
+                                join call in _db.WorkflowRunModelCall.AsNoTracking() on attempt.ModelCallId equals call.Id
+                                join run in _db.WorkflowRun.AsNoTracking() on new { call.TeamId, Id = call.WorkflowRunId } equals new { run.TeamId, run.Id }
+                                where call.SourceKind == SourceKind && attempt.SourceStartedRecordId != null && attempt.SourceTerminalRecordId == null
+                                      && attempt.Status == "Pending"
+                                      && (run.Status == WorkflowRunStatus.Success || run.Status == WorkflowRunStatus.Failure
+                                          || run.Status == WorkflowRunStatus.Cancelled)
+                                orderby attempt.CreatedDate, attempt.Id
+                                select new OrphanedStartCandidate(attempt.Id, attempt.SourceEvidenceRevision, call.Id, call.WorkflowRunId,
+                                    run.CompletedAt ?? call.LastModifiedDate))
+            .Take(batchSize).ToListAsync(cancellationToken).ConfigureAwait(false);
+        if (candidates.Count == 0) return 0;
+
+        await TakeRunLocksAsync(candidates.Select(value => value.WorkflowRunId), cancellationToken).ConfigureAwait(false);
+        var attemptIds = candidates.Select(value => value.AttemptId).ToArray();
+        var attempts = await _db.WorkflowRunModelCallAttempt.Where(value => attemptIds.Contains(value.Id)).ToDictionaryAsync(value => value.Id, cancellationToken).ConfigureAwait(false);
+        var callIds = candidates.Select(value => value.ModelCallId).Distinct().ToArray();
+        var calls = await _db.WorkflowRunModelCall.Where(value => callIds.Contains(value.Id)).ToDictionaryAsync(value => value.Id, cancellationToken).ConfigureAwait(false);
+        var changed = 0;
+        foreach (var candidate in candidates)
+        {
+            if (!attempts.TryGetValue(candidate.AttemptId, out var attempt) || !calls.TryGetValue(candidate.ModelCallId, out var call)
+                || attempt.SourceTerminalRecordId != null || attempt.Status != "Pending" || attempt.SourceEvidenceRevision != candidate.SourceEvidenceRevision) continue;
+            attempt.Status = "Indeterminate";
+            attempt.ErrorCode = "TerminalCaptureMissing";
+            attempt.CompletedAt = candidate.TerminalAt < attempt.StartedAt ? attempt.StartedAt : candidate.TerminalAt;
+            attempt.SourceEvidenceRevision++;
+            attempt.LastModifiedDate = attempt.CompletedAt.Value;
+            call.LastModifiedDate = attempt.CompletedAt.Value;
+            changed++;
+        }
+
+        if (changed > 0) await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        return changed;
     }
 
     private async Task<int> ProjectTerminalsAsync(int batchSize, CancellationToken cancellationToken)
@@ -143,6 +281,42 @@ public sealed class WorkflowRunModelCallProjector : IWorkflowRunModelCallProject
     /// reads or writes artifact bytes: storage latency/failure belongs to the independently leased materializer, while
     /// this durable row keeps the immutable source discoverable until materialization reaches an honest outcome.
     /// </summary>
+    private async Task<int> DeclareStartedBodyCapturesAsync(int batchSize, CancellationToken cancellationToken)
+    {
+        var candidates = await (from attempt in _db.WorkflowRunModelCallAttempt.AsNoTracking()
+                                join call in _db.WorkflowRunModelCall.AsNoTracking() on attempt.ModelCallId equals call.Id
+                                where call.SourceKind == SourceKind && attempt.SourceStartedRecordId != null
+                                      && !_db.WorkflowRunModelCallBodyCapture.Any(value => value.ModelCallAttemptId == attempt.Id
+                                          && value.BodyKind == WorkflowRunModelCallBodyKind.LogicalRequest)
+                                orderby attempt.CreatedDate, attempt.Id
+                                select new StartedBodyCaptureCandidate(call.TeamId, call.WorkflowRunId, call.Id, attempt.Id,
+                                    attempt.SourceStartedRecordId!.Value))
+            .Take(batchSize).ToListAsync(cancellationToken).ConfigureAwait(false);
+        if (candidates.Count == 0) return 0;
+
+        await TakeRunLocksAsync(candidates.Select(value => value.WorkflowRunId), cancellationToken).ConfigureAwait(false);
+        var attemptIds = candidates.Select(value => value.ModelCallAttemptId).ToArray();
+        var existing = (await _db.WorkflowRunModelCallBodyCapture.AsNoTracking().Where(value => attemptIds.Contains(value.ModelCallAttemptId)
+                && value.BodyKind == WorkflowRunModelCallBodyKind.LogicalRequest)
+            .Select(value => value.ModelCallAttemptId).ToListAsync(cancellationToken).ConfigureAwait(false)).ToHashSet();
+        var now = DateTimeOffset.UtcNow;
+        var declared = 0;
+        foreach (var candidate in candidates.Where(value => existing.Add(value.ModelCallAttemptId)))
+        {
+            _db.WorkflowRunModelCallBodyCapture.Add(new WorkflowRunModelCallBodyCapture
+            {
+                Id = Guid.NewGuid(), TeamId = candidate.TeamId, WorkflowRunId = candidate.WorkflowRunId, ModelCallId = candidate.ModelCallId,
+                ModelCallAttemptId = candidate.ModelCallAttemptId, BodyKind = WorkflowRunModelCallBodyKind.LogicalRequest, SourceKind = SourceKind,
+                SourceRecordId = candidate.SourceStartedRecordId, SourceProperty = "prompt", State = WorkflowRunModelCallBodyCaptureState.Pending,
+                NextMaterializationAt = now, Revision = 1, CreatedAt = now, LastModifiedAt = now,
+            });
+            declared++;
+        }
+
+        if (declared > 0) await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        return declared;
+    }
+
     private async Task<int> DeclareBodyCapturesAsync(int batchSize, CancellationToken cancellationToken)
     {
         var candidates = await (from attempt in _db.WorkflowRunModelCallAttempt.AsNoTracking()
@@ -242,6 +416,20 @@ public sealed class WorkflowRunModelCallProjector : IWorkflowRunModelCallProject
             .ToDictionary(group => group.Key, group => group.OrderBy(value => value.Sequence).First());
     }
 
+    private async Task<Dictionary<SourceScope, SourceTerminal>> ReadTerminalsAsync(IReadOnlyCollection<SourceScope> scopes, CancellationToken cancellationToken)
+    {
+        var runIds = scopes.Select(value => value.RunId).Distinct().ToArray();
+        var correlationIds = scopes.Select(value => value.CorrelationId).Distinct().ToArray();
+        var candidates = await _db.WorkflowRunRecord.AsNoTracking()
+            .Where(record => record.CorrelationId != null && runIds.Contains(record.RunId) && correlationIds.Contains(record.CorrelationId.Value)
+                && (record.RecordType == WorkflowRunRecordTypes.InteractionCompleted || record.RecordType == WorkflowRunRecordTypes.InteractionFailed))
+            .Select(record => new SourceTerminal(record.Id, record.RunId, record.NodeId, record.IterationKey, record.CorrelationId!.Value,
+                record.Sequence, record.OccurredAt, record.RecordType, record.PayloadJson)).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var requested = scopes.ToHashSet();
+        return candidates.Where(value => requested.Contains(SourceScope.For(value))).GroupBy(SourceScope.For)
+            .ToDictionary(group => group.Key, group => group.OrderBy(value => value.OccurredAt).ThenBy(value => value.Id).First());
+    }
+
     private static WorkflowRunModelCall BuildCall(ProjectionInput input) => new()
     {
         // Source allocation order is intentionally used only as a stable, gap-tolerant within-run display ordinal;
@@ -253,6 +441,25 @@ public sealed class WorkflowRunModelCallProjector : IWorkflowRunModelCallProject
         CaptureSource = SourceKind, CaptureCompleteness = Completeness(input.StartedPayload, input.TerminalPayload), SchemaVersion = WorkflowRunDataContract.CurrentVersion,
         CreatedDate = input.StartedRecord?.OccurredAt ?? input.Candidate.OccurredAt, CreatedBy = input.Candidate.ActorId,
         LastModifiedDate = input.Candidate.OccurredAt, LastModifiedBy = input.Candidate.ActorId,
+    };
+
+    private static WorkflowRunModelCall BuildStartedCall(StartedCandidate source, ParsedPayload payload) => new()
+    {
+        Id = Guid.NewGuid(), TeamId = source.TeamId, WorkflowRunId = source.RunId, NodeId = source.NodeId, IterationKey = source.IterationKey,
+        CallOrdinal = Math.Max(1, source.Sequence), SourceKind = SourceKind, SourceCorrelationId = source.CorrelationId, Purpose = Purpose(payload.Kind),
+        RequestedProvider = Limit(payload.Provider, 100), RequestedModel = Limit(payload.Model, 500), CaptureSource = SourceKind,
+        CaptureCompleteness = payload.IsCorrupt ? WorkflowRunCaptureCompleteness.Corrupt : WorkflowRunCaptureCompleteness.Partial,
+        SchemaVersion = WorkflowRunDataContract.CurrentVersion, CreatedDate = source.OccurredAt, CreatedBy = source.ActorId,
+        LastModifiedDate = source.OccurredAt, LastModifiedBy = source.ActorId,
+    };
+
+    private static WorkflowRunModelCallAttempt BuildStartedAttempt(StartedCandidate source, ParsedPayload payload, Guid callId) => new()
+    {
+        Id = Guid.NewGuid(), TeamId = source.TeamId, WorkflowRunId = source.RunId, ModelCallId = callId, AttemptOrdinal = 1,
+        SourceStartedRecordId = source.RecordId, SourceEvidenceRevision = 1, Status = "Pending", CaptureSource = SourceKind,
+        CaptureCompleteness = payload.IsCorrupt ? WorkflowRunCaptureCompleteness.Corrupt : WorkflowRunCaptureCompleteness.Partial,
+        StartedAt = source.OccurredAt, SchemaVersion = WorkflowRunDataContract.CurrentVersion, CreatedDate = source.OccurredAt,
+        CreatedBy = source.ActorId, LastModifiedDate = source.OccurredAt, LastModifiedBy = source.ActorId,
     };
 
     private static WorkflowRunModelCallAttempt BuildAttempt(ProjectionInput input, Guid callId, Guid? startedRecordId, Guid? responseArtifactId) => new()
@@ -281,6 +488,26 @@ public sealed class WorkflowRunModelCallProjector : IWorkflowRunModelCallProject
         attempt.CaptureCompleteness = Completeness(evidence.StartedPayload, evidence.TerminalPayload);
     }
 
+    private static void ApplyTerminal(WorkflowRunModelCall call, WorkflowRunModelCallAttempt attempt, ParsedPayload startedPayload,
+        SourceTerminal terminal, ParsedPayload terminalPayload, Guid? responseArtifactId)
+    {
+        call.CaptureCompleteness = Completeness(startedPayload, terminalPayload);
+        call.LastModifiedDate = terminal.OccurredAt;
+        attempt.SourceTerminalRecordId = terminal.Id;
+        attempt.SourceEvidenceRevision++;
+        attempt.EffectiveProvider = Limit(terminalPayload.Provider, 100);
+        attempt.EffectiveModel = Limit(terminalPayload.Model, 500);
+        attempt.ResponseArtifactId = responseArtifactId;
+        attempt.Status = Status(terminal.RecordType, terminalPayload.FailureKind);
+        attempt.ErrorCode = Limit(terminalPayload.ErrorCode, 200);
+        attempt.FinishReason = Limit(terminalPayload.FinishReason, 100);
+        attempt.CaptureCompleteness = Completeness(startedPayload, terminalPayload);
+        attempt.InputTokens = terminalPayload.InputTokens;
+        attempt.OutputTokens = terminalPayload.OutputTokens;
+        attempt.CompletedAt = terminal.OccurredAt;
+        attempt.LastModifiedDate = terminal.OccurredAt;
+    }
+
     private async Task TakeRunLocksAsync(IEnumerable<Guid> runIds, CancellationToken cancellationToken)
     {
         foreach (var runId in runIds.Distinct().OrderBy(value => value))
@@ -305,23 +532,35 @@ public sealed class WorkflowRunModelCallProjector : IWorkflowRunModelCallProject
 
     private sealed record TerminalCandidate(Guid RecordId, long Sequence, Guid RunId, Guid TeamId, Guid ActorId, string? NodeId,
         string IterationKey, Guid CorrelationId, DateTimeOffset OccurredAt, string RecordType, string PayloadJson);
+    private sealed record StartedCandidate(Guid RecordId, long Sequence, Guid RunId, Guid TeamId, Guid ActorId, string? NodeId,
+        string IterationKey, Guid CorrelationId, DateTimeOffset OccurredAt, string PayloadJson);
     private sealed record LateStartCandidate(Guid AttemptId, int SourceEvidenceRevision, Guid TerminalRecordId, Guid ModelCallId,
         Guid TeamId, Guid WorkflowRunId, string? NodeId, string IterationKey, Guid CorrelationId);
+    private sealed record LateTerminalCandidate(Guid AttemptId, int SourceEvidenceRevision, Guid ModelCallId, Guid TeamId,
+        Guid WorkflowRunId, string? NodeId, string IterationKey, Guid CorrelationId);
+    private sealed record OrphanedStartCandidate(Guid AttemptId, int SourceEvidenceRevision, Guid ModelCallId, Guid WorkflowRunId, DateTimeOffset TerminalAt);
     private sealed record BodyCaptureCandidate(Guid TeamId, Guid WorkflowRunId, Guid ModelCallId, Guid ModelCallAttemptId,
         Guid? SourceStartedRecordId, Guid SourceTerminalRecordId, string TerminalRecordType, Guid? ResponseArtifactId);
+    private sealed record StartedBodyCaptureCandidate(Guid TeamId, Guid WorkflowRunId, Guid ModelCallId, Guid ModelCallAttemptId, Guid SourceStartedRecordId);
     private sealed record BodyArtifact(Guid TeamId, Guid Id, string Sha256, long SizeBytes, string ContentType);
     private readonly record struct BodyCaptureIdentity(Guid ModelCallAttemptId, WorkflowRunModelCallBodyKind BodyKind);
     private readonly record struct SourceIdentity(Guid TeamId, Guid RunId, Guid CorrelationId)
     {
         public static SourceIdentity For(TerminalCandidate value) => new(value.TeamId, value.RunId, value.CorrelationId);
+        public static SourceIdentity For(StartedCandidate value) => new(value.TeamId, value.RunId, value.CorrelationId);
     }
     private readonly record struct SourceScope(Guid RunId, string? NodeId, string IterationKey, Guid CorrelationId)
     {
         public static SourceScope For(TerminalCandidate value) => new(value.RunId, value.NodeId, value.IterationKey, value.CorrelationId);
+        public static SourceScope For(StartedCandidate value) => new(value.RunId, value.NodeId, value.IterationKey, value.CorrelationId);
         public static SourceScope For(SourceStarted value) => new(value.RunId, value.NodeId, value.IterationKey, value.CorrelationId);
+        public static SourceScope For(SourceTerminal value) => new(value.RunId, value.NodeId, value.IterationKey, value.CorrelationId);
+        public static SourceScope For(LateTerminalCandidate value) => new(value.WorkflowRunId, value.NodeId, value.IterationKey, value.CorrelationId);
     }
     private sealed record SourceStarted(Guid Id, Guid RunId, string? NodeId, string IterationKey, Guid CorrelationId, long Sequence,
         DateTimeOffset OccurredAt, string PayloadJson);
+    private sealed record SourceTerminal(Guid Id, Guid RunId, string? NodeId, string IterationKey, Guid CorrelationId, long Sequence,
+        DateTimeOffset OccurredAt, string RecordType, string PayloadJson);
     private readonly record struct ArtifactIdentity(Guid TeamId, Guid ArtifactId);
     private sealed record ProjectionInput(TerminalCandidate Candidate, SourceStarted? StartedRecord, ParsedPayload? StartedPayload, ParsedPayload TerminalPayload);
     private sealed record LateStartEvidence(SourceStarted Started, ParsedPayload StartedPayload, WorkflowRunRecord Terminal, ParsedPayload TerminalPayload);

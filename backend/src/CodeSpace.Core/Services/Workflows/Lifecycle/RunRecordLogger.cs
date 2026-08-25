@@ -92,7 +92,7 @@ public sealed class RunRecordLogger : IRunRecordLogger, IScopedDependency
         return await InsertAsync(runId, WorkflowRunRecordTypes.NodeStarted, nodeId, iterationKey, payload, correlationId: null, parentRecordId: null, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task NodeCompletedAsync(Guid runId, string nodeId, string iterationKey, IReadOnlyDictionary<string, JsonElement> outputs, IReadOnlyList<string>? routingHints, TimeSpan duration, CancellationToken cancellationToken)
+    public async Task<Guid> NodeCompletedAsync(Guid runId, string nodeId, string iterationKey, IReadOnlyDictionary<string, JsonElement> outputs, IReadOnlyList<string>? routingHints, TimeSpan duration, CancellationToken cancellationToken)
     {
         // routingHints are persisted ONLY for branch nodes (NodeResult.RoutingHints != null) so
         // the durable walker can rebuild edge-liveness on re-entry without re-running the branch.
@@ -101,7 +101,7 @@ public sealed class RunRecordLogger : IRunRecordLogger, IScopedDependency
             ? JsonSerializer.Serialize(new { outputs, duration_ms = (long)duration.TotalMilliseconds })
             : JsonSerializer.Serialize(new { outputs, routingHints, duration_ms = (long)duration.TotalMilliseconds });
 
-        await InsertAsync(runId, WorkflowRunRecordTypes.NodeCompleted, nodeId, iterationKey, payload, correlationId: null, parentRecordId: null, cancellationToken).ConfigureAwait(false);
+        return await InsertAsync(runId, WorkflowRunRecordTypes.NodeCompleted, nodeId, iterationKey, payload, correlationId: null, parentRecordId: null, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task NodeFailedAsync(Guid runId, string nodeId, string iterationKey, string error, TimeSpan duration, CancellationToken cancellationToken)

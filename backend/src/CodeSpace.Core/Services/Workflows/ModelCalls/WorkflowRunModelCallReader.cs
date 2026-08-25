@@ -35,6 +35,51 @@ public sealed class WorkflowRunModelCallReader : IWorkflowRunModelCallReader, IS
         _artifacts = artifacts;
     }
 
+    public async Task<WorkflowRunModelCallPage?> ReadPageAsync(Guid runId, Guid teamId, string? cursor, int limit, CancellationToken cancellationToken)
+    {
+        if (limit is < 1 or > Messages.Queries.Workflows.ListWorkflowRunModelCallsQuery.MaximumPageSize) throw new ArgumentOutOfRangeException(nameof(limit));
+        WorkflowRunModelCallPageCursor? decoded = null;
+        if (cursor is not null)
+        {
+            if (!WorkflowRunModelCallPageCursor.TryDecode(cursor, out var parsed)) throw new ArgumentException("Invalid model-call cursor.", nameof(cursor));
+            decoded = parsed;
+        }
+
+        if (!await _db.WorkflowRun.AsNoTracking().AnyAsync(value => value.Id == runId && value.TeamId == teamId, cancellationToken).ConfigureAwait(false)) return null;
+
+        var query = _db.WorkflowRunModelCall.AsNoTracking().Where(value => value.WorkflowRunId == runId && value.TeamId == teamId);
+        if (decoded is { } after)
+            query = query.Where(value => value.CreatedDate < after.CreatedAt || value.CreatedDate == after.CreatedAt && value.Id.CompareTo(after.Id) < 0);
+
+        var rows = await query.OrderByDescending(value => value.CreatedDate).ThenByDescending(value => value.Id).Take(limit + 1)
+            .Select(value => new WorkflowRunModelCallListItem
+            {
+                WorkflowRunModelCallId = value.Id,
+                RunId = value.WorkflowRunId,
+                CallOrdinal = value.CallOrdinal,
+                NodeId = value.NodeId,
+                IterationKey = value.IterationKey,
+                ExecutionAttemptId = value.ExecutionAttemptId,
+                Purpose = value.Purpose,
+                RequestedProvider = value.RequestedProvider,
+                RequestedModel = value.RequestedModel,
+                CaptureSource = value.CaptureSource,
+                CaptureCompleteness = value.CaptureCompleteness,
+                CreatedAt = value.CreatedDate,
+            }).ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var hasMore = rows.Count > limit;
+        if (hasMore) rows.RemoveAt(rows.Count - 1);
+        return new WorkflowRunModelCallPage
+        {
+            RunId = runId,
+            RequestCursor = cursor,
+            Limit = limit,
+            Items = rows,
+            NextCursor = hasMore ? new WorkflowRunModelCallPageCursor(rows[^1].CreatedAt, rows[^1].WorkflowRunModelCallId).Encode() : null,
+        };
+    }
+
     public async Task<WorkflowRunModelCallDetailMetadata?> ReadByIdAsync(Guid runId, Guid modelCallId, Guid teamId, CancellationToken cancellationToken)
     {
         var call = await _db.WorkflowRunModelCall.AsNoTracking()

@@ -179,13 +179,10 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
         return JsonSerializer.SerializeToElement(config);
     }
 
-    /// <summary>The synth Config — the LLM the reduce runs on. Provider defaults to Anthropic (the same default the planner node + <c>WorkflowPlanProjector</c>'s synth use); the profile's model maps on via AddIfPresent. A test retargets the provider at the ILLMClient seam, never the builder.</summary>
+    /// <summary>The synth Config — an omitted provider inherits the team's ranked pool; the profile's optional model remains a pin. This keeps Standard projection generic across Anthropic, OpenAI, and Custom pools.</summary>
     private static JsonElement SynthConfig(TaskBuildContext context)
     {
-        var config = new Dictionary<string, object?>
-        {
-            ["provider"] = "Anthropic",
-        };
+        var config = new Dictionary<string, object?>();
 
         AddIfPresent(config, "model", NullIfBlank(context.AgentProfile?.Model));
 
@@ -202,7 +199,7 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
     /// The reduce's input character budget. 120K characters is roughly 40K tokens on this repo's own chars/3 estimate
     /// (<c>LlmBudgetGuard.EstimateUsd</c>): well inside the 200K-token window of the Anthropic models this synth
     /// defaults to, and far above any ordinary fan-out, so the common case never reaches the bound and its prompt
-    /// stays byte-identical. It does NOT fit a narrow-context model — an operator whose pool serves one lowers it
+    /// stays byte-identical. It does NOT fit every narrow-context model — an operator whose pool serves one lowers it
     /// through <see cref="SynthPromptBudgetCharsEnvVar"/>; that is what the override is for.
     /// </summary>
     public const int SynthPromptBudgetCharsDefault = 120_000;

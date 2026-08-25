@@ -15,6 +15,7 @@ using CodeSpace.Core.Services.Workflows.Lifecycle;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Budget;
 using CodeSpace.Core.Services.Workflows.Runtime;
+using CodeSpace.Core.Services.RunData;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
@@ -54,6 +55,8 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     private readonly IRunRecordLogger _recordLogger;
     private readonly IArtifactOffloader _offloader;
     private readonly IPayloadRedactor _redactor;
+    private readonly IWorkflowSensitivePayloadStore _sensitivePayloadStore;
+    private readonly IRunDataCompletenessWriter _completenessWriter;
     private readonly IArtifactStore _artifactStore;
     private readonly ILogger<WorkflowEngine> _logger;
     private readonly ILoggerFactory _loggerFactory;
@@ -79,7 +82,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     internal const int DefaultMaxParallelism = 8;
     internal const int MaxParallelismCeiling = 64;
 
-    public WorkflowEngine(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IVariableService variableService, IRunRecordLogger recordLogger, IPayloadRedactor redactor, IArtifactStore artifactStore, IArtifactOffloader offloader, ILogger<WorkflowEngine> logger, ILoggerFactory loggerFactory, ICodeSpaceBackgroundJobClient backgroundJobClient, ISubworkflowService subworkflowService, IWorkflowResumeService resumeService, IAgentRunService agentRunService, IAgentDefinitionResolver agentDefinitionResolver, IRunCancellationRegistry cancellationRegistry, ILifetimeScope lifetimeScope, Completion.ICompletionTerminalAuthority terminalAuthority)
+    public WorkflowEngine(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IVariableService variableService, IRunRecordLogger recordLogger, IPayloadRedactor redactor, IWorkflowSensitivePayloadStore sensitivePayloadStore, IRunDataCompletenessWriter completenessWriter, IArtifactStore artifactStore, IArtifactOffloader offloader, ILogger<WorkflowEngine> logger, ILoggerFactory loggerFactory, ICodeSpaceBackgroundJobClient backgroundJobClient, ISubworkflowService subworkflowService, IWorkflowResumeService resumeService, IAgentRunService agentRunService, IAgentDefinitionResolver agentDefinitionResolver, IRunCancellationRegistry cancellationRegistry, ILifetimeScope lifetimeScope, Completion.ICompletionTerminalAuthority terminalAuthority)
     {
         _terminalAuthority = terminalAuthority;
         _db = db;
@@ -87,6 +90,8 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         _variableService = variableService;
         _recordLogger = recordLogger;
         _redactor = redactor;
+        _sensitivePayloadStore = sensitivePayloadStore;
+        _completenessWriter = completenessWriter;
         _artifactStore = artifactStore;
         _offloader = offloader;
         _logger = logger;
@@ -191,6 +196,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     private async Task RunAfterClaimAsync(Guid runId, DateTimeOffset engineStartedAt, CancellationToken cancellationToken)
     {
         var run = await LoadRunAsync(runId, cancellationToken).ConfigureAwait(false);
+        await _completenessWriter.InitializeAsync(new RunDataManifestInitialization(run.TeamId, run.Id), CancellationToken.None).ConfigureAwait(false);
         await _recordLogger.RunStartedAsync(run.Id, cancellationToken).ConfigureAwait(false);
 
         var (definition, releaseHash) = await LoadDefinitionAndHashAsync(run, cancellationToken).ConfigureAwait(false);
@@ -218,15 +224,13 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         try
         {
             var walkerOutputs = await WalkGraphAsync(run, definition, scope, cancellationToken).ConfigureAwait(false);
-            await CompleteRunAsync(run, WorkflowRunStatus.Success, error: null, JsonSerializer.Serialize(walkerOutputs), cancellationToken).ConfigureAwait(false);
-            await _recordLogger.RunCompletedAsync(run.Id, DateTimeOffset.UtcNow - engineStartedAt, outputsPresent: walkerOutputs.Count > 0, cancellationToken).ConfigureAwait(false);
+            await CompleteAndRecordAsync(run, new TerminalCompletionRequest(WorkflowRunStatus.Success, null, JsonSerializer.Serialize(walkerOutputs), DateTimeOffset.UtcNow - engineStartedAt, walkerOutputs.Count > 0), cancellationToken).ConfigureAwait(false);
         }
         catch (NodeFailureException ex)
         {
             // A failed walk declares no new outputs: the run's own current value travels back in unchanged, so the
             // terminal write below is the SAME statement on every path and none of them leaves the column behind.
-            await CompleteRunAsync(run, WorkflowRunStatus.Failure, ex.Message, run.OutputsJson, cancellationToken).ConfigureAwait(false);
-            await _recordLogger.RunFailedAsync(run.Id, ex.Message, DateTimeOffset.UtcNow - engineStartedAt, cancellationToken).ConfigureAwait(false);
+            await CompleteAndRecordAsync(run, new TerminalCompletionRequest(WorkflowRunStatus.Failure, RedactForPersistence(scope, ex.Message), run.OutputsJson, DateTimeOffset.UtcNow - engineStartedAt, false), cancellationToken).ConfigureAwait(false);
         }
         catch (RunSuspendedException)
         {
@@ -248,9 +252,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         {
             // Contract violation — Terminal output referenced a Secret variable. Surface the
             // exact message (it names the node + path) so the operator can fix the wiring.
-            _logger.LogError("Run {RunId} failed: secret-leak guard tripped. {Message}", run.Id, ex.Message);
-            await CompleteRunAsync(run, WorkflowRunStatus.Failure, ex.Message, run.OutputsJson, cancellationToken).ConfigureAwait(false);
-            await _recordLogger.RunFailedAsync(run.Id, ex.Message, DateTimeOffset.UtcNow - engineStartedAt, cancellationToken).ConfigureAwait(false);
+            var persistedError = RedactForPersistence(scope, ex.Message);
+            _logger.LogError("Run {RunId} failed: secret-leak guard tripped. {Message}", run.Id, persistedError);
+            await CompleteAndRecordAsync(run, new TerminalCompletionRequest(WorkflowRunStatus.Failure, persistedError, run.OutputsJson, DateTimeOffset.UtcNow - engineStartedAt, false), cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -271,6 +275,25 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         }
     }
 
+    private async Task RecordTerminalAsync(Guid runId, RunCompletion completion, TimeSpan duration, bool outputsPresent, CancellationToken cancellationToken)
+    {
+        if (completion.Status == WorkflowRunStatus.Success)
+            await _recordLogger.RunCompletedAsync(runId, duration, outputsPresent, cancellationToken).ConfigureAwait(false);
+        else if (completion.Status == WorkflowRunStatus.Failure)
+            await _recordLogger.RunFailedAsync(runId, completion.Error ?? "Workflow run failed.", duration, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Commit the authoritative run row and its matching terminal ledger fact together, then run recoverable post-terminal ceremonies outside the transaction.</summary>
+    private async Task CompleteAndRecordAsync(WorkflowRun run, TerminalCompletionRequest request, CancellationToken cancellationToken)
+    {
+        await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        var completion = await CompleteRunAsync(run, request.Status, request.Error, request.OutputsJson, cancellationToken).ConfigureAwait(false);
+        await RecordTerminalAsync(run.Id, completion, request.Duration, request.OutputsPresent, cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+
+        await RunCompletionCeremoniesAsync(run, completion, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>
     /// Land a cancelled walk's run terminal via a <c>WHERE Status = Running</c> CAS — the conflict-free completion
     /// for the cooperative-cancel path. 0 rows = the operator's own flip already owns the terminal (then it also
@@ -280,6 +303,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// </summary>
     private async Task EnsureRunCancelledAsync(Guid runId, DateTimeOffset engineStartedAt)
     {
+        await using var transaction = await _db.Database.BeginTransactionAsync(CancellationToken.None).ConfigureAwait(false);
         var flipped = await _db.WorkflowRun
             .Where(r => r.Id == runId && r.Status == WorkflowRunStatus.Running)
             .ExecuteUpdateAsync(s => s
@@ -288,7 +312,10 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             .ConfigureAwait(false);
 
         if (flipped > 0)
+        {
             await _recordLogger.RunCancelledAsync(runId, DateTimeOffset.UtcNow - engineStartedAt, CancellationToken.None).ConfigureAwait(false);
+            await transaction.CommitAsync(CancellationToken.None).ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -326,7 +353,8 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         _logger.LogError(failure, "Run {RunId} failed during bootstrap before walker started", runId);
 
         var now = DateTimeOffset.UtcNow;
-        await _db.WorkflowRun
+        await using var transaction = await _db.Database.BeginTransactionAsync(CancellationToken.None).ConfigureAwait(false);
+        var flipped = await _db.WorkflowRun
             .Where(r => r.Id == runId && r.Status == WorkflowRunStatus.Running)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(r => r.Status, WorkflowRunStatus.Failure)
@@ -334,16 +362,14 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
                 .SetProperty(r => r.CompletedAt, (DateTimeOffset?)now), CancellationToken.None)
             .ConfigureAwait(false);
 
-        // Best-effort ledger record — if THIS throws we just log; the row's already
-        // terminal and that's the important guarantee.
-        try
-        {
-            await _recordLogger.RunFailedAsync(runId, message, now - engineStartedAt, CancellationToken.None).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Run {RunId} bootstrap failure recorded in workflow_run but ledger emit failed", runId);
-        }
+        if (flipped == 0)
+            return;
+
+        // The bootstrap terminal is the same invariant as every other terminal: the authoritative row and the
+        // matching tape fact become visible together. If ledger persistence fails, rollback leaves Running for the
+        // abandoned-run reconciler instead of publishing a terminal state whose timeline can never explain it.
+        await _recordLogger.RunFailedAsync(runId, message, now - engineStartedAt, CancellationToken.None).ConfigureAwait(false);
+        await transaction.CommitAsync(CancellationToken.None).ConfigureAwait(false);
     }
 
     private async Task<WorkflowRun> LoadRunAsync(Guid runId, CancellationToken cancellationToken) =>
@@ -671,7 +697,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// template like <c>{ "key": "prefix-{{team.API_KEY}}-suffix" }</c> still fails — any path
     /// usage is rejected, not just the sole-template case.
     /// </summary>
-    private static void EnsureNoSecretInTerminalOutputs(NodeDefinition terminal, NodeRunScope scope)
+    private static void EnsureNoSecretInTerminalOutputs(NodeDefinition terminal, IReadOnlyDictionary<string, JsonElement> resolvedInputs, NodeRunScope scope)
     {
         if (scope.SecretPaths.Count == 0) return;
 
@@ -686,6 +712,11 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
                 $"node consumption (HTTP auth headers, LLM API keys). Remove the reference, or change the " +
                 $"underlying variable's type from Secret to a non-secret type if intentional.");
         }
+
+        if (PersistenceSecretRedactor.FromScope(scope).Redact(resolvedInputs).Changed)
+            throw new WorkflowSecretLeakException(
+                $"Terminal node '{terminal.Id}' resolved output contains a secret-derived value from an upstream node. " +
+                "Secrets cannot cross the workflow terminal boundary; keep the value in internal node inputs or emit a non-sensitive derived result.");
     }
 
     /// <summary>
@@ -850,9 +881,11 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// was offloaded on write resolves to its real value when a downstream node reads <c>{{nodes.X.outputs.*}}</c>
     /// after a replay — never the bare ref.
     /// </summary>
-    private async Task<Dictionary<string, JsonElement>> LoadNodeOutputsAsync(string? outputsJson, Guid teamId, CancellationToken cancellationToken)
+    private async Task<Dictionary<string, JsonElement>> LoadNodeOutputsAsync(WorkflowRunNode node, Guid teamId, CancellationToken cancellationToken)
     {
-        return await NodeOutputArtifacts.ResolveRequiredAsync(_artifactStore, teamId, ParsePayloadObject(outputsJson), cancellationToken).ConfigureAwait(false);
+        var sensitive = await _sensitivePayloadStore.ReadNodeOutputsAsync(node.RecordId, node.RunId, teamId, cancellationToken).ConfigureAwait(false);
+        var persisted = sensitive ?? ParsePayloadObject(node.OutputsJson);
+        return await NodeOutputArtifacts.ResolveRequiredAsync(_artifactStore, teamId, persisted, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task StartRunAsync(WorkflowRun run, CancellationToken cancellationToken)
@@ -923,7 +956,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         return updated == 1;
     }
 
-    private async Task CompleteRunAsync(WorkflowRun run, WorkflowRunStatus status, string? error, string outputsJson, CancellationToken cancellationToken)
+    private async Task<RunCompletion> CompleteRunAsync(WorkflowRun run, WorkflowRunStatus status, string? error, string outputsJson, CancellationToken cancellationToken)
     {
         // The run's declared outputs are part of the terminal row, so they arrive WITH it — ONE value feeding
         // every writer below, and the tracked copy the post-terminal readers (the sub-workflow parent resume) see.
@@ -962,7 +995,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             run.Error = arbitration.Reason;
             run.CompletionParkedAt = DateTimeOffset.UtcNow;
             await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-            return;
+            return new RunCompletion(WorkflowRunStatus.Suspended, arbitration.Reason);
         }
 
         (status, error) = (arbitration.Status, arbitration.Reason ?? error);
@@ -987,7 +1020,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
                 run.Error = "completion-authority: the ledger moved at the terminal stamp itself — parked for review";
                 run.CompletionParkedAt = DateTimeOffset.UtcNow;
                 await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-                return;
+                return new RunCompletion(WorkflowRunStatus.Suspended, run.Error);
             }
 
             // The row is terminal in the DATABASE; sync the tracked instance for the readers below, then detach it —
@@ -1010,22 +1043,23 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        // A run reaching Failure/Cancelled with branch waits still parked (a terminate-mode map failure that
-        // fails the run, or an operator cancel) would otherwise leave its staged-but-undispatched AgentRun /
-        // Subworkflow children orphaned. Clean them at the source — best-effort; the reconciler's parent-run-
-        // terminal guard is the robust net that catches any orphan this misses.
-        if (status is WorkflowRunStatus.Failure or WorkflowRunStatus.Cancelled)
-            await CancelPendingWaitsAndChildrenAsync(run, cancellationToken).ConfigureAwait(false);
+        return new RunCompletion(status, error);
+    }
 
-        // A Rerun fork reaching terminal frees the active-rerun leases it holds IMMEDIATELY (so the operator can
-        // re-rerun the same branch without waiting a reconciler tick); the reconciler's terminal-join sweep is the
-        // complete backstop for the cancel paths that skip this method and for a best-effort flip that failed.
+    private async Task RunCompletionCeremoniesAsync(WorkflowRun run, RunCompletion completion, CancellationToken cancellationToken)
+    {
+        if (completion.Status is not (WorkflowRunStatus.Success or WorkflowRunStatus.Failure or WorkflowRunStatus.Cancelled)) return;
+
+        // All ceremonies are recoverable by reconcilers and intentionally occur only after row+ledger commit.
+        if (completion.Status is WorkflowRunStatus.Failure or WorkflowRunStatus.Cancelled)
+            await CancelPendingWaitsAndChildrenAsync(run, cancellationToken).ConfigureAwait(false);
         if (run.SourceType == WorkflowRunSourceTypes.Rerun)
             await ReleaseRerunLeasesAsync(run.Id, cancellationToken).ConfigureAwait(false);
-
-        // If this run is a sub-workflow child, wake the parent that's parked on it (the reconciler re-fires this if lost).
-        await _subworkflowService.ResumeParentIfChildTerminalAsync(run, status, error, cancellationToken).ConfigureAwait(false);
+        await _subworkflowService.ResumeParentIfChildTerminalAsync(run, completion.Status, completion.Error, cancellationToken).ConfigureAwait(false);
     }
+
+    private sealed record RunCompletion(WorkflowRunStatus Status, string? Error);
+    private sealed record TerminalCompletionRequest(WorkflowRunStatus Status, string? Error, string OutputsJson, TimeSpan Duration, bool OutputsPresent);
 
     /// <summary>Best-effort: free the active-rerun leases this fork holds (status-guarded CAS by fork id). NEVER
     /// throws out of completion — the reconciler's terminal-join sweep re-releases anything this misses.</summary>
@@ -1456,7 +1490,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
             var outputs = BuildLoopOutputs(loopVars, iterations, failures, reason);
             scope.Nodes[loopNode.Id] = outputs;
-            await CompleteNodeWithOffloadAsync(run.Id, run.TeamId, loopNode.Id, nodeIterationKey, outputs, null, DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
+            await CompleteNodeWithOffloadAsync(new NodeCompletionPersistence(run.Id, run.TeamId, loopNode.Id, nodeIterationKey, outputs, null, DateTimeOffset.UtcNow - startedAt, PersistenceSecretRedactor.FromScope(scope)), cancellationToken).ConfigureAwait(false);
             return NodeStatus.Success;
         }
         catch (NodeFailureException ex)
@@ -1464,7 +1498,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             // A body failure (no error edge) or a tripped budget — expose it as the loop's `error`
             // output so the loop's own error edge can catch it, then write node.failed.
             scope.Nodes[loopNode.Id] = BuildErrorOutput(ex.Message, loopNode.Id);
-            await _recordLogger.NodeFailedAsync(run.Id, loopNode.Id, nodeIterationKey, ex.Message, DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
+            await _recordLogger.NodeFailedAsync(run.Id, loopNode.Id, nodeIterationKey, RedactForPersistence(scope, ex.Message), DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
             return NodeStatus.Failure;
         }
     }
@@ -1504,7 +1538,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             : EmptyJsonBag;
         scope.Nodes[tryNode.Id] = outputs;
 
-        await _recordLogger.NodeCompletedAsync(run.Id, tryNode.Id, nodeIterationKey, outputs, new[] { hint }, DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
+        await CompleteNodeWithOffloadAsync(new NodeCompletionPersistence(run.Id, run.TeamId, tryNode.Id, nodeIterationKey, outputs, new[] { hint }, DateTimeOffset.UtcNow - startedAt, PersistenceSecretRedactor.FromScope(scope)), cancellationToken).ConfigureAwait(false);
 
         // The try always succeeds (it caught the body failure, or there was none); the routing hint
         // sends the run down `catch` or the default success path.
@@ -1577,7 +1611,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
             var outputs = BuildMapOutputs(plan.ResultKey, results, failed, plan.PromptBudgetChars);
             scope.Nodes[mapNode.Id] = outputs;
-            await CompleteNodeWithOffloadAsync(run.Id, run.TeamId, mapNode.Id, nodeIterationKey, outputs, null, DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
+            await CompleteNodeWithOffloadAsync(new NodeCompletionPersistence(run.Id, run.TeamId, mapNode.Id, nodeIterationKey, outputs, null, DateTimeOffset.UtcNow - startedAt, PersistenceSecretRedactor.FromScope(scope)), cancellationToken).ConfigureAwait(false);
             return NodeStatus.Success;
         }
         catch (NodeFailureException ex)
@@ -1585,7 +1619,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             // A non-array binding, a tripped ceiling, or (terminate mode) a branch failure — expose it as
             // the map's `error` output so the map's own error edge can catch it, then write node.failed.
             scope.Nodes[mapNode.Id] = BuildErrorOutput(ex.Message, mapNode.Id);
-            await _recordLogger.NodeFailedAsync(run.Id, mapNode.Id, nodeIterationKey, ex.Message, DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
+            await _recordLogger.NodeFailedAsync(run.Id, mapNode.Id, nodeIterationKey, RedactForPersistence(scope, ex.Message), DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
             return NodeStatus.Failure;
         }
     }
@@ -1703,7 +1737,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// failing the map out from under it. A suspended branch carries an empty result placeholder; the map
     /// re-suspends rather than reducing, so the placeholder is never emitted.
     /// </summary>
-    private readonly record struct MapBranchOutcome(int Index, JsonElement Result, bool Failed, bool Suspended = false, string? TerminateFailure = null);
+    private readonly record struct MapBranchOutcome(int Index, JsonElement Result, bool Failed, bool Suspended = false, string? TerminateFailure = null, Guid? SourceRecordId = null, Guid? SourceRunId = null);
 
     /// <summary>
     /// Run a map body subgraph for ONE element as a parallel WAVE — the same model as the loop body
@@ -2100,7 +2134,10 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     {
         if (outcome.Failed || outcome.Result.ValueKind != JsonValueKind.Object) return outcome;
 
-        var resolved = await NodeOutputArtifacts.ResolveRequiredAsync(_artifactStore, teamId, ParsePayloadObject(outcome.Result.GetRawText()), cancellationToken).ConfigureAwait(false);
+        IReadOnlyDictionary<string, JsonElement> persisted = ParsePayloadObject(outcome.Result.GetRawText());
+        if (outcome.SourceRecordId is { } recordId && outcome.SourceRunId is { } runId)
+            persisted = await _sensitivePayloadStore.ReadNodeOutputsAsync(recordId, runId, teamId, cancellationToken).ConfigureAwait(false) ?? persisted;
+        var resolved = await NodeOutputArtifacts.ResolveRequiredAsync(_artifactStore, teamId, persisted, cancellationToken).ConfigureAwait(false);
 
         return outcome with { Result = JsonSerializer.SerializeToElement(resolved) };
     }
@@ -2124,7 +2161,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         // result (the in-walk path yields EmptyJsonObject when the terminal isn't in scope).
         if (terminalRow is { Status: NodeStatus.Success })
         {
-            outcome = new MapBranchOutcome(index, JsonSerializer.SerializeToElement(ParsePayloadObject(terminalRow.OutputsJson)), Failed: false);
+            outcome = new MapBranchOutcome(index, JsonSerializer.SerializeToElement(ParsePayloadObject(terminalRow.OutputsJson)), Failed: false, SourceRecordId: terminalRow.RecordId, SourceRunId: terminalRow.RunId);
             return true;
         }
 
@@ -2197,7 +2234,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
             if (row.Status != NodeStatus.Success) continue;
 
-            var outputs = await LoadNodeOutputsAsync(row.OutputsJson, run.TeamId, cancellationToken).ConfigureAwait(false);
+            var outputs = await LoadNodeOutputsAsync(row, run.TeamId, cancellationToken).ConfigureAwait(false);
             if (outputs.Count > 0) branchScope.Nodes[row.NodeId] = outputs;
 
             var hints = ParseRoutingHints(row.RoutingHintsJson);
@@ -2492,7 +2529,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             var passNodes = new Dictionary<string, IReadOnlyDictionary<string, JsonElement>>();
             foreach (var (k, v) in outerScope.Nodes) passNodes[k] = v;
             foreach (var r in passRows.Where(r => r.Status == NodeStatus.Success))
-                passNodes[r.NodeId] = await LoadNodeOutputsAsync(r.OutputsJson, run.TeamId, cancellationToken).ConfigureAwait(false);
+                passNodes[r.NodeId] = await LoadNodeOutputsAsync(r, run.TeamId, cancellationToken).ConfigureAwait(false);
 
             loopVars = ApplyLoopVarUpdates(config.LoopVariables, loopVars, BuildLoopScope(outerScope, passNodes, loopVars, j));
         }
@@ -2525,7 +2562,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
             if (row.Status != NodeStatus.Success) continue;
 
-            var outputs = await LoadNodeOutputsAsync(row.OutputsJson, run.TeamId, cancellationToken).ConfigureAwait(false);
+            var outputs = await LoadNodeOutputsAsync(row, run.TeamId, cancellationToken).ConfigureAwait(false);
             if (outputs.Count > 0) iterScope.Nodes[row.NodeId] = outputs;
 
             var hints = ParseRoutingHints(row.RoutingHintsJson);
@@ -2677,7 +2714,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
             if (node.Status != NodeStatus.Success) continue;
 
-            var outputs = await LoadNodeOutputsAsync(node.OutputsJson, run.TeamId, cancellationToken).ConfigureAwait(false);
+            var outputs = await LoadNodeOutputsAsync(node, run.TeamId, cancellationToken).ConfigureAwait(false);
             if (outputs.Count > 0) scope.Nodes[node.NodeId] = outputs;
 
             var hints = ParseRoutingHints(node.RoutingHintsJson);
@@ -2722,7 +2759,11 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         }
 
         if (lastTerminal != null)
-            state.WorkflowOutputs = VariableResolver.ResolveBag(lastTerminal.Inputs, scope);
+        {
+            var resolved = VariableResolver.ResolveBag(lastTerminal.Inputs, scope);
+            EnsureNoSecretInTerminalOutputs(lastTerminal, resolved, scope);
+            state.WorkflowOutputs = resolved;
+        }
     }
 
     /// <summary>
@@ -3176,7 +3217,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             // singleton RecordingLLMClientDecorator captures the interaction.* triple of ANY model call the node makes
             // (llm.complete, the plan-author's planner + critic, a future model-calling node) with ZERO per-node wiring.
             // A more-specific inner Push (e.g. the supervisor's per-turn "supervisor.decision") nests + wins for its call.
-            using var recording = Llm.LlmCallContext.Push(new Llm.LlmCallScope(exec.Run.Id, exec.Run.TeamId, exec.Node.Id, exec.IterationKey, exec.Node.TypeKey, _recordLogger, _offloader));
+            using var recording = Llm.LlmCallContext.Push(new Llm.LlmCallScope(exec.Run.Id, exec.Run.TeamId, exec.Node.Id, exec.IterationKey, exec.Node.TypeKey, _recordLogger, _offloader, CaptureRedactor: PersistenceSecretRedactor.FromScope(exec.Scope), Completeness: _completenessWriter));
 
             var result = await exec.Runtime.RunAsync(context, cancellationToken).ConfigureAwait(false);
             return (result, null);
@@ -3185,7 +3226,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         catch (WorkflowSecretLeakException) { throw; }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Node {NodeId} threw unhandled exception", exec.Node.Id);
+            _logger.LogError("Node {NodeId} threw {ExceptionType}: {Message}", exec.Node.Id, ex.GetType().Name, RedactForPersistence(exec.Scope, ex.Message));
             return (null, ex);   // the EXCEPTION (not just its message) so the retry loop can classify a typed retryable-vs-terminal fault
         }
     }
@@ -3234,7 +3275,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// </summary>
     private async Task<NodeRunOutcome> FinalizeFailureAsync(NodeExecution exec, string error, CancellationToken cancellationToken)
     {
-        await _recordLogger.NodeFailedAsync(exec.Run.Id, exec.Node.Id, exec.IterationKey, error, DateTimeOffset.UtcNow - exec.StartedAt, cancellationToken).ConfigureAwait(false);
+        await _recordLogger.NodeFailedAsync(exec.Run.Id, exec.Node.Id, exec.IterationKey, RedactForPersistence(exec.Scope, error), DateTimeOffset.UtcNow - exec.StartedAt, cancellationToken).ConfigureAwait(false);
         return new NodeRunOutcome(NodeStatus.Failure, BuildErrorOutput(error, exec.Node.Id), null, null);
     }
 
@@ -3266,10 +3307,11 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         // carrying the attempt index, the full per-attempt error, how long it ran, and the backoff before the next
         // try. This is the structured retry history (reconstructable from the DB), keyed to the node's iteration
         // so a map-branch / loop-iteration retry is addressable. The Warn line below stays for the live timeline.
-        await _recordLogger.AttemptFailedAsync(exec.Run.Id, exec.Node.Id, exec.IterationKey, attempt, plan.MaxAttempts, error, DateTimeOffset.UtcNow - attemptStartedAt, delaySeconds, exec.ParentRecordId, cancellationToken).ConfigureAwait(false);
+        var persistedError = RedactForPersistence(exec.Scope, error);
+        await _recordLogger.AttemptFailedAsync(exec.Run.Id, exec.Node.Id, exec.IterationKey, attempt, plan.MaxAttempts, persistedError, DateTimeOffset.UtcNow - attemptStartedAt, delaySeconds, exec.ParentRecordId, cancellationToken).ConfigureAwait(false);
 
         var waitHint = delaySeconds > 0 ? $" Retrying in {delaySeconds:0.##}s." : " Retrying now.";
-        var message = $"Attempt {attempt}/{plan.MaxAttempts} failed: {Truncate(error, 200)}.{waitHint}";
+        var message = $"Attempt {attempt}/{plan.MaxAttempts} failed: {Truncate(persistedError, 200)}.{waitHint}";
 
         await _recordLogger.LogAsync(exec.Run.Id, exec.Node.Id, Lifecycle.LogLevel.Warn, message, cancellationToken).ConfigureAwait(false);
 
@@ -3278,6 +3320,8 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     }
 
     private static string Truncate(string value, int max) => value.Length <= max ? value : value[..max] + "…";
+
+    private static string RedactForPersistence(NodeRunScope scope, string value) => PersistenceSecretRedactor.FromScope(scope).Redact(value).Value ?? PersistenceSecretRedactor.Marker;
 
     /// <summary>
     /// Build the redacted Inputs/Config pair the ledger persists. The node itself receives
@@ -3291,7 +3335,8 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     {
         var redactedInputs = _redactor.RedactBag(node.Inputs, resolvedInputs, scope.SecretPaths);
         var redactedConfig = _redactor.RedactBag(node.Config, resolvedConfig, scope.SecretPaths);
-        return (redactedInputs, redactedConfig);
+        var exact = PersistenceSecretRedactor.FromScope(scope);
+        return (exact.Redact(redactedInputs).Value, exact.Redact(redactedConfig).Value);
     }
 
     /// <summary>
@@ -3311,7 +3356,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     private NodeRunContext BuildNodeRunContext(NodeExecution exec)
     {
         var nodeLogger = _loggerFactory.CreateLogger($"Workflow.{exec.Runtime.TypeKey}.{exec.Node.Id}");
-        var observability = new NodeObservability(_recordLogger, _artifactStore, exec.Run.Id, exec.Node.Id, exec.Run.TeamId, exec.ParentRecordId);
+        var observability = new NodeObservability(new NodeObservationBinding(_recordLogger, _artifactStore, exec.Run.Id, exec.Node.Id, exec.Run.TeamId, exec.ParentRecordId, PersistenceSecretRedactor.FromScope(exec.Scope)));
 
         return new NodeRunContext
         {
@@ -3354,9 +3399,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     private async Task PersistNodeResultAsync(NodeExecution exec, NodeResult result, TimeSpan duration, CancellationToken cancellationToken)
     {
         if (result.Status == NodeStatus.Success)
-            await CompleteNodeWithOffloadAsync(exec.Run.Id, exec.Run.TeamId, exec.Node.Id, exec.IterationKey, result.Outputs, result.RoutingHints, duration, cancellationToken).ConfigureAwait(false);
+            await CompleteNodeWithOffloadAsync(new NodeCompletionPersistence(exec.Run.Id, exec.Run.TeamId, exec.Node.Id, exec.IterationKey, result.Outputs, result.RoutingHints, duration, PersistenceSecretRedactor.FromScope(exec.Scope)), cancellationToken).ConfigureAwait(false);
         else
-            await _recordLogger.NodeFailedAsync(exec.Run.Id, exec.Node.Id, exec.IterationKey, result.Error ?? "Node returned non-success without error message.", duration, cancellationToken).ConfigureAwait(false);
+            await _recordLogger.NodeFailedAsync(exec.Run.Id, exec.Node.Id, exec.IterationKey, RedactForPersistence(exec.Scope, result.Error ?? "Node returned non-success without error message."), duration, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -3371,13 +3416,14 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// re-dispatch re-firing a non-idempotent side effect). A tripped cancel token is the exception: it re-throws so
     /// the run lands Cancelled (a terminal run never re-walks, so the node can't re-fire).</para>
     /// </summary>
-    private async Task CompleteNodeWithOffloadAsync(Guid runId, Guid teamId, string nodeId, string iterationKey, IReadOnlyDictionary<string, JsonElement> outputs, IReadOnlyList<string>? routingHints, TimeSpan duration, CancellationToken cancellationToken)
+    private async Task CompleteNodeWithOffloadAsync(NodeCompletionPersistence completion, CancellationToken cancellationToken)
     {
+        var redaction = completion.Redactor.Redact(completion.Outputs);
         IReadOnlyDictionary<string, JsonElement> ledgerOutputs;
 
         try
         {
-            ledgerOutputs = await NodeOutputArtifacts.OffloadLargeAsync(_artifactStore, teamId, outputs, ArtifactStoreConfig.InlineThresholdBytes, cancellationToken).ConfigureAwait(false);
+            ledgerOutputs = await NodeOutputArtifacts.OffloadLargeAsync(_artifactStore, completion.TeamId, redaction.Value, ArtifactStoreConfig.InlineThresholdBytes, cancellationToken).ConfigureAwait(false);
         }
         catch (Workflows.Artifacts.Exceptions.ArtifactStorageDestinationUnavailableException ex)
         {
@@ -3385,20 +3431,41 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             // transient IO, so it repeats for every node of every run until they fix it. Settling is still
             // mandatory (the side effect already fired), but a LogWarning would leave the only symptom a green run
             // over an empty destination. Record it so it reaches the run's own timeline.
-            _logger.LogError(ex, "Run {RunId} node {NodeId}: the configured storage destination refused the node's outputs ({Code}); settling with full inline outputs so the node never re-fires its side effect", runId, nodeId, DestinationProblemOf(ex));
+            _logger.LogError("Run {RunId} node {NodeId}: the configured storage destination refused the node's outputs ({Code}); settling with redacted inline outputs so the node never re-fires its side effect", completion.RunId, completion.NodeId, DestinationProblemOf(ex));
 
-            await RecordStorageUnavailableAsync(runId, nodeId, iterationKey, ex, cancellationToken).ConfigureAwait(false);
+            await RecordStorageUnavailableAsync(completion, ex, cancellationToken).ConfigureAwait(false);
 
-            ledgerOutputs = outputs;
+            ledgerOutputs = redaction.Value;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogWarning(ex, "Run {RunId} node {NodeId}: output offload failed; writing node.completed with full inline outputs so the node is recorded settled and never re-fires its side effect", runId, nodeId);
-            ledgerOutputs = outputs;
+            _logger.LogWarning("Run {RunId} node {NodeId}: output offload failed ({FailureType}); writing node.completed with redacted inline outputs so the node is recorded settled and never re-fires its side effect", completion.RunId, completion.NodeId, ex.GetType().Name);
+            ledgerOutputs = redaction.Value;
         }
 
-        await _recordLogger.NodeCompletedAsync(runId, nodeId, iterationKey, ledgerOutputs, routingHints, duration, cancellationToken).ConfigureAwait(false);
+        if (!redaction.Changed)
+        {
+            await _recordLogger.NodeCompletedAsync(completion.RunId, completion.NodeId, completion.IterationKey, ledgerOutputs, completion.RoutingHints, completion.Duration, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        try
+        {
+            await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            var recordId = await _recordLogger.NodeCompletedAsync(completion.RunId, completion.NodeId, completion.IterationKey, ledgerOutputs, completion.RoutingHints, completion.Duration, cancellationToken).ConfigureAwait(false);
+            await _sensitivePayloadStore.SaveNodeOutputsAsync(recordId, completion.RunId, completion.TeamId, completion.Outputs, cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError("Run {RunId} node {NodeId}: encrypted recovery payload could not commit atomically ({FailureType}); settling the public redacted record through an isolated context", completion.RunId, completion.NodeId, ex.GetType().Name);
+            await using var fallbackScope = _lifetimeScope.BeginLifetimeScope();
+            var fallbackLogger = fallbackScope.Resolve<IRunRecordLogger>();
+            await fallbackLogger.NodeCompletedAsync(completion.RunId, completion.NodeId, completion.IterationKey, ledgerOutputs, completion.RoutingHints, completion.Duration, cancellationToken).ConfigureAwait(false);
+        }
     }
+
+    private sealed record NodeCompletionPersistence(Guid RunId, Guid TeamId, string NodeId, string IterationKey, IReadOnlyDictionary<string, JsonElement> Outputs, IReadOnlyList<string>? RoutingHints, TimeSpan Duration, PersistenceSecretRedactor Redactor);
 
     /// <summary>WHICH refusal this was, as a stable token: routing policy refused before the provider was reached, or the transfer itself did not commit. The IFailure code is one constant for both, so it cannot tell the two apart.</summary>
     private static string DestinationProblemOf(Workflows.Artifacts.Exceptions.ArtifactStorageDestinationUnavailableException ex) =>
@@ -3409,15 +3476,15 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// fail-open, whose whole purpose is that the node settles: a ledger hiccup while reporting a storage problem
     /// must not stop node.completed from being written, or the node re-dispatches and re-fires its side effect.
     /// </summary>
-    private async Task RecordStorageUnavailableAsync(Guid runId, string nodeId, string iterationKey, Workflows.Artifacts.Exceptions.ArtifactStorageDestinationUnavailableException ex, CancellationToken cancellationToken)
+    private async Task RecordStorageUnavailableAsync(NodeCompletionPersistence completion, Workflows.Artifacts.Exceptions.ArtifactStorageDestinationUnavailableException ex, CancellationToken cancellationToken)
     {
         try
         {
-            await _recordLogger.NodeStorageUnavailableAsync(runId, nodeId, iterationKey, ex.Message, DestinationProblemOf(ex), cancellationToken).ConfigureAwait(false);
+            await _recordLogger.NodeStorageUnavailableAsync(completion.RunId, completion.NodeId, completion.IterationKey, completion.Redactor.Redact(ex.Message).Value ?? "Storage unavailable.", DestinationProblemOf(ex), cancellationToken).ConfigureAwait(false);
         }
         catch (Exception recordFailure) when (recordFailure is not OperationCanceledException)
         {
-            _logger.LogWarning(recordFailure, "Run {RunId} node {NodeId}: could not record the storage-unavailable signal; the node still settles", runId, nodeId);
+            _logger.LogWarning("Run {RunId} node {NodeId}: could not record the storage-unavailable signal ({FailureType}); the node still settles", completion.RunId, completion.NodeId, recordFailure.GetType().Name);
         }
     }
 
@@ -3474,7 +3541,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// </summary>
     private static IReadOnlyDictionary<string, JsonElement> CaptureTerminalOutputs(NodeDefinition node, IReadOnlyDictionary<string, JsonElement> resolvedInputs, NodeRunScope scope)
     {
-        EnsureNoSecretInTerminalOutputs(node, scope);
+        EnsureNoSecretInTerminalOutputs(node, resolvedInputs, scope);
         return resolvedInputs;
     }
 

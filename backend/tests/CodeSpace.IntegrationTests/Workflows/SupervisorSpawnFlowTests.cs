@@ -502,16 +502,14 @@ public class SupervisorSpawnFlowTests : IDisposable
     }
 
     [Fact]
-    public async Task A_fault_injected_crash_mid_fan_out_recovers_to_exactly_K_agents_without_orphans_or_double_spawn()
+    public async Task A_fault_mid_fan_out_rolls_back_the_whole_wave_then_replay_creates_exactly_K_agents_and_waits()
     {
         // 🟢 HIGH fidelity (REAL executor write path + REAL Pending→Running claim hop + REAL AgentRunService over
         // real Postgres). Unlike the sibling planted-residue test, the crash residue here is AUTHENTIC: a
         // ThrowingAgentRunService decorator delegates to the real service but THROWS on the 2nd CreateAsync, so the
-        // executor's spawn loop commits agent 1 for real (CreateAsync saves each), then aborts BEFORE staging wait 2
-        // and BEFORE the single end-of-loop SaveChanges that flushes the waits. The Pending→Running claim already
-        // ran (the must-fix-#2 gate, before the side effect), so the spawn decision is left STUCK Running by the
-        // REAL code path — no hand-fabricated decision row, no manual db.Add. We then re-execute WITHOUT the fault
-        // and assert recovery lands EXACTLY 2 agents + 2 waits + 1 terminal spawn decision, no double-spawn.
+        // executor's spawn loop flushes agent 1 inside the wave transaction, then aborts BEFORE agent/wait 2.
+        // The transaction must roll the prefix back, while the Pending→Running claim remains as the replay anchor.
+        // We then re-execute WITHOUT the fault and assert exactly 2 agents + 2 waits + 1 terminal decision.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var workflowId = await CreateWorkflowAsync(teamId, userId);
         var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
@@ -527,24 +525,19 @@ public class SupervisorSpawnFlowTests : IDisposable
             await ResolveSelfAdvanceAsync(runId);
 
             // ── INJECT THE FAULT: run turn 1 (spawn[both]) through the REAL turn service with a decorator that
-            // throws on the 2nd CreateAsync. The executor commits agent 0 (its own SaveChanges), then the 2nd
-            // CreateAsync throws → the loop aborts before staging wait 1 + before the end-of-loop wait flush, and
-            // before the terminal record. The exception propagates out (the turn service doesn't catch it). ──
+            // throws on the 2nd CreateAsync. Agent 0 is flushed but not committed; the exception rolls the whole
+            // staging transaction back before the terminal record. ──
             var ex = await Should.ThrowAsync<InvalidOperationException>(() => RunTurnWithSpawnFaultAsync(runId, teamId, throwOnCall: 2));
             ex.Message.ShouldBe(ThrowingAgentRunService.FaultMessage, "the throw is OUR injected fault, not an incidental failure — proves the decorator reached the executor's spawn loop");
 
-            // ── Sanity: the AUTHENTIC mid-fan-out crash residue the REAL code path left — 1 committed orphan, 0
-            // waits, the spawn decision stuck Running (flipped by the real claim hop before the side effect threw).
-            // No hand-fabricated decision row, no manual db.Add. ──
-            Guid orphanAgentId;
+            // ── Sanity: no prefix is externally visible. The decision claim intentionally remains Running so
+            // normal replay can retry the still-unsettled action. ──
             using (var verify = _fixture.BeginScope())
             {
                 var db = verify.Resolve<CodeSpaceDbContext>();
 
                 var orphans = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).ToListAsync();
-                orphans.Count.ShouldBe(1, "the fault committed exactly one agent before the 2nd CreateAsync threw — the authentic mid-fan-out orphan");
-                orphans[0].Status.ShouldBe(AgentRunStatus.Queued, "the orphan never advanced past Queued — its wait was never staged");
-                orphanAgentId = orphans[0].Id;
+                orphans.ShouldBeEmpty("a fan-out is one authorization wave; no leading AgentRun may survive a failed later slot");
 
                 (await db.WorkflowRunWait.AsNoTracking().CountAsync(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.AgentRun))
                     .ShouldBe(0, "the throw aborted before the end-of-loop SaveChanges that flushes the waits");
@@ -555,8 +548,7 @@ public class SupervisorSpawnFlowTests : IDisposable
 
             // ── RECOVER: re-dispatch the run WITHOUT the fault (a normal scope). The node re-enters with ZERO
             // pending agent waits, re-runs turn 1, re-claims the stuck-Running spawn (InFlight, not Duplicate), and
-            // re-executes under the existing Running claim. The executor RECLAIMS the orphan for slot 0 + creates
-            // slot 1 → exactly 2 agents, 2 waits, no leaked orphan, no double-spawn. ──
+            // re-executes under the existing Running claim and creates the complete wave exactly once. ──
             using (var scope = _fixture.BeginScope())
             {
                 await scope.Resolve<CodeSpaceDbContext>().WorkflowRun
@@ -569,8 +561,7 @@ public class SupervisorSpawnFlowTests : IDisposable
                 var db = verify.Resolve<CodeSpaceDbContext>();
 
                 var agents = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).Select(r => r.Id).ToListAsync();
-                agents.Count.ShouldBe(2, "recovery landed EXACTLY 2 agents — the orphan was reclaimed, one new agent created (no double-spawn)");
-                agents.ShouldContain(orphanAgentId, "the reclaimed orphan is one of the two — not leaked");
+                agents.Count.ShouldBe(2, "recovery landed exactly the authored wave after the failed prefix rolled back");
 
                 var waits = await db.WorkflowRunWait.AsNoTracking()
                     .Where(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.AgentRun && w.Status == WorkflowWaitStatuses.Pending)
@@ -990,10 +981,9 @@ public class SupervisorSpawnFlowTests : IDisposable
     // never hand-constructed). Resolving the turn service DIRECTLY from this scope (vs through the engine, whose
     // singleton supervisor node opens its own root-child scope that the override can't reach) means the executor it
     // injects resolves the DECORATED IAgentRunService. So the real turn pipeline runs: rehydrate → decide (spawn) →
-    // real Pending→Running claim hop → RealSupervisorActionExecutor.StageAgentsAndParkAsync, whose fan-out commits
-    // the leading agent for real then crashes mid-loop on the 2nd CreateAsync — the authentic mid-fan-out crash
-    // residue (no production change). The exception propagates out so the terminal record never runs → the spawn
-    // decision is left stuck Running by the real code path. Recovery then re-enters through the full engine.
+    // real Pending→Running claim hop → RealSupervisorActionExecutor.StageAgentsAndParkAsync, whose fan-out flushes
+    // the leading agent inside its transaction then crashes on the 2nd CreateAsync. The exception propagates so the
+    // decision remains Running, while the wave transaction must leave no externally-visible agent/wait prefix.
     private async Task RunTurnWithSpawnFaultAsync(Guid runId, Guid teamId, int throwOnCall)
     {
         using var scope = _fixture.BeginScope(b =>

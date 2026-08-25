@@ -19,7 +19,7 @@ import type { PaneView } from "@/components/sessions/RoomRunPane";
  * tab (set by a journal jump affordance).
  */
 type RunDetailSearch = { trace?: string; view?: RunView; pane?: PaneView; turn?: number; node?: string };
-const RUN_VIEWS: readonly RunView[] = ["activity", "canvas", "changes", "governed-tools", "trace"];
+const RUN_VIEWS: readonly RunView[] = ["activity", "canvas", "changes", "model-calls", "governed-tools", "trace"];
 const PANE_VIEWS: readonly PaneView[] = ["canvas", "changes", "trace"];
 
 /** Parse + whitelist the run-detail URL search — an unknown view and an empty trace drop for a clean URL. Exported for unit test. */

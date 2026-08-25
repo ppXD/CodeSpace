@@ -29,8 +29,15 @@ public static class ArtifactRetentionPolicy
     public static readonly ArtifactRetentionRule ArtifactManifestContent =
         new(ArtifactRetentionClass.ArtifactManifestContent, TimeSpan.FromDays(7), TimeSpan.FromHours(24));
 
+    public static readonly ArtifactRetentionRule SensitiveRecordPayload =
+        new(ArtifactRetentionClass.SensitiveRecordPayload, TimeSpan.FromDays(7), TimeSpan.FromHours(24));
+
     private static readonly IReadOnlyDictionary<ArtifactRetentionClass, ArtifactRetentionRule> Rules =
-        new Dictionary<ArtifactRetentionClass, ArtifactRetentionRule> { [ArtifactManifestContent.Class] = ArtifactManifestContent };
+        new Dictionary<ArtifactRetentionClass, ArtifactRetentionRule>
+        {
+            [ArtifactManifestContent.Class] = ArtifactManifestContent,
+            [SensitiveRecordPayload.Class] = SensitiveRecordPayload,
+        };
 
     /// <summary>The rule for <paramref name="value"/>, or null when the running policy does not register it — which the reaper reads as "cannot tell" and keeps.</summary>
     /// <summary>The rule for a class NAME, or null when this build registers none — including a name a rolled-back build wrote that this one has never heard of. Null settles as keep.</summary>

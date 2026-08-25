@@ -13,7 +13,8 @@ public enum WorkflowRunDataCompletenessScope
 
 /// <summary>
 /// Bounded, metadata-only observation of the completeness statements producers durably recorded for one Workflow
-/// Run. This view never invents a run-wide verdict: a missing facet statement means unknown, not exact or empty.
+/// Run. A missing required facet statement means unknown, not exact or empty; a run-wide verdict is emitted only for
+/// a terminal run whose registered producer coverage is complete.
 /// </summary>
 public sealed record WorkflowRunDataCompletenessView
 {
@@ -21,6 +22,9 @@ public sealed record WorkflowRunDataCompletenessView
     public required WorkflowRunDataCompletenessScope Scope { get; init; }
     public required IReadOnlyList<WorkflowRunDataFacetCompleteness> Facets { get; init; }
     public required bool HasStatements { get; init; }
+    public required bool IsTerminal { get; init; }
+    public required IReadOnlyList<string> RequiredFacets { get; init; }
+    public required IReadOnlyList<string> MissingFacetStatements { get; init; }
     public required WorkflowRunCaptureCompleteness? RunWideVerdict { get; init; }
     public required bool Truncated { get; init; }
 }

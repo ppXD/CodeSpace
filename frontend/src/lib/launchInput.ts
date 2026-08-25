@@ -11,6 +11,9 @@ export interface LaunchWorkspaceRepo {
   isPrimary: boolean;
 }
 
+/** A nullable backend boolean rendered truthfully: inherit omits the field; on/off send an explicit value. */
+export type LaunchBooleanOverride = "inherit" | "on" | "off";
+
 /** The slice of Launch-modal state that maps to backend params. Pure data — the modal owns the React
  *  state; this is the snapshot handed to {@link buildLaunchInput} so the mapping is unit-testable in
  *  isolation (no DOM). Caps fields are strings because they come from text inputs / a select. */
@@ -33,12 +36,12 @@ export interface LaunchFormState {
   runnerKind: string;
   /** "Working dir" — multi-repo cwd mode: `"auto"` (default) / `"workspace"` / `"primary"`. Sent (as `workingDirMode`) only when non-auto. Applies to all tiers (an agent-setup knob); inert on a single-repo run. */
   cwdMode: string;
-  /** "Force MCP fabric" — per-run opt-in to the FULL (side-effecting) MCP tool catalog. Default false ⇒ omitted ⇒ defer to the ambient flag (byte-identical). Sent (as `enableMcp:true`) only when on. Applies to all tiers (an agent-setup knob). */
-  enableMcp: boolean;
+  /** "MCP fabric" — inherit the ambient/profile choice, or explicitly narrow/widen this run. */
+  enableMcp: LaunchBooleanOverride;
   /** "Tools" — a Claude-only tool allow-list (canonical names). Empty ⇒ omitted ⇒ harness default (all tools), byte-identical. Non-empty ⇒ sent as `allowedTools`. Additive against a persona's tools; not a write boundary. */
   tools: string[];
-  /** "Publish branch" — per-run opt-in to publishing the agent's diff as a branch even when the ambient push flag is off. Default false ⇒ omitted ⇒ defer to the ambient flag (byte-identical). Sent (as `pushBranch:true`) only when on. All tiers. */
-  pushBranch: boolean;
+  /** "Publish branch" — inherit the ambient/profile choice, or explicitly narrow/widen this run. */
+  pushBranch: LaunchBooleanOverride;
   /** Coordination "Limits" — the max agents that run CONCURRENTLY (the only agent knob; a supervised run loops until
    *  done, bounded by the cost budget + no-progress, not a round/total-agent count). Only meaningful on deep/auto. */
   maxParallel: string;
@@ -50,8 +53,8 @@ export interface LaunchFormState {
   agentPool: string[];
   /** Coordination "Autonomy ceiling" — a tier name, or `""` (Inherit the preset). Tighten-only on the backend. */
   autonomyCeiling: string;
-  /** Coordination "Integrate branches" — Deep only: opt in to integrating the spawned agents' diffs into one reviewable branch at merge. Default false ⇒ defer to the ambient flag. */
-  integrateBranches: boolean;
+  /** Coordination "Integrate branches" — Deep only; inherit, explicitly on, or explicitly off. */
+  integrateBranches: LaunchBooleanOverride;
   /** Evaluation "Acceptance criteria" — every tier (S5b): Deep renders them into the supervisor prompt, Standard into the planner prompt (per-item contracts target them), Quick into the agent's goal. Sent only when changed from {@link DEFAULT_ACCEPTANCE} (unmodified ⇒ omitted, byte-identical). */
   acceptanceCriteria: string[];
   /** Evaluation "Acceptance checks" — the EXECUTABLE argv floor (one element per token, e.g. ["sh","check.sh"]): Deep runs it at the terminal stop; Quick grades the single agent's produced branch (S5). Standard verifies per item via the plan's own contracts, so it never sends this. Sent only when non-empty (⇒ omitted, byte-identical). */
@@ -144,17 +147,15 @@ export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
   // byte-identical; "workspace"/"primary" are sent so a multi-repo run anchors the cwd where the operator asked.
   if (state.cwdMode && state.cwdMode !== "auto") input.workingDirMode = state.cwdMode;
 
-  // Force-MCP is a default-OFF per-run opt-in (the OR-gate can force the full fabric ON, never OFF). Send true only when
-  // on (default off ⇒ omitted ⇒ defer to the ambient flag, byte-identical). An agent-setup knob ⇒ all tiers.
-  if (state.enableMcp) input.enableMcp = true;
+  // Nullable booleans are three-state in the UI: inherit omits; on/off are both explicit and survive profile/default
+  // resolution. This prevents a visible "Off" from being silently reinterpreted as ambient "On" downstream.
+  if (state.enableMcp !== "inherit") input.enableMcp = state.enableMcp === "on";
 
   // The tool allow-list (a Claude-only capability filter). Empty ⇒ omitted ⇒ the harness default (all tools) ⇒
   // byte-identical; a non-empty pick is sent verbatim. An agent-setup knob ⇒ all tiers.
   if (state.tools.length) input.allowedTools = [...state.tools];
 
-  // Publish-branch is a default-OFF per-run opt-in (the OR-gate forces publish ON, never OFF). Send true only when on
-  // (default off ⇒ omitted ⇒ defer to the ambient flag, byte-identical). An agent-setup knob ⇒ all tiers.
-  if (state.pushBranch) input.pushBranch = true;
+  if (state.pushBranch !== "inherit") input.pushBranch = state.pushBranch === "on";
 
   // The per-agent wall-clock — sent on ALL tiers (a per-agent setting, unlike the deep/auto-gated caps). The default
   // "3600" (1h) is OMITTED so an untouched launch stays byte-identical to the backend default; "0" = No limit
@@ -175,9 +176,7 @@ export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
   // The autonomy ceiling is a Coordination knob (deep/auto only); "" means Inherit the preset ⇒ omit the key.
   if (tierExposesCaps(state.effort) && state.autonomyCeiling) input.autonomyCeiling = state.autonomyCeiling;
 
-  // Integrate-branches is a Deep-only supervisor opt-in; send it only when ON (default off defers to the ambient flag,
-  // byte-identical) and only on the tiers that expose Coordination (inert on a single-agent run).
-  if (tierExposesCaps(state.effort) && state.integrateBranches) input.integrateBranches = true;
+  if (tierExposesCaps(state.effort) && state.integrateBranches !== "inherit") input.integrateBranches = state.integrateBranches === "on";
 
   // Acceptance criteria STEER on every tier (S5b: deep → the supervisor prompt, standard → the planner prompt so
   // per-item contracts target them, quick → the agent's goal). Send only when the operator CHANGED them from the

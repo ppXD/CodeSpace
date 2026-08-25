@@ -21,15 +21,15 @@ const form = (over: Partial<LaunchFormState> = {}): LaunchFormState => ({
   agentDefinitionId: "",
   runnerKind: "",
   cwdMode: "auto",
-  enableMcp: false,
+  enableMcp: "inherit",
   tools: [],
-  pushBranch: false,
+  pushBranch: "inherit",
   maxParallel: "5",
   budget: "none",
   agentModels: [],
   agentPool: [],
   autonomyCeiling: "",
-  integrateBranches: false,
+  integrateBranches: "inherit",
   acceptanceCriteria: [...DEFAULT_ACCEPTANCE],
   acceptanceChecks: [],
   requirePlanConfirmation: false,
@@ -112,10 +112,11 @@ describe("buildLaunchInput — base fields", () => {
     expect(buildLaunchInput(form({ modelCredentialModelId: "row-1" })).modelCredentialModelId).toBe("row-1");
   });
 
-  it("sends integrateBranches only on a Deep tier and only when on (default off ⇒ omitted, byte-identical)", () => {
-    expect(buildLaunchInput(form({ effort: "deep", integrateBranches: true })).integrateBranches).toBe(true);
-    expect(buildLaunchInput(form({ effort: "deep", integrateBranches: false }))).not.toHaveProperty("integrateBranches");
-    expect(buildLaunchInput(form({ effort: "quick", integrateBranches: true }))).not.toHaveProperty("integrateBranches", "inert on a single-agent tier");
+  it("sends an explicit integrateBranches choice only on a coordination tier", () => {
+    expect(buildLaunchInput(form({ effort: "deep", integrateBranches: "on" })).integrateBranches).toBe(true);
+    expect(buildLaunchInput(form({ effort: "deep", integrateBranches: "off" })).integrateBranches).toBe(false);
+    expect(buildLaunchInput(form({ effort: "deep", integrateBranches: "inherit" }))).not.toHaveProperty("integrateBranches");
+    expect(buildLaunchInput(form({ effort: "quick", integrateBranches: "on" }))).not.toHaveProperty("integrateBranches", "inert on a single-agent tier");
   });
 
   it("omits acceptanceCriteria when left at the canonical default (byte-identical supervisor prompt)", () => {
@@ -160,15 +161,15 @@ describe("buildLaunchInput — base fields", () => {
     expect(buildLaunchInput(form({ effort: "deep", cwdMode: "workspace" })).workingDirMode).toBe("workspace");
   });
 
-  it("omits enableMcp when off (the default ⇒ defer to the ambient flag, byte-identical)", () => {
-    expect(buildLaunchInput(form({ enableMcp: false }))).not.toHaveProperty("enableMcp");
+  it("omits enableMcp only when inheriting", () => {
+    expect(buildLaunchInput(form({ enableMcp: "inherit" }))).not.toHaveProperty("enableMcp");
     expect(buildLaunchInput(form())).not.toHaveProperty("enableMcp");
   });
 
-  it("sends enableMcp:true when the operator forces the fabric on, on ANY tier", () => {
-    expect(buildLaunchInput(form({ enableMcp: true })).enableMcp).toBe(true);
-    expect(buildLaunchInput(form({ effort: "quick", enableMcp: true })).enableMcp).toBe(true);
-    expect(buildLaunchInput(form({ effort: "deep", enableMcp: true })).enableMcp).toBe(true);
+  it("sends both explicit enableMcp values on any tier", () => {
+    expect(buildLaunchInput(form({ enableMcp: "on" })).enableMcp).toBe(true);
+    expect(buildLaunchInput(form({ effort: "quick", enableMcp: "off" })).enableMcp).toBe(false);
+    expect(buildLaunchInput(form({ effort: "deep", enableMcp: "on" })).enableMcp).toBe(true);
   });
 
   it("omits allowedTools at the empty default (⇒ harness default, byte-identical)", () => {
@@ -186,15 +187,15 @@ describe("buildLaunchInput — base fields", () => {
     expect(buildLaunchInput(form({ effort: "deep", tools: ["Bash"] })).allowedTools).toEqual(["Bash"]);
   });
 
-  it("omits pushBranch when off (the default ⇒ defer to the ambient flag, byte-identical)", () => {
-    expect(buildLaunchInput(form({ pushBranch: false }))).not.toHaveProperty("pushBranch");
+  it("omits pushBranch only when inheriting", () => {
+    expect(buildLaunchInput(form({ pushBranch: "inherit" }))).not.toHaveProperty("pushBranch");
     expect(buildLaunchInput(form())).not.toHaveProperty("pushBranch");
   });
 
-  it("sends pushBranch:true when the operator opts to publish, on ANY tier", () => {
-    expect(buildLaunchInput(form({ pushBranch: true })).pushBranch).toBe(true);
-    expect(buildLaunchInput(form({ effort: "quick", pushBranch: true })).pushBranch).toBe(true);
-    expect(buildLaunchInput(form({ effort: "deep", pushBranch: true })).pushBranch).toBe(true);
+  it("sends both explicit pushBranch values on any tier", () => {
+    expect(buildLaunchInput(form({ pushBranch: "on" })).pushBranch).toBe(true);
+    expect(buildLaunchInput(form({ effort: "quick", pushBranch: "off" })).pushBranch).toBe(false);
+    expect(buildLaunchInput(form({ effort: "deep", pushBranch: "on" })).pushBranch).toBe(true);
   });
 
   it("omits all review fields when off (the default ⇒ byte-identical)", () => {

@@ -4,6 +4,7 @@ namespace CodeSpace.Core.Services.Workflows.ModelCalls;
 
 public interface IWorkflowRunModelCallReader
 {
+    Task<WorkflowRunModelCallPage?> ReadPageAsync(Guid runId, Guid teamId, string? cursor, int limit, CancellationToken cancellationToken);
     Task<WorkflowRunModelCallDetailMetadata?> ReadByIdAsync(Guid runId, Guid modelCallId, Guid teamId, CancellationToken cancellationToken);
     Task<WorkflowRunModelCallBodyPage?> ReadBodyAsync(WorkflowRunModelCallBodyReadRequest request, CancellationToken cancellationToken);
     Task<WorkflowRunModelCallMetadata?> ReadMetadataAsync(Guid runId, long sequence, Guid teamId, CancellationToken cancellationToken);

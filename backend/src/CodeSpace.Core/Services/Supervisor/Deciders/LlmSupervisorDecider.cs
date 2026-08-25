@@ -443,7 +443,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             .Where(p => context.AllowedAgentDefinitionIds is not { Count: > 0 } pool || pool.Contains(p.Id))
             .Select(p => new PersonaCatalogInfo(p.Slug, p.Name, p.Description)).ToList();
 
-        return RenderCatalog(_harnesses.All, pool, personas) + RenderBoundRepositories(context);
+        return RenderCatalog(AgentHarnessPool.Clamp(_harnesses.All, context.AllowedAgentKinds), pool, personas) + RenderBoundRepositories(context);
     }
 
     /// <summary>
@@ -742,9 +742,10 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 
         if (hasFiles)
         {
+            var total = result.TotalChangedFiles ?? result.ChangedFiles.Count;
             var shown = string.Join(", ", result.ChangedFiles.Take(maxFiles));
-            var more = result.ChangedFiles.Count > maxFiles ? $" (+{result.ChangedFiles.Count - maxFiles} more)" : "";
-            parts.Add($"{result.ChangedFiles.Count} changed file(s): {shown}{more}");
+            var more = total > maxFiles ? $" (+{total - maxFiles} more)" : "";
+            parts.Add($"{total} changed file(s): {shown}{more}");
         }
 
         if (hasBranch) parts.Add($"branch {result.ProducedBranch}");

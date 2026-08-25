@@ -77,7 +77,7 @@ public sealed class WorkflowRunModelCallAttemptConfiguration : IEntityTypeConfig
             table.HasCheckConstraint("ck_workflow_run_model_call_attempt_cost", "(cost_amount IS NULL AND cost_currency IS NULL) OR (cost_amount IS NOT NULL AND cost_amount >= 0 AND cost_currency IS NOT NULL AND cost_currency ~ '^[A-Z]{3}$')");
             table.HasCheckConstraint("ck_workflow_run_model_call_attempt_http_status", "http_status_code IS NULL OR http_status_code BETWEEN 100 AND 599");
             table.HasCheckConstraint("ck_workflow_run_model_call_attempt_positive_values", "attempt_ordinal > 0 AND schema_version > 0 AND (input_tokens IS NULL OR input_tokens >= 0) AND (output_tokens IS NULL OR output_tokens >= 0) AND (cache_read_tokens IS NULL OR cache_read_tokens >= 0) AND (cache_write_tokens IS NULL OR cache_write_tokens >= 0) AND (reasoning_tokens IS NULL OR reasoning_tokens >= 0)");
-            table.HasCheckConstraint("ck_workflow_run_model_call_attempt_source_identity", "(source_started_record_id IS NULL AND source_terminal_record_id IS NULL AND source_evidence_revision = 0) OR (source_terminal_record_id IS NOT NULL AND source_evidence_revision > 0)");
+            table.HasCheckConstraint("ck_workflow_run_model_call_attempt_source_identity", "(source_started_record_id IS NULL AND source_terminal_record_id IS NULL AND source_evidence_revision = 0) OR ((source_started_record_id IS NOT NULL OR source_terminal_record_id IS NOT NULL) AND source_evidence_revision > 0)");
             table.HasCheckConstraint("ck_workflow_run_model_call_attempt_status", "status IN ('Pending', 'Running', 'Succeeded', 'Failed', 'Cancelled', 'TimedOut', 'Indeterminate')");
             table.HasCheckConstraint("ck_workflow_run_model_call_attempt_timing", "(first_token_at IS NULL OR first_token_at >= started_at) AND (completed_at IS NULL OR completed_at >= started_at) AND (first_token_at IS NULL OR completed_at IS NULL OR first_token_at <= completed_at)");
             table.HasCheckConstraint("ck_workflow_run_model_call_attempt_source_native_record", "source_native_record_id IS NULL OR source_native_record_id <> '00000000-0000-0000-0000-000000000000'::uuid");
@@ -122,8 +122,10 @@ public sealed class WorkflowRunModelCallAttemptConfiguration : IEntityTypeConfig
             .HasDatabaseName("ux_workflow_run_model_call_attempt_source_started").HasFilter("source_started_record_id IS NOT NULL");
         builder.HasIndex(a => new { a.TeamId, a.WorkflowRunId, a.SourceTerminalRecordId }).IsUnique()
             .HasDatabaseName("ux_workflow_run_model_call_attempt_source_terminal").HasFilter("source_terminal_record_id IS NOT NULL");
-        builder.HasIndex(a => new { a.WorkflowRunId, a.ModelCallId }).HasDatabaseName("ix_workflow_run_model_call_attempt_late_start")
+        builder.HasIndex(a => new { a.WorkflowRunId, a.ModelCallId }, "IX_WorkflowRunModelCallAttempt_LateStart").HasDatabaseName("ix_workflow_run_model_call_attempt_late_start")
             .HasFilter("source_terminal_record_id IS NOT NULL AND source_started_record_id IS NULL");
+        builder.HasIndex(a => new { a.WorkflowRunId, a.ModelCallId }, "IX_WorkflowRunModelCallAttempt_LateTerminal").HasDatabaseName("ix_workflow_run_model_call_attempt_late_terminal")
+            .HasFilter("source_started_record_id IS NOT NULL AND source_terminal_record_id IS NULL");
         builder.HasIndex(a => new { a.CreatedDate, a.Id }).HasDatabaseName("ix_workflow_run_model_call_attempt_body_capture")
             .HasFilter("source_terminal_record_id IS NOT NULL");
 

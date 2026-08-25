@@ -124,6 +124,24 @@ public class SupervisorAgentResultsFoldTests
     }
 
     [Fact]
+    public void ProjectCompact_bounds_prompt_visible_text_and_file_lists_without_mutating_the_full_result()
+    {
+        var summary = new string('s', SupervisorOutcome.CompactTextMaxChars + 100);
+        var error = new string('e', SupervisorOutcome.CompactTextMaxChars + 100);
+        var files = Enumerable.Range(0, SupervisorOutcome.CompactChangedFilesMax + 10).Select(i => $"src/{i}.cs").ToArray();
+
+        var compact = SupervisorOutcome.ProjectCompact(Guid.NewGuid(), "Failed", rowError: null, ResultJson(summary, error, files));
+
+        compact.Summary!.Length.ShouldBe(SupervisorOutcome.CompactTextMaxChars);
+        compact.Summary.ShouldEndWith(SupervisorOutcome.CompactTruncationMarker);
+        compact.Error!.Length.ShouldBe(SupervisorOutcome.CompactTextMaxChars);
+        compact.Error.ShouldEndWith(SupervisorOutcome.CompactTruncationMarker);
+        compact.ChangedFiles.Count.ShouldBe(SupervisorOutcome.CompactChangedFilesMax);
+        compact.ChangedFiles[^1].ShouldBe($"src/{SupervisorOutcome.CompactChangedFilesMax - 1}.cs");
+        compact.TotalChangedFiles.ShouldBe(files.Length, "the compact remains truthful about the full git-ground-truth count");
+    }
+
+    [Fact]
     public void ProjectCompact_tolerates_a_corrupt_result_json()
     {
         var compact = SupervisorOutcome.ProjectCompact(Guid.NewGuid(), "Failed", rowError: "the reason", resultJson: "{not json");

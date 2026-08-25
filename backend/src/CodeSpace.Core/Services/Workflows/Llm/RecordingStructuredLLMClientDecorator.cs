@@ -28,6 +28,7 @@ public class RecordingStructuredLLMClientDecorator : RecordingLLMClientDecorator
         if (scope is null) return await _structuredInner.CompleteStructuredAsync(request, cancellationToken).ConfigureAwait(false);
 
         var correlationId = Guid.NewGuid();
+        await DeclareCaptureIntentAsync(scope).ConfigureAwait(false);
         await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionStarted, correlationId,
             () => StartedPayloadAsync(scope, Provider, request.Model, request.SystemPrompt, request.UserPrompt, request.Temperature, request.MaxOutputTokens, cancellationToken), cancellationToken).ConfigureAwait(false);
 
@@ -43,12 +44,14 @@ public class RecordingStructuredLLMClientDecorator : RecordingLLMClientDecorator
         }
         catch (Exception ex)
         {
-            await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionFailed, correlationId, () => Task.FromResult(FailedPayload(scope, Provider, ex)), cancellationToken).ConfigureAwait(false);
+            if (await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionFailed, correlationId, () => Task.FromResult(FailedPayload(scope, Provider, ex)), CancellationToken.None).ConfigureAwait(false))
+                await MarkCapturePresentAsync(scope).ConfigureAwait(false);
             throw;
         }
 
-        await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionCompleted, correlationId,
-            async () => CompletedPayload(scope, Provider, completion.Model, completion.Usage, await OffloadJsonAsync(scope, completion.Json, cancellationToken).ConfigureAwait(false)), cancellationToken).ConfigureAwait(false);
+        if (await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionCompleted, correlationId,
+            async () => CompletedPayload(scope, Provider, completion.Model, completion.Usage, await OffloadJsonAsync(scope, completion.Json, CancellationToken.None).ConfigureAwait(false)), CancellationToken.None).ConfigureAwait(false))
+            await MarkCapturePresentAsync(scope).ConfigureAwait(false);
         return completion;
     }
 }

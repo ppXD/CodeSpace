@@ -25,7 +25,7 @@ vi.mock("@/hooks/use-workflows", () => ({
   useRunDataCompleteness: () => ({
     isLoading: false,
     error: null,
-    data: { runId: "run-1", scope: "RecordedFacetsOnly", facets: [], hasStatements: false, runWideVerdict: null, truncated: false },
+    data: { runId: "run-1", scope: "RecordedFacetsOnly", facets: [], hasStatements: false, isTerminal: false, requiredFacets: [], missingFacetStatements: [], runWideVerdict: null, truncated: false },
   }),
 }));
 

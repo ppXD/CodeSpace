@@ -38,6 +38,17 @@ public class SupervisorCapabilityCatalogTests
     }
 
     [Fact]
+    public void Allowed_harness_pool_clamps_the_catalog_before_the_model_authors_a_dispatch()
+    {
+        var allowed = AgentHarnessPool.Clamp(Harnesses, new[] { "claude-code" });
+
+        var catalog = LlmSupervisorDecider.RenderCatalog(allowed, new[] { new PoolModelInfo("metis-coder-max", "Anthropic") });
+
+        catalog.ShouldContain("claude-code — drives: Anthropic, Custom");
+        catalog.ShouldNotContain("codex-cli", Case.Insensitive, "a disallowed CLI must not be advertised as an available execution path");
+    }
+
+    [Fact]
     public void Catalog_appends_the_capability_tier_when_known_and_guides_allocation()
     {
         var pool = new[]

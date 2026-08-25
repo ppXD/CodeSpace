@@ -93,16 +93,22 @@ public class LlmCompleteNodeTests
     private sealed class StubPoolSelector : IModelPoolSelector
     {
         private readonly ModelPoolPick? _pick;
-        public StubPoolSelector(ModelPoolPick? pick) { _pick = pick; }
-        public static StubPoolSelector WithModel() => new(new ModelPoolPick { ModelId = "claude-sonnet-4-5", Credential = new ResolvedModelCredential { Provider = "Anthropic", ApiKey = "k" } });
-        public static StubPoolSelector Empty() => new(null);
-        public Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken) => Task.FromResult(_pick);
+        private readonly string? _defaultProvider;
+        public string? LastProvider { get; private set; }
+        public StubPoolSelector(ModelPoolPick? pick, string? defaultProvider = null) { _pick = pick; _defaultProvider = defaultProvider; }
+        public static StubPoolSelector WithModel() => new(new ModelPoolPick { ModelId = "claude-sonnet-4-5", Credential = new ResolvedModelCredential { Provider = "Anthropic", ApiKey = "k" } }, "Anthropic");
+        public static StubPoolSelector Empty() => new(null, "Anthropic");
+        public Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken)
+        {
+            LastProvider = provider;
+            return Task.FromResult(_pick);
+        }
         public Task<ModelPoolPick?> ResolveByRowIdAsync(Guid teamId, Guid modelCredentialModelId, CancellationToken cancellationToken) => Task.FromResult(_pick);
         public Task<ModelDispatchRef?> ResolveDispatchAsync(Guid teamId, string modelName, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => Task.FromResult<ModelDispatchRef?>(null);
         public Task<IReadOnlyList<PoolModelInfo>> ListPoolAsync(Guid teamId, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<PoolModelInfo>>(Array.Empty<PoolModelInfo>());
         public Task<Guid?> SelectBrainRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken) => Task.FromResult<Guid?>(null);
         public Task<Guid?> ResolvePinnedBrainRowIdAsync(Guid teamId, Guid modelCredentialModelId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken) => Task.FromResult<Guid?>(null);
-        public Task<string?> ResolveTeamDefaultProviderAsync(Guid teamId, CancellationToken cancellationToken) => Task.FromResult<string?>(null);
+        public Task<string?> ResolveTeamDefaultProviderAsync(Guid teamId, CancellationToken cancellationToken) => Task.FromResult(_defaultProvider);
     }
 
     /// <summary>Minimal scope factory that hands the node a scope resolving exactly the stub selector (the node resolves IModelPoolSelector per-call from a fresh scope, mirroring production's captive-dependency avoidance).</summary>
@@ -118,6 +124,24 @@ public class LlmCompleteNodeTests
 
     private static LlmCompleteNode Node(ILLMClient client, IModelPoolSelector selector) =>
         new(new StubRegistry(client), new StubScopeFactory(selector));
+
+    [Fact]
+    public async Task Auto_provider_uses_the_team_pool_default_instead_of_a_hardcoded_vendor()
+    {
+        var selector = new StubPoolSelector(new ModelPoolPick
+        {
+            ModelId = "gpt-5",
+            Credential = new ResolvedModelCredential { Provider = "OpenAI", ApiKey = "k" }
+        }, defaultProvider: "OpenAI");
+        var node = Node(new StructuredStubClient(), selector);
+
+        node.Manifest.ConfigSchema.GetProperty("properties").GetProperty("provider").TryGetProperty("default", out _).ShouldBeFalse("omission is the inherit state; enum members remain real registered wires only");
+
+        var result = await node.RunAsync(Context(config: new(), userPrompt: "hi"), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success);
+        selector.LastProvider.ShouldBe("OpenAI", "Auto must inherit the team's ranked default provider");
+    }
 
     [Fact]
     public void The_maxTokens_config_has_no_artificial_ceiling_so_a_large_output_can_stream()

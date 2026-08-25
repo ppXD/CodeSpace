@@ -204,12 +204,13 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         return map.Count > 0 ? map : null;
     }
 
-    /// <summary>The terminal surfaces the supervisor's outputs as the run's outputs — the SAME output keys agent.supervisor emits (status / decision / reason / turns / integratedBranch / repositoryId / repositoryBranches), wired via {{ref}}. PUBLIC so the E2E whole-loop suites bind their own authored terminals through this exact literal (sharing beats mirroring — a drift here is a compile-visible change, never a silently stale copy); the node id is pinned to <c>sup</c> on both sides.</summary>
+    /// <summary>The terminal surfaces the supervisor's outputs as the run's outputs — the SAME output keys agent.supervisor emits, wired via {{ref}}. PUBLIC so E2E loops share this literal instead of drifting.</summary>
     public static JsonElement TerminalInputs() => JsonSerializer.SerializeToElement(new
     {
         status = "{{nodes.sup.outputs.status}}",
         decision = "{{nodes.sup.outputs.decision}}",
         reason = "{{nodes.sup.outputs.reason}}",
+        summary = "{{nodes.sup.outputs.summary}}",
         turns = "{{nodes.sup.outputs.turns}}",
         integratedBranch = "{{nodes.sup.outputs.integratedBranch}}",
         repositoryId = "{{nodes.sup.outputs.repositoryId}}",

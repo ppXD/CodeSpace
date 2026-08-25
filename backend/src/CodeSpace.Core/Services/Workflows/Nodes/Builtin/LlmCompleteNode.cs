@@ -10,7 +10,8 @@ using Microsoft.Extensions.Logging;
 namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 
 /// <summary>
-/// Single-turn LLM completion. Config picks <c>provider</c> (Anthropic, etc) + <c>model</c>;
+/// Single-turn LLM completion. Config may pin a real wire <c>provider</c> (Anthropic, OpenAI, etc) and <c>model</c>;
+/// omitting the provider inherits the team's ranked pool.
 /// inputs supply the rendered system + user prompts. Outputs the completion text + token
 /// counts. Two distinct knobs:
 ///   - <see cref="NodeManifest.ConfigSchema"/> — "which LLM" (rarely changes at runtime)
@@ -50,9 +51,9 @@ public sealed class LlmCompleteNode : INodeRuntime
             {
               "type": "object",
               "x-intent": "Complete a prompt with {provider}, using {model}.",
-              "x-intentPlaceholders": { "provider": "Anthropic", "model": "the pool's recommended model" },
+              "x-intentPlaceholders": { "provider": "the team's default provider", "model": "the pool's recommended model" },
               "properties": {
-                "provider": { "type": "string", "enum": ["Anthropic", "OpenAI", "Custom"], "default": "Anthropic", "x-control": "radioCards", "x-enumLabels": { "Anthropic": "Anthropic (Claude)", "OpenAI": "OpenAI", "Custom": "Custom gateway" }, "x-optionConsequence": { "Anthropic": "Anthropic's Claude models — via an Anthropic model credential.", "OpenAI": "The OpenAI API, or an OpenAI-tagged compatible gateway — via an OpenAI model credential.", "Custom": "Your own OpenAI-compatible endpoint (LiteLLM / vLLM / OpenRouter…) — via a Custom-gateway model credential." }, "description": "Which wire to call — match it to how your model credential is set up. The Model list below shows what's enabled under the chosen provider.", "x-spotlight": 1 },
+                "provider": { "type": "string", "enum": ["Anthropic", "OpenAI", "Custom"], "x-control": "radioCards", "x-enumLabels": { "Anthropic": "Anthropic (Claude)", "OpenAI": "OpenAI", "Custom": "Custom gateway" }, "x-optionConsequence": { "Anthropic": "Anthropic's Claude models — via an Anthropic model credential.", "OpenAI": "The OpenAI API, or an OpenAI-tagged compatible gateway — via an OpenAI model credential.", "Custom": "Your own OpenAI-compatible endpoint (LiteLLM / vLLM / OpenRouter…) — via a Custom-gateway model credential." }, "description": "Optional provider pin. Leave unset to inherit the team's ranked pool; an explicit value pins the wire. The Model list shows what's enabled under the chosen provider.", "x-spotlight": 1 },
                 "model": { "type": "string", "x-selector": "poolModel", "title": "Model", "description": "Optional. Pins ONE model from your team's pool for the provider above — pick it from the list. Leave empty to let the pool pick its recommended model, or switch to Expression to bind a {{ref}}.", "x-spotlight": 2 },
                 "maxTokens": { "type": "integer", "minimum": 1, "default": 2048, "description": "Output-token cap. No artificial ceiling — the transport clamps it to the MODEL's real output ceiling, so pinning a high value never limits a model below its true limit. A value above the streaming threshold (~21k) is STREAMED on the wire so a long generation can't idle-timeout. The default stays small so an ordinary output remains a single buffered call." },
                 "temperature": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.2 },
@@ -62,7 +63,7 @@ public sealed class LlmCompleteNode : INodeRuntime
                 "stop": { "type": "array", "items": { "type": "string" }, "maxItems": 4, "description": "Optional stop sequences — generation halts when any is produced." },
                 "responseSchema": { "type": "object", "description": "Optional JSON Schema. When set, the model is constrained to return JSON matching it, surfaced on the 'json' output (downstream can index into it, e.g. {{nodes.this.outputs.json.items[0]}}). Requires a provider that supports structured output.", "x-spotlight": 3 }
               },
-              "required": ["provider"]
+              "required": []
             }
             """),
         InputSchema = SchemaBuilder.Parse("""
@@ -112,7 +113,7 @@ public sealed class LlmCompleteNode : INodeRuntime
 
     private async Task<NodeResult> RunCoreAsync(NodeRunContext context, CancellationToken cancellationToken)
     {
-        var provider = ReadString(context.Config, "provider", "Anthropic");
+        var provider = ReadString(context.Config, "provider", "Auto");
         var modelPin = ReadStringOrNull(context.Config, "model");   // optional pin; null = let the pool pick its recommended model
         var maxTokens = ReadInt(context.Config, "maxTokens", 2048);
         var temperature = ReadDouble(context.Config, "temperature", 0.2);
@@ -122,8 +123,6 @@ public sealed class LlmCompleteNode : INodeRuntime
         var userPrompt = ReadString(context.Inputs, "userPrompt", "");
 
         if (string.IsNullOrWhiteSpace(userPrompt)) return NodeResult.Fail("Input 'userPrompt' is required.");
-
-        var client = _clientRegistry.Resolve(provider);
 
         var useStructured = TryReadObject(context.Config, "responseSchema", out var responseSchema);
 
@@ -135,10 +134,14 @@ public sealed class LlmCompleteNode : INodeRuntime
         if (!NodeScopeReader.TryReadTeamId(context, out var teamId))
             return NodeResult.Fail("The run carries no team context — llm.complete resolves its model + credential from the team's pool.");
 
-        var pick = await ResolvePoolPickAsync(teamId, provider, modelPin, cancellationToken).ConfigureAwait(false);
+        var dispatch = await ResolvePoolDispatchAsync(teamId, provider, modelPin, cancellationToken).ConfigureAwait(false);
+        provider = dispatch.Provider;
+        var pick = dispatch.Pick;
 
         if (pick is null)
             return NodeResult.Fail(NoPoolModelMessage(provider, modelPin));
+
+        var client = _clientRegistry.Resolve(provider);
 
         // Structured mode: a responseSchema constrains the model to schema-valid JSON, surfaced on the
         // 'json' output. Routes through the IStructuredLLMClient sibling capability — clean fail if the
@@ -277,14 +280,35 @@ public sealed class LlmCompleteNode : INodeRuntime
             user_prompt_chars = userPrompt?.Length ?? 0,
         });
 
-    /// <summary>Resolve the pool pick in a FRESH DI scope (the node is a singleton — it must not capture the scoped selector's DbContext, which concurrent map branches would share + collide on). The pick is a detached POCO, safe to use after the scope disposes.</summary>
-    private async Task<ModelPoolPick?> ResolvePoolPickAsync(Guid teamId, string provider, string? modelPin, CancellationToken cancellationToken)
+    /// <summary>Resolve provider + model in a FRESH DI scope. Auto uses the team's ranked pool default; an explicit provider remains pinned. The detached pick is safe after the scope disposes.</summary>
+    private async Task<PoolDispatch> ResolvePoolDispatchAsync(Guid teamId, string configuredProvider, string? modelPin, CancellationToken cancellationToken)
     {
         using var scope = _scopeFactory.CreateScope();
         var selector = scope.ServiceProvider.GetRequiredService<IModelPoolSelector>();
+        if (!configuredProvider.Equals("Auto", StringComparison.OrdinalIgnoreCase))
+        {
+            var explicitPick = await selector.SelectAsync(teamId, configuredProvider, allowedModels: null, pinnedModel: modelPin, cancellationToken).ConfigureAwait(false);
+            return new PoolDispatch(configuredProvider, explicitPick);
+        }
 
-        return await selector.SelectAsync(teamId, provider, allowedModels: null, pinnedModel: modelPin, cancellationToken).ConfigureAwait(false);
+        var provider = await selector.ResolveTeamDefaultProviderAsync(teamId, cancellationToken).ConfigureAwait(false);
+
+        if (string.IsNullOrWhiteSpace(provider)) return new PoolDispatch("Auto", null);
+
+        // A profile model pin may belong to a non-default provider. Try the default first, then every registered wire,
+        // keeping a deterministic order and never widening past the team's pool.
+        var providers = new[] { provider }.Concat(_clientRegistry.All.Select(client => client.Provider).OrderBy(value => value, StringComparer.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase);
+        foreach (var candidate in providers)
+        {
+            var pick = await selector.SelectAsync(teamId, candidate, allowedModels: null, pinnedModel: modelPin, cancellationToken).ConfigureAwait(false);
+            if (pick is not null) return new PoolDispatch(candidate, pick);
+            if (modelPin is null) break;
+        }
+
+        return new PoolDispatch(provider, null);
     }
+
+    private sealed record PoolDispatch(string Provider, ModelPoolPick? Pick);
 
     /// <summary>The fail-closed message when nothing in the team's pool qualifies — names the provider + the pin (if any) so the operator knows exactly what to add to the pool.</summary>
     private static string NoPoolModelMessage(string provider, string? modelPin)

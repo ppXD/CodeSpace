@@ -33,6 +33,7 @@ public sealed class ArtifactReferenceOracle : IArtifactReferenceOracle, IScopedD
         ("workflow_run_tool_call", "arguments_artifact_id"),
         ("workflow_run_tool_call_attempt", "result_artifact_id"),
         ("workflow_run_tool_call_attempt", "error_artifact_id"),
+        ("workflow_run_sensitive_record_payload", "ciphertext_artifact_id"),
     ];
 
     private static readonly string ExistsSql = BuildExistsSql();

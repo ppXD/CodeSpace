@@ -6,6 +6,21 @@ using MediatR;
 
 namespace CodeSpace.Core.Handlers.QueryHandlers.Workflows;
 
+public sealed class ListWorkflowRunModelCallsQueryHandler : IRequestHandler<ListWorkflowRunModelCallsQuery, WorkflowRunModelCallPage?>
+{
+    private readonly IWorkflowRunModelCallReader _reader;
+    private readonly ICurrentTeam _currentTeam;
+
+    public ListWorkflowRunModelCallsQueryHandler(IWorkflowRunModelCallReader reader, ICurrentTeam currentTeam)
+    {
+        _reader = reader;
+        _currentTeam = currentTeam;
+    }
+
+    public async Task<WorkflowRunModelCallPage?> Handle(ListWorkflowRunModelCallsQuery request, CancellationToken cancellationToken) =>
+        await _reader.ReadPageAsync(request.RunId, _currentTeam.Id!.Value, request.Cursor, request.Limit, cancellationToken).ConfigureAwait(false);
+}
+
 public sealed class GetWorkflowRunModelCallByIdQueryHandler : IRequestHandler<GetWorkflowRunModelCallByIdQuery, WorkflowRunModelCallDetailMetadata?>
 {
     private readonly IWorkflowRunModelCallReader _reader;

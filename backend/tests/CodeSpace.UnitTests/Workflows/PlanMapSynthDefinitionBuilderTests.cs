@@ -298,9 +298,9 @@ public class PlanMapSynthDefinitionBuilderTests
         var def = Builder.Build(Context());
         var synth = def.Nodes.Single(n => n.Id == "synth");
 
-        // The synth is a REAL llm.complete reduce (provider default Anthropic), NOT a builtin.terminal raw-bind.
+        // The synth is a REAL llm.complete reduce (provider inherited from the team pool), NOT a builtin.terminal raw-bind.
         synth.TypeKey.ShouldBe("llm.complete");
-        synth.Config.GetProperty("provider").GetString().ShouldBe("Anthropic");
+        synth.Config.TryGetProperty("provider", out _).ShouldBeFalse("omission inherits the team's ranked provider without inventing a pseudo-wire enum member");
 
         // The userPrompt embeds the seed goal AND the map's results — generic over ANY subtask count, NOT a fixed
         // element-indexed width — through the map's BUDGET-BOUNDED projection, so the reduce sees every fanned-out

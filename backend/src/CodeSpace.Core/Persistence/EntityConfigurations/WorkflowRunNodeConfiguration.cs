@@ -18,6 +18,7 @@ public class WorkflowRunNodeConfiguration : IEntityTypeConfiguration<WorkflowRun
         // generation, no INSERT/UPDATE/DELETE methods, no shadow tracking changes.
         builder.HasNoKey().ToView("workflow_run_node");
 
+        builder.Property(n => n.RecordId).HasColumnName("record_id");
         builder.Property(n => n.Status).HasConversion<string>().HasMaxLength(16);
         builder.Property(n => n.InputsJson).HasColumnName("inputs_jsonb").HasColumnType("jsonb");
         builder.Property(n => n.OutputsJson).HasColumnName("outputs_jsonb").HasColumnType("jsonb");

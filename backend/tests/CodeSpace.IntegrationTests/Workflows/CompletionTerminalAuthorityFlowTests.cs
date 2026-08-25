@@ -352,7 +352,9 @@ public sealed class CompletionTerminalAuthorityFlowTests
         // Lock Clause 1's architecture pin: CompleteRunAsync must consult the authority BEFORE any status write —
         // a new terminal writer (or a reorder that writes first) breaks this pin and must argue itself in review.
         var source = File.ReadAllText(Path.Combine(FindRepoRoot(), "backend/src/CodeSpace.Core/Services/Workflows/Engine/WorkflowEngine.cs"));
-        var body = source[source.IndexOf("private async Task CompleteRunAsync", StringComparison.Ordinal)..];
+        var start = source.IndexOf("CompleteRunAsync(WorkflowRun", StringComparison.Ordinal);
+        start.ShouldBeGreaterThanOrEqualTo(0, "the terminal chokepoint must remain present");
+        var body = source[start..];
 
         body.IndexOf("ArbitrateAsync", StringComparison.Ordinal).ShouldBeGreaterThan(0);
         body.IndexOf("ArbitrateAsync", StringComparison.Ordinal).ShouldBeLessThan(body.IndexOf("run.Status =", StringComparison.Ordinal), "arbitration precedes the terminal write");

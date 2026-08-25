@@ -74,6 +74,17 @@ public class HarnessModelReconcilerTests
         result.Repaired.ShouldBeTrue();
     }
 
+    [Fact]
+    public void Reconciliation_can_only_select_from_the_operator_allowed_harness_pool()
+    {
+        var allowed = AgentHarnessPool.Clamp(Pool, new[] { "claude-code" });
+
+        var result = HarnessModelReconciler.Reconcile("codex-cli", "Anthropic", allowed, Default);
+
+        result.HarnessKind.ShouldBe("claude-code");
+        allowed.ShouldAllBe(h => !string.Equals(h.Kind, "codex-cli", StringComparison.OrdinalIgnoreCase));
+    }
+
     private sealed class FakeHarness : IAgentHarness, IModelCredentialProjector
     {
         public FakeHarness(string kind, params string[] providers) { Kind = kind; SupportedProviders = providers; }
