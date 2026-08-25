@@ -35,7 +35,7 @@ public sealed record SupervisorGoalConfig
     /// <summary>The frozen maximum character count for the optional merge-synthesis model input. New projected runs stamp a resolved value; null/invalid legacy authoring normalizes to <see cref="SupervisorSynthesisBudget.DefaultChars"/>.</summary>
     public int? SynthesisPromptBudgetChars { get; init; }
 
-    /// <summary>Optional allow-list of harness / agent kinds the supervisor may spawn (e.g. <c>["codex-cli"]</c>). Null / empty = no restriction (the harness default). RESERVED — stored + parsed; the spawn-time enforcement gate is a follow-up.</summary>
+    /// <summary>Optional allow-list of effective harness kinds the supervisor may spawn (e.g. <c>["codex-cli"]</c>). Enforced after persona/model reconciliation, so neither can bypass it. Null / empty = no restriction.</summary>
     public IReadOnlyList<string>? AllowedAgents { get; init; }
 
     /// <summary>Optional allow-list of tool kinds spawned agents may use — threaded into each spawned <c>AgentTask.Tools</c> (via <c>SupervisorTurnContext.SpawnedAgentTools</c>). Null / empty = no restriction.</summary>
@@ -131,8 +131,8 @@ public sealed record SupervisorGoalConfig
     /// The operator's ALLOWED AGENT (persona) POOL for the agents this supervisor dispatches — a multi-select of
     /// <c>AgentDefinition</c> ROW ids, the persona analogue of <see cref="AllowedModelIds"/>. Every dispatched agent's
     /// effective persona (a model-authored slug OR the run-level profile default) must be in this pool, else FAILS
-    /// CLOSED at dispatch. Null / empty = the pool is ALL the team's personas. Distinct from the wrong-typed reserved
-    /// <see cref="AllowedAgents"/> (harness/agent KIND strings, no enforcement) — this is persona Guids, enforced.
+    /// CLOSED at dispatch. Null / empty = the pool is ALL the team's personas. Distinct from
+    /// <see cref="AllowedAgents"/> (effective harness-kind strings) — this is persona Guids.
     /// </summary>
     public IReadOnlyList<Guid>? AllowedAgentDefinitionIds { get; init; }
 }

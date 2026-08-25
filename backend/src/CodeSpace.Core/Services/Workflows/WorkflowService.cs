@@ -1025,6 +1025,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         // Status-guarded CAS from ANY non-terminal state → Cancelled (a pure UPDATE, not a tracked save on xmin, so
         // it never races the engine's own heartbeat-driven concurrency). 0 rows = the run reached a terminal state
         // between the read and the flip (the engine completed it, or a concurrent cancel won) → no-op, re-read.
+        await using var terminalTransaction = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         var flipped = await _db.WorkflowRun
             .Where(r => r.Id == runId && r.TeamId == teamId && r.Status == current.Value)
             .ExecuteUpdateAsync(s => s
@@ -1034,6 +1035,11 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
         if (flipped == 0) return await ReReadTerminalOutcomeAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
 
+        // The terminal row and matching ledger fact are one commit. Teardown is a recoverable ceremony and runs only
+        // after this truth is visible, so a process-kill or child-cleanup failure cannot leave a terminal without tape.
+        await _recordLogger.RunCancelledAsync(runId, TimeSpan.Zero, cancellationToken).ConfigureAwait(false);
+        await terminalTransaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+
         // Trip the in-process walk's token so an actively-running engine walk on THIS host stops cooperatively
         // at its next safe checkpoint instead of running every remaining node under CancellationToken.None. A
         // no-op when no walk is running here (a parked run, or one walking on another replica — that one is
@@ -1041,8 +1047,6 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         _cancellationRegistry.Cancel(runId);
 
         var agentRunsCancelled = await TearDownCancelledRunAsync(runId, cancellationToken).ConfigureAwait(false);
-
-        await _recordLogger.RunCancelledAsync(runId, TimeSpan.Zero, cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation("Workflow run cancelled by operator. RunId={RunId} TeamId={TeamId} From={From} AgentRunsCancelled={AgentRunsCancelled}", runId, teamId, current.Value, agentRunsCancelled);
 

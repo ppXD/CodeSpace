@@ -101,7 +101,7 @@ public sealed class HttpRequestNode : INodeRuntime
 
         using var request = BuildRequest(method, url, context.Inputs);
 
-        context.Logger.LogInformation("HTTP {Method} {Url} (timeout={Timeout}s)", method, url, timeoutSeconds);
+        context.Logger.LogInformation("HTTP {Method} {Target} (timeout={Timeout}s)", method, SafeLogTarget(url), timeoutSeconds);
 
         // Wrap the external HTTP call so the ledger records a
         // (external_call.started, external_call.completed | external_call.failed) pair.
@@ -178,6 +178,10 @@ public sealed class HttpRequestNode : INodeRuntime
             header_names = headerNames,
         });
     }
+
+    private static string SafeLogTarget(string url) => Uri.TryCreate(url, UriKind.Absolute, out var parsed)
+        ? parsed.GetLeftPart(UriPartial.Authority)
+        : "[invalid-or-relative-url]";
 
     private static HttpRequestMessage BuildRequest(HttpMethod method, string url, IReadOnlyDictionary<string, JsonElement> inputs)
     {

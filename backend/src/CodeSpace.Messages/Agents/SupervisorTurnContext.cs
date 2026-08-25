@@ -177,6 +177,9 @@ public sealed record SupervisorTurnContext
     /// </summary>
     public IReadOnlyList<string>? SpawnedAgentTools { get; init; }
 
+    /// <summary>The operator's allowed effective harness-kind pool. Applied after persona and model reconciliation so the final CLI adapter cannot escape it. Null / empty = all registered harnesses.</summary>
+    public IReadOnlyList<string>? AllowedAgentKinds { get; init; }
+
     /// <summary>
     /// The operator's ALLOWED MODEL POOL for spawned agents (the model analogue of the bound repos) — a list of
     /// credentialed-model ROW ids. Every dispatched agent's effective model must resolve to a row in this pool and runs

@@ -146,6 +146,59 @@ public sealed class WorkflowRunModelCallReadFlowTests
         part.Text.ShouldBe("USER", "the projected attempt's exact started row wins over an earlier row that reused the correlation in another source scope");
     }
 
+    [Fact]
+    public async Task Run_level_page_indexes_projected_calls_from_the_stable_cross_producer_plane()
+    {
+        var seeded = await SeedCallAsync(includeMissingSystemPrompt: false, result: "RESULT");
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<IWorkflowRunModelCallProjector>().SweepAsync(50, CancellationToken.None);
+
+        var page = await scope.Resolve<IWorkflowRunModelCallReader>().ReadPageAsync(seeded.RunId, seeded.TeamId, cursor: null, limit: 20, CancellationToken.None);
+
+        page.ShouldNotBeNull();
+        page!.Items.Count.ShouldBe(1);
+        page.Items[0].Purpose.ShouldBe("supervisor.decision/v1");
+        page.Items[0].CaptureSource.ShouldBe("workflow-run-record/v1");
+        page.Items[0].WorkflowRunModelCallId.ShouldNotBe(Guid.Empty);
+    }
+
+    [Fact]
+    public async Task Run_level_page_uses_a_created_time_and_id_keyset_without_duplicates_across_equal_timestamps()
+    {
+        var seeded = await SeedCallAsync(includeMissingSystemPrompt: false, result: "RESULT");
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<IWorkflowRunModelCallProjector>().SweepAsync(50, CancellationToken.None);
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var tiedAt = DateTimeOffset.UtcNow.AddDays(1);
+        var tiedIds = new[]
+        {
+            Guid.Parse("10000000-0000-0000-0000-000000000001"),
+            Guid.Parse("10000000-0000-0000-0000-000000000002"),
+            Guid.Parse("10000000-0000-0000-0000-000000000003"),
+        };
+        db.WorkflowRunModelCall.AddRange(tiedIds.Select((id, index) => new WorkflowRunModelCall
+        {
+            Id = id, TeamId = seeded.TeamId, WorkflowRunId = seeded.RunId, CallOrdinal = index + 10,
+            Purpose = "keyset-test/v1", CaptureSource = "test/v1", CaptureCompleteness = WorkflowRunCaptureCompleteness.Partial,
+            CreatedDate = tiedAt, LastModifiedDate = tiedAt,
+        }));
+        await db.SaveChangesAsync();
+
+        var reader = scope.Resolve<IWorkflowRunModelCallReader>();
+        var first = (await reader.ReadPageAsync(seeded.RunId, seeded.TeamId, cursor: null, limit: 2, CancellationToken.None))!;
+        first.Items.Count.ShouldBe(2);
+        first.NextCursor.ShouldNotBeNull();
+        var second = (await reader.ReadPageAsync(seeded.RunId, seeded.TeamId, first.NextCursor, limit: 2, CancellationToken.None))!;
+
+        var ids = first.Items.Concat(second.Items).Select(value => value.WorkflowRunModelCallId).ToList();
+        ids.Count.ShouldBe(4);
+        ids.Distinct().Count().ShouldBe(4, "the composite cursor neither repeats nor skips rows sharing one timestamptz");
+        ids.ShouldContain(tiedIds[0]);
+        ids.ShouldContain(tiedIds[1]);
+        ids.ShouldContain(tiedIds[2]);
+        second.NextCursor.ShouldBeNull();
+    }
+
     private async Task<(Guid RunId, Guid TeamId, long Sequence)> SeedCallAsync(bool includeMissingSystemPrompt, string result, string? earlierForeignPrompt = null)
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);

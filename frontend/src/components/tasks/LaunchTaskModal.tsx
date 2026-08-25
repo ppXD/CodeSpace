@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 import type { TaskSpecSuggestion, TaskSurfaceKind } from "@/api/tasks";
-import { buildLaunchInput, DEFAULT_ACCEPTANCE } from "@/lib/launchInput";
+import { buildLaunchInput, DEFAULT_ACCEPTANCE, type LaunchBooleanOverride } from "@/lib/launchInput";
 import { presetOf, QUALITY_PRESETS, type QualityTier } from "@/lib/qualityPresets";
 import { Combo, type Option } from "@/components/common/Combo";
 import { DecisionLadderDiagram, EvaluationPipelineDiagram, HelpTip, PlanCriticDiagram } from "@/components/tasks/LaunchHelp";
@@ -13,6 +13,12 @@ import { useCredentialedModels } from "@/hooks/use-model-credentials";
 import { useRepositories, useRepositoryBranches } from "@/hooks/use-repositories";
 import { useSpecPreview } from "@/hooks/use-spec-preview";
 import { useLaunchTask } from "@/hooks/use-tasks";
+
+const BOOLEAN_OVERRIDE_OPTIONS: Option[] = [
+  { value: "inherit", label: "Inherit", desc: "Use the effective profile or deployment default" },
+  { value: "on", label: "On", desc: "Explicitly enable for this run" },
+  { value: "off", label: "Off", desc: "Explicitly disable for this run" },
+];
 
 /** Caller-supplied prefill. The component shape is INVARIANT across surfaces (Repository / PR / Issue /
  *  Chat / Workflow / Run failure / Decision queue) — only this prop and `surface` differ. */
@@ -104,10 +110,10 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   ];
   // Design-ahead Customize config (interactive UI state; not yet sent to the launch command).
   const [cfg, setCfg] = useState({
-    pushBranch: false, tools: [] as string[], enableMcp: false, cwdMode: "auto",
+    pushBranch: "inherit" as LaunchBooleanOverride, tools: [] as string[], enableMcp: "inherit" as LaunchBooleanOverride, cwdMode: "auto",
     agentModels: [] as string[], agentPool: [] as string[],
     maxParallel: "5", budget: "none",
-    integrateBranches: false, autonomyCeiling: "",
+    integrateBranches: "inherit" as LaunchBooleanOverride, autonomyCeiling: "",
     acceptance: [...DEFAULT_ACCEPTANCE], acceptanceChecks: [] as string[],
     decisionSurface: "run-activity", timeout: "safe-default", timeLimit: "3600", notifyChat: "off",
     requirePlanConfirmation: false, plannerReview: "None",
@@ -118,9 +124,9 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   // Hand-editing a knob after picking Delivery must not quietly drop the mandate back to Prototype.
   const [tier, setTier] = useState<QualityTier>("Prototype");
   const resetTab = () => {
-    if (customizeTab === "execution") { setAgentDefinitionId(""); setHarness(""); setModel(""); setModelCredentialId(""); setRunnerKind(""); setC({ pushBranch: false, tools: [], enableMcp: false, cwdMode: "auto" }); }
+    if (customizeTab === "execution") { setAgentDefinitionId(""); setHarness(""); setModel(""); setModelCredentialId(""); setRunnerKind(""); setC({ pushBranch: "inherit", tools: [], enableMcp: "inherit", cwdMode: "auto" }); }
     else if (customizeTab === "planning") setC({ requirePlanConfirmation: false, plannerReview: "None", reviewerModel: "" });
-    else if (customizeTab === "supervisor") setC({ agentModels: [], agentPool: [], maxParallel: "5", budget: "none", integrateBranches: false, autonomyCeiling: "", decisionReview: "None" });
+    else if (customizeTab === "supervisor") setC({ agentModels: [], agentPool: [], maxParallel: "5", budget: "none", integrateBranches: "inherit", autonomyCeiling: "", decisionReview: "None" });
     else if (customizeTab === "evaluation") setC({ acceptance: [...DEFAULT_ACCEPTANCE], acceptanceChecks: [], outputReview: "None", reviseRounds: "", reviewerAgent: false });
     else setC({ decisionSurface: "run-activity", timeout: "safe-default", timeLimit: "3600", notifyChat: "off" });
   };
@@ -474,9 +480,9 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
                     })}
                   </div>
                 </RowPop>
-                <SToggleRow label="Publish branch" on={cfg.pushBranch} onToggle={() => setC({ pushBranch: !cfg.pushBranch })} />
+                <Combo label="Publish branch" value={cfg.pushBranch} options={BOOLEAN_OVERRIDE_OPTIONS} onChange={v => setC({ pushBranch: v as LaunchBooleanOverride })} />
                 <Combo label="Working dir" value={cfg.cwdMode} options={[{ value: "auto", label: "Auto" }, { value: "workspace", label: "Workspace root" }, { value: "primary", label: "Primary repo" }]} onChange={v => setC({ cwdMode: v })} />
-                <SToggleRow label="Force MCP fabric" on={cfg.enableMcp} onToggle={() => setC({ enableMcp: !cfg.enableMcp })} />
+                <Combo label="Full MCP fabric" value={cfg.enableMcp} options={BOOLEAN_OVERRIDE_OPTIONS} onChange={v => setC({ enableMcp: v as LaunchBooleanOverride })} />
               </>}
 
               {customizeTab === "supervisor" && <>
@@ -527,7 +533,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
                   <div className="lt3-poolhint">The run keeps working the plan until it's done — bounded by this concurrency and the Budget, not a fixed round or agent count.</div>
                 </RowPop>
                 <Combo label="Autonomy ceiling" value={cfg.autonomyCeiling} options={[{ value: "", label: "Inherit" }, ...PERMS.map(p => ({ value: p.v, label: p.v }))]} onChange={v => setC({ autonomyCeiling: v })} />
-                <SToggleRow label="Integrate branches" on={cfg.integrateBranches} onToggle={() => setC({ integrateBranches: !cfg.integrateBranches })} />
+                <Combo label="Integrate branches" value={cfg.integrateBranches} options={BOOLEAN_OVERRIDE_OPTIONS} onChange={v => setC({ integrateBranches: v as LaunchBooleanOverride })} />
                 <div className="lt3-hrow">
                   <Combo label="Decision critic" value={cfg.decisionReview} options={[
                     { value: "None", label: "Off", desc: "Decisions execute unreviewed — plan decisions can still use the Plan critic" },

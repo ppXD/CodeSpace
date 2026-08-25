@@ -88,6 +88,11 @@ public class CompletionEnforcedCohortFlowTests
         run.Status.ShouldBe(WorkflowRunStatus.Suspended, "an Enforced claim nothing staked must still park, never terminalize");
         run.Error.ShouldNotBeNull();
         run.Error.ShouldContain("completion-authority", customMessage: "the park must name its arbiter — check workflow_run.error for the decision detail");
+
+        var terminalRecords = await verify.Resolve<CodeSpaceDbContext>().WorkflowRunRecord.AsNoTracking()
+            .Where(r => r.RunId == runId && new[] { WorkflowRunRecordTypes.RunCompleted, WorkflowRunRecordTypes.RunFailed, WorkflowRunRecordTypes.RunCancelled }.Contains(r.RecordType))
+            .ToListAsync();
+        terminalRecords.ShouldBeEmpty("a parked run is resumable, so its append-only ledger must not announce a contradictory terminal state");
     }
 
     [Fact]

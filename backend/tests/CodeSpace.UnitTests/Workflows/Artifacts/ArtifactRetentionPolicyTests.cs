@@ -26,12 +26,12 @@ public sealed class ArtifactRetentionPolicyTests
     private const string UnreachableDatabase = "Host=127.0.0.1;Port=1;Database=unused;Username=unused;Password=unused;Timeout=1";
 
     [Fact]
-    public void The_only_registered_class_keeps_captured_deliverable_bytes_for_a_week_then_quarantines_them_for_a_day()
+    public void Registered_classes_keep_orphan_candidates_for_a_week_then_quarantine_them_for_a_day()
     {
-        var rule = ArtifactRetentionPolicy.For(ArtifactRetentionClass.ArtifactManifestContent.ToString()).ShouldNotBeNull();
+        var rules = new[] { ArtifactRetentionClass.ArtifactManifestContent, ArtifactRetentionClass.SensitiveRecordPayload }
+            .Select(value => ArtifactRetentionPolicy.For(value.ToString()).ShouldNotBeNull()).ToArray();
 
-        rule.MinimumAge.ShouldBe(TimeSpan.FromDays(7));
-        rule.QuarantineWindow.ShouldBe(TimeSpan.FromHours(24));
+        rules.ShouldAllBe(rule => rule.MinimumAge == TimeSpan.FromDays(7) && rule.QuarantineWindow == TimeSpan.FromHours(24));
         ArtifactRetentionPolicy.MinimumAgeFloor.ShouldBe(TimeSpan.FromDays(7), "the claim query pre-filters on the smallest floor across all classes");
     }
 
@@ -94,7 +94,7 @@ public sealed class ArtifactRetentionPolicyTests
     }
 
     [Fact]
-    public void The_manifest_capture_is_the_only_production_caller_that_can_mint_a_retention_candidate()
+    public void Every_production_retention_candidate_has_one_oracle_visible_holder_write()
     {
         var sourceRoot = Path.Combine(FindRepoRoot(), "backend", "src", "CodeSpace.Core");
         var callers = Directory.EnumerateFiles(sourceRoot, "*.cs", SearchOption.AllDirectories)
@@ -102,12 +102,12 @@ public sealed class ArtifactRetentionPolicyTests
             .Select(path => Path.GetRelativePath(sourceRoot, path).Replace(Path.DirectorySeparatorChar, '/'))
             .OrderBy(path => path, StringComparer.Ordinal).ToArray();
 
-        callers.ShouldBe(["Services/Agents/Publish/ArtifactManifestStore.cs"],
-            "the routed reaper relies on every retention-candidate id being freshly obtained through PutDeclaredAsync before its one holder write; a second production caller must prove the same admission invariant");
+        callers.ShouldBe(["Services/Agents/Publish/ArtifactManifestStore.cs", "Services/Workflows/Runtime/WorkflowSensitivePayloadStore.cs"],
+            "every retention-candidate id must be freshly obtained through PutDeclaredAsync immediately before its one oracle-visible holder write");
         typeof(IArtifactManifestStore).GetMethod(nameof(IArtifactManifestStore.CaptureDeclaredAsync))!.ReturnType.ShouldBe(typeof(Task<int>),
             "manifest capture must not return the candidate artifact id for a later writer to reuse without passing the store's availability/dedup fence again");
-        File.ReadAllText(Path.Combine(sourceRoot, callers.Single())).ShouldContain("ContentArtifactId = artifactId",
-            customMessage: "the sole production caller must consume the freshly admitted id as the oracle-visible manifest reference");
+        File.ReadAllText(Path.Combine(sourceRoot, callers[0])).ShouldContain("ContentArtifactId = artifactId");
+        File.ReadAllText(Path.Combine(sourceRoot, callers[1])).ShouldContain("CiphertextArtifactId = artifactId");
     }
 
     [Fact]

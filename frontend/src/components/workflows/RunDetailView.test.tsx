@@ -37,7 +37,7 @@ vi.mock("@/hooks/use-workflows", () => ({
   useRunPhases: () => useRunPhasesMock(),
   useRunTimeline: () => ({ data: undefined }),   // the narrative band stays empty in these node-trace tests
   useRunRecordWindow: () => ({ records: [], isLoading: false, isLoadingOlder: false, error: null, hasOlder: false, olderRecordsOmitted: false, newerRecordsOmitted: false, atLatest: true, loadOlder: vi.fn(), returnToLatest: vi.fn() }),   // the Trace tab isn't the active view here
-  useRunDataCompleteness: () => ({ data: { runId: "parent-1", scope: "RecordedFacetsOnly", facets: [], hasStatements: false, runWideVerdict: null, truncated: false }, isLoading: false, error: null }),
+  useRunDataCompleteness: () => ({ data: { runId: "parent-1", scope: "RecordedFacetsOnly", facets: [], hasStatements: false, isTerminal: false, requiredFacets: [], missingFacetStatements: [], runWideVerdict: null, truncated: false }, isLoading: false, error: null }),
   useCellAttempts: () => ({ data: { attempts: [] } }),   // a terminal's per-cell history — empty (no rerun) here
 }));
 

@@ -3685,6 +3685,8 @@ textarea:-webkit-autofill {
 .acs-root .gt-detail h3 { margin: 3px 0 0; font-family: var(--font-mono, ui-monospace, monospace); font-size: 14px; }
 .acs-root .gt-eyebrow, .acs-root .gt-field-label { display: block; color: var(--muted-2); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
 .acs-root .gt-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 14px; margin-top: 12px; }
+.acs-root .gt-tabs { display: flex; gap: 6px; margin: 14px 0 10px; padding-bottom: 9px; border-bottom: 1px solid var(--line); }
+.acs-root .gt-tabs button[aria-selected="true"] { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
 .acs-root .gt-field { min-width: 0; }
 .acs-root .gt-field-value { display: block; margin-top: 2px; overflow-wrap: anywhere; color: var(--ink-2); font-size: 11.5px; }
 .acs-root .gt-mono { font-family: var(--font-mono, ui-monospace, monospace); font-size: 10.5px; }

@@ -108,6 +108,91 @@ public sealed class WorkflowRunModelCallProjectorTests
     }
 
     [Fact]
+    public async Task Started_without_terminal_is_visible_as_pending_then_terminal_attaches_exactly_once()
+    {
+        var world = await SeedRunAsync();
+        var correlationId = Guid.NewGuid();
+        // Postgres timestamptz keeps microseconds while UtcNow may carry 100ns residue. This test intentionally makes
+        // an exact terminal-time assertion, so seed a lossless whole-second instant instead of intermittently testing
+        // the provider's documented precision truncation.
+        var startedAt = DateTimeOffset.FromUnixTimeSeconds(DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        var started = Record(world.RunId, WorkflowRunRecordTypes.InteractionStarted, correlationId,
+            """{"kind":"supervisor.decision","provider":"custom","model":"reasoner-v1","prompt":{"user":"durable intent"}}""", startedAt);
+        await AddRecordsAsync(started);
+
+        var first = await SweepAsync(50);
+        first.StartedAttemptsProjected.ShouldBe(1);
+        first.BodyCapturesDeclared.ShouldBe(1);
+
+        using (var pendingScope = _fixture.BeginScope())
+        {
+            var db = pendingScope.Resolve<CodeSpaceDbContext>();
+            var call = await db.WorkflowRunModelCall.AsNoTracking().SingleAsync(value => value.SourceCorrelationId == correlationId);
+            var attempt = await db.WorkflowRunModelCallAttempt.AsNoTracking().SingleAsync(value => value.ModelCallId == call.Id);
+            attempt.SourceStartedRecordId.ShouldBe(started.Id);
+            attempt.SourceTerminalRecordId.ShouldBeNull();
+            attempt.Status.ShouldBe("Pending");
+            attempt.CompletedAt.ShouldBeNull();
+            attempt.SourceEvidenceRevision.ShouldBe(1);
+            (await db.WorkflowRunModelCallBodyCapture.CountAsync(value => value.ModelCallAttemptId == attempt.Id
+                && value.BodyKind == WorkflowRunModelCallBodyKind.LogicalRequest)).ShouldBe(1);
+        }
+
+        var terminal = Record(world.RunId, WorkflowRunRecordTypes.InteractionCompleted, correlationId,
+            """{"kind":"supervisor.decision","provider":"custom","model":"reasoner-v1","usage":{"inputTokens":4,"outputTokens":2}}""",
+            started.OccurredAt.AddSeconds(2));
+        await AddRecordsAsync(terminal);
+
+        var attached = await SweepAsync(50);
+        attached.LateTerminalsAttached.ShouldBe(1);
+        (await SweepAsync(50)).TotalChanges.ShouldBe(0);
+
+        using var scope = _fixture.BeginScope();
+        var readDb = scope.Resolve<CodeSpaceDbContext>();
+        var projectedCall = await readDb.WorkflowRunModelCall.AsNoTracking().SingleAsync(value => value.SourceCorrelationId == correlationId);
+        var projectedAttempt = await readDb.WorkflowRunModelCallAttempt.AsNoTracking().SingleAsync(value => value.ModelCallId == projectedCall.Id);
+        projectedAttempt.SourceStartedRecordId.ShouldBe(started.Id);
+        projectedAttempt.SourceTerminalRecordId.ShouldBe(terminal.Id);
+        projectedAttempt.SourceEvidenceRevision.ShouldBe(2);
+        projectedAttempt.Status.ShouldBe("Succeeded");
+        projectedAttempt.InputTokens.ShouldBe(4);
+        projectedAttempt.OutputTokens.ShouldBe(2);
+        projectedAttempt.CompletedAt.ShouldBe(terminal.OccurredAt);
+    }
+
+    [Fact]
+    public async Task Started_without_terminal_settles_indeterminate_after_the_owning_run_is_terminal()
+    {
+        var world = await SeedRunAsync();
+        var correlationId = Guid.NewGuid();
+        var started = Record(world.RunId, WorkflowRunRecordTypes.InteractionStarted, correlationId,
+            """{"kind":"grader.oracle","provider":"custom","model":"judge-v1","prompt":{"user":"evaluate"}}""");
+        await AddRecordsAsync(started);
+        using (var terminalScope = _fixture.BeginScope())
+        {
+            var completedAt = started.OccurredAt.AddSeconds(5);
+            await terminalScope.Resolve<CodeSpaceDbContext>().WorkflowRun.Where(value => value.Id == world.RunId)
+                .ExecuteUpdateAsync(update => update.SetProperty(value => value.Status, WorkflowRunStatus.Failure)
+                    .SetProperty(value => value.CompletedAt, completedAt));
+        }
+
+        var result = await SweepAsync(50);
+        result.StartedAttemptsProjected.ShouldBe(1);
+        result.OrphanedStartsSettled.ShouldBe(1);
+        (await SweepAsync(50)).TotalChanges.ShouldBe(0);
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var callId = await db.WorkflowRunModelCall.Where(value => value.SourceCorrelationId == correlationId).Select(value => value.Id).SingleAsync();
+        var attempt = await db.WorkflowRunModelCallAttempt.AsNoTracking().SingleAsync(value => value.ModelCallId == callId);
+        attempt.Status.ShouldBe("Indeterminate");
+        attempt.ErrorCode.ShouldBe("TerminalCaptureMissing");
+        attempt.SourceEvidenceRevision.ShouldBe(2);
+        attempt.SourceTerminalRecordId.ShouldBeNull();
+        attempt.CompletedAt.ShouldNotBeNull();
+    }
+
+    [Fact]
     public async Task Malformed_payload_is_visible_as_corrupt_and_never_blocks_a_later_candidate()
     {
         var world = await SeedRunAsync();

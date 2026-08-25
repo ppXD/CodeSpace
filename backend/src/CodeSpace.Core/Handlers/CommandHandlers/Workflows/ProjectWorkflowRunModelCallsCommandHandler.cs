@@ -1,4 +1,5 @@
 using CodeSpace.Core.Services.Workflows.ModelCalls;
+using System.Diagnostics;
 using CodeSpace.Messages.Commands.Workflows;
 using MediatR;
 
@@ -10,6 +11,11 @@ public sealed class ProjectWorkflowRunModelCallsCommandHandler : IRequestHandler
 
     public ProjectWorkflowRunModelCallsCommandHandler(IWorkflowRunModelCallProjector projector) => _projector = projector;
 
-    public async Task<int> Handle(ProjectWorkflowRunModelCallsCommand request, CancellationToken cancellationToken) =>
-        (await _projector.SweepAsync(request.BatchSize, cancellationToken).ConfigureAwait(false)).TotalChanges;
+    public async Task<int> Handle(ProjectWorkflowRunModelCallsCommand request, CancellationToken cancellationToken)
+    {
+        var started = Stopwatch.GetTimestamp();
+        var result = await _projector.SweepAsync(request.BatchSize, cancellationToken).ConfigureAwait(false);
+        WorkflowRunModelCallMetrics.RecordProjection(result, request.BatchSize, Stopwatch.GetElapsedTime(started));
+        return result.TotalChanges;
+    }
 }

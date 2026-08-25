@@ -565,6 +565,7 @@ public class SupervisorTurnServiceTests
         var outputs = AgentSupervisorNode.Finish(NullLogger.Instance, SupervisorTurnResult.Finished("stop", terminalReason: null, stopClassification: success)).Outputs;
 
         outputs["status"].GetString().ShouldBe("Completed");
+        outputs["summary"].GetString().ShouldBe("shipped", "the supervisor's final synthesis must survive onto the workflow output contract");
     }
 
     [Fact]

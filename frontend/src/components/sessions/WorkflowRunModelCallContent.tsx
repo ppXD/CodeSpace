@@ -428,7 +428,7 @@ function StableTrace({ metadata, attempt, legacy }: { metadata: WorkflowRunModel
 
 const LEGACY_BODY_STATES: ReadonlySet<WorkflowRunModelCallBodyReferenceState> = new Set(["NotRecorded", "Partial", "LegacyUnknown"]);
 
-function StableCall({ metadata, sequence, tab }: { metadata: WorkflowRunModelCallDetailMetadata; sequence: number; tab: WorkflowRunModelCallTab }) {
+function StableCall({ metadata, sequence, tab }: { metadata: WorkflowRunModelCallDetailMetadata; sequence?: number; tab: WorkflowRunModelCallTab }) {
   const orderedAttempts = useMemo(() => [...metadata.attempts].sort((left, right) => left.attemptOrdinal - right.attemptOrdinal || left.attemptId.localeCompare(right.attemptId)), [metadata.attempts]);
   const [selectedAttemptId, setSelectedAttemptId] = useState<string>();
   const selectedAttempt = orderedAttempts.find((attempt) => attempt.attemptId === selectedAttemptId) ?? orderedAttempts.at(-1) ?? null;
@@ -438,25 +438,30 @@ function StableCall({ metadata, sequence, tab }: { metadata: WorkflowRunModelCal
   const logicalRequest = descriptor(metadata, "LogicalRequest");
   const attemptRequest = selectedAttempt == null ? undefined : descriptor(selectedAttempt, "AttemptRequest");
   const error = selectedAttempt == null ? undefined : descriptor(selectedAttempt, "AttemptError");
-  const fallbackResponse = exactLedgerAttempt != null && response != null && LEGACY_BODY_STATES.has(response.referenceState);
-  const fallbackPrompt = exactLedgerAttempt?.sourceStartedRecordId != null && logicalRequest != null && attemptRequest != null
+  const fallbackResponse = sequence != null && exactLedgerAttempt != null && response != null && LEGACY_BODY_STATES.has(response.referenceState);
+  const fallbackPrompt = sequence != null && exactLedgerAttempt?.sourceStartedRecordId != null && logicalRequest != null && attemptRequest != null
     && LEGACY_BODY_STATES.has(logicalRequest.referenceState) && LEGACY_BODY_STATES.has(attemptRequest.referenceState);
-  const fallbackError = exactLedgerAttempt?.status === "Failed" && error != null && LEGACY_BODY_STATES.has(error.referenceState);
+  const fallbackError = sequence != null && exactLedgerAttempt?.status === "Failed" && error != null && LEGACY_BODY_STATES.has(error.referenceState);
 
   return (
     <>
       <StableMetadata metadata={metadata} selectedAttemptId={selectedAttempt?.attemptId} onSelectAttempt={setSelectedAttemptId} />
       {tab === "result"
         ? selectedAttempt == null ? <ReadState availability="MetadataMissing" message="No physical attempt response was projected." />
-          : fallbackResponse ? <StableLegacyFallback descriptor={response!}><LegacyPart runId={metadata.runId} sequence={sequence} part="Result" emptyLabel="result" /></StableLegacyFallback>
+            : fallbackResponse ? <StableLegacyFallback descriptor={response!}><LegacyPart runId={metadata.runId} sequence={sequence!} part="Result" emptyLabel="result" /></StableLegacyFallback>
             : <StableBody metadata={metadata} descriptor={response} emptyLabel="result" />
         : tab === "usage" ? <StableUsage attempt={selectedAttempt} />
-        : tab === "trace" ? <StableTrace metadata={metadata} attempt={selectedAttempt} legacy={fallbackError ? { runId: metadata.runId, sequence } : undefined} />
+        : tab === "trace" ? <StableTrace metadata={metadata} attempt={selectedAttempt} legacy={fallbackError ? { runId: metadata.runId, sequence: sequence! } : undefined} />
         : fallbackPrompt
-          ? <StableLegacyFallback descriptor={logicalRequest!}><LegacyPart runId={metadata.runId} sequence={sequence} part="SystemPrompt" heading="SYSTEM" emptyLabel="system prompt" /><LegacyPart runId={metadata.runId} sequence={sequence} part="UserPrompt" heading="USER" emptyLabel="user prompt" /></StableLegacyFallback>
+          ? <StableLegacyFallback descriptor={logicalRequest!}><LegacyPart runId={metadata.runId} sequence={sequence!} part="SystemPrompt" heading="SYSTEM" emptyLabel="system prompt" /><LegacyPart runId={metadata.runId} sequence={sequence!} part="UserPrompt" heading="USER" emptyLabel="user prompt" /></StableLegacyFallback>
           : <><StableBody metadata={metadata} descriptor={logicalRequest} heading="LOGICAL REQUEST" emptyLabel="logical request" />{selectedAttempt && <StableBody metadata={metadata} descriptor={attemptRequest} heading={`ATTEMPT ${selectedAttempt.attemptOrdinal} REQUEST`} emptyLabel="attempt request" />}</>}
     </>
   );
+}
+
+/** Stable-id content used by cross-producer indexes. It never touches the sequence compatibility route. */
+export function WorkflowRunStableModelCallContent({ metadata, tab }: { metadata: WorkflowRunModelCallDetailMetadata; tab: WorkflowRunModelCallTab }) {
+  return <StableCall metadata={metadata} tab={tab} />;
 }
 
 /** Sequence metadata is the compatibility gate; projected calls switch to stable-id reads without changing legacy runs. */

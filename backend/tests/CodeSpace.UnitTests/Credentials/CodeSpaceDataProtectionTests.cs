@@ -1,4 +1,5 @@
 using CodeSpace.Core.Services.Credentials;
+using CodeSpace.Core.Services.Workflows.Runtime;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
@@ -28,6 +29,12 @@ public class CodeSpaceDataProtectionTests
     public void Credential_protector_purpose_is_pinned_renaming_it_orphans_every_encrypted_payload()
     {
         DataProtectionPayloadEncryptor.ProtectorPurpose.ShouldBe("CodeSpace.Credentials.v1");
+    }
+
+    [Fact]
+    public void Workflow_recovery_protector_purpose_is_pinned_renaming_it_orphans_every_encrypted_node_output()
+    {
+        DataProtectionWorkflowSensitivePayloadProtector.ProtectorPurpose.ShouldBe("CodeSpace.Workflows.SensitiveRecordPayload.v1");
     }
 
     [Fact]

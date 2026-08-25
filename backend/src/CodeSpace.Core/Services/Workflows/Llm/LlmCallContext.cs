@@ -1,5 +1,7 @@
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Lifecycle;
+using CodeSpace.Core.Services.Workflows.Runtime;
+using CodeSpace.Core.Services.RunData;
 
 namespace CodeSpace.Core.Services.Workflows.Llm;
 
@@ -26,7 +28,11 @@ public sealed record LlmCallScope(
     /// <summary>W-hard: the run's budget ledger, carried by a pusher that wants THIS scope's model calls atomically admitted against <see cref="CapUsd"/>. Null (every pre-slice pusher) = no reservation, byte-identical.</summary>
     Budget.IBudgetLedger? Budget = null,
     /// <summary>The run's cost cap the guard admits against. Null = no cap known here — no reservation.</summary>
-    decimal? CapUsd = null);
+    decimal? CapUsd = null,
+    /// <summary>Optional exact-value masker applied only to persisted/offloaded model-call capture.</summary>
+    PersistenceSecretRedactor? CaptureRedactor = null,
+    /// <summary>Observation-only fail-open completeness accounting for this call's capture intent and gaps.</summary>
+    IRunDataCompletenessWriter? Completeness = null);
 
 public static class LlmCallContext
 {
@@ -39,6 +45,10 @@ public static class LlmCallContext
     public static IDisposable Push(LlmCallScope scope)
     {
         var prior = Holder.Value;
+        if (scope.CaptureRedactor is null && prior?.CaptureRedactor is not null)
+            scope = scope with { CaptureRedactor = prior.CaptureRedactor };
+        if (scope.Completeness is null && prior?.Completeness is not null)
+            scope = scope with { Completeness = prior.Completeness };
         Holder.Value = scope;
         return new Scope(prior);
     }

@@ -379,6 +379,29 @@ public class SupervisorRichSpawnFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task A_spawn_with_an_effective_harness_outside_allowedAgents_fails_closed_before_staging()
+    {
+        using (var s = _fixture.BeginScope()) s.Resolve<SupervisorDecisionScript>().PlanSpawnStop();
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateConfigWorkflowAsync(teamId, userId, """{ "goal": "ship it", "allowedAgents": ["claude-code"] }""");
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+
+        await RunEngineAsync(runId);
+        await ResolveSelfAdvanceAsync(runId);
+        try { await RunEngineAsync(runId); } catch { }
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        var spawn = await db.SupervisorDecisionRecord.AsNoTracking().SingleAsync(d => d.SupervisorRunId == runId && d.DecisionKind == SupervisorDecisionKinds.Spawn);
+        spawn.Status.ShouldBe(SupervisorDecisionStatus.Failed);
+        spawn.Error.ShouldContain("allowed harness pool", Case.Insensitive);
+        (await db.AgentRun.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId)).ShouldBe(0);
+    }
+
+    [Fact]
     public async Task A_spawn_with_a_profile_default_persona_outside_the_allowed_pool_fails_closed()
     {
         // Defense-in-depth: the single post-resolution gate bounds the RESOLVED persona, so even the run-level PROFILE

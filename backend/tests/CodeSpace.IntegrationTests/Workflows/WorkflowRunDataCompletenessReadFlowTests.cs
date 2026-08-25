@@ -9,6 +9,7 @@ using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Queries.Workflows;
 using MediatR;
+using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows;
@@ -70,6 +71,28 @@ public sealed class WorkflowRunDataCompletenessReadFlowTests
         native.PresentRecordCount.ShouldBe(1);
         native.Verdict.ShouldBe(WorkflowRunCaptureCompleteness.Exact);
         native.IsStrictlyReadable.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task Terminal_run_folds_only_after_every_registered_producer_facet_has_a_statement()
+    {
+        var seeded = await SeedRunAsync();
+        using (var scope = _fixture.BeginScope())
+        {
+            var writer = scope.Resolve<IRunDataCompletenessWriter>();
+            (await writer.InitializeAsync(new RunDataManifestInitialization(seeded.TeamId, seeded.RunId), CancellationToken.None)).ShouldBeTrue();
+            (await writer.AdvanceAsync(Advance(seeded, WorkflowRunDataOwnerKinds.ModelCall, expected: 1, present: 0), CancellationToken.None)).ShouldBeTrue();
+            await scope.Resolve<CodeSpace.Core.Persistence.Db.CodeSpaceDbContext>().WorkflowRun.Where(run => run.Id == seeded.RunId)
+                .ExecuteUpdateAsync(update => update.SetProperty(run => run.Status, CodeSpace.Messages.Enums.WorkflowRunStatus.Failure));
+        }
+
+        using var readScope = _fixture.BeginScope();
+        var view = (await readScope.Resolve<IRunDataCompletenessReader>().ReadAsync(seeded.RunId, seeded.TeamId, CancellationToken.None)).ShouldNotBeNull();
+
+        view.IsTerminal.ShouldBeTrue();
+        view.RequiredFacets.ShouldBe(RunDataManifestCoverage.RequiredFacets);
+        view.MissingFacetStatements.ShouldBeEmpty();
+        view.RunWideVerdict.ShouldBe(WorkflowRunCaptureCompleteness.Partial, "one incomplete facet cannot be cancelled out by three exact empty facets");
     }
 
     [Fact]

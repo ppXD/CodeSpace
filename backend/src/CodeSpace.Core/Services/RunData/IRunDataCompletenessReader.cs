@@ -3,6 +3,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Dtos.Workflows;
+using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.RunData;
@@ -28,24 +29,18 @@ public sealed class RunDataCompletenessReader : IRunDataCompletenessReader, ISco
 
     public async Task<WorkflowRunDataCompletenessView?> ReadAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken)
     {
-        var rows = await (
-            from run in _db.WorkflowRun.AsNoTracking()
-            where run.Id == workflowRunId && run.TeamId == teamId
-            join statement in _db.WorkflowRunDataManifest.AsNoTracking()
-                on new { TeamId = run.TeamId, WorkflowRunId = run.Id }
-                equals new { statement.TeamId, statement.WorkflowRunId }
-                into statementGroup
-            from statement in statementGroup.DefaultIfEmpty()
-            orderby statement.Facet
-            select statement)
-            .Take(MaxFacets + 1)
-            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        var status = await _db.WorkflowRun.AsNoTracking().Where(run => run.Id == workflowRunId && run.TeamId == teamId)
+            .Select(run => (WorkflowRunStatus?)run.Status).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        if (status is null) return null;
 
-        if (rows.Count == 0) return null;
-
-        var statements = rows.Where(statement => statement != null).ToList();
+        var statements = await _db.WorkflowRunDataManifest.AsNoTracking()
+            .Where(statement => statement.WorkflowRunId == workflowRunId && statement.TeamId == teamId)
+            .OrderBy(statement => statement.Facet).Take(MaxFacets + 1).ToListAsync(cancellationToken).ConfigureAwait(false);
         var truncated = statements.Count > MaxFacets;
         var facets = statements.Take(MaxFacets).Select(Project).ToList();
+        var present = facets.Select(facet => facet.Facet).ToHashSet(StringComparer.Ordinal);
+        var missing = RunDataManifestCoverage.RequiredFacets.Where(facet => !present.Contains(facet)).ToList();
+        var terminal = status is WorkflowRunStatus.Success or WorkflowRunStatus.Failure or WorkflowRunStatus.Cancelled;
 
         return new WorkflowRunDataCompletenessView
         {
@@ -53,9 +48,22 @@ public sealed class RunDataCompletenessReader : IRunDataCompletenessReader, ISco
             Scope = WorkflowRunDataCompletenessScope.RecordedFacetsOnly,
             Facets = facets,
             HasStatements = facets.Count > 0,
-            RunWideVerdict = null,
+            IsTerminal = terminal,
+            RequiredFacets = RunDataManifestCoverage.RequiredFacets,
+            MissingFacetStatements = missing,
+            RunWideVerdict = terminal && !truncated && missing.Count == 0 ? Fold(facets) : null,
             Truncated = truncated,
         };
+    }
+
+    private static WorkflowRunCaptureCompleteness Fold(IReadOnlyList<WorkflowRunDataFacetCompleteness> facets)
+    {
+        if (facets.Any(facet => facet.Verdict == WorkflowRunCaptureCompleteness.Corrupt)) return WorkflowRunCaptureCompleteness.Corrupt;
+        if (facets.Any(facet => facet.Verdict == WorkflowRunCaptureCompleteness.Unavailable)) return WorkflowRunCaptureCompleteness.Unavailable;
+        if (facets.Any(facet => facet.Verdict == WorkflowRunCaptureCompleteness.Partial)) return WorkflowRunCaptureCompleteness.Partial;
+        if (facets.Any(facet => facet.Verdict == WorkflowRunCaptureCompleteness.LegacyUnknown)) return WorkflowRunCaptureCompleteness.LegacyUnknown;
+        return facets.Any(facet => facet.Verdict == WorkflowRunCaptureCompleteness.RedactedExact)
+            ? WorkflowRunCaptureCompleteness.RedactedExact : WorkflowRunCaptureCompleteness.Exact;
     }
 
     private static WorkflowRunDataFacetCompleteness Project(WorkflowRunDataManifest statement) => new()

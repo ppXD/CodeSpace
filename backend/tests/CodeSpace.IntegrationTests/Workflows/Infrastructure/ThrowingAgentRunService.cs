@@ -9,11 +9,8 @@ namespace CodeSpace.IntegrationTests.Workflows.Infrastructure;
 /// A FAULT-INJECTING <see cref="IAgentRunService"/> decorator for the supervisor crash-recovery test: it
 /// delegates EVERY member to the real inner service, EXCEPT it THROWS on the N-th <see cref="CreateAsync"/> call
 /// (1-based). Registered over the real service in a child scope (last-wins) so the supervisor executor's spawn
-/// fan-out stages the leading agents FOR REAL (each <c>CreateAsync</c> commits its own row) and then crashes
-/// MID-LOOP — exactly the durable residue a process crash leaves: one or more committed orphan agents, NO waits
-/// flushed (the single SaveChanges at the end of the staging loop never ran), and the spawn decision stuck
-/// Running (the Pending→Running claim hop already flipped it before the side effect). No production change — the
-/// fault is injected purely through this test-only decorator + DI override.
+/// fan-out flushes the leading agents inside its wave transaction and then crashes MID-LOOP. The regression test
+/// proves that prefix rolls back while the already-claimed spawn decision remains the replay anchor.
 /// </summary>
 public sealed class ThrowingAgentRunService : IAgentRunService
 {

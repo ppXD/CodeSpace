@@ -12,6 +12,7 @@ import { isRunActive, useNodeManifests, useResumeRun, useWorkflowRunDetail, useW
 import { AgentRunTimeline } from "./AgentRunTimeline";
 import { AgentToolCalls } from "./AgentToolCalls";
 import { GovernedToolsPanel } from "./GovernedToolsPanel";
+import { ModelCallsPanel } from "./ModelCallsPanel";
 import { JsonView } from "./JsonView";
 import { RunActionsContext } from "./runActionsContext";
 import { RunActivityTimeline } from "./RunActivityTimeline";
@@ -40,7 +41,7 @@ const MAX_EMBED_DEPTH = 3;
  * host must live inside `.acs-root` (the route does; the editor overlay renders in-tree rather
  * than portaling to <body> for exactly this reason).
  */
-export type RunView = "activity" | "canvas" | "changes" | "governed-tools" | "trace";
+export type RunView = "activity" | "canvas" | "changes" | "model-calls" | "governed-tools" | "trace";
 
 export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, defaultView = "activity", view: controlledView, onViewChange, selectedPhaseId, selectedAgentRunId, onSelectAgent }: { runId: string; nested?: boolean; depth?: number; onOpenRun?: (runId: string) => void; defaultView?: RunView; view?: RunView; onViewChange?: (v: RunView) => void; selectedPhaseId?: string | null; selectedAgentRunId?: string | null; onSelectAgent?: (agentRunId: string | null) => void }) {
   // The view tab is controlled when a host lifts it via onViewChange (the run-detail route deep-links it as
@@ -200,7 +201,8 @@ function IdentityRunDetailView({ runId, view, setView }: { runId: string; view: 
         <>
           <BoundedRunStatusNotice status={identity.data.status} />
           {view === "changes" ? <RunTabComingSoon title="Changes" note="The files this run created or modified — per-repo change sets, diffs, and the pull requests it opened." />
-            : view === "governed-tools" ? <GovernedToolsPanel runId={runId} active={isRunActive(identity.data.status)} />
+            : view === "model-calls" ? <ModelCallsPanel runId={runId} active={isRunActive(identity.data.status)} />
+              : view === "governed-tools" ? <GovernedToolsPanel runId={runId} active={isRunActive(identity.data.status)} />
               : <RunTrace runId={runId} active={isRunActive(identity.data.status)} />}
         </>
       )}
@@ -269,6 +271,7 @@ function RunViewTabs({ view, setView }: { view: RunView; setView: (view: RunView
       <button type="button" role="tab" aria-selected={view === "activity"} data-active={view === "activity"} onClick={() => setView("activity")}><Ic.Clock size={13} /> Activity</button>
       <button type="button" role="tab" aria-selected={view === "canvas"} data-active={view === "canvas"} onClick={() => setView("canvas")}><Ic.Workflow size={13} /> Canvas</button>
       <button type="button" role="tab" aria-selected={view === "changes"} data-active={view === "changes"} onClick={() => setView("changes")}><Ic.Branch size={13} /> Changes</button>
+      <button type="button" role="tab" aria-selected={view === "model-calls"} data-active={view === "model-calls"} onClick={() => setView("model-calls")}><Ic.Sparkles size={13} /> Model calls</button>
       <button type="button" role="tab" aria-selected={view === "governed-tools"} data-active={view === "governed-tools"} onClick={() => setView("governed-tools")}><Ic.Wrench size={13} /> Governed tools</button>
       <button type="button" role="tab" aria-selected={view === "trace"} data-active={view === "trace"} onClick={() => setView("trace")}><Ic.Code size={13} /> Trace</button>
     </div>

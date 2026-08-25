@@ -820,13 +820,16 @@ export interface WorkflowRunDataFacetCompleteness {
   lastModifiedAt: string;
 }
 
-/** Observation-only producer statements. `runWideVerdict` is deliberately and always null. */
+/** Observation-only producer statements with a terminal-only fold over the explicitly registered producer coverage. */
 export interface WorkflowRunDataCompletenessView {
   runId: string;
   scope: WorkflowRunDataCompletenessScope;
   facets: WorkflowRunDataFacetCompleteness[];
   hasStatements: boolean;
-  runWideVerdict: null;
+  isTerminal: boolean;
+  requiredFacets: string[];
+  missingFacetStatements: string[];
+  runWideVerdict: WorkflowRunCaptureCompleteness | null;
   truncated: boolean;
 }
 export type WorkflowRunModelCallPart = "Result" | "SystemPrompt" | "UserPrompt" | "Usage" | "Trace" | "Error";
@@ -871,6 +874,36 @@ export type WorkflowRunModelCallBody = "LogicalRequest" | "AttemptRequest" | "At
 export type WorkflowRunModelCallBodyReferenceState = "Referenced" | "NotRecorded" | "Redacted" | "Partial" | "Unavailable" | "Corrupt" | "LegacyUnknown";
 export type WorkflowRunModelCallBodyCaptureHealth = "Pending" | "Materializing" | "Retry" | "Available" | "Failed" | "Abandoned";
 export type WorkflowRunModelCallSourceEvidence = "Native" | "TerminalOnly" | "StartedAndTerminal" | "LateStartAttached";
+
+export interface WorkflowRunModelCallListItem {
+  workflowRunModelCallId: string;
+  runId: string;
+  callOrdinal: number;
+  nodeId: string | null;
+  iterationKey: string;
+  executionAttemptId: string | null;
+  purpose: string;
+  requestedProvider: string | null;
+  requestedModel: string | null;
+  captureSource: string;
+  captureCompleteness: WorkflowRunCaptureCompleteness;
+  createdAt: string;
+}
+
+export interface WorkflowRunModelCallPage {
+  runId: string;
+  requestCursor: string | null;
+  limit: number;
+  items: WorkflowRunModelCallListItem[];
+  nextCursor: string | null;
+}
+
+export class InvalidWorkflowRunModelCallPageError extends Error {
+  constructor() {
+    super("Invalid Workflow Run model-call page.");
+    this.name = "InvalidWorkflowRunModelCallPageError";
+  }
+}
 
 export interface WorkflowRunModelCallBodyDescriptor {
   body: WorkflowRunModelCallBody;
@@ -986,6 +1019,8 @@ const WORKFLOW_RUN_TOOL_CALL_ERROR_CODES = new Set<WorkflowRunToolCallErrorCode>
 const WORKFLOW_RUN_TOOL_CALL_CURSOR_MAX = 96;
 const WORKFLOW_RUN_TOOL_CALL_PAGE_MAX = 200;
 const WORKFLOW_RUN_TOOL_CALL_ATTEMPT_MAX = 100;
+const WORKFLOW_RUN_MODEL_CALL_CURSOR_MAX = 128;
+const WORKFLOW_RUN_MODEL_CALL_PAGE_MAX = 200;
 
 function isJsonObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -1043,6 +1078,10 @@ function isGuid(value: unknown): value is string {
 
 function invalidRunToolCall(): never {
   throw new InvalidWorkflowRunToolCallResponseError();
+}
+
+function invalidRunModelCallPage(): never {
+  throw new InvalidWorkflowRunModelCallPageError();
 }
 
 function sameGuid(left: unknown, right: string): left is string {
@@ -1159,6 +1198,38 @@ function decodeRunToolCallDetail(value: unknown, expectedRunId: string, expected
   }
   if (value.attemptsTruncated && attempts.length !== WORKFLOW_RUN_TOOL_CALL_ATTEMPT_MAX) return invalidRunToolCall();
   return { call, attempts, attemptsTruncated: value.attemptsTruncated };
+}
+
+function decodeRunModelCallPage(value: unknown, expectedRunId: string, expectedCursor: string | null, expectedLimit: number): WorkflowRunModelCallPage {
+  if (!isJsonObject(value) || !sameGuid(value.runId, expectedRunId) || value.requestCursor !== expectedCursor || value.limit !== expectedLimit
+    || !Array.isArray(value.items) || value.items.length > expectedLimit || !Object.prototype.hasOwnProperty.call(value, "nextCursor")
+    || (value.nextCursor !== null && (typeof value.nextCursor !== "string" || value.nextCursor.length === 0 || value.nextCursor.length > WORKFLOW_RUN_MODEL_CALL_CURSOR_MAX)))
+    return invalidRunModelCallPage();
+
+  const items: WorkflowRunModelCallListItem[] = [];
+  const ids = new Set<string>();
+  let previous: WorkflowRunModelCallListItem | null = null;
+  for (const candidate of value.items) {
+    if (!isJsonObject(candidate) || !isGuid(candidate.workflowRunModelCallId) || !sameGuid(candidate.runId, expectedRunId)
+      || !isSafeCount(candidate.callOrdinal, true) || !hasNullableString(candidate, "nodeId") || typeof candidate.iterationKey !== "string"
+      || !hasNullableString(candidate, "executionAttemptId") || candidate.executionAttemptId !== null && !isGuid(candidate.executionAttemptId)
+      || typeof candidate.purpose !== "string" || candidate.purpose.length === 0 || !hasNullableString(candidate, "requestedProvider")
+      || !hasNullableString(candidate, "requestedModel") || typeof candidate.captureSource !== "string" || candidate.captureSource.length === 0
+      || !WORKFLOW_RUN_CAPTURE_COMPLETENESS.has(candidate.captureCompleteness as WorkflowRunCaptureCompleteness) || instantKey(candidate.createdAt) === null)
+      return invalidRunModelCallPage();
+    const item = candidate as unknown as WorkflowRunModelCallListItem;
+    const id = item.workflowRunModelCallId.toLowerCase();
+    const instant = instantKey(item.createdAt)!;
+    const previousInstant = previous === null ? null : instantKey(previous.createdAt)!;
+    if (ids.has(id) || previous !== null && (previousInstant! < instant || previousInstant === instant && previous.workflowRunModelCallId.toLowerCase() <= id))
+      return invalidRunModelCallPage();
+    ids.add(id);
+    items.push(item);
+    previous = item;
+  }
+
+  if ((items.length === 0 || items.length < expectedLimit) && value.nextCursor !== null) return invalidRunModelCallPage();
+  return { runId: value.runId, requestCursor: expectedCursor, limit: expectedLimit, items, nextCursor: value.nextCursor as string | null };
 }
 
 function decodeRunRecordPage(value: unknown, expectedRunId: string, request: RunRecordPageRequest): RunRecordPageResponse {
@@ -1295,8 +1366,17 @@ function invalidRunDataCompleteness(): never {
 }
 
 function decodeRunDataCompleteness(value: unknown, expectedRunId: string): WorkflowRunDataCompletenessView {
-  if (!isJsonObject(value) || value.runId !== expectedRunId || value.scope !== "RecordedFacetsOnly" || value.runWideVerdict !== null || typeof value.hasStatements !== "boolean" || typeof value.truncated !== "boolean" || !Array.isArray(value.facets) || value.facets.length > 100)
+  if (!isJsonObject(value) || value.runId !== expectedRunId || value.scope !== "RecordedFacetsOnly"
+    || (value.runWideVerdict !== null && !WORKFLOW_RUN_CAPTURE_COMPLETENESS.has(value.runWideVerdict as WorkflowRunCaptureCompleteness))
+    || typeof value.hasStatements !== "boolean" || typeof value.isTerminal !== "boolean" || typeof value.truncated !== "boolean"
+    || !Array.isArray(value.requiredFacets) || !Array.isArray(value.missingFacetStatements) || !Array.isArray(value.facets) || value.facets.length > 100)
     return invalidRunDataCompleteness();
+
+  const requiredFacets = value.requiredFacets.filter((facet): facet is string => typeof facet === "string" && facet.length > 0);
+  const missingFacetStatements = value.missingFacetStatements.filter((facet): facet is string => typeof facet === "string" && facet.length > 0);
+  if (requiredFacets.length !== value.requiredFacets.length || missingFacetStatements.length !== value.missingFacetStatements.length
+    || new Set(requiredFacets).size !== requiredFacets.length || new Set(missingFacetStatements).size !== missingFacetStatements.length
+    || missingFacetStatements.some((facet) => !requiredFacets.includes(facet))) return invalidRunDataCompleteness();
 
   const facets: WorkflowRunDataFacetCompleteness[] = [];
   let previousFacet: string | null = null;
@@ -1322,9 +1402,14 @@ function decodeRunDataCompleteness(value: unknown, expectedRunId: string): Workf
     previousFacet = candidate.facet;
   }
 
-  if (value.hasStatements !== (facets.length > 0)) return invalidRunDataCompleteness();
+  const facetNames = new Set(facets.map((facet) => facet.facet));
+  const expectedMissing = requiredFacets.filter((facet) => !facetNames.has(facet));
+  if (value.hasStatements !== (facets.length > 0) || expectedMissing.length !== missingFacetStatements.length
+    || expectedMissing.some((facet) => !missingFacetStatements.includes(facet))
+    || value.runWideVerdict !== null && (!value.isTerminal || value.truncated || missingFacetStatements.length > 0)) return invalidRunDataCompleteness();
 
-  return { runId: expectedRunId, scope: "RecordedFacetsOnly", facets, hasStatements: value.hasStatements, runWideVerdict: null, truncated: value.truncated };
+  return { runId: expectedRunId, scope: "RecordedFacetsOnly", facets, hasStatements: value.hasStatements, isTerminal: value.isTerminal,
+    requiredFacets, missingFacetStatements, runWideVerdict: value.runWideVerdict as WorkflowRunCaptureCompleteness | null, truncated: value.truncated };
 }
 
 // ─── API client ────────────────────────────────────────────────────────────────
@@ -1473,6 +1558,22 @@ export const workflowsApi = {
       if (error.status === 401 || error.status === 403) return { availability: "AccessDenied", code: error.code, isRetryable: false };
       if (error.status === 408 || error.status === 429 || error.status >= 500) return { availability: "BackendUnavailable", code: error.code, isRetryable: true };
       return decodeRunRecordPayloadProblem(error.body, { runId, recordId, sequence });
+    }
+  },
+
+  /** Metadata only; opening the drawer never eagerly downloads prompt/result blobs. */
+  pageRunModelCalls: async (runId: string, cursor?: string, limit = 100, signal?: AbortSignal): Promise<WorkflowRunModelCallPage | null> => {
+    if (!isGuid(runId) || !Number.isSafeInteger(limit) || limit < 1 || limit > WORKFLOW_RUN_MODEL_CALL_PAGE_MAX
+      || cursor !== undefined && (cursor.length === 0 || cursor.trim() !== cursor || cursor.length > WORKFLOW_RUN_MODEL_CALL_CURSOR_MAX))
+      return invalidRunModelCallPage();
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (cursor) params.set("cursor", cursor);
+    try {
+      const value = await fetchJson<unknown>(`/api/workflows/runs/${encodeURIComponent(runId)}/model-calls?${params}`, { signal });
+      return decodeRunModelCallPage(value, runId, cursor ?? null, limit);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null;
+      throw error;
     }
   },
 

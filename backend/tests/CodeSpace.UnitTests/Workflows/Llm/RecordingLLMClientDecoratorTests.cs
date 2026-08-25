@@ -4,7 +4,11 @@ using Autofac;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Lifecycle;
 using CodeSpace.Core.Services.Workflows.Llm;
+using CodeSpace.Core.Services.Workflows.Runtime;
+using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.RunData;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Contracts;
 using Microsoft.Extensions.Time.Testing;
 using Shouldly;
 
@@ -132,15 +136,20 @@ public class RecordingLLMClientDecoratorTests
     {
         var inner = new FakeClient(Completion());
         var logger = new CapturingLogger { ThrowOnRecord = true };
+        var completeness = new CapturingCompletenessWriter();
         var decorator = new RecordingStructuredLLMClientDecorator(inner);
 
         StructuredLLMCompletion result;
-        using (PushScope(logger))
+        using (LlmCallContext.Push(new LlmCallScope(Run, Team, "sup", "sup#turn1", "supervisor.decision", logger, new NoopOffloader(), Completeness: completeness)))
         {
             result = await decorator.CompleteStructuredAsync(Request(), CancellationToken.None);   // must NOT throw
         }
 
         result.ShouldBeSameAs(inner.StructuredResult, "a ledger write failure is swallowed — capture is fail-open");
+        completeness.Advances.ShouldHaveSingleItem().Expected.ShouldBe(1, "capture intent is stated before the first ledger write");
+        completeness.Advances.Sum(value => value.Present).ShouldBe(0, "a refused terminal row cannot be counted present");
+        completeness.Gaps.Count.ShouldBe(2, "both the missing started and terminal facts remain explicit");
+        completeness.Gaps.ShouldAllBe(gap => gap.Reason == CaptureGapReason.WriteRefused && gap.SubjectKind == WorkflowRunDataOwnerKinds.ModelCall);
     }
 
     [Fact]
@@ -161,6 +170,59 @@ public class RecordingLLMClientDecoratorTests
         logger.Calls.Select(c => c.RecordType).ShouldBe(new[] { WorkflowRunRecordTypes.InteractionStarted, WorkflowRunRecordTypes.InteractionCompleted });
         logger.Calls[0].Payload.GetProperty("prompt").GetProperty("user").GetString().ShouldBe("USR");
         logger.Calls[1].Payload.GetProperty("output").GetString().ShouldBe("plain-text", "a plain-text completion is captured as the text output");
+    }
+
+    [Fact]
+    public async Task Secret_values_are_redacted_only_on_the_capture_side_while_the_provider_receives_and_returns_verbatim_content()
+    {
+        const string secret = "sk-live-sensitive-value";
+        var inner = new EchoingPlainClient();
+        var logger = new CapturingLogger();
+        var decorator = new RecordingLLMClientDecorator(inner);
+        var request = new LLMCompletionRequest { Model = "m", SystemPrompt = $"system {secret}", UserPrompt = $"use {secret}" };
+
+        LLMCompletion result;
+        using (LlmCallContext.Push(new LlmCallScope(Run, Team, "llm", "", "llm.complete", logger, new NoopOffloader(), CaptureRedactor: new PersistenceSecretRedactor([secret]))))
+        {
+            result = await decorator.CompleteAsync(request, CancellationToken.None);
+        }
+
+        inner.ObservedRequest.ShouldBeSameAs(request, "capture redaction is a persistence side-channel and must not alter model intelligence");
+        result.Text.ShouldBe($"provider echoed {secret}", "the caller receives the provider's verbatim response");
+
+        var persisted = string.Join('\n', logger.Calls.Select(call => call.Payload.GetRawText()));
+        persisted.ShouldNotContain(secret, customMessage: "no interaction payload may persist a plaintext secret, including a provider echo");
+        persisted.ShouldContain("[REDACTED]", customMessage: "the tape stays explicit that content was intentionally masked");
+    }
+
+    [Fact]
+    public async Task Structured_secret_values_are_recursively_redacted_only_on_the_capture_side()
+    {
+        const string secret = "structured-sensitive-value";
+        var completion = new StructuredLLMCompletion
+        {
+            Json = JsonSerializer.SerializeToElement(new { result = new { message = $"echo {secret}", items = new[] { "safe", secret } } }),
+            Model = "claude-x",
+            Usage = new LlmUsage { InputTokens = 4, OutputTokens = 2, FinishReason = "stop" },
+        };
+        var inner = new FakeClient(completion);
+        var logger = new CapturingLogger();
+        var decorator = new RecordingStructuredLLMClientDecorator(inner);
+        var request = Request() with { SystemPrompt = $"system {secret}", UserPrompt = $"use {secret}" };
+
+        StructuredLLMCompletion result;
+        using (LlmCallContext.Push(new LlmCallScope(Run, Team, "llm", "", "llm.structured", logger, new NoopOffloader(), CaptureRedactor: new PersistenceSecretRedactor([secret]))))
+        {
+            result = await decorator.CompleteStructuredAsync(request, CancellationToken.None);
+        }
+
+        inner.ObservedStructuredRequest.ShouldBeSameAs(request, "capture redaction must not mutate the structured provider request");
+        result.ShouldBeSameAs(completion, "the caller receives the provider's structured result verbatim");
+        result.Json.GetProperty("result").GetProperty("message").GetString().ShouldContain(secret);
+
+        var persisted = string.Join('\n', logger.Calls.Select(call => call.Payload.GetRawText()));
+        persisted.ShouldNotContain(secret, customMessage: "recursive JSON capture must redact nested object and array values");
+        persisted.ShouldContain("[REDACTED]", customMessage: "the persisted structured capture remains explicit about masking");
     }
 
     [Fact]
@@ -377,6 +439,27 @@ public class RecordingLLMClientDecoratorTests
         logger.Calls.ShouldNotContain(c => c.RecordType == WorkflowRunRecordTypes.InteractionCompleted);
     }
 
+    [Fact]
+    public async Task A_cancelled_buffered_call_records_its_failed_terminal_with_a_non_cancelled_capture_token()
+    {
+        var inner = new CancelledPlainClient();
+        var logger = new CapturingLogger { HonorCancellation = true };
+        var decorator = new RecordingLLMClientDecorator(inner);
+        using var cancellation = new CancellationTokenSource();
+
+        Task call;
+        using (PushScope(logger))
+        {
+            call = decorator.CompleteAsync(new LLMCompletionRequest { Model = "m", SystemPrompt = "s", UserPrompt = "u" }, cancellation.Token);
+            await inner.Entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            cancellation.Cancel();
+            await Should.ThrowAsync<OperationCanceledException>(() => call);
+        }
+
+        logger.Calls.Select(c => c.RecordType).ShouldBe(new[] { WorkflowRunRecordTypes.InteractionStarted, WorkflowRunRecordTypes.InteractionFailed });
+        logger.Calls[^1].Payload.GetProperty("failureKind").GetString().ShouldBe("cancelled");
+    }
+
     private static async Task ConsumeAsync(IStreamingLLMClient client, CancellationToken cancellationToken)
     {
         await foreach (var _ in client.StreamAsync(new LLMCompletionRequest { Model = "m", SystemPrompt = "s", UserPrompt = "u" }, cancellationToken)) { }
@@ -387,16 +470,46 @@ public class RecordingLLMClientDecoratorTests
     private sealed class FakeClient : ILLMClient, IStructuredLLMClient
     {
         public StructuredLLMCompletion StructuredResult { get; }
+        public StructuredLLMCompletionRequest? ObservedStructuredRequest { get; private set; }
         public FakeClient(StructuredLLMCompletion result) { StructuredResult = result; }
         public string Provider => "anthropic";
         public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken ct) => Task.FromResult(new LLMCompletion { Text = "t", Model = "m" });
-        public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken ct) => Task.FromResult(StructuredResult);
+        public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken ct)
+        {
+            ObservedStructuredRequest = request;
+            return Task.FromResult(StructuredResult);
+        }
     }
 
     private sealed class PlainClient : ILLMClient
     {
         public string Provider => "plain";
         public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken ct) => Task.FromResult(new LLMCompletion { Text = "plain-text", Model = "m" });
+    }
+
+    private sealed class CancelledPlainClient : ILLMClient
+    {
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public string Provider => "plain";
+
+        public async Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken ct)
+        {
+            Entered.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            throw new InvalidOperationException("unreachable");
+        }
+    }
+
+    private sealed class EchoingPlainClient : ILLMClient
+    {
+        public LLMCompletionRequest? ObservedRequest { get; private set; }
+        public string Provider => "plain";
+
+        public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken ct)
+        {
+            ObservedRequest = request;
+            return Task.FromResult(new LLMCompletion { Text = $"provider echoed {request.UserPrompt[4..]}", Model = request.Model });
+        }
     }
 
     private sealed class ThrowingClient : ILLMClient, IStructuredLLMClient
@@ -476,9 +589,11 @@ public class RecordingLLMClientDecoratorTests
         public List<Captured> Calls { get; } = new();
         public TaskCompletionSource DeltaRecorded { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public bool ThrowOnRecord { get; set; }
+        public bool HonorCancellation { get; set; }
 
         public Task<Guid> RecordInteractionAsync(Guid runId, string recordType, string? nodeId, string iterationKey, Guid correlationId, Guid? parentRecordId, JsonElement payload, CancellationToken cancellationToken)
         {
+            if (HonorCancellation) cancellationToken.ThrowIfCancellationRequested();
             if (ThrowOnRecord) throw new InvalidOperationException("ledger down");
             Calls.Add(new Captured(runId, recordType, nodeId, iterationKey, correlationId, payload.Clone()));
             if (recordType == WorkflowRunRecordTypes.InteractionDelta) DeltaRecorded.TrySetResult();
@@ -497,7 +612,7 @@ public class RecordingLLMClientDecoratorTests
         public Task RunReplayedAsync(Guid runId, Guid? parentRunId, int snapshotCount, CancellationToken ct) => Task.CompletedTask;
         public Task SupervisorRunRecoveredAsync(Guid runId, int attempt, CancellationToken ct) => Task.CompletedTask;
         public Task<Guid> NodeStartedAsync(Guid runId, string nodeId, string iterationKey, IReadOnlyDictionary<string, JsonElement> resolvedInputs, IReadOnlyDictionary<string, JsonElement> resolvedConfig, CancellationToken ct) => Task.FromResult(Guid.NewGuid());
-        public Task NodeCompletedAsync(Guid runId, string nodeId, string iterationKey, IReadOnlyDictionary<string, JsonElement> outputs, IReadOnlyList<string>? routingHints, TimeSpan duration, CancellationToken ct) => Task.CompletedTask;
+        public Task<Guid> NodeCompletedAsync(Guid runId, string nodeId, string iterationKey, IReadOnlyDictionary<string, JsonElement> outputs, IReadOnlyList<string>? routingHints, TimeSpan duration, CancellationToken ct) => Task.FromResult(Guid.Empty);
         public Task NodeFailedAsync(Guid runId, string nodeId, string iterationKey, string error, TimeSpan duration, CancellationToken ct) => Task.CompletedTask;
         public Task AttemptFailedAsync(Guid runId, string nodeId, string iterationKey, int attempt, int maxAttempts, string error, TimeSpan duration, double retryInSeconds, Guid? parentRecordId, CancellationToken ct) => Task.CompletedTask;
         public Task NodeSkippedAsync(Guid runId, string nodeId, string iterationKey, string reason, CancellationToken ct) => Task.CompletedTask;
@@ -510,5 +625,25 @@ public class RecordingLLMClientDecoratorTests
         public Task ExternalCallFailedAsync(Guid runId, string? nodeId, Guid correlationId, string target, string error, TimeSpan duration, CancellationToken ct) => Task.CompletedTask;
         public Task LogAsync(Guid runId, string? nodeId, LogLevel level, string message, CancellationToken ct) => Task.CompletedTask;
         public Task WaitReissuedAsync(Guid runId, string nodeId, string iterationKey, string waitKind, Guid waitId, Guid byUserId, CancellationToken ct) => Task.CompletedTask;
+    }
+
+    private sealed class CapturingCompletenessWriter : IRunDataCompletenessWriter
+    {
+        public List<RunDataFacetAdvance> Advances { get; } = new();
+        public List<WorkflowRunCaptureGap> Gaps { get; } = new();
+
+        public Task<bool> AdvanceAsync(RunDataFacetAdvance advance, CancellationToken cancellationToken)
+        {
+            Advances.Add(advance);
+            return Task.FromResult(true);
+        }
+
+        public Task<bool> NoticeAsync(WorkflowRunCaptureGap gap, CancellationToken cancellationToken)
+        {
+            Gaps.Add(gap);
+            return Task.FromResult(true);
+        }
+
+        public Task<bool> UnstateExpectationAsync(Guid teamId, Guid workflowRunId, string facet, CancellationToken cancellationToken) => Task.FromResult(true);
     }
 }

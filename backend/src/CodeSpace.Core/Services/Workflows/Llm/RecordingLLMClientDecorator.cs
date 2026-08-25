@@ -1,5 +1,7 @@
 using System.Text;
 using System.Text.Json;
+using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Constants;
 
 namespace CodeSpace.Core.Services.Workflows.Llm;
@@ -37,6 +39,7 @@ public class RecordingLLMClientDecorator : ILLMClient
         if (scope is null) return await _inner.CompleteAsync(request, cancellationToken).ConfigureAwait(false);
 
         var correlationId = Guid.NewGuid();
+        await DeclareCaptureIntentAsync(scope).ConfigureAwait(false);
         await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionStarted, correlationId,
             () => StartedPayloadAsync(scope, Provider, request.Model, request.SystemPrompt, request.UserPrompt, request.Temperature, request.MaxOutputTokens, cancellationToken), cancellationToken).ConfigureAwait(false);
 
@@ -52,27 +55,75 @@ public class RecordingLLMClientDecorator : ILLMClient
         }
         catch (Exception ex)
         {
-            await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionFailed, correlationId, () => Task.FromResult(FailedPayload(scope, Provider, ex)), cancellationToken).ConfigureAwait(false);
+            // The caller token is commonly cancelled by the failure itself. Terminal capture gets one independent,
+            // fail-open attempt so cancellation does not erase the interaction's final fact.
+            if (await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionFailed, correlationId, () => Task.FromResult(FailedPayload(scope, Provider, ex)), CancellationToken.None).ConfigureAwait(false))
+                await MarkCapturePresentAsync(scope).ConfigureAwait(false);
             throw;
         }
 
-        await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionCompleted, correlationId,
-            async () => CompletedPayload(scope, Provider, completion.Model, completion.Usage, await OffloadTextAsync(scope, completion.Text, cancellationToken).ConfigureAwait(false)), cancellationToken).ConfigureAwait(false);
+        if (await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionCompleted, correlationId,
+            async () => CompletedPayload(scope, Provider, completion.Model, completion.Usage, await OffloadTextAsync(scope, completion.Text, CancellationToken.None).ConfigureAwait(false)), CancellationToken.None).ConfigureAwait(false))
+            await MarkCapturePresentAsync(scope).ConfigureAwait(false);
         return completion;
     }
 
     /// <summary>Build the payload + write the row, swallowing ANY failure — capturing an interaction must never fault the model call or the run (a ledger/artifact write error, or a cancellation, is best-effort lost, never propagated).</summary>
-    protected static async Task SafeRecordAsync(LlmCallScope scope, string recordType, Guid correlationId, Func<Task<JsonElement>> buildPayload, CancellationToken cancellationToken)
+    protected static async Task<bool> SafeRecordAsync(LlmCallScope scope, string recordType, Guid correlationId, Func<Task<JsonElement>> buildPayload, CancellationToken cancellationToken)
     {
         try
         {
             var payload = await buildPayload().ConfigureAwait(false);
             await scope.Logger.RecordInteractionAsync(scope.RunId, recordType, scope.NodeId, scope.IterationKey, correlationId, parentRecordId: null, payload, cancellationToken).ConfigureAwait(false);
+            return true;
         }
-        catch
+        catch (Exception ex)
         {
-            // fail-open — see the class doc.
+            if (scope.Completeness is not null)
+            {
+                try
+                {
+                    await scope.Completeness.NoticeAsync(new WorkflowRunCaptureGap
+                    {
+                        Id = Guid.NewGuid(), TeamId = scope.TeamId, WorkflowRunId = scope.RunId,
+                        SubjectKind = WorkflowRunDataOwnerKinds.ModelCall, SubjectId = $"{correlationId:N}/{recordType}",
+                        RangeKind = CaptureGapRangeKind.Unbounded, Reason = CaptureGapReason.WriteRefused,
+                        ReasonDetail = $"{recordType} capture failed with {ex.GetType().Name}.", CaptureSource = "in-process",
+                        NoticedAt = DateTimeOffset.UtcNow, CreatedAt = DateTimeOffset.UtcNow,
+                    }, CancellationToken.None).ConfigureAwait(false);
+                }
+                catch { }
+            }
+            return false;
         }
+    }
+
+    protected static async Task DeclareCaptureIntentAsync(LlmCallScope scope)
+    {
+        if (scope.Completeness is null) return;
+        try
+        {
+            await scope.Completeness.AdvanceAsync(new RunDataFacetAdvance
+            {
+                TeamId = scope.TeamId, WorkflowRunId = scope.RunId, Facet = WorkflowRunDataOwnerKinds.ModelCall,
+                Expected = 1, Present = 0, Masked = false,
+            }, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch { }
+    }
+
+    protected static async Task MarkCapturePresentAsync(LlmCallScope scope)
+    {
+        if (scope.Completeness is null) return;
+        try
+        {
+            await scope.Completeness.AdvanceAsync(new RunDataFacetAdvance
+            {
+                TeamId = scope.TeamId, WorkflowRunId = scope.RunId, Facet = WorkflowRunDataOwnerKinds.ModelCall,
+                Expected = 0, Present = 1, Masked = scope.CaptureRedactor is not null,
+            }, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch { }
     }
 
     protected static async Task<JsonElement> StartedPayloadAsync(LlmCallScope scope, string provider, string model, string system, string user, double? temperature, int? maxOutputTokens, CancellationToken cancellationToken)
@@ -110,12 +161,14 @@ public class RecordingLLMClientDecorator : ILLMClient
             _ => "exception",
         };
 
-        return JsonSerializer.SerializeToElement(new { kind = scope.Kind, provider, error = ex.Message, category, failureKind });
+        var error = scope.CaptureRedactor is null ? ex.Message : scope.CaptureRedactor.Redact(ex.Message).Value;
+        return JsonSerializer.SerializeToElement(new { kind = scope.Kind, provider, error, category, failureKind });
     }
 
     /// <summary>A plain-text field (a prompt / a text completion): the inline string when small, else a content-addressed <c>$artifact_id</c> ref. Null/empty rides as-is.</summary>
     protected static async Task<object?> OffloadTextAsync(LlmCallScope scope, string? text, CancellationToken cancellationToken)
     {
+        if (scope.CaptureRedactor is not null) text = scope.CaptureRedactor.Redact(text).Value;
         if (string.IsNullOrEmpty(text)) return text;
 
         var off = await scope.Offloader.OffloadIfLargeAsync(scope.TeamId, text, "text/plain", cancellationToken).ConfigureAwait(false);
@@ -126,6 +179,7 @@ public class RecordingLLMClientDecorator : ILLMClient
     /// <summary>A JSON field (a structured completion): the inline JSON object when small, else a <c>$artifact_id</c> ref to its serialized bytes.</summary>
     protected static async Task<object?> OffloadJsonAsync(LlmCallScope scope, JsonElement json, CancellationToken cancellationToken)
     {
+        if (scope.CaptureRedactor is not null) json = scope.CaptureRedactor.Redact(json).Value;
         var text = json.GetRawText();
 
         var off = await scope.Offloader.OffloadIfLargeAsync(scope.TeamId, text, "application/json", cancellationToken).ConfigureAwait(false);

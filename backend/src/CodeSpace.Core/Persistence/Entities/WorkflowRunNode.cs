@@ -16,6 +16,8 @@ namespace CodeSpace.Core.Persistence.Entities;
 /// </summary>
 public class WorkflowRunNode
 {
+    /// <summary>The exact immutable latest node.* ledger row backing this projection.</summary>
+    public Guid RecordId { get; set; }
     public Guid RunId { get; set; }
     public string NodeId { get; set; } = default!;
     public string IterationKey { get; set; } = string.Empty;

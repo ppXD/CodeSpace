@@ -56,7 +56,7 @@ public class RequestAuthorizationInventoryTests
         ["FireDueScheduleTriggersCommand"] = "sweep",
         ["ProbeStaleModelAvailabilityCommand"] = "sweep",
         ["ProbeUnknownModelCapabilitiesCommand"] = "sweep",
-        ["ProjectWorkflowRunModelCallsCommand"] = "projects terminal workflow-run interaction evidence; it is dispatched only by the bounded system recurring job.",
+        ["ProjectWorkflowRunModelCallsCommand"] = "projects started and terminal workflow-run interaction evidence; it is dispatched only by the bounded system recurring job.",
         ["ProjectWorkflowRunToolCallsCommand"] = "projects governed side-effect ledger facts into the observation-only Workflow Run tool-call plane; it is dispatched only by the bounded system recurring job.",
         ["MaterializeWorkflowRunModelCallBodiesCommand"] = "materializes already-declared telemetry bodies in bounded lease/fence batches; it changes no Workflow Run outcome.",
         ["ReapAgentRunSpoolsCommand"] = "sweep",

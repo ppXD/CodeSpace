@@ -36,7 +36,8 @@ function withRecords(records: RunRecordPageItem[] | undefined, isLoading = false
 }
 
 function completeness(facets: WorkflowRunDataCompletenessView["facets"]): WorkflowRunDataCompletenessView {
-  return { runId: "r1", scope: "RecordedFacetsOnly", facets, hasStatements: facets.length > 0, runWideVerdict: null, truncated: false };
+  return { runId: "r1", scope: "RecordedFacetsOnly", facets, hasStatements: facets.length > 0, isTerminal: false,
+    requiredFacets: [], missingFacetStatements: [], runWideVerdict: null, truncated: false };
 }
 
 beforeEach(() => {
@@ -85,7 +86,7 @@ describe("RunTrace", () => {
     expect(recordsMock.returnToLatest).toHaveBeenCalledTimes(1);
   });
 
-  it("shows recorded facets independently and never presents them as a run-wide verdict", () => {
+  it("shows producer facets independently while a non-terminal run has no fold", () => {
     withRecords([record({ sequence: 1 })]);
     completenessMock.data = completeness([
       { facet: "harness-process-attempt", expectedRecordCount: 2, presentRecordCount: 1, knownMissingCount: 1, verdict: "Partial", isStrictlyReadable: false, revision: 4, schemaVersion: 1, lastModifiedAt: "2026-08-21T02:00:00Z" },
@@ -94,8 +95,8 @@ describe("RunTrace", () => {
 
     render(<RunTrace runId="r1" active />);
 
-    expect(screen.getByText(/recorded facets only/i)).toBeInTheDocument();
-    expect(screen.getByText(/no run-wide verdict/i)).toBeInTheDocument();
+    expect(screen.getByText(/registered producer facets/i)).toBeInTheDocument();
+    expect(screen.queryByText(/terminal run-wide verdict/i)).toBeNull();
     expect(screen.getByText("harness-process-attempt")).toBeInTheDocument();
     expect(screen.getByText("Partial")).toBeInTheDocument();
     expect(screen.getByText(/1 present \/ 2 expected/i)).toBeInTheDocument();

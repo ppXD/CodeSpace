@@ -26,6 +26,9 @@ function valid() {
       },
     ],
     hasStatements: true,
+    isTerminal: false,
+    requiredFacets: ["model-call", "native-record"],
+    missingFacetStatements: ["model-call"],
     runWideVerdict: null,
     truncated: false,
   };
@@ -56,7 +59,8 @@ describe("Workflow Run data completeness API", () => {
   it.each([
     ["foreign identity", { runId: "foreign" }],
     ["future scope", { scope: "AllKnownFacets" }],
-    ["invented run verdict", { runWideVerdict: "Exact" }],
+    ["premature run verdict", { runWideVerdict: "Exact" }],
+    ["missing-facet contradiction", { missingFacetStatements: [] }],
     ["unsafe count", { facets: [{ ...valid().facets[0], presentRecordCount: Number.MAX_SAFE_INTEGER + 1 }] }],
     ["readability contradiction", { facets: [{ ...valid().facets[0], verdict: "Exact", isStrictlyReadable: false }] }],
     ["statement contradiction", { facets: [], hasStatements: true }],

@@ -37,6 +37,9 @@ namespace CodeSpace.Core.Services.RunData;
 /// </summary>
 public interface IRunDataCompletenessWriter
 {
+    /// <summary>Idempotently states zero for every registered producer facet before a run can emit records.</summary>
+    Task<bool> InitializeAsync(RunDataManifestInitialization initialization, CancellationToken cancellationToken) => Task.FromResult(true);
+
     /// <summary>
     /// Fold one delta into the facet's statement, computing the verdict in the database so a producer never offers 0146
     /// a claim it would refuse. Returns whether the statement was made; a producer that ignores the answer is behaving
@@ -73,6 +76,11 @@ public sealed class RunDataCompletenessWriter : IRunDataCompletenessWriter, ISco
         _scopeFactory = scopeFactory;
         _logger = logger;
     }
+
+    public async Task<bool> InitializeAsync(RunDataManifestInitialization initialization, CancellationToken cancellationToken) =>
+        await ContainedAsync(initialization.WorkflowRunId, WorkflowRunDataOwnerKinds.DataManifest, async db => await db.Database.ExecuteSqlAsync(
+            $"SELECT workflow_run_data_manifest_initialize({initialization.TeamId}, {initialization.WorkflowRunId}, {RunDataManifestCoverage.RequiredFacets.ToArray()}, {WorkflowRunDataContract.CurrentVersion})",
+            cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
 
     public async Task<bool> AdvanceAsync(RunDataFacetAdvance advance, CancellationToken cancellationToken) =>
         await ContainedAsync(advance.WorkflowRunId, advance.Facet, async db => await db.Database.ExecuteSqlAsync(

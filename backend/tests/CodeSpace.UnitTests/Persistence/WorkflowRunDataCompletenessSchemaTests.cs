@@ -31,6 +31,7 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
     private const string RendezvousMigration = "0148_workflow_run_data_manifest_advance.sql";
     private const string BodyCaptureMigration = "0151_workflow_run_model_call_body_capture.sql";
     private const string AttemptAttributionMigration = "0155_workflow_run_capture_gap_attempt_attribution.sql";
+    private const string InitializationMigration = "0171_workflow_run_data_manifest_initialization.sql";
 
     [Fact]
     public void A_gap_is_one_known_missing_span_with_a_subject_a_coordinate_a_typed_reason_and_a_notice_time()
@@ -229,11 +230,12 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
     }
 
     /// <summary>
-    /// The isolation that still holds, checked rather than asserted in prose: THREE production producers, all in the
+    /// The isolation that still holds, checked rather than asserted in prose: FOUR production producers, all in the
     /// capture plane, and TWO observation-only bounded readers. The only files in <c>backend/src</c> that may mention
     /// either table are the two entities, their two configurations, the DbContext that registers them, the shared
     /// completeness writer, the Workflow Run manifest reader, the Agent Run exact-gap reader, and the capture plane's
-    /// three completeness partials — the native-record, harness-process-attempt and harness-execution facets. Each
+    /// three capture partials plus the in-process model-call recorder — the native-record, harness-process-attempt,
+    /// harness-execution and model-call facets. Each
     /// producer states its own facet, records a gap for
     /// its own refused write, and reads neither table for any decision. The summary reader observes only exact,
     /// team-scoped attribution, orders it deterministically, and takes one more than its display bound to state
@@ -246,7 +248,7 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
     /// message below is the number a reader can trust without grepping.</para>
     /// </summary>
     [Fact]
-    public void Only_the_capture_planes_three_producers_and_two_bounded_operator_readers_touch_either_table()
+    public void Only_the_four_producers_and_two_bounded_operator_readers_touch_either_table()
     {
         var sourceRoot = ProductionSourceRoot();
 
@@ -265,6 +267,7 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
             "NativeRecordPlane.Completeness.cs",
             "NativeRecordPlane.ExecutionCompleteness.cs",
             "NativeRecordPlane.ProcessCompleteness.cs",
+            "RecordingLLMClientDecorator.cs",
             "RunDataFacetAdvance.cs",
             "WorkflowRunCaptureGap.cs",
             "WorkflowRunCaptureGapConfiguration.cs",
@@ -272,8 +275,8 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
             "WorkflowRunDataManifestConfiguration.cs",
         }, customMessage: "a production file other than the shared completeness writer, the Workflow Run manifest " +
                           "reader, the Agent Run exact-gap reader, and the capture plane's three completeness partials " +
-                          "now touches the capture-gap / data-manifest plane. Exactly three producers exist — the " +
-                          "native-record, harness-process-attempt and harness-execution facets — and exactly two bounded, " +
+                          "now touches the capture-gap / data-manifest plane. Exactly four producers exist — the " +
+                          "native-record, harness-process-attempt, harness-execution and model-call facets — and exactly two bounded, " +
                           "observation-only readers exist. No reducer folds a gap and terminal authority does not " +
                           "consult the manifest. Any new producer or reader is a deliberate step that updates this " +
                           "list — not a silent one.");
@@ -383,6 +386,22 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
                 customMessage: $"the completeness writer no longer calls '{function}'. The lock discipline lives inside that " +
                                "function, so a producer reaching the manifest by any other route is back to choosing an order " +
                                "it can get wrong.");
+    }
+
+    [Fact]
+    public void Initialization_uses_the_same_run_lock_and_starts_the_mask_latch_false_without_rewriting_existing_history()
+    {
+        var migration = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Persistence", "DbUpFiles", InitializationMigration));
+
+        DbUpRunner.DiscoverScriptNames().ShouldContain(name => name.EndsWith(InitializationMigration, StringComparison.OrdinalIgnoreCase));
+        migration.IndexOf("PERFORM workflow_run_data_completeness_lock(team, run)", StringComparison.Ordinal)
+            .ShouldBeLessThan(migration.IndexOf("INSERT INTO workflow_run_data_manifest", StringComparison.Ordinal),
+                customMessage: "initialization must rendezvous before it probes gaps or states any facet");
+        migration.ShouldContain("known_missing_count, verdict, masked_observed, revision");
+        migration.ShouldContain("CASE WHEN open_anywhere THEN 'Partial' ELSE 'Exact' END, FALSE,",
+            customMessage: "a zero-record declaration has observed no masked bytes; later advances own the monotonic true transition");
+        migration.ShouldContain("ON CONFLICT (team_id, workflow_run_id, facet) DO NOTHING",
+            customMessage: "replay must preserve both the upstream masked_observed latch and the existing statement revision");
     }
 
     /// <summary>The three things a producer must not be able to spell in C#: the rendezvous, the probe the rendezvous protects, and direct DML against the statement it produces.</summary>

@@ -14,6 +14,9 @@ public enum ArtifactRetentionClass
     /// reclaims.
     /// </summary>
     ArtifactManifestContent = 1,
+
+    /// <summary>Encrypted recovery bytes referenced by one immutable sensitive-record sidecar row.</summary>
+    SensitiveRecordPayload = 2,
 }
 
 /// <summary>

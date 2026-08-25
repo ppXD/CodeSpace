@@ -178,6 +178,7 @@ public sealed partial class SupervisorTurnService
             AgentProfile = goalConfig?.AgentProfile,
             AcceptanceChecks = acceptanceCommand,
             SpawnedAgentTools = NormalizeTools(goalConfig?.AllowedTools),
+            AllowedAgentKinds = NormalizeKinds(goalConfig?.AllowedAgents),
             AllowedModelIds = NormalizeModelIds(goalConfig?.AllowedModelIds),
             AllowedAgentDefinitionIds = NormalizeModelIds(goalConfig?.AllowedAgentDefinitionIds),
             AcceptanceCriteria = NormalizeTools(goalConfig?.AcceptanceCriteria),
@@ -1316,6 +1317,12 @@ public sealed partial class SupervisorTurnService
     /// </summary>
     private static IReadOnlyList<string>? NormalizeTools(IReadOnlyList<string>? allowedTools) =>
         allowedTools?.Where(t => !string.IsNullOrWhiteSpace(t)).ToList();
+
+    private static IReadOnlyList<string>? NormalizeKinds(IReadOnlyList<string>? kinds)
+    {
+        var normalized = kinds?.Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        return normalized is { Count: > 0 } ? normalized : null;
+    }
 
     /// <summary>Normalise an operator-allowed Guid pool — the credentialed-model row ids AND the agent-definition (persona) ids share this exact shape: drop empty Guids, dedupe, and collapse an empty list to <c>null</c> ("the pool is ALL of the team's"), so a configured-but-empty pool reads as unbounded, never as "nothing allowed".</summary>
     private static IReadOnlyList<Guid>? NormalizeModelIds(IReadOnlyList<Guid>? pool)

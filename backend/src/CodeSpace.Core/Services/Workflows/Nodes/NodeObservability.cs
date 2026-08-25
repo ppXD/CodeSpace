@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Lifecycle;
+using CodeSpace.Core.Services.Workflows.Runtime;
 
 namespace CodeSpace.Core.Services.Workflows.Nodes;
 
@@ -28,28 +29,36 @@ public sealed class NodeObservability : INodeObservability
     private readonly string _nodeId;
     private readonly Guid _teamId;
     private readonly Guid _parentRecordId;
+    private readonly PersistenceSecretRedactor _redactor;
+
+    public NodeObservability(NodeObservationBinding binding)
+    {
+        _recordLogger = binding.RecordLogger;
+        _artifactStore = binding.ArtifactStore;
+        _runId = binding.RunId;
+        _nodeId = binding.NodeId;
+        _teamId = binding.TeamId;
+        _parentRecordId = binding.ParentRecordId;
+        _redactor = binding.Redactor;
+    }
 
     public NodeObservability(IRunRecordLogger recordLogger, IArtifactStore artifactStore, Guid runId, string nodeId, Guid teamId, Guid parentRecordId)
-    {
-        _recordLogger = recordLogger;
-        _artifactStore = artifactStore;
-        _runId = runId;
-        _nodeId = nodeId;
-        _teamId = teamId;
-        _parentRecordId = parentRecordId;
-    }
+        : this(new NodeObservationBinding(recordLogger, artifactStore, runId, nodeId, teamId, parentRecordId, new PersistenceSecretRedactor([]))) { }
 
     public async Task<TResult> TraceExternalCallAsync<TResult>(string target, string method, JsonElement? requestPayload, Func<CancellationToken, Task<TResult>> action, Func<TResult, ExternalCallCompletion>? completionExtractor = null, CancellationToken cancellationToken = default)
     {
         var startedAt = DateTimeOffset.UtcNow;
-        var (_, correlationId) = await _recordLogger.ExternalCallStartedAsync(_runId, _nodeId, target, method, requestPayload, _parentRecordId, cancellationToken).ConfigureAwait(false);
+        var persistedTarget = _redactor.Redact(target).Value ?? PersistenceSecretRedactor.Marker;
+        var persistedRequest = requestPayload is { } request ? _redactor.Redact(request).Value : (JsonElement?)null;
+        var (_, correlationId) = await _recordLogger.ExternalCallStartedAsync(_runId, _nodeId, persistedTarget, method, persistedRequest, _parentRecordId, cancellationToken).ConfigureAwait(false);
 
         try
         {
             var result = await action(cancellationToken).ConfigureAwait(false);
             var duration = DateTimeOffset.UtcNow - startedAt;
             var completion = completionExtractor?.Invoke(result);
-            await _recordLogger.ExternalCallCompletedAsync(_runId, _nodeId, correlationId, completion?.StatusCode, completion?.ResponsePayload, duration, cancellationToken).ConfigureAwait(false);
+            var persistedResponse = completion?.ResponsePayload is { } response ? _redactor.Redact(response).Value : (JsonElement?)null;
+            await _recordLogger.ExternalCallCompletedAsync(_runId, _nodeId, correlationId, completion?.StatusCode, persistedResponse, duration, cancellationToken).ConfigureAwait(false);
             return result;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -64,7 +73,7 @@ public sealed class NodeObservability : INodeObservability
         catch (Exception ex)
         {
             var duration = DateTimeOffset.UtcNow - startedAt;
-            await _recordLogger.ExternalCallFailedAsync(_runId, _nodeId, correlationId, target, ex.Message, duration, cancellationToken).ConfigureAwait(false);
+            await _recordLogger.ExternalCallFailedAsync(_runId, _nodeId, correlationId, persistedTarget, _redactor.Redact(ex.Message).Value ?? "External call failed.", duration, cancellationToken).ConfigureAwait(false);
             throw;
         }
     }
@@ -72,7 +81,9 @@ public sealed class NodeObservability : INodeObservability
     public async IAsyncEnumerable<TEvent> TraceExternalStreamAsync<TEvent>(string target, string method, JsonElement? requestPayload, Func<CancellationToken, IAsyncEnumerable<TEvent>> stream, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         var startedAt = DateTimeOffset.UtcNow;
-        var (_, correlationId) = await _recordLogger.ExternalCallStartedAsync(_runId, _nodeId, target, method, requestPayload, _parentRecordId, cancellationToken).ConfigureAwait(false);
+        var persistedTarget = _redactor.Redact(target).Value ?? PersistenceSecretRedactor.Marker;
+        var persistedRequest = requestPayload is { } request ? _redactor.Redact(request).Value : (JsonElement?)null;
+        var (_, correlationId) = await _recordLogger.ExternalCallStartedAsync(_runId, _nodeId, persistedTarget, method, persistedRequest, _parentRecordId, cancellationToken).ConfigureAwait(false);
 
         await using var enumerator = stream(cancellationToken).GetAsyncEnumerator(cancellationToken);
         while (true)
@@ -90,7 +101,7 @@ public sealed class NodeObservability : INodeObservability
             }
             catch (Exception ex)
             {
-                await _recordLogger.ExternalCallFailedAsync(_runId, _nodeId, correlationId, target, ex.Message, DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
+                await _recordLogger.ExternalCallFailedAsync(_runId, _nodeId, correlationId, persistedTarget, _redactor.Redact(ex.Message).Value ?? "External stream failed.", DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
                 throw;
             }
 
@@ -134,3 +145,5 @@ public sealed class NodeObservability : INodeObservability
             Task.FromResult(JsonSerializer.SerializeToElement(new { artifact_id = Guid.Empty, size_bytes = bytes.Length, content_type = contentType }));
     }
 }
+
+public sealed record NodeObservationBinding(IRunRecordLogger RecordLogger, IArtifactStore ArtifactStore, Guid RunId, string NodeId, Guid TeamId, Guid ParentRecordId, PersistenceSecretRedactor Redactor);

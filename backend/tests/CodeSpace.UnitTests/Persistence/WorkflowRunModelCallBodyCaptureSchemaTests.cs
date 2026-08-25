@@ -51,4 +51,17 @@ public sealed class WorkflowRunModelCallBodyCaptureSchemaTests
         migration.ShouldContain("IF OLD.state <> 'Pending' THEN",
             customMessage: "the Available rows backfilled as external must make format immutable with their terminal outcome");
     }
+
+    [Fact]
+    public void Started_recovery_preserves_the_fenced_body_reference_seam_and_limits_each_source_transition()
+    {
+        var migration = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Persistence", "DbUpFiles",
+            "0169_workflow_run_model_call_started_recovery.sql"));
+
+        migration.ShouldContain("late model-call terminal evidence must advance exactly one revision");
+        migration.ShouldContain("orphaned model-call start settlement cannot rewrite projected attempt facts");
+        migration.ShouldContain("model-call body reference update cannot rewrite projected attempt facts");
+        migration.ShouldContain("NEW.source_evidence_revision <> OLD.source_evidence_revision",
+            customMessage: "a body materializer must keep source evidence stable while it attaches artifact refs");
+    }
 }

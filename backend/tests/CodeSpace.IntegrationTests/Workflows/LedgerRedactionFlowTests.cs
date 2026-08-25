@@ -2,6 +2,9 @@ using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Variables;
+using CodeSpace.Core.Services.Workflows.Artifacts;
+using CodeSpace.Core.Services.Workflows.Engine;
+using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Commands.Workflows;
@@ -120,6 +123,111 @@ public class LedgerRedactionFlowTests
             (row.ValuePlain ?? string.Empty).Contains(Sentinel).ShouldBeFalse(
                 "Secret plaintext appeared in workflow_run_variable.value_plain — snapshot contract broken");
         }
+    }
+
+    [Fact]
+    public async Task Secret_echoed_by_a_node_is_publicly_redacted_and_recovers_from_its_encrypted_exact_record_sidecar()
+    {
+        const string Sentinel = "sk-ECHO-RECOVERY-DO-NOT-LEAK-12345678";
+        var secretValue = Sentinel + new string('x', ArtifactStoreConfig.InlineThresholdBytes + 256);
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        using (var setup = _fixture.BeginScope())
+        {
+            await setup.Resolve<IVariableService>().SetAsync(VariableScope.Team, teamId, teamId, "API_KEY", VariableValueType.Secret, JsonString(secretValue), null, userId, CancellationToken.None);
+        }
+
+        var definition = new WorkflowDefinition
+        {
+            SchemaVersion = 1,
+            Nodes = new List<NodeDefinition>
+            {
+                new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+                new() { Id = "emit", TypeKey = JsonEmitNode.Key, Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "value": "prefix-{{team.API_KEY}}" }""") },
+                new() { Id = "gate", TypeKey = "flow.wait_approval", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+                new() { Id = "after", TypeKey = JsonEmitNode.Key, Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "value": "{{nodes.emit.outputs.value}}" }""") },
+                new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "status": "ok" }""") },
+            },
+            Edges = new List<EdgeDefinition>
+            {
+                new() { From = "start", To = "emit" },
+                new() { From = "emit", To = "gate" },
+                new() { From = "gate", To = "after" },
+                new() { From = "after", To = "end" },
+            },
+        };
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, definition);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        await RunEngineAsync(runId);
+
+        using (var parked = _fixture.BeginScope())
+        {
+            var db = parked.Resolve<CodeSpaceDbContext>();
+            var emit = await db.WorkflowRunNode.AsNoTracking().SingleAsync(node => node.RunId == runId && node.NodeId == "emit");
+            emit.OutputsJson.ShouldContain(PersistenceSecretRedactor.Marker);
+            emit.OutputsJson.ShouldNotContain(Sentinel);
+
+            var sidecar = await db.WorkflowRunSensitiveRecordPayload.AsNoTracking().SingleAsync(payload => payload.RecordId == emit.RecordId);
+            sidecar.Ciphertext.ShouldBeNull("large ciphertext must leave the hot sidecar row");
+            sidecar.CiphertextArtifactId.ShouldNotBeNull("large encrypted recovery bytes use the scalable artifact plane");
+            (await parked.Resolve<IArtifactStore>().GetBytesAsync(teamId, sidecar.CiphertextArtifactId.Value, CancellationToken.None))!.Bytes
+                .AsSpan().IndexOf(System.Text.Encoding.UTF8.GetBytes(Sentinel)).ShouldBe(-1, "artifact bytes must be authenticated ciphertext, never plaintext");
+            var recovered = await parked.Resolve<IWorkflowSensitivePayloadStore>().ReadNodeOutputsAsync(emit.RecordId, runId, teamId, CancellationToken.None);
+            recovered!["value"].GetString().ShouldBe("prefix-" + secretValue);
+        }
+
+        using (var resume = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+            (await resume.Resolve<IMediator>().Send(new ResumeRunCommand { RunId = runId, Approved = true, Comment = "continue" })).ShouldBeTrue();
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var verifyDb = verify.Resolve<CodeSpaceDbContext>();
+        var completed = await verifyDb.WorkflowRun.AsNoTracking().SingleAsync(run => run.Id == runId);
+        completed.Status.ShouldBe(WorkflowRunStatus.Success);
+
+        var after = await verifyDb.WorkflowRunNode.AsNoTracking().SingleAsync(node => node.RunId == runId && node.NodeId == "after");
+        after.OutputsJson.ShouldContain(PersistenceSecretRedactor.Marker, Case.Sensitive, "the resumed downstream node received the original value but its public projection remains masked");
+        after.OutputsJson.ShouldNotContain(Sentinel);
+        var afterRecovered = await verify.Resolve<IWorkflowSensitivePayloadStore>().ReadNodeOutputsAsync(after.RecordId, runId, teamId, CancellationToken.None);
+        afterRecovered!["value"].GetString().ShouldBe("prefix-" + secretValue, "rehydration must feed the exact original output to downstream execution");
+
+        var publicRows = await verifyDb.WorkflowRunRecord.AsNoTracking().Where(record => record.RunId == runId).Select(record => record.PayloadJson).ToListAsync();
+        publicRows.ShouldAllBe(payload => !payload.Contains(Sentinel, StringComparison.Ordinal), "no public ledger record may expose the echoed secret");
+    }
+
+    [Fact]
+    public async Task Terminal_rejects_an_indirect_secret_echo_from_an_upstream_node()
+    {
+        const string Sentinel = "sk-INDIRECT-TERMINAL-DO-NOT-LEAK";
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using (var setup = _fixture.BeginScope())
+            await setup.Resolve<IVariableService>().SetAsync(VariableScope.Team, teamId, teamId, "API_KEY", VariableValueType.Secret, JsonString(Sentinel), null, userId, CancellationToken.None);
+
+        var definition = new WorkflowDefinition
+        {
+            SchemaVersion = 1,
+            Nodes = new List<NodeDefinition>
+            {
+                new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+                new() { Id = "emit", TypeKey = JsonEmitNode.Key, Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "value": "{{team.API_KEY}}" }""") },
+                new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "result": "{{nodes.emit.outputs.value}}" }""") },
+            },
+            Edges = new List<EdgeDefinition> { new() { From = "start", To = "emit" }, new() { From = "emit", To = "end" } },
+        };
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, definition);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        await RunEngineAsync(runId);
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var run = await db.WorkflowRun.AsNoTracking().SingleAsync(value => value.Id == runId);
+        run.Status.ShouldBe(WorkflowRunStatus.Failure);
+        run.Error.ShouldContain("secret-derived value", Case.Insensitive);
+        run.OutputsJson.ShouldNotContain(Sentinel);
+        (await db.WorkflowRunRecord.AsNoTracking().Where(value => value.RunId == runId).Select(value => value.PayloadJson).ToListAsync())
+            .ShouldAllBe(value => !value.Contains(Sentinel, StringComparison.Ordinal));
     }
 
     [Fact]

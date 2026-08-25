@@ -172,6 +172,14 @@ public class WorkflowRunsController : ControllerBase
         return result == null ? NotFound() : Ok(result);
     }
 
+    /// <summary>One body-free keyset page across in-process, CLI-native and harness model-call producers.</summary>
+    [HttpGet("{runId:guid}/model-calls")]
+    public async Task<IActionResult> ListModelCalls([FromRoute] Guid runId, [FromQuery] string? cursor, [FromQuery] int limit = ListWorkflowRunModelCallsQuery.DefaultPageSize, CancellationToken cancellationToken = default)
+    {
+        var result = await _mediator.Send(new ListWorkflowRunModelCallsQuery { RunId = runId, Cursor = cursor, Limit = limit }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
     /// <summary>Metadata-only view of one model call owned by this Workflow Run. Prompt/output bytes are fetched through the bounded part route below.</summary>
     [HttpGet("{runId:guid}/model-calls/{sequence:long}")]
     public async Task<IActionResult> GetModelCall([FromRoute] Guid runId, [FromRoute] long sequence, CancellationToken cancellationToken)

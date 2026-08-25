@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Lifecycle;
 using CodeSpace.Core.Services.Workflows.Nodes;
+using CodeSpace.Core.Services.Workflows.Runtime;
 using Shouldly;
 using LogLevel = CodeSpace.Core.Services.Workflows.Lifecycle.LogLevel;
 
@@ -119,6 +120,37 @@ public class NodeObservabilityTests
     }
 
     [Fact]
+    public async Task TraceExternalCallAsync_redacts_persisted_target_request_response_and_error_without_mutating_execution()
+    {
+        const string secret = "secret-token-123";
+        var logger = new RecordingLogger();
+        var observability = new NodeObservability(new NodeObservationBinding(logger, new RecordingArtifactStore(), RunId, NodeId, TeamId, ParentRecordId, new PersistenceSecretRedactor([secret])));
+        var rawResult = JsonSerializer.SerializeToElement(new { value = "response-" + secret });
+
+        var returned = await observability.TraceExternalCallAsync(
+            target: "https://api.example.test?token=" + secret,
+            method: "POST",
+            requestPayload: JsonSerializer.SerializeToElement(new { auth = secret }),
+            action: _ => Task.FromResult(rawResult),
+            completionExtractor: result => new ExternalCallCompletion { ResponsePayload = result },
+            cancellationToken: CancellationToken.None);
+
+        returned.GetProperty("value").GetString().ShouldContain(secret, Case.Sensitive, "observability must never alter the value returned to node execution");
+        logger.StartedCalls.Single().Target.ShouldNotContain(secret);
+        logger.StartedCalls.Single().RequestPayload!.Value.GetRawText().ShouldNotContain(secret);
+        logger.CompletedCalls.Single().Payload!.Value.GetRawText().ShouldNotContain(secret);
+
+        await Should.ThrowAsync<InvalidOperationException>(() => observability.TraceExternalCallAsync<int>(
+            target: secret,
+            method: "GET",
+            requestPayload: null,
+            action: _ => throw new InvalidOperationException("provider echoed " + secret),
+            cancellationToken: CancellationToken.None));
+        logger.FailedCalls.Single().Error.ShouldNotContain(secret);
+        logger.FailedCalls.Single().Target.ShouldBe(PersistenceSecretRedactor.Marker);
+    }
+
+    [Fact]
     public async Task PersistArtifactAsync_delegates_to_store_with_bound_team_id()
     {
         var logger = new RecordingLogger();
@@ -144,7 +176,7 @@ public class NodeObservabilityTests
 
     private sealed class RecordingLogger : IRunRecordLogger
     {
-        public List<(Guid RecordId, Guid CorrelationId, string Target, string Method, Guid? ParentRecordId)> StartedCalls { get; } = new();
+        public List<(Guid RecordId, Guid CorrelationId, string Target, string Method, JsonElement? RequestPayload, Guid? ParentRecordId)> StartedCalls { get; } = new();
         public List<(Guid CorrelationId, int? StatusCode, JsonElement? Payload)> CompletedCalls { get; } = new();
         public List<(Guid CorrelationId, string Target, string Error)> FailedCalls { get; } = new();
 
@@ -152,7 +184,7 @@ public class NodeObservabilityTests
         {
             var recordId = Guid.NewGuid();
             var correlationId = Guid.NewGuid();
-            StartedCalls.Add((recordId, correlationId, target, method, parentRecordId));
+            StartedCalls.Add((recordId, correlationId, target, method, requestPayload, parentRecordId));
             return Task.FromResult((recordId, correlationId));
         }
 
@@ -181,7 +213,7 @@ public class NodeObservabilityTests
         public Task RunReplayedAsync(Guid runId, Guid? parentRunId, int snapshotCount, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task SupervisorRunRecoveredAsync(Guid runId, int attempt, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task<Guid> NodeStartedAsync(Guid runId, string nodeId, string iterationKey, IReadOnlyDictionary<string, JsonElement> resolvedInputs, IReadOnlyDictionary<string, JsonElement> resolvedConfig, CancellationToken cancellationToken) => Task.FromResult(Guid.NewGuid());
-        public Task NodeCompletedAsync(Guid runId, string nodeId, string iterationKey, IReadOnlyDictionary<string, JsonElement> outputs, IReadOnlyList<string>? routingHints, TimeSpan duration, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<Guid> NodeCompletedAsync(Guid runId, string nodeId, string iterationKey, IReadOnlyDictionary<string, JsonElement> outputs, IReadOnlyList<string>? routingHints, TimeSpan duration, CancellationToken cancellationToken) => Task.FromResult(Guid.Empty);
         public Task NodeFailedAsync(Guid runId, string nodeId, string iterationKey, string error, TimeSpan duration, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task AttemptFailedAsync(Guid runId, string nodeId, string iterationKey, int attempt, int maxAttempts, string error, TimeSpan duration, double retryInSeconds, Guid? parentRecordId, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task NodeSkippedAsync(Guid runId, string nodeId, string iterationKey, string reason, CancellationToken cancellationToken) => Task.CompletedTask;
