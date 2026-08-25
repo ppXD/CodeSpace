@@ -75,6 +75,18 @@ public class SupervisorDecisionRecord : IEntity<Guid>, IAuditable
     /// <summary>Mirrors <see cref="AgentRun.FenceEpoch"/> at claim time — recorded for audit/forensics only (NOT a CAS guard).</summary>
     public long FenceEpoch { get; set; }
 
+    /// <summary>
+    /// D2 (cross-run learning): the lesson-experiment arm the turn that emitted this decision built its prompt under —
+    /// <c>injected</c> / <c>withheld</c> / <c>none</c>, a <c>LessonArms</c> value. A JOURNAL field (frozen at insert by
+    /// the immutability trigger, like the payload): an assignment that could be rewritten afterwards is not evidence.
+    ///
+    /// <para>Written on EVERY decision row of a run — the run's rehydrate reads the earliest recorded value back and
+    /// reuses it, which is what keeps the arm from re-rolling turn to turn, and <c>SupervisorScorecardService</c>
+    /// reads it so a scorecard can be sliced injected-vs-withheld. NULL on rows written before the column existed and
+    /// on any run that emitted decisions with no arm resolved.</para>
+    /// </summary>
+    public string? LessonArm { get; set; }
+
     public DateTimeOffset CreatedDate { get; set; }
     public Guid CreatedBy { get; set; }
     public DateTimeOffset LastModifiedDate { get; set; }

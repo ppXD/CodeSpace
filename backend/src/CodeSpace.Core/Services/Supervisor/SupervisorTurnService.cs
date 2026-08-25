@@ -636,7 +636,19 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         var idempotencyKey = DeriveDecisionKey(decision, context.TurnNumber);
         var inputHash = SupervisorDecisionLog.HashPayload(decision.PayloadJson);
 
-        var claim = await _ledger.TryClaimAsync(supervisorRunId, teamId, decision.Kind, idempotencyKey, inputHash, decision.PayloadJson, fenceEpoch: context.TurnNumber, cancellationToken).ConfigureAwait(false);
+        var claim = await _ledger.TryClaimAsync(new SupervisorDecisionClaimRequest
+        {
+            SupervisorRunId = supervisorRunId,
+            TeamId = teamId,
+            DecisionKind = decision.Kind,
+            IdempotencyKey = idempotencyKey,
+            InputHash = inputHash,
+            PayloadJson = decision.PayloadJson,
+            FenceEpoch = context.TurnNumber,
+            // D2: stamp the run's lesson arm on the row so the experiment is sliceable afterwards — and so the NEXT
+            // turn reads the assignment back off the tape instead of re-rolling it against a changed lesson ledger.
+            LessonArm = context.LessonArm,
+        }, cancellationToken).ConfigureAwait(false);
 
         // Duplicate = a TERMINAL row already settled this turn's decision → REPLAY: never re-run the side
         // effect (the exactly-once-spawn guarantee — a spawn turn that already staged its K agent runs does NOT

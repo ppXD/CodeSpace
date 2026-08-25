@@ -27,7 +27,7 @@ public class FakeSupervisorDecisionLogTests
         // terminal reachable ONLY from Running — the must-fix-#2 mandatory claim hop). The fake throws, exactly
         // as the real RecordTerminalAsync would, instead of silently flipping the row (the old fake's drift).
         var fake = new FakeSupervisorDecisionLog();
-        var claim = await fake.TryClaimAsync(_runId, _teamId, SupervisorDecisionKinds.Plan, "k", "h", "{}", fenceEpoch: 0, CancellationToken.None);
+        var claim = await fake.TryClaimAsync(new SupervisorDecisionClaimRequest { SupervisorRunId = _runId, TeamId = _teamId, DecisionKind = SupervisorDecisionKinds.Plan, IdempotencyKey = "k", InputHash = "h", PayloadJson = "{}", FenceEpoch = 0 }, CancellationToken.None);
 
         var ex = await Should.ThrowAsync<SupervisorDecisionTransitionException>(
             () => fake.RecordTerminalAsync(claim.DecisionId, _teamId, SupervisorDecisionStatus.Succeeded, "{}", error: null, CancellationToken.None));
@@ -41,7 +41,7 @@ public class FakeSupervisorDecisionLogTests
         // Claim → Running → Succeeded is legal; a SECOND terminal record (Succeeded → Failed) is illegal — a
         // terminal never transitions out. The fake rejects it like the real ledger's status-guarded CAS.
         var fake = new FakeSupervisorDecisionLog();
-        var claim = await fake.TryClaimAsync(_runId, _teamId, SupervisorDecisionKinds.Plan, "k", "h", "{}", fenceEpoch: 0, CancellationToken.None);
+        var claim = await fake.TryClaimAsync(new SupervisorDecisionClaimRequest { SupervisorRunId = _runId, TeamId = _teamId, DecisionKind = SupervisorDecisionKinds.Plan, IdempotencyKey = "k", InputHash = "h", PayloadJson = "{}", FenceEpoch = 0 }, CancellationToken.None);
 
         (await fake.TryBeginExecutionAsync(claim.DecisionId, _teamId, CancellationToken.None)).ShouldBeTrue("the claim hop wins Pending → Running");
         await fake.RecordTerminalAsync(claim.DecisionId, _teamId, SupervisorDecisionStatus.Succeeded, "{}", error: null, CancellationToken.None);
@@ -58,7 +58,7 @@ public class FakeSupervisorDecisionLogTests
         // RecordTerminalAsync only accepts a TERMINAL target (mirrors the real ledger's IsTerminal guard); a
         // Running target throws before any legality check.
         var fake = new FakeSupervisorDecisionLog();
-        var claim = await fake.TryClaimAsync(_runId, _teamId, SupervisorDecisionKinds.Plan, "k", "h", "{}", fenceEpoch: 0, CancellationToken.None);
+        var claim = await fake.TryClaimAsync(new SupervisorDecisionClaimRequest { SupervisorRunId = _runId, TeamId = _teamId, DecisionKind = SupervisorDecisionKinds.Plan, IdempotencyKey = "k", InputHash = "h", PayloadJson = "{}", FenceEpoch = 0 }, CancellationToken.None);
 
         var ex = await Should.ThrowAsync<SupervisorDecisionTransitionException>(
             () => fake.RecordTerminalAsync(claim.DecisionId, _teamId, SupervisorDecisionStatus.Running, "{}", error: null, CancellationToken.None));
@@ -73,7 +73,7 @@ public class FakeSupervisorDecisionLogTests
         // Running (no longer a legal Pending/AwaitingApproval source) → false. This is the replay path the loser
         // takes, modelled exactly as the real CAS.
         var fake = new FakeSupervisorDecisionLog();
-        var claim = await fake.TryClaimAsync(_runId, _teamId, SupervisorDecisionKinds.Plan, "k", "h", "{}", fenceEpoch: 0, CancellationToken.None);
+        var claim = await fake.TryClaimAsync(new SupervisorDecisionClaimRequest { SupervisorRunId = _runId, TeamId = _teamId, DecisionKind = SupervisorDecisionKinds.Plan, IdempotencyKey = "k", InputHash = "h", PayloadJson = "{}", FenceEpoch = 0 }, CancellationToken.None);
 
         (await fake.TryBeginExecutionAsync(claim.DecisionId, _teamId, CancellationToken.None)).ShouldBeTrue("first claimer wins");
         (await fake.TryBeginExecutionAsync(claim.DecisionId, _teamId, CancellationToken.None)).ShouldBeFalse("a second begin loses — the row is already Running");

@@ -48,7 +48,7 @@ public class SupervisorDecisionLogTests
         Guid decisionId;
         using (var scope = _fixture.BeginScope())
         {
-            var claim = await Log(scope).TryClaimAsync(runId, teamId, Kind, Key, InputHash, Payload, 0, CancellationToken.None);
+            var claim = await Log(scope).TryClaimAsync(Claim(runId, teamId, Kind, Key, Payload), CancellationToken.None);
             claim.Outcome.ShouldBe(SupervisorDecisionClaimOutcome.Proceed, "the first claim INSERTs the Pending row");
             decisionId = claim.DecisionId;
         }
@@ -56,7 +56,7 @@ public class SupervisorDecisionLogTests
         using (var scope = _fixture.BeginScope())
         {
             // Still Pending (no terminal) → a second claim for the same key dedups to In-Flight, NOT a second row.
-            var second = await Log(scope).TryClaimAsync(runId, teamId, Kind, Key, InputHash, Payload, 0, CancellationToken.None);
+            var second = await Log(scope).TryClaimAsync(Claim(runId, teamId, Kind, Key, Payload), CancellationToken.None);
             second.Outcome.ShouldBe(SupervisorDecisionClaimOutcome.InFlight, "a Pending row means a concurrent/prior decision owns the key — don't double-execute");
             second.DecisionId.ShouldBe(decisionId, "the in-flight claim points at the existing row");
         }
@@ -74,7 +74,7 @@ public class SupervisorDecisionLogTests
 
         Guid decisionId;
         using (var scope = _fixture.BeginScope())
-            decisionId = (await Log(scope).TryClaimAsync(runId, teamId, Kind, Key, InputHash, Payload, 0, CancellationToken.None)).DecisionId;
+            decisionId = (await Log(scope).TryClaimAsync(Claim(runId, teamId, Kind, Key, Payload), CancellationToken.None)).DecisionId;
 
         // Must claim into Running BEFORE recording a terminal (must-fix #2 — no Pending → terminal shortcut).
         using (var scope = _fixture.BeginScope())
@@ -85,7 +85,7 @@ public class SupervisorDecisionLogTests
 
         using (var scope = _fixture.BeginScope())
         {
-            var dup = await Log(scope).TryClaimAsync(runId, teamId, Kind, Key, InputHash, Payload, 0, CancellationToken.None);
+            var dup = await Log(scope).TryClaimAsync(Claim(runId, teamId, Kind, Key, Payload), CancellationToken.None);
             dup.Outcome.ShouldBe(SupervisorDecisionClaimOutcome.Duplicate, "a terminal row for (run, key) dedups — never re-execute");
             dup.PriorStatus.ShouldBe(SupervisorDecisionStatus.Succeeded);
 
@@ -106,7 +106,7 @@ public class SupervisorDecisionLogTests
         async Task<SupervisorDecisionClaim> ClaimAsync()
         {
             using var scope = _fixture.BeginScope();
-            return await Log(scope).TryClaimAsync(runId, teamId, Kind, Key, InputHash, Payload, 0, CancellationToken.None);
+            return await Log(scope).TryClaimAsync(Claim(runId, teamId, Kind, Key, Payload), CancellationToken.None);
         }
 
         var results = await Task.WhenAll(ClaimAsync(), ClaimAsync(), ClaimAsync(), ClaimAsync());
@@ -131,7 +131,7 @@ public class SupervisorDecisionLogTests
 
         Guid decisionId;
         using (var scope = _fixture.BeginScope())
-            decisionId = (await Log(scope).TryClaimAsync(runId, teamId, Kind, Key, InputHash, Payload, 0, CancellationToken.None)).DecisionId;
+            decisionId = (await Log(scope).TryClaimAsync(Claim(runId, teamId, Kind, Key, Payload), CancellationToken.None)).DecisionId;
 
         async Task<bool> ClaimExecutionAsync()
         {
@@ -159,7 +159,7 @@ public class SupervisorDecisionLogTests
 
         Guid decisionId;
         using (var scope = _fixture.BeginScope())
-            decisionId = (await Log(scope).TryClaimAsync(runId, teamId, Kind, Key, InputHash, Payload, 0, CancellationToken.None)).DecisionId;
+            decisionId = (await Log(scope).TryClaimAsync(Claim(runId, teamId, Kind, Key, Payload), CancellationToken.None)).DecisionId;
 
         using (var scope = _fixture.BeginScope())
             await Should.ThrowAsync<SupervisorDecisionTransitionException>(() =>
@@ -174,7 +174,7 @@ public class SupervisorDecisionLogTests
 
         Guid decisionId;
         using (var scope = _fixture.BeginScope())
-            decisionId = (await Log(scope).TryClaimAsync(runId, teamId, Kind, Key, InputHash, Payload, 0, CancellationToken.None)).DecisionId;
+            decisionId = (await Log(scope).TryClaimAsync(Claim(runId, teamId, Kind, Key, Payload), CancellationToken.None)).DecisionId;
 
         using (var scope = _fixture.BeginScope())
             (await Log(scope).TryBeginExecutionAsync(decisionId, teamId, CancellationToken.None)).ShouldBeTrue();
@@ -196,7 +196,7 @@ public class SupervisorDecisionLogTests
 
         Guid decisionId;
         using (var scope = _fixture.BeginScope())
-            decisionId = (await Log(scope).TryClaimAsync(runId, ownerTeam, Kind, Key, InputHash, Payload, 0, CancellationToken.None)).DecisionId;
+            decisionId = (await Log(scope).TryClaimAsync(Claim(runId, ownerTeam, Kind, Key, Payload), CancellationToken.None)).DecisionId;
 
         using (var scope = _fixture.BeginScope())
             (await Log(scope).TryBeginExecutionAsync(decisionId, ownerTeam, CancellationToken.None)).ShouldBeTrue();
@@ -225,9 +225,9 @@ public class SupervisorDecisionLogTests
         using (var scope = _fixture.BeginScope())
         {
             var log = Log(scope);
-            await log.TryClaimAsync(runId, teamId, "plan", "plan:1", InputHash, Payload, 0, CancellationToken.None);
-            await log.TryClaimAsync(runId, teamId, "spawn", "spawn:2", InputHash, Payload, 0, CancellationToken.None);
-            await log.TryClaimAsync(runId, teamId, "merge", "merge:3", InputHash, Payload, 0, CancellationToken.None);
+            await log.TryClaimAsync(Claim(runId, teamId, "plan", "plan:1", Payload), CancellationToken.None);
+            await log.TryClaimAsync(Claim(runId, teamId, "spawn", "spawn:2", Payload), CancellationToken.None);
+            await log.TryClaimAsync(Claim(runId, teamId, "merge", "merge:3", Payload), CancellationToken.None);
         }
 
         using var verify = _fixture.BeginScope();
@@ -246,7 +246,7 @@ public class SupervisorDecisionLogTests
 
         Guid decisionId;
         using (var scope = _fixture.BeginScope())
-            decisionId = (await Log(scope).TryClaimAsync(runId, teamId, Kind, Key, InputHash, Payload, 0, CancellationToken.None)).DecisionId;
+            decisionId = (await Log(scope).TryClaimAsync(Claim(runId, teamId, Kind, Key, Payload), CancellationToken.None)).DecisionId;
 
         // A journal-field UPDATE (payload_jsonb) is rejected by the trigger — the emitted decision is frozen at insert.
         var journalUpdate = await Should.ThrowAsync<PostgresException>(() =>
@@ -289,8 +289,8 @@ public class SupervisorDecisionLogTests
         using (var scope = _fixture.BeginScope())
         {
             var log = Log(scope);
-            staleId = (await log.TryClaimAsync(runId, teamId, "plan", "plan:stale", InputHash, Payload, 0, CancellationToken.None)).DecisionId;
-            freshId = (await log.TryClaimAsync(runId, teamId, "plan", "plan:fresh", InputHash, Payload, 0, CancellationToken.None)).DecisionId;
+            staleId = (await log.TryClaimAsync(Claim(runId, teamId, "plan", "plan:stale", Payload), CancellationToken.None)).DecisionId;
+            freshId = (await log.TryClaimAsync(Claim(runId, teamId, "plan", "plan:fresh", Payload), CancellationToken.None)).DecisionId;
         }
 
         // Backdate the stale row's created_date below the cutoff (the status path is mutable; created_date isn't a
@@ -318,7 +318,7 @@ public class SupervisorDecisionLogTests
 
         Guid decisionId;
         using (var scope = _fixture.BeginScope())
-            decisionId = (await Log(scope).TryClaimAsync(runId, teamId, Kind, Key, InputHash, Payload, 0, CancellationToken.None)).DecisionId;
+            decisionId = (await Log(scope).TryClaimAsync(Claim(runId, teamId, Kind, Key, Payload), CancellationToken.None)).DecisionId;
 
         using (var scope = _fixture.BeginScope())
             (await Log(scope).TryBeginExecutionAsync(decisionId, teamId, CancellationToken.None)).ShouldBeTrue();
@@ -359,7 +359,7 @@ public class SupervisorDecisionLogTests
         }).PayloadJson;
 
         using (var scope = _fixture.BeginScope())
-            await Log(scope).TryClaimAsync(runId, teamId, "stop", "stop:accept", InputHash, canonical, 0, CancellationToken.None);
+            await Log(scope).TryClaimAsync(Claim(runId, teamId, "stop", "stop:accept", canonical), CancellationToken.None);
 
         SupervisorDecisionRecord replayed;
         using (var scope = _fixture.BeginScope())
@@ -391,7 +391,7 @@ public class SupervisorDecisionLogTests
         canonical.ShouldBe("""{"outcome":"completed","summary":"done"}""", "no acceptance authored → the pre-field idempotency-key bytes");
 
         using (var scope = _fixture.BeginScope())
-            await Log(scope).TryClaimAsync(runId, teamId, "stop", "stop:plain", InputHash, canonical, 0, CancellationToken.None);
+            await Log(scope).TryClaimAsync(Claim(runId, teamId, "stop", "stop:plain", canonical), CancellationToken.None);
 
         SupervisorDecisionRecord replayed;
         using (var verify = _fixture.BeginScope())
@@ -425,7 +425,7 @@ public class SupervisorDecisionLogTests
         }).PayloadJson;
 
         using (var scope = _fixture.BeginScope())
-            await Log(scope).TryClaimAsync(runId, teamId, "spawn", "spawn:agents", InputHash, canonical, 0, CancellationToken.None);
+            await Log(scope).TryClaimAsync(Claim(runId, teamId, "spawn", "spawn:agents", canonical), CancellationToken.None);
 
         SupervisorDecisionRecord replayed;
         using (var scope = _fixture.BeginScope())
@@ -456,7 +456,7 @@ public class SupervisorDecisionLogTests
         canonical.ShouldBe("""{"subtaskIds":["s1"]}""", "no per-agent specs → the pre-field idempotency-key bytes");
 
         using (var scope = _fixture.BeginScope())
-            await Log(scope).TryClaimAsync(runId, teamId, "spawn", "spawn:plain", InputHash, canonical, 0, CancellationToken.None);
+            await Log(scope).TryClaimAsync(Claim(runId, teamId, "spawn", "spawn:plain", canonical), CancellationToken.None);
 
         using var verify = _fixture.BeginScope();
         JsonSerializer.Deserialize<SupervisorSpawnPayload>((await Log(verify).GetForRunAsync(runId, teamId, CancellationToken.None)).Single().PayloadJson, AgentJson.Options)!.Agents
@@ -482,7 +482,7 @@ public class SupervisorDecisionLogTests
         }).PayloadJson;
 
         using (var scope = _fixture.BeginScope())
-            await Log(scope).TryClaimAsync(runId, teamId, "spawn", "spawn:rationale", InputHash, canonical, 0, CancellationToken.None);
+            await Log(scope).TryClaimAsync(Claim(runId, teamId, "spawn", "spawn:rationale", canonical), CancellationToken.None);
 
         SupervisorDecisionRecord replayed;
         using (var scope = _fixture.BeginScope())
@@ -508,7 +508,7 @@ public class SupervisorDecisionLogTests
         canonical.ShouldBe("""{"subtaskIds":["s1"]}""", "no rationale authored → the pre-field idempotency-key bytes (byte-identical to before the feature)");
 
         using (var scope = _fixture.BeginScope())
-            await Log(scope).TryClaimAsync(runId, teamId, "spawn", "spawn:norationale", InputHash, canonical, 0, CancellationToken.None);
+            await Log(scope).TryClaimAsync(Claim(runId, teamId, "spawn", "spawn:norationale", canonical), CancellationToken.None);
 
         using var verify = _fixture.BeginScope();
         SupervisorOutcome.ReadRationale((await Log(verify).GetForRunAsync(runId, teamId, CancellationToken.None)).Single().PayloadJson)
@@ -516,6 +516,10 @@ public class SupervisorDecisionLogTests
     }
 
     private static ISupervisorDecisionLog Log(ILifetimeScope scope) => scope.Resolve<ISupervisorDecisionLog>();
+
+    /// <summary>The claim request these tests INSERT with — the fixed audit hash + fence epoch every case shares, so a test names only what it varies.</summary>
+    private static SupervisorDecisionClaimRequest Claim(Guid runId, Guid teamId, string kind, string key, string payload) =>
+        new() { SupervisorRunId = runId, TeamId = teamId, DecisionKind = kind, IdempotencyKey = key, InputHash = InputHash, PayloadJson = payload, FenceEpoch = 0 };
 
     private async Task<SupervisorDecisionRecord> ReadRowAsync(Guid decisionId)
     {

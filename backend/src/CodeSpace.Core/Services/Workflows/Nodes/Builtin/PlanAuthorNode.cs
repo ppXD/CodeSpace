@@ -134,7 +134,7 @@ public sealed class PlanAuthorNode : INodeRuntime
         if (!NodeScopeReader.TryReadWorkflowRunId(context, out var workflowRunId))
             return NodeResult.Fail("The run carries no run id — plan.author persists the plan against the run.");
 
-        var request = BuildPlanRequest(context.Config, teamId, ComposeGoalWithCriteria(goal, criteria), grounding, feedback, workflowRunId, context.NodeId);
+        var request = BuildPlanRequest(context.Config, teamId, new PlanPromptParts(goal, criteria, grounding, feedback), workflowRunId, context.NodeId);
 
         using var scope = _scopeFactory.CreateScope();
 
@@ -206,23 +206,44 @@ public sealed class PlanAuthorNode : INodeRuntime
     /// <summary>The flat-plan constraint line appended to the task text — the planner must author parallel-safe subtasks. Pinned by a unit test (the map projections depend on it).</summary>
     public const string FlatPlanConstraint = "Constraint: author INDEPENDENT subtasks only — they run in PARALLEL, so do NOT use dependsOn.";
 
-    /// <summary>Map config → the planner request. The feedback (when present) rides the task text so EVERY planner backend revises against it without a contract change (a flat plan additionally appends <see cref="FlatPlanConstraint"/>); defensive reads per the node convention (an out-of-range reviewMode degrades to off, never throws). The run/node linkage (D①) lets the grounded plan reviewer land its AgentRun on this node's cell.</summary>
-    internal static WorkflowPlanRequest BuildPlanRequest(IReadOnlyDictionary<string, JsonElement> config, Guid teamId, string goal, string grounding, string feedback, Guid? workflowRunId = null, string? nodeId = null) => new()
+    /// <summary>
+    /// The four prompt parts a plan request is composed from, grouped so <see cref="BuildPlanRequest"/> stays inside
+    /// the parameter cap (Rule 1's parameter-object remedy — an internal grouping for one caller, NOT a wire noun).
+    /// <see cref="Goal"/> is the operator's UNDECORATED ask; the other three are the decorations folded on top of it.
+    /// </summary>
+    internal readonly record struct PlanPromptParts(string Goal, IReadOnlyList<string> Criteria, string Grounding, string Feedback);
+
+    /// <summary>
+    /// Map config + <paramref name="prompt"/> → the planner request. The criteria fold (S5b) and the feedback fold
+    /// (the edit loop) both ride the task text so EVERY planner backend honours them without a contract change (a
+    /// flat plan additionally appends <see cref="FlatPlanConstraint"/>) — composed HERE rather than at each caller,
+    /// so plan.author and plan.confirm cannot decorate differently. <c>TaskGoal</c> carries the undecorated goal
+    /// past all of that, because the D2 A/B arm hashes the task's identity and must not move when a re-plan appends
+    /// feedback. Defensive config reads per the node convention (an out-of-range reviewMode degrades to off, never
+    /// throws). The run/node linkage (D①) lets the grounded plan reviewer land its AgentRun on this node's cell.
+    /// </summary>
+    internal static WorkflowPlanRequest BuildPlanRequest(IReadOnlyDictionary<string, JsonElement> config, Guid teamId, PlanPromptParts prompt, Guid? workflowRunId = null, string? nodeId = null)
     {
-        TaskText = ReadFlatPlan(config) ? $"{ComposeTaskText(goal, feedback)}\n\n{FlatPlanConstraint}" : ComposeTaskText(goal, feedback),
-        TeamId = teamId,
-        GroundingContext = string.IsNullOrWhiteSpace(grounding) ? null : grounding,
-        BrainModelId = ReadGuid(config, "plannerModelId"),
-        Review = ReadReviewMode(config),
-        ReviewerModelId = ReadGuid(config, "reviewerModelId"),
-        // D① grounded plan review: a real read-only agent verifies the plan against this repository's actual tree.
-        ReviewerAgent = ReadBool(config, "reviewerAgent"),
-        RepositoryId = ReadGuid(config, "repositoryId"),
-        // S1: the launch's immutable base pin — the reviewer clones the SAME commit the executing agents materialize.
-        PinnedSha = string.IsNullOrWhiteSpace(ReadString(config, "pinnedSha")) ? null : ReadString(config, "pinnedSha"),
-        WorkflowRunId = workflowRunId,
-        NodeId = nodeId,
-    };
+        var taskText = ComposeTaskText(ComposeGoalWithCriteria(prompt.Goal, prompt.Criteria), prompt.Feedback);
+
+        return new WorkflowPlanRequest
+        {
+            TaskText = ReadFlatPlan(config) ? $"{taskText}\n\n{FlatPlanConstraint}" : taskText,
+            TaskGoal = prompt.Goal,
+            TeamId = teamId,
+            GroundingContext = string.IsNullOrWhiteSpace(prompt.Grounding) ? null : prompt.Grounding,
+            BrainModelId = ReadGuid(config, "plannerModelId"),
+            Review = ReadReviewMode(config),
+            ReviewerModelId = ReadGuid(config, "reviewerModelId"),
+            // D① grounded plan review: a real read-only agent verifies the plan against this repository's actual tree.
+            ReviewerAgent = ReadBool(config, "reviewerAgent"),
+            RepositoryId = ReadGuid(config, "repositoryId"),
+            // S1: the launch's immutable base pin — the reviewer clones the SAME commit the executing agents materialize.
+            PinnedSha = string.IsNullOrWhiteSpace(ReadString(config, "pinnedSha")) ? null : ReadString(config, "pinnedSha"),
+            WorkflowRunId = workflowRunId,
+            NodeId = nodeId,
+        };
+    }
 
     /// <summary>Defensive bool config read — absent / non-bool ⇒ false, mirroring the node convention.</summary>
     private static bool ReadBool(IReadOnlyDictionary<string, JsonElement> config, string key) =>

@@ -733,7 +733,7 @@ public class SupervisorTurnServiceTests
         var replayContext = new SupervisorTurnContext { Goal = "goal", TurnNumber = 0 };
         var decision = await new StubSupervisorDecider().DecideAsync(replayContext, CancellationToken.None);
         var key = SupervisorDecisionLog.DeriveIdempotencyKey(decision.Kind, decision.PayloadJson, SupervisorTurnService.TurnDiscriminator(0));
-        var claim = await ledger.TryClaimAsync(_runId, _teamId, decision.Kind, key, "h", decision.PayloadJson, 0, CancellationToken.None);
+        var claim = await ledger.TryClaimAsync(new SupervisorDecisionClaimRequest { SupervisorRunId = _runId, TeamId = _teamId, DecisionKind = decision.Kind, IdempotencyKey = key, InputHash = "h", PayloadJson = decision.PayloadJson, FenceEpoch = 0 }, CancellationToken.None);
 
         claim.Outcome.ShouldBe(SupervisorDecisionClaimOutcome.Duplicate, "the same per-turn key collides → replay the prior outcome");
         executor.Calls.ShouldBe(1, "the side effect ran exactly once — no double-plan on replay");

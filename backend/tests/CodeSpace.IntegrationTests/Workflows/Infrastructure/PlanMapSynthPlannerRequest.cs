@@ -51,7 +51,7 @@ public static class PlanMapSynthPlannerRequest
         var goal = inputs.TryGetValue("goal", out var g) && g.ValueKind == JsonValueKind.String ? g.GetString()! : "";
         var grounding = inputs.TryGetValue("grounding", out var gr) && gr.ValueKind == JsonValueKind.String ? gr.GetString()! : "";
 
-        var planRequest = PlanAuthorNode.BuildPlanRequest(config, teamId, goal, grounding, feedback: "");
+        var planRequest = PlanAuthorNode.BuildPlanRequest(config, teamId, new PlanAuthorNode.PlanPromptParts(goal, [], grounding, ""));
 
         var pool = await scope.Resolve<IModelPoolSelector>().ListPoolAsync(teamId, allowedRowIds: null, cancellationToken).ConfigureAwait(false);
         var catalog = CapabilityCatalog.Render(scope.Resolve<IAgentHarnessRegistry>().All, pool);

@@ -205,7 +205,7 @@ public sealed class PlanConfirmNode : INodeRuntime
             ? cv.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String).Select(e => e.GetString() ?? "").ToList()
             : (IReadOnlyList<string>)Array.Empty<string>();
 
-        var request = PlanAuthorNode.BuildPlanRequest(context.Config, teamId, PlanAuthorNode.ComposeGoalWithCriteria(goal, criteria), ReadString(context.Inputs, "grounding"), feedback: answer, workflowRunId, context.NodeId);
+        var request = PlanAuthorNode.BuildPlanRequest(context.Config, teamId, new PlanAuthorNode.PlanPromptParts(goal, criteria, ReadString(context.Inputs, "grounding"), answer), workflowRunId, context.NodeId);
 
         PlannedWorkflow plan;
         try

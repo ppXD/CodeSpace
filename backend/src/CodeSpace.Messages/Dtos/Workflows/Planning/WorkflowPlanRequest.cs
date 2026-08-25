@@ -10,8 +10,20 @@ namespace CodeSpace.Messages.Dtos.Workflows.Planning;
 /// </summary>
 public sealed record WorkflowPlanRequest
 {
-    /// <summary>The operator's free-text description of the task to plan.</summary>
+    /// <summary>The operator's free-text description of the task to plan — the PROMPT text, decorations included.</summary>
     public required string TaskText { get; init; }
+
+    /// <summary>
+    /// The operator's UNDECORATED goal — the task's identity, and the ONLY thing the D2 lesson A/B hashes to pick
+    /// an arm (<c>LessonArms</c>). Distinct from <see cref="TaskText"/>, which additionally carries the acceptance
+    /// criteria, any edit-loop feedback and the flat-plan constraint: hashing THAT re-rolled the arm every time a
+    /// re-plan appended feedback, and never matched the supervisor lane's arm for the same task.
+    ///
+    /// <para>Null when the caller composes no decorations at all (the <c>PlanWorkflowFromTaskCommand</c> surface,
+    /// where <see cref="TaskText"/> IS the operator's goal) — the planner then assigns from <see cref="TaskText"/>,
+    /// which for that caller is the same string.</para>
+    /// </summary>
+    public string? TaskGoal { get; init; }
 
     /// <summary>Tenancy: the team this plan belongs to. The planner stays team-scoped; the value comes from <c>ICurrentTeam</c>, never the request body.</summary>
     public required Guid TeamId { get; init; }
