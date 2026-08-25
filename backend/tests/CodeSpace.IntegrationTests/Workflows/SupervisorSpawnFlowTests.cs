@@ -352,14 +352,23 @@ public class SupervisorSpawnFlowTests : IDisposable
     [Fact]
     public async Task A_dispatch_authoring_a_model_outside_the_pool_fails_the_spawn_cleanly()
     {
-        // Option B: a model-authored dispatch whose model is NOT a credentialed model in the operator's allowed pool
-        // (here: "rogue-model", out of the seeded one-row pool) fails the dispatch resolution; the turn service
-        // terminalizes the spawn as a CLEAN Failed (never stranded Running), staging no agents. Also proves the config
-        // round-trip: allowedModelIds on the node config threads into the turn context's pool.
+        // Option B: a model-authored dispatch whose model is REAL + credentialed to the team but NOT admitted to the
+        // operator's allowed pool fails closed; the turn service terminalizes the spawn as a CLEAN Failed (never
+        // stranded Running), staging no agents. Also proves the config round-trip: allowedModelIds on the node config
+        // threads into the turn context's pool.
+        //
+        // The FIXTURE changed, not the intent. This test used to seed "allowed-model" alone and let the dispatch author
+        // the never-credentialed name "rogue-model" — so it asserted the out-of-POOL message while actually exercising
+        // the "no such model" path. Both produced the same throw and the same conflated message ("not a credentialed
+        // model in this run's allowed model pool"), so nothing caught the mismatch. Those cases now diverge — a name the
+        // team credentials nowhere is a MODEL MISS the brain may re-author (its own test follows) — so the seeding is
+        // corrected to make "rogue-model" a genuine team model the operator kept out, which is what the name claims and
+        // what governance actually means. Every property the old test protected is asserted unchanged below.
         using (var s = _fixture.BeginScope()) s.Resolve<SupervisorDecisionScript>().PlanSpawnBadModelStop();
 
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var (_, allowedRowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "allowed-model");   // the only model in the pool; the dispatch authors "rogue-model" (out of pool)
+        var (_, allowedRowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "allowed-model");   // the ONLY model in the pool
+        await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, ScriptedSupervisorDecider.DispatchModelName);   // credentialed to the team, but NOT admitted to the pool
         var workflowId = await CreateWorkflowAsync(teamId, userId, $$"""{"goal":"ship the feature","allowedModelIds":["{{allowedRowId}}"]}""");
         var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
@@ -386,6 +395,45 @@ public class SupervisorSpawnFlowTests : IDisposable
         {
             jobClient.AutoExecute = true;
         }
+    }
+
+    [Fact]
+    public async Task A_dispatch_authoring_a_model_no_credential_backs_rejects_the_spawn_and_the_run_survives()
+    {
+        // The miss half of the split, and the defect this pair exists to close: an authored model name the team
+        // credentials NOWHERE used to reach ApplyDispatchModelAsync and throw, so the turn service recorded the decision
+        // Failed and RE-THREW — the node failed and the whole run terminalized Failure, mid fan-out, after the plan had
+        // already succeeded. That is the persona defect #1535 fixed, on its model sibling: a name the brain invented or
+        // typo'd carries no governance content, so it must be re-authorable, exactly like an unknown subtask id.
+        //
+        // Identical fixture to the governance test above except for ONE row: "rogue-model" is not seeded, so it resolves
+        // to nothing rather than to a real row the operator excluded. That single difference is the whole distinction,
+        // and it is why the run below LIVES where the one above dies.
+        using (var s = _fixture.BeginScope()) s.Resolve<SupervisorDecisionScript>().PlanSpawnBadModelStop();
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (_, allowedRowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "allowed-model");
+        var workflowId = await CreateWorkflowAsync(teamId, userId, $$"""{"goal":"ship the feature","allowedModelIds":["{{allowedRowId}}"]}""");
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+
+        await RunEngineAsync(runId);
+        await ResolveSelfAdvanceAsync(runId);
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var spawn = (await db.SupervisorDecisionRecord.AsNoTracking().Where(r => r.SupervisorRunId == runId && r.DecisionKind == SupervisorDecisionKinds.Spawn).ToListAsync()).Single();
+        spawn.Status.ShouldNotBe(SupervisorDecisionStatus.Running, "the decision is never left stranded — that property is unchanged from the throw it replaced");
+        spawn.Status.ShouldNotBe(SupervisorDecisionStatus.Failed, "an unresolvable model name is a model miss, and a miss must not terminalize a decision the brain can simply re-author");
+
+        (await db.AgentRun.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId)).ShouldBe(0, "no agent staged — the WHOLE spawn is rejected, never a partial fan-out on the profile's model");
+
+        var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+        run.Status.ShouldNotBe(WorkflowRunStatus.Failure, "the run survives a model name the brain made up — the regression this lane closes");
     }
 
     [Fact]

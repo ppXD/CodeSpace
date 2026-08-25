@@ -41,7 +41,12 @@ public sealed record SupervisorAgentDispatch
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Harness { get; init; }
 
-    /// <summary>A model REQUEST for this agent. Null → the profile's model.</summary>
+    /// <summary>
+    /// A model REQUEST for this agent — a model NAME the run's credentialed pool holds (the capability catalog renders
+    /// that pool). A name no credentialed model of the team has REJECTS the whole spawn re-authorably (the brain may
+    /// re-author or omit the field); a real team model the operator kept OUT of this run's pool fails closed instead —
+    /// that boundary is the operator's, not the brain's. Both are decided BEFORE any agent stages. Null → the profile's model.
+    /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Model { get; init; }
 
@@ -53,9 +58,10 @@ public sealed record SupervisorAgentDispatch
     /// The Agent persona this agent embodies — the @-mention SLUG of one of the team's personas (rendered in the
     /// capability catalog), e.g. <c>"security-reviewer"</c>. The server resolves it to that team's
     /// <c>AgentDefinitionId</c> (the persona's system prompt / model / tools then merge into the run, exactly as the
-    /// run-level profile persona does). FAIL-CLOSED on an unknown / foreign / deleted slug (a clean terminal, like an
-    /// out-of-pool model) — the brain only picks from the team's own personas the catalog lists. Null → the run-level
-    /// profile persona (byte-identical to a homogeneous spawn).
+    /// run-level profile persona does). An unknown / foreign / deleted slug REJECTS the whole spawn re-authorably before
+    /// any agent stages — it is a MODEL miss, not a privilege breach, so the fail-closed terminal is reserved for the
+    /// operator's own boundaries (an out-of-pool model, an out-of-set repo). Null → the run-level profile persona
+    /// (byte-identical to a homogeneous spawn).
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? AgentDefinition { get; init; }
