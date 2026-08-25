@@ -20,7 +20,7 @@ public sealed class RunQualificationRoundCommandHandler : IRequestHandler<RunQua
 
     public async Task<RunQualificationRoundResponse> Handle(RunQualificationRoundCommand request, CancellationToken cancellationToken)
     {
-        var spec = new QualificationSpec { MinSolveRateLowerBound = 0.0, MinEvaluatorHealth = request.MinEvaluatorHealth, ValidityDays = request.ValidityDays };
+        var spec = new QualificationSpec { MinSolveRateLowerBound = request.MinSolveRateLowerBound, MinEvaluatorHealth = request.MinEvaluatorHealth, ValidityDays = request.ValidityDays };
         var selection = new BenchmarkAgentSelection { Harness = request.Harness, Model = request.Model, ModelCredentialId = request.ModelCredentialId, Autonomy = request.Autonomy };
 
         var outcome = await _runner.QualifyAsync(request.Mode, request.CapabilityKey, spec, _currentTeam.Id!.Value, selection, cancellationToken).ConfigureAwait(false);
