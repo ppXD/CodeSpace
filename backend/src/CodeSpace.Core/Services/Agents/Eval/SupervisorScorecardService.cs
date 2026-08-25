@@ -137,6 +137,9 @@ public sealed class SupervisorScorecardService : ISupervisorScorecardService, IS
             SpawnedAgentStatuses = spawnedStatuses,
             TerminalStatus = runState.TerminalStatus,
             TimeToStopSeconds = runState.TerminalStatus is not null ? TimeToStopSeconds(decisions, runState.CompletedAt) : null,
+            // D2: the run's assignment, read the SAME way its rehydrate reads it — the earliest row that recorded one.
+            // Rows are already in Sequence order here, and a run straddling the column's arrival has NULLs first.
+            LessonArm = decisions.Select(d => d.LessonArm).FirstOrDefault(arm => !string.IsNullOrWhiteSpace(arm)),
         };
 
     private static SupervisorDecisionSummary ToSummary(SupervisorDecisionRecord row) => new()

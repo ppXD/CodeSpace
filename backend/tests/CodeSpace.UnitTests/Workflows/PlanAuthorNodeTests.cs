@@ -36,7 +36,7 @@ public class PlanAuthorNodeTests
     {
         var config = new Dictionary<string, JsonElement> { ["flatPlan"] = JsonSerializer.SerializeToElement(true) };
 
-        var request = PlanAuthorNode.BuildPlanRequest(config, Guid.NewGuid(), "ship it", grounding: "", feedback: "");
+        var request = PlanAuthorNode.BuildPlanRequest(config, Guid.NewGuid(), new PlanAuthorNode.PlanPromptParts("ship it", [], "", ""));
 
         request.TaskText.ShouldContain(PlanAuthorNode.FlatPlanConstraint, customMessage: "the parallel map cannot honor ordering — the planner must be told");
     }
@@ -68,7 +68,7 @@ public class PlanAuthorNodeTests
     [Fact]
     public void Without_the_flat_flag_the_task_text_is_unchanged()
     {
-        var request = PlanAuthorNode.BuildPlanRequest(new Dictionary<string, JsonElement>(), Guid.NewGuid(), "ship it", grounding: "", feedback: "");
+        var request = PlanAuthorNode.BuildPlanRequest(new Dictionary<string, JsonElement>(), Guid.NewGuid(), new PlanAuthorNode.PlanPromptParts("ship it", [], "", ""));
 
         request.TaskText.ShouldNotContain(PlanAuthorNode.FlatPlanConstraint);
     }
@@ -80,7 +80,7 @@ public class PlanAuthorNodeTests
         var reviewerRow = Guid.NewGuid();
         var config = Config($$"""{"plannerModelId":"{{plannerRow}}","reviewMode":2,"reviewerModelId":"{{reviewerRow}}"}""");
 
-        var request = PlanAuthorNode.BuildPlanRequest(config, teamId: Guid.NewGuid(), goal: "ship it", grounding: "repo layout", feedback: "");
+        var request = PlanAuthorNode.BuildPlanRequest(config, teamId: Guid.NewGuid(), prompt: new PlanAuthorNode.PlanPromptParts("ship it", [], "repo layout", ""));
 
         request.TaskText.ShouldBe("ship it");
         request.GroundingContext.ShouldBe("repo layout");
@@ -94,9 +94,9 @@ public class PlanAuthorNodeTests
     {
         // S1: the projection's pinnedSha config reaches the plan request, so the grounded reviewer clones the SAME
         // commit the executing agents materialize; blank/absent folds to null (byte-identical legacy).
-        PlanAuthorNode.BuildPlanRequest(Config("""{"pinnedSha":"abc123def456"}"""), Guid.NewGuid(), "goal", "", "").PinnedSha.ShouldBe("abc123def456");
-        PlanAuthorNode.BuildPlanRequest(Config("""{"pinnedSha":"   "}"""), Guid.NewGuid(), "goal", "", "").PinnedSha.ShouldBeNull();
-        PlanAuthorNode.BuildPlanRequest(Config("""{}"""), Guid.NewGuid(), "goal", "", "").PinnedSha.ShouldBeNull();
+        PlanAuthorNode.BuildPlanRequest(Config("""{"pinnedSha":"abc123def456"}"""), Guid.NewGuid(), new PlanAuthorNode.PlanPromptParts("goal", [], "", "")).PinnedSha.ShouldBe("abc123def456");
+        PlanAuthorNode.BuildPlanRequest(Config("""{"pinnedSha":"   "}"""), Guid.NewGuid(), new PlanAuthorNode.PlanPromptParts("goal", [], "", "")).PinnedSha.ShouldBeNull();
+        PlanAuthorNode.BuildPlanRequest(Config("""{}"""), Guid.NewGuid(), new PlanAuthorNode.PlanPromptParts("goal", [], "", "")).PinnedSha.ShouldBeNull();
     }
 
     [Theory]
@@ -105,7 +105,7 @@ public class PlanAuthorNodeTests
     [InlineData("""{}""")]                    // absent → off
     public void An_unusable_review_mode_degrades_to_off(string configJson)
     {
-        var request = PlanAuthorNode.BuildPlanRequest(Config(configJson), Guid.NewGuid(), "goal", "", "");
+        var request = PlanAuthorNode.BuildPlanRequest(Config(configJson), Guid.NewGuid(), new PlanAuthorNode.PlanPromptParts("goal", [], "", ""));
 
         request.Review.ShouldBe(ReviewMode.None);
         request.BrainModelId.ShouldBeNull();

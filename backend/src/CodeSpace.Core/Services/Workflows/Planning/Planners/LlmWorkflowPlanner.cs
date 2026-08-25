@@ -25,8 +25,8 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
     private readonly IAgentHarnessRegistry _harnesses;
     private readonly Learning.ILessonReader _lessons;
 
-    /// <summary>Lessons shown per plan — the freshest few beat an exhaustive dump (prompt budget + recency bias are both deliberate).</summary>
-    public const int LessonTopK = 5;
+    /// <summary>Lessons shown per plan — the freshest few beat an exhaustive dump (prompt budget + recency bias are both deliberate). The SHARED window, so the supervisor lane's treatment is the same slice of the ledger.</summary>
+    public const int LessonTopK = Learning.LessonArms.TopK;
 
     public LlmWorkflowPlanner(ILLMClientRegistry clientRegistry, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses, Learning.ILessonReader lessons)
     {
@@ -60,9 +60,10 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         var catalog = CapabilityCatalog.Render(_harnesses.All, pool);
 
         // D2 (cross-run learning): the distilled lessons ride the plan prompt — under a deterministic, toggle-free
-        // A/B arm (hash of team + task text) so the north-star referee can slice injected vs withheld afterwards.
+        // A/B arm hashed from team + the UNDECORATED goal (never the prompt text, which a re-plan's feedback fold and
+        // the flat-plan constraint both move), so the same task lands in the same arm here and on the supervisor lane.
         var current = await _lessons.ListCurrentAsync(request.TeamId, request.RepositoryId, LessonTopK, cancellationToken).ConfigureAwait(false);
-        var arm = current.Count == 0 ? Learning.LessonArms.None : Learning.LessonArms.Assign(request.TeamId, request.TaskText);
+        var arm = Learning.LessonArms.For(request.TeamId, request.TaskGoal ?? request.TaskText, current.Count);
         var injected = arm == Learning.LessonArms.Injected ? current : Array.Empty<Persistence.Entities.Lesson>();
 
         var completion = await structured.CompleteStructuredAsync(BuildRequest(request, pick, catalog, injected), cancellationToken).ConfigureAwait(false);
@@ -115,7 +116,7 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
             builder.AppendLine();
             builder.AppendLine("Lessons distilled from this team's prior failed runs (real post-mortems — apply them where they fit the task):");
             foreach (var lesson in lessons)
-                builder.AppendLine($"- [{lesson.FailureClass}] {lesson.WhatFailed} → {lesson.HowToApply}");
+                builder.AppendLine($"- {Learning.LessonArms.Line(lesson)}");
         }
 
         // IMPROVE: an independent reviewer critiqued a prior draft of this plan — revise to address it (set by the

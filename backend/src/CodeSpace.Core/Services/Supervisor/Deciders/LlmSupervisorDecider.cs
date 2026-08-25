@@ -615,8 +615,8 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             AppendOutstandingAmendments(builder, context);
         }
 
-        // D2 (cross-run learning, decider lane): the distilled lessons ride the turn prompt — filled at
-        // rehydration under the same deterministic arm the planner uses; empty ⇒ byte-identical prompt.
+        // D2 (cross-run learning, decider lane): the distilled lessons ride the turn prompt — filled at rehydration
+        // when the run's recorded arm is `injected`; empty (withheld / none / no lessons) ⇒ byte-identical prompt.
         if (context.LessonLines is { Count: > 0 } lessonLines)
         {
             builder.AppendLine();

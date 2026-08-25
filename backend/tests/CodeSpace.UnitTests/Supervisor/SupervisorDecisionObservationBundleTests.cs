@@ -186,7 +186,7 @@ public sealed class SupervisorDecisionObservationBundleTests
             return Read(supervisorRunId, teamId, cancellationToken);
         }
 
-        public Task<SupervisorDecisionClaim> TryClaimAsync(Guid supervisorRunId, Guid teamId, string decisionKind, string idempotencyKey, string inputHash, string payloadJson, long fenceEpoch, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<SupervisorDecisionClaim> TryClaimAsync(SupervisorDecisionClaimRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<bool> TryBeginExecutionAsync(Guid decisionId, Guid teamId, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task RecordTerminalAsync(Guid decisionId, Guid teamId, SupervisorDecisionStatus status, string? outcomeJson, string? error, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<IReadOnlyList<SupervisorPriorDecision>> GetTerminalDecisionsAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken) => throw new NotSupportedException();

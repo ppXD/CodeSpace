@@ -84,6 +84,9 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
             // A continuing turn's thread-context is prepended to the supervisor's goal (its planning prompt) the SAME
             // way the agent.run projections inject it, so the supervisor plans the follow-up against prior work.
             ["goal"] = AgentNodeMapping.ComposeGoal(context.Seed.Goal, context.GroundingContext),
+            // The CLEAN pre-grounding task text — the same key agent.run's projection bakes. The D2 lesson A/B hashes
+            // it (never the composed goal above), so a CONTINUE turn stays in the arm its first turn was assigned.
+            ["displayTitle"] = context.Seed.Goal,
             ["approvalPolicy"] = context.Route.Caps.RequiresApproval ? "spawns" : "none",
             ["synthesisPromptBudgetChars"] = SynthesisPromptBudgetChars,
         };

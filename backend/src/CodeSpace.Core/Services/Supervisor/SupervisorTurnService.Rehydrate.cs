@@ -148,10 +148,14 @@ public sealed partial class SupervisorTurnService
             ? await FoldBrainPlaneSpendAsync(supervisorRunId, cancellationToken).ConfigureAwait(false)
             : BrainPlaneSpendSummary.Empty;
 
+        // D2 — the run's lesson arm (frozen on the tape after turn 1) + the lines this turn's prompt carries.
+        var lessons = await ResolveLessonInjectionAsync(goal, goalConfig, rows, teamId, cancellationToken).ConfigureAwait(false);
+
         return new SupervisorTurnContext
         {
             Goal = goal,
-            LessonLines = await BuildLessonLinesAsync(goal, teamId, goalConfig?.AgentProfile?.RepositoryId, cancellationToken).ConfigureAwait(false),
+            LessonArm = lessons.Arm,
+            LessonLines = lessons.Lines,
             SynthesisPromptBudgetChars = SupervisorSynthesisBudget.Normalize(goalConfig?.SynthesisPromptBudgetChars),
             SupervisorRunId = supervisorRunId,
             TeamId = teamId,
@@ -1425,13 +1429,34 @@ public sealed partial class SupervisorTurnService
     /// <summary>Read the <c>reason</c> from a stop decision's payload for the node's terminal output (best-effort; null when absent/malformed) — delegates to the shared <see cref="SupervisorOutcome.ReadStopReason"/> so the forced-stop reason has ONE reader.</summary>
     private static string? ReadStopReason(SupervisorDecision decision) => SupervisorOutcome.ReadStopReason(decision.PayloadJson);
 
-    /// <summary>Mirrors the workflow planner's cap (top 5, repo-matched first) and its deterministic arm — the SAME task is injected or withheld in BOTH brain lanes, so the A/B stays coherent.</summary>
-    private async Task<IReadOnlyList<string>> BuildLessonLinesAsync(string goal, Guid teamId, Guid? repositoryId, CancellationToken cancellationToken)
+    /// <summary>
+    /// The text the D2 lesson A/B hashes for THIS run: the projection's clean pre-grounding <c>displayTitle</c>
+    /// when the definition baked one, else the node's <paramref name="goal"/> verbatim (a hand-authored node, or a
+    /// definition projected before that key existed — for which the two are the same string whenever no session
+    /// grounding was prepended). Never the composed goal when a clean one is available: the grounding digest
+    /// differs per turn-thread, and hashing it put the same task in a different arm from the planner lane.
+    /// </summary>
+    internal static string LessonAssignmentGoal(string goal, SupervisorGoalConfig? goalConfig) =>
+        string.IsNullOrWhiteSpace(goalConfig?.DisplayTitle) ? goal : goalConfig.DisplayTitle;
+
+    /// <summary>
+    /// The run's lesson arm + the lesson lines THIS turn's prompt carries. The arm is the RUN's unit of assignment:
+    /// once any decision row recorded one it is read back off the tape and reused verbatim, so a run that began
+    /// outside the experiment (<c>none</c> — no lesson existed yet) can never be promoted into the treatment by a
+    /// lesson the distiller landed mid-run, and a treated run cannot fall out of it. Only the assignment is frozen:
+    /// the injected LINES are re-read every turn, because the intervention under test is "the prompt carries the
+    /// team's CURRENT lessons" — recorded per turn in the prompt itself, not pinned at turn 1.
+    /// <para>A frozen withheld/none arm skips the ledger read entirely (the control arm costs no query).</para>
+    /// </summary>
+    private async Task<(string Arm, IReadOnlyList<string> Lines)> ResolveLessonInjectionAsync(string goal, SupervisorGoalConfig? goalConfig, IReadOnlyList<Persistence.Entities.SupervisorDecisionRecord> rows, Guid teamId, CancellationToken cancellationToken)
     {
-        var current = await _lessons.ListCurrentAsync(teamId, repositoryId, take: 5, cancellationToken).ConfigureAwait(false);
+        var frozen = rows.Select(r => r.LessonArm).FirstOrDefault(arm => !string.IsNullOrWhiteSpace(arm));
 
-        if (current.Count == 0 || Learning.LessonArms.Assign(teamId, goal) != Learning.LessonArms.Injected) return [];
+        if (frozen is Learning.LessonArms.Withheld or Learning.LessonArms.None) return (frozen, []);
 
-        return current.Select(l => $"[{l.FailureClass}] {l.WhatFailed} → {l.HowToApply}").ToList();
+        var current = await _lessons.ListCurrentAsync(teamId, goalConfig?.AgentProfile?.RepositoryId, Learning.LessonArms.TopK, cancellationToken).ConfigureAwait(false);
+        var arm = frozen ?? Learning.LessonArms.For(teamId, LessonAssignmentGoal(goal, goalConfig), current.Count);
+
+        return arm == Learning.LessonArms.Injected ? (arm, current.Select(Learning.LessonArms.Line).ToList()) : (arm, []);
     }
 }

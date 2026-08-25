@@ -49,6 +49,7 @@ public static class SupervisorEvalScorecard
             TimeToStopSeconds = isTerminal ? run.TimeToStopSeconds : null,
             Outcome = isTerminal ? ClassifyOutcome(decisions, run.TerminalStatus!.Value) : SupervisorOutcomes.NotScored,
             NotScored = !isTerminal,
+            LessonArm = run.LessonArm,
         };
     }
 

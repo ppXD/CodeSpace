@@ -46,6 +46,13 @@ public sealed record SupervisorRunOutcome
 
     /// <summary>The run's REAL terminal <see cref="WorkflowRunStatus"/> (Success / Failure / Cancelled) once the WorkflowRun reached a terminal state; null while the run is in flight. Carried (not a lossy bool) so the scorer can classify a terminal run that recorded NO supervisor stop decision by its honest run status — a Failure/Cancelled run never masquerades as completed. A non-null value means the run is scored.</summary>
     public WorkflowRunStatus? TerminalStatus { get; init; }
+
+    /// <summary>
+    /// D2: the lesson-experiment arm this run was assigned — a <c>LessonArms</c> value read off the EARLIEST decision
+    /// row that recorded one, which is the same rule the run's own rehydrate uses to keep the arm from re-rolling
+    /// turn to turn. Null for a run whose rows predate the column (never counted into either arm).
+    /// </summary>
+    public string? LessonArm { get; init; }
 }
 
 /// <summary>The canonical outcome buckets a scored supervisor run lands in — derived from the terminal stop's reason/label. <see cref="NotScored"/> is the honest marker for a still-in-flight run (excluded from the roll-up averages, like an in-flight agent run).</summary>
@@ -112,6 +119,14 @@ public sealed record SupervisorRunScore
 
     /// <summary>True when the run has not reached a terminal stop — reported but excluded from the roll-up averages (honest).</summary>
     public required bool NotScored { get; init; }
+
+    /// <summary>
+    /// D2: which lesson-experiment arm this run was in — <c>injected</c> (its prompts carried the team's distilled
+    /// lessons) / <c>withheld</c> (the control) / <c>none</c> (no lesson existed, so it is neither). Null for a run
+    /// recorded before the arm was written, which must be excluded from an injected-vs-withheld comparison rather
+    /// than counted as a control.
+    /// </summary>
+    public string? LessonArm { get; init; }
 }
 
 /// <summary>

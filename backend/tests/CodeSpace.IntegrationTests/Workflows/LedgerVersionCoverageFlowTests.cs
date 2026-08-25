@@ -49,7 +49,7 @@ public sealed class LedgerVersionCoverageFlowTests
         using var scope = _fixture.BeginScope();
         var log = scope.Resolve<ISupervisorDecisionLog>();
 
-        var claim = await log.TryClaimAsync(runId, teamId, SupervisorDecisionKinds.Plan, "k1", "h", "{}", fenceEpoch: 1, CancellationToken.None);
+        var claim = await log.TryClaimAsync(new SupervisorDecisionClaimRequest { SupervisorRunId = runId, TeamId = teamId, DecisionKind = SupervisorDecisionKinds.Plan, IdempotencyKey = "k1", InputHash = "h", PayloadJson = "{}", FenceEpoch = 1 }, CancellationToken.None);
         (await log.TryBeginExecutionAsync(claim.DecisionId, teamId, CancellationToken.None)).ShouldBeTrue();
 
         await log.RecordTerminalAsync(claim.DecisionId, teamId, SupervisorDecisionStatus.Succeeded, "{}", null, CancellationToken.None);

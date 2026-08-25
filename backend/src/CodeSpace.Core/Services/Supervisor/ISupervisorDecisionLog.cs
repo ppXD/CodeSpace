@@ -31,7 +31,7 @@ public interface ISupervisorDecisionLog
     /// (with the prior terminal outcome) when terminal, else <see cref="SupervisorDecisionClaimOutcome.InFlight"/>. Exactly
     /// one caller for a given key ever gets <see cref="SupervisorDecisionClaimOutcome.Proceed"/>.
     /// </summary>
-    Task<SupervisorDecisionClaim> TryClaimAsync(Guid supervisorRunId, Guid teamId, string decisionKind, string idempotencyKey, string inputHash, string payloadJson, long fenceEpoch, CancellationToken cancellationToken);
+    Task<SupervisorDecisionClaim> TryClaimAsync(SupervisorDecisionClaimRequest request, CancellationToken cancellationToken);
 
     /// <summary>
     /// Single-winner CAS claiming a decision for execution: Pending → Running, team-scoped. This is the must-fix-#2 gate
@@ -111,19 +111,20 @@ public sealed class SupervisorDecisionLog : ISupervisorDecisionLog, IScopedDepen
     /// <summary>Lower-case hex SHA-256 of the canonical payload bytes (64 chars) — the key already binds this, surfaced separately for the audit column.</summary>
     public static string HashPayload(string payloadJson) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(payloadJson)));
 
-    public async Task<SupervisorDecisionClaim> TryClaimAsync(Guid supervisorRunId, Guid teamId, string decisionKind, string idempotencyKey, string inputHash, string payloadJson, long fenceEpoch, CancellationToken cancellationToken)
+    public async Task<SupervisorDecisionClaim> TryClaimAsync(SupervisorDecisionClaimRequest request, CancellationToken cancellationToken)
     {
         var row = new SupervisorDecisionRecord
         {
             Id = Guid.NewGuid(),
-            TeamId = teamId,
-            SupervisorRunId = supervisorRunId,
-            DecisionKind = decisionKind,
-            IdempotencyKey = idempotencyKey,
-            InputHash = inputHash,
-            PayloadJson = payloadJson,
+            TeamId = request.TeamId,
+            SupervisorRunId = request.SupervisorRunId,
+            DecisionKind = request.DecisionKind,
+            IdempotencyKey = request.IdempotencyKey,
+            InputHash = request.InputHash,
+            PayloadJson = request.PayloadJson,
             Status = SupervisorDecisionStatus.Pending,
-            FenceEpoch = fenceEpoch,
+            FenceEpoch = request.FenceEpoch,
+            LessonArm = string.IsNullOrWhiteSpace(request.LessonArm) ? null : request.LessonArm,
         };
 
         _db.SupervisorDecisionRecord.Add(row);
@@ -142,7 +143,7 @@ public sealed class SupervisorDecisionLog : ISupervisorDecisionLog, IScopedDepen
             // either return its terminal outcome (Duplicate) or signal it's still in flight — NEVER double-execute.
             _db.ChangeTracker.Clear();
 
-            return await ReadExistingClaimAsync(supervisorRunId, idempotencyKey, cancellationToken).ConfigureAwait(false);
+            return await ReadExistingClaimAsync(request.SupervisorRunId, request.IdempotencyKey, cancellationToken).ConfigureAwait(false);
         }
     }
 

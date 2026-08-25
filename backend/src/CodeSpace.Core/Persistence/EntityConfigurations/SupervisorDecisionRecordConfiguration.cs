@@ -26,6 +26,7 @@ public class SupervisorDecisionRecordConfiguration : IEntityTypeConfiguration<Su
         builder.Property(d => d.PayloadJson).HasColumnName("payload_jsonb").HasColumnType("jsonb");
         builder.Property(d => d.OutcomeJson).HasColumnName("outcome_jsonb").HasColumnType("jsonb");
         builder.Property(d => d.FenceEpoch).HasColumnName("fence_epoch");
+        builder.Property(d => d.LessonArm).HasColumnName("lesson_arm").HasMaxLength(16);
 
         // BIGSERIAL on the DB side; value-generated-on-add so the SaveChanges round-trip returns the actual sequence
         // number (mirrors WorkflowRunRecord.Sequence).

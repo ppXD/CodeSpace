@@ -28,22 +28,25 @@ public sealed class FakeSupervisorDecisionLog : ISupervisorDecisionLog, ISupervi
     public List<SupervisorDecisionRecord> Rows { get; } = new();
     private long _seq;
 
-    public void SeedTerminal(Guid runId, Guid teamId, string kind, string payloadJson, string outcomeJson) =>
-        Rows.Add(new SupervisorDecisionRecord { Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId, Sequence = ++_seq, DecisionKind = kind, IdempotencyKey = $"{kind}:{Rows.Count}", InputHash = "h", PayloadJson = payloadJson, Status = SupervisorDecisionStatus.Succeeded, OutcomeJson = outcomeJson });
+    /// <summary><paramref name="lessonArm"/> seeds a run whose D2 arm was already assigned on an earlier turn — null (the default) is a tape written before the column existed.</summary>
+    public void SeedTerminal(Guid runId, Guid teamId, string kind, string payloadJson, string outcomeJson, string? lessonArm = null) =>
+        Rows.Add(new SupervisorDecisionRecord { Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId, Sequence = ++_seq, DecisionKind = kind, IdempotencyKey = $"{kind}:{Rows.Count}", InputHash = "h", PayloadJson = payloadJson, Status = SupervisorDecisionStatus.Succeeded, OutcomeJson = outcomeJson, LessonArm = lessonArm });
 
     public void SeedPending(Guid runId, Guid teamId, string kind, string payloadJson) =>
         Rows.Add(new SupervisorDecisionRecord { Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId, Sequence = ++_seq, DecisionKind = kind, IdempotencyKey = $"{kind}:{Rows.Count}", InputHash = "h", PayloadJson = payloadJson, Status = SupervisorDecisionStatus.Pending });
 
-    public Task<SupervisorDecisionClaim> TryClaimAsync(Guid supervisorRunId, Guid teamId, string decisionKind, string idempotencyKey, string inputHash, string payloadJson, long fenceEpoch, CancellationToken cancellationToken)
+    public Task<SupervisorDecisionClaim> TryClaimAsync(SupervisorDecisionClaimRequest request, CancellationToken cancellationToken)
     {
-        var existing = Rows.FirstOrDefault(r => r.SupervisorRunId == supervisorRunId && r.IdempotencyKey == idempotencyKey);
+        var existing = Rows.FirstOrDefault(r => r.SupervisorRunId == request.SupervisorRunId && r.IdempotencyKey == request.IdempotencyKey);
 
         if (existing != null)
             return Task.FromResult(SupervisorDecisionStateMachine.IsTerminal(existing.Status)
                 ? SupervisorDecisionClaim.Duplicate(existing.Id, existing.Status, existing.OutcomeJson, existing.Error)
                 : SupervisorDecisionClaim.InFlight(existing.Id));
 
-        var row = new SupervisorDecisionRecord { Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = supervisorRunId, Sequence = ++_seq, DecisionKind = decisionKind, IdempotencyKey = idempotencyKey, InputHash = inputHash, PayloadJson = payloadJson, Status = SupervisorDecisionStatus.Pending, FenceEpoch = fenceEpoch };
+        // The real ledger normalizes a blank arm to NULL (the column means "outside the experiment"); mirror it, or a
+        // fake row would carry "" and the run's frozen-arm read-back would behave differently here than in production.
+        var row = new SupervisorDecisionRecord { Id = Guid.NewGuid(), TeamId = request.TeamId, SupervisorRunId = request.SupervisorRunId, Sequence = ++_seq, DecisionKind = request.DecisionKind, IdempotencyKey = request.IdempotencyKey, InputHash = request.InputHash, PayloadJson = request.PayloadJson, Status = SupervisorDecisionStatus.Pending, FenceEpoch = request.FenceEpoch, LessonArm = string.IsNullOrWhiteSpace(request.LessonArm) ? null : request.LessonArm };
         Rows.Add(row);
         return Task.FromResult(SupervisorDecisionClaim.Proceed(row.Id));
     }
