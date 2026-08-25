@@ -225,8 +225,11 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
             },
         });
 
-    // S4: a spawn whose dispatch authors a model OUTSIDE the operator's allowed pool → the per-agent model clamp throws,
-    // and the turn service must terminalize the spawn as a CLEAN failure (no stranded-Running decision, no agent staged).
+    /// <summary>The model name a dispatch authors. What it MEANS is decided by the test's seeding: seed it as a team model the pool excludes → out-of-pool GOVERNANCE (fail closed); leave it unseeded → an unresolvable name, a MODEL MISS (re-authorable rejection). Both tests drive this one script.</summary>
+    public const string DispatchModelName = "rogue-model";
+
+    // S4: a spawn whose dispatch authors a per-agent model by NAME. The two outcomes the name can have are separated by
+    // the seeding, not by the script — see DispatchModelName.
     private static SupervisorDecision PlanSpawnBadModelStop(SupervisorTurnContext context) => context.TurnNumber == 0
         ? Plan(context.Goal)
         : Canonical(SupervisorDecisionKinds.Spawn, new SupervisorSpawnPayload
@@ -234,7 +237,7 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
             SubtaskIds = new[] { SubtaskA },
             Agents = new[]
             {
-                new SupervisorAgentDispatch { SubtaskId = SubtaskA, Model = "rogue-model" },
+                new SupervisorAgentDispatch { SubtaskId = SubtaskA, Model = DispatchModelName },
             },
         });
 

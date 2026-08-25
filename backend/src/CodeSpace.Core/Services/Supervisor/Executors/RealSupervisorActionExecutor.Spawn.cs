@@ -78,6 +78,19 @@ public sealed partial class RealSupervisorActionExecutor
             return SupervisorExecution.Synchronous(JsonSerializer.Serialize(BuildUnknownPersonaSpawnOutcome(unknownPersonas), AgentJson.Options));
         }
 
+        // The MODEL twin of the persona pre-flight above, and the last known run-killer of its class. A model-authored
+        // per-agent model NAME the run cannot resolve used to reach ApplyDispatchModelAsync and THROW mid fan-out, after
+        // the plan and the dependency staging had both already succeeded — the byte-identical failure #1535 fixed for
+        // slugs. ScreenAuthoredModelsAsync splits the one null ResolveDispatchAsync returns into its two cases: a name
+        // the team credentials nowhere is a MODEL MISS, rejected re-authorably here; a real team model merely OUTSIDE
+        // the operator's pool stays a fail-closed throw (that boundary is governance, and is not re-authorable) — but
+        // now raised BEFORE anything stages, so even the governance path can no longer leave a partial fan-out behind.
+        if (await ScreenAuthoredModelsAsync(spawn, context, cancellationToken).ConfigureAwait(false) is { Count: > 0 } unknownModels)
+        {
+            _logger.LogWarning("Supervisor REJECTED the spawn at turn {Turn} on node {NodeId} — it authored model name(s) [{Models}] that resolve to no credentialed model of this team", context.TurnNumber, context.NodeId, string.Join(", ", unknownModels));
+            return SupervisorExecution.Synchronous(JsonSerializer.Serialize(BuildUnknownModelSpawnOutcome(unknownModels), AgentJson.Options));
+        }
+
         // Fan out over the subtask ids (already clamped to the dependency-ready frontier when the decision was formed —
         // see SupervisorTurnService.ClampSpawnToDependencyFrontier — so the persisted payload's subtaskIds match the
         // staged agents one-for-one). For each, apply the model-authored per-agent dispatch override (L4 arc B) when the
@@ -187,6 +200,36 @@ public sealed partial class RealSupervisorActionExecutor
         return unresolvable;
     }
 
+    /// <summary>
+    /// Screen every DISTINCT model-authored per-agent model NAME in this spawn UP FRONT — the model twin of
+    /// <see cref="UnresolvablePersonaSlugsAsync"/>. <c>ResolveDispatchAsync</c> answers BOTH "no such credentialed model"
+    /// and "credentialed, but not in this run's pool" with the same null, so the two are separated by asking a SECOND
+    /// time UNBOUNDED (<c>allowedRowIds: null</c> — the same team-wide call <c>HarnessModelReconciler</c> makes):
+    /// resolvable team-wide but not under the run's pool is the OPERATOR's boundary, so it THROWS
+    /// <see cref="SupervisorModelAccessException"/> (fail-closed, never re-authorable); resolvable under neither is a
+    /// name the team credentials nowhere — a MODEL MISS, RETURNED for a re-authorable rejection. Returns empty when the
+    /// spawn authored no model (the profile's own model stands) or when every authored name resolves in-pool.
+    /// <para>An unbounded run (null/empty <c>AllowedModelIds</c>) can never take the throw branch: the first query IS
+    /// the unbounded one, so a null there re-nulls on the second and classifies as a miss.</para>
+    /// </summary>
+    private async Task<IReadOnlyList<string>> ScreenAuthoredModelsAsync(SupervisorSpawnPayload spawn, SupervisorTurnContext context, CancellationToken cancellationToken)
+    {
+        var authored = spawn.SubtaskIds.Select(id => NullIfBlank(DispatchFor(spawn, id)?.Model)).OfType<string>().Distinct(StringComparer.Ordinal).ToList();
+        var unresolvable = new List<string>();
+
+        foreach (var name in authored)
+        {
+            if (await _modelSelector.ResolveDispatchAsync(context.TeamId, name, context.AllowedModelIds, cancellationToken).ConfigureAwait(false) is not null) continue;
+
+            if (await _modelSelector.ResolveDispatchAsync(context.TeamId, name, allowedRowIds: null, cancellationToken).ConfigureAwait(false) is not null)
+                throw new SupervisorModelAccessException($"agent.supervisor spawn requests model '{name}', which this team credentials but the operator did not admit to this run's allowed model pool.");
+
+            unresolvable.Add(name);
+        }
+
+        return unresolvable;
+    }
+
     private static SupervisorAgentDispatch? DispatchFor(SupervisorSpawnPayload spawn, string subtaskId) =>
         spawn.Agents?.FirstOrDefault(a => a.SubtaskId == subtaskId);
 
@@ -241,6 +284,15 @@ public sealed partial class RealSupervisorActionExecutor
         agentCount = 0,
         spawn = "rejected",
         reason = $"the spawn authored persona slug(s) that no active persona in this team's library has: [{string.Join(", ", unknown)}] — re-author with a slug the capability catalog lists, or OMIT agentDefinition entirely to let the run's own persona stand",
+    };
+
+    /// <summary>The rejection outcome for a spawn authoring a model name no credentialed model of this team has — re-authorable, unlike the throw it replaced, which killed the run mid fan-out. An out-of-POOL (but real) model is NOT routed here: that boundary is the operator's, and stays a fail-closed throw.</summary>
+    internal static object BuildUnknownModelSpawnOutcome(IReadOnlyList<string> unknown) => new
+    {
+        agentRunIds = Array.Empty<Guid>(),
+        agentCount = 0,
+        spawn = "rejected",
+        reason = $"the spawn authored model name(s) no credentialed model of this team has: [{string.Join(", ", unknown)}] — re-author with a model the capability catalog lists, or OMIT model entirely to let the run's own model apply",
     };
 
     /// <summary>H2: the rejection outcome for a retry naming an id the current plan never declared — without this the instruction chain fell through to the WHOLE GOAL (a ghost re-run of the entire task under a stale or typo'd id).</summary>
@@ -741,13 +793,6 @@ public sealed partial class RealSupervisorActionExecutor
     }
 
     /// <summary>
-    /// Resolve the spawned agent's effective model NAME to a credentialed pool row (option B): the model + the credential
-    /// it runs on both come from that row, so a dispatched agent can only run a model the team credentialed — and on that
-    /// model's own key. Bounded to the operator's <see cref="SupervisorTurnContext.AllowedModelIds"/> pool (empty = all
-    /// the team's credentialed models). A null effective model is the harness default (no name → no gate). Out of pool →
-    /// <see cref="SupervisorModelAccessException"/> (fail-closed, terminalized by the turn service's catch).
-    /// </summary>
-    /// <summary>
     /// Resolve a model-authored per-agent persona SLUG (L4 — the third Auto axis) to a team-scoped
     /// <c>AgentDefinitionId</c> and stamp it, OVERRIDING the run-level profile persona <see cref="BuildTaskWithGoal"/>
     /// seeded — so each agent can embody a DISTINCT persona the brain picked from the catalog (its system prompt /
@@ -768,6 +813,18 @@ public sealed partial class RealSupervisorActionExecutor
         return task with { AgentDefinitionId = personaId };
     }
 
+    /// <summary>
+    /// Resolve the spawned agent's effective model NAME to a credentialed pool row (option B): the model + the credential
+    /// it runs on both come from that row, so a dispatched agent can only run a model the team credentialed — and on that
+    /// model's own key. Bounded to the operator's <see cref="SupervisorTurnContext.AllowedModelIds"/> pool (empty = all
+    /// the team's credentialed models). A null effective model is the harness default (no name → no gate).
+    /// <para>This is NO LONGER the path a model-AUTHORED name takes: <c>ExecuteSpawnAsync</c> screens every authored name
+    /// before staging (<see cref="ScreenAuthoredModelsAsync"/>) and rejects an unresolvable one re-authorably, because
+    /// reaching the throw here killed the run mid fan-out. What still arrives here is an effective model the MODEL did
+    /// not author — one a resolved persona or the run profile filled in — plus any authored name as defence in depth.
+    /// The throw is NOT a clean terminal: the turn service records THIS DECISION Failed (no stranded <c>Running</c> row)
+    /// and then RE-THROWS, so the node fails and the run terminalizes Failure.</para>
+    /// </summary>
     private async Task<AgentTask> ApplyDispatchModelAsync(AgentTask resolved, SupervisorTurnContext context, CancellationToken cancellationToken)
     {
         if (NullIfBlank(resolved.Model) is not { } effectiveModel) return resolved;

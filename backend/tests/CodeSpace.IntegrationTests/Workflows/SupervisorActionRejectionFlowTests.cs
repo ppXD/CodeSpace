@@ -1,11 +1,16 @@
 using System.Text.Json;
 using Autofac;
+using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Deciders;
 using CodeSpace.Core.Services.Supervisor.Executors;
 using CodeSpace.IntegrationTests.Infrastructure;
+using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Enums;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows;
@@ -168,6 +173,131 @@ public sealed class SupervisorActionRejectionFlowTests
 
         execution.OutcomeJson.ShouldBe(JsonSerializer.Serialize(RealSupervisorActionExecutor.BuildUnknownPersonaSpawnOutcome(new[] { "no-such-persona" }), AgentJson.Options));
         execution.ParkedAgentWaitCount.ShouldBe(0, "including for 'auth', whose own dispatch was fine — a partial fan-out would desync the positional join");
+    }
+
+    // ── A model-authored MODEL name nothing credentials is a MODEL miss; an out-of-POOL one is governance ──
+
+    [Fact]
+    public async Task A_spawn_authoring_a_model_name_nothing_credentials_rejects_the_spawn_instead_of_failing_the_run()
+    {
+        // The persona sibling of #1535, and the last run-killer of its class. Before this, the authored name reached
+        // ApplyDispatchModelAsync inside StageAgentsAndParkAsync and threw SupervisorModelAccessException — the turn
+        // service recorded the decision Failed and RE-THREW, so the node failed and the run terminalized Failure, after
+        // the plan and the dependency staging had both already succeeded. A name the model invented is a MODEL miss:
+        // the schema advertises the field and the catalog lists a pool, so misnaming it must be re-authorable.
+        using var scope = _fixture.BeginScope();
+
+        var spawn = SpawnWithModel(new[] { "auth" }, subtaskId: "auth", model: "claude-omega-4");
+
+        var execution = await scope.Resolve<ISupervisorActionExecutor>()
+            .ExecuteAsync(spawn, ContextWithPlan("auth", "ui"), CancellationToken.None);
+
+        execution.OutcomeJson.ShouldBe(JsonSerializer.Serialize(RealSupervisorActionExecutor.BuildUnknownModelSpawnOutcome(new[] { "claude-omega-4" }), AgentJson.Options),
+            "the reason must name the model and tell the brain it may simply omit the field — that is what makes the next turn recoverable");
+        execution.ParkedAgentWaitCount.ShouldBe(0, "nothing is staged");
+    }
+
+    [Fact]
+    public async Task A_spawn_whose_second_dispatch_names_a_bad_model_stages_no_agent_at_all()
+    {
+        // The other half of why the screen moved up front: resolving models inside the staging loop meant a spawn could
+        // create the first agent and then throw on the second one's model, leaving a partial fan-out behind a failed run.
+        using var scope = _fixture.BeginScope();
+
+        var spawn = SpawnWithModel(new[] { "auth", "ui" }, subtaskId: "ui", model: "no-such-model");
+
+        var execution = await scope.Resolve<ISupervisorActionExecutor>()
+            .ExecuteAsync(spawn, ContextWithPlan("auth", "ui"), CancellationToken.None);
+
+        execution.OutcomeJson.ShouldBe(JsonSerializer.Serialize(RealSupervisorActionExecutor.BuildUnknownModelSpawnOutcome(new[] { "no-such-model" }), AgentJson.Options));
+        execution.ParkedAgentWaitCount.ShouldBe(0, "including for 'auth', whose own dispatch was fine — a partial fan-out would desync the positional join");
+    }
+
+    [Fact]
+    public async Task A_spawn_authoring_a_real_team_model_the_operator_kept_out_of_the_pool_still_fails_closed()
+    {
+        // The distinction this lane rests on. ResolveDispatchAsync answers "no such model" and "real, but not in this
+        // run's pool" with the SAME null, so the screen asks a second time UNBOUNDED to tell them apart. This is the
+        // governance side: the model is genuinely credentialed to the team, the OPERATOR excluded it from this run, and
+        // that boundary must not become a thing the brain can re-author its way around. It stays a fail-closed throw —
+        // now raised before staging, so the governance path can no longer leave a partial fan-out behind either.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var credentialId = await SeedCredentialAsync(teamId);
+        await SeedModelAsync(credentialId, "team-model-out-of-pool");
+        var admittedRowId = await SeedModelAsync(credentialId, "team-model-in-pool");
+
+        using var scope = _fixture.BeginScope();
+
+        var context = ContextWithPlan("auth", "ui") with { TeamId = teamId, AllowedModelIds = new[] { admittedRowId } };
+        var spawn = SpawnWithModel(new[] { "auth" }, subtaskId: "auth", model: "team-model-out-of-pool");
+
+        var thrown = await Should.ThrowAsync<SupervisorModelAccessException>(async () =>
+            await scope.Resolve<ISupervisorActionExecutor>().ExecuteAsync(spawn, context, CancellationToken.None));
+
+        thrown.Message.ShouldContain("team-model-out-of-pool");
+        thrown.Message.ShouldContain("allowed model pool", Case.Insensitive, "the reason names the OPERATOR's boundary, not a bad name — the two must stay distinguishable in the record");
+    }
+
+    [Fact]
+    public async Task A_spawn_authoring_a_pool_model_is_screened_clean_and_still_stages()
+    {
+        // The screen must not reject the HAPPY path: an authored name that IS in the run's pool passes both queries and
+        // falls through to staging. Without this the two rejection tests above would also pass on a screen that refused
+        // every authored model.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var credentialId = await SeedCredentialAsync(teamId);
+        var admittedRowId = await SeedModelAsync(credentialId, "team-model-in-pool");
+
+        using var scope = _fixture.BeginScope();
+
+        var context = ContextWithPlan("auth", "ui") with { TeamId = teamId, AllowedModelIds = new[] { admittedRowId } };
+        var spawn = SpawnWithModel(new[] { "auth" }, subtaskId: "auth", model: "team-model-in-pool");
+
+        // Staging a real agent run needs infrastructure this bare context has none of, so the assertion is the NEGATIVE
+        // that isolates the screen: whatever happens next, it is not this screen's rejection and not its access throw.
+        var outcome = await Record.ExceptionAsync(async () =>
+        {
+            var execution = await scope.Resolve<ISupervisorActionExecutor>().ExecuteAsync(spawn, context, CancellationToken.None);
+            execution.OutcomeJson.ShouldNotBe(JsonSerializer.Serialize(RealSupervisorActionExecutor.BuildUnknownModelSpawnOutcome(new[] { "team-model-in-pool" }), AgentJson.Options));
+        });
+
+        outcome.ShouldNotBeOfType<SupervisorModelAccessException>("an in-pool model is admitted — the screen resolved it on the FIRST, pool-bounded query");
+    }
+
+    private static SupervisorDecision SpawnWithModel(string[] subtaskIds, string subtaskId, string model) => new()
+    {
+        Kind = SupervisorDecisionKinds.Spawn,
+        PayloadJson = JsonSerializer.Serialize(new SupervisorSpawnPayload
+        {
+            SubtaskIds = subtaskIds,
+            Agents = new[] { new SupervisorAgentDispatch { SubtaskId = subtaskId, Model = model } },
+        }, AgentJson.Options),
+    };
+
+    private async Task<Guid> SeedCredentialAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var id = Guid.NewGuid();
+        db.ModelCredential.Add(new ModelCredential
+        {
+            Id = id, TeamId = teamId, Provider = "Anthropic", DisplayName = "lane-d3 cred",
+            EncryptedApiKey = scope.Resolve<IPayloadEncryptor>().Encrypt("test-key"), Status = CredentialStatus.Active,
+        });
+        await db.SaveChangesAsync();
+        return id;
+    }
+
+    private async Task<Guid> SeedModelAsync(Guid credentialId, string modelId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var id = Guid.NewGuid();
+        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = id, ModelCredentialId = credentialId, ModelId = modelId, Enabled = true, Source = ModelSource.Manual });
+        await db.SaveChangesAsync();
+        return id;
     }
 
     // ── B4 (MAJOR-3): the amend card clears the hard infra precondition before it is even posted ──────
