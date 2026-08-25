@@ -256,6 +256,16 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             _logger.LogError("Run {RunId} failed: secret-leak guard tripped. {Message}", run.Id, persistedError);
             await CompleteAndRecordAsync(run, new TerminalCompletionRequest(WorkflowRunStatus.Failure, persistedError, run.OutputsJson, DateTimeOffset.UtcNow - engineStartedAt, false), cancellationToken).ConfigureAwait(false);
         }
+        catch (WorkflowRedactedOutputsUnrecoverableException ex)
+        {
+            // A settled cell's originals are gone (its recovery sidecar never committed). No resume can produce
+            // them and the node will never re-dispatch on THIS run, so the honest end is a terminal failure that
+            // names the cell — never a run that proceeds on the redaction placeholder, never a park nobody can
+            // resolve. The operator's remedy is a from-node rerun, which forks a run that re-executes that cell.
+            var persistedError = RedactForPersistence(scope, ex.Message);
+            _logger.LogError("Run {RunId} failed: a settled cell's redacted outputs are unrecoverable. {Message}", run.Id, persistedError);
+            await CompleteAndRecordAsync(run, new TerminalCompletionRequest(WorkflowRunStatus.Failure, persistedError, run.OutputsJson, DateTimeOffset.UtcNow - engineStartedAt, false), cancellationToken).ConfigureAwait(false);
+        }
         catch (OperationCanceledException)
         {
             // Operator-initiated cancel (the registry token tripped, or the wave-boundary re-read saw a
@@ -880,13 +890,47 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// scope-from-ledger rebuild (crash-resume, map / loop replay) routes through, so a node's large output that
     /// was offloaded on write resolves to its real value when a downstream node reads <c>{{nodes.X.outputs.*}}</c>
     /// after a replay — never the bare ref.
+    ///
+    /// <para>Recovery of a REDACTED row goes through <see cref="RecoverPersistedOutputsAsync"/> first, so what
+    /// comes back here is either the node's real values or an exception — never the redaction placeholder.</para>
     /// </summary>
     private async Task<Dictionary<string, JsonElement>> LoadNodeOutputsAsync(WorkflowRunNode node, Guid teamId, CancellationToken cancellationToken)
     {
-        var sensitive = await _sensitivePayloadStore.ReadNodeOutputsAsync(node.RecordId, node.RunId, teamId, cancellationToken).ConfigureAwait(false);
-        var persisted = sensitive ?? ParsePayloadObject(node.OutputsJson);
+        var cell = new PersistedOutputRecovery(node.RecordId, node.RunId, teamId, node.NodeId, ParsePayloadObject(node.OutputsJson));
+        var persisted = await RecoverPersistedOutputsAsync(cell, cancellationToken).ConfigureAwait(false);
         return await NodeOutputArtifacts.ResolveRequiredAsync(_artifactStore, teamId, persisted, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>One settled cell whose ORIGINAL outputs a rehydrate needs: the exact backing ledger row, its team, a label for the failure text, and the public (possibly redacted) outputs that row projects.</summary>
+    private sealed record PersistedOutputRecovery(Guid RecordId, Guid RunId, Guid TeamId, string Cell, IReadOnlyDictionary<string, JsonElement> LedgerOutputs);
+
+    /// <summary>
+    /// The ONE place a settled cell's persisted outputs turn back into VALUES. The encrypted same-record sidecar
+    /// wins when it is there; otherwise the ledger row is the value — but ONLY if that row never claimed to be a
+    /// redaction stand-in. A row that made the claim and has no readable sidecar has no original left anywhere,
+    /// so it fails closed here rather than passing <c>"[REDACTED]"</c> downstream as though it were the secret.
+    ///
+    /// <para>The claim is asked for only on the sidecar-absent path, and its ABSENCE is what the fast path
+    /// (nothing to redact) and every row written before the claim existed both produce — so the untouched
+    /// majority of cells resolve exactly as they did, with no extra read.</para>
+    /// </summary>
+    private async Task<IReadOnlyDictionary<string, JsonElement>> RecoverPersistedOutputsAsync(PersistedOutputRecovery recovery, CancellationToken cancellationToken)
+    {
+        var sensitive = await _sensitivePayloadStore.ReadNodeOutputsAsync(recovery.RecordId, recovery.RunId, recovery.TeamId, cancellationToken).ConfigureAwait(false);
+        if (sensitive is not null) return sensitive;
+
+        if (await RecordClaimsRedactedOutputsAsync(recovery.RecordId, recovery.RunId, cancellationToken).ConfigureAwait(false))
+            throw new WorkflowRedactedOutputsUnrecoverableException(recovery.Cell);
+
+        return recovery.LedgerOutputs;
+    }
+
+    /// <summary>Does this exact <c>node.completed</c> row admit its outputs are a redaction stand-in? A row that predates the claim, or had nothing to redact, answers false — the conservative reading that keeps every existing row resolvable.</summary>
+    private async Task<bool> RecordClaimsRedactedOutputsAsync(Guid recordId, Guid runId, CancellationToken cancellationToken) =>
+        await _db.Database.SqlQuery<bool>($"""
+            SELECT COALESCE((payload_json->>{WorkflowRunRecordPayloadKeys.OutputsRedacted})::boolean, false) AS "Value"
+            FROM workflow_run_record WHERE id = {recordId} AND run_id = {runId}
+            """).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
     private async Task StartRunAsync(WorkflowRun run, CancellationToken cancellationToken)
     {
@@ -2129,14 +2173,15 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         return new MapReplayState(settled);
     }
 
-    /// <summary>Re-inflate required offloaded-value refs in a settled branch's replayed terminal outputs. A missing or unreadable value must fail closed before the branch can feed the map's aggregate; a failed / non-object outcome carries nothing to resolve.</summary>
+    /// <summary>Recover a settled branch's replayed terminal outputs — its redacted originals, then its required offloaded-value refs. A missing or unreadable value must fail closed before the branch can feed the map's aggregate; a failed / non-object outcome carries nothing to resolve.</summary>
     private async Task<MapBranchOutcome> ResolveBranchOutcomeAsync(MapBranchOutcome outcome, Guid teamId, CancellationToken cancellationToken)
     {
         if (outcome.Failed || outcome.Result.ValueKind != JsonValueKind.Object) return outcome;
 
         IReadOnlyDictionary<string, JsonElement> persisted = ParsePayloadObject(outcome.Result.GetRawText());
         if (outcome.SourceRecordId is { } recordId && outcome.SourceRunId is { } runId)
-            persisted = await _sensitivePayloadStore.ReadNodeOutputsAsync(recordId, runId, teamId, cancellationToken).ConfigureAwait(false) ?? persisted;
+            persisted = await RecoverPersistedOutputsAsync(new PersistedOutputRecovery(recordId, runId, teamId, $"map branch {outcome.Index}", persisted), cancellationToken).ConfigureAwait(false);
+
         var resolved = await NodeOutputArtifacts.ResolveRequiredAsync(_artifactStore, teamId, persisted, cancellationToken).ConfigureAwait(false);
 
         return outcome with { Result = JsonSerializer.SerializeToElement(resolved) };
@@ -3224,6 +3269,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         }
         catch (OperationCanceledException) { throw; }
         catch (WorkflowSecretLeakException) { throw; }
+        catch (WorkflowRedactedOutputsUnrecoverableException) { throw; }
         catch (Exception ex)
         {
             _logger.LogError("Node {NodeId} threw {ExceptionType}: {Message}", exec.Node.Id, ex.GetType().Name, RedactForPersistence(exec.Scope, ex.Message));
@@ -3449,21 +3495,36 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             return;
         }
 
+        var redacted = new RedactedNodeCompletion(completion.RunId, completion.NodeId, completion.IterationKey, ledgerOutputs, completion.RoutingHints, completion.Duration);
+
         try
         {
             await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-            var recordId = await _recordLogger.NodeCompletedAsync(completion.RunId, completion.NodeId, completion.IterationKey, ledgerOutputs, completion.RoutingHints, completion.Duration, cancellationToken).ConfigureAwait(false);
+            var recordId = await WriteRedactedCompletionAsync(_recordLogger, redacted, cancellationToken).ConfigureAwait(false);
             await _sensitivePayloadStore.SaveNodeOutputsAsync(recordId, completion.RunId, completion.TeamId, completion.Outputs, cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogError("Run {RunId} node {NodeId}: encrypted recovery payload could not commit atomically ({FailureType}); settling the public redacted record through an isolated context", completion.RunId, completion.NodeId, ex.GetType().Name);
+            // Settling is still mandatory (the side effect already fired) but the ORIGINALS are now gone: they
+            // lived only in this process. The record written here carries that admission, so a later rehydrate
+            // refuses it instead of handing the redaction marker downstream as if it were the secret.
+            _logger.LogError("Run {RunId} node {NodeId}: encrypted recovery payload could not commit atomically ({FailureType}); settling a redacted record whose originals are UNRECOVERABLE — a resume that needs them will fail this run", completion.RunId, completion.NodeId, ex.GetType().Name);
             await using var fallbackScope = _lifetimeScope.BeginLifetimeScope();
-            var fallbackLogger = fallbackScope.Resolve<IRunRecordLogger>();
-            await fallbackLogger.NodeCompletedAsync(completion.RunId, completion.NodeId, completion.IterationKey, ledgerOutputs, completion.RoutingHints, completion.Duration, cancellationToken).ConfigureAwait(false);
+            await WriteRedactedCompletionAsync(fallbackScope.Resolve<IRunRecordLogger>(), redacted, cancellationToken).ConfigureAwait(false);
         }
     }
+
+    /// <summary>
+    /// Write a <c>node.completed</c> whose outputs are a redaction stand-in, claiming so on the row when the
+    /// logger offers that capability (Rule 7 sibling — <see cref="IRedactedNodeOutputLedger"/>, feature-detected
+    /// here and nowhere else). A logger that does NOT offer it writes the plain unclaimed row, which readers
+    /// treat as trustworthy — the conservative pre-existing default, never an upgrade of an unclaimed row.
+    /// </summary>
+    private static async Task<Guid> WriteRedactedCompletionAsync(IRunRecordLogger logger, RedactedNodeCompletion completion, CancellationToken cancellationToken) =>
+        logger is IRedactedNodeOutputLedger ledger
+            ? await ledger.NodeCompletedRedactedAsync(completion, cancellationToken).ConfigureAwait(false)
+            : await logger.NodeCompletedAsync(completion.RunId, completion.NodeId, completion.IterationKey, completion.RedactedOutputs, completion.RoutingHints, completion.Duration, cancellationToken).ConfigureAwait(false);
 
     private sealed record NodeCompletionPersistence(Guid RunId, Guid TeamId, string NodeId, string IterationKey, IReadOnlyDictionary<string, JsonElement> Outputs, IReadOnlyList<string>? RoutingHints, TimeSpan Duration, PersistenceSecretRedactor Redactor);
 
