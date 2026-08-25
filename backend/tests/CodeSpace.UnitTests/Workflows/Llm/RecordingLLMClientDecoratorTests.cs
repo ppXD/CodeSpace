@@ -225,6 +225,95 @@ public class RecordingLLMClientDecoratorTests
         persisted.ShouldContain("[REDACTED]", customMessage: "the persisted structured capture remains explicit about masking");
     }
 
+    /// <summary>
+    /// The declaration guard belongs to EVERY recording face, not just the one the integration tier drives. All three
+    /// share this base's producer methods but each has its own call site, so the theory walks all three: a declaration
+    /// that was refused, or that threw, may not be followed by a presence — 0171 seeds the facet at a determinate
+    /// expected=0 and a present-only delta over it reads Exact — and un-states the expectation instead.
+    /// </summary>
+    [Theory]
+    [InlineData("plain", LostDeclaration.Refused)]
+    [InlineData("plain", LostDeclaration.Thrown)]
+    [InlineData("structured", LostDeclaration.Refused)]
+    [InlineData("structured", LostDeclaration.Thrown)]
+    [InlineData("streaming", LostDeclaration.Refused)]
+    [InlineData("streaming", LostDeclaration.Thrown)]
+    public async Task A_lost_declaration_states_no_presence_and_unstates_the_expectation_on_every_recording_face(string face, LostDeclaration lost)
+    {
+        var logger = new CapturingLogger();
+        var completeness = new CapturingCompletenessWriter { Lose = lost };
+
+        using (LlmCallContext.Push(new LlmCallScope(Run, Team, "llm", "", "llm.complete", logger, new NoopOffloader(), Completeness: completeness)))
+        {
+            await CallEveryFaceAsync(face);
+        }
+
+        logger.Calls.Select(call => call.RecordType).ShouldContain(WorkflowRunRecordTypes.InteractionCompleted,
+            customMessage: "the premise: the capture floor is untouched and only the claim about it was lost");
+        completeness.Advances.ShouldBeEmpty("a declaration nobody admitted may never be followed by a present-only delta, which reads Exact over the determinate zero 0171 seeded");
+        completeness.Unstated.ShouldBe(new[] { WorkflowRunDataOwnerKinds.ModelCall });
+    }
+
+    /// <summary>One call on whichever recording face the theory is walking; the streaming face is drained so its terminal capture runs.</summary>
+    private static async Task CallEveryFaceAsync(string face)
+    {
+        var request = new LLMCompletionRequest { Model = "m", SystemPrompt = "sys", UserPrompt = "usr" };
+
+        if (face == "plain") await new RecordingLLMClientDecorator(new PlainClient()).CompleteAsync(request, CancellationToken.None);
+        if (face == "structured") await new RecordingStructuredLLMClientDecorator(new FakeClient(Completion())).CompleteStructuredAsync(Request(), CancellationToken.None);
+        if (face == "streaming") await ConsumeAsync(new RecordingStreamingStructuredLLMClientDecorator(new StreamingFakeClient()), CancellationToken.None);
+    }
+
+    /// <summary>
+    /// <c>Masked</c> is a claim about the BYTES this call persisted, never about whether a redactor object exists. The
+    /// engine builds one for EVERY node scope from the scope's secret paths, so a constant "a redactor is configured"
+    /// reports every model call masked — and <c>workflow_run_data_manifest.masked_observed</c> is a monotonic latch, so
+    /// nothing later can take that claim back.
+    /// </summary>
+    [Theory]
+    [InlineData("use sk-live-unit-secret now", true)]
+    [InlineData("use nothing sensitive now", false)]
+    public async Task The_masked_flag_reports_whether_content_was_actually_replaced_rather_than_whether_a_redactor_is_configured(string userPrompt, bool masked)
+    {
+        const string secret = "sk-live-unit-secret";
+        var logger = new CapturingLogger();
+        var completeness = new CapturingCompletenessWriter();
+        var decorator = new RecordingLLMClientDecorator(new PlainClient());
+
+        using (LlmCallContext.Push(new LlmCallScope(Run, Team, "llm", "", "llm.complete", logger, new NoopOffloader(), CaptureRedactor: new PersistenceSecretRedactor([secret]), Completeness: completeness)))
+        {
+            await decorator.CompleteAsync(new LLMCompletionRequest { Model = "m", SystemPrompt = "sys", UserPrompt = userPrompt }, CancellationToken.None);
+        }
+
+        completeness.Advances.Single(advance => advance.Present > 0).Masked.ShouldBe(masked,
+            customMessage: "the presence delta may only reach the redacted arm when this call's own capture actually had content replaced");
+        completeness.Advances.Single(advance => advance.Expected > 0).Masked.ShouldBeFalse(
+            customMessage: "a declaration is stated before any content exists to mask, so it can never be the delta that latches the redacted arm");
+    }
+
+    /// <summary>
+    /// A masking observation belongs to ONE call. The scope the engine pushes lives for a whole node, and every model
+    /// call the node makes reads the same redactor off it; latching there would report a later, secret-free call masked
+    /// because an earlier one carried a secret.
+    /// </summary>
+    [Fact]
+    public async Task A_masked_call_does_not_report_the_next_call_on_the_same_scope_as_masked()
+    {
+        const string secret = "sk-live-unit-secret";
+        var logger = new CapturingLogger();
+        var completeness = new CapturingCompletenessWriter();
+        var decorator = new RecordingLLMClientDecorator(new PlainClient());
+
+        using (LlmCallContext.Push(new LlmCallScope(Run, Team, "llm", "", "llm.complete", logger, new NoopOffloader(), CaptureRedactor: new PersistenceSecretRedactor([secret]), Completeness: completeness)))
+        {
+            await decorator.CompleteAsync(new LLMCompletionRequest { Model = "m", SystemPrompt = "sys", UserPrompt = $"use {secret}" }, CancellationToken.None);
+            await decorator.CompleteAsync(new LLMCompletionRequest { Model = "m", SystemPrompt = "sys", UserPrompt = "nothing sensitive" }, CancellationToken.None);
+        }
+
+        completeness.Advances.Where(advance => advance.Present > 0).Select(advance => advance.Masked).ShouldBe(new[] { true, false },
+            customMessage: "the masking observation is per call, so the second call's verbatim capture must not inherit the first call's replacement");
+    }
+
     [Fact]
     public void Autofac_conditionally_wraps_each_client_so_the_recorder_mirrors_the_inners_faces()
     {
@@ -629,11 +718,18 @@ public class RecordingLLMClientDecoratorTests
 
     private sealed class CapturingCompletenessWriter : IRunDataCompletenessWriter
     {
+        /// <summary>How a declaration is lost: refused (what the real writer's containment reports) or thrown (what an empty catch used to hide). Null = every claim is admitted.</summary>
+        public LostDeclaration? Lose { get; init; }
+
         public List<RunDataFacetAdvance> Advances { get; } = new();
         public List<WorkflowRunCaptureGap> Gaps { get; } = new();
+        public List<string> Unstated { get; } = new();
 
         public Task<bool> AdvanceAsync(RunDataFacetAdvance advance, CancellationToken cancellationToken)
         {
+            if (Lose is { } lost && advance.Expected > 0)
+                return lost == LostDeclaration.Thrown ? throw new InvalidOperationException("the declaration never reached the manifest") : Task.FromResult(false);
+
             Advances.Add(advance);
             return Task.FromResult(true);
         }
@@ -644,6 +740,13 @@ public class RecordingLLMClientDecoratorTests
             return Task.FromResult(true);
         }
 
-        public Task<bool> UnstateExpectationAsync(Guid teamId, Guid workflowRunId, string facet, CancellationToken cancellationToken) => Task.FromResult(true);
+        public Task<bool> UnstateExpectationAsync(Guid teamId, Guid workflowRunId, string facet, CancellationToken cancellationToken)
+        {
+            Unstated.Add(facet);
+            return Task.FromResult(true);
+        }
     }
+
+    /// <summary>The two ways a declaration never lands: the writer's own containment REFUSES it, or a writer THROWS it. Both are the same lost declaration.</summary>
+    public enum LostDeclaration { Refused, Thrown }
 }

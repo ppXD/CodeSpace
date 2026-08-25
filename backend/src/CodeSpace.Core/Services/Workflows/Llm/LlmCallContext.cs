@@ -32,7 +32,13 @@ public sealed record LlmCallScope(
     /// <summary>Optional exact-value masker applied only to persisted/offloaded model-call capture.</summary>
     PersistenceSecretRedactor? CaptureRedactor = null,
     /// <summary>Observation-only fail-open completeness accounting for this call's capture intent and gaps.</summary>
-    IRunDataCompletenessWriter? Completeness = null);
+    IRunDataCompletenessWriter? Completeness = null,
+    /// <summary>What THIS call's capture actually masked, minted per call by <see cref="ForOneCall"/>. Null on the ambient scope a caller pushes, because nothing has been captured under it yet.</summary>
+    ModelCallCaptureMasking? Masking = null)
+{
+    /// <summary>This scope viewed for ONE model call: the same identity and collaborators, its own masking observation. The recording decorators take it before capturing, so a call whose prompt carried a secret cannot report the next call on the same node scope as masked.</summary>
+    public LlmCallScope ForOneCall() => this with { Masking = new ModelCallCaptureMasking() };
+}
 
 public static class LlmCallContext
 {

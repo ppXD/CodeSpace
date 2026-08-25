@@ -43,7 +43,7 @@ public sealed class RecordingStreamingStructuredLLMClientDecorator : RecordingSt
 
     public async IAsyncEnumerable<LlmStreamEvent> StreamAsync(LLMCompletionRequest request, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        var scope = LlmCallContext.Current;
+        var scope = LlmCallContext.Current?.ForOneCall();
         if (scope is null)
         {
             await foreach (var e in _streamingInner.StreamAsync(request, cancellationToken).ConfigureAwait(false))
@@ -52,7 +52,7 @@ public sealed class RecordingStreamingStructuredLLMClientDecorator : RecordingSt
         }
 
         var correlationId = Guid.NewGuid();
-        await DeclareCaptureIntentAsync(scope).ConfigureAwait(false);
+        var declared = await DeclareCaptureIntentAsync(scope).ConfigureAwait(false);
         await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionStarted, correlationId,
             () => StartedPayloadAsync(scope, Provider, request.Model, request.SystemPrompt, request.UserPrompt, request.Temperature, request.MaxOutputTokens, cancellationToken), cancellationToken).ConfigureAwait(false);
 
@@ -95,8 +95,9 @@ public sealed class RecordingStreamingStructuredLLMClientDecorator : RecordingSt
                 if (pending.Length > 0)
                     await RecordPendingDeltaAsync(scope, correlationId, pending, deltaOrdinal++, CancellationToken.None).ConfigureAwait(false);
 
-                if (await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionFailed, correlationId, () => Task.FromResult(FailedPayload(scope, Provider, ex)), CancellationToken.None).ConfigureAwait(false))
-                    await MarkCapturePresentAsync(scope).ConfigureAwait(false);
+                var failureRecorded = await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionFailed, correlationId, () => Task.FromResult(FailedPayload(scope, Provider, ex)), CancellationToken.None).ConfigureAwait(false);
+                if (failureRecorded && declared) await MarkCapturePresentAsync(scope).ConfigureAwait(false);
+
                 throw;
             }
 
@@ -125,9 +126,9 @@ public sealed class RecordingStreamingStructuredLLMClientDecorator : RecordingSt
         if (pending.Length > 0)
             await RecordPendingDeltaAsync(scope, correlationId, pending, deltaOrdinal, cancellationToken).ConfigureAwait(false);
 
-        if (await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionCompleted, correlationId,
-            async () => CompletedPayload(scope, Provider, accumulator.ResolveModel(request.Model), accumulator.Usage, await OffloadTextAsync(scope, accumulator.Text, CancellationToken.None).ConfigureAwait(false)), CancellationToken.None).ConfigureAwait(false))
-            await MarkCapturePresentAsync(scope).ConfigureAwait(false);
+        var recorded = await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionCompleted, correlationId,
+            async () => CompletedPayload(scope, Provider, accumulator.ResolveModel(request.Model), accumulator.Usage, await OffloadTextAsync(scope, accumulator.Text, CancellationToken.None).ConfigureAwait(false)), CancellationToken.None).ConfigureAwait(false);
+        if (recorded && declared) await MarkCapturePresentAsync(scope).ConfigureAwait(false);
     }
 
     private async Task RecordPendingDeltaAsync(LlmCallScope scope, Guid correlationId, StringBuilder pending, int ordinal, CancellationToken cancellationToken)
