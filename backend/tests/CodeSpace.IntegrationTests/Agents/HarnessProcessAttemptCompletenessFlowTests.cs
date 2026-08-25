@@ -225,6 +225,59 @@ public sealed class HarnessProcessAttemptCompletenessFlowTests
     }
 
     /// <summary>
+    /// THE OTHER DIRECTION A LOST CLAIM CAN GO, and the one a present-only advance turns into a false assurance. When
+    /// it is the DECLARATION that is lost rather than the accounting, the producer must not go on to state presence:
+    /// 0148's insert reads a present delta over an expected delta of zero as Exact, and its update leaves an
+    /// expectation that never counted this launch standing above a presence that did. Either way the facet would read
+    /// complete over a record whose obligation nobody established.
+    ///
+    /// <para>So the launch un-states the expectation instead, exactly as the harness-execution facet already does. The
+    /// two arms are the two states the facet can be in when that happens: with nothing stated before, un-stating
+    /// invents no row and the absent statement IS the indeterminate answer; with an earlier launch's statement already
+    /// there, the expectation it carries is un-stated in place, which the database itself refuses every complete
+    /// verdict over.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(0, "absent")]
+    [InlineData(1, "LegacyUnknown over expected=null present=1")]
+    public async Task A_lost_attempt_declaration_leaves_the_facet_indeterminate_instead_of_counting_a_present_only_delta(int priorLaunches, string indeterminate)
+    {
+        var run = await SeedWorkflowBoundRunAsync();
+
+        for (var launch = 0; launch < priorLaunches; launch++)
+        {
+            var accounted = Plane(out var accountedScope);
+            using var opened = accountedScope;
+            await OpenAsync(accounted, run);
+        }
+
+        using var planeScope = _fixture.BeginScope(builder => builder.Register<IRunDataCompletenessWriter>(context =>
+                new AttemptDeclarationLosingWriter(new RunDataCompletenessWriter(context.Resolve<IServiceScopeFactory>(), NullLogger<RunDataCompletenessWriter>.Instance)))
+            .InstancePerLifetimeScope());
+
+        var handle = await OpenAsync(planeScope.Resolve<INativeRecordPlane>(), run);
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        (await db.WorkflowRunHarnessProcessAttempt.CountAsync(candidate => candidate.Id == handle.AttemptId)).ShouldBe(1,
+            customMessage: "the premise: the attempt row is durable and only the declaration about it was lost, or this test asserts nothing about the fail direction");
+
+        var statement = await StatementOrNullAsync(run);
+
+        Describe(statement).ShouldBe(indeterminate,
+            customMessage: "the producer must not follow a lost expectation with a present-only delta. With nothing stated before, that delta writes expected=0 beside present=1 and 0148 reads it as Exact over a launch nobody counted; with an earlier statement standing, it states a presence against an expectation that never counted this launch and reads Exact over a record the facet never undertook.");
+
+        (statement?.Verdict.IsStrictlyReadable() ?? false).ShouldBeFalse();
+    }
+
+    /// <summary>The facet's whole answer as one line, so a red run prints what was actually written rather than which of four assertions tripped first.</summary>
+    private static string Describe(WorkflowRunDataManifest? statement) =>
+        statement is null
+            ? "absent"
+            : $"{statement.Verdict} over expected={statement.ExpectedRecordCount?.ToString() ?? "null"} present={statement.PresentRecordCount}";
+
+    /// <summary>
     /// A STANDALONE Agent Run belongs to no workflow run and the manifest is keyed to one, so its process attempt is
     /// recorded and NO statement is invented for it — the same named keying gap 0137/0141 already carry. This is the
     /// run whose attempt facet can never honestly be called complete: an absent statement is the indeterminate answer,
@@ -288,6 +341,16 @@ public sealed class HarnessProcessAttemptCompletenessFlowTests
 
         return await scope.Resolve<CodeSpaceDbContext>().WorkflowRunDataManifest.AsNoTracking()
             .SingleAsync(candidate => candidate.WorkflowRunId == run.WorkflowRunId
+                && candidate.Facet == WorkflowRunDataOwnerKinds.HarnessProcessAttempt);
+    }
+
+    /// <summary>The facet's statement, or null where the facet has none — because "no row" is itself one of the two indeterminate answers this producer can leave behind.</summary>
+    private async Task<WorkflowRunDataManifest?> StatementOrNullAsync(SeededRun run)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().WorkflowRunDataManifest.AsNoTracking()
+            .SingleOrDefaultAsync(candidate => candidate.WorkflowRunId == run.WorkflowRunId
                 && candidate.Facet == WorkflowRunDataOwnerKinds.HarnessProcessAttempt);
     }
 
@@ -379,6 +442,28 @@ public sealed class HarnessProcessAttemptCompletenessFlowTests
     /// the survivable failure the containment already produces in production — a lost claim is reported, not thrown —
     /// so this substitutes the failure rather than a different code path.
     /// </summary>
+    /// <summary>
+    /// The real writer with the other one of the producer's two advances dropped: the DECLARATION. Same survivable
+    /// failure the containment already produces in production — a lost claim is reported as false, never thrown — and
+    /// scoped to this facet so the launch's harness-execution statement is untouched.
+    /// </summary>
+    private sealed class AttemptDeclarationLosingWriter : IRunDataCompletenessWriter
+    {
+        private readonly IRunDataCompletenessWriter _real;
+
+        public AttemptDeclarationLosingWriter(IRunDataCompletenessWriter real) => _real = real;
+
+        public Task<bool> AdvanceAsync(RunDataFacetAdvance advance, CancellationToken cancellationToken) =>
+            advance.Facet == WorkflowRunDataOwnerKinds.HarnessProcessAttempt && advance.Expected > 0
+                ? Task.FromResult(false)
+                : _real.AdvanceAsync(advance, cancellationToken);
+
+        public Task<bool> NoticeAsync(WorkflowRunCaptureGap gap, CancellationToken cancellationToken) => _real.NoticeAsync(gap, cancellationToken);
+
+        public Task<bool> UnstateExpectationAsync(Guid teamId, Guid workflowRunId, string facet, CancellationToken cancellationToken) =>
+            _real.UnstateExpectationAsync(teamId, workflowRunId, facet, cancellationToken);
+    }
+
     private sealed class PresenceLosingWriter : IRunDataCompletenessWriter
     {
         private readonly IRunDataCompletenessWriter _real;

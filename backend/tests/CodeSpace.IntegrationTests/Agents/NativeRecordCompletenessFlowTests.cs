@@ -390,12 +390,148 @@ public sealed class NativeRecordCompletenessFlowTests
         (await db.WorkflowRunCaptureGap.CountAsync(candidate => candidate.TeamId == run.TeamId)).ShouldBe(0);
     }
 
+    /// <summary>
+    /// THE OTHER DIRECTION A LOST CLAIM CAN GO, and the one that turns into a false assurance rather than a visible
+    /// shortfall. When it is the DECLARATION that is lost rather than the accounting, the plane must not go on to state
+    /// presence: 0148's insert reads a present delta over an expected delta of zero as Exact, and its update states the
+    /// batch's presence against an expectation that never counted it. Either way the facet reads complete over frames
+    /// whose obligation nobody established — and unlike a shortfall, nothing downstream can ever detect it.
+    ///
+    /// <para>The two arms are the two states the facet can be in when that happens: with nothing stated before,
+    /// un-stating invents no row and the absent statement IS the indeterminate answer; with an earlier batch's
+    /// statement already there, the expectation it carries is un-stated in place, which the database itself refuses
+    /// every complete verdict over.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(0, "absent")]
+    [InlineData(2, "LegacyUnknown over expected=null present=2")]
+    public async Task A_lost_batch_declaration_leaves_the_facet_indeterminate_instead_of_counting_a_present_only_delta(int accountedFrames, string indeterminate)
+    {
+        var run = await SeedWorkflowBoundRunAsync();
+
+        using var planeScope = _fixture.BeginScope(builder => builder.Register<IRunDataCompletenessWriter>(context =>
+                new DeclarationLosingWriter(new RunDataCompletenessWriter(context.Resolve<IServiceScopeFactory>(), NullLogger<RunDataCompletenessWriter>.Instance)))
+            .InstancePerLifetimeScope());
+
+        var losing = planeScope.Resolve<INativeRecordPlane>();
+        var handle = await OpenAsync(losing, run);
+
+        if (accountedFrames > 0)
+        {
+            var plane = Plane(out var accountedScope);
+            using var opened = accountedScope;
+            await plane.WriteAsync(Batch(handle, Frame(handle, 0), Frame(handle, 1)), CancellationToken.None);
+        }
+
+        await losing.WriteAsync(Batch(handle, Frame(handle, accountedFrames), Frame(handle, accountedFrames + 1)), CancellationToken.None);
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        (await db.WorkflowRunNativeRecord.CountAsync(candidate => candidate.StreamId == handle.StreamId)).ShouldBe(accountedFrames + 2,
+            customMessage: "the premise: the frames are durable and only the declaration about them was lost, or this test asserts nothing about the fail direction");
+
+        Describe(await StatementOrNullAsync(run)).ShouldBe(indeterminate,
+            customMessage: "the plane must not follow a lost expectation with a present-only delta. With nothing stated before, that delta writes expected=0 beside present=2 and 0148 reads it as Exact over frames nobody counted; with an earlier statement standing, it states this batch's presence against an expectation that never undertook it.");
+    }
+
+    /// <summary>
+    /// THE MASKED OBSERVATION IS STICKY, which is what makes the redacted arm mean anything across a run rather than
+    /// across one batch. A masked frame reached storage, so the run's record is not verbatim and never becomes verbatim
+    /// again — no volume of later unmasked frames can turn it back.
+    ///
+    /// <para>It has to be sticky in a COLUMN rather than in the verdict, because the verdict is overwritten on the way
+    /// past: the next batch's declaration reads present below expected and legitimately writes Partial, which erases
+    /// the only record that anything was ever masked, and the accounting that follows reaches parity and reads
+    /// <see cref="WorkflowRunCaptureCompleteness.Exact"/>. That claims the stored bytes are verbatim when the run holds
+    /// masked ones — the single-batch pin above cannot see it, because it never advances the facet a second time.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_masked_frame_keeps_the_redacted_arm_across_every_later_unmasked_batch()
+    {
+        var run = await SeedWorkflowBoundRunAsync();
+        var plane = Plane(out var planeScope);
+        using var _ = planeScope;
+
+        var handle = await OpenAsync(plane, run);
+
+        await plane.WriteAsync(Batch(handle, Frame(handle, 0, NativeRecordRedaction.Masked), Frame(handle, 1, NativeRecordRedaction.Masked)), CancellationToken.None);
+
+        (await StatementAsync(run)).Verdict.ShouldBe(WorkflowRunCaptureCompleteness.RedactedExact,
+            customMessage: "the premise: one masked batch reaches the redacted arm, or this test is asserting stickiness over something that was never sticky");
+
+        await plane.WriteAsync(Batch(handle, Frame(handle, 2), Frame(handle, 3)), CancellationToken.None);
+        await plane.WriteAsync(Batch(handle, Frame(handle, 4), Frame(handle, 5)), CancellationToken.None);
+
+        Describe(await StatementOrNullAsync(run)).ShouldBe("RedactedExact over expected=6 present=6",
+            customMessage: "a run holding masked frames may never read back as verbatim. If this says Exact, the masked observation lived only in the verdict column and the next batch's honest Partial erased it — and the record now claims bytes it does not have.");
+    }
+
+    /// <summary>
+    /// THE WHOLE CYCLE, driven through the real plane rather than a refusing double: a batch is declared, the database
+    /// refuses it, the span becomes an open gap, and a later backfill re-delivers the frames the refused batch carried.
+    /// The verdict must still be not-complete afterwards — the backfill repairs THIS plane's records, and admitting the
+    /// recovered range into the historical expectation is a separate digest/ordinal-aware transition that does not
+    /// exist. A producer that silently healed here would close the one gap that was honestly observed.
+    /// </summary>
+    [Fact]
+    public async Task A_backfill_of_refused_frames_does_not_silently_heal_the_gap_the_refusal_opened()
+    {
+        var run = await SeedWorkflowBoundRunAsync();
+        var plane = Plane(out var planeScope);
+        using var _ = planeScope;
+
+        var handle = await OpenAsync(plane, run);
+
+        await plane.WriteAsync(Batch(handle, Frame(handle, 0), Frame(handle, 1)), CancellationToken.None);
+
+        // Ordinal 1 is already recorded on this stream, so ux_workflow_run_native_record_ordinal refuses the batch —
+        // a real refusal of a real durable write, which is what opens the gap the backfill must not close.
+        await Should.ThrowAsync<DbUpdateException>(() =>
+            plane.WriteAsync(Batch(handle, Frame(handle, 1), Frame(handle, 2)), CancellationToken.None));
+
+        var refused = await StatementAsync(run);
+        refused.ExpectedRecordCount.ShouldBe(4, customMessage: "the premise: the refused batch declared before it tried, so its shortfall is in the counts");
+        refused.KnownMissingCount.ShouldBe(1);
+
+        await plane.WriteAsync(Backfill(handle, Frame(handle, 2), Frame(handle, 3)), CancellationToken.None);
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        (await db.WorkflowRunNativeRecord.CountAsync(candidate => candidate.StreamId == handle.StreamId)).ShouldBe(4,
+            customMessage: "the premise: the backfill's frames are durable, or the test asserts nothing about what a delivered repair does to the verdict");
+        (await db.WorkflowRunCaptureGap.CountAsync(candidate => candidate.WorkflowRunId == run.WorkflowRunId && candidate.Resolution == CaptureGapResolution.Open)).ShouldBe(1,
+            customMessage: "this producer does not close the gap its own refusal opened; recovery has to CITE what now covers the span, which a backfill cannot");
+
+        var healed = await StatementAsync(run);
+        healed.ExpectedRecordCount.ShouldBe(4, customMessage: "a backfill re-delivers frames an earlier batch already declared, so it must not declare them a second time and inflate what the run owes");
+        healed.PresentRecordCount.ShouldBe(4);
+        healed.Verdict.IsStrictlyReadable().ShouldBeFalse(
+            customMessage: "the counts reached parity but a known-missing span of this run is still open, so the verdict must stay not-complete. A run that healed itself back to complete here would have erased the only honest observation of what it lost.");
+    }
+
+    /// <summary>The facet's whole answer as one line, so a red run prints what was actually written rather than which of four assertions tripped first.</summary>
+    private static string Describe(WorkflowRunDataManifest? statement) =>
+        statement is null
+            ? "absent"
+            : $"{statement.Verdict} over expected={statement.ExpectedRecordCount?.ToString() ?? "null"} present={statement.PresentRecordCount}";
+
     private async Task<WorkflowRunDataManifest> StatementAsync(SeededRun run)
     {
         using var scope = _fixture.BeginScope();
 
         return await scope.Resolve<CodeSpaceDbContext>().WorkflowRunDataManifest.AsNoTracking()
             .SingleAsync(candidate => candidate.WorkflowRunId == run.WorkflowRunId && candidate.Facet == WorkflowRunDataOwnerKinds.NativeRecord);
+    }
+
+    /// <summary>The facet's statement, or null where the facet has none — because "no row" is itself one of the two indeterminate answers this producer can leave behind.</summary>
+    private async Task<WorkflowRunDataManifest?> StatementOrNullAsync(SeededRun run)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().WorkflowRunDataManifest.AsNoTracking()
+            .SingleOrDefaultAsync(candidate => candidate.WorkflowRunId == run.WorkflowRunId && candidate.Facet == WorkflowRunDataOwnerKinds.NativeRecord);
     }
 
     private async Task SeedGapAsync(SeededRun run)
@@ -445,6 +581,10 @@ public sealed class NativeRecordCompletenessFlowTests
         Records = frames.Select(frame => new NativeRecordCapture { Frame = frame, Normalization = NativeRecordNormalization.Projected }).ToList(),
         Events = Array.Empty<AgentSemanticEventV1>(),
     };
+
+    /// <summary>A batch re-delivering frames an earlier batch already declared, which is what a replacement observer's repair is — so it must state presence without declaring the expectation a second time.</summary>
+    private static NativeRecordBatch Backfill(NativeRecordCaptureHandle handle, params NativeRecordV1[] frames) =>
+        Batch(handle, frames) with { BackfillsDeclaredFrames = true };
 
     private async Task RejectsAttributedGapAsync(NativeRecordCaptureHandle handle, Action<WorkflowRunCaptureGap> forge, string expected)
     {
@@ -531,6 +671,28 @@ public sealed class NativeRecordCompletenessFlowTests
     /// the survivable failure the containment already produces in production — a lost claim is reported, not thrown —
     /// so this substitutes the failure rather than a different code path.
     /// </summary>
+    /// <summary>
+    /// The real writer with the OTHER one of the plane's two advances dropped: the declaration. Same survivable failure
+    /// the containment already produces in production — a lost claim is reported as false, never thrown — and scoped to
+    /// this facet so the opening's other statements are untouched.
+    /// </summary>
+    private sealed class DeclarationLosingWriter : IRunDataCompletenessWriter
+    {
+        private readonly IRunDataCompletenessWriter _real;
+
+        public DeclarationLosingWriter(IRunDataCompletenessWriter real) => _real = real;
+
+        public Task<bool> AdvanceAsync(RunDataFacetAdvance advance, CancellationToken cancellationToken) =>
+            advance.Facet == WorkflowRunDataOwnerKinds.NativeRecord && advance.Expected > 0
+                ? Task.FromResult(false)
+                : _real.AdvanceAsync(advance, cancellationToken);
+
+        public Task<bool> NoticeAsync(WorkflowRunCaptureGap gap, CancellationToken cancellationToken) => _real.NoticeAsync(gap, cancellationToken);
+
+        public Task<bool> UnstateExpectationAsync(Guid teamId, Guid workflowRunId, string facet, CancellationToken cancellationToken) =>
+            _real.UnstateExpectationAsync(teamId, workflowRunId, facet, cancellationToken);
+    }
+
     private sealed class PresenceLosingWriter : IRunDataCompletenessWriter
     {
         private readonly IRunDataCompletenessWriter _real;

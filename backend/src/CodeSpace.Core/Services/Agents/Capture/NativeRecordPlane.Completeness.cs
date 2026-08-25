@@ -18,8 +18,13 @@ namespace CodeSpace.Core.Services.Agents.Capture;
 /// makes that checkable: the expectation is DECLARED before the frames are written and their presence is stated only
 /// after they are durable, so the window between them reads present below expected — a shortfall, which is not
 /// complete. Advancing both counts in one statement would have left them equally short whenever the accounting was
-/// lost, and the facet would have read Exact over frames nobody counted. All of this runs in a SEPARATE unit of work
-/// from the frames, so a refused claim can never take a frame down with it.</para>
+/// lost, and the facet would have read Exact over frames nobody counted. The MIRROR of that is the declaration being
+/// the lost one, and it does not fail closed by itself: a presence stated alone lands over an expectation that never
+/// counted the batch — expected=0 on a fresh statement, which 0148 reads as Exact — so a batch whose declaration was
+/// not admitted un-states the facet instead of accounting for itself. And because the redacted arm is a claim about
+/// BYTES rather than counts, the masked observation latches in a column of its own (0166): once any frame of the run
+/// reached storage masked, no later unmasked batch can read the run back as verbatim. All of this runs in a SEPARATE
+/// unit of work from the frames, so a refused claim can never take a frame down with it.</para>
 ///
 /// <para><b>What it does NOT mean</b>, because a manifest that overstated its reach would be worse than none. It is a
 /// claim about the frames the runner's reader DELIVERED, never about bytes the durable source did not retain. And it covers exactly the frames that reached a
@@ -83,7 +88,7 @@ public sealed partial class NativeRecordPlane
     /// </summary>
     private async Task CommitAsync(CodeSpaceDbContext db, NativeRecordBatch batch, CancellationToken cancellationToken)
     {
-        if (!batch.BackfillsDeclaredFrames) await DeclareAsync(batch, cancellationToken).ConfigureAwait(false);
+        var declared = batch.BackfillsDeclaredFrames || await DeclareAsync(batch, cancellationToken).ConfigureAwait(false);
 
         try
         {
@@ -96,15 +101,33 @@ public sealed partial class NativeRecordPlane
             throw;
         }
 
-        await AccountForAsync(batch, cancellationToken).ConfigureAwait(false);
+        if (declared) await AccountForAsync(batch, cancellationToken).ConfigureAwait(false);
+        else await MarkDeclarationLostAsync(batch, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>What this plane UNDERTAKES to make durable, stated before it tries, so a failure after this point is visible as a shortfall rather than as two counts that fell short together.</summary>
-    private async Task DeclareAsync(NativeRecordBatch batch, CancellationToken cancellationToken)
+    /// <summary>What this plane UNDERTAKES to make durable, stated before it tries, so a failure after this point is visible as a shortfall rather than as two counts that fell short together. Returns whether the claim was admitted, because a lost declaration may not be followed by a presence.</summary>
+    private async Task<bool> DeclareAsync(NativeRecordBatch batch, CancellationToken cancellationToken)
     {
-        if (Advance(batch, expected: batch.Records.Count, present: 0, masked: false) is not { } declaration) return;
+        if (Advance(batch, expected: batch.Records.Count, present: 0, masked: false) is not { } declaration) return false;
 
-        await _completeness.AdvanceAsync(declaration, cancellationToken).ConfigureAwait(false);
+        return await _completeness.AdvanceAsync(declaration, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// A lost declaration can never be followed by a present-only advance, which would manufacture Exact over
+    /// expected=0. The batch's frames are durable and stay so; what stops being knowable is how many the run owes, and
+    /// an unstated expectation is what 0146 refuses every complete verdict over.
+    ///
+    /// <para>A batch this plane may state nothing about — a run bound to no workflow run, or a batch carrying no frames
+    /// of this facet — is not an un-stating either: there was no expectation to lose.</para>
+    /// </summary>
+    private async Task MarkDeclarationLostAsync(NativeRecordBatch batch, CancellationToken cancellationToken)
+    {
+        if (batch.Handle.WorkflowRunId is not { } workflowRunId || batch.Records.Count == 0) return;
+
+        if (!await _completeness.UnstateExpectationAsync(batch.Handle.TeamId, workflowRunId, WorkflowRunDataOwnerKinds.NativeRecord, cancellationToken).ConfigureAwait(false)) return;
+
+        _logger.LogWarning("The expectation declaration for a captured batch of workflow run {WorkflowRunId} was not admitted, so its {FrameCount} frame(s) remain durable but the facet is unstated rather than counted from a present-only delta", workflowRunId, batch.Records.Count);
     }
 
     /// <summary>Every frame of this batch is durable, so the facet's presence advances by exactly the frames it carried — and by the redacted arm where any of them reached storage masked.</summary>
