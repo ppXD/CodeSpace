@@ -2,6 +2,8 @@ using Autofac;
 using Autofac.Extensions.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Jobs;
+using CodeSpace.Core.Settings;
+using CodeSpace.Messages.Enums;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
@@ -86,6 +88,19 @@ public sealed class TaskLaunchApiFactory : WebApplicationFactory<CodeSpace.Api.P
                 ["CodeSpaceStore:ConnectionString"] = _testConnectionString,
                 ["Authentication:Jwt:SymmetricKey"] = JwtKey,
                 ["OAuth:CallbackUrl"] = "http://localhost/api/credentials/oauth/callback",
+                // The API role, explicitly. The DEFAULT role is Worker (HangfireHostingSetting resolves absent,
+                // blank and unrecognised to it so a mistyped deployment still processes jobs), and a Worker host
+                // starts two Hangfire servers whose workers each hold a Postgres connection —
+                // ControlWorkerCount + Environment.ProcessorCount * 2 of them, so ONE fixture's footprint scales
+                // with the dev box's core count. Measured on a 12-core host: 38 connections held idle per fixture,
+                // so the third concurrent fixture hit `53300: sorry, too many clients already` against the
+                // postgres:18-alpine default max_connections=100 that CI uses too.
+                //
+                // Those workers were never doing anything here: this factory replaces the job client with a
+                // DeferredJobClient the TEST drains by hand, so a live server is dead weight that can only race
+                // that drain. Read through the setting's own key constant, so renaming the key cannot silently
+                // return these fixtures to the Worker role.
+                [HangfireHostingSetting.ConfigurationKey] = nameof(HangfireHosting.Api),
             });
         });
     }

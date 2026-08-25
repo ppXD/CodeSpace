@@ -1,5 +1,7 @@
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Settings;
+using CodeSpace.Messages.Enums;
 using CodeSpace.Core.Services.Jobs;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -87,6 +89,10 @@ public sealed class WebhookApiFactory : WebApplicationFactory<CodeSpace.Api.Prog
                 ["CodeSpaceStore:ConnectionString"] = _testConnectionString,
                 ["Authentication:Jwt:SymmetricKey"] = "test-only-key-do-not-use-in-prod-minimum-32-chars",
                 ["OAuth:CallbackUrl"] = "http://localhost/api/credentials/oauth/callback",
+                // The API role, explicitly — see TaskLaunchApiFactory for the measurement. Worker is the DEFAULT
+                // role, and it starts job servers whose workers each hold a Postgres connection; this factory
+                // swaps in a no-op job client, so not one of them could ever run anything.
+                [HangfireHostingSetting.ConfigurationKey] = nameof(HangfireHosting.Api),
             });
         });
 
