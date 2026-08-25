@@ -52,6 +52,9 @@ public static class FailureCodes
     public const string RerunUpstreamNotReusable = "rerun_upstream_not_reusable";
     public const string PackImportFailed = "pack_import_failed";
 
+    /// <summary>A settled cell's outputs were redacted for persistence and their encrypted recovery payload is not readable, so the originals exist nowhere. Remedy: re-run the workflow from that node — a resume can only ever offer the redaction placeholder.</summary>
+    public const string WorkflowOutputsUnrecoverable = "workflow_outputs_unrecoverable";
+
     // ── Invitations ────────────────────────────────────────────────────────────────
     public const string InvitationNotUsable = "invitation_not_usable";
     public const string InvitationEmailMismatch = "invitation_email_mismatch";

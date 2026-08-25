@@ -3,6 +3,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Workflows;
 
 namespace CodeSpace.Core.Services.Workflows.Lifecycle;
 
@@ -17,7 +18,7 @@ namespace CodeSpace.Core.Services.Workflows.Lifecycle;
 /// the same change-tracker. Thread-safety mirrors the DbContext's: one logger instance per
 /// scoped concurrent run.
 /// </summary>
-public sealed class RunRecordLogger : IRunRecordLogger, IScopedDependency
+public sealed class RunRecordLogger : IRunRecordLogger, IRedactedNodeOutputLedger, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
 
@@ -94,14 +95,39 @@ public sealed class RunRecordLogger : IRunRecordLogger, IScopedDependency
 
     public async Task<Guid> NodeCompletedAsync(Guid runId, string nodeId, string iterationKey, IReadOnlyDictionary<string, JsonElement> outputs, IReadOnlyList<string>? routingHints, TimeSpan duration, CancellationToken cancellationToken)
     {
-        // routingHints are persisted ONLY for branch nodes (NodeResult.RoutingHints != null) so
-        // the durable walker can rebuild edge-liveness on re-entry without re-running the branch.
-        // Omitted when null → the view's routing_hints_jsonb projects SQL NULL (follow all edges).
-        var payload = routingHints == null
-            ? JsonSerializer.Serialize(new { outputs, duration_ms = (long)duration.TotalMilliseconds })
-            : JsonSerializer.Serialize(new { outputs, routingHints, duration_ms = (long)duration.TotalMilliseconds });
+        var payload = NodeCompletedPayload(outputs, routingHints, duration, outputsRedacted: false);
 
         return await InsertAsync(runId, WorkflowRunRecordTypes.NodeCompleted, nodeId, iterationKey, payload, correlationId: null, parentRecordId: null, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<Guid> NodeCompletedRedactedAsync(RedactedNodeCompletion completion, CancellationToken cancellationToken)
+    {
+        var payload = NodeCompletedPayload(completion.RedactedOutputs, completion.RoutingHints, completion.Duration, outputsRedacted: true);
+
+        return await InsertAsync(completion.RunId, WorkflowRunRecordTypes.NodeCompleted, completion.NodeId, completion.IterationKey, payload, correlationId: null, parentRecordId: null, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The single <c>node.completed</c> payload shape. routingHints are persisted ONLY for branch nodes
+    /// (NodeResult.RoutingHints != null) so the durable walker can rebuild edge-liveness on re-entry without
+    /// re-running the branch; omitted when null → the view's routing_hints_jsonb projects SQL NULL (follow all
+    /// edges). <paramref name="outputsRedacted"/> appends the claim that these outputs are a redacted stand-in;
+    /// the un-redacted shapes are byte-identical to what this method emitted before the claim existed, so every
+    /// row already written keeps parsing exactly as it did. Internal (not private) so both shapes are unit-pinned
+    /// directly via InternalsVisibleTo — the wire key is a ledger contract, not an implementation detail.
+    /// </summary>
+    internal static string NodeCompletedPayload(IReadOnlyDictionary<string, JsonElement> outputs, IReadOnlyList<string>? routingHints, TimeSpan duration, bool outputsRedacted)
+    {
+        var duration_ms = (long)duration.TotalMilliseconds;
+
+        if (!outputsRedacted)
+            return routingHints == null
+                ? JsonSerializer.Serialize(new { outputs, duration_ms })
+                : JsonSerializer.Serialize(new { outputs, routingHints, duration_ms });
+
+        return routingHints == null
+            ? JsonSerializer.Serialize(new { outputs, duration_ms, outputsRedacted })
+            : JsonSerializer.Serialize(new { outputs, routingHints, duration_ms, outputsRedacted });
     }
 
     public async Task NodeFailedAsync(Guid runId, string nodeId, string iterationKey, string error, TimeSpan duration, CancellationToken cancellationToken)
