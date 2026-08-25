@@ -453,6 +453,9 @@ public sealed class HarnessProcessAttemptCompletenessFlowTests
 
         public AttemptDeclarationLosingWriter(IRunDataCompletenessWriter real) => _real = real;
 
+        public Task<bool> InitializeAsync(RunDataManifestInitialization initialization, CancellationToken cancellationToken) =>
+            _real.InitializeAsync(initialization, cancellationToken);
+
         public Task<bool> AdvanceAsync(RunDataFacetAdvance advance, CancellationToken cancellationToken) =>
             advance.Facet == WorkflowRunDataOwnerKinds.HarnessProcessAttempt && advance.Expected > 0
                 ? Task.FromResult(false)
@@ -469,6 +472,9 @@ public sealed class HarnessProcessAttemptCompletenessFlowTests
         private readonly IRunDataCompletenessWriter _real;
 
         public PresenceLosingWriter(IRunDataCompletenessWriter real) => _real = real;
+
+        public async Task<bool> InitializeAsync(RunDataManifestInitialization initialization, CancellationToken cancellationToken) =>
+            await _real.InitializeAsync(initialization, cancellationToken).ConfigureAwait(false);
 
         public async Task<bool> AdvanceAsync(RunDataFacetAdvance advance, CancellationToken cancellationToken) =>
             advance.Present > 0 ? false : await _real.AdvanceAsync(advance, cancellationToken).ConfigureAwait(false);

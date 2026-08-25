@@ -273,6 +273,9 @@ public sealed class HarnessExecutionCompletenessFlowTests
 
         public RecordingWriter(IRunDataCompletenessWriter real, ICollection<RunDataFacetAdvance> advances) { _real = real; _advances = advances; }
 
+        public async Task<bool> InitializeAsync(RunDataManifestInitialization initialization, CancellationToken cancellationToken) =>
+            await _real.InitializeAsync(initialization, cancellationToken).ConfigureAwait(false);
+
         public async Task<bool> AdvanceAsync(RunDataFacetAdvance advance, CancellationToken cancellationToken)
         {
             _advances.Add(advance);
@@ -292,6 +295,9 @@ public sealed class HarnessExecutionCompletenessFlowTests
 
         public ExecutionPresenceLosingWriter(IRunDataCompletenessWriter real) => _real = real;
 
+        public async Task<bool> InitializeAsync(RunDataManifestInitialization initialization, CancellationToken cancellationToken) =>
+            await _real.InitializeAsync(initialization, cancellationToken).ConfigureAwait(false);
+
         public async Task<bool> AdvanceAsync(RunDataFacetAdvance advance, CancellationToken cancellationToken) =>
             advance.Facet == WorkflowRunDataOwnerKinds.HarnessExecution && advance.Present > 0
                 ? false
@@ -309,6 +315,9 @@ public sealed class HarnessExecutionCompletenessFlowTests
         private readonly IRunDataCompletenessWriter _real;
 
         public ExecutionDeclarationLosingWriter(IRunDataCompletenessWriter real) => _real = real;
+
+        public async Task<bool> InitializeAsync(RunDataManifestInitialization initialization, CancellationToken cancellationToken) =>
+            await _real.InitializeAsync(initialization, cancellationToken).ConfigureAwait(false);
 
         public async Task<bool> AdvanceAsync(RunDataFacetAdvance advance, CancellationToken cancellationToken) =>
             advance.Facet == WorkflowRunDataOwnerKinds.HarnessExecution && advance.Expected > 0

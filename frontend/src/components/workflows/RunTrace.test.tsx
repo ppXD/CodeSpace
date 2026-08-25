@@ -104,6 +104,23 @@ describe("RunTrace", () => {
     expect(screen.getByText("Exact")).toBeInTheDocument();
   });
 
+  it("reads a run nobody has stated as not stated, in quiet tone rather than as an alarm", () => {
+    withRecords([record({ sequence: 1 })]);
+    const view = completeness([
+      { facet: "model-call", expectedRecordCount: null, presentRecordCount: 0, knownMissingCount: 0, verdict: "LegacyUnknown", isStrictlyReadable: false, revision: 1, schemaVersion: 1, lastModifiedAt: "2026-08-21T02:00:00Z" },
+    ]);
+    completenessMock.data = { ...view, isTerminal: true, requiredFacets: ["model-call"], runWideVerdict: "LegacyUnknown" };
+
+    render(<RunTrace runId="r1" />);
+
+    expect(screen.getByText("Not stated")).toBeInTheDocument();
+    expect(screen.getByText(/terminal run-wide verdict . not stated/i)).toBeInTheDocument();
+    expect(screen.queryByText(/LegacyUnknown/)).toBeNull();
+    expect(screen.getByText(/expected unstated/i)).toBeInTheDocument();
+    expect(screen.getByText("model-call").closest("li")).toHaveAttribute("data-verdict", "LegacyUnknown");
+    expect(screen.getByText("model-call").closest("li")).not.toHaveAttribute("data-readable");
+  });
+
   it("keeps zero statements visibly unstated instead of calling the run exact", () => {
     withRecords([record({ sequence: 1 })]);
 

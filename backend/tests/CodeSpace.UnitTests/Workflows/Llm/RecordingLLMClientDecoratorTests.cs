@@ -632,6 +632,14 @@ public class RecordingLLMClientDecoratorTests
         public List<RunDataFacetAdvance> Advances { get; } = new();
         public List<WorkflowRunCaptureGap> Gaps { get; } = new();
 
+        public List<RunDataManifestInitialization> Initializations { get; } = new();
+
+        public Task<bool> InitializeAsync(RunDataManifestInitialization initialization, CancellationToken cancellationToken)
+        {
+            Initializations.Add(initialization);
+            return Task.FromResult(true);
+        }
+
         public Task<bool> AdvanceAsync(RunDataFacetAdvance advance, CancellationToken cancellationToken)
         {
             Advances.Add(advance);
