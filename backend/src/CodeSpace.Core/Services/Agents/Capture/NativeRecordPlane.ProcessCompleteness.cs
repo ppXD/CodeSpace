@@ -26,7 +26,9 @@ namespace CodeSpace.Core.Services.Agents.Capture;
 /// BEFORE the row is written and its presence stated only once the row is durable, so the window between them reads
 /// present below expected — a shortfall, which is not complete. Advancing both counts in one statement would have left
 /// them equally short whenever the accounting was lost, and the facet would have read Exact over a process nobody
-/// counted. Only the verbatim arm is reachable: an attempt row is execution identity, never captured bytes, so
+/// counted. The MIRROR is a lost DECLARATION, which does not fail closed on its own: a presence stated alone reads
+/// Exact over expected=0, so a launch whose declaration was not admitted un-states the facet rather than counting
+/// itself present. Only the verbatim arm is reachable: an attempt row is execution identity, never captured bytes, so
 /// <see cref="RunDataFacetAdvance.Masked"/> is always false and there is nothing in it to redact.</para>
 ///
 /// <para><b>What it does NOT mean.</b> It is a claim about the launches this plane was ASKED to open, never about every
@@ -58,7 +60,7 @@ public sealed partial class NativeRecordPlane
     /// </summary>
     private async Task AppendAttemptAsync(CodeSpaceDbContext db, NativeRecordCaptureRequest request, Guid? workflowRunId, Guid attemptId, CancellationToken cancellationToken)
     {
-        await DeclareAttemptAsync(request.TeamId, workflowRunId, cancellationToken).ConfigureAwait(false);
+        var declared = await DeclareAttemptAsync(request.TeamId, workflowRunId, cancellationToken).ConfigureAwait(false);
 
         try
         {
@@ -72,15 +74,26 @@ public sealed partial class NativeRecordPlane
             throw;
         }
 
-        await AccountForAttemptAsync(request.TeamId, workflowRunId, cancellationToken).ConfigureAwait(false);
+        if (declared)
+            await AccountForAttemptAsync(request.TeamId, workflowRunId, cancellationToken).ConfigureAwait(false);
+        else if (workflowRunId is { } unstated)
+            await MarkAttemptExpectationIndeterminateAsync(request.TeamId, unstated, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>What the launch UNDERTAKES to make durable — one process record — stated before it tries, so a failure after this point is visible as a shortfall rather than as two counts that fell short together.</summary>
-    private async Task DeclareAttemptAsync(Guid teamId, Guid? workflowRunId, CancellationToken cancellationToken)
+    /// <summary>What the launch UNDERTAKES to make durable — one process record — stated before it tries, so a failure after this point is visible as a shortfall rather than as two counts that fell short together. Returns whether the claim was admitted, because a lost declaration may not be followed by a presence.</summary>
+    private async Task<bool> DeclareAttemptAsync(Guid teamId, Guid? workflowRunId, CancellationToken cancellationToken)
     {
-        if (AttemptAdvance(teamId, workflowRunId, expected: 1, present: 0) is not { } declaration) return;
+        if (AttemptAdvance(teamId, workflowRunId, expected: 1, present: 0) is not { } declaration) return false;
 
-        await _completeness.AdvanceAsync(declaration, cancellationToken).ConfigureAwait(false);
+        return await _completeness.AdvanceAsync(declaration, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>A lost declaration can never be followed by a present-only advance, which would manufacture Exact over expected=0.</summary>
+    private async Task MarkAttemptExpectationIndeterminateAsync(Guid teamId, Guid workflowRunId, CancellationToken cancellationToken)
+    {
+        if (!await _completeness.UnstateExpectationAsync(teamId, workflowRunId, WorkflowRunDataOwnerKinds.HarnessProcessAttempt, cancellationToken).ConfigureAwait(false)) return;
+
+        _logger.LogWarning("The expectation declaration for the harness process attempt of workflow run {WorkflowRunId} was not admitted, so the attempt row remains durable but the facet is unstated rather than counted from a present-only delta", workflowRunId);
     }
 
     /// <summary>The process record is durable, so the facet's presence advances by the one row the launch owed.</summary>
