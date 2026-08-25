@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { StorageProfileSummary } from "@/api/storage";
 import type { StorageRouteDetail, StorageRouteRevisionDetail, StorageRouteSummary } from "@/api/storageRoutes";
+import type { MeResponse } from "@/api/types";
+import { TeamPermissions } from "@/hooks/use-team-management";
 
 import { StorageRouteSettings } from "./StorageRouteSettings";
 
@@ -84,12 +86,27 @@ function json(body: unknown, status = 200) {
 
 type FetchHandler = (url: URL, init: RequestInit) => Response | Promise<Response>;
 
-function renderRoutes(handler: FetchHandler, profiles: StorageProfileSummary[] = [primaryProfile, archiveProfile, disabledProfile]) {
+function me(permissions: string[]): MeResponse {
+  return {
+    id: "user-1", email: "owner@test.local", name: "Owner", passwordMustChange: false, permissions: [],
+    teams: [{ id: "team-1", slug: "platform", name: "Platform", kind: "Workspace", role: "Owner", permissions, memberCount: 1, repositoryCount: 0, projectCount: 0, workflowCount: 0 }],
+  };
+}
+
+interface RouteRenderOptions {
+  profiles?: StorageProfileSummary[];
+  permissions?: string[];
+}
+
+function renderRoutes(handler: FetchHandler, options: RouteRenderOptions = {}) {
+  const profiles = options.profiles ?? [primaryProfile, archiveProfile, disabledProfile];
   localStorage.setItem("codespace.jwt", "test-jwt");
   localStorage.setItem("codespace.activeTeamId", "team-1");
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
     const raw = typeof input === "string" ? input : input.toString();
-    return handler(new URL(raw, "http://test.local"), init);
+    const url = new URL(raw, "http://test.local");
+    if (url.pathname === "/api/users/me") return json(me(options.permissions ?? [TeamPermissions.StorageManage]));
+    return handler(url, init);
   }));
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } } });
   return render(<QueryClientProvider client={client}><StorageRouteSettings profiles={profiles} /></QueryClientProvider>);
@@ -245,7 +262,7 @@ describe("storage data routing settings", () => {
     let dialog = await screen.findByRole("dialog", { name: "Manage data route artifact-cas/v1" });
     fireEvent.click(await within(dialog).findByRole("button", { name: "Append route revision" }));
 
-    expect(await within(dialog).findByRole("alert")).toHaveTextContent(/changed elsewhere.*reloaded.*review.*try again/i);
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(/stale.*latest data was reloaded/i);
     await waitFor(() => expect(detailReads).toBeGreaterThanOrEqual(2));
     expect(appendAttempts).toBe(1);
     dialog = await screen.findByRole("dialog", { name: "Manage data route artifact-cas/v1" });
@@ -312,5 +329,96 @@ describe("storage data routing settings", () => {
     expect(alert).toHaveTextContent(/unsupported storage profile revision mode/i);
     expect(document.body).not.toHaveTextContent("/private/storage");
     expect(document.body).not.toHaveTextContent("db:secret-reference");
+  });
+});
+
+/** The create control is inert until the route list has loaded, so a bare click can silently do nothing. */
+async function clickWhenEnabled(name: string) {
+  await waitFor(() => expect(screen.getByRole("button", { name })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name }));
+}
+
+describe("storage data routing copy and permissions", () => {
+  const dataClasses = [
+    { typeKey: "agent-run-log/v1", displayName: "Agent run logs" },
+    { typeKey: "workflow-artifact/v1", displayName: "Workflow artifacts" },
+  ];
+
+  function catalogHandler(extra: FetchHandler = async () => json({}, 500)): FetchHandler {
+    return async (url, init) => {
+      if (url.pathname === "/api/storage/routes/page") return json({ items: [], nextCursor: null });
+      if (url.pathname === "/api/storage/data-classes") return json(dataClasses);
+      return extra(url, init);
+    };
+  }
+
+  it("says what a data class is rather than only labelling the field", async () => {
+    renderRoutes(catalogHandler());
+
+    await clickWhenEnabled("Create data route");
+    const dialog = await screen.findByRole("dialog", { name: "Create data route" });
+    expect(dialog).toHaveTextContent(/A data class is one kind of data this build writes/i);
+  });
+
+  // The two shipped classes differ by exactly one declaration — WorkflowArtifactDataClass implements
+  // IRoutedDataClassLocalFallback and AgentRunLogDataClass deliberately does not — so an un-activated route
+  // means "keeps its local home" for one and "capture refuses" for the other. One sentence cannot be true of both.
+  it("explains a Draft route per data class, the way the runtime resolves each one", async () => {
+    renderRoutes(catalogHandler());
+
+    await clickWhenEnabled("Create data route");
+    const dialog = await screen.findByRole("dialog", { name: "Create data route" });
+    const picker = await within(dialog).findByLabelText("Data class");
+
+    fireEvent.change(picker, { target: { value: "workflow-artifact/v1" } });
+    expect(await within(dialog).findByText(/While this route is Draft, workflow artifacts keep writing to local storage/i)).toBeInTheDocument();
+    expect(dialog).not.toHaveTextContent(/capture is unavailable/i);
+
+    fireEvent.change(picker, { target: { value: "agent-run-log/v1" } });
+    expect(await within(dialog).findByText(/While this route is Draft, agent run log capture is unavailable/i)).toBeInTheDocument();
+    expect(dialog).not.toHaveTextContent(/keep writing to local storage/i);
+  });
+
+  // Disabled is NOT the inverse of Active: StorageRouteSnapshotResolver reports Draft as RouteNotActivated
+  // (local home applies) and Disabled/Retired as RouteNotActive (it never does, for any class).
+  it("does not let Disabled read as a return to local storage", async () => {
+    renderRoutes(async (url) => {
+      if (url.pathname === "/api/storage/routes/page") return json({ items: [{ ...route, state: "Active" }], nextCursor: null });
+      if (url.pathname === "/api/storage/data-classes") return json(dataClasses);
+      if (url.pathname === `/api/storage/routes/${route.id}`) return json(detail({ state: "Active" }));
+      return json({}, 500);
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Manage artifact-cas/v1" }));
+    const dialog = await screen.findByRole("dialog", { name: "Manage data route artifact-cas/v1" });
+    expect(await within(dialog).findByText(/Disabling a route does not return writes to local storage/i)).toBeInTheDocument();
+  });
+
+  // Nothing changed elsewhere when a team already holds a route for that class, and the server said exactly that.
+  it("surfaces the server's own duplicate-identity 409 verbatim", async () => {
+    const refusal = "Storage route 'workflow-artifact/v1' already exists in this team.";
+    renderRoutes(catalogHandler(async (url, init) => (url.pathname === "/api/storage/routes" && (init.method ?? "GET") === "POST"
+      ? json({ code: "storage_route_conflict", message: refusal }, 409)
+      : json({}, 500))));
+
+    await clickWhenEnabled("Create data route");
+    const dialog = await screen.findByRole("dialog", { name: "Create data route" });
+    fireEvent.change(await within(dialog).findByLabelText("Data class"), { target: { value: "workflow-artifact/v1" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Create Draft" }));
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(refusal);
+    expect(within(dialog).getByRole("alert")).not.toHaveTextContent(/changed elsewhere/i);
+  });
+
+  it("renders no route write control without storage.manage", async () => {
+    renderRoutes(async (url) => {
+      if (url.pathname === "/api/storage/routes/page") return json({ items: [route], nextCursor: null });
+      if (url.pathname === "/api/storage/data-classes") return json(dataClasses);
+      return json({}, 500);
+    }, { permissions: [] });
+
+    expect(await screen.findByText("artifact-cas/v1")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Create data route" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Manage / })).not.toBeInTheDocument();
   });
 });

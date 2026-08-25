@@ -3,6 +3,9 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { StorageCredentialMetadata, StorageProfileDetail, StorageProfileProbeResult, StorageProfileSummary, StorageProviderModuleSummary } from "@/api/storage";
+import type { StorageRouteSummary } from "@/api/storageRoutes";
+import type { MeResponse } from "@/api/types";
+import { TeamPermissions } from "@/hooks/use-team-management";
 
 import { StorageSettings } from "./StorageSettings";
 
@@ -106,18 +109,58 @@ function probeResult(overrides: Partial<StorageProfileProbeResult> = {}): Storag
   };
 }
 
-function renderSettings(handler: FetchHandler) {
+const routedDataClasses = [
+  { typeKey: "agent-run-log/v1", displayName: "Agent run logs" },
+  { typeKey: "workflow-artifact/v1", displayName: "Workflow artifacts" },
+];
+
+function me(permissions: string[]): MeResponse {
+  return {
+    id: "user-1", email: "owner@test.local", name: "Owner", passwordMustChange: false, permissions: [],
+    teams: [{ id: "team-1", slug: "platform", name: "Platform", kind: "Workspace", role: "Owner", permissions, memberCount: 1, repositoryCount: 0, projectCount: 0, workflowCount: 0 }],
+  };
+}
+
+interface RenderOptions {
+  /** Team-scoped permissions the server expands for this caller. Storage reads AND writes both require storage.manage. */
+  permissions?: string[];
+  routes?: StorageRouteSummary[];
+}
+
+function renderSettings(handler: FetchHandler, options: RenderOptions = {}) {
   localStorage.setItem("codespace.jwt", "test-jwt");
   localStorage.setItem("codespace.activeTeamId", "team-1");
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
     const raw = typeof input === "string" ? input : input.toString();
     const path = new URL(raw, "http://test.local").pathname;
-    if (path === "/api/storage/routes/page") return json(page([]));
+    if (path === "/api/users/me") return json(me(options.permissions ?? [TeamPermissions.StorageManage]));
+    if (path === "/api/storage/routes/page") return json(page(options.routes ?? []));
+    if (path === "/api/storage/data-classes") return json(routedDataClasses);
     return handler(path, init);
   }));
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } } });
 
   return render(<QueryClientProvider client={client}><StorageSettings /></QueryClientProvider>);
+}
+
+type StepName = "credential" | "profile" | "route";
+
+/** The rail's own state marker, read the way the page paints it. */
+function stepState(step: StepName): string | null {
+  return document.querySelector(`[data-step="${step}"]`)?.getAttribute("data-step-state") ?? null;
+}
+
+function railStates(): Record<StepName, string | null> {
+  return { credential: stepState("credential"), profile: stepState("profile"), route: stepState("route") };
+}
+
+function activeStep(): string | null {
+  return document.querySelector("[data-step-state='active']")?.getAttribute("data-step") ?? null;
+}
+
+/** A finished step collapses to its summary line; its rows are behind the disclosure. */
+async function expandStep(title: string) {
+  fireEvent.click(await screen.findByRole("button", { name: `Show ${title}` }));
 }
 
 function defaultHandler(options: { providers?: StorageProviderModuleSummary[]; profiles?: StorageProfileSummary[]; detail?: StorageProfileDetail; credentials?: StorageCredentialMetadata[] } = {}): FetchHandler {
@@ -145,6 +188,7 @@ describe("storage profiles settings", () => {
   it("lists only safe credential metadata and never renders the opaque reference", async () => {
     renderSettings(defaultHandler({ credentials: [credential] }));
 
+    await expandStep("Storage credentials");
     const list = await screen.findByRole("list", { name: "Storage credentials" });
     expect(within(list).getByText("aliyun-primary")).toBeInTheDocument();
     expect(within(list).getByText("Revision 3")).toBeInTheDocument();
@@ -165,6 +209,7 @@ describe("storage profiles settings", () => {
     });
 
     await screen.findByText("primary");
+    await expandStep("Storage credentials");
     await screen.findByText("aliyun-primary");
     fireEvent.click(screen.getByRole("button", { name: "Load more profiles" }));
     fireEvent.click(screen.getByRole("button", { name: "Load more credentials" }));
@@ -236,6 +281,7 @@ describe("storage profiles settings", () => {
       return json({ message: "Unexpected request" }, 500);
     });
 
+    await expandStep("Storage credentials");
     await screen.findByText("aliyun-primary");
     fireEvent.click(screen.getByRole("button", { name: "Manage credential aliyun-primary" }));
     const dialog = await screen.findByRole("dialog", { name: "Manage storage credential aliyun-primary" });
@@ -262,9 +308,14 @@ describe("storage profiles settings", () => {
     renderSettings(defaultHandler({ profiles: [{ ...profile, state: "Active" }] }));
 
     expect(screen.getByRole("heading", { name: "Artifact storage" })).toBeInTheDocument();
-    expect(screen.getByText(/Active profiles are control-plane configuration only/i)).toBeInTheDocument();
-    expect(screen.getByText(/deployment-managed until qualification and cutover/i)).toBeInTheDocument();
+    // The header used to call the runtime "deployment-managed until qualification and cutover are complete",
+    // which described a permanent layer as an unfinished one. An Active route over an Active profile IS where
+    // the next write lands, so the header now says what this screen decides instead of disclaiming it.
+    expect(screen.getByText(/Once a data route is Active, the next write for that data class lands on the profile it names/i)).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent(/qualification and cutover/i);
+    expect(document.body).not.toHaveTextContent(/control-plane configuration only/i);
 
+    await expandStep("Storage profiles");
     const list = await screen.findByRole("list", { name: "Storage profiles" });
     expect(within(list).getByText("primary")).toBeInTheDocument();
     expect(within(list).getByText("Active")).toBeInTheDocument();
@@ -366,10 +417,36 @@ describe("storage profiles settings", () => {
     await screen.findByText("Current revision 2");
     fireEvent.click(screen.getByRole("button", { name: "Set Active" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(/changed elsewhere/i);
-    expect(screen.getByRole("alert")).toHaveTextContent(/review the latest revision and try again/i);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Storage profile version mismatch.");
+    expect(screen.getByRole("alert")).toHaveTextContent(/latest data was reloaded/i);
     await waitFor(() => expect(detailReads).toBeGreaterThan(1));
     expect(await screen.findByText("Current revision 3")).toBeInTheDocument();
+  });
+
+  // Every 409 used to collapse into one "changed elsewhere" sentence. StorageProfileService throws several
+  // distinct ones, and this is the case where the generic string is not merely vague but false: nothing
+  // changed elsewhere, and the reason plus the exact fix were both in the message that got thrown away.
+  it("surfaces the server's own 409 reason instead of assuming a concurrent edit", async () => {
+    const refusal = "Storage profile cannot be retired while 2 active storage route(s) still target it. Repoint or disable those routes first.";
+    renderSettings(async (path, init) => {
+      const method = init.method ?? "GET";
+      if (path === "/api/storage/provider-modules") return json([localProvider]);
+      if (path === "/api/storage/credentials/page") return json(page([]));
+      if (path === "/api/storage/profiles/page" && method === "GET") return json(page([activeProfile]));
+      if (path === `/api/storage/profiles/${profile.id}` && method === "GET") return json({ ...detail, state: "Active" });
+      if (path === `/api/storage/profiles/${profile.id}/state` && method === "PUT") return json({ code: "storage_profile_conflict", message: refusal }, 409);
+      return json({ message: "Unexpected request" }, 500);
+    });
+
+    await expandStep("Storage profiles");
+    await screen.findByText("primary");
+    fireEvent.click(screen.getByRole("button", { name: "Manage primary" }));
+    await screen.findByText("Current revision 2");
+    fireEvent.click(screen.getByRole("button", { name: "Retire profile" }));
+    fireEvent.click(within(await screen.findByRole("alertdialog", { name: "Retire primary?" })).getByRole("button", { name: "Retire permanently" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(refusal);
+    expect(screen.getByRole("alert")).not.toHaveTextContent(/changed elsewhere/i);
   });
 
   it("uses concurrency tokens for Active/Disabled/Retired state changes and explicitly confirms retirement", async () => {
@@ -604,5 +681,103 @@ describe("storage profiles settings", () => {
     expect(await screen.findByText("Couldn't load storage profiles")).toBeInTheDocument();
     expect(screen.getByText("Profile ledger unavailable")).toBeInTheDocument();
     expect(screen.queryByText("No storage profiles configured")).not.toBeInTheDocument();
+  });
+});
+
+const activeProfile: StorageProfileSummary = { ...profile, state: "Active" };
+
+function routeSummary(state: StorageRouteSummary["state"]): StorageRouteSummary {
+  return {
+    id: "route-1", dataClassTypeKey: "workflow-artifact/v1", state, currentRevision: 1, xmin: 30,
+    storageProfileId: activeProfile.id, storageProfileStableName: activeProfile.stableName,
+    profileRevisionMode: "CurrentAtWrite", pinnedProfileRevision: null,
+    createdDate: "2026-08-14T10:00:00Z", lastModifiedDate: "2026-08-15T10:00:00Z",
+  };
+}
+
+describe("storage guided flow", () => {
+  // The chain is enforced by the server, not by this screen: a route may only target an Active profile
+  // (StorageRouteService.RequireActiveProfileAsync), and a profile whose provider declares required secret
+  // inputs may only be activated once a credential is linked. The rail has to name the same order.
+  const completionStates: Array<{ name: string; credentials: StorageCredentialMetadata[]; profiles: StorageProfileSummary[]; routes: StorageRouteSummary[]; expected: Record<StepName, string | null> }> = [
+    { name: "nothing configured", credentials: [], profiles: [], routes: [], expected: { credential: "active", profile: "upcoming", route: "locked" } },
+    { name: "credential only", credentials: [credential], profiles: [], routes: [], expected: { credential: "done", profile: "active", route: "locked" } },
+    { name: "credential plus a Draft profile", credentials: [credential], profiles: [profile], routes: [], expected: { credential: "done", profile: "active", route: "locked" } },
+    { name: "credential plus an Active profile", credentials: [credential], profiles: [activeProfile], routes: [], expected: { credential: "done", profile: "done", route: "active" } },
+    // A later step being reachable does not move the accent onto it: local-rwx needs no secret, so this
+    // team has an Active profile with the credential step still untouched. Routing stays available —
+    // upcoming, not locked — because nothing refuses it.
+    { name: "an Active profile reached without a credential", credentials: [], profiles: [activeProfile], routes: [], expected: { credential: "active", profile: "done", route: "upcoming" } },
+    { name: "a Draft route over an Active profile", credentials: [credential], profiles: [activeProfile], routes: [routeSummary("Draft")], expected: { credential: "done", profile: "done", route: "active" } },
+  ];
+
+  it.each(completionStates)("makes the first incomplete step the active one — $name", async ({ credentials, profiles, routes, expected }) => {
+    renderSettings(defaultHandler({ credentials, profiles }), { routes });
+
+    await waitFor(() => expect(railStates()).toEqual(expected));
+    expect(activeStep()).toBe(Object.entries(expected).find(([, value]) => value === "active")?.[0]);
+  });
+
+  it("leaves no step active once every step is complete", async () => {
+    renderSettings(defaultHandler({ credentials: [credential], profiles: [activeProfile] }), { routes: [routeSummary("Active")] });
+
+    await waitFor(() => expect(stepState("route")).toBe("done"));
+    expect(activeStep()).toBeNull();
+    expect(stepState("credential")).toBe("done");
+    expect(stepState("profile")).toBe("done");
+  });
+
+  it("shows exactly one primary action on the whole screen", async () => {
+    renderSettings(defaultHandler({ credentials: [credential], profiles: [] }));
+
+    await waitFor(() => expect(railStates()).toEqual({ credential: "done", profile: "active", route: "locked" }));
+    expect(document.querySelectorAll(".btn-primary")).toHaveLength(1);
+  });
+
+  it("states the route step's precondition inline instead of offering a disabled button beside a separate hint", async () => {
+    renderSettings(defaultHandler({ credentials: [credential], profiles: [profile] }));
+
+    await waitFor(() => expect(stepState("route")).toBe("locked"));
+    expect(screen.getByText(/Available once a storage profile is Active/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Create data route" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Activate a storage profile before creating or revising a data route/i)).not.toBeInTheDocument();
+  });
+
+  // local-rwx/v1 declares no secret properties at all, so a Storage Credential could hold nothing for it.
+  it("omits the credential step when no installed provider takes a secret", async () => {
+    renderSettings(defaultHandler({ providers: [localProvider], profiles: [] }));
+
+    await waitFor(() => expect(activeStep()).toBe("profile"));
+    expect(stepState("credential")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Storage credentials" })).not.toBeInTheDocument();
+  });
+
+  it("presents the credential step when an installed provider takes a secret", async () => {
+    renderSettings(defaultHandler({ providers: [secretProvider], profiles: [] }));
+
+    await waitFor(() => expect(activeStep()).toBe("credential"));
+    expect(screen.getByRole("heading", { name: "Storage credentials" })).toBeInTheDocument();
+  });
+
+  // Same rule the roster follows: a control the caller may not use is ABSENT, not present-and-refusing.
+  it("renders no write control without storage.manage", async () => {
+    // A Draft profile is the state that offers the most write controls to a caller who does hold it:
+    // Activate, Create, and a per-row Manage. None of them may appear here.
+    renderSettings(defaultHandler({ credentials: [credential], profiles: [profile] }), { permissions: [] });
+
+    expect(await screen.findByText("primary")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Create /i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Manage /i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Activate /i })).not.toBeInTheDocument();
+    expect(screen.getByText(/needs the storage.manage permission/i)).toBeInTheDocument();
+  });
+
+  it("names the deployment catalog as deployment-set rather than as a fourth thing to configure", async () => {
+    renderSettings(defaultHandler({ profiles: [] }));
+
+    const catalog = await screen.findByRole("region", { name: "Installed providers" });
+    expect(catalog).toHaveAttribute("data-scope", "deployment");
+    expect(catalog).toHaveTextContent(/set by this deployment/i);
+    expect(within(catalog).queryByRole("button")).not.toBeInTheDocument();
   });
 });

@@ -1,18 +1,31 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
+import { Ic } from "@/_imported/ai-code-space/icons";
 import { ApiError } from "@/api/request";
 import type { StorageCredentialMetadata, StorageProfileDetail, StorageProfileProbeResult, StorageProfileState, StorageProfileSummary, StorageProviderModuleSummary } from "@/api/storage";
 import { useAppendStorageProfileRevision, useCreateStorageProfile, useProbeStorageProfile, useSetStorageProfileState, useStorageCredentials, useStorageProfile, useStorageProfiles, useStorageProviderModules } from "@/hooks/use-storage";
+import { useStorageRoutes } from "@/hooks/use-storage-routes";
+import { TeamPermissions, useTeamPermissions } from "@/hooks/use-team-management";
 import { SchemaForm } from "@/components/workflows/SchemaForm";
 import { StorageCredentialSettings } from "./StorageCredentialSettings";
 import { StorageRouteSettings } from "./StorageRouteSettings";
+import { StorageStep, type StorageStepState } from "./StorageStep";
 
-/** Settings → Storage profile control plane. Runtime ArtifactStore selection remains deployment-managed. */
+/**
+ * Settings → Storage. One ordered flow over a dependency chain the server enforces: a credential
+ * carries a provider's secret, a profile names where bytes live, and a data route points one class
+ * of data at an Active profile. The step still to do is the only one with an accent.
+ *
+ * <p>The installed-provider catalog is a different scope tier — set by the deployment, never edited
+ * here — so it sits below the flow on its own recessed ground rather than as a fourth peer.</p>
+ */
 export function StorageSettings() {
   const providers = useStorageProviderModules();
   const credentials = useStorageCredentials();
   const profiles = useStorageProfiles();
+  const routes = useStorageRoutes();
+  const mayManage = useTeamPermissions().can(TeamPermissions.StorageManage);
   const [createOpen, setCreateOpen] = useState(false);
   const [managedProfileId, setManagedProfileId] = useState<string | null>(null);
   const providerRows = providers.data ?? [];
@@ -21,61 +34,104 @@ export function StorageSettings() {
   const providerError = errorMessage(providers.error);
   const profileError = errorMessage(profiles.error);
 
+  // A Storage Credential can only ever hold a provider's secret inputs. With none declared anywhere in
+  // this deployment's catalog there is nothing for the step to collect, so it is absent rather than empty.
+  const credentialStepApplies = providerRows.some(providerHasSecretInputs);
+  const activeCredentials = credentialRows.filter((credential) => credential.state === "Active");
+  const activeProfiles = profileRows.filter((profile) => profile.state === "Active");
+  const activeRoutes = (routes.data ?? []).filter((route) => route.state === "Active");
+  const routeLocked = !profiles.isLoading && profileError == null && activeProfiles.length === 0;
+
+  const done = {
+    credential: activeCredentials.length > 0,
+    profile: profileError == null && activeProfiles.length > 0,
+    route: activeRoutes.length > 0,
+  };
+  // The active step is the first one still to do that nothing is stopping. Everything after it stays
+  // reachable — being later in the order is not a refusal.
+  const next = ([
+    credentialStepApplies && !done.credential ? "credential" : null,
+    !done.profile ? "profile" : null,
+    !done.route && !routeLocked ? "route" : null,
+  ] as const).find((step): step is "credential" | "profile" | "route" => step != null) ?? null;
+
+  const stepState = (step: "credential" | "profile" | "route"): StorageStepState => {
+    if (done[step]) return "done";
+    if (step === "route" && routeLocked) return "locked";
+    return step === next ? "active" : "upcoming";
+  };
+
+  const profileState = stepState("profile");
+  const activatable = profileRows.find((profile) => profile.state !== "Retired");
+
   return (
     <div aria-labelledby="storage-settings-title">
       <div className="cn-banner" style={{ margin: 16 }}>
         <h2 className="cn-banner-h" id="storage-settings-title">Artifact storage</h2>
         <div className="cn-banner-p">
-          Active profiles are control-plane configuration only. The current ArtifactStore and runtime remain
-          deployment-managed until qualification and cutover are complete.
+          Once a data route is Active, the next write for that data class lands on the profile it names. Until then
+          each class keeps the home it already has, which differs by class.
         </div>
+        {/* Deliberately silent about reads: every storage query declares the same permission server-side, so
+            promising a read-only view would be a claim this screen cannot keep. */}
+        {!mayManage && <div className="cn-banner-p">Changing anything here needs the storage.manage permission, which you do not hold in this team.</div>}
       </div>
 
-      <StorageCredentialSettings providers={providerRows} />
+      <div className="stg-flow" style={{ margin: 16 }}>
+        <StorageCredentialSettings providers={providerRows} state={stepState("credential")} />
 
-      <section aria-labelledby="storage-profiles-title" style={{ margin: 16 }}>
-        <div className="cn-listhead">
-          <h3 className="cn-listhead-l" id="storage-profiles-title">Storage profiles</h3>
-          <button type="button" className="btn btn-primary" disabled={providers.isLoading || providerError != null || providerRows.length === 0} onClick={() => setCreateOpen(true)}>
-            Create storage profile
-          </button>
+        <StorageStep
+          step="profile"
+          title="Storage profiles"
+          titleId="storage-profiles-title"
+          state={profileState}
+          line={profileLine(profileRows, activeProfiles, profiles.isLoading, profileError)}
+          action={mayManage ? (
+            <>
+              {/* With a profile already drafted, the accented act is activating it — a route may only
+                  target an Active profile. Creating another stays available beside it. */}
+              {activeProfiles.length === 0 && activatable && (
+                <button type="button" className={profileState === "active" ? "btn btn-primary" : "btn"} onClick={() => setManagedProfileId(activatable.id)}>Activate {activatable.stableName}</button>
+              )}
+              <button type="button" className={profileState === "active" && (activeProfiles.length > 0 || !activatable) ? "btn btn-primary" : "btn"} disabled={providers.isLoading || providerError != null || providerRows.length === 0} onClick={() => setCreateOpen(true)}>Create storage profile</button>
+            </>
+          ) : undefined}
+        >
+          {profiles.isLoading && <LoadingMessage>Loading storage profiles…</LoadingMessage>}
+
+          {profileError && <ErrorBanner title="Couldn't load storage profiles" message={profileError} />}
+
+          {!profiles.isLoading && !profileError && profileRows.length === 0 && (
+            <div className="stg-hint">A profile names a provider and its non-secret configuration. It carries no data of its own until a route points at it.</div>
+          )}
+
+          {!profiles.isLoading && !profileError && profileRows.length > 0 && (
+            <>
+              <div className="cn-list" role="list" aria-label="Storage profiles">
+                {profileRows.map((profile) => (
+                  <StorageProfileRow key={profile.id} profile={profile} provider={providerRows.find((provider) => provider.typeKey === profile.providerTypeKey)} onManage={mayManage ? () => setManagedProfileId(profile.id) : undefined} />
+                ))}
+              </div>
+              {profiles.hasNextPage && (
+                <button type="button" className="btn" disabled={profiles.isFetchingNextPage} onClick={() => profiles.fetchNextPage()}>
+                  {profiles.isFetchingNextPage ? "Loading more profiles…" : "Load more profiles"}
+                </button>
+              )}
+            </>
+          )}
+        </StorageStep>
+
+        <StorageRouteSettings profiles={profileRows} state={stepState("route")} />
+      </div>
+
+      <section className="stg-scope" aria-labelledby="storage-providers-title" data-scope="deployment">
+        <div className="stg-scope-head">
+          <span className="stg-scope-lock" aria-hidden="true"><Ic.Lock size={12} /></span>
+          <h3 className="stg-title" id="storage-providers-title">Installed providers</h3>
         </div>
-
-        {profiles.isLoading && <LoadingMessage>Loading storage profiles…</LoadingMessage>}
-
-        {profileError && (
-          <ErrorBanner title="Couldn't load storage profiles" message={profileError} />
-        )}
-
-        {!profiles.isLoading && !profileError && profileRows.length === 0 && (
-          <div className="ct-empty">
-            <div className="ct-empty-h">No storage profiles configured</div>
-            <div className="ct-empty-p">Create a Draft from an installed provider. Drafts do not change runtime storage.</div>
-          </div>
-        )}
-
-        {!profiles.isLoading && !profileError && profileRows.length > 0 && (
-          <>
-            <div className="cn-list" role="list" aria-label="Storage profiles">
-              {profileRows.map((profile) => (
-                <StorageProfileRow key={profile.id} profile={profile} provider={providerRows.find((provider) => provider.typeKey === profile.providerTypeKey)} onManage={() => setManagedProfileId(profile.id)} />
-              ))}
-            </div>
-            {profiles.hasNextPage && (
-              <button type="button" className="btn" disabled={profiles.isFetchingNextPage} onClick={() => profiles.fetchNextPage()}>
-                {profiles.isFetchingNextPage ? "Loading more profiles…" : "Load more profiles"}
-              </button>
-            )}
-          </>
-        )}
-      </section>
-
-      <StorageRouteSettings profiles={profileRows} />
-
-      <section aria-labelledby="storage-providers-title" style={{ margin: 16 }}>
-        <div className="cn-listhead">
-          <h3 className="cn-listhead-l" id="storage-providers-title">Installed providers</h3>
-          <span className="cn-listhead-c">Deployment catalog</span>
+        <div className="stg-scope-note">
+          Set by this deployment. Installing or removing a provider module is a deployment change, not a team setting,
+          and it never moves data that is already stored.
         </div>
 
         {providers.isLoading && <LoadingMessage>Loading storage providers…</LoadingMessage>}
@@ -83,13 +139,7 @@ export function StorageSettings() {
         {providerError && <ErrorBanner title="Couldn't load storage providers" message={providerError} />}
 
         {!providers.isLoading && !providerError && providerRows.length === 0 && (
-          <div className="ct-empty">
-            <div className="ct-empty-h">No storage provider modules installed</div>
-            <div className="ct-empty-p">
-              Provider packages will appear here when installed. This does not change where current run artifacts,
-              model calls, or logs are written.
-            </div>
-          </div>
+          <div className="stg-hint">No provider module is installed, so no storage profile can be created in this deployment.</div>
         )}
 
         {!providers.isLoading && !providerError && providerRows.length > 0 && (
@@ -105,7 +155,21 @@ export function StorageSettings() {
   );
 }
 
-function StorageProfileRow({ profile, provider, onManage }: { profile: StorageProfileSummary; provider?: StorageProviderModuleSummary; onManage: () => void }) {
+/** The one line the profile step shows: what state the team's profiles are in, not what to do about it. */
+function profileLine(all: StorageProfileSummary[], active: StorageProfileSummary[], loading: boolean, error: string | null): string {
+  if (error) return "The storage profiles could not be read.";
+  if (loading) return "Loading storage profiles…";
+  if (all.length === 0) return "No storage profiles configured";
+  if (active.length === 0) return `${countLabel(all.length, "profile")}, none Active — a data route can only target an Active profile`;
+  if (all.length === 1) return `${active[0].stableName} · Active · revision ${active[0].currentRevision}`;
+  return `${countLabel(all.length, "profile")}, ${active.length} Active`;
+}
+
+function countLabel(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+function StorageProfileRow({ profile, provider, onManage }: { profile: StorageProfileSummary; provider?: StorageProviderModuleSummary; onManage?: () => void }) {
   return (
     <div className="cn-row" role="listitem">
       <div className="cn-row-head">
@@ -121,7 +185,7 @@ function StorageProfileRow({ profile, provider, onManage }: { profile: StoragePr
             {provider && <span>{profile.providerTypeKey}</span>}
           </div>
         </div>
-        <button type="button" className="btn" aria-label={`Manage ${profile.stableName}`} onClick={onManage}>Manage</button>
+        {onManage && <button type="button" className="btn" aria-label={`Manage ${profile.stableName}`} onClick={onManage}>Manage</button>}
       </div>
     </div>
   );
@@ -230,7 +294,7 @@ function ManageStorageProfileDialog({ profileId, providers, credentials, onClose
   const label = profile.data?.stableName ?? "storage profile";
 
   return (
-    <ModalFrame label={`Manage storage profile ${label}`} title={profile.data?.stableName ?? "Storage profile"} subtitle="Append-only revision and lifecycle controls. Runtime storage is not changed here." onClose={onClose}>
+    <ModalFrame label={`Manage storage profile ${label}`} title={profile.data?.stableName ?? "Storage profile"} subtitle="Append-only revisions and lifecycle. An Active route that names this profile follows it, so what changes here changes where the next write lands." onClose={onClose}>
       <div className="mdl-body">
         {profile.isLoading && <LoadingMessage>Loading profile…</LoadingMessage>}
         {profile.error && (
@@ -245,7 +309,7 @@ function ManageStorageProfileDialog({ profileId, providers, credentials, onClose
         )}
       </div>
       <div className="mdl-foot">
-        <span className="mdl-foot-info">Control plane only</span>
+        <span className="mdl-foot-info">Takes effect on the next write</span>
         <button type="button" className="btn" onClick={onClose}>Close</button>
       </div>
     </ModalFrame>
@@ -611,9 +675,16 @@ function errorMessage(error: unknown): string | null {
   return error == null ? null : "An unexpected storage error occurred.";
 }
 
+/**
+ * A 409 is not always a concurrent edit. `StorageProfileService` also refuses retirement while active
+ * routes or stored locations still live under the profile, and names both the count and the fix in the
+ * message. Collapsing every 409 into "this changed elsewhere" replaced a true, actionable sentence with
+ * a false one, so the server's own words are shown and only the reload note is added.
+ */
 function mutationErrorMessage(error: unknown, fallback: string): string {
-  if (error instanceof ApiError && error.status === 409) return "This profile changed elsewhere. The latest data was reloaded; review the latest revision and try again.";
-  return errorMessage(error) ?? fallback;
+  if (!(error instanceof ApiError) || error.status !== 409) return errorMessage(error) ?? fallback;
+  const reason = error.message.trim();
+  return reason.length === 0 ? fallback : `${reason} The latest data was reloaded — review it before trying again.`;
 }
 
 function providerInitials(displayName: string): string {
