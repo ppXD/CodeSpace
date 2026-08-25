@@ -32,6 +32,8 @@ public static class FailureCodes
     public const string StorageProfileConflict = "storage_profile_conflict";
     public const string StorageRouteInvalid = "storage_route_invalid";
     public const string StorageRouteConflict = "storage_route_conflict";
+    public const string StorageDefaultInvalid = "storage_default_invalid";
+    public const string StorageDefaultConflict = "storage_default_conflict";
     public const string ArtifactContentUnavailable = "artifact_content_unavailable";
     public const string ArtifactStorageDestinationUnavailable = "artifact_storage_destination_unavailable";
 

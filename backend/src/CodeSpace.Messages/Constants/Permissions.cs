@@ -22,6 +22,23 @@ public static partial class Permissions
     public const string TeamsCreate = "teams.create";
 
     /// <summary>
+    /// May author the deployment-wide storage template — the per-data-class default a team is pointed at.
+    /// Instance-level because the template describes ALL teams, so it is not an action inside any one of them and no
+    /// TeamRole can express it.
+    ///
+    /// <para><b>Who can hold it in this build: the bootstrap admin seeded by <c>0006_default_admin_seed.sql</c>, and
+    /// nobody else.</b> <c>role_user</c> has no C# writer at all (the only INSERTs are in migrations 0004 and 0006),
+    /// and <c>user_permission</c> has exactly one writer — <c>TeamInvitationService</c>, which grants only
+    /// <see cref="GrantedToEveryAccount"/>. There is therefore no product path to grant this to a second person, and
+    /// an authorization UI is out of scope for this tier. An operator who needs a second deployment admin must INSERT
+    /// a <c>role_user</c> or <c>user_permission</c> row directly against the database.</para>
+    ///
+    /// <para>Deliberately NOT in <see cref="GrantedToEveryAccount"/>: that list is handed to every account that
+    /// exists, and this is deployment-level write access.</para>
+    /// </summary>
+    public const string StorageDefaultsManage = "storage.defaults.manage";
+
+    /// <summary>
     /// What every account holds from the moment it exists.
     ///
     /// <para>Opening a workspace is something anyone here may do: you become its owner and can invite
