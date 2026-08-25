@@ -207,6 +207,14 @@ public class AgentsController : ControllerBase
     }
 
     /// <summary>Q4 (SOTA-claim gate): the qualification claim board — every registered (mode × capability) pair's measured performance standing, resolved from the immutable qualification-receipt ledger at read time. Sealed appears only while a current sealed receipt backs it (receipt id + suite digest + expiry on the row); expiry or revocation downgrades the board with no code change. Platform-level; any team member may read.</summary>
+    /// <summary>Q-ops: mint ONE qualification round against the operator-staged hidden suite on this worker host. Spends real model budget and appends a durable receipt — global-admin only; the paying team is the X-Team-Id header. An absent suite is a 500 naming the misconfiguration, never a silent pass.</summary>
+    [HttpPost("qualification-rounds")]
+    public async Task<IActionResult> RunQualificationRound([FromBody] RunQualificationRoundCommand command, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     [HttpGet("qualification-claims")]
     public async Task<IActionResult> GetQualificationClaims(CancellationToken cancellationToken)
     {

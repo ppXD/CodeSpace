@@ -90,6 +90,22 @@ public class QualificationRunnerFlowTests
         ex.Message.ShouldContain("misconfiguration");
     }
 
+    [Fact]
+    public async Task The_minting_entry_surfaces_an_absent_suite_as_a_misconfiguration()
+    {
+        // Q-ops: the global-admin command → handler → runner wiring, driven end-to-end. On a host with no staged
+        // suite (this CI runner), the round must THROW naming the misconfiguration — never mint, never silently pass.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        using var scope = _fixture.BeginScopeAs(userId, teamId, CodeSpace.Messages.Constants.Roles.Admin);
+        var ex = await Should.ThrowAsync<InvalidOperationException>(() => scope.Resolve<MediatR.IMediator>().Send(new CodeSpace.Messages.Commands.Agents.RunQualificationRoundCommand
+        {
+            Mode = "supervisor", CapabilityKey = "git-branch", MinSolveRateLowerBound = 0.5,
+        }, CancellationToken.None));
+
+        ex.Message.ShouldContain("misconfiguration");
+    }
+
     // ─── Plumbing ────────────────────────────────────────────────────────────────
 
     private static QualificationRunner Runner(ILifetimeScope scope, IReadOnlyList<CorpusCellOutcome> cells) =>

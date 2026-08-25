@@ -26,6 +26,7 @@ public class TeamWritePermissionAdoptionTests
     /// </summary>
     private static readonly IReadOnlyDictionary<string, string> SelfServiceByDesign = new Dictionary<string, string>
     {
+        ["RunQualificationRoundCommand"] = "gated ABOVE the team grain: IRequireGlobalAdmin (a platform-level mint spending real budget); the team header only scopes which pool pays",
         ["MarkConversationReadCommand"] = "advances the caller's own read cursor; unread counts are per-member and the cursor only moves forward.",
         ["LinkProviderIdentityByPatCommand"] = "links the caller's own GitHub/GitLab account; the service scopes by ICurrentUser.Id, never by team.",
         ["UnlinkProviderIdentityCommand"] = "unlinks the caller's own provider identity, same scoping.",

@@ -512,6 +512,96 @@ jobs:
             backend/TestResults/real-model-benchmark.trx \
             RealModelBenchmark
 
+  real-model-qualification-rehearsal:
+    name: real model (hidden-suite qualification rehearsal — report only)
+    runs-on: ubuntu-latest
+    # Q-ops — the qualification REHEARSAL, dispatch-only like the extended corpus: stages the operator-held hidden
+    # suite from a secret URL (absent ⇒ the test self-skips loudly), runs the EXACT IQualificationRunner chain the
+    # deployment's minting entry drives, and prints the would-be bound/health/digest so the operator can price a
+    # round before minting the durable receipt on the deployment. The receipt appended here lands in the job-local
+    # throwaway db — a rehearsal never mints the deployment's claim. Dispatch via
+    # `gh workflow run real-model.yml --ref <branch>`.
+    if: github.event_name == 'workflow_dispatch'
+    timeout-minutes: 60
+
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: '123456'
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      CODESPACE_LLM_BASE_URL: ${{ secrets.CODESPACE_LLM_BASE_URL }}
+      CODESPACE_LLM_API_KEY: ${{ secrets.CODESPACE_LLM_API_KEY }}
+      CODESPACE_LLM_MODEL_ID: ${{ secrets.CODESPACE_LLM_MODEL_ID }}
+      # Same rationale as the corpus lanes: a suite round is many live coding-agent runs; 45m per attempt bounds a
+      # genuine hang while fitting a real suite inside the job's 60-minute cap.
+      CODESPACE_REALMODEL_WHOLE_LOOP_ATTEMPT_DEADLINE_SECONDS: "2700"
+      CODESPACE_BWRAP_PATH: /nonexistent/bwrap-disabled-on-the-qualification-rehearsal-lane
+      CODESPACE_AGENT_MAX_PROCESSES: '0'
+      CODESPACE_AGENT_MAX_FILE_MB: '0'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage the operator-held hidden suite (optional — absent ⇒ the rehearsal self-skips loudly)
+        env:
+          SUITE_TARBALL_URL: ${{ secrets.CODESPACE_HIDDEN_SUITE_URL }}
+        run: |
+          if [ -n "$SUITE_TARBALL_URL" ]; then
+            mkdir -p "$HOME/.codespace/hidden-suite"
+            curl -fsSL "$SUITE_TARBALL_URL" | tar -xz -C "$HOME/.codespace/hidden-suite"
+            echo "hidden suite staged ($(find "$HOME/.codespace/hidden-suite" -type f | wc -l) file(s))"
+          else
+            echo "CODESPACE_HIDDEN_SUITE_URL secret absent — the rehearsal test will self-skip (skip ≠ pass)"
+          fi
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Set up Node (for the real coding-agent CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install the real coding-agent CLI (Claude Code)
+        run: |
+          npm install -g '@anthropic-ai/claude-code@~2.1.0' || { sleep 5; npm install -g '@anthropic-ai/claude-code@~2.1.0'; }
+          claude --version
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-realmodel-e2e-${{ runner.os }}-${{ hashFiles('backend/**/*.csproj') }}
+          restore-keys: nuget-realmodel-e2e-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
+
+      - name: Test (the hidden-suite qualification rehearsal — report only)
+        run: >
+          dotnet test backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
+          --no-restore
+          --filter "FullyQualifiedName~RealModelQualificationRehearsal"
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=real-model-qualification-rehearsal.trx"
+          --results-directory backend/TestResults
+
+      - name: Assert the rehearsal actually ran (no silent skip)
+        run: bash .github/scripts/assert-every-filter-clause-ran.sh backend/TestResults/real-model-qualification-rehearsal.trx RealModelQualificationRehearsal
+
   real-model-benchmark-extended:
     name: real model (extended benchmark corpus — report only)
     runs-on: ubuntu-latest
