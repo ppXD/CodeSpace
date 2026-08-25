@@ -69,6 +69,9 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork, IDataProtectionKeyCont
     public DbSet<StorageRouteRevision> StorageRouteRevision => Set<StorageRouteRevision>();
     public DbSet<StorageCredential> StorageCredential => Set<StorageCredential>();
     public DbSet<StorageCredentialRevision> StorageCredentialRevision => Set<StorageCredentialRevision>();
+    public DbSet<StorageDefault> StorageDefault => Set<StorageDefault>();
+    public DbSet<StorageDefaultCredential> StorageDefaultCredential => Set<StorageDefaultCredential>();
+    public DbSet<StorageDefaultMaterialization> StorageDefaultMaterialization => Set<StorageDefaultMaterialization>();
     public DbSet<ArtifactObject> ArtifactObject => Set<ArtifactObject>();
     public DbSet<ArtifactLocation> ArtifactLocation => Set<ArtifactLocation>();
     public DbSet<ArtifactLocationEvent> ArtifactLocationEvent => Set<ArtifactLocationEvent>();

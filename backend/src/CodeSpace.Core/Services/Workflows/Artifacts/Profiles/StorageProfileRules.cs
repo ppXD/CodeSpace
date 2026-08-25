@@ -24,9 +24,16 @@ internal static class StorageProfileRules
         if (config.ValueKind != JsonValueKind.Object) throw new ArgumentException("NonSecretConfig must be a JSON object.");
         StorageProviderJson.ValidateSchema(configSchema, "ConfigSchema");
         StorageProviderJson.ValidateSchema(secretSchema, "SecretSchema");
-        RejectSecretProperties(config, secretSchema, "$");
+        EnsureNoSecretProperties(config, secretSchema);
         StorageProviderJson.Validate(config, configSchema, "NonSecretConfig", "ConfigSchema");
     }
+
+    /// <summary>
+    /// The secret-leak half of <see cref="ValidateConfig"/>, on its own so a caller holding a config that is
+    /// deliberately PARTIAL — the deployment-default template, whose namespace field is assembled per team later — can
+    /// still run the one check that must never be skipped, without also asserting required-ness it cannot satisfy yet.
+    /// </summary>
+    public static void EnsureNoSecretProperties(JsonElement config, JsonElement secretSchema) => RejectSecretProperties(config, secretSchema, "$");
 
     public static string CanonicalJson(JsonElement value) => StorageProviderJson.Canonicalize(value, "NonSecretConfig");
 
