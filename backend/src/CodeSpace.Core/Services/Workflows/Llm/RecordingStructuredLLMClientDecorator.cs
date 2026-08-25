@@ -24,11 +24,11 @@ public class RecordingStructuredLLMClientDecorator : RecordingLLMClientDecorator
 
     public async Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
     {
-        var scope = LlmCallContext.Current;
+        var scope = LlmCallContext.Current?.ForOneCall();
         if (scope is null) return await _structuredInner.CompleteStructuredAsync(request, cancellationToken).ConfigureAwait(false);
 
         var correlationId = Guid.NewGuid();
-        await DeclareCaptureIntentAsync(scope).ConfigureAwait(false);
+        var declared = await DeclareCaptureIntentAsync(scope).ConfigureAwait(false);
         await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionStarted, correlationId,
             () => StartedPayloadAsync(scope, Provider, request.Model, request.SystemPrompt, request.UserPrompt, request.Temperature, request.MaxOutputTokens, cancellationToken), cancellationToken).ConfigureAwait(false);
 
@@ -44,14 +44,16 @@ public class RecordingStructuredLLMClientDecorator : RecordingLLMClientDecorator
         }
         catch (Exception ex)
         {
-            if (await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionFailed, correlationId, () => Task.FromResult(FailedPayload(scope, Provider, ex)), CancellationToken.None).ConfigureAwait(false))
-                await MarkCapturePresentAsync(scope).ConfigureAwait(false);
+            var failureRecorded = await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionFailed, correlationId, () => Task.FromResult(FailedPayload(scope, Provider, ex)), CancellationToken.None).ConfigureAwait(false);
+            if (failureRecorded && declared) await MarkCapturePresentAsync(scope).ConfigureAwait(false);
+
             throw;
         }
 
-        if (await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionCompleted, correlationId,
-            async () => CompletedPayload(scope, Provider, completion.Model, completion.Usage, await OffloadJsonAsync(scope, completion.Json, CancellationToken.None).ConfigureAwait(false)), CancellationToken.None).ConfigureAwait(false))
-            await MarkCapturePresentAsync(scope).ConfigureAwait(false);
+        var recorded = await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionCompleted, correlationId,
+            async () => CompletedPayload(scope, Provider, completion.Model, completion.Usage, await OffloadJsonAsync(scope, completion.Json, CancellationToken.None).ConfigureAwait(false)), CancellationToken.None).ConfigureAwait(false);
+        if (recorded && declared) await MarkCapturePresentAsync(scope).ConfigureAwait(false);
+
         return completion;
     }
 }
