@@ -379,11 +379,59 @@ public class SupervisorRichSpawnFlowTests : IDisposable
     }
 
     [Fact]
-    public async Task A_spawn_with_an_effective_harness_outside_allowedAgents_fails_closed_before_staging()
+    public async Task A_spawn_whose_only_out_of_pool_harness_is_the_platform_default_stages_on_an_admitted_one()
     {
+        // WHY THIS TEST CHANGED ALIGNMENT. It used to assert that this exact config — allowedAgents set, agentProfile
+        // absent — FAILED the spawn closed, and it passed. But nobody authored the harness it failed on: with no profile
+        // harness the task carries AgentHarnessDefaults.DefaultHarness (codex-cli), so "allow only claude-code" made
+        // EVERY spawn of the run die on the platform floor, and the node schema invites exactly that shape (allowedAgents
+        // is a standalone Guardrails array; agentProfile.harness is optional and documented as "Defaults to codex-cli").
+        // The property the old test actually protected — no agent ever runs on a harness outside the pool — is kept
+        // verbatim below; only the disposition of an UNAUTHORED out-of-pool kind changed, from killing the run to being
+        // clamped into the operator's own list. A MODEL-authored one still fails closed: the sibling test below.
         using (var s = _fixture.BeginScope()) s.Resolve<SupervisorDecisionScript>().PlanSpawnStop();
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var workflowId = await CreateConfigWorkflowAsync(teamId, userId, """{ "goal": "ship it", "allowedAgents": ["claude-code"] }""");
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            await ResolveSelfAdvanceAsync(runId);
+            await RunEngineAsync(runId);
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            var spawn = await db.SupervisorDecisionRecord.AsNoTracking().SingleAsync(d => d.SupervisorRunId == runId && d.DecisionKind == SupervisorDecisionKinds.Spawn);
+            spawn.Status.ShouldBe(SupervisorDecisionStatus.Succeeded, "the operator's allow-list constrains the platform default; it does not collide with it");
+
+            var staged = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).ToListAsync();
+            staged.Count.ShouldBe(2, "both planned units stage — the run is no longer killed by its own guardrail");
+
+            foreach (var run in staged)
+                JsonSerializer.Deserialize<AgentTask>(run.TaskJson, AgentJson.Options)!.Harness
+                    .ShouldBe("claude-code", "the ONLY admitted kind — the property the old assertion protected: no agent runs outside the pool");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task A_spawn_whose_MODEL_AUTHORED_harness_is_outside_allowedAgents_fails_closed_before_staging()
+    {
+        // The governance half the rewrite above must not weaken: PlanSpawnDispatchStop authors Harness="claude-code" on
+        // the first dispatch, and the operator admitted only codex-cli. That boundary is the OPERATOR's, so it stays a
+        // fail-closed throw the brain cannot re-author around — raised by the pre-flight screen, before anything stages.
+        using (var s = _fixture.BeginScope()) s.Resolve<SupervisorDecisionScript>().PlanSpawnDispatchStop();
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateConfigWorkflowAsync(teamId, userId, """{ "goal": "ship it", "allowedAgents": ["codex-cli"] }""");
         var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
         var jobClient = ResolveJobClient();
@@ -398,7 +446,71 @@ public class SupervisorRichSpawnFlowTests : IDisposable
         var spawn = await db.SupervisorDecisionRecord.AsNoTracking().SingleAsync(d => d.SupervisorRunId == runId && d.DecisionKind == SupervisorDecisionKinds.Spawn);
         spawn.Status.ShouldBe(SupervisorDecisionStatus.Failed);
         spawn.Error.ShouldContain("allowed harness pool", Case.Insensitive);
-        (await db.AgentRun.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId)).ShouldBe(0);
+        spawn.Error.ShouldContain("registered adapter", Case.Insensitive, "the record must say the kind was REAL and un-admitted — an invented kind is the separate, re-authorable case");
+        (await db.AgentRun.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId)).ShouldBe(0, "including the second dispatch, whose own harness was fine");
+    }
+
+    [Fact]
+    public async Task The_execution_time_reconciler_cannot_repair_a_spawned_agent_onto_a_harness_outside_allowedAgents()
+    {
+        // The allow-list was enforced only where the spawn STAMPS a harness. The adapter that actually runs is chosen
+        // again at execution: AgentRunExecutor.ExecuteAsync calls IHarnessModelReconciler.ReconcileAsync, which selected
+        // from the UNCLAMPED registry — so on this exact config (admit only codex-cli; the team's default model is
+        // Anthropic, which codex cannot drive) the reconciler repaired the admitted codex-cli agent onto claude-code and
+        // ran it. The clamp was authoring-time only, while the field documented itself as non-bypassable.
+        //
+        // The assertion drives the SAME ReconcileAsync call the executor makes, on the SAME persisted TaskJson the spawn
+        // produced — not a hand-built task — so it fails if the allow-list stops reaching execution for any reason.
+        using (var s = _fixture.BeginScope()) s.Resolve<SupervisorDecisionScript>().PlanSpawnStop();
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        await SeedDefaultPoolModelAsync(teamId, "claude-opus", "Anthropic");
+
+        var workflowId = await CreateConfigWorkflowAsync(teamId, userId, """{ "goal": "ship it", "allowedAgents": ["codex-cli"] }""");
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            await ResolveSelfAdvanceAsync(runId);
+            await RunEngineAsync(runId);
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            var taskJson = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).Select(r => r.TaskJson).FirstAsync();
+            var task = JsonSerializer.Deserialize<AgentTask>(taskJson, AgentJson.Options)!;
+
+            task.Harness.ShouldBe("codex-cli", "the spawn stamps an admitted kind — this test is about what happens AFTER that");
+
+            var reconciled = await verify.Resolve<IHarnessModelReconciler>().ReconcileAsync(task, teamId, CancellationToken.None);
+
+            reconciled.HarnessKind.ShouldBe("codex-cli", "the operator admitted ONLY codex-cli; execution-time repair may not step outside that list even to reach a driveable harness");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    /// <summary>Seed an enabled, DEFAULT pool model under a fresh active credential of <paramref name="provider"/> — this is what <c>ResolveTeamDefaultProviderAsync</c> reads, so it decides the provider an UNPINNED agent reconciles against.</summary>
+    private async Task SeedDefaultPoolModelAsync(Guid teamId, string modelId, string provider)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var credentialId = Guid.NewGuid();
+        db.ModelCredential.Add(new ModelCredential
+        {
+            Id = credentialId, TeamId = teamId, Provider = provider, DisplayName = provider + " cred",
+            EncryptedApiKey = scope.Resolve<CodeSpace.Core.Services.Credentials.IPayloadEncryptor>().Encrypt("k"), Status = CredentialStatus.Active,
+        });
+        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = Guid.NewGuid(), ModelCredentialId = credentialId, ModelId = modelId, Enabled = true, IsDefault = true });
+
+        await db.SaveChangesAsync();
     }
 
     [Fact]

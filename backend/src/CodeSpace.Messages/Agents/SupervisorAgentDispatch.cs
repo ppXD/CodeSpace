@@ -37,7 +37,13 @@ public sealed record SupervisorAgentDispatch
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public JsonElement? TargetRepos { get; init; }
 
-    /// <summary>A harness REQUEST (e.g. "codex-cli") — granted only if the operator's allow-list permits it, else the profile/harness default. Null → the profile default.</summary>
+    /// <summary>
+    /// A harness REQUEST for this agent — a kind the capability catalog lists (e.g. <c>"codex-cli"</c>). A kind NO
+    /// registered adapter has REJECTS the whole spawn re-authorably (the brain may re-author or omit the field); a
+    /// registered kind the operator kept OUT of this run's allow-list fails closed instead — that boundary is the
+    /// operator's, not the brain's. Both are decided BEFORE any agent stages. It is NOT silently downgraded to the
+    /// profile default: an authored kind either runs or refuses. Null → the profile default.
+    /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Harness { get; init; }
 

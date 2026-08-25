@@ -17,6 +17,11 @@ namespace CodeSpace.Core.Services.Agents;
 /// that CAN, so the agent still runs. It NEVER fails on a mismatch; it falls back. The brain stays free to author
 /// any (harness, model); this layer makes a wrong pairing harmless instead of fatal.
 ///
+/// <para>The fallback is bounded by <see cref="AgentTask.AllowedHarnessKinds"/> — the run's harness allow-list, when it
+/// has one. A repair therefore only ever lands on a kind the OPERATOR admitted; when none of them drives the provider,
+/// the authored (admitted) kind is kept and the credential resolver surfaces the real error. Null / empty = unbounded,
+/// which is every non-supervisor path and every task envelope persisted before that field existed.</para>
+///
 /// <para>It needs the model's PROVIDER, and finds it from whichever the task carries: a PINNED credential
 /// (<see cref="AgentTask.ModelCredentialId"/> — the supervisor / hand-authored pin path) reads that credential's
 /// provider; else a loose MODEL NAME (<see cref="AgentTask.Model"/> with no pin — the planner path) resolves the
@@ -34,7 +39,7 @@ namespace CodeSpace.Core.Services.Agents;
 /// </summary>
 public interface IHarnessModelReconciler
 {
-    /// <summary>Resolve the harness KIND to ACTUALLY run for <paramref name="task"/>: the authored one when it can drive the model's provider (from the pinned credential or, failing a pin, the named model's pool row), else a registered harness that can (the always-runnable fallback). The caller resolves the kind to an adapter, so the registry stays the single owner of kind→adapter.</summary>
+    /// <summary>Resolve the harness KIND to ACTUALLY run for <paramref name="task"/>: the authored one when it can drive the model's provider (from the pinned credential or, failing a pin, the named model's pool row), else a registered, run-ADMITTED harness that can (the always-runnable fallback). The caller resolves the kind to an adapter, so the registry stays the single owner of kind→adapter.</summary>
     Task<HarnessReconciliation> ReconcileAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken);
 }
 
@@ -62,7 +67,15 @@ public sealed class HarnessModelReconciler : IHarnessModelReconciler, IScopedDep
         // caller's registry resolves it; a genuinely-unregistered kind surfaces there, unchanged).
         if (provider is null) return new HarnessReconciliation(task.Harness, false, null);
 
-        return Reconcile(task.Harness, provider, _harnesses.All, AgentHarnessDefaults.DefaultHarness);
+        // The repair chooses from the registry CLAMPED to the run's harness allow-list (null/empty = the whole registry,
+        // which is every non-supervisor path and every pre-field task envelope). Without this clamp the run-time repair
+        // was the allow-list's hole: an agent the spawn correctly stamped with an admitted kind got repaired onto an
+        // UNADMITTED one here whenever the admitted kind could not drive the model's provider. When nothing admitted can
+        // drive it, Reconcile returns the authored kind unchanged — the honest floor, and the authored kind is the
+        // admitted one, so the floor stays inside the list too.
+        var pool = AgentHarnessPool.Clamp(_harnesses.All, task.AllowedHarnessKinds);
+
+        return Reconcile(task.Harness, provider, pool, AgentHarnessDefaults.DefaultHarness);
     }
 
     /// <summary>

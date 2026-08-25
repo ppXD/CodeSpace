@@ -158,6 +158,32 @@ public class HarnessModelReconcilerFlowTests
         result.HarnessKind.ShouldBe("codex-cli", "a model name not in the pool leaves the authored harness for the resolver's default");
     }
 
+    [Theory]
+    [InlineData(null, "claude-code")]
+    [InlineData("codex-cli", "codex-cli")]
+    public async Task The_repair_selects_only_from_the_runs_harness_allow_list(string? allowedKind, string expectedHarness)
+    {
+        // Same impossible pairing both rows: an Anthropic-pinned credential under an authored codex-cli. UNBOUNDED (null
+        // list — every non-supervisor path and every pre-field task envelope) still repairs to claude-code, unchanged.
+        // BOUNDED to codex-cli, the repair has nowhere admitted to go, so it keeps the authored kind and lets the
+        // credential resolver surface its precise error — never a silent run on a harness the operator did not admit.
+        // That second row is the hole this closed: the reconciler used to select from the whole registry, so the
+        // allow-list only ever bound authoring.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var credentialId = await SeedCredentialAsync(teamId, "Anthropic");
+
+        var task = new AgentTask
+        {
+            Goal = "g", Harness = "codex-cli", ModelCredentialId = credentialId,
+            AllowedHarnessKinds = allowedKind is null ? null : new[] { allowedKind },
+        };
+
+        using var scope = _fixture.BeginScope();
+        var result = await scope.Resolve<IHarnessModelReconciler>().ReconcileAsync(task, teamId, CancellationToken.None);
+
+        result.HarnessKind.ShouldBe(expectedHarness);
+    }
+
     [Fact]
     public async Task A_foreign_or_missing_credential_is_left_for_the_resolver_to_reject()
     {

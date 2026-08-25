@@ -177,7 +177,14 @@ public sealed record SupervisorTurnContext
     /// </summary>
     public IReadOnlyList<string>? SpawnedAgentTools { get; init; }
 
-    /// <summary>The operator's allowed effective harness-kind pool. Applied after persona and model reconciliation so the final CLI adapter cannot escape it. Null / empty = all registered harnesses.</summary>
+    /// <summary>
+    /// The operator's allowed effective harness-kind pool (carried from <c>SupervisorGoalConfig.AllowedAgents</c>, which
+    /// documents the full behaviour). Null / empty = all registered harnesses. It bounds the harness at BOTH ends: the
+    /// spawn refuses a model-authored kind outside it before staging, and the same list is stamped onto each spawned
+    /// <c>AgentTask.AllowedHarnessKinds</c> so the execution-time repair cannot re-pick outside it either. A harness the
+    /// list excludes that NOBODY authored against it — the profile's, or the platform floor — is clamped into the list
+    /// rather than failing the run.
+    /// </summary>
     public IReadOnlyList<string>? AllowedAgentKinds { get; init; }
 
     /// <summary>

@@ -35,7 +35,25 @@ public sealed record SupervisorGoalConfig
     /// <summary>The frozen maximum character count for the optional merge-synthesis model input. New projected runs stamp a resolved value; null/invalid legacy authoring normalizes to <see cref="SupervisorSynthesisBudget.DefaultChars"/>.</summary>
     public int? SynthesisPromptBudgetChars { get; init; }
 
-    /// <summary>Optional allow-list of effective harness kinds the supervisor may spawn (e.g. <c>["codex-cli"]</c>). Enforced after persona/model reconciliation, so neither can bypass it. Null / empty = no restriction.</summary>
+    /// <summary>
+    /// Optional allow-list of effective harness kinds the supervisor may spawn (e.g. <c>["codex-cli"]</c>). Null / empty
+    /// = no restriction. What it does, precisely:
+    /// <list type="bullet">
+    ///   <item>The capability catalog renders only these kinds, so the brain is shown the admitted set, not the registry.</item>
+    ///   <item>A per-agent <c>agents[].harness</c> naming an admitted kind is granted; naming a REGISTERED kind outside
+    ///         the list FAILS THE SPAWN CLOSED before anything stages (governance — the brain cannot re-author around it);
+    ///         naming a kind no adapter has at all REJECTS the spawn re-authorably instead (a model miss, not a breach).</item>
+    ///   <item>A harness NOBODY authored against this list — the run profile's, or the platform floor when no profile
+    ///         named one — is CLAMPED into the list rather than failing the run, so setting this alone can never make
+    ///         every spawn die on a default the operator never chose.</item>
+    ///   <item>The list rides on each spawned <c>AgentTask.AllowedHarnessKinds</c>, so the execution-time repair
+    ///         (<c>HarnessModelReconciler</c>, which may swap the harness to drive the model's provider) selects only
+    ///         from it too. When no admitted kind can drive that provider the agent keeps its admitted harness and fails
+    ///         at credential resolution — it is never silently run on an unadmitted one.</item>
+    /// </list>
+    /// It bounds the SUPERVISOR's spawns only; it is not a team-wide harness policy, and nothing applies it to an
+    /// <c>agent.run</c> node or a planner-projected run.
+    /// </summary>
     public IReadOnlyList<string>? AllowedAgents { get; init; }
 
     /// <summary>Optional allow-list of tool kinds spawned agents may use — threaded into each spawned <c>AgentTask.Tools</c> (via <c>SupervisorTurnContext.SpawnedAgentTools</c>). Null / empty = no restriction.</summary>
