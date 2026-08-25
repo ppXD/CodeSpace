@@ -4,36 +4,50 @@ import { createPortal } from "react-dom";
 import { ApiError } from "@/api/request";
 import type { StorageCredentialMetadata, StorageProviderModuleSummary } from "@/api/storage";
 import { useAppendStorageCredentialRevision, useCreateStorageCredential, useRevokeStorageCredential, useStorageCredentials } from "@/hooks/use-storage";
+import { TeamPermissions, useTeamPermissions } from "@/hooks/use-team-management";
 import { SchemaForm } from "@/components/workflows/SchemaForm";
+import { StorageStep, type StorageStepState } from "./StorageStep";
 
-export function StorageCredentialSettings({ providers }: { providers: StorageProviderModuleSummary[] }) {
+/**
+ * Step 1 of the Storage flow — and only rendered when some installed provider declares secret inputs.
+ * A provider such as `local-rwx/v1` has none, so a credential for it could hold nothing.
+ */
+export function StorageCredentialSettings({ providers, state }: { providers: StorageProviderModuleSummary[]; state: StorageStepState }) {
   const credentials = useStorageCredentials();
+  const mayManage = useTeamPermissions().can(TeamPermissions.StorageManage);
   const [createOpen, setCreateOpen] = useState(false);
   const [managedId, setManagedId] = useState<string | null>(null);
   const rows = credentials.data ?? [];
   const error = errorMessage(credentials.error);
   const managed = rows.find((value) => value.id === managedId);
   const secretProviders = providers.filter(hasSecretInputs);
+  const active = rows.filter((credential) => credential.state === "Active");
+
+  // Rendered unconditionally by the parent so this observer of the credentials query mounts alongside
+  // its own. Mounting it later — once the provider catalog resolved — made the second observer refetch
+  // page 1 on its own, which silently replaced the loaded rows.
+  if (secretProviders.length === 0) return null;
 
   return (
-    <section aria-labelledby="storage-credentials-title" style={{ margin: 16 }}>
-      <div className="cn-listhead">
-        <h3 className="cn-listhead-l" id="storage-credentials-title">Storage credentials</h3>
-        <button type="button" className="btn btn-primary" disabled={secretProviders.length === 0} onClick={() => setCreateOpen(true)}>Create storage credential</button>
-      </div>
-
+    <StorageStep
+      step="credential"
+      title="Storage credentials"
+      titleId="storage-credentials-title"
+      state={state}
+      line={credentialLine(rows, active, credentials.isLoading, error)}
+      action={mayManage ? (
+        <button type="button" className={state === "active" ? "btn btn-primary" : "btn"} onClick={() => setCreateOpen(true)}>Create storage credential</button>
+      ) : undefined}
+    >
       {credentials.isLoading && <LoadingMessage>Loading storage credentials…</LoadingMessage>}
       {error && <ErrorBanner title="Couldn't load storage credentials" message={error} />}
       {!credentials.isLoading && !error && rows.length === 0 && (
-        <div className="ct-empty">
-          <div className="ct-empty-h">No storage credentials configured</div>
-          <div className="ct-empty-p">Credentials are encrypted, team-scoped, revisioned, and never shown again after submission.</div>
-        </div>
+        <div className="stg-hint">Credentials are encrypted, team-scoped, revisioned, and never shown again after submission. A provider that declares required secret inputs cannot have a profile activated until one is linked.</div>
       )}
       {!credentials.isLoading && !error && rows.length > 0 && (
         <>
           <div className="cn-list" role="list" aria-label="Storage credentials">
-            {rows.map((credential) => <StorageCredentialRow key={credential.id} credential={credential} provider={providers.find((provider) => provider.typeKey === credential.providerTypeKey)} onManage={() => setManagedId(credential.id)} />)}
+            {rows.map((credential) => <StorageCredentialRow key={credential.id} credential={credential} provider={providers.find((provider) => provider.typeKey === credential.providerTypeKey)} onManage={mayManage ? () => setManagedId(credential.id) : undefined} />)}
           </div>
           {credentials.hasNextPage && (
             <button type="button" className="btn" disabled={credentials.isFetchingNextPage} onClick={() => credentials.fetchNextPage()}>
@@ -45,11 +59,20 @@ export function StorageCredentialSettings({ providers }: { providers: StoragePro
 
       {createOpen && <CreateStorageCredentialDialog providers={secretProviders} onClose={() => setCreateOpen(false)} />}
       {managedId && managed && <ManageStorageCredentialDialog key={`${managed.id}:${managed.xmin}:${managed.currentRevision}`} credential={managed} provider={providers.find((value) => value.typeKey === managed.providerTypeKey)} onClose={() => setManagedId(null)} />}
-    </section>
+    </StorageStep>
   );
 }
 
-function StorageCredentialRow({ credential, provider, onManage }: { credential: StorageCredentialMetadata; provider?: StorageProviderModuleSummary; onManage: () => void }) {
+function credentialLine(all: StorageCredentialMetadata[], active: StorageCredentialMetadata[], loading: boolean, error: string | null): string {
+  if (error) return "The storage credentials could not be read.";
+  if (loading) return "Loading storage credentials…";
+  if (all.length === 0) return "No storage credentials configured";
+  if (active.length === 0) return `${all.length} credential${all.length === 1 ? "" : "s"}, all Revoked`;
+  if (all.length === 1) return `${active[0].stableName} · Active · revision ${active[0].currentRevision}`;
+  return `${all.length} credentials, ${active.length} Active`;
+}
+
+function StorageCredentialRow({ credential, provider, onManage }: { credential: StorageCredentialMetadata; provider?: StorageProviderModuleSummary; onManage?: () => void }) {
   return (
     <div className="cn-row" role="listitem">
       <div className="cn-row-head">
@@ -62,7 +85,7 @@ function StorageCredentialRow({ credential, provider, onManage }: { credential: 
           </div>
           <div className="cn-sub"><span>{provider?.displayName ?? credential.providerTypeKey}</span>{credential.safeHint && <span>{credential.safeHint}</span>}</div>
         </div>
-        <button type="button" className="btn" aria-label={`Manage credential ${credential.stableName}`} onClick={onManage}>Manage</button>
+        {onManage && <button type="button" className="btn" aria-label={`Manage credential ${credential.stableName}`} onClick={onManage}>Manage</button>}
       </div>
     </div>
   );
@@ -225,9 +248,11 @@ function errorMessage(error: unknown): string | null {
   return error == null ? null : "An unexpected storage credential error occurred.";
 }
 
+/** The server names its own reason on a 409; only the reload note is ours to add. */
 function mutationErrorMessage(error: unknown, fallback: string): string {
-  if (error instanceof ApiError && error.status === 409) return "This credential changed elsewhere. The latest metadata was reloaded; review it and try again.";
-  return errorMessage(error) ?? fallback;
+  if (!(error instanceof ApiError) || error.status !== 409) return errorMessage(error) ?? fallback;
+  const reason = error.message.trim();
+  return reason.length === 0 ? fallback : `${reason} The latest data was reloaded — review it before trying again.`;
 }
 
 function providerInitials(displayName: string): string {

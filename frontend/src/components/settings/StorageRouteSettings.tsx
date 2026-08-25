@@ -5,38 +5,80 @@ import { ApiError } from "@/api/request";
 import type { StorageProfileSummary } from "@/api/storage";
 import type { StorageProfileRevisionMode, StorageRouteDetail, StorageRouteRevisionDetail, StorageRouteState, StorageRouteSummary } from "@/api/storageRoutes";
 import { useAppendStorageRouteRevision, useCreateStorageRoute, useRoutedDataClasses, useSetStorageRouteState, useStorageRoute, useStorageRoutes } from "@/hooks/use-storage-routes";
+import { TeamPermissions, useTeamPermissions } from "@/hooks/use-team-management";
+import { StorageStep, type StorageStepState } from "./StorageStep";
+
+export const DATA_CLASS_DEFINITION = "A data class is one kind of data this build writes — a runtime consumer asks the routing plane for it by name, so only a class this deployment reads can be routed at all.";
+
+/**
+ * What a route that has never been activated means, per data class.
+ *
+ * <p>The authority is one backend declaration: `WorkflowArtifactDataClass` implements
+ * `IRoutedDataClassLocalFallback` and `AgentRunLogDataClass` deliberately does not, and that is what
+ * turns "no route" and "route never activated" into a local write for the first and a refusal for the
+ * second (`RoutedDestinationResolver.LocalApplies`). That flag is NOT carried on the
+ * `RoutedDataClassDescriptor` this screen reads, so the table below is a second copy of it and can
+ * drift. A key with no entry therefore claims nothing about where its bytes go, rather than guessing —
+ * a class added later cannot silently inherit the wrong half of this.</p>
+ */
+const PRE_CUTOVER_BY_DATA_CLASS: Record<string, string> = {
+  "workflow-artifact/v1": "While this route is Draft, workflow artifacts keep writing to local storage.",
+  "agent-run-log/v1": "While this route is Draft, agent run log capture is unavailable — this class has no home outside the routing plane.",
+};
+
+function preCutoverNote(dataClassTypeKey: string): string {
+  return PRE_CUTOVER_BY_DATA_CLASS[dataClassTypeKey]
+    ?? "While this route is Draft it moves no bytes. What this data class does instead is decided by the runtime consumer that reads it.";
+}
+
+/**
+ * Draft and Disabled are NOT two names for "off". `StorageRouteSnapshotResolver` reports Draft as
+ * RouteNotActivated and Disabled/Retired as RouteNotActive, and only the first one lets a class keep a
+ * home outside the routing plane — for every class, disabling an Active route makes its writes fail.
+ */
+const DISABLED_NOTE = "Disabling a route does not return writes to local storage. A route that has never been activated leaves its data class exactly as it was before the route existed; a route you disable after activating it makes that class's writes fail until it is Active again.";
 
 /** Team-scoped, versioned data-class routing. The control plane does not expose provider config or credentials. */
-export function StorageRouteSettings({ profiles }: { profiles: StorageProfileSummary[] }) {
+export function StorageRouteSettings({ profiles, state = "active" }: { profiles: StorageProfileSummary[]; state?: StorageStepState }) {
   const routes = useStorageRoutes();
+  const mayManage = useTeamPermissions().can(TeamPermissions.StorageManage);
   const [createOpen, setCreateOpen] = useState(false);
   const [managedRoute, setManagedRoute] = useState<Pick<StorageRouteSummary, "id" | "dataClassTypeKey"> | null>(null);
   const rows = routes.data ?? [];
   const activeProfiles = profiles.filter((profile) => profile.state === "Active");
+  const activeRoutes = rows.filter((route) => route.state === "Active");
+  const routeError = errorMessage(routes.error);
+  const activatable = rows.find((route) => route.state !== "Retired" && route.state !== "Active");
+  const manage = (route: Pick<StorageRouteSummary, "id" | "dataClassTypeKey">) => setManagedRoute({ id: route.id, dataClassTypeKey: route.dataClassTypeKey });
 
   return (
-    <section aria-labelledby="storage-routes-title" style={{ margin: 16 }}>
-      <div className="cn-listhead">
-        <div>
-          <h3 className="cn-listhead-l" id="storage-routes-title">Data routing</h3>
-          <div className="cn-listhead-c">Versioned data-class policy</div>
-        </div>
-        <button type="button" className="btn btn-primary" disabled={activeProfiles.length === 0 || routes.isLoading || routes.error != null} onClick={() => setCreateOpen(true)}>Create data route</button>
-      </div>
-
-      {activeProfiles.length === 0 && <Notice title="No Active storage profile">Activate a storage profile before creating or revising a data route.</Notice>}
+    <StorageStep
+      step="route"
+      title="Data routing"
+      titleId="storage-routes-title"
+      state={state}
+      precondition="a storage profile is Active — a route may only target one"
+      line={routeLine(rows, activeRoutes, routes.isLoading, routeError)}
+      action={mayManage ? (
+        <>
+          {/* The blocker is a route nobody cut over, so activating it — not creating another — is the
+              accented act. Creating one for a second data class stays available beside it. */}
+          {activeRoutes.length === 0 && activatable && (
+            <button type="button" className={state === "active" ? "btn btn-primary" : "btn"} onClick={() => manage(activatable)}>Activate {activatable.dataClassTypeKey}</button>
+          )}
+          <button type="button" className={state === "active" && (activeRoutes.length > 0 || !activatable) ? "btn btn-primary" : "btn"} disabled={activeProfiles.length === 0 || routes.isLoading || routeError != null} onClick={() => setCreateOpen(true)}>Create data route</button>
+        </>
+      ) : undefined}
+    >
       {routes.isLoading && <LoadingMessage>Loading data routes…</LoadingMessage>}
-      {routes.error && <ErrorBanner title="Couldn't load data routes" message={errorMessage(routes.error) ?? "The data routes could not be loaded."} />}
-      {!routes.isLoading && !routes.error && rows.length === 0 && (
-        <div className="ct-empty">
-          <div className="ct-empty-h">No data routes configured</div>
-          <div className="ct-empty-p">Create an immutable, versioned data-class identity in Draft state. A Draft route never routes bytes; set it Active to cut over.</div>
-        </div>
+      {routeError && <ErrorBanner title="Couldn't load data routes" message={routeError} />}
+      {!routes.isLoading && !routeError && rows.length === 0 && (
+        <div className="stg-hint">{DATA_CLASS_DEFINITION} A new route is born Draft and never routes bytes; set it Active to cut over.</div>
       )}
-      {!routes.isLoading && !routes.error && rows.length > 0 && (
+      {!routes.isLoading && !routeError && rows.length > 0 && (
         <>
           <div className="cn-list" role="list" aria-label="Storage data routes">
-            {rows.map((route) => <StorageRouteRow key={route.id} route={route} onManage={() => setManagedRoute({ id: route.id, dataClassTypeKey: route.dataClassTypeKey })} />)}
+            {rows.map((route) => <StorageRouteRow key={route.id} route={route} onManage={mayManage ? () => manage(route) : undefined} />)}
           </div>
           {routes.hasNextPage && (
             <button type="button" className="btn" disabled={routes.isFetchingNextPage} onClick={() => routes.fetchNextPage()}>
@@ -48,11 +90,21 @@ export function StorageRouteSettings({ profiles }: { profiles: StorageProfileSum
 
       {createOpen && <CreateStorageRouteDialog profiles={activeProfiles} onClose={() => setCreateOpen(false)} />}
       {managedRoute && <ManageStorageRouteDialog routeId={managedRoute.id} dataClassTypeKey={managedRoute.dataClassTypeKey} profiles={activeProfiles} onClose={() => setManagedRoute(null)} />}
-    </section>
+    </StorageStep>
   );
 }
 
-function StorageRouteRow({ route, onManage }: { route: StorageRouteSummary; onManage: () => void }) {
+/** The one line the routing step shows: which data classes this team actually routes right now. */
+function routeLine(all: StorageRouteSummary[], active: StorageRouteSummary[], loading: boolean, error: string | null): string {
+  if (error) return "The data routes could not be read.";
+  if (loading) return "Loading data routes…";
+  if (all.length === 0) return "No data routes configured";
+  if (active.length === 0) return `${all.length} route${all.length === 1 ? "" : "s"}, none Active — no data class is routed yet`;
+  if (all.length === 1) return `${active[0].dataClassTypeKey} → ${active[0].storageProfileStableName}`;
+  return `${all.length} routes, ${active.length} Active`;
+}
+
+function StorageRouteRow({ route, onManage }: { route: StorageRouteSummary; onManage?: () => void }) {
   return (
     <div className="cn-row" role="listitem">
       <div className="cn-row-head">
@@ -65,7 +117,7 @@ function StorageRouteRow({ route, onManage }: { route: StorageRouteSummary; onMa
           </div>
           <div className="cn-sub">{route.storageProfileStableName} · {selectionLabel(route.profileRevisionMode, route.pinnedProfileRevision)}</div>
         </div>
-        <button type="button" className="btn" aria-label={`Manage ${route.dataClassTypeKey}`} onClick={onManage}>Manage</button>
+        {onManage && <button type="button" className="btn" aria-label={`Manage ${route.dataClassTypeKey}`} onClick={onManage}>Manage</button>}
       </div>
     </div>
   );
@@ -116,7 +168,8 @@ function CreateStorageRouteDialog({ profiles, onClose }: { profiles: StorageProf
             <select id="storage-route-data-class" className="wf-form-input" value={dataClassTypeKey} onChange={(event) => setChosenDataClass(event.target.value)} disabled={routable.length === 0} autoFocus>
               {routable.map((dataClass) => <option key={dataClass.typeKey} value={dataClass.typeKey}>{dataClass.displayName} · {dataClass.typeKey}</option>)}
             </select>
-            <span className="wf-form-help">Only a class this deployment reads can be routed. While the route is Draft, workflow artifacts keep local storage and agent run log capture is unavailable.</span>
+            <span className="wf-form-help">{DATA_CLASS_DEFINITION}</span>
+            {dataClassTypeKey !== "" && <span className="wf-form-help">{preCutoverNote(dataClassTypeKey)}</span>}
           </div>
           {dataClasses.isLoading && <LoadingMessage>Loading routable data classes…</LoadingMessage>}
           {dataClasses.error && <ErrorBanner title="Couldn't load routable data classes" message={errorMessage(dataClasses.error) ?? "The routable data classes could not be loaded."} />}
@@ -232,6 +285,7 @@ function StorageRouteEditor({ detail, profiles, hasMoreRevisions, loadingMoreRev
           <span style={{ marginLeft: 8 }}>Current revision {detail.currentRevision}</span>
         </div>
         <div className="cn-banner-p">Data class {detail.dataClassTypeKey}</div>
+        {detail.state === "Draft" && <div className="cn-banner-p">{preCutoverNote(detail.dataClassTypeKey)}</div>}
       </div>
 
       <section aria-labelledby="storage-route-current-target" style={{ marginTop: 16 }}>
@@ -260,6 +314,7 @@ function StorageRouteEditor({ detail, profiles, hasMoreRevisions, loadingMoreRev
 
       <section aria-labelledby="storage-route-state" style={{ borderTop: "1px solid var(--line)", marginTop: 18, paddingTop: 16 }}>
         <div className="wf-form-label" id="storage-route-state" style={{ marginBottom: 8 }}>Route state</div>
+        <div className="wf-form-help" style={{ marginBottom: 10 }}>{DISABLED_NOTE}</div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
           <button type="button" className="btn" disabled={retired || detail.state === "Active" || pending} onClick={() => transition("Active")}>Set Active</button>
           <button type="button" className="btn" disabled={retired || detail.state === "Disabled" || pending} onClick={() => transition("Disabled")}>Set Disabled</button>
@@ -366,10 +421,15 @@ function selectionLabel(mode: StorageProfileRevisionMode, pinnedRevision: number
   return mode === "Pinned" ? `pinned profile revision ${pinnedRevision}` : "current at write";
 }
 
+/**
+ * Not every 409 is a concurrent edit: creating a second route for a data class the team already routes
+ * answers "Storage route '…' already exists in this team.", which the old catch-all replaced with a
+ * sentence that was both vaguer and untrue. The server's own words stand; only the reload note is ours.
+ */
 function routeMutationErrorMessage(error: unknown, fallback: string): string {
-  if (error instanceof ApiError && error.status === 409)
-    return "This data route changed elsewhere. The latest route and history were reloaded; review the current target and try again.";
-  return errorMessage(error) ?? fallback;
+  if (!(error instanceof ApiError) || error.status !== 409) return errorMessage(error) ?? fallback;
+  const reason = error.message.trim();
+  return reason.length === 0 ? fallback : `${reason} The latest data was reloaded — review it before trying again.`;
 }
 
 function errorMessage(error: unknown): string | null {

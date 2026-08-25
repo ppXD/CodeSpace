@@ -27,6 +27,11 @@ export const TeamPermissions = {
   MembersManage: "members.manage",
   TeamManage: "team.manage",
   ReposManage: "repos.manage",
+  // Every storage surface — reads included — declares this one on the server
+  // (`TeamPermissions.StorageManage`), so a caller without it gets an empty page rather than a
+  // read-only one. The UI still gates its writes on it: a control that can only answer 403 is worse
+  // than no control.
+  StorageManage: "storage.manage",
 } as const;
 
 /** Pending invitations. Only fetched when the caller may manage members — the endpoint refuses otherwise. */

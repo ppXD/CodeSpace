@@ -7203,3 +7203,50 @@ input.lt3-chip2-add::placeholder { color: var(--accent); opacity: 0.75; }
    panes; the last `.hk-pre` drops its rule because the frame already draws that edge. */
 .hk-rej-doc { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 .hk-rej-doc .hk-pre:last-child { border-bottom: 0; }
+
+/* ── Settings → Storage: the guided flow ─────────────────────────────────────────────────
+   Four equal panels used to hide a strict dependency chain — a credential feeds a profile,
+   a profile is the only thing a data route may target — and the screen only admitted the
+   order when you got it wrong. The rail states the order: a marker per step, one line of
+   current state, one right-aligned action, and the accent only on the step still to do.
+   No transitions here on purpose: nothing about a step's state is worth animating, so
+   there is nothing for prefers-reduced-motion to suppress. */
+.acs-root .stg-flow { display: flex; flex-direction: column; }
+.acs-root .stg-step { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 12px; padding-bottom: 20px; }
+.acs-root .stg-step:last-child { padding-bottom: 0; }
+
+/* The connector is what makes three sections read as one ordered flow. */
+.acs-root .stg-rail { display: flex; flex-direction: column; align-items: center; }
+.acs-root .stg-rail-line { flex: 1; width: 1px; min-height: 8px; margin-top: 6px; background: var(--line-2); }
+.acs-root .stg-step:last-child .stg-rail-line { display: none; }
+.acs-root .stg-marker {
+  width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; flex-shrink: 0;
+  border: 1px solid var(--line-2); background: var(--panel); color: var(--muted-2);
+}
+.acs-root .stg-step[data-step-state="done"] .stg-marker { border-color: transparent; background: var(--good); color: #fff; }
+.acs-root .stg-step[data-step-state="active"] .stg-marker { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.acs-root .stg-step[data-step-state="locked"] .stg-marker { background: var(--panel-2); }
+/* The step ordinal is carried by the rail, so the pending marker is a plain dot rather than a number. */
+.acs-root .stg-marker-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+.acs-root .stg-main { min-width: 0; }
+.acs-root .stg-head { display: flex; align-items: flex-start; gap: 12px; min-height: 22px; }
+.acs-root .stg-headings { flex: 1; min-width: 0; padding-top: 1px; }
+.acs-root .stg-title { font-size: 13.5px; font-weight: 600; color: var(--ink); letter-spacing: -0.005em; }
+.acs-root .stg-step[data-step-state="locked"] .stg-title { color: var(--muted); }
+/* The single state line — and, when the step is locked, its own precondition. That replaces the
+   old disabled-button-plus-separate-hint-box pair, which said the same fact twice in two places. */
+.acs-root .stg-line { font-size: 12.5px; color: var(--muted); line-height: 1.5; margin-top: 2px; }
+.acs-root .stg-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.acs-root .stg-toggle { font-size: 12px; }
+.acs-root .stg-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.acs-root .stg-body { margin-top: 12px; }
+.acs-root .stg-hint { font-size: 12.5px; color: var(--muted); line-height: 1.55; max-width: 62em; }
+
+/* A different scope tier, so a different ground: the provider catalog is set by the deployment and
+   has no action here at all. Recessed rather than a fourth peer panel with an implied Create. */
+.acs-root .stg-scope { margin: 16px; padding: 14px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--panel-2); }
+.acs-root .stg-scope-head { display: flex; align-items: center; gap: 7px; }
+.acs-root .stg-scope-lock { display: inline-flex; color: var(--muted-2); }
+.acs-root .stg-scope-note { font-size: 12.5px; color: var(--muted); line-height: 1.5; margin-top: 3px; max-width: 62em; }
+.acs-root .stg-scope .cn-list { margin-top: 12px; }
