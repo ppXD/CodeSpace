@@ -11,8 +11,11 @@ namespace CodeSpace.Messages.Commands.Agents;
 /// <c>~/.codespace/hidden-suite</c>) — spends real model budget and appends a DURABLE receipt, so it is
 /// global-admin only and never recurring. An absent suite throws (misconfiguration, never a silent pass).
 /// </summary>
-public sealed record RunQualificationRoundCommand : ICommand<RunQualificationRoundResponse>, IRequireGlobalAdmin, IRequireTeamMembership
+public sealed record RunQualificationRoundCommand : ICommand<RunQualificationRoundResponse>, IRequireGlobalAdmin, IRequireTeamPermission
 {
+    /// <summary>A round launches real agent runs on the team's pool — the same consequence class as launching runs (the global-admin gate sits ABOVE this).</summary>
+    public string RequiredPermission => Constants.TeamPermissions.RunsLaunch;
+
     public required string Mode { get; init; }
 
     public required string CapabilityKey { get; init; }
