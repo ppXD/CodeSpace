@@ -178,6 +178,10 @@ public sealed class ModelCallCompletenessFlowTests
             return false;
         }
 
+        /// <summary>Delegated verbatim: this double drops one DECLARATION, never the run's initialization, so the facet under test starts from exactly the state a real run starts from.</summary>
+        public async Task<bool> InitializeAsync(RunDataManifestInitialization initialization, CancellationToken cancellationToken) =>
+            await _real.InitializeAsync(initialization, cancellationToken).ConfigureAwait(false);
+
         public async Task<bool> NoticeAsync(WorkflowRunCaptureGap gap, CancellationToken cancellationToken) =>
             await _real.NoticeAsync(gap, cancellationToken).ConfigureAwait(false);
 
