@@ -1,3 +1,4 @@
+using Autofac;
 using CodeSpace.Core.Jobs;
 using CodeSpace.Core.Jobs.RecurringJobs;
 using CodeSpace.Core.Persistence.Db;
@@ -6,6 +7,7 @@ using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Artifacts.Backends;
 using CodeSpace.Core.Services.Workflows.Artifacts.Retention;
 using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
+using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Artifacts;
 using CodeSpace.Messages.Commands.Workflows;
 using MediatR;
@@ -108,6 +110,19 @@ public sealed class ArtifactRetentionPolicyTests
             "manifest capture must not return the candidate artifact id for a later writer to reuse without passing the store's availability/dedup fence again");
         File.ReadAllText(Path.Combine(sourceRoot, callers[0])).ShouldContain("ContentArtifactId = artifactId");
         File.ReadAllText(Path.Combine(sourceRoot, callers[1])).ShouldContain("CiphertextArtifactId = artifactId");
+    }
+
+    [Fact]
+    public void The_sensitive_payload_store_cannot_declare_through_its_callers_own_context()
+    {
+        // Its holder row is written inside a transaction the engine owns, and the encrypted bytes reach the provider
+        // before that row is attempted — so the declaration has to survive a rollback the bytes cannot. An injected
+        // IArtifactRetentionWriter would be the AMBIENT one, sharing the store's CodeSpaceDbContext and therefore that
+        // transaction, and the declaration would revert with it, leaving durable ciphertext nothing can ever collect.
+        var parameters = typeof(WorkflowSensitivePayloadStore).GetConstructors().ShouldHaveSingleItem().GetParameters().Select(parameter => parameter.ParameterType).ToArray();
+
+        parameters.ShouldNotContain(typeof(IArtifactRetentionWriter), "a writer resolved alongside the store enlists in the caller's transaction");
+        parameters.ShouldContain(typeof(ILifetimeScope), "the isolated scope IS the mechanism — see WorkflowSensitivePayloadStore.DeclareCiphertextAsync");
     }
 
     [Fact]
