@@ -38,12 +38,15 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts.Retention;
 ///
 /// <para><b>The routed soft-reference window.</b> The final oracle check is not allowed to make a late reference to
 /// already-purged bytes look safe. The admission barrier is earlier: Deleting is not a reusable CAS location, so a
-/// producer cannot obtain this artifact id from Put/dedup after the physical claim. Retention candidates have one
-/// production minting caller, <c>ArtifactManifestStore</c>; it obtains the id through <c>PutDeclaredAsync</c>, consumes
-/// it immediately in the oracle-visible manifest row, and does not return it. A later recapture goes through Put again
-/// and either revokes the declaration before the claim or is refused while Deleting. The production-caller inventory
-/// and the post-claim mutation are pinned by tests; adding a caller that directly reuses a candidate id would invalidate
-/// this protocol and must add equivalent admission before it can mint declarations.</para>
+/// producer cannot obtain this artifact id from Put/dedup after the physical claim. Retention candidates have two
+/// production minting callers, <c>ArtifactManifestStore</c> and <c>WorkflowSensitivePayloadStore</c>; each obtains the
+/// id through <c>PutDeclaredAsync</c>, consumes it immediately in its own oracle-visible holder row — the manifest row
+/// and the sensitive-payload sidecar row respectively — and does not return it. The sidecar's insert can be rolled back
+/// by the transaction its caller owns while the declaration, minted on a scope of its own, cannot; that asymmetry is
+/// deliberate and leaves exactly the declared-and-unreferenced artifact this sweep collects. A later recapture goes
+/// through Put again and either revokes the declaration before the claim or is refused while Deleting. The
+/// production-caller inventory and the post-claim mutation are pinned by tests; adding a caller that directly reuses a
+/// candidate id would invalidate this protocol and must add equivalent admission before it can mint declarations.</para>
 /// </summary>
 public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
 {
