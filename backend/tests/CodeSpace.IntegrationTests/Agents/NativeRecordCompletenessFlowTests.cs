@@ -682,6 +682,9 @@ public sealed class NativeRecordCompletenessFlowTests
 
         public DeclarationLosingWriter(IRunDataCompletenessWriter real) => _real = real;
 
+        public Task<bool> InitializeAsync(RunDataManifestInitialization initialization, CancellationToken cancellationToken) =>
+            _real.InitializeAsync(initialization, cancellationToken);
+
         public Task<bool> AdvanceAsync(RunDataFacetAdvance advance, CancellationToken cancellationToken) =>
             advance.Facet == WorkflowRunDataOwnerKinds.NativeRecord && advance.Expected > 0
                 ? Task.FromResult(false)
@@ -698,6 +701,9 @@ public sealed class NativeRecordCompletenessFlowTests
         private readonly IRunDataCompletenessWriter _real;
 
         public PresenceLosingWriter(IRunDataCompletenessWriter real) => _real = real;
+
+        public Task<bool> InitializeAsync(RunDataManifestInitialization initialization, CancellationToken cancellationToken) =>
+            _real.InitializeAsync(initialization, cancellationToken);
 
         public Task<bool> AdvanceAsync(RunDataFacetAdvance advance, CancellationToken cancellationToken) =>
             advance.Present > 0 ? Task.FromResult(false) : _real.AdvanceAsync(advance, cancellationToken);

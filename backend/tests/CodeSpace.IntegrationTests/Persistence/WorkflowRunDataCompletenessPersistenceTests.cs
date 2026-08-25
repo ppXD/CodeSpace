@@ -118,6 +118,57 @@ public sealed class WorkflowRunDataCompletenessPersistenceTests
     /// admitted, because a re-observed record can legitimately push the present count past it — and a plane that made
     /// that unwritable would push producers into not counting at all, which is where the silence came from.
     /// </summary>
+    /// <summary>
+    /// 0172's corrective rewrite, run as the bytes it ships rather than as a restatement of them: the migration file
+    /// is re-executed against seeded rows, which is safe because every statement in it is idempotent.
+    ///
+    /// <para>It must rewrite the statements 0171 minted — a determinate zero under a complete verdict — into
+    /// indeterminate ones, and leave every statement a producer folded alone. The discriminator is BOTH counts being
+    /// zero, which is sound rather than heuristic: every production advance moves exactly one count strictly above
+    /// zero and 0148 refuses a negative delta, so a row holding zero and zero has never been folded by a producer.
+    /// A statement already un-stated must also survive untouched and keep absorbing.</para>
+    /// </summary>
+    [Fact]
+    public async Task The_corrective_migration_rewrites_only_the_statements_initialization_minted()
+    {
+        var world = await SeedRunAsync();
+        var minted = await SeedManifestAsync(world, WorkflowRunDataOwnerKinds.ModelCall, statement =>
+        {
+            statement.ExpectedRecordCount = 0;
+            statement.PresentRecordCount = 0;
+        });
+        var folded = await SeedManifestAsync(world, WorkflowRunDataOwnerKinds.NativeRecord);
+        var unstated = await SeedManifestAsync(world, WorkflowRunDataOwnerKinds.ToolCall, statement =>
+        {
+            statement.ExpectedRecordCount = null;
+            statement.PresentRecordCount = 4;
+            statement.Verdict = WorkflowRunCaptureCompleteness.LegacyUnknown;
+        });
+
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlRawAsync(CorrectiveMigration());
+
+        var rewritten = await Manifests(scope).SingleAsync(candidate => candidate.Id == minted.Id);
+        rewritten.ExpectedRecordCount.ShouldBeNull(customMessage: "a determinate zero nobody counted is exactly the claim this migration removes");
+        rewritten.Verdict.ShouldBe(WorkflowRunCaptureCompleteness.LegacyUnknown);
+        rewritten.Revision.ShouldBe(minted.Revision + 1, customMessage: "every write to this table advances its revision; the guard refuses anything else");
+
+        var untouched = await Manifests(scope).SingleAsync(candidate => candidate.Id == folded.Id);
+        untouched.ExpectedRecordCount.ShouldBe(3);
+        untouched.PresentRecordCount.ShouldBe(3);
+        untouched.Verdict.ShouldBe(WorkflowRunCaptureCompleteness.Exact, customMessage: "a facet a producer counted is not a facet this migration has anything to say about");
+        untouched.Revision.ShouldBe(folded.Revision);
+
+        var stillUnstated = await Manifests(scope).SingleAsync(candidate => candidate.Id == unstated.Id);
+        stillUnstated.ExpectedRecordCount.ShouldBeNull();
+        stillUnstated.PresentRecordCount.ShouldBe(4);
+        stillUnstated.Revision.ShouldBe(unstated.Revision);
+
+        (await DeclaredFlagsAsync(scope, minted.Id, folded.Id, unstated.Id))
+            .ShouldBe(new[] { false, true, true },
+                customMessage: "only the minted statement has no declared expectation; the un-stated one keeps its latch, which is what makes its NULL absorb");
+    }
+
     [Fact]
     public async Task A_surplus_over_a_declared_expectation_does_not_block_a_complete_record()
     {
@@ -852,6 +903,20 @@ public sealed class WorkflowRunDataCompletenessPersistenceTests
         return gap;
     }
 
+    /// <summary>The shipped corrective migration, read from the file the image deploys so this test cannot drift from it.</summary>
+    private static string CorrectiveMigration() =>
+        File.ReadAllText(Path.Combine(AppContext.BaseDirectory, DbUpRunner.ScriptFolder, "0172_workflow_run_data_manifest_indeterminate_initialization.sql"));
+
+    /// <summary>expectation_declared is deliberately not mapped in EF — its readers are the two SQL functions — so the pin reads it directly.</summary>
+    private static async Task<IReadOnlyList<bool>> DeclaredFlagsAsync(ILifetimeScope scope, params Guid[] statementIds)
+    {
+        var flags = await scope.Resolve<CodeSpaceDbContext>().Database
+            .SqlQuery<DeclaredFlag>($"SELECT id AS \"Id\", expectation_declared AS \"Declared\" FROM workflow_run_data_manifest WHERE id = ANY({statementIds})")
+            .ToListAsync();
+
+        return statementIds.Select(id => flags.Single(flag => flag.Id == id).Declared).ToList();
+    }
+
     private async Task<WorkflowRunDataManifest> SeedManifestAsync(RunWorld world, string facet, Action<WorkflowRunDataManifest>? configure = null)
     {
         var statement = Manifest(world, facet);
@@ -908,6 +973,8 @@ public sealed class WorkflowRunDataCompletenessPersistenceTests
             SchemaVersion = WorkflowRunDataContract.CurrentVersion, CreatedAt = now, LastModifiedAt = now,
         };
     }
+
+    private sealed record DeclaredFlag(Guid Id, bool Declared);
 
     private sealed record RunWorld(Guid RunId, Guid TeamId);
 }

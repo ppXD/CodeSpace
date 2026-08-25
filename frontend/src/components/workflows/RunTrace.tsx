@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
-import type { RunRecordPageItem, WorkflowRunDataCompletenessView } from "@/api/workflows";
+import type { RunRecordPageItem, WorkflowRunCaptureCompleteness, WorkflowRunDataCompletenessView } from "@/api/workflows";
 import { useRunDataCompleteness, useRunRecordWindow } from "@/hooks/use-workflows";
 
 import { RunRecordPayload } from "./RunRecordPayload";
@@ -54,7 +54,7 @@ function RunDataCompleteness({ view, loading, failed }: { view: WorkflowRunDataC
   return (
     <section className="run-data-completeness" aria-label="Recorded Workflow Run data completeness">
       <div className="run-data-completeness-head">Data completeness</div>
-      <div className="run-data-completeness-scope">Registered producer facets · terminal fold only when every required statement is present.</div>
+      <div className="run-data-completeness-scope">Registered producer facets · at terminal the run reads as the weakest facet, and a facet nobody stated is not a complete one.</div>
       {loading && view === undefined ? (
         <div className="run-data-completeness-empty">Loading producer statements…</div>
       ) : view == null ? (
@@ -64,20 +64,30 @@ function RunDataCompleteness({ view, loading, failed }: { view: WorkflowRunDataC
       ) : (
         <ul className="run-data-completeness-list">
           {view.facets.map((facet) => (
-            <li key={facet.facet} className="run-data-completeness-row" data-readable={facet.isStrictlyReadable || undefined}>
+            <li key={facet.facet} className="run-data-completeness-row" data-readable={facet.isStrictlyReadable || undefined} data-verdict={facet.verdict}>
               <code>{facet.facet}</code>
               <span className="run-data-completeness-count">{facet.presentRecordCount} present {facet.expectedRecordCount == null ? "· expected unstated" : `/ ${facet.expectedRecordCount} expected`}{facet.knownMissingCount > 0 ? ` · ${facet.knownMissingCount} known missing` : ""}</span>
-              <span className="run-data-completeness-verdict">{facet.verdict}</span>
+              <span className="run-data-completeness-verdict">{verdictLabel(facet.verdict)}</span>
             </li>
           ))}
         </ul>
       )}
       {failed && view != null && <div className="run-data-completeness-warning">Last refresh failed; displaying the last valid producer statements.</div>}
-      {view?.runWideVerdict && <div className="run-data-completeness-scope">Terminal run-wide verdict · {view.runWideVerdict}</div>}
+      {view?.runWideVerdict && <div className="run-data-completeness-scope" data-verdict={view.runWideVerdict}>Terminal run-wide verdict · {verdictLabel(view.runWideVerdict)}</div>}
       {view && view.missingFacetStatements.length > 0 && <div className="run-data-completeness-warning">Unstated required facets: {view.missingFacetStatements.join(", ")}.</div>}
       {view?.truncated && <div className="run-data-completeness-warning">Additional recorded facets were omitted by the bounded metadata read.</div>}
     </section>
   );
+}
+
+/**
+ * LegacyUnknown is the INDETERMINATE arm — nobody established what the facet should hold — and it is the resting state
+ * of every facet of every run until its producer speaks. Rendered by its enum name it reads as a data-migration
+ * problem, and rendered in the not-readable red it reads as an alarm on every in-flight run; it is neither. The other
+ * five verdicts are shown verbatim, because they each already say what they mean.
+ */
+function verdictLabel(verdict: WorkflowRunCaptureCompleteness): string {
+  return verdict === "LegacyUnknown" ? "Not stated" : verdict;
 }
 
 function TraceRow({ runId, record }: { runId: string; record: RunRecordPageItem }) {

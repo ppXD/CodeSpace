@@ -32,6 +32,8 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
     private const string BodyCaptureMigration = "0151_workflow_run_model_call_body_capture.sql";
     private const string AttemptAttributionMigration = "0155_workflow_run_capture_gap_attempt_attribution.sql";
     private const string InitializationMigration = "0171_workflow_run_data_manifest_initialization.sql";
+    /// <summary>The migration that replaced initialization's determinate zero with an indeterminate statement, and taught the advance which NULL absorbs.</summary>
+    private const string IndeterminateInitializationMigration = "0172_workflow_run_data_manifest_indeterminate_initialization.sql";
 
     [Fact]
     public void A_gap_is_one_known_missing_span_with_a_subject_a_coordinate_a_typed_reason_and_a_notice_time()
@@ -388,20 +390,49 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
                                "it can get wrong.");
     }
 
-    [Fact]
-    public void Initialization_uses_the_same_run_lock_and_starts_the_mask_latch_false_without_rewriting_existing_history()
+    /// <summary>
+    /// Both initialization migrations rendezvous before they touch the plane, and both leave an existing statement
+    /// alone on replay. The lock ordering is the property neither of them may lose: the gap probe that decides the
+    /// minted verdict runs under it, and the guard re-probes underneath the same lock.
+    /// </summary>
+    [Theory]
+    [InlineData(InitializationMigration)]
+    [InlineData(IndeterminateInitializationMigration)]
+    public void Initialization_rendezvouses_before_it_states_anything_and_never_revises_an_existing_statement(string migrationName)
     {
-        var migration = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Persistence", "DbUpFiles", InitializationMigration));
+        var migration = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, DbUpRunner.ScriptFolder, migrationName));
 
-        DbUpRunner.DiscoverScriptNames().ShouldContain(name => name.EndsWith(InitializationMigration, StringComparison.OrdinalIgnoreCase));
+        DbUpRunner.DiscoverScriptNames().ShouldContain(name => name.EndsWith(migrationName, StringComparison.OrdinalIgnoreCase));
         migration.IndexOf("PERFORM workflow_run_data_completeness_lock(team, run)", StringComparison.Ordinal)
             .ShouldBeLessThan(migration.IndexOf("INSERT INTO workflow_run_data_manifest", StringComparison.Ordinal),
                 customMessage: "initialization must rendezvous before it probes gaps or states any facet");
-        migration.ShouldContain("known_missing_count, verdict, masked_observed, revision");
-        migration.ShouldContain("CASE WHEN open_anywhere THEN 'Partial' ELSE 'Exact' END, FALSE,",
-            customMessage: "a zero-record declaration has observed no masked bytes; later advances own the monotonic true transition");
         migration.ShouldContain("ON CONFLICT (team_id, workflow_run_id, facet) DO NOTHING",
             customMessage: "replay must preserve both the upstream masked_observed latch and the existing statement revision");
+    }
+
+    /// <summary>
+    /// What the LIVE initializer states, which is the whole of this defect: a facet it mints is INDETERMINATE, never a
+    /// determinate zero under a complete verdict. 0171 shipped the second, and a run that terminalized in bootstrap
+    /// read back as a complete and verbatim record for four planes that had counted nothing.
+    ///
+    /// <para>The latch is pinned beside it because it is what keeps the indeterminate row establishable: without
+    /// expectation_declared, 0148's rule that a NULL expectation absorbs would swallow every producer's delta and the
+    /// plane would report LegacyUnknown for every run forever.</para>
+    /// </summary>
+    [Fact]
+    public void The_live_initializer_states_an_indeterminate_facet_and_only_an_unstated_expectation_absorbs()
+    {
+        var migration = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, DbUpRunner.ScriptFolder, IndeterminateInitializationMigration));
+
+        migration.ShouldContain("known_missing_count, verdict, masked_observed, expectation_declared, revision");
+        migration.ShouldContain("SELECT gen_random_uuid(), team, run, facet_name, NULL::BIGINT, 0, gaps.open_here,",
+            customMessage: "a minted statement declares that the facet EXISTS; zero would be the determinate claim that it is expected to be empty");
+        migration.ShouldContain("CASE WHEN gaps.open_here > 0 THEN 'Partial' ELSE 'LegacyUnknown' END, FALSE, FALSE,",
+            customMessage: "a minted statement has observed no masked bytes and carries no declared expectation; later advances own both monotonic true transitions");
+        migration.ShouldContain("expectation_declared = statement.expectation_declared OR expected_delta > 0",
+            customMessage: "the latch is what separates an expectation nobody has declared from one that was un-stated, and only the second may absorb");
+        migration.ShouldContain("WHEN statement.expected_record_count IS NULL AND (statement.expectation_declared OR expected_delta = 0) THEN statement.verdict",
+            customMessage: "an un-stated expectation must still carry its verdict rather than be recomputed from a later partial count");
     }
 
     /// <summary>The three things a producer must not be able to spell in C#: the rendezvous, the probe the rendezvous protects, and direct DML against the statement it produces.</summary>

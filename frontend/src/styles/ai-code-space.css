@@ -2891,6 +2891,9 @@ textarea:-webkit-autofill {
 .acs-root .run-data-completeness-count { color: var(--muted); font-variant-numeric: tabular-nums; }
 .acs-root .run-data-completeness-verdict { justify-self: end; color: #9e3535; font-weight: 600; }
 .acs-root .run-data-completeness-row[data-readable] .run-data-completeness-verdict { color: #2f7a50; }
+/* The indeterminate arm is not a fault: every facet rests here until its producer states something, so it reads as
+   quiet metadata rather than as the red reserved for a record that is known to be incomplete. */
+.acs-root .run-data-completeness-row[data-verdict="LegacyUnknown"] .run-data-completeness-verdict { color: var(--muted); font-weight: 500; }
 .acs-root .run-trace-head { display: flex; align-items: center; gap: 7px; font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-2); }
 .acs-root .run-trace-head > svg { color: var(--muted-2); }
 .acs-root .run-trace-empty { font-size: 12.5px; color: var(--muted); padding: 16px 4px; }

@@ -37,8 +37,18 @@ namespace CodeSpace.Core.Services.RunData;
 /// </summary>
 public interface IRunDataCompletenessWriter
 {
-    /// <summary>Idempotently states zero for every registered producer facet before a run can emit records.</summary>
-    Task<bool> InitializeAsync(RunDataManifestInitialization initialization, CancellationToken cancellationToken) => Task.FromResult(true);
+    /// <summary>
+    /// Idempotently states that every registered producer facet EXISTS and that nobody has established what it should
+    /// contain — an expectation of NULL, which 0146 refuses every complete verdict over. It declares a plane, never a
+    /// count: a zero here would be the determinate claim "this facet is expected to be empty", and a run that died
+    /// before its producers counted anything would read back as a complete record.
+    ///
+    /// <para>It carries no default implementation ON PURPOSE. It shipped with one — a body returning <c>true</c> —
+    /// which no test double overrode, so every completeness-flow test ran against a run whose manifest this method had
+    /// never touched, and the state it actually creates was unreachable from the suite that was supposed to cover it.
+    /// A seam whose no-op is invisible to every double is not covered by them.</para>
+    /// </summary>
+    Task<bool> InitializeAsync(RunDataManifestInitialization initialization, CancellationToken cancellationToken);
 
     /// <summary>
     /// Fold one delta into the facet's statement, computing the verdict in the database so a producer never offers 0146
