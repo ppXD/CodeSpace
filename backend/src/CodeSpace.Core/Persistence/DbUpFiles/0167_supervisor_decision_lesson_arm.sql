@@ -1,4 +1,4 @@
--- 0166_supervisor_decision_lesson_arm.sql
+-- 0167_supervisor_decision_lesson_arm.sql
 --
 -- D2 (cross-run learning) — record the lesson-experiment ARM on the supervisor lane.
 --
