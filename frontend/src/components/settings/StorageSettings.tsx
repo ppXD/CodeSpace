@@ -11,6 +11,7 @@ import { SchemaForm } from "@/components/workflows/SchemaForm";
 import { StorageCredentialSettings } from "./StorageCredentialSettings";
 import { StorageDefaultAdoption } from "./StorageDefaultAdoption";
 import { StorageRouteSettings } from "./StorageRouteSettings";
+import { StorageHealthBadge } from "./StorageHealthBadge";
 import { StorageStep, type StorageStepState } from "./StorageStep";
 
 /**
@@ -183,6 +184,9 @@ function StorageProfileRow({ profile, provider, onManage }: { profile: StoragePr
             {profile.stableName}
             <span className={profile.state === "Active" ? "cn-status cn-status-active" : profile.state === "Retired" ? "cn-status cn-status-revoked" : "cn-status"}>{profile.state}</span>
             <span className="cn-status">Revision {profile.currentRevision}</span>
+            {/* Whether this destination is taking bytes, as of the last time anything asked. Rendered next to the
+                lifecycle state because Active says an operator turned it on, not that it works. */}
+            <StorageHealthBadge health={profile.health} currentRevision={profile.currentRevision} />
           </div>
           <div className="cn-sub">
             <span>{provider?.displayName ?? profile.providerTypeKey}</span>

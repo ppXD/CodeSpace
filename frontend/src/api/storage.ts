@@ -101,6 +101,24 @@ export interface RevokeStorageCredentialInput {
   expectedCurrentRevision: number;
 }
 
+/**
+ * What a probe last saw at a profile's destination.
+ *
+ * `null` on the profile is a real answer and must be rendered as one: nobody has checked is not working.
+ * The distinction matters most right after a profile is created, when nothing has probed it yet.
+ */
+export interface StorageProfileHealthSummary {
+  status: StorageProfileProbeStatus;
+  /** True only when the probe PUT and discarded a real object. A passing read-only probe qualifies reachability, not that a run's bytes will land. */
+  writeVerified: boolean;
+  /** The revision that was exercised. Behind the profile's current revision means this describes a destination the profile has since left. */
+  profileRevision: number;
+  failureStage?: StorageProfileProbeFailureStage | null;
+  failureCode?: StorageProfileProbeFailureCode | null;
+  latencyMilliseconds: number;
+  observedAt: string;
+}
+
 export interface StorageProfileSummary {
   id: string;
   stableName: string;
@@ -110,6 +128,8 @@ export interface StorageProfileSummary {
   providerTypeKey: string;
   createdDate: string;
   lastModifiedDate: string;
+  /** Null when nothing has ever probed this destination. */
+  health?: StorageProfileHealthSummary | null;
 }
 
 export interface StorageProfileRevisionDetail {
