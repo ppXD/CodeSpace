@@ -53,6 +53,7 @@ public sealed class ArtifactRetentionDecisionTests
 
     [Theory]
     [InlineData(ArtifactPurgePath.LocalBlobShared, "artifact-blob-shared")]              // another row names the same physical file
+    [InlineData(ArtifactPurgePath.RoutedObjectShared, "artifact-routed-object-shared")]   // another stored object occupies the same key in the same namespace
     [InlineData(ArtifactPurgePath.BackendCannotPurge, "artifact-blob-backend-cannot-purge")]   // the transport offers no removal at all
     public void An_artifact_whose_bytes_have_no_purge_path_is_kept_and_says_which_one_is_missing(ArtifactPurgePath purge, string expectedCode)
     {

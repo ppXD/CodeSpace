@@ -371,7 +371,8 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
         if (artifact is null) return null;
-        if (artifact.CasArtifactObjectId is { } objectId) return new ArtifactPlacement(artifact.CreatedAt, ArtifactPurgePath.Routed, null, objectId);
+        if (artifact.CasArtifactObjectId is { } objectId)
+            return new ArtifactPlacement(artifact.CreatedAt, await RoutedPurgePathAsync(db, objectId, cancellationToken).ConfigureAwait(false), null, objectId);
 
         // Neither routed nor a storage_url means the bytes are in the row: 0016's storage xor was validated when it
         // required exactly one of inline_bytes/storage_url, so a row with no destination at all cannot exist.
@@ -386,6 +387,56 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
             ? new ArtifactPlacement(artifact.CreatedAt, ArtifactPurgePath.LocalBlobShared, null, null)
             : new ArtifactPlacement(artifact.CreatedAt, ArtifactPurgePath.LocalBlobExclusive, storageUrl, null);
     }
+
+
+    /// <summary>
+    /// The routed arm of the same sharing question the local arm asks below, and it has to be asked for the same
+    /// reason: <c>ArtifactStore.ObjectKeyFor</c> builds <c>workflow-artifacts/{aa}/{bb}/{sha256}</c> with NO team
+    /// segment, so two objects holding identical content land on the same key. Whether that key is the same PHYSICAL
+    /// object then depends entirely on whether the two profile revisions name the same namespace — which is what
+    /// <c>storage_profile_revision.namespace_fingerprint</c> identifies, and the only thing that identifies it.
+    ///
+    /// <para>Comparing the object key ALONE would be unsound in the safe direction but useless in practice: every team
+    /// storing the same bytes shares a key, so the reaper would refuse to collect any deduplicated content even when
+    /// the two teams are in different buckets. Comparing the fingerprint alone would be unsound in the other
+    /// direction. Both together are the question "is this the same object", which is the one the local arm answers
+    /// with a <c>storage_url</c> comparison because there the url already carries both.</para>
+    ///
+    /// <para>Deliberately NOT team-scoped, and deliberately not filtered by <see cref="ArtifactLocationState"/>. A
+    /// location whose bytes are already Purged cannot really be harmed, so including it only ever costs a kept
+    /// artifact, never a lost one; excluding it would make the probe depend on a lifecycle race it cannot observe.
+    /// Keeping is always safe here, collecting is not.</para>
+    ///
+    /// <para>The window this probe does NOT close is the same one the local arm names: a concurrent first placement of
+    /// identical content into a shared namespace can insert its location after this read and before the collector
+    /// commits. Closing it would need the placement path to hold a lock across its transfer and its location insert,
+    /// which this lane does not change.</para>
+    /// </summary>
+    private static async Task<ArtifactPurgePath> RoutedPurgePathAsync(CodeSpaceDbContext db, Guid objectId, CancellationToken cancellationToken)
+    {
+        var mine = await db.ArtifactLocation.AsNoTracking()
+            .Where(location => location.ArtifactObjectId == objectId)
+            .Join(db.StorageProfileRevision.AsNoTracking(), location => location.StorageProfileRevisionId, revision => revision.Id,
+                (location, revision) => new PlacedAt(location.ObjectKey, revision.NamespaceFingerprint))
+            .Distinct()
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        if (mine.Count == 0) return ArtifactPurgePath.Routed;
+
+        var keys = mine.Select(placed => placed.ObjectKey).Distinct().ToList();
+
+        var collisions = await db.ArtifactLocation.AsNoTracking()
+            .Where(location => location.ArtifactObjectId != objectId && keys.Contains(location.ObjectKey))
+            .Join(db.StorageProfileRevision.AsNoTracking(), location => location.StorageProfileRevisionId, revision => revision.Id,
+                (location, revision) => new PlacedAt(location.ObjectKey, revision.NamespaceFingerprint))
+            .Distinct()
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return collisions.Any(mine.Contains) ? ArtifactPurgePath.RoutedObjectShared : ArtifactPurgePath.Routed;
+    }
+
+    /// <summary>One physical destination: the key, plus the namespace identity that says WHICH store that key is inside.</summary>
+    private sealed record PlacedAt(string ObjectKey, string NamespaceFingerprint);
 
     /// <summary>
     /// Applies the outcome under a proven claim. The COLLECT arm additionally re-asks the reference question inside this
