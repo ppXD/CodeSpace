@@ -55,6 +55,7 @@ public class RequestAuthorizationInventoryTests
         ["ExpireStaleToolCallsCommand"] = "sweep",
         ["FireDueScheduleTriggersCommand"] = "sweep",
         ["ProbeStaleModelAvailabilityCommand"] = "sweep",
+        ["ProbeStaleStorageDestinationsCommand"] = "re-probes the destinations Active routes currently bind writes to, across every team; a per-team capability would make the deployment-wide question unaskable, and it changes no row a user owns — only the observed health of a destination.",
         ["ProbeUnknownModelCapabilitiesCommand"] = "sweep",
         ["ProjectWorkflowRunModelCallsCommand"] = "projects started and terminal workflow-run interaction evidence; it is dispatched only by the bounded system recurring job.",
         ["ProjectWorkflowRunToolCallsCommand"] = "projects governed side-effect ledger facts into the observation-only Workflow Run tool-call plane; it is dispatched only by the bounded system recurring job.",
