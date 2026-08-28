@@ -3402,7 +3402,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     private NodeRunContext BuildNodeRunContext(NodeExecution exec)
     {
         var nodeLogger = _loggerFactory.CreateLogger($"Workflow.{exec.Runtime.TypeKey}.{exec.Node.Id}");
-        var observability = new NodeObservability(new NodeObservationBinding(_recordLogger, _artifactStore, exec.Run.Id, exec.Node.Id, exec.Run.TeamId, exec.ParentRecordId, PersistenceSecretRedactor.FromScope(exec.Scope)));
+        var observability = new NodeObservability(new NodeObservationBinding(_recordLogger, _artifactStore, exec.Run.Id, exec.Node.Id, exec.Run.TeamId, exec.ParentRecordId, PersistenceSecretRedactor.FromScope(exec.Scope), _completenessWriter));
 
         return new NodeRunContext
         {
@@ -3480,12 +3480,16 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             _logger.LogError("Run {RunId} node {NodeId}: the configured storage destination refused the node's outputs ({Code}); settling with redacted inline outputs so the node never re-fires its side effect", completion.RunId, completion.NodeId, DestinationProblemOf(ex));
 
             await RecordStorageUnavailableAsync(completion, ex, cancellationToken).ConfigureAwait(false);
+            await NoticeOutputsNotOffloadedAsync(completion, $"The configured storage destination refused the node's outputs ({DestinationProblemOf(ex)}).").ConfigureAwait(false);
 
             ledgerOutputs = redaction.Value;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning("Run {RunId} node {NodeId}: output offload failed ({FailureType}); writing node.completed with redacted inline outputs so the node is recorded settled and never re-fires its side effect", completion.RunId, completion.NodeId, ex.GetType().Name);
+
+            await NoticeOutputsNotOffloadedAsync(completion, $"The node's outputs could not be offloaded ({ex.GetType().Name}).").ConfigureAwait(false);
+
             ledgerOutputs = redaction.Value;
         }
 
@@ -3537,6 +3541,39 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// fail-open, whose whole purpose is that the node settles: a ledger hiccup while reporting a storage problem
     /// must not stop node.completed from being written, or the node re-dispatches and re-fires its side effect.
     /// </summary>
+    /// <summary>
+    /// Records that this node's outputs are in the ledger rather than at their destination.
+    ///
+    /// <para>Settling the node is not in question: its side effect already fired, so re-firing it would be worse than
+    /// a large row. What was missing is the ACCOUNTING. Without this the run reports success while the bytes an
+    /// operator configured a bucket for are in this database instead, and nothing downstream can tell that run apart
+    /// from one whose storage worked. A gap makes the completeness plane refuse a complete verdict, which is the
+    /// difference between a green run that is trustworthy and one that merely looks it.</para>
+    ///
+    /// <para>Best-effort by necessity: this is already the failure path, and a gap that cannot be written must not
+    /// take down a node that has to settle. A lost gap leaves the run claiming complete data it does not have — the
+    /// same false claim, one layer further out — which is why the write is attempted before the node is recorded and
+    /// its own failure is logged at Warning rather than swallowed silently.</para>
+    /// </summary>
+    private async Task NoticeOutputsNotOffloadedAsync(NodeCompletionPersistence completion, string detail)
+    {
+        try
+        {
+            await _completenessWriter.NoticeAsync(new WorkflowRunCaptureGap
+            {
+                Id = Guid.NewGuid(), TeamId = completion.TeamId, WorkflowRunId = completion.RunId,
+                SubjectKind = Messages.Contracts.WorkflowRunDataOwnerKinds.NodeOutput, SubjectId = completion.NodeId,
+                RangeKind = CaptureGapRangeKind.Unbounded, Reason = CaptureGapReason.WriteRefused,
+                ReasonDetail = detail, CaptureSource = "in-process",
+                NoticedAt = DateTimeOffset.UtcNow, CreatedAt = DateTimeOffset.UtcNow,
+            }, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "Run {RunId} node {NodeId}: the node's outputs stayed inline after a storage failure and the capture gap recording that could not be written, so this run may report complete data it does not have", completion.RunId, completion.NodeId);
+        }
+    }
+
     private async Task RecordStorageUnavailableAsync(NodeCompletionPersistence completion, Workflows.Artifacts.Exceptions.ArtifactStorageDestinationUnavailableException ex, CancellationToken cancellationToken)
     {
         try

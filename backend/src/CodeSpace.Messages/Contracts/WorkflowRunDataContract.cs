@@ -78,6 +78,9 @@ public static class WorkflowRunDataOwnerKinds
     public const string LogSegment = "log-segment";
     public const string Session = "session";
     public const string SessionStateRevision = "session-state-revision";
+
+    /// <summary>Bytes a node produced that a storage failure kept out of their destination. A gap subject only: nothing can declare in advance how many outputs a run will offload, so there is no facet to count.</summary>
+    public const string NodeOutput = "node-output";
     public const string CaptureGap = "capture-gap";
     public const string DataManifest = "data-manifest";
 

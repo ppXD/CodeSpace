@@ -148,8 +148,8 @@ public sealed class AgentRunCommandNode : INodeRuntime
         // D5 — when the cap DROPPED content, preserve the FULL stream in the artifact store so the complete
         // output is durably recoverable (no truncation data-loss). The inline stdout/stderr stay the preview.
         var teamScope = hasTeam ? teamId : (Guid?)null;
-        var stdoutArtifactId = await PreserveFullIfTruncatedAsync(teamScope, stdout, result.Stdout, context.Logger, cancellationToken).ConfigureAwait(false);
-        var stderrArtifactId = await PreserveFullIfTruncatedAsync(teamScope, stderr, result.Stderr, context.Logger, cancellationToken).ConfigureAwait(false);
+        var stdoutArtifactId = await PreserveFullIfTruncatedAsync(teamScope, stdout, result.Stdout, context.Logger, context.Observability as INodeLossReporting, cancellationToken).ConfigureAwait(false);
+        var stderrArtifactId = await PreserveFullIfTruncatedAsync(teamScope, stderr, result.Stderr, context.Logger, context.Observability as INodeLossReporting, cancellationToken).ConfigureAwait(false);
 
         var outputs = new Dictionary<string, JsonElement>
         {
@@ -179,7 +179,7 @@ public sealed class AgentRunCommandNode : INodeRuntime
     /// and swallowed (no artifact id surfaces, the inline preview remains) rather than failing an otherwise-good
     /// command — preserving the node's "command completed → node succeeds" contract.</para>
     /// </summary>
-    private async Task<Guid?> PreserveFullIfTruncatedAsync(Guid? teamId, OutputCap.Result capped, string? full, ILogger logger, CancellationToken cancellationToken)
+    private async Task<Guid?> PreserveFullIfTruncatedAsync(Guid? teamId, OutputCap.Result capped, string? full, ILogger logger, INodeLossReporting? loss, CancellationToken cancellationToken)
     {
         if (!capped.Truncated || teamId is not { } tid || string.IsNullOrEmpty(full)) return null;
 
@@ -190,7 +190,15 @@ public sealed class AgentRunCommandNode : INodeRuntime
         }
         catch (Exception ex)
         {
+            // The capped preview survives and the node still succeeds -- the command DID complete, and failing it over
+            // a lost copy of its own output would be worse. But this was the ONLY copy of the untruncated stream, so
+            // the loss is reported rather than left as a log line nobody queries: a run that lost it must not also
+            // report complete data.
             logger.LogWarning(ex, "Failed to preserve the full command output to the artifact store; keeping the capped preview only.");
+
+            if (loss is { } reporter)
+                await reporter.NoticeContentNotStoredAsync($"The full command output could not be stored ({ex.GetType().Name}); only the capped preview was kept.", CancellationToken.None).ConfigureAwait(false);
+
             return null;
         }
     }
