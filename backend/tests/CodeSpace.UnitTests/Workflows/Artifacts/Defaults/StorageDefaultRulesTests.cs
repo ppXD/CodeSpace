@@ -109,6 +109,25 @@ public sealed class StorageDefaultRulesTests
         Should.NotThrow(() => StorageDefaultRules.ValidatePartialConfig(Json("""{"anythingElse":"fine"}"""), new OpenConfigModule()));
 
     [Fact]
+    public void Partial_config_refuses_the_property_that_IS_the_namespace()
+    {
+        // The template's own doc says its config EXCLUDES every namespace field, and that NamespaceRoot is "a ROOT,
+        // never a finished namespace". A config that already sets the provider's namespace property would shadow the
+        // per-team segment the materializer composes and hand every team one namespace — while both comments still
+        // read as though that could not happen. Object keys carry no team segment, so one namespace means one object.
+        var rejected = Should.Throw<ArgumentException>(
+            () => StorageDefaultRules.ValidatePartialConfig(Json("""{"prefix":"one-namespace-for-everyone/"}"""), new OpenConfigModule()));
+
+        rejected.Message.ShouldContain("prefix", Case.Sensitive, "the refusal must name the offending property, not merely decline");
+    }
+
+    [Fact]
+    public void A_provider_that_cannot_subdivide_its_namespace_cannot_be_a_deployment_default() =>
+        // Refusing at admission is the last point where the deployment can still choose otherwise: once teams are
+        // materialized onto one shared namespace their routes are Active, and an Active route never returns to Draft.
+        Should.Throw<ArgumentException>(() => StorageDefaultRules.ValidatePartialConfig(Json("""{"anythingElse":"fine"}"""), new UndividableModule()));
+
+    [Fact]
     public void Partial_config_must_be_an_object() =>
         Should.Throw<ArgumentException>(() => StorageDefaultRules.ValidatePartialConfig(Json("[]"), new LocalRwxStorageProviderModule()));
 
@@ -160,7 +179,7 @@ public sealed class StorageDefaultRulesTests
     }
 
     /// <summary>A lawful module whose ConfigSchema does NOT close additional properties — the only shape that reaches the secret-leak check.</summary>
-    private sealed class OpenConfigModule : IStorageProviderModule
+    private sealed class OpenConfigModule : IStorageProviderModule, IStorageProviderTeamNamespace
     {
         public string TypeKey => "open-config/v1";
         public string DisplayName => "Open config test provider";
@@ -168,5 +187,18 @@ public sealed class StorageDefaultRulesTests
         public JsonElement SecretSchema => Json("""{"type":"object","properties":{"apiToken":{"type":"string"}},"required":["apiToken"],"additionalProperties":false}""");
         public StorageProviderCapabilities Capabilities => StorageProviderCapabilities.None;
         public Type FactoryType => typeof(OpenConfigModule);
+        public string TeamNamespaceProperty => "prefix";
+        public string ComposeTeamNamespace(string namespaceRoot, string teamSegment) => $"{namespaceRoot}/{teamSegment}";
+    }
+
+    /// <summary>The same module WITHOUT the subdivision sibling — a provider that can only ever name one namespace.</summary>
+    private sealed class UndividableModule : IStorageProviderModule
+    {
+        public string TypeKey => "undividable/v1";
+        public string DisplayName => "Undividable test provider";
+        public JsonElement ConfigSchema => Json("""{"type":"object","properties":{},"additionalProperties":true}""");
+        public JsonElement SecretSchema => Json("""{"type":"object","properties":{},"additionalProperties":false}""");
+        public StorageProviderCapabilities Capabilities => StorageProviderCapabilities.None;
+        public Type FactoryType => typeof(UndividableModule);
     }
 }

@@ -7,7 +7,7 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts.Providers.Local;
 /// driver or activate it through <see cref="ArtifactStore"/>: that store continues to receive the convention-registered
 /// <see cref="IArtifactBlobBackend"/> exactly as before until the profile/runtime cutover lands.
 /// </summary>
-public sealed class LocalRwxStorageProviderModule : IStorageProviderModule
+public sealed class LocalRwxStorageProviderModule : IStorageProviderModule, IStorageProviderTeamNamespace
 {
     private static readonly JsonElement Config = ParseSchema("""
         {
@@ -25,6 +25,12 @@ public sealed class LocalRwxStorageProviderModule : IStorageProviderModule
           "additionalProperties": false
         }
         """);
+
+    /// <summary>The mount is shared; the directory beneath it is what a team gets to itself.</summary>
+    public string TeamNamespaceProperty => "rootPath";
+
+    /// <summary>A filesystem path, so the join is a directory beneath the root and carries no trailing separator.</summary>
+    public string ComposeTeamNamespace(string namespaceRoot, string teamSegment) => $"{namespaceRoot.Trim().TrimEnd('/')}/{teamSegment}";
 
     private static readonly JsonElement Secrets = ParseSchema("""
         {
