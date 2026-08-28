@@ -26,11 +26,13 @@ public sealed class StorageRouteService : IStorageRouteService, IScopedDependenc
     internal const string ConcurrentRouteSqlState = "P7501";
     private readonly CodeSpaceDbContext _db;
     private readonly IRoutedDataClassCatalog _dataClasses;
+    private readonly Runtime.IStorageProfileProbeService _probe;
 
-    public StorageRouteService(CodeSpaceDbContext db, IRoutedDataClassCatalog dataClasses)
+    public StorageRouteService(CodeSpaceDbContext db, IRoutedDataClassCatalog dataClasses, Runtime.IStorageProfileProbeService probe)
     {
         _db = db;
         _dataClasses = dataClasses;
+        _probe = probe;
     }
 
     public async Task<StoragePage<StorageRouteSummary>> ListPageAsync(Guid teamId, string? cursor, int limit, CancellationToken cancellationToken)
@@ -155,6 +157,9 @@ public sealed class StorageRouteService : IStorageRouteService, IScopedDependenc
             var current = await _db.StorageRouteRevision.AsNoTracking().SingleAsync(value => value.TeamId == teamId
                 && value.StorageRouteId == route.Id && value.Revision == route.CurrentRevision, cancellationToken).ConfigureAwait(false);
             await RequireActiveProfileAsync(teamId, current.StorageProfileId, new ProfileSelection(current.ProfileRevisionMode, current.PinnedProfileRevision), cancellationToken).ConfigureAwait(false);
+
+            if (route.State != requested)
+                await ProveDestinationWritableAsync(teamId, current, cancellationToken).ConfigureAwait(false);
         }
         if (route.State == requested)
             return await GetAsync(teamId, route.Id, null, StorageRouteRevisionPageLimits.DefaultPageSize, cancellationToken).ConfigureAwait(false);
@@ -177,6 +182,38 @@ public sealed class StorageRouteService : IStorageRouteService, IScopedDependenc
 
         var known = string.Join(", ", _dataClasses.DataClasses.Select(dataClass => dataClass.TypeKey));
         throw new StorageRouteInvalidException($"No runtime consumer in this build reads data class '{dataClassTypeKey}'. Routable data classes: {known}.");
+    }
+
+/// <summary>
+    /// Writes and discards one real object at the destination this route is about to bind, BEFORE it binds it.
+    ///
+    /// <para>Activation is a one-way door: <c>StorageRouteRules.EnsureTransition</c> refuses every transition back to
+    /// Draft, Retired is terminal, and a route cannot be deleted. Until now the entire gate was a database read
+    /// asserting the profile row says Active — no driver opened, no credential resolved, nothing written — so a route
+    /// pointing at a nonexistent bucket, a mistyped endpoint or a key that was never valid reached Active and started
+    /// binding writes. For <c>workflow-artifact/v1</c> this is the ONLY path: its data class declares a local home, so
+    /// the deployment-default materializer's probed adoption may never take it automatically.</para>
+    ///
+    /// <para>Only on the actual transition. An idempotent re-activation of an already-Active route must stay a no-op:
+    /// failing it during a transient outage would make a caller's retry the thing that breaks.</para>
+    ///
+    /// <para>Only <c>Available</c> passes, and a retryable failure is refused like any other — activating onto a
+    /// destination that is unreachable right now is exactly the mistake this exists to prevent. The message carries the
+    /// provider's own stage and code so an operator is told which end to fix.</para>
+    /// </summary>
+    private async Task ProveDestinationWritableAsync(Guid teamId, StorageRouteRevision revision, CancellationToken cancellationToken)
+    {
+        var result = await _probe.ProbeAsync(
+            new Runtime.StorageProfileProbeRequest(teamId, revision.StorageProfileId, revision.PinnedProfileRevision, VerifyWriteAccess: true), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (result.Status == StorageProfileProbeStatusValue.Available) return;
+
+        var reason = result.Failure is { } failure ? $" ({failure.Stage}/{failure.Code})" : string.Empty;
+        var retry = result.Failure?.Retryable == true ? " The destination reported this as temporary, so activating again later may succeed." : string.Empty;
+
+        throw new StorageRouteInvalidException(
+            $"The destination did not accept a write, so this route was not activated{reason}. Activating a route cannot be undone, so it is refused rather than bound to a destination that is not taking bytes.{retry}");
     }
 
     private async Task<StorageProfile> RequireActiveProfileAsync(Guid teamId, Guid profileId, ProfileSelection selection, CancellationToken cancellationToken)
