@@ -1,3 +1,5 @@
+using CodeSpace.Core.Services.Workflows.Artifacts.Defaults;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Core.Services.Workflows.Artifacts.Routing;
 using CodeSpace.Core.Services.Workflows.Artifacts.Routing.DataClasses;
 
@@ -22,10 +24,13 @@ public sealed class AgentRunLogStorageResolver : IAgentRunLogStorageResolver
     private readonly IAgentRunLogStorageReadiness _readiness;
     private readonly AgentRunLogDataClass _dataClass;
 
-    public AgentRunLogStorageResolver(IRoutedDestinationResolver destinations, IAgentRunLogStorageReadiness readiness, AgentRunLogDataClass dataClass)
+    private readonly IStorageDefaultMaterializer _materializer;
+
+    public AgentRunLogStorageResolver(IRoutedDestinationResolver destinations, IAgentRunLogStorageReadiness readiness, IStorageDefaultMaterializer materializer, AgentRunLogDataClass dataClass)
     {
         _destinations = destinations;
         _readiness = readiness;
+        _materializer = materializer;
         _dataClass = dataClass;
     }
 
@@ -34,7 +39,7 @@ public sealed class AgentRunLogStorageResolver : IAgentRunLogStorageResolver
         var destination = await _destinations.ResolveAsync(_dataClass, teamId, cancellationToken).ConfigureAwait(false);
         if (destination is RoutedDestination.Unusable { Disposition: RoutedDestinationDisposition.NoRoute })
         {
-            await _readiness.EnsureDefaultRouteAsync(teamId, cancellationToken).ConfigureAwait(false);
+            await BootstrapAsync(teamId, cancellationToken).ConfigureAwait(false);
             destination = await _destinations.ResolveAsync(_dataClass, teamId, cancellationToken).ConfigureAwait(false);
         }
 
@@ -44,6 +49,28 @@ public sealed class AgentRunLogStorageResolver : IAgentRunLogStorageResolver
             RoutedDestination.Unusable unusable => new AgentRunLogStorageResolution.Unavailable(Problem(unusable.Disposition)),
             _ => throw new InvalidOperationException($"Data class '{_dataClass.TypeKey}' resolved to a local destination it has no backend for. Only a class with somewhere to put the bytes may declare {nameof(IRoutedDataClassLocalFallback)}."),
         };
+    }
+
+    /// <summary>
+    /// Gives a team with no route one, deployment default FIRST and the local namespace only if there is no default
+    /// to take.
+    ///
+    /// <para>That order is the whole point of the default tier: an operator who authored a destination for this class
+    /// authored the deployment's answer, and bootstrapping this team onto local disk instead would answer with
+    /// something nobody chose — permanently, since an Active route never returns to Draft. The local bootstrap stays
+    /// as the second arm because a deployment that authored nothing still needs capture to start working.</para>
+    ///
+    /// <para>Automatic: true. A first write is not a person, so a template that declares itself Explicit refuses here
+    /// and this team falls through to local — exactly as it did before this class had a default to consider.</para>
+    /// </summary>
+    private async Task BootstrapAsync(Guid teamId, CancellationToken cancellationToken)
+    {
+        var materialization = await _materializer.MaterializeAsync(
+            new StorageMaterializationRequest(teamId, DataClassTypeKey, SystemUsers.SeederId, Automatic: true), cancellationToken).ConfigureAwait(false);
+
+        if (materialization is StorageMaterialization.Materialized or StorageMaterialization.AlreadyMaterialized or StorageMaterialization.TeamOwnsRoute) return;
+
+        await _readiness.EnsureDefaultRouteAsync(teamId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

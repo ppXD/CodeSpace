@@ -15,8 +15,10 @@ namespace CodeSpace.Api.Controllers;
 /// operator happened to visit last. A separate route keeps the ambient header inert here: nothing on this controller
 /// reads a team.</para>
 ///
-/// <para><b>Nothing consumes these templates yet.</b> No team resolves storage through one, no route is created from
-/// one, and no byte moves because one exists — the materializer lane is the intended reader.</para>
+/// <para><b>Authoring a template does not move any team.</b> A team is materialized from one only when its own admin
+/// adopts it through <c>POST api/storage/adoptions</c> — or, for a class whose template declares an Automatic policy,
+/// on that team's first write. Editing or disabling a template changes what a LATER materialization will produce and
+/// never touches a team already on it: reads resolve through the profile revision recorded at write time.</para>
 /// </summary>
 [ApiController]
 [Route("api/admin/storage-defaults")]
