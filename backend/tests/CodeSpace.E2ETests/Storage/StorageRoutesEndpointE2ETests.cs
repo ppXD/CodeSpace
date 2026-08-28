@@ -307,6 +307,9 @@ public sealed class StorageRoutesEndpointE2ETests : IClassFixture<TaskLaunchApiF
         return new World(userId, teamId, foreignTeamId);
     }
 
+    /// <summary>A real directory whose name is still the marker this suite asserts never appears in a route response.</summary>
+    private static readonly string RouteConfigRoot = Path.Combine(Path.GetTempPath(), "do-not-expose-route-config", Guid.NewGuid().ToString("N"));
+
     private async Task<Guid> SeedProfileAsync(Guid teamId, Guid actorId, string stableName, StorageProfileState state = StorageProfileState.Active, int revisions = 1)
     {
         using var scope = _factory.Services.CreateScope();
@@ -322,8 +325,13 @@ public sealed class StorageRoutesEndpointE2ETests : IClassFixture<TaskLaunchApiF
             profile.Revisions.Add(new StorageProfileRevision
             {
                 Id = Guid.NewGuid(), TeamId = teamId, StorageProfileId = profile.Id, Revision = revision,
-                ProviderTypeKey = "local-rwx/v1", NonSecretConfigJson = "{\"rootPath\":\"/do-not-expose-route-config\"}",
-                CredentialRef = "db:11111111-2222-3333-4444-555555555555:1",
+                // A REAL writable directory, because activating a route now probes the destination with a write and
+                // refuses a one-way transition onto one that is not taking bytes. The path still carries the name this
+                // suite asserts never leaks over the wire.
+                ProviderTypeKey = "local-rwx/v1", NonSecretConfigJson = JsonSerializer.Serialize(new { rootPath = RouteConfigRoot }),
+                // No credential: local-rwx needs none, and a ref pointing at a credential that does not exist made
+                // the destination unresolvable the moment activation started probing it.
+                CredentialRef = null,
                 NamespaceFingerprint = $"sha256:{new string((char)('a' + revision - 1), 64)}", CreatedDate = now, CreatedBy = actorId,
             });
         }
