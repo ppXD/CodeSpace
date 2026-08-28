@@ -7,7 +7,7 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts.Providers.AliyunOss;
 /// route, data class, or existing artifact path resolves to it until an operator creates a profile and points a route
 /// at it, so adding this module cannot move a single byte that is written today.
 /// </summary>
-public sealed class AliyunOssStorageProviderModule : IStorageProviderModule
+public sealed class AliyunOssStorageProviderModule : IStorageProviderModule, IStorageProviderTeamNamespace
 {
     internal static JsonElement ConfigSchemaDocument { get; } = ParseSchema("""
         {
@@ -50,6 +50,12 @@ public sealed class AliyunOssStorageProviderModule : IStorageProviderModule
           "additionalProperties": false
         }
         """);
+
+    /// <summary>The bucket is shared; the key prefix is what a team gets to itself.</summary>
+    public string TeamNamespaceProperty => "keyPrefix";
+
+    /// <summary>ConfigSchema requires a key prefix to end in a slash and to contain no backslash, so the join produces exactly that.</summary>
+    public string ComposeTeamNamespace(string namespaceRoot, string teamSegment) => $"{namespaceRoot.Trim().Trim('/')}/{teamSegment}/";
 
     internal static JsonElement SecretSchemaDocument { get; } = ParseSchema("""
         {

@@ -49,10 +49,40 @@ internal static partial class StorageDefaultRules
         StorageProviderJson.ValidateSchema(module.ConfigSchema, "ConfigSchema");
         StorageProviderJson.ValidateSchema(module.SecretSchema, "SecretSchema");
         StorageProfileRules.EnsureNoSecretProperties(config, module.SecretSchema);
+        EnsureNoTeamNamespaceProperty(config, RequireTeamNamespace(module));
         StorageProviderJson.Validate(config, WithoutRequired(module.ConfigSchema), "NonSecretConfig", "ConfigSchema");
     }
 
     public static string CanonicalJson(JsonElement value) => StorageProfileRules.CanonicalJson(value);
+
+    /// <summary>
+    /// The provider's subdivision capability, or a refusal. A provider that cannot give each team a namespace of its
+    /// own cannot be a deployment default at ALL: every team materialized from it would share one namespace, and
+    /// because <c>ArtifactStore.ObjectKeyFor</c> puts no team segment in an object key, that makes their identical
+    /// content one physical object. Refusing here is the only place the deployment can still choose otherwise.
+    /// </summary>
+    public static IStorageProviderTeamNamespace RequireTeamNamespace(IStorageProviderModule module)
+    {
+        ArgumentNullException.ThrowIfNull(module);
+        if (module is IStorageProviderTeamNamespace subdividable) return subdividable;
+
+        throw new ArgumentException($"Storage provider '{module.TypeKey}' cannot subdivide its namespace per team, so it cannot be a deployment default: every team would share one namespace, and identical content across two teams is then one object rather than two.");
+    }
+
+    /// <summary>
+    /// Makes the template's own promise true. <c>StorageDefault.NonSecretConfigJson</c> documents itself as "provider
+    /// config EXCLUDING every namespace field", and <c>NamespaceRoot</c> as "a ROOT, never a finished namespace" —
+    /// but a config that already carries the provider's namespace property would SHADOW the per-team segment the
+    /// materializer composes, handing every team the operator's one literal namespace while both doc comments still
+    /// read as though it could not happen.
+    /// </summary>
+    private static void EnsureNoTeamNamespaceProperty(JsonElement config, IStorageProviderTeamNamespace provider)
+    {
+        if (!config.TryGetProperty(provider.TeamNamespaceProperty, out _)) return;
+
+        throw new ArgumentException($"NonSecretConfig must not set '{provider.TeamNamespaceProperty}': that property IS the namespace, and a template describes the whole deployment. The materializer composes it per team from NamespaceRoot, and a value here would replace that with one namespace every team shares.");
+    }
+
 
     /// <summary>
     /// Which adoption policies a given data class may declare, derived from the class's own declaration rather than
