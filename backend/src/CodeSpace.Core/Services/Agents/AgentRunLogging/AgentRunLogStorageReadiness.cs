@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers.Local;
 using CodeSpace.Core.Settings;
@@ -19,7 +20,6 @@ namespace CodeSpace.Core.Services.Agents.AgentRunLogging;
 public sealed class AgentRunLogStorageReadiness : IAgentRunLogStorageReadiness
 {
     internal const string DefaultProfileStableName = "codespace-agent-run-log-default";
-    private const int AdvisoryLockNamespace = 117;
     private readonly CodeSpaceDbContext _db;
     private readonly TimeProvider _clock;
 
@@ -36,7 +36,7 @@ public sealed class AgentRunLogStorageReadiness : IAgentRunLogStorageReadiness
         await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            await _db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock(hashtextextended({teamId.ToString()}, {AdvisoryLockNamespace}))", cancellationToken).ConfigureAwait(false);
+            await StorageBootstrapLock.TakeAsync(_db.Database, teamId, cancellationToken).ConfigureAwait(false);
             if (!await _db.Team.AsNoTracking().AnyAsync(team => team.Id == teamId, cancellationToken).ConfigureAwait(false)
                 || await _db.StorageRoute.AsNoTracking().AnyAsync(route => route.TeamId == teamId && route.DataClassTypeKey == AgentRunLogStorageResolver.DataClassTypeKey, cancellationToken).ConfigureAwait(false))
             {
