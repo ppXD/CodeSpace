@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { StorageCredentialMetadata, StorageProfileDetail, StorageProfileProbeResult, StorageProfileSummary, StorageProviderModuleSummary } from "@/api/storage";
+import type { StorageAdoptionStatus } from "@/api/storageAdoptions";
 import type { StorageRouteSummary } from "@/api/storageRoutes";
 import type { MeResponse } from "@/api/types";
 import { TeamPermissions } from "@/hooks/use-team-management";
@@ -127,6 +128,8 @@ interface RenderOptions {
   /** Team-scoped permissions the server expands for this caller. Storage reads AND writes both require storage.manage. */
   permissions?: string[];
   routes?: StorageRouteSummary[];
+  /** Deployment defaults offered to this team. Empty by default, which is the state a deployment that authored none is in. */
+  adoptions?: StorageAdoptionStatus[];
 }
 
 function renderSettings(handler: FetchHandler, options: RenderOptions = {}) {
@@ -138,6 +141,7 @@ function renderSettings(handler: FetchHandler, options: RenderOptions = {}) {
     if (path === "/api/users/me") return json(me(options.permissions ?? [TeamPermissions.StorageManage]));
     if (path === "/api/storage/routes/page") return json(page(options.routes ?? []));
     if (path === "/api/storage/data-classes") return json(routedDataClasses);
+    if (path === "/api/storage/adoptions" && (init.method ?? "GET") === "GET") return json(options.adoptions ?? []);
     return handler(path, init);
   }));
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } } });
