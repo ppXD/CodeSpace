@@ -65,6 +65,7 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork, IDataProtectionKeyCont
     public DbSet<AgentRunLogSegment> AgentRunLogSegment => Set<AgentRunLogSegment>();
     public DbSet<StorageProfile> StorageProfile => Set<StorageProfile>();
     public DbSet<StorageProfileRevision> StorageProfileRevision => Set<StorageProfileRevision>();
+    public DbSet<StorageProfileHealth> StorageProfileHealth => Set<StorageProfileHealth>();
     public DbSet<StorageRoute> StorageRoute => Set<StorageRoute>();
     public DbSet<StorageRouteRevision> StorageRouteRevision => Set<StorageRouteRevision>();
     public DbSet<StorageCredential> StorageCredential => Set<StorageCredential>();

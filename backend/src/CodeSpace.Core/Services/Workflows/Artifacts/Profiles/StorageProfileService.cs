@@ -33,13 +33,16 @@ public sealed class StorageProfileService : IStorageProfileService, IScopedDepen
             join revision in _db.StorageProfileRevision.AsNoTracking()
                 on new { profile.TeamId, StorageProfileId = profile.Id, Revision = profile.CurrentRevision }
                 equals new { revision.TeamId, revision.StorageProfileId, revision.Revision }
+            join health in _db.StorageProfileHealth.AsNoTracking()
+                on new { profile.TeamId, StorageProfileId = profile.Id } equals new { health.TeamId, health.StorageProfileId } into healthRows
+            from health in healthRows.DefaultIfEmpty()
             where profile.TeamId == teamId
             orderby profile.StableName, profile.Id
-            select new { Profile = profile, revision.ProviderTypeKey })
+            select new { Profile = profile, revision.ProviderTypeKey, Health = health })
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
 
-        return rows.Select(row => Summary(row.Profile, row.ProviderTypeKey)).ToList();
+        return rows.Select(row => Summary(row.Profile, row.ProviderTypeKey, row.Health)).ToList();
     }
 
     public async Task<StoragePage<StorageProfileSummary>> ListPageAsync(Guid teamId, string? cursor, int limit, CancellationToken cancellationToken)
@@ -51,8 +54,11 @@ public sealed class StorageProfileService : IStorageProfileService, IScopedDepen
             join revision in _db.StorageProfileRevision.AsNoTracking()
                 on new { profile.TeamId, StorageProfileId = profile.Id, Revision = profile.CurrentRevision }
                 equals new { revision.TeamId, revision.StorageProfileId, revision.Revision }
+            join health in _db.StorageProfileHealth.AsNoTracking()
+                on new { profile.TeamId, StorageProfileId = profile.Id } equals new { health.TeamId, health.StorageProfileId } into healthRows
+            from health in healthRows.DefaultIfEmpty()
             where profile.TeamId == teamId
-            select new { Profile = profile, revision.ProviderTypeKey };
+            select new { Profile = profile, revision.ProviderTypeKey, Health = health };
         if (keyset is { } after)
             query = query.Where(row => string.Compare(row.Profile.StableName, after.StableName) > 0
                 || (row.Profile.StableName == after.StableName && row.Profile.Id.CompareTo(after.Id) > 0));
@@ -63,7 +69,7 @@ public sealed class StorageProfileService : IStorageProfileService, IScopedDepen
         var page = hasMore ? rows.GetRange(0, take) : rows;
         return new StoragePage<StorageProfileSummary>
         {
-            Items = page.Select(row => Summary(row.Profile, row.ProviderTypeKey)).ToList(),
+            Items = page.Select(row => Summary(row.Profile, row.ProviderTypeKey, row.Health)).ToList(),
             NextCursor = hasMore ? new StorageSettingsCursor(page[^1].Profile.StableName, page[^1].Profile.Id).Encode() : null,
         };
     }
@@ -273,10 +279,23 @@ public sealed class StorageProfileService : IStorageProfileService, IScopedDepen
         CreatedDate = now, CreatedBy = actorId,
     };
 
-    private static StorageProfileSummary Summary(StorageProfile profile, string providerTypeKey) => new()
+    private static StorageProfileSummary Summary(StorageProfile profile, string providerTypeKey, StorageProfileHealth? health) => new()
     {
         Id = profile.Id, StableName = profile.StableName, State = State(profile.State), CurrentRevision = profile.CurrentRevision,
         Xmin = profile.Xmin, ProviderTypeKey = providerTypeKey, CreatedDate = profile.CreatedDate, LastModifiedDate = profile.LastModifiedDate,
+        Health = Health(health),
+    };
+
+    /// <summary>
+    /// Null when nothing has ever probed this destination, and that is reported as null rather than smoothed into a
+    /// neutral-looking status: "nobody has checked" and "checked and working" are different facts, and only one of
+    /// them is a reason to trust the destination.
+    /// </summary>
+    private static StorageProfileHealthSummary? Health(StorageProfileHealth? health) => health == null ? null : new StorageProfileHealthSummary
+    {
+        Status = health.Status, WriteVerified = health.WriteVerified, ProfileRevision = health.ProfileRevision,
+        FailureStage = health.FailureStage, FailureCode = health.FailureCode,
+        LatencyMilliseconds = health.LatencyMs, ObservedAt = health.ObservedAt,
     };
 
     private static StorageProfileDetail Detail(StorageProfile profile) => new()
