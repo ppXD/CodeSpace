@@ -12,6 +12,9 @@ using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
+using CodeSpace.Core.Services.Workflows.Artifacts.Providers.Local;
+using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
+using System.Text.Json;
 
 namespace CodeSpace.IntegrationTests.Workflows;
 
@@ -342,7 +345,166 @@ public sealed class ArtifactRetentionReaperFlowTests
         (await ArtifactExistsAsync(artifactId)).ShouldBeTrue();
     }
 
+    [Fact]
+    public async Task A_routed_artifact_whose_object_another_tenant_also_occupies_is_kept_and_says_so()
+    {
+        // The routed path has the same property the local one does: ArtifactStore.ObjectKeyFor builds
+        // workflow-artifacts/{aa}/{bb}/{sha256} with NO team segment, so two tenants storing identical content land on
+        // one key. If their profiles also name one namespace, that key is ONE physical object -- and purge deletes by
+        // the location's own ETag, which identical bytes share. Collecting either would take the other's content.
+        var world = await SeedWorldAsync();
+        var neighbour = await SeedWorldAsync();
+        var namespaceConfig = NamespaceConfig("/srv/shared-bucket");
+        const string key = "workflow-artifacts/ab/cd/abcdef0123456789";
+
+        var artifactId = await DeclareRoutedAsync(world, "routed bytes two tenants both produced", namespaceConfig, key);
+        await SeedRoutedNeighbourAsync(neighbour, namespaceConfig, key);
+
+        await AgeDeclarationAsync(artifactId, TimeSpan.FromDays(30));
+        await SweepAsync();
+        await AgeQuarantineAsync(artifactId, TimeSpan.FromDays(2));
+        await SweepAsync();
+
+        var declaration = (await DeclarationAsync(artifactId)).ShouldNotBeNull("the artifact was COLLECTED — its bytes are one object with the neighbour's, so the neighbour now points at content that is gone");
+        declaration.LastErrorCode.ShouldBe("artifact-routed-object-shared", "the kept row must say WHY, not merely survive");
+        declaration.State.ShouldBe(ArtifactRetentionState.Indeterminate, "a second occupant of one object is an unknown, and unknown means keep");
+        (await ArtifactExistsAsync(artifactId)).ShouldBeTrue("collecting this object would take the neighbour's bytes with it");
+    }
+
+    [Fact]
+    public async Task A_routed_artifact_sharing_only_its_key_with_a_separate_namespace_is_not_treated_as_shared()
+    {
+        // The guard on the guard. Content addressing means EVERY tenant storing the same bytes shares a key, so a probe
+        // that compared keys alone would refuse to collect any deduplicated content anywhere -- retention would look
+        // like it worked and quietly stop. What makes two keys one object is the namespace, which is exactly what
+        // namespace_fingerprint identifies; this pins that the probe reads it.
+        var world = await SeedWorldAsync();
+        var neighbour = await SeedWorldAsync();
+        const string key = "workflow-artifacts/ef/01/ef0123456789abcd";
+
+        var artifactId = await DeclareRoutedAsync(world, "routed bytes in this tenant's own bucket", NamespaceConfig("/srv/bucket-a"), key);
+        await SeedRoutedNeighbourAsync(neighbour, NamespaceConfig("/srv/bucket-b"), key);
+
+        await AgeDeclarationAsync(artifactId, TimeSpan.FromDays(30));
+        await SweepAsync();
+        await AgeQuarantineAsync(artifactId, TimeSpan.FromDays(2));
+        await SweepAsync();
+
+        var declaration = await DeclarationAsync(artifactId);
+        declaration?.LastErrorCode.ShouldNotBe("artifact-routed-object-shared",
+            "the two objects sit in different namespaces, so one key in common is a dedup coincidence and not one object");
+    }
+
     // ─── World + helpers ─────────────────────────────────────────────────────
+
+    /// <summary>A local-rwx namespace config. The provider is irrelevant to the probe -- what matters is that two revisions built from the SAME config produce one fingerprint, which is production's own definition of one namespace.</summary>
+    private static string NamespaceConfig(string rootPath)
+    {
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(new { rootPath }));
+        return StorageProfileRules.CanonicalJson(document.RootElement);
+    }
+
+    /// <summary>
+    /// A declared routed artifact: an Active profile revision naming <paramref name="namespaceConfig"/>, a CAS object,
+    /// its location at <paramref name="objectKey"/>, and the retention declaration the reaper sweeps.
+    ///
+    /// <para>The rows are seeded rather than written through <c>IArtifactStore</c> because a routed write needs an
+    /// Active route and a live transfer, neither of which this probe reads. What the probe DOES read is computed the
+    /// way production computes it: the fingerprint comes from <c>StorageProfileRules.NamespaceFingerprint</c>, so
+    /// "the same namespace" here means precisely what it means at a real write.</para>
+    /// </summary>
+    private async Task<Guid> DeclareRoutedAsync(World world, string content, string namespaceConfig, string objectKey)
+    {
+        var artifactId = await SeedRoutedArtifactAsync(world, content, namespaceConfig, objectKey);
+
+        // Declared directly rather than through IArtifactRetentionWriter, which writes bytes as it declares and would
+        // therefore produce an inline or local-blob artifact rather than a routed one. The row is built with the same
+        // fields that writer sets on a first declaration, so what the reaper reads is unchanged.
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        db.WorkflowArtifactRetention.Add(new WorkflowArtifactRetention
+        {
+            ArtifactId = artifactId, TeamId = world.TeamId, RetentionClass = nameof(ArtifactRetentionClass.ArtifactManifestContent),
+            HolderKind = "artifact_manifest", HolderId = world.AgentRunId, State = ArtifactRetentionState.Declared,
+            DeclaredAt = now, NextSweepAt = now, Revision = 1, LastModifiedAt = now,
+        });
+        await db.SaveChangesAsync();
+
+        return artifactId;
+    }
+
+    /// <summary>The second occupant: a routed artifact in another team, with no declaration of its own — the reaper cannot collect it, so it can only ever be an obstacle.</summary>
+    private async Task SeedRoutedNeighbourAsync(World world, string namespaceConfig, string objectKey) =>
+        await SeedRoutedArtifactAsync(world, $"neighbour-{Guid.NewGuid():N}", namespaceConfig, objectKey);
+
+    private async Task<Guid> SeedRoutedArtifactAsync(World world, string content, string namespaceConfig, string objectKey)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var profileId = Guid.NewGuid();
+        var revisionId = Guid.NewGuid();
+        var objectId = Guid.NewGuid();
+        var artifactId = Guid.NewGuid();
+        var bytes = System.Text.Encoding.UTF8.GetBytes(content);
+        var digest = System.Security.Cryptography.SHA256.HashData(bytes);
+
+        using var document = JsonDocument.Parse(namespaceConfig);
+
+        db.StorageProfile.Add(new StorageProfile
+        {
+            Id = profileId, TeamId = world.TeamId, StableName = $"routed-probe-{profileId:N}", CurrentRevision = 1,
+            State = StorageProfileState.Active, CreatedDate = now, CreatedBy = world.ActorId,
+            LastModifiedDate = now, LastModifiedBy = world.ActorId,
+            Revisions =
+            {
+                new StorageProfileRevision
+                {
+                    Id = revisionId, TeamId = world.TeamId, StorageProfileId = profileId, Revision = 1,
+                    ProviderTypeKey = LocalRwxArtifactStorageDriverFactory.TypeKey, NonSecretConfigJson = namespaceConfig, CredentialRef = null,
+                    NamespaceFingerprint = StorageProfileRules.NamespaceFingerprint(LocalRwxArtifactStorageDriverFactory.TypeKey, document.RootElement),
+                    CreatedDate = now, CreatedBy = world.ActorId,
+                },
+            },
+        });
+        db.ArtifactObject.Add(new ArtifactObject
+        {
+            Id = objectId, TeamId = world.TeamId, DigestAlgorithm = ArtifactDigestAlgorithm.Sha256, Digest = digest,
+            SizeBytes = bytes.Length, CreatedDate = now, CreatedBy = world.ActorId,
+        });
+        db.WorkflowArtifact.Add(new WorkflowArtifact
+        {
+            Id = artifactId, TeamId = world.TeamId, Sha256 = Convert.ToHexString(digest).ToLowerInvariant(),
+            ContentType = "application/octet-stream", SizeBytes = bytes.Length, InlineBytes = null, StorageUrl = null,
+            CasArtifactObjectId = objectId, CreatedAt = now,
+        });
+        await db.SaveChangesAsync();
+
+        // The location and its event go in ONE SaveChanges: the schema requires every location revision to have a
+        // byte-identical append-only event snapshot, so a location without one is rejected at commit.
+        var locationId = Guid.NewGuid();
+        db.ArtifactLocationEvent.Add(new ArtifactLocationEvent
+        {
+            Id = Guid.NewGuid(), TeamId = world.TeamId, ArtifactLocationId = locationId, Revision = 1,
+            EventType = ArtifactLocationEventType.Created, State = ArtifactLocationState.Available, ObservedAt = now,
+            ProviderChecksumAlgorithm = "Sha256", ProviderChecksum = digest, ObservedSizeBytes = bytes.Length, VerifiedAt = now,
+            CreatedBy = world.ActorId,
+        });
+        db.ArtifactLocation.Add(new ArtifactLocation
+        {
+            Id = locationId, TeamId = world.TeamId, ArtifactObjectId = objectId, StorageProfileRevisionId = revisionId,
+            Locator = objectKey, ObjectKey = objectKey, State = ArtifactLocationState.Available, Revision = 1,
+            // The schema requires an Available location's observed size to agree with its object's — an Available
+            // placement asserts the bytes are really there, and a null size cannot make that assertion.
+            ObservedSizeBytes = bytes.Length, ProviderChecksumAlgorithm = "Sha256", ProviderChecksum = digest, VerifiedAt = now,
+            CreatedDate = now, CreatedBy = world.ActorId, LastModifiedDate = now, LastModifiedBy = world.ActorId,
+        });
+        await db.SaveChangesAsync();
+
+        return artifactId;
+    }
+
 
     private async Task<ArtifactRetentionSweepSummary> SweepAsync()
     {

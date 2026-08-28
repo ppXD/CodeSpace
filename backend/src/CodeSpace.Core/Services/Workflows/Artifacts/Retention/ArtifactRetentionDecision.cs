@@ -44,6 +44,9 @@ public enum ArtifactPurgePath
     /// <summary>Bytes were placed through a configured storage profile and are removable through their recorded CAS location lifecycle.</summary>
     Routed,
 
+    /// <summary>Bytes are a routed object another <c>artifact_object</c> is ALSO stored as, byte-for-byte, at the same object key inside the same profile namespace. Not removable, for the same reason as <see cref="LocalBlobShared"/>: the two objects are one physical object, and whether the other one is collectable is a question this build does not ask.</summary>
+    RoutedObjectShared,
+
     /// <summary>The backend holding the bytes offers no removal at all (it does not implement <c>IArtifactBlobPurge</c>).</summary>
     BackendCannotPurge,
 
@@ -115,6 +118,8 @@ internal sealed record ArtifactRetentionDecision(ArtifactRetentionAction Action,
         ArtifactPurgePath.Inline or ArtifactPurgePath.LocalBlobExclusive or ArtifactPurgePath.Routed => null,
         ArtifactPurgePath.LocalBlobShared => Indeterminate("artifact-blob-shared",
             "Another artifact row points at the same physical blob, so removing the bytes would take that row's content too and they are kept."),
+        ArtifactPurgePath.RoutedObjectShared => Indeterminate("artifact-routed-object-shared",
+            "Another stored object occupies the same object key in the same profile namespace, so removing these bytes would take that object's content too and they are kept."),
         ArtifactPurgePath.BackendCannotPurge => Indeterminate("artifact-blob-backend-cannot-purge",
             "The blob backend holding the artifact's bytes offers no removal, so the row is kept with them."),
         _ => Retry("artifact-placement-indeterminate", "Where the artifact's bytes live could not be established, so the artifact is kept for now."),
