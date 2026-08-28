@@ -32,15 +32,17 @@ public class FailureTaxonomyTests
     };
 
     /// <summary>
-    /// Throws that are a jump, not a fault. Both are caught by the code that threw them — a suspended
-    /// run is the SUCCESS path for a wait node, and a stalled sandbox is selected as a status sixty
-    /// lines from where it is raised. Classifying them would invite someone to render a parked run to
-    /// a user as an error.
+    /// Throws that are a jump, not a fault. Each is caught by the code that threw it — a suspended run
+    /// is the SUCCESS path for a wait node, a stalled sandbox is selected as a status sixty lines from
+    /// where it is raised, and a halted materialization carries one of a closed set of outcomes out of
+    /// a pipeline that then RETURNS it. Classifying them would invite someone to render a parked run,
+    /// or a team that simply already had its own storage route, to a user as an error.
     /// </summary>
     private static readonly IReadOnlySet<string> ControlFlowNotFailure = new HashSet<string>
     {
         "RunSuspendedException",
         "AgentStalledException",
+        "MaterializationHaltException",
     };
 
     [Fact]
