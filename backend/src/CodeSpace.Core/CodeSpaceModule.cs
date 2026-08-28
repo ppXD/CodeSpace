@@ -266,6 +266,10 @@ public class CodeSpaceModule : Autofac.Module
     /// </summary>
     private static void RegisterDecorators(ContainerBuilder builder)
     {
+        // A probe answers; this keeps what it saw. Without it a probe result is an HTTP response and nothing else,
+        // so an operator who sees a red answer leaves no trace and the next page load looks identical to a healthy one.
+        builder.RegisterDecorator<Services.Workflows.Artifacts.Runtime.RecordingStorageProfileProbeDecorator, Services.Workflows.Artifacts.Runtime.IStorageProfileProbeService>();
+
         builder.RegisterDecorator<Services.Workflows.Planning.Planners.CriticPlannerDecorator, Services.Workflows.Planning.IWorkflowPlanner>();
 
         // Retry sits INSIDE the critic (registered first ⇒ innermost), so a transient brain-call blip self-heals before
