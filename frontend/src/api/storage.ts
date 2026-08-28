@@ -7,6 +7,8 @@ export interface StorageProviderModuleSummary {
   configSchema: Record<string, unknown>;
   secretSchema: Record<string, unknown>;
   capabilities: string[];
+  /** The config property that carries this provider's namespace, or null when it cannot subdivide one — and so cannot be a deployment default. */
+  teamNamespaceProperty: string | null;
 }
 
 export type StorageProfileState = "Draft" | "Active" | "Disabled" | "Retired";

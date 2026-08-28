@@ -20,6 +20,7 @@ const localProvider: StorageProviderModuleSummary = {
   },
   secretSchema: { type: "object", properties: {}, additionalProperties: false },
   capabilities: ["ConditionalCreate", "StreamingRead"],
+  teamNamespaceProperty: "rootPath",
 };
 
 const secretProvider: StorageProviderModuleSummary = {
@@ -38,6 +39,7 @@ const secretProvider: StorageProviderModuleSummary = {
     additionalProperties: false,
   },
   capabilities: ["MultipartUpload", "StreamingWrite"],
+  teamNamespaceProperty: "keyPrefix",
 };
 
 const profile: StorageProfileSummary = {

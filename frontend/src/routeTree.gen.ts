@@ -18,6 +18,7 @@ import { Route as ResetPasswordTokenRouteImport } from './routes/reset-password.
 import { Route as InviteTokenRouteImport } from './routes/invite.$token'
 import { Route as AppRepositoriesRouteImport } from './routes/_app.repositories'
 import { Route as AppTeamsTeamSlugRouteImport } from './routes/_app.teams.$teamSlug'
+import { Route as AppAdminStorageRouteImport } from './routes/_app.admin.storage'
 import { Route as AppAdminAccountsRouteImport } from './routes/_app.admin.accounts'
 import { Route as AppTeamsTeamSlugIndexRouteImport } from './routes/_app.teams.$teamSlug.index'
 import { Route as AppTeamsTeamSlugWorkflowsRouteImport } from './routes/_app.teams.$teamSlug.workflows'
@@ -97,6 +98,11 @@ const AppRepositoriesRoute = AppRepositoriesRouteImport.update({
 const AppTeamsTeamSlugRoute = AppTeamsTeamSlugRouteImport.update({
   id: '/teams/$teamSlug',
   path: '/teams/$teamSlug',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppAdminStorageRoute = AppAdminStorageRouteImport.update({
+  id: '/admin/storage',
+  path: '/admin/storage',
   getParentRoute: () => AppRoute,
 } as any)
 const AppAdminAccountsRoute = AppAdminAccountsRouteImport.update({
@@ -320,6 +326,7 @@ export interface FileRoutesByFullPath {
   '/invite/$token': typeof InviteTokenRoute
   '/reset-password/$token': typeof ResetPasswordTokenRoute
   '/admin/accounts': typeof AppAdminAccountsRoute
+  '/admin/storage': typeof AppAdminStorageRoute
   '/teams/$teamSlug': typeof AppTeamsTeamSlugRouteWithChildren
   '/teams/$teamSlug/agents': typeof AppTeamsTeamSlugAgentsRouteWithChildren
   '/teams/$teamSlug/library': typeof AppTeamsTeamSlugLibraryRoute
@@ -366,6 +373,7 @@ export interface FileRoutesByTo {
   '/reset-password/$token': typeof ResetPasswordTokenRoute
   '/': typeof AppIndexRoute
   '/admin/accounts': typeof AppAdminAccountsRoute
+  '/admin/storage': typeof AppAdminStorageRoute
   '/teams/$teamSlug/library': typeof AppTeamsTeamSlugLibraryRoute
   '/teams/$teamSlug/members': typeof AppTeamsTeamSlugMembersRoute
   '/teams/$teamSlug': typeof AppTeamsTeamSlugIndexRoute
@@ -404,6 +412,7 @@ export interface FileRoutesById {
   '/reset-password/$token': typeof ResetPasswordTokenRoute
   '/_app/': typeof AppIndexRoute
   '/_app/admin/accounts': typeof AppAdminAccountsRoute
+  '/_app/admin/storage': typeof AppAdminStorageRoute
   '/_app/teams/$teamSlug': typeof AppTeamsTeamSlugRouteWithChildren
   '/_app/teams/$teamSlug/agents': typeof AppTeamsTeamSlugAgentsRouteWithChildren
   '/_app/teams/$teamSlug/library': typeof AppTeamsTeamSlugLibraryRoute
@@ -452,6 +461,7 @@ export interface FileRouteTypes {
     | '/invite/$token'
     | '/reset-password/$token'
     | '/admin/accounts'
+    | '/admin/storage'
     | '/teams/$teamSlug'
     | '/teams/$teamSlug/agents'
     | '/teams/$teamSlug/library'
@@ -498,6 +508,7 @@ export interface FileRouteTypes {
     | '/reset-password/$token'
     | '/'
     | '/admin/accounts'
+    | '/admin/storage'
     | '/teams/$teamSlug/library'
     | '/teams/$teamSlug/members'
     | '/teams/$teamSlug'
@@ -535,6 +546,7 @@ export interface FileRouteTypes {
     | '/reset-password/$token'
     | '/_app/'
     | '/_app/admin/accounts'
+    | '/_app/admin/storage'
     | '/_app/teams/$teamSlug'
     | '/_app/teams/$teamSlug/agents'
     | '/_app/teams/$teamSlug/library'
@@ -645,6 +657,13 @@ declare module '@tanstack/react-router' {
       path: '/teams/$teamSlug'
       fullPath: '/teams/$teamSlug'
       preLoaderRoute: typeof AppTeamsTeamSlugRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/admin/storage': {
+      id: '/_app/admin/storage'
+      path: '/admin/storage'
+      fullPath: '/admin/storage'
+      preLoaderRoute: typeof AppAdminStorageRouteImport
       parentRoute: typeof AppRoute
     }
     '/_app/admin/accounts': {
@@ -1115,6 +1134,7 @@ interface AppRouteChildren {
   AppRepositoriesRoute: typeof AppRepositoriesRoute
   AppIndexRoute: typeof AppIndexRoute
   AppAdminAccountsRoute: typeof AppAdminAccountsRoute
+  AppAdminStorageRoute: typeof AppAdminStorageRoute
   AppTeamsTeamSlugRoute: typeof AppTeamsTeamSlugRouteWithChildren
 }
 
@@ -1122,6 +1142,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppRepositoriesRoute: AppRepositoriesRoute,
   AppIndexRoute: AppIndexRoute,
   AppAdminAccountsRoute: AppAdminAccountsRoute,
+  AppAdminStorageRoute: AppAdminStorageRoute,
   AppTeamsTeamSlugRoute: AppTeamsTeamSlugRouteWithChildren,
 }
 
