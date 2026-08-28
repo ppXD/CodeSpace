@@ -7,6 +7,7 @@ using CodeSpace.Core.Services.Workflows.Artifacts.Providers;
 using CodeSpace.Core.Services.Workflows.Artifacts.Routing;
 using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace CodeSpace.Core.Services.Workflows.Artifacts.Defaults;
 
@@ -49,7 +50,16 @@ public sealed partial class StorageDefaultMaterializer : IStorageDefaultMaterial
     {
         _ctx = BuildContext(request);
 
-        await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken);
+        // The caller may already own a transaction: TransactionalBehavior wraps every ICommand, so an adoption arriving
+        // through the mediator is already inside one. Joining it without a savepoint would be unsound in the worst
+        // direction — a refused destination would return its outcome while the OUTER transaction commits the profile
+        // and credential this pipeline had already written, and neither can ever be deleted.
+        var ambient = _db.Database.CurrentTransaction;
+        await using var owned = ambient == null ? await _db.Database.BeginTransactionAsync(cancellationToken) : null;
+        var savepoint = ambient == null ? null : $"materialize_{Guid.NewGuid():N}";
+
+        if (savepoint != null) await ambient!.CreateSavepointAsync(savepoint, cancellationToken).ConfigureAwait(false);
+
         try
         {
             await StorageBootstrapLock.TakeAsync(_db.Database, _ctx.TeamId, cancellationToken).ConfigureAwait(false);
@@ -64,18 +74,35 @@ public sealed partial class StorageDefaultMaterializer : IStorageDefaultMaterial
             await CreateActiveRouteAsync(cancellationToken).ConfigureAwait(false);
             await RecordProvenanceAsync(cancellationToken).ConfigureAwait(false);
 
-            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            if (owned != null) await owned.CommitAsync(cancellationToken).ConfigureAwait(false);
 
             return new StorageMaterialization.Materialized(_ctx.ProfileId, _ctx.RouteId, _ctx.Template.Revision);
         }
         catch (MaterializationHaltException halt)
         {
-            // Rolled back as ONE unit on purpose. Every row this pipeline writes is undeletable once committed, so a
+            // Undone as ONE unit on purpose. Every row this pipeline writes is undeletable once committed, so a
             // partial materialization would be permanent: an orphaned Active profile keeps its credential unrevokable,
             // and a route that reached Active can never return to Draft.
-            await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+            await UndoAsync(owned, ambient, savepoint, cancellationToken).ConfigureAwait(false);
             return halt.Outcome;
         }
+    }
+
+    /// <summary>
+    /// Discards everything this pipeline wrote, whichever transaction it was writing into.
+    ///
+    /// <para>The change tracker is cleared either way, and that is not tidiness: a rollback undoes the DATABASE, not
+    /// EF's opinion of it. The entities the storage services added are still tracked as Added afterwards, so the next
+    /// <c>SaveChangesAsync</c> on this scope — the caller's own, or the one TransactionalBehavior performs — would
+    /// insert them again, outside the transaction that was supposed to have discarded them. The shipped agent-run-log
+    /// bootstrap clears the tracker after its own rollback for exactly this reason.</para>
+    /// </summary>
+    private async Task UndoAsync(IDbContextTransaction? owned, IDbContextTransaction? ambient, string? savepoint, CancellationToken cancellationToken)
+    {
+        if (owned != null) await owned.RollbackAsync(cancellationToken).ConfigureAwait(false);
+        else await ambient!.RollbackToSavepointAsync(savepoint!, cancellationToken).ConfigureAwait(false);
+
+        _db.ChangeTracker.Clear();
     }
 
     private static MaterializationContext BuildContext(StorageMaterializationRequest request)

@@ -174,4 +174,27 @@ public class StorageController : ControllerBase
         var result = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
         return result == null ? NotFound() : Ok(result);
     }
+
+    /// <summary>Where this team stands on the deployment's default for every routed data class.</summary>
+    [HttpGet("adoptions")]
+    public async Task<IActionResult> ListAdoptions(CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new ListStorageAdoptionsQuery(), cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Takes this team onto the deployment's default for one data class.
+    ///
+    /// <para>Always 200 with a named outcome, never 404 or 409. "The deployment authored no default", "this team
+    /// already adopted it" and "the destination refused a write" are all answers a Settings screen has to render
+    /// differently, and a status code collapses them into an error the screen can only apologise for.</para>
+    /// </summary>
+    [HttpPost("adoptions")]
+    [RequestSizeLimit(MaxMutationBodyBytes)]
+    public async Task<IActionResult> Adopt([FromBody] AdoptStorageDefaultCommand command, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
 }
