@@ -232,8 +232,9 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
     }
 
     /// <summary>
-    /// The isolation that still holds, checked rather than asserted in prose: FOUR production producers, all in the
-    /// capture plane, and TWO observation-only bounded readers. The only files in <c>backend/src</c> that may mention
+    /// The isolation that still holds, checked rather than asserted in prose: SIX production producers and TWO
+    /// observation-only bounded readers. Four are in the capture plane; two more only WRITE a gap, on paths that
+    /// swallow a storage failure and settle anyway, so the loss is accounted rather than silent. The only files in <c>backend/src</c> that may mention
     /// either table are the two entities, their two configurations, the DbContext that registers them, the shared
     /// completeness writer, the Workflow Run manifest reader, the Agent Run exact-gap reader, and the capture plane's
     /// three capture partials plus the in-process model-call recorder — the native-record, harness-process-attempt,
@@ -250,7 +251,7 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
     /// message below is the number a reader can trust without grepping.</para>
     /// </summary>
     [Fact]
-    public void Only_the_four_producers_and_two_bounded_operator_readers_touch_either_table()
+    public void Only_the_six_producers_and_two_bounded_operator_readers_touch_either_table()
     {
         var sourceRoot = ProductionSourceRoot();
 
@@ -269,8 +270,17 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
             "NativeRecordPlane.Completeness.cs",
             "NativeRecordPlane.ExecutionCompleteness.cs",
             "NativeRecordPlane.ProcessCompleteness.cs",
+
+            // Two producers that WRITE a gap and read neither table. Both sit on a path that deliberately swallows a
+            // storage failure and settles anyway -- the engine because the node's side effect already fired, the node
+            // observability seam because a completed command must not fail over a lost copy of its own output. Each
+            // records the loss so the run cannot also report complete data. Neither consults the manifest for any
+            // decision, so the isolation this list protects -- that nothing in completion, terminal decision, planner,
+            // oracle, critic or routing may READ it -- is untouched.
+            "NodeObservability.cs",
             "RecordingLLMClientDecorator.cs",
             "RunDataFacetAdvance.cs",
+            "WorkflowEngine.cs",
             "WorkflowRunCaptureGap.cs",
             "WorkflowRunCaptureGapConfiguration.cs",
             "WorkflowRunDataManifest.cs",

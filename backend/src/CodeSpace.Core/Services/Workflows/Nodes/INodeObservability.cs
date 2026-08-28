@@ -63,6 +63,27 @@ public interface INodeObservability
 }
 
 /// <summary>
+/// A node's way of saying "something this run produced was not kept".
+///
+/// <para>A sibling of <see cref="INodeObservability"/> rather than a method on it (Rule 7): reporting a LOSS is a
+/// different act from recording an observation, and a node that only records should not carry the ability to declare
+/// the run's data incomplete.</para>
+///
+/// <para>It exists because a node that swallows a storage failure and continues is often making the right call — the
+/// work succeeded, and failing the node over a lost copy would be worse — but a swallow with no trace leaves the run
+/// reporting success while something an operator expected to find is simply absent. This turns the silence into an
+/// accounted gap, so the completeness plane refuses to call that run's data complete.</para>
+/// </summary>
+public interface INodeLossReporting
+{
+    /// <summary>
+    /// Records that content this node produced could not be stored. Never throws: this is already the failure path,
+    /// and a node that must settle cannot be taken down by the bookkeeping about why it settled badly.
+    /// </summary>
+    Task NoticeContentNotStoredAsync(string detail, CancellationToken cancellationToken = default);
+}
+
+/// <summary>
 /// Optional decoration for <see cref="INodeObservability.TraceExternalCallAsync"/>'s completed
 /// record. Nodes use this to surface protocol-level outcome (HTTP status, an artifact ref to
 /// the response body, etc) on top of the bare "the call returned" signal.

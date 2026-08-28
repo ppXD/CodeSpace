@@ -14,7 +14,7 @@ namespace CodeSpace.Core.Services.Workflows.Nodes;
 /// Doing it inline means we don't have to thread <c>NodeId</c> / <c>RunId</c> through
 /// AsyncLocal or a scoped factory — the binding is explicit at construction time.</para>
 /// </summary>
-public sealed class NodeObservability : INodeObservability
+public sealed class NodeObservability : INodeObservability, INodeLossReporting
 {
     /// <summary>
     /// No-op handle for unit tests that exercise node logic without an engine. Production
@@ -30,6 +30,7 @@ public sealed class NodeObservability : INodeObservability
     private readonly Guid _teamId;
     private readonly Guid _parentRecordId;
     private readonly PersistenceSecretRedactor _redactor;
+    private readonly RunData.IRunDataCompletenessWriter? _completeness;
 
     public NodeObservability(NodeObservationBinding binding)
     {
@@ -40,10 +41,42 @@ public sealed class NodeObservability : INodeObservability
         _teamId = binding.TeamId;
         _parentRecordId = binding.ParentRecordId;
         _redactor = binding.Redactor;
+        _completeness = binding.Completeness;
     }
 
     public NodeObservability(IRunRecordLogger recordLogger, IArtifactStore artifactStore, Guid runId, string nodeId, Guid teamId, Guid parentRecordId)
         : this(new NodeObservationBinding(recordLogger, artifactStore, runId, nodeId, teamId, parentRecordId, new PersistenceSecretRedactor([]))) { }
+
+    /// <summary>
+    /// Turns a node's swallowed storage failure into an accounted gap.
+    ///
+    /// <para>Never throws, and never on the caller's cancellation token: a node reaches here only after deciding to
+    /// settle despite losing content, and the bookkeeping about that decision must not be the thing that fails it.
+    /// A binding with no completeness writer records nothing and says so by doing nothing — the same shape the model
+    /// call lane uses for a scope that carries no writer.</para>
+    /// </summary>
+    public async Task NoticeContentNotStoredAsync(string detail, CancellationToken cancellationToken = default)
+    {
+        if (_completeness is not { } writer) return;
+
+        try
+        {
+            await writer.NoticeAsync(new Persistence.Entities.WorkflowRunCaptureGap
+            {
+                Id = Guid.NewGuid(), TeamId = _teamId, WorkflowRunId = _runId,
+                SubjectKind = Messages.Contracts.WorkflowRunDataOwnerKinds.NodeOutput, SubjectId = _nodeId,
+                RangeKind = Persistence.Entities.CaptureGapRangeKind.Unbounded,
+                Reason = Persistence.Entities.CaptureGapReason.WriteRefused,
+                ReasonDetail = detail, CaptureSource = "in-process",
+                NoticedAt = DateTimeOffset.UtcNow, CreatedAt = DateTimeOffset.UtcNow,
+            }, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch
+        {
+            // The gap itself is best-effort. A lost gap leaves the run claiming complete data it does not have, which
+            // is the same false claim one layer out — but a node that already lost content must still settle.
+        }
+    }
 
     public async Task<TResult> TraceExternalCallAsync<TResult>(string target, string method, JsonElement? requestPayload, Func<CancellationToken, Task<TResult>> action, Func<TResult, ExternalCallCompletion>? completionExtractor = null, CancellationToken cancellationToken = default)
     {
@@ -146,4 +179,4 @@ public sealed class NodeObservability : INodeObservability
     }
 }
 
-public sealed record NodeObservationBinding(IRunRecordLogger RecordLogger, IArtifactStore ArtifactStore, Guid RunId, string NodeId, Guid TeamId, Guid ParentRecordId, PersistenceSecretRedactor Redactor);
+public sealed record NodeObservationBinding(IRunRecordLogger RecordLogger, IArtifactStore ArtifactStore, Guid RunId, string NodeId, Guid TeamId, Guid ParentRecordId, PersistenceSecretRedactor Redactor, RunData.IRunDataCompletenessWriter? Completeness = null);
