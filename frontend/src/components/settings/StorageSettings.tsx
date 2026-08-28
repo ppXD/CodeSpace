@@ -9,6 +9,7 @@ import { useStorageRoutes } from "@/hooks/use-storage-routes";
 import { TeamPermissions, useTeamPermissions } from "@/hooks/use-team-management";
 import { SchemaForm } from "@/components/workflows/SchemaForm";
 import { StorageCredentialSettings } from "./StorageCredentialSettings";
+import { StorageDefaultAdoption } from "./StorageDefaultAdoption";
 import { StorageRouteSettings } from "./StorageRouteSettings";
 import { StorageStep, type StorageStepState } from "./StorageStep";
 
@@ -76,6 +77,9 @@ export function StorageSettings() {
             promising a read-only view would be a claim this screen cannot keep. */}
         {!mayManage && <div className="cn-banner-p">Changing anything here needs the storage.manage permission, which you do not hold in this team.</div>}
       </div>
+
+      {/* Above the flow: adopting means the three steps below are already done for that class. */}
+      <StorageDefaultAdoption mayManage={mayManage} />
 
       <div className="stg-flow" style={{ margin: 16 }}>
         <StorageCredentialSettings providers={providerRows} state={stepState("credential")} />
