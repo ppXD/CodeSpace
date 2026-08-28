@@ -29,6 +29,22 @@ public class StorageDefaultsController : ControllerBase
 
     public StorageDefaultsController(IMediator mediator) { _mediator = mediator; }
 
+    /// <summary>The installed provider catalog, under this controller's own capability — an operator who authors templates need not belong to any team.</summary>
+    [HttpGet("provider-modules")]
+    public async Task<IActionResult> ListProviderModules(CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new ListStorageDefaultProviderModulesQuery(), cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>The routed data classes a template may be authored for, under this controller's own capability.</summary>
+    [HttpGet("data-classes")]
+    public async Task<IActionResult> ListDataClasses(CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new ListStorageDefaultDataClassesQuery(), cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     [HttpGet]
     public async Task<IActionResult> List(CancellationToken cancellationToken)
     {

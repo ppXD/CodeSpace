@@ -13,4 +13,14 @@ public sealed record StorageProviderModuleDescriptor
     public required JsonElement ConfigSchema { get; init; }
     public required JsonElement SecretSchema { get; init; }
     public required IReadOnlyList<string> Capabilities { get; init; }
+
+    /// <summary>
+    /// The <see cref="ConfigSchema"/> property that carries this provider's namespace, or null when it cannot
+    /// subdivide one and therefore cannot be a deployment default at all.
+    ///
+    /// <para>An author of a DEPLOYMENT template must not set it — the server refuses a template config that does —
+    /// because a template describes the whole deployment while that property names one team. A form has to know which
+    /// field that is, or it can only find out by being rejected.</para>
+    /// </summary>
+    public string? TeamNamespaceProperty { get; init; }
 }

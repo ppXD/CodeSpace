@@ -40,8 +40,10 @@ public sealed class StorageProviderModulesEndpointE2ETests : IClassFixture<TaskL
 
         var local = modules.Single(module => module.GetProperty("typeKey").GetString() == "local-rwx/v1");
         local.EnumerateObject().Select(property => property.Name).ShouldBe([
-            "typeKey", "displayName", "configSchema", "secretSchema", "capabilities"
+            "typeKey", "displayName", "configSchema", "secretSchema", "capabilities", "teamNamespaceProperty"
         ]);
+        local.GetProperty("teamNamespaceProperty").GetString().ShouldBe("rootPath",
+            "an admin form has to remove this property from the config it offers — the server refuses a deployment template that sets it, because it names one team");
         local.GetProperty("displayName").GetString().ShouldBe("Local / shared filesystem");
         local.GetProperty("configSchema").GetProperty("properties").TryGetProperty("rootPath", out _).ShouldBeTrue();
         local.GetProperty("secretSchema").GetProperty("properties").EnumerateObject().ShouldBeEmpty("the local provider declares no secret inputs");
