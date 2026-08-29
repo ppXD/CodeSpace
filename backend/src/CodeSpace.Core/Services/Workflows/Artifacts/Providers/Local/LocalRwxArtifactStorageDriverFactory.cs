@@ -224,9 +224,21 @@ internal sealed class LocalRwxArtifactStorageDriver : IArtifactStorageDriver
 
         try
         {
-            Directory.CreateDirectory(_root);
+            // A read-only probe must not MAKE the destination healthy. Creating the root here answered "yes, reachable"
+            // for a volume that had vanished, which is the one answer that must never be invented: the verifier asks
+            // this exact question to decide whether an absent object is evidence the object is gone, and a recreated
+            // empty root turns "the mount is missing" into "every object under it was deleted".
+            if (!request.VerifyWriteAccess && !Directory.Exists(_root))
+                return new ArtifactStorageProbeResult
+                {
+                    Status = ArtifactStorageProbeStatus.Unavailable, Latency = stopwatch.Elapsed,
+                    Error = Error(ArtifactStorageErrorCode.Unavailable, $"Local storage root '{_root}' does not exist.", isRetryable: true),
+                };
+
             if (request.VerifyWriteAccess)
             {
+                Directory.CreateDirectory(_root);
+
                 var probePath = Path.Combine(_root, ".codespace-probe-" + Guid.NewGuid().ToString("N"));
                 try
                 {
