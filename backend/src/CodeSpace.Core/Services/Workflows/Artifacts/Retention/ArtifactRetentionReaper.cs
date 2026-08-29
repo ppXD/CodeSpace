@@ -369,9 +369,8 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
 
     private ArtifactRetentionDecision RoutedWait(string code, string message) => ArtifactRetentionDecision.WaitForRetry(code, message);
 
-    private static ArtifactRetentionDecision ClaimRejection(ArtifactCasProblem problem) => problem.Code == ArtifactCasProblemCode.MultipleLocationsUnsupported
-        ? ArtifactRetentionDecision.Indeterminate("artifact-routed-multiple-locations", "The object has multiple physical locations; this reaper version refuses all partial replica deletion.")
-        : ArtifactRetentionDecision.Retry("artifact-routed-claim-refused", $"The routed location claim was refused with '{problem.Code}'.");
+    private static ArtifactRetentionDecision ClaimRejection(ArtifactCasProblem problem) =>
+        ArtifactRetentionDecision.Retry("artifact-routed-claim-refused", $"The routed location claim was refused with '{problem.Code}'.");
 
     /// <summary>
     /// Where the artifact's bytes are and whether they can be removed, read through <paramref name="db"/> so the
