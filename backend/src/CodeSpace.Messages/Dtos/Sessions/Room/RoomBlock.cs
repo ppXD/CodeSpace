@@ -317,6 +317,37 @@ public sealed record DeliveryBlock : RoomBlock
     public string? Url { get; init; }
 }
 
+/// <summary>
+/// The files a turn produced as files — a report, a diagram, a dataset — rather than as a change to a repository.
+///
+/// <para>Distinct from <see cref="DeliveryBlock"/>, which is the change set a turn pushed. An agent run with no
+/// repository has no git ground truth at all, so its deliverable is invisible everywhere the UI shows changed files:
+/// the workspace it was written in is deleted at the end of the run, and only the content-addressed copy survives.
+/// This block is the only way back to it.</para>
+/// </summary>
+public sealed record DeliverablesBlock : RoomBlock
+{
+    public required string Title { get; init; }
+    public required IReadOnlyList<DeliverableFile> Files { get; init; }
+}
+
+/// <summary>One produced file, with the id that fetches its bytes from <c>GET /api/artifacts/{artifactId}</c>.</summary>
+public sealed record DeliverableFile
+{
+    /// <summary>Where the agent wrote it, relative to its workspace — the path the operator asked for.</summary>
+    public required string Path { get; init; }
+
+    /// <summary>A routing hint for presentation (document, diagram, dataset), never a verdict about the content.</summary>
+    public required string Kind { get; init; }
+
+    public required long SizeBytes { get; init; }
+    public required string ContentType { get; init; }
+    public required Guid ArtifactId { get; init; }
+
+    /// <summary>Which agent produced it, so a multi-agent turn attributes its files.</summary>
+    public required Guid AgentRunId { get; init; }
+}
+
 /// <summary>A decision the AI needs answered — rendered as an inline answerable card (the wait it parked on).</summary>
 public sealed record DecisionBlock : RoomBlock
 {

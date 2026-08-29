@@ -206,6 +206,7 @@ public static class RoomNarrative
         if (ToolsStat(idPrefix, seq, facts) is { } tools) blocks.Add(tools);
 
         if (DeliveryFrom(idPrefix, seq, facts) is { } delivery) blocks.Add(delivery);
+        if (DeliverablesFrom(idPrefix, seq, facts) is { } deliverables) blocks.Add(deliverables);
 
         // Pending decisions are "now" — the current ask.
         blocks.AddRange(decisions);
@@ -503,6 +504,15 @@ public static class RoomNarrative
         NodeId = a.NodeId,
         IterationKey = a.IterationKey,
     };
+
+    /// <summary>Absent rather than empty when the turn produced no files: an empty list reads as "it produced nothing", which is a claim about the run rather than about this surface.</summary>
+    private static DeliverablesBlock? DeliverablesFrom(string idPrefix, long seq, RoomTurnFacts f) =>
+        f.Deliverables.Count == 0 ? null : new DeliverablesBlock
+        {
+            Id = $"{idPrefix}:deliverables", Seq = seq,
+            Title = f.Deliverables.Count == 1 ? "Produced 1 file" : $"Produced {f.Deliverables.Count} files",
+            Files = f.Deliverables,
+        };
 
     private static DeliveryBlock? DeliveryFrom(string idPrefix, long seq, RoomTurnFacts f)
     {

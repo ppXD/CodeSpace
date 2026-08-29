@@ -33,8 +33,11 @@ import type {
   RoomView,
   StatBlock,
   StatItem,
+  DeliverablesBlock,
+  DeliverableFile,
 } from "@/api/sessions";
 import { sessionsApi } from "@/api/sessions";
+import { downloadArtifact } from "@/api/artifacts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type PendingDecision, type PhaseAgentRef, type WorkflowRunStatus } from "@/api/workflows";
 import { AgentTerminal } from "@/components/workflows/AgentTerminal";
@@ -875,7 +878,7 @@ function RoomExecution({ steps, turnStatus, onSummon, canvasOpen }: { steps: Exe
 // ─── Journal mode: the chronological ③ timeline that replaces the Room's narrative blocks ───
 
 /** Result-family blocks rendered BELOW the journal timeline — the final answer / delivery / diagnostic ⑥ + any live pending decision. The supervisor "stop" is internal lifecycle, so its outcome lives HERE (the result card), never as a step in ③. */
-const JOURNAL_RESULT = new Set<RoomBlock["type"]>(["delivery", "final_answer", "diagnostic", "decision"]);
+const JOURNAL_RESULT = new Set<RoomBlock["type"]>(["delivery", "deliverables", "final_answer", "diagnostic", "decision"]);
 
 /** Every KNOWN inner-block type the journal deliberately consumes: execution map ① (via turn.map), plan ②, the decision skeleton ③ in place of agent_group, the live ticker, the result ⑥, and the stat support strip. Anything NOT here is an unknown/future additive type and falls through InnerBlock so it degrades to a faint line rather than vanishing (matching the room's forward-compat contract). (The room's narrative_step stack was deleted in P6 — the journal ③ owns that surface.) */
 const JOURNAL_HANDLED = new Set<RoomBlock["type"]>(["execution_map", "agent_group", "plan_checklist", "stat", "live_activity", ...JOURNAL_RESULT]);
@@ -1372,6 +1375,7 @@ function InnerBlock({ block, pdById, onOpenTrace }: { block: RoomBlock; pdById: 
   if (block.type === "plan_checklist") return <PlanChecklistCard plan={block as PlanChecklistBlock} />;
   if (block.type === "agent_group") return <AgentSection group={block as AgentGroupBlock} />;
   if (block.type === "delivery") return <PrCard delivery={block as DeliveryBlock} />;
+  if (block.type === "deliverables") return <ProducedFilesCard block={block as DeliverablesBlock} />;
   if (block.type === "final_answer") return <FinalAnswer answer={block as FinalAnswerBlock} />;
   if (block.type === "live_activity") return <LiveTicker live={block as LiveActivityBlock} />;
   if (block.type === "diagnostic") return <ErrorCard diag={block as DiagnosticBlock} onOpenTrace={onOpenTrace} />;
@@ -1885,6 +1889,49 @@ function PrCard({ delivery }: { delivery: DeliveryBlock }) {
 }
 
 /** The rich failure diagnostic — humanized title + cause + typed remediation + the raw error behind a toggle. */
+/**
+ * The files a turn produced as files — the only way back to them.
+ *
+ * <p>A run with no repository has no git ground truth, so its deliverable appears in no changed-file list, and the
+ * workspace it was written in is deleted when the run ends. Each row fetches the stored copy.</p>
+ */
+export function ProducedFilesCard({ block }: { block: DeliverablesBlock }) {
+  const [failed, setFailed] = useState<string | null>(null);
+
+  // Named, because "nothing happened" on a click is the failure mode this card exists to end: the bytes live at a
+  // storage destination that can stop serving them, and the row must say so rather than go quiet.
+  const save = (file: DeliverableFile) => {
+    setFailed(null);
+    downloadArtifact(file.artifactId, baseName(file.path)).catch(() => setFailed(file.path));
+  };
+
+  return (
+    <div className="room-pr">
+      <span className="room-pr-av"><Sym n="file" s={16} /></span>
+      <div className="room-pr-main">
+        <div className="room-pr-title"><span className="room-pr-name">{block.title}</span></div>
+        {block.files.map((file) => (
+          <div className="room-pr-sub" key={file.artifactId}>
+            <button type="button" className="room-pr-btn" onClick={() => save(file)}>{file.path}</button>
+            <span className="room-row-mid">·</span>
+            <span className="room-muted">{file.kind.toLowerCase()}</span>
+            <span className="room-row-mid">·</span>
+            <span className="room-muted">{formatBytes(file.sizeBytes)}</span>
+          </div>
+        ))}
+        {failed && <div className="room-pr-sub room-danger">Could not fetch {baseName(failed)}. It may have been removed from its storage destination.</div>}
+      </div>
+    </div>
+  );
+}
+
+/** Sizes an operator reads at a glance, not exact byte counts. */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 function ErrorCard({ diag, onOpenTrace }: { diag: DiagnosticBlock; onOpenTrace?: () => void }) {
   const [showRaw, setShowRaw] = useState(false);
   const actions = diag.actions ?? [];

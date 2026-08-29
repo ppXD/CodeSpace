@@ -107,6 +107,118 @@ public class RoomProjectorFlowTests
     }
 
     [Fact]
+    public async Task A_file_the_run_produced_is_reachable_even_though_it_touched_no_repository()
+    {
+        // The hole this closes: an agent.run with no repositoryId and an ArtifactPresent acceptance writes its
+        // report into a scratch workspace, the capture mints a manifest row plus CAS bytes, the oracle passes, the
+        // run reports Succeeded — and the workspace is then deleted. Every file surface in the UI is built from git
+        // ground truth, which that run has none of, so the deliverable existed only as a row nobody could reach.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Produced a report");
+        var runId = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Write the report", resultSummary: "done");
+        var agentRunId = await SeedProducedFileAsync(teamId, runId, "report.md", ArtifactManifestKind.Document, sizeBytes: 4096);
+
+        var block = await DeliverablesOfAsync(runId, teamId);
+
+        var file = block.Files.ShouldHaveSingleItem();
+        file.Path.ShouldBe("report.md");
+        file.Kind.ShouldBe(nameof(ArtifactManifestKind.Document));
+        file.SizeBytes.ShouldBe(4096);
+        file.AgentRunId.ShouldBe(agentRunId, "a multi-agent turn has to say which agent produced which file");
+        file.ArtifactId.ShouldNotBe(Guid.Empty, "the id is the whole point — it is what GET /api/artifacts/{id} takes");
+    }
+
+    [Fact]
+    public async Task A_re_captured_file_is_listed_once_as_its_current_copy()
+    {
+        // The ledger is append-only: a re-capture supersedes rather than rewrites, and the superseded row keeps
+        // pointing at its successor so the chain stays auditable. A reader asking "what did this run produce" wants
+        // the current copy; listing both would make one file look like two.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Recaptured a report");
+        var runId = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Rewrite the report", resultSummary: "done");
+        await SeedProducedFileAsync(teamId, runId, "report.md", ArtifactManifestKind.Document, sizeBytes: 10, supersededBy: Guid.NewGuid());
+        await SeedProducedFileAsync(teamId, runId, "report.md", ArtifactManifestKind.Document, sizeBytes: 4096);
+
+        var block = await DeliverablesOfAsync(runId, teamId);
+
+        block.Files.ShouldHaveSingleItem().SizeBytes.ShouldBe(4096);
+    }
+
+    [Fact]
+    public async Task A_turn_that_produced_no_files_carries_no_deliverables_block_at_all()
+    {
+        // Absent rather than empty: an empty list reads as "it produced nothing", which is a claim about the run
+        // rather than about this surface, and every repo-bound turn would then carry a misleading zero.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Produced nothing");
+        var runId = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Just think", resultSummary: "done");
+
+        var room = (await ProjectAsync(runId, teamId)).ShouldNotBeNull();
+
+        AllBlocks(room).OfType<DeliverablesBlock>().ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task One_teams_produced_files_never_appear_in_another_teams_room()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (otherTeam, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Scoped");
+        var runId = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Write", resultSummary: "done");
+        await SeedProducedFileAsync(otherTeam, runId, "theirs.md", ArtifactManifestKind.Document, sizeBytes: 8);
+
+        var room = (await ProjectAsync(runId, teamId)).ShouldNotBeNull();
+
+        AllBlocks(room).OfType<DeliverablesBlock>().ShouldBeEmpty();
+    }
+
+    private async Task<DeliverablesBlock> DeliverablesOfAsync(Guid runId, Guid teamId)
+    {
+        var room = (await ProjectAsync(runId, teamId)).ShouldNotBeNull();
+
+        return AllBlocks(room).OfType<DeliverablesBlock>().ShouldHaveSingleItem();
+    }
+
+    private async Task<RoomView?> ProjectAsync(Guid runId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<IRoomProjector>().ProjectByRunAsync(runId, teamId, CancellationToken.None);
+    }
+
+    private static IEnumerable<RoomBlock> AllBlocks(RoomView room) =>
+        room.Blocks.Concat(room.Blocks.OfType<AssistantTurnBlock>().SelectMany(turn => turn.Blocks));
+
+    /// <summary>Mints the manifest row and its CAS content the way a capture does, so the projection reads what production writes.</summary>
+    private async Task<Guid> SeedProducedFileAsync(Guid teamId, Guid runId, string path, ArtifactManifestKind kind, long sizeBytes, Guid? supersededBy = null)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var agentRunId = Guid.NewGuid();
+        var payload = System.Text.Encoding.UTF8.GetBytes($"{path} {Guid.NewGuid():N}");
+        var artifactId = Guid.NewGuid();
+
+        db.WorkflowArtifact.Add(new WorkflowArtifact
+        {
+            Id = artifactId, TeamId = teamId, Sha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(payload)),
+            ContentType = "text/markdown", SizeBytes = payload.Length, InlineBytes = payload, CreatedAt = now,
+        });
+        db.ArtifactManifest.Add(new ArtifactManifest
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, AgentRunId = agentRunId, WorkflowRunId = runId, FenceEpoch = 1,
+            Kind = kind, LogicalPath = path, ContentArtifactId = artifactId,
+            Sha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(payload)),
+            SizeBytes = sizeBytes, ContentType = "text/markdown", SupersededByManifestId = supersededBy,
+            CreatedDate = now, LastModifiedDate = now,
+        });
+        await db.SaveChangesAsync();
+
+        return agentRunId;
+    }
+
+    [Fact]
     public async Task A_foreign_run_or_session_projects_to_null_never_leaked()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
