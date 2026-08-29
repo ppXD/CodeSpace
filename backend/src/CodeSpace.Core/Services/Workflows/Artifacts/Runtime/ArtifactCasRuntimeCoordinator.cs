@@ -98,12 +98,12 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
             if (head.Problem != null) return new ArtifactCasReadResult.Unavailable(head.Problem);
             if (head.Timeout) return new ArtifactCasReadResult.Unavailable(Problem(ArtifactCasProblemCode.ProviderTimeout, true));
             if (head.Value?.Error != null) return new ArtifactCasReadResult.Unavailable(Map(head.Value.Error, readMissing: true));
-            if (!MetadataMatches(stored, head.Value!.Metadata!))
+            if (!MetadataMatches(stored, head.Value!.Metadata!, driver.Capabilities))
                 return new ArtifactCasReadResult.Unavailable(Problem(ArtifactCasProblemCode.TargetCorrupt));
 
             var opened = await InvokeAsync(token => driver.OpenReadAsync(new ArtifactStorageReadRequest(stored.ObjectKey)
             {
-                ExpectedETag = stored.ProviderETag,
+                ExpectedETag = DurableETag(stored.ProviderETag, driver.Capabilities),
                 ExpectedVersion = stored.ProviderObjectVersion,
             }, token), timeout, cancellationToken, driverLease).ConfigureAwait(false);
             if (opened.Problem != null) return new ArtifactCasReadResult.Unavailable(opened.Problem);
@@ -934,11 +934,22 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
         string.Equals(metadata.ObjectKey, objectKey, StringComparison.Ordinal) && metadata.Length == input.Size
         && (metadata.Sha256 == null || string.Equals(metadata.Sha256, Convert.ToHexStringLower(input.Digest), StringComparison.OrdinalIgnoreCase));
 
-    private static bool MetadataMatches(ReadLocation stored, ArtifactStorageObjectMetadata metadata) =>
+    private static bool MetadataMatches(ReadLocation stored, ArtifactStorageObjectMetadata metadata, StorageProviderCapabilities capabilities) =>
         string.Equals(metadata.ObjectKey, stored.ObjectKey, StringComparison.Ordinal) && metadata.Length == stored.Size
         && (metadata.Sha256 == null || string.Equals(metadata.Sha256, Convert.ToHexStringLower(stored.Digest), StringComparison.OrdinalIgnoreCase))
-        && (stored.ProviderETag == null || string.Equals(metadata.ETag, stored.ProviderETag, StringComparison.Ordinal))
+        && (DurableETag(stored.ProviderETag, capabilities) == null || string.Equals(metadata.ETag, stored.ProviderETag, StringComparison.Ordinal))
         && (stored.ProviderObjectVersion == null || string.Equals(metadata.Version, stored.ProviderObjectVersion, StringComparison.Ordinal));
+
+    /// <summary>
+    /// A recorded ETag, but only from a provider whose ETag actually identifies the bytes.
+    ///
+    /// <para>An ETag the destination may change while the object stays put — the local driver derives one from the
+    /// file's modification time — is a valid same-session conditional token and a false identity months later. Applied
+    /// here rather than at write time so destinations that already recorded such a value stop failing their reads,
+    /// which is the state a restore or a migration leaves them in.</para>
+    /// </summary>
+    internal static string? DurableETag(string? recorded, StorageProviderCapabilities capabilities) =>
+        capabilities.HasFlag(StorageProviderCapabilities.StableETag) ? recorded : null;
 
     private static bool MetadataAgrees(ArtifactStorageObjectMetadata head, ArtifactStorageObjectMetadata opened, string objectKey) =>
         string.Equals(head.ObjectKey, objectKey, StringComparison.Ordinal) && string.Equals(opened.ObjectKey, objectKey, StringComparison.Ordinal)

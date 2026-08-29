@@ -80,7 +80,7 @@ public sealed partial class ArtifactCasRuntimeCoordinator
         {
             var deletion = await InvokeAsync(token => lease.Driver.DeleteAsync(new ArtifactStorageDeleteRequest(claim.ObjectKey)
             {
-                ExpectedETag = claim.ProviderETag, ExpectedVersion = claim.ProviderObjectVersion,
+                ExpectedETag = DurableETag(claim.ProviderETag, lease.Driver.Capabilities), ExpectedVersion = claim.ProviderObjectVersion,
             }, token), claim.OperationTimeout, cancellationToken, lease).ConfigureAwait(false);
             if (deletion.Problem != null) return new ArtifactCasPurgeResult.Rejected(deletion.Problem, EffectMayHaveOccurred: true);
             if (deletion.Timeout) return new ArtifactCasPurgeResult.Rejected(Problem(ArtifactCasProblemCode.ProviderTimeout, true), EffectMayHaveOccurred: true);
