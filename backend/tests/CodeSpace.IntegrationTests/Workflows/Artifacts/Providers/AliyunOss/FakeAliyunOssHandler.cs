@@ -5,7 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 
-namespace CodeSpace.UnitTests.Workflows.Artifacts.Providers.AliyunOss;
+namespace CodeSpace.IntegrationTests.Workflows.Artifacts.Providers.AliyunOss;
 
 /// <summary>
 /// Deterministic in-memory stand-in for the Aliyun OSS object API, so the shared driver conformance kit runs in CI
@@ -26,7 +26,7 @@ namespace CodeSpace.UnitTests.Workflows.Artifacts.Providers.AliyunOss;
 /// which is the correct next step whenever the driver learns to discard by version id.
 /// The STS token is optional here exactly as it is in the secret schema, so both credential shapes reach the wire.
 /// </summary>
-internal sealed class FakeAliyunOssHandler : HttpMessageHandler
+public sealed class FakeAliyunOssHandler : HttpMessageHandler
 {
     public const string Bucket = "codespace-artifacts";
     public const string Region = "cn-hangzhou";
@@ -49,6 +49,9 @@ internal sealed class FakeAliyunOssHandler : HttpMessageHandler
 
     /// <summary>Forces every request to fail the way OSS fails a bad signature, body echo included.</summary>
     public bool RejectEverySignature { get; set; }
+
+    /// <summary>Empties the bucket without touching the recorded calls — the shape of an object deleted outside CodeSpace.</summary>
+    public void EmptyBucket() => _objects.Clear();
 
     public IReadOnlyCollection<string> Keys { get { lock (_gate) return _objects.Keys.ToList(); } }
 

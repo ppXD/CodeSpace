@@ -26,4 +26,11 @@
     <ProjectReference Include="..\..\src\CodeSpace.Messages\CodeSpace.Messages.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- ONE source for the in-memory OSS endpoint. It lives in the integration project because that is where it is
+         driven through the real CAS coordinator; linking it here keeps the driver-level contract tests on the exact
+         same fake, so the two tiers can never disagree about what the provider does. -->
+    <Compile Include="..\CodeSpace.IntegrationTests\Workflows\Artifacts\Providers\AliyunOss\FakeAliyunOssHandler.cs" Link="Workflows\Artifacts\Providers\AliyunOss\FakeAliyunOssHandler.cs" />
+  </ItemGroup>
+
 </Project>
