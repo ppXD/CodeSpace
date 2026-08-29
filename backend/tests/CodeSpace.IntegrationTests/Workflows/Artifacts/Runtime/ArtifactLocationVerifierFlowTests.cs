@@ -145,6 +145,29 @@ public sealed class ArtifactLocationVerifierFlowTests : IDisposable
         after.Revision.ShouldBe(demoted.Revision, "a Corrupt row must not even be re-examined, let alone rewritten");
     }
 
+    [Fact]
+    public async Task A_destination_whose_whole_root_has_vanished_demotes_nothing()
+    {
+        // The scenario the liveness corroboration exists for, and the one it did not actually cover: an unmounted
+        // volume, a detached disk, a deleted directory. Every object under it reads as absent, so without a truthful
+        // answer about the DESTINATION every placement a team owns is demoted in a single pass — and a demotion of
+        // bytes that are merely unreachable is far worse than the silence it replaced.
+        //
+        // The existing sibling test replaces the root with a FILE, which throws and is therefore easy to answer
+        // honestly. A root that is simply GONE is the case a probe can silently paper over by creating it.
+        var world = await SeedStoredArtifactAsync();
+        var before = await LocationAsync(world);
+
+        Directory.Delete(world.Root, recursive: true);
+
+        await VerifyAsync();
+
+        var after = await LocationAsync(world);
+        after.State.ShouldBe(ArtifactLocationState.Available, "a destination that is not there cannot testify that an object was deleted");
+        after.VerifiedAt.ShouldBe(before.VerifiedAt, "and the row must stay visibly unchecked rather than looking freshly confirmed");
+        Directory.Exists(world.Root).ShouldBeFalse("checking a destination must never be what creates it");
+    }
+
     // ─── World + helpers ─────────────────────────────────────────────────────
 
     private async Task<ArtifactLocationVerificationSummary> VerifyAsync()
