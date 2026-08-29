@@ -202,7 +202,7 @@ public sealed class AliyunOssArtifactStorageDriverContractTests : ArtifactStorag
 
         head.Error!.Code.ShouldBe(ArtifactStorageErrorCode.Unavailable, "a bucket that is not there is a profile an operator must fix, not an object the plane may treat as not yet written");
         head.Error.ProviderCode.ShouldBe("NoSuchBucket");
-        head.Error.IsRetryable.ShouldBeTrue();
+        head.Error.IsRetryable.ShouldBeFalse("retrying does not bring a deleted bucket back — and this bit is what separates it from a transient 5xx wearing the same code, which is the entire safety of corroborated abandonment");
         _oss.Calls.ShouldBe(["HEAD /codespace/objects/absent/value", "GET /?list-type=2&max-keys=0"], "the HEAD carries no body to classify, so exactly one bucket-scoped re-ask must supply the token");
     }
 
