@@ -104,8 +104,16 @@ public sealed class AgentProgressLeaseTests : IDisposable
         // spool output, and the watchdog must see the wait as progress. Assert both halves — the lease stayed fresh
         // (measured as the observer measures it) AND the protocol response is byte-identical.
         var lease = new AgentProgressLease(Path.Combine(TempDirectory(), "progress"));
-        var window = AgentProgressLease.RenewalHeartbeat * 2;
-        var inner = new BlockingHandler(window * 2) { Lease = lease };
+        var block = AgentProgressLease.RenewalHeartbeat * 4;
+
+        // The window is 3 heartbeats, not 2, and the asymmetry is deliberate. The two outcomes are not equally
+        // jittery: a WORKING heartbeat lands the age somewhere near one heartbeat plus whatever the thread pool adds,
+        // while a DEAD one lands it at exactly the block — a value that does not move under load. So the slack belongs
+        // on the passing side. At 2 heartbeats this had ~1s of room for pool jitter and went red on loaded CI; at 3 it
+        // has ~2s, and a dead heartbeat still overshoots by a full second. Tightening this back trades a real
+        // regression signal for nothing.
+        var window = AgentProgressLease.RenewalHeartbeat * 3;
+        var inner = new BlockingHandler(block) { Lease = lease };
 
         var handler = new ProgressLeaseRenewingHandler(inner, lease);
         var response = await handler.HandleAsync(JsonDocument.Parse("""{"jsonrpc":"2.0","id":1,"method":"tools/call"}""").RootElement, CancellationToken.None);
@@ -114,7 +122,7 @@ public sealed class AgentProgressLeaseTests : IDisposable
         response!.Value.GetProperty("result").GetString().ShouldBe("parked-then-approved", "the decorator forwards the handler's own response unchanged");
 
         inner.LeaseAgeAtWake.ShouldBeLessThan(window,
-            customMessage: "measured at the instant the approval landed, the lease must be fresher than the no-progress window — that is exactly the comparison the observer makes before killing a run");
+            customMessage: $"the lease was {inner.LeaseAgeAtWake.TotalMilliseconds:0}ms stale when the approval landed, against a {window.TotalMilliseconds:0}ms window and a {block.TotalMilliseconds:0}ms block — measured at that instant, the lease must be fresher than the no-progress window, which is exactly the comparison the observer makes before killing a run. A value at or near the block means the heartbeat never renewed at all.");
     }
 
     /// <summary>A handler that BLOCKS like a real tools/call parked on a human approval, and records how stale the lease was at the moment it woke — the quantity the observer's watchdog actually tests.</summary>

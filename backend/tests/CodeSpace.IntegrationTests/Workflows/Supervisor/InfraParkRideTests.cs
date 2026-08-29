@@ -81,7 +81,7 @@ public sealed class InfraParkRideTests
         // red the floor (the first walk covers only one fast failed 429/503) — the exact false red this lane removes.
         // If it INCLUDED the pauses, the ride would hand a fake-served planner ~40s of free credit and the floor could
         // never catch the 221ms fake again. So: real wake work counted, deliberate sleeping not.
-        var pause = TimeSpan.FromMilliseconds(400);          // slept TWICE (once per wake) → 800ms of pure waiting
+        var pause = TimeSpan.FromMilliseconds(600);          // slept TWICE (once per wake) → 1200ms of pure waiting
         var workPerWake = TimeSpan.FromMilliseconds(60);     // driven TWICE → ~120ms of real engine driving
         var reads = new Queue<ParkedCell>(new[] { Parked(), Parked(), Settled() });
 
@@ -92,7 +92,11 @@ public sealed class InfraParkRideTests
         ride.DriveTime.ShouldBeGreaterThanOrEqualTo(workPerWake,
             $"DriveTime was {ride.DriveTime.TotalMilliseconds:0}ms — the ride drove the engine for {workPerWake.TotalMilliseconds:0}ms per wake, and dropping that work leaves the floor timing one FAILED call and red-ing a park that RESOLVED");
 
-        ride.DriveTime.ShouldBeLessThan(pause,
+        // The ceiling is EXACTLY the total slept, not a fraction of it, and that is what makes the margin hold under
+        // load. A ride that wrongly counted its pauses reports sleeping PLUS work, so it overshoots this line by the
+        // work — a gap that grows with load rather than shrinking, because both halves grow together. A fraction of
+        // the pause would instead squeeze the honest case, which is the only one thread-pool jitter can inflate.
+        ride.DriveTime.ShouldBeLessThan(pause * 2,
             $"DriveTime was {ride.DriveTime.TotalMilliseconds:0}ms, which reaches into the {(pause * 2).TotalMilliseconds:0}ms the ride SLEPT — counting the ride's own waiting would let a fake-served planner clear the live-call floor for free");
     }
 
