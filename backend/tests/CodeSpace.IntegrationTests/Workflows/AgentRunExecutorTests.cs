@@ -132,6 +132,83 @@ public class AgentRunExecutorTests
         harness.BuiltTask.RestoredTranscriptArtifactId.ShouldBeNull("the harness consumes the resolved bytes, not a storage coordinate");
     }
 
+
+    [Fact]
+    public async Task A_resume_transcript_that_lives_at_a_provider_reaches_the_harness_byte_for_byte()
+    {
+        // The sibling above uses a 38-byte transcript, which stays INLINE — so the executor's only artifact read has
+        // never touched a driver or the location ledger. This is the same guarantee over the shape a configured
+        // deployment always has: bytes that exist only at a provider must still reach the sandbox.
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var actorId = await OwnerOfAsync(teamId);
+        var destination = await RoutedArtifactSeed.RouteTeamAsync(_fixture, teamId, actorId);
+        var artifactId = await RoutedArtifactSeed.WriteRoutedAsync(_fixture, teamId, "prior session state with exact utf8 \u03c0", "text/plain");
+        var expected = System.Text.Encoding.UTF8.GetString(RoutedArtifactSeed.Payload("prior session state with exact utf8 \u03c0"));
+
+        destination.ObjectCount.ShouldBe(1, "the transcript must physically be at the provider, or this proves nothing the inline test did not");
+
+        var runId = await CreateResumeRunAsync(teamId, artifactId);
+        var harness = new ScriptedHarness("printf 'resumed\\n'");
+
+        await ExecuteAsync(runId, harness);
+
+        using var verify = _fixture.BeginScope();
+        (await verify.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded,
+            "a run whose transcript is at a provider must launch exactly like one whose transcript is inline");
+        harness.BuiltTask.ShouldNotBeNull().RestoredTranscript.ShouldBe(expected, "every byte the provider holds must arrive, not a truncated or re-encoded copy");
+        harness.BuiltTask.RestoredTranscriptArtifactId.ShouldBeNull("the harness consumes the resolved bytes, not a storage coordinate");
+    }
+
+    [Fact]
+    public async Task A_resume_transcript_written_before_a_route_repoint_still_reaches_the_harness()
+    {
+        // The provider-switch guarantee where it costs the most: a run that cannot read its own transcript does not
+        // degrade, it never launches. The resolve is fail-closed by design.
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var actorId = await OwnerOfAsync(teamId);
+        var first = await RoutedArtifactSeed.RouteTeamAsync(_fixture, teamId, actorId);
+        var artifactId = await RoutedArtifactSeed.WriteRoutedAsync(_fixture, teamId, "written before the switch", "text/plain");
+        var runId = await CreateResumeRunAsync(teamId, artifactId);
+
+        await RepointArtifactRouteAsync(teamId, actorId, first.RouteId);
+
+        var harness = new ScriptedHarness("printf 'resumed\\n'");
+        await ExecuteAsync(runId, harness);
+
+        using var verify = _fixture.BeginScope();
+        (await verify.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded);
+        harness.BuiltTask.ShouldNotBeNull().RestoredTranscript.ShouldStartWith("written before the switch");
+        first.ObjectCount.ShouldBe(1, "the bytes never moved — only the route did");
+    }
+
+    [Fact]
+    public async Task A_resume_transcript_whose_provider_object_is_gone_stops_the_run_instead_of_launching_without_it()
+    {
+        // Fail-closed is the whole contract here. An agent resumed WITHOUT its prior state is not a degraded run, it is
+        // a different run that will redo or contradict work — far worse than a run that refuses to start.
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var actorId = await OwnerOfAsync(teamId);
+        var destination = await RoutedArtifactSeed.RouteTeamAsync(_fixture, teamId, actorId);
+        var artifactId = await RoutedArtifactSeed.WriteRoutedAsync(_fixture, teamId, "about to vanish", "text/plain");
+        var runId = await CreateResumeRunAsync(teamId, artifactId);
+
+        Directory.Delete(destination.Root, recursive: true);
+
+        var harness = new ScriptedHarness("printf 'resumed\\n'");
+        await ExecuteAsync(runId, harness);
+
+        using var verify = _fixture.BeginScope();
+        (await verify.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status.ShouldNotBe(AgentRunStatus.Succeeded,
+            "a resume that silently dropped its prior state would look like a success and behave like a different run");
+        harness.BuiltTask.ShouldBeNull("the harness must never be built without the state the task declared it required");
+    }
+
     [Fact]
     public async Task The_launch_hands_the_runner_the_autonomy_tier_s_resource_ceilings()
     {
@@ -1552,6 +1629,52 @@ public class AgentRunExecutorTests
             new AgentTask { Goal = "scripted", Harness = "scripted", Model = "test-model", TimeoutSeconds = 1800, Workspace = spec, PushProducedBranch = push },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
         return run.Id;
+    }
+
+    /// <summary>The Owner this suite seeded for the team, needed by fixtures that write rows attributed to a real user.</summary>
+    private async Task<Guid> OwnerOfAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().TeamMembership.AsNoTracking()
+            .Where(membership => membership.TeamId == teamId).Select(membership => membership.UserId).FirstAsync();
+    }
+
+    /// <summary>A run that declares it REQUIRES a stored transcript, so the executor must resolve it before the harness is built.</summary>
+    private async Task<Guid> CreateResumeRunAsync(Guid teamId, Guid transcriptArtifactId)
+    {
+        using var scope = _fixture.BeginScope();
+        var created = await scope.Resolve<IAgentRunService>().CreateAsync(
+            new AgentTask
+            {
+                Goal = "resume the prior work",
+                Harness = "scripted",
+                Model = "test-model",
+                ResumeFromSessionId = "session-with-required-state",
+                RestoredTranscriptArtifactId = transcriptArtifactId,
+            },
+            teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
+
+        return created.Id;
+    }
+
+    /// <summary>Appends a route revision pointing somewhere else and advances the head in one save, the way 0134 requires.</summary>
+    private async Task RepointArtifactRouteAsync(Guid teamId, Guid actorId, Guid routeId)
+    {
+        var next = await RoutedArtifactSeed.RouteTeamAsync(_fixture, teamId, actorId, dataClassTypeKey: "unused/v1");
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var route = await db.StorageRoute.SingleAsync(value => value.Id == routeId);
+        route.CurrentRevision = 2;
+        route.LastModifiedDate = DateTimeOffset.UtcNow;
+        db.StorageRouteRevision.Add(new StorageRouteRevision
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, StorageRouteId = routeId, Revision = 2, StorageProfileId = next.ProfileId,
+            ProfileRevisionMode = StorageProfileRevisionMode.CurrentAtWrite, PinnedProfileRevision = null,
+            CreatedDate = DateTimeOffset.UtcNow, CreatedBy = actorId,
+        });
+        await db.SaveChangesAsync();
     }
 
     private async Task<Guid> SeedTeamAsync()
