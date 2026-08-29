@@ -236,6 +236,111 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         (await PlacementStateAsync(world, locationId)).ShouldBe(ArtifactLocationState.Corrupt);
     }
 
+    [Theory]
+    [InlineData(ArtifactStorageErrorCode.ProviderFailure)]   // the destination is having a bad moment
+    [InlineData(ArtifactStorageErrorCode.Throttled)]         // it is refusing the pace, not the object
+    public async Task A_destination_having_a_bad_moment_is_not_evidence_that_anything_is_gone(ArtifactStorageErrorCode transient)
+    {
+        // The predicate that decides what counts as proof is the whole safety of this operation. An answer about the
+        // REQUEST — a fault, a throttle — says nothing about whether the object is there, and closing a record on it
+        // would strand readable bytes on the strength of one bad second.
+        var world = await SeedWorldAsync();
+        var storage = MultiLocationStorage();
+        var bytes = "bytes behind a flaky destination"u8.ToArray();
+        var committed = (await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "abandon-flaky")))
+            .ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        var locationId = await FirstPlacementAsync(world, committed.ArtifactObjectId, exceptId: Guid.Empty);
+        storage.HeadErrors.Enqueue(new ArtifactStorageError(transient, "not now", true));
+
+        var result = await AbandonAsync(world, storage, committed.ArtifactObjectId);
+
+        result.ShouldBeOfType<ArtifactCasAbandonResult.Rejected>();
+        (await PlacementStateAsync(world, locationId)).ShouldBe(ArtifactLocationState.Deleting,
+            "the claim stands so a caller can retry or release it — what must not happen is the record being closed");
+    }
+
+    [Fact]
+    public async Task A_placement_is_never_abandoned_while_its_destination_still_serves_it()
+    {
+        // The invariant the whole operation rests on. Abandoning closes the record without deleting anything, so if
+        // the bytes are still there the record was the only thing pointing at them — and closing it strands them
+        // exactly as thoroughly as deleting them would have.
+        var world = await SeedWorldAsync();
+        var storage = MultiLocationStorage();
+        var bytes = "bytes that are still there"u8.ToArray();
+        var committed = (await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "abandon-live")))
+            .ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        var locationId = await FirstPlacementAsync(world, committed.ArtifactObjectId, exceptId: Guid.Empty);
+
+        var result = await AbandonAsync(world, storage, committed.ArtifactObjectId);
+
+        result.ShouldBeOfType<ArtifactCasAbandonResult.StillServed>();
+        storage.DeleteCalls.ShouldBe(0);
+        (await PlacementStateAsync(world, locationId)).ShouldBe(ArtifactLocationState.Available,
+            "a refused abandonment must give the row back exactly as it found it");
+    }
+
+    [Fact]
+    public async Task A_placement_whose_destination_no_longer_holds_it_is_closed_without_a_delete()
+    {
+        // The exit for a destination that is already gone. Nothing else can close these records: a delete cannot be
+        // attempted against a destination that will not answer, and the verifier deliberately leaves an unanswerable
+        // destination alone because that is not evidence about an object.
+        var world = await SeedWorldAsync();
+        var storage = MultiLocationStorage();
+        var bytes = "bytes at a destination that vanished"u8.ToArray();
+        var committed = (await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "abandon-gone")))
+            .ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        var locationId = await FirstPlacementAsync(world, committed.ArtifactObjectId, exceptId: Guid.Empty);
+        storage.Objects.Remove("cas/abandon-gone.bin", out _);
+
+        var result = await AbandonAsync(world, storage, committed.ArtifactObjectId);
+
+        result.ShouldBeOfType<ArtifactCasAbandonResult.Abandoned>().Evidence.ShouldContain("cas/abandon-gone.bin");
+        storage.DeleteCalls.ShouldBe(0, "abandoning is a statement about the record; it must never touch the destination");
+        (await PlacementStateAsync(world, locationId)).ShouldBe(ArtifactLocationState.Purged);
+    }
+
+    [Fact]
+    public async Task A_placement_holding_someone_elses_object_can_be_closed_even_though_it_can_never_be_deleted()
+    {
+        // Corrupt is the one state with no other way out: it cannot be deleted, because the delete cannot be
+        // conditioned on identity for every provider. Without this it would block its profile's retirement forever
+        // and keep that content unwritable under the revision.
+        var world = await SeedWorldAsync();
+        var storage = MultiLocationStorage();
+        var bytes = "bytes replaced at the destination"u8.ToArray();
+        var committed = (await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "abandon-corrupt")))
+            .ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        var locationId = await FirstPlacementAsync(world, committed.ArtifactObjectId, exceptId: Guid.Empty);
+        await DemoteAsync(world, locationId, ArtifactLocationState.Corrupt);
+        storage.Objects.Remove("cas/abandon-corrupt.bin", out _);
+
+        var result = await AbandonAsync(world, storage, committed.ArtifactObjectId);
+
+        result.ShouldBeOfType<ArtifactCasAbandonResult.Abandoned>();
+        (await PlacementStateAsync(world, locationId)).ShouldBe(ArtifactLocationState.Purged);
+    }
+
+    [Fact]
+    public async Task A_refused_abandonment_gives_a_lost_placement_back_as_lost_rather_than_as_good()
+    {
+        // Releasing a claim establishes nothing about the row. Putting a Missing row back as Available would declare
+        // unreadable bytes readable again on the strength of an operation that did nothing.
+        var world = await SeedWorldAsync();
+        var storage = MultiLocationStorage();
+        var bytes = "bytes recorded lost but still present"u8.ToArray();
+        var committed = (await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "abandon-relapse")))
+            .ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        var locationId = await FirstPlacementAsync(world, committed.ArtifactObjectId, exceptId: Guid.Empty);
+        await DemoteAsync(world, locationId, ArtifactLocationState.Missing);
+
+        var result = await AbandonAsync(world, storage, committed.ArtifactObjectId);
+
+        result.ShouldBeOfType<ArtifactCasAbandonResult.StillServed>();
+        (await PlacementStateAsync(world, locationId)).ShouldBe(ArtifactLocationState.Missing);
+    }
+
     [Fact]
     public async Task Routed_purge_still_refuses_to_guess_which_placement_a_multi_placed_object_meant()
     {
@@ -1209,6 +1314,18 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         await db.SaveChangesAsync();
     }
 
+    private async Task<ArtifactCasAbandonResult> AbandonAsync(World world, FakeStorageState storage, Guid artifactObjectId)
+    {
+        using var scope = Scope(storage);
+        var coordinator = scope.Resolve<IArtifactCasPurgeCoordinator>();
+        var claimed = await coordinator.ClaimAsync(new ArtifactCasPurgeRequest
+        {
+            TeamId = world.TeamId, ArtifactObjectId = artifactObjectId, ActorId = world.ActorId,
+        }, CancellationToken.None);
+
+        return await coordinator.AbandonAsync(claimed.ShouldBeOfType<ArtifactCasPurgeClaimResult.Claimed>().Claim, CancellationToken.None);
+    }
+
     private static FakeStorageState MultiLocationStorage() => new()
     {
         Capabilities = StorageProviderCapabilities.StreamingWrite | StorageProviderCapabilities.StreamingRead
@@ -1306,6 +1423,7 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
     {
         public ConcurrentDictionary<string, byte[]> Objects { get; } = new(StringComparer.Ordinal);
         public ConcurrentQueue<ArtifactStorageError> PutErrors { get; } = new();
+        public ConcurrentQueue<ArtifactStorageError> HeadErrors { get; } = new();
         public TaskCompletionSource BlockedPutEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ReleaseBlockedPut { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource BlockedAfterPutEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1386,7 +1504,9 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         }
 
         public ValueTask<ArtifactStorageHeadResult> HeadAsync(ArtifactStorageHeadRequest request, CancellationToken cancellationToken) =>
-            ValueTask.FromResult(state.Objects.TryGetValue(request.ObjectKey, out var bytes)
+            state.HeadErrors.TryDequeue(out var injected)
+                ? ValueTask.FromResult(ArtifactStorageHeadResult.Failed(injected))
+                : ValueTask.FromResult(state.Objects.TryGetValue(request.ObjectKey, out var bytes)
                 ? ArtifactStorageHeadResult.Found(Metadata(request.ObjectKey, bytes))
                 : ArtifactStorageHeadResult.Failed(new ArtifactStorageError(ArtifactStorageErrorCode.Missing, "missing")));
 

@@ -1195,6 +1195,8 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
 
         public Task<ArtifactCasPurgeResult> DeleteAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken) => _inner.DeleteAsync(claim, cancellationToken);
         public Task<bool> ReleaseAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken) => _inner.ReleaseAsync(claim, cancellationToken);
+
+        public Task<ArtifactCasAbandonResult> AbandonAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken) => _inner.AbandonAsync(claim, cancellationToken);
         public Task<ArtifactCasPurgeResult> PurgeAsync(ArtifactCasPurgeRequest request, CancellationToken cancellationToken) => _inner.PurgeAsync(request, cancellationToken);
     }
 
@@ -1216,6 +1218,8 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
             ReleaseCalls++;
             return _inner.ReleaseAsync(claim, cancellationToken);
         }
+
+        public Task<ArtifactCasAbandonResult> AbandonAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken) => _inner.AbandonAsync(claim, cancellationToken);
 
         public Task<ArtifactCasPurgeResult> PurgeAsync(ArtifactCasPurgeRequest request, CancellationToken cancellationToken) => _inner.PurgeAsync(request, cancellationToken);
     }
