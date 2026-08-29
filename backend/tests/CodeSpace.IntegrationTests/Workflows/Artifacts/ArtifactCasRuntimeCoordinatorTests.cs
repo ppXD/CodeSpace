@@ -185,6 +185,58 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
     }
 
     [Fact]
+    public async Task A_placement_the_destination_says_is_gone_can_be_drained_and_its_content_written_again()
+    {
+        // A Missing row was unreachable by every path at once: readers skip it, the drain refused it, and it kept
+        // blocking its profile's retirement. Worse, only a Purged location spends the idempotency generation — so
+        // until this row can reach Purged, that content is permanently unwritable under this profile revision.
+        var world = await SeedWorldAsync();
+        var storage = MultiLocationStorage();
+        var bytes = "bytes the destination lost"u8.ToArray();
+        var committed = (await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "purge-lost")))
+            .ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        var locationId = await FirstPlacementAsync(world, committed.ArtifactObjectId, exceptId: Guid.Empty);
+        await DemoteAsync(world, locationId, ArtifactLocationState.Missing);
+        storage.Objects.Remove("cas/purge-lost.bin", out _);
+
+        using var purgeScope = Scope(storage);
+        var result = await purgeScope.Resolve<IArtifactCasPurgeCoordinator>().PurgeAsync(new ArtifactCasPurgeRequest
+        {
+            TeamId = world.TeamId, ArtifactObjectId = committed.ArtifactObjectId, ActorId = world.ActorId,
+        }, CancellationToken.None);
+
+        result.ShouldBeOfType<ArtifactCasPurgeResult.Purged>();
+        (await PlacementStateAsync(world, locationId)).ShouldBe(ArtifactLocationState.Purged,
+            "the record has to reach Purged, which is the only state that lets the same content be written here again");
+    }
+
+    [Fact]
+    public async Task A_placement_holding_someone_elses_object_is_never_drained_by_deleting_it()
+    {
+        // Corrupt is a positive claim that the destination holds something that is NOT this object. The delete cannot
+        // always be conditioned — a provider whose ETag is not a content identity gives nothing to condition on — so
+        // proceeding would delete bytes already identified as not ours. Closing that record is a separate decision
+        // about the record, never about the bytes.
+        var world = await SeedWorldAsync();
+        var storage = MultiLocationStorage();
+        var bytes = "bytes replaced by something else"u8.ToArray();
+        var committed = (await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "purge-corrupt")))
+            .ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        var locationId = await FirstPlacementAsync(world, committed.ArtifactObjectId, exceptId: Guid.Empty);
+        await DemoteAsync(world, locationId, ArtifactLocationState.Corrupt);
+
+        using var purgeScope = Scope(storage);
+        var result = await purgeScope.Resolve<IArtifactCasPurgeCoordinator>().PurgeAsync(new ArtifactCasPurgeRequest
+        {
+            TeamId = world.TeamId, ArtifactObjectId = committed.ArtifactObjectId, ActorId = world.ActorId,
+        }, CancellationToken.None);
+
+        result.ShouldBeOfType<ArtifactCasPurgeResult.Rejected>();
+        storage.DeleteCalls.ShouldBe(0, "the one thing that must not happen is deleting an object we have positively identified as not ours");
+        (await PlacementStateAsync(world, locationId)).ShouldBe(ArtifactLocationState.Corrupt);
+    }
+
+    [Fact]
     public async Task Routed_purge_still_refuses_to_guess_which_placement_a_multi_placed_object_meant()
     {
         // Naming no placement means "the only one". For an object with several that is not an instruction, and
@@ -1129,6 +1181,32 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         await db.SaveChangesAsync();
 
         return location.Id;
+    }
+
+    /// <summary>Moves a placement to a state the verifier would put it in, with the ledger entry the schema requires alongside it.</summary>
+    private async Task DemoteAsync(World world, Guid locationId, ArtifactLocationState state)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var location = await db.ArtifactLocation.SingleAsync(value => value.TeamId == world.TeamId && value.Id == locationId);
+        var now = DateTimeOffset.UtcNow;
+        location.State = state;
+        location.Revision++;
+        location.LastErrorCode = "seeded-demotion";
+        location.LastErrorMessage = "Seeded by a test to reach a state the verifier produces.";
+        location.LastModifiedDate = now;
+        db.ArtifactLocationEvent.Add(new ArtifactLocationEvent
+        {
+            Id = Guid.NewGuid(), TeamId = world.TeamId, ArtifactLocationId = location.Id, Revision = location.Revision,
+            EventType = ArtifactLocationEventType.StateChanged, State = state, ObservedAt = now,
+            ProviderObjectVersion = location.ProviderObjectVersion, ProviderETag = location.ProviderETag,
+            ProviderChecksumAlgorithm = location.ProviderChecksumAlgorithm, ProviderChecksum = location.ProviderChecksum,
+            ObservedSizeBytes = location.ObservedSizeBytes,
+            VerifiedAt = location.VerifiedAt, ErrorCode = location.LastErrorCode, ErrorMessage = location.LastErrorMessage,
+            DetailsJson = "{}", CreatedBy = world.ActorId,
+        });
+
+        await db.SaveChangesAsync();
     }
 
     private static FakeStorageState MultiLocationStorage() => new()

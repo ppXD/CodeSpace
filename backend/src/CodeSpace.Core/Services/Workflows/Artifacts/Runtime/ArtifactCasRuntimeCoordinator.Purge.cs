@@ -44,7 +44,16 @@ public sealed partial class ArtifactCasRuntimeCoordinator
         if (location == null) return ClaimRejected(ArtifactCasProblemCode.ArtifactMissing);
         if (location.State == ArtifactLocationState.Purged)
             return new ArtifactCasPurgeClaimResult.Purged(location.Id, location.Revision);
-        if (location.State is not (ArtifactLocationState.Available or ArtifactLocationState.Deleting))
+        // Missing joins Available and Deleting: the destination has said the object is not there, and letting the row
+        // reach Deleting is the only way it can reach Purged — which is what spends the idempotency generation and
+        // makes that content writable under this revision again. Refusing it left the row unreachable by every path
+        // at once: unreadable, undrainable, and blocking its profile's retirement forever.
+        //
+        // Corrupt is deliberately NOT admitted. It asserts the destination holds something that is NOT this object,
+        // and the delete cannot always be conditioned — a provider without a stable ETag (the local driver, since the
+        // recorded one is derived from a modification time) would delete whatever is at that key. A record positively
+        // identified as naming someone else's bytes is closed by abandoning the record, never by deleting them.
+        if (location.State is not (ArtifactLocationState.Available or ArtifactLocationState.Deleting or ArtifactLocationState.Missing))
             return ClaimRejected(ArtifactCasProblemCode.LocationUnavailable);
         var profile = await db.StorageProfileRevision.AsNoTracking()
             .Where(value => value.TeamId == request.TeamId && value.Id == location.StorageProfileRevisionId)
