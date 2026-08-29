@@ -66,3 +66,33 @@ public sealed class GetPlacementIntegrityQueryHandler : IRequestHandler<GetPlace
     public async Task<PlacementIntegritySummary> Handle(GetPlacementIntegrityQuery request, CancellationToken cancellationToken) =>
         await _reader.ReadAsync(_currentTeam.Id!.Value, cancellationToken).ConfigureAwait(false);
 }
+
+public sealed class ListProfilePlacementsQueryHandler : IRequestHandler<ListProfilePlacementsQuery, ProfilePlacementPage>
+{
+    private readonly IProfilePlacementReader _reader;
+    private readonly ICurrentTeam _currentTeam;
+
+    public ListProfilePlacementsQueryHandler(IProfilePlacementReader reader, ICurrentTeam currentTeam)
+    {
+        _reader = reader;
+        _currentTeam = currentTeam;
+    }
+
+    public async Task<ProfilePlacementPage> Handle(ListProfilePlacementsQuery request, CancellationToken cancellationToken) =>
+        await _reader.ListAsync(_currentTeam.Id!.Value, request.ProfileId, request.Cursor, request.Limit, cancellationToken).ConfigureAwait(false);
+}
+
+public sealed class GetProfilePlacementTotalsQueryHandler : IRequestHandler<GetProfilePlacementTotalsQuery, IReadOnlyList<ProfilePlacementTotal>>
+{
+    private readonly IProfilePlacementReader _reader;
+    private readonly ICurrentTeam _currentTeam;
+
+    public GetProfilePlacementTotalsQueryHandler(IProfilePlacementReader reader, ICurrentTeam currentTeam)
+    {
+        _reader = reader;
+        _currentTeam = currentTeam;
+    }
+
+    public async Task<IReadOnlyList<ProfilePlacementTotal>> Handle(GetProfilePlacementTotalsQuery request, CancellationToken cancellationToken) =>
+        await _reader.TotalsAsync(_currentTeam.Id!.Value, request.ProfileId, cancellationToken).ConfigureAwait(false);
+}

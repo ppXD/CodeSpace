@@ -166,7 +166,7 @@ public sealed class StorageProfileService : IStorageProfileService, IScopedDepen
 
         var locations = await CountAvailableLocationsAsync(teamId, profileId, cancellationToken).ConfigureAwait(false);
         if (locations > 0)
-            throw new StorageProfileConflictException($"Storage profile cannot be retired while {locations} stored artifact location(s) still live under it. Migrate or delete those artifacts first.");
+            throw new StorageProfileConflictException($"Storage profile cannot be retired while {locations} stored artifact location(s) still live under it. See GET /api/storage/profiles/{profileId}/placements for what they are; retiring is irreversible and would leave them recorded under a profile that can never take another revision.");
     }
 
     private Task<int> CountActiveRoutesAsync(Guid teamId, Guid profileId, CancellationToken cancellationToken) =>
