@@ -1,6 +1,8 @@
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows.Artifacts.Retention;
+using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Contracts;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -71,6 +73,50 @@ public sealed class ArtifactReferenceOracleTests
 
         verdict.ShouldBe(ArtifactReferenceVerdict.Indeterminate);
     }
+
+    /// <summary>
+    /// Artifact-id-valued fields whose NAME does not contain "artifact", listed so that promoting one to a database
+    /// column is a decision rather than an accident.
+    ///
+    /// <para><see cref="IsArtifactSoftLink"/> recognises a reference by its column name ending in
+    /// <c>artifact_id</c> — its own comment concedes that is the only machine signal available, since no foreign key
+    /// in this schema points at <c>workflow_artifact</c>. These three carry an artifact id under a name that signal
+    /// cannot see. They live in JSON today, where the oracle already does not look, so nothing is wrong right now.
+    /// The hazard is the promotion: the model-call lane already turned a JSON <c>$artifact_id</c> into four real
+    /// columns, and if one of these followed that path the drift detector would wave it through in silence — an
+    /// artifact the reaper deletes while a live column still names it.</para>
+    /// </summary>
+    private static readonly IReadOnlyList<(Type Owner, string Property)> UnnamedArtifactReferences =
+    [
+        (typeof(AgentRunResult), nameof(AgentRunResult.PublishEvidenceId)),
+        (typeof(AgentRunResult), nameof(AgentRunResult.AcceptanceEvidenceId)),
+        (typeof(RepositoryRunResult), nameof(RepositoryRunResult.PublishEvidenceId)),
+        (typeof(SupervisorAgentResult), nameof(SupervisorAgentResult.AcceptanceEvidenceId)),
+        (typeof(ReceiptEnvelope), nameof(ReceiptEnvelope.EvidenceRef)),
+    ];
+
+    [Fact]
+    public void An_artifact_reference_whose_name_hides_it_is_not_silently_promoted_to_a_column()
+    {
+        // The detector's blind spot, made loud. Each of these holds a workflow_artifact id under a name containing
+        // neither "artifact" nor "_id" in the shape the detector matches. While they live only in JSON the oracle is
+        // honest — it never claims to read JSON. The moment one becomes a column it becomes a reference the oracle
+        // does not probe, and the reaper deletes artifacts that column still names.
+        var mapped = BuildContext().Model.GetEntityTypes()
+            .SelectMany(entity => entity.GetProperties().Select(property => ColumnNameOf(entity, property)))
+            .Where(column => column != null).Select(column => column!).ToHashSet(StringComparer.Ordinal);
+
+        foreach (var (owner, property) in UnnamedArtifactReferences)
+        {
+            owner.GetProperty(property).ShouldNotBeNull($"{owner.Name}.{property} was renamed or removed — update this list rather than deleting the check");
+            mapped.ShouldNotContain(SnakeCase(property),
+                $"{owner.Name}.{property} carries a workflow_artifact id and is now a mapped column, but IsArtifactSoftLink cannot see that name. "
+                + "Add it to ArtifactReferenceOracle.ReferenceSites and to the detector, or the reaper will delete artifacts it still names.");
+        }
+    }
+
+    private static string SnakeCase(string property) =>
+        string.Concat(property.Select((character, index) => char.IsUpper(character) && index > 0 ? $"_{char.ToLowerInvariant(character)}" : $"{char.ToLowerInvariant(character)}"));
 
     /// <summary>
     /// A column that soft-links <c>workflow_artifact.id</c>: named <c>*_artifact_id</c>, excluding the CAS v2 object
