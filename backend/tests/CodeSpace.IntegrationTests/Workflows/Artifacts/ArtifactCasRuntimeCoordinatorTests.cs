@@ -185,14 +185,12 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
     }
 
     [Fact]
-    public async Task Routed_purge_fails_closed_before_claiming_an_object_with_multiple_locations()
+    public async Task Routed_purge_still_refuses_to_guess_which_placement_a_multi_placed_object_meant()
     {
+        // Naming no placement means "the only one". For an object with several that is not an instruction, and
+        // guessing would delete bytes the caller never asked about.
         var world = await SeedWorldAsync();
-        var storage = new FakeStorageState
-        {
-            Capabilities = StorageProviderCapabilities.StreamingWrite | StorageProviderCapabilities.StreamingRead
-                | StorageProviderCapabilities.ConditionalCreate | StorageProviderCapabilities.Delete,
-        };
+        var storage = MultiLocationStorage();
         var bytes = "replicated routed bytes"u8.ToArray();
         var committed = (await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "purge-multi")))
             .ShouldBeOfType<ArtifactCasTransferResult.Committed>();
@@ -204,13 +202,38 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
             TeamId = world.TeamId, ArtifactObjectId = committed.ArtifactObjectId, ActorId = world.ActorId,
         }, CancellationToken.None);
 
-        result.ShouldBeOfType<ArtifactCasPurgeResult.Rejected>().Problem.Code.ShouldBe(ArtifactCasProblemCode.MultipleLocationsUnsupported);
+        result.ShouldBeOfType<ArtifactCasPurgeResult.Rejected>();
         storage.DeleteCalls.ShouldBe(0);
-        using var verify = _fixture.BeginScope();
-        (await verify.Resolve<CodeSpaceDbContext>().ArtifactLocation.AsNoTracking()
-            .Where(value => value.TeamId == world.TeamId && value.ArtifactObjectId == committed.ArtifactObjectId)
-            .Select(value => value.State).ToListAsync()).ShouldAllBe(value => value == ArtifactLocationState.Available,
-                "a fail-closed multi-location object must not have a partial deletion claim");
+        (await PlacementStatesAsync(world, committed.ArtifactObjectId)).ShouldAllBe(value => value == ArtifactLocationState.Available,
+            "an unanswerable request must leave every placement exactly as it was");
+    }
+
+    [Fact]
+    public async Task Routed_purge_removes_only_the_placement_it_was_given()
+    {
+        // The capability the refusal used to cost: an object placed at two destinations can have ONE of them drained,
+        // which is what draining a destination is. Before this, a second placement made an object permanently
+        // un-purgeable — and the reaper recorded that refusal as a terminal keep.
+        var world = await SeedWorldAsync();
+        var storage = MultiLocationStorage();
+        var bytes = "replicated routed bytes"u8.ToArray();
+        var committed = (await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "purge-multi")))
+            .ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        var sibling = await AddSecondLocationAsync(world, committed.ArtifactObjectId, bytes);
+        var target = await FirstPlacementAsync(world, committed.ArtifactObjectId, exceptId: sibling);
+
+        using var purgeScope = Scope(storage);
+        var result = await purgeScope.Resolve<IArtifactCasPurgeCoordinator>().PurgeAsync(new ArtifactCasPurgeRequest
+        {
+            TeamId = world.TeamId, ArtifactObjectId = committed.ArtifactObjectId, ActorId = world.ActorId,
+            ArtifactLocationId = target,
+        }, CancellationToken.None);
+
+        result.ShouldBeOfType<ArtifactCasPurgeResult.Purged>();
+        storage.DeleteCalls.ShouldBe(1, "exactly one destination was named, so exactly one object may be deleted");
+        (await PlacementStateAsync(world, target)).ShouldBe(ArtifactLocationState.Purged);
+        (await PlacementStateAsync(world, sibling)).ShouldBe(ArtifactLocationState.Available,
+            "the placement nobody named must keep both its bytes and its record");
     }
 
     [Fact]
@@ -1080,7 +1103,7 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         return location.Revision;
     }
 
-    private async Task AddSecondLocationAsync(World world, Guid artifactObjectId, byte[] bytes)
+    private async Task<Guid> AddSecondLocationAsync(World world, Guid artifactObjectId, byte[] bytes)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -1104,6 +1127,41 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         });
         db.ArtifactLocation.Add(location);
         await db.SaveChangesAsync();
+
+        return location.Id;
+    }
+
+    private static FakeStorageState MultiLocationStorage() => new()
+    {
+        Capabilities = StorageProviderCapabilities.StreamingWrite | StorageProviderCapabilities.StreamingRead
+            | StorageProviderCapabilities.ConditionalCreate | StorageProviderCapabilities.Delete,
+    };
+
+    private async Task<List<ArtifactLocationState>> PlacementStatesAsync(World world, Guid artifactObjectId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().ArtifactLocation.AsNoTracking()
+            .Where(value => value.TeamId == world.TeamId && value.ArtifactObjectId == artifactObjectId)
+            .Select(value => value.State).ToListAsync();
+    }
+
+    private async Task<ArtifactLocationState> PlacementStateAsync(World world, Guid locationId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().ArtifactLocation.AsNoTracking()
+            .Where(value => value.TeamId == world.TeamId && value.Id == locationId)
+            .Select(value => value.State).SingleAsync();
+    }
+
+    private async Task<Guid> FirstPlacementAsync(World world, Guid artifactObjectId, Guid exceptId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().ArtifactLocation.AsNoTracking()
+            .Where(value => value.TeamId == world.TeamId && value.ArtifactObjectId == artifactObjectId && value.Id != exceptId)
+            .Select(value => value.Id).SingleAsync();
     }
 
     private async Task SetProfileStateAsync(World world, StorageProfileState state)

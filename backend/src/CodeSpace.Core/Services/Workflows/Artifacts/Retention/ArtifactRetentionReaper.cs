@@ -222,12 +222,21 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
     /// </summary>
     private async Task<SweepSettlement> SweepRoutedClaimAsync(SweepClaim claim, Guid objectId, CancellationToken cancellationToken)
     {
+        // One placement per sweep, named explicitly. An unnamed claim means "the only one", which an object placed at
+        // several destinations cannot answer — and guessing would delete bytes nobody asked about. Naming the next
+        // one makes the drain a sequence of independently fenced steps, each resumable from the ledger rather than
+        // from a variable, because the declaration stays live until every placement is gone.
+        var target = await NextUnpurgedPlacementAsync(claim.TeamId, objectId, cancellationToken).ConfigureAwait(false);
+
+        if (target == null) return await SettleRoutedAsync(claim, ArtifactRetentionDecision.Collect(), cancellationToken).ConfigureAwait(false);
+
         ArtifactCasPurgeClaimResult physical;
         try
         {
             physical = await _routedPurge.ClaimAsync(new ArtifactCasPurgeRequest
             {
-                TeamId = claim.TeamId, ArtifactObjectId = objectId, ActorId = SystemUsers.SeederId, OperationTimeout = _options.OperationTimeout,
+                TeamId = claim.TeamId, ArtifactObjectId = objectId, ActorId = SystemUsers.SeederId,
+                ArtifactLocationId = target, OperationTimeout = _options.OperationTimeout,
             }, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
@@ -237,14 +246,31 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
             return await SettleRoutedAsync(claim, RoutedWait("artifact-routed-claim-exception", "The routed location claim failed before a delete result was available."), cancellationToken).ConfigureAwait(false);
         }
 
+        // Purged means the placement this sweep named was drained by someone else in between, not that the object is
+        // done. Collecting here would delete the pointer while sibling destinations still hold bytes nothing could
+        // reach afterwards — the reaper's only entry to an object is a declaration joined to workflow_artifact, so
+        // the row IS the handle. Whether the object is finished is re-asked at the top of the next sweep.
         if (physical is ArtifactCasPurgeClaimResult.Purged)
-            return await SettleRoutedAsync(claim, ArtifactRetentionDecision.Collect(), cancellationToken).ConfigureAwait(false);
+            return await SettleRoutedAsync(claim, RoutedWait("artifact-routed-placement-already-purged",
+                "The placement this sweep named was already drained; the live declaration continues with the next one."), cancellationToken).ConfigureAwait(false);
 
         if (physical is ArtifactCasPurgeClaimResult.Rejected rejected)
             return await SettleRoutedAsync(claim, ClaimRejection(rejected.Problem), cancellationToken).ConfigureAwait(false);
 
         var claimed = ((ArtifactCasPurgeClaimResult.Claimed)physical).Claim;
         return await SweepClaimedRoutedAsync(claim, objectId, claimed, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<Guid?> NextUnpurgedPlacementAsync(Guid teamId, Guid objectId, CancellationToken cancellationToken)
+    {
+        await using var db = CreateDb();
+
+        return await db.ArtifactLocation.AsNoTracking()
+            .Where(location => location.TeamId == teamId && location.ArtifactObjectId == objectId
+                && location.State != ArtifactLocationState.Purged && location.State != ArtifactLocationState.Deleted)
+            .OrderBy(location => location.Id)
+            .Select(location => (Guid?)location.Id)
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<SweepSettlement> SweepClaimedRoutedAsync(SweepClaim claim, Guid objectId, ArtifactCasPurgeClaim physical, CancellationToken cancellationToken)
@@ -482,8 +508,8 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
 
     /// <summary>
     /// Everything the deletion depends on, re-established inside the deleting transaction, and then the byte removal
-    /// that the row's DELETE must not outrun. Three gates in order, each of which abandons the deletion: the reference
-    /// question, the placement question, and the backend's own answer.
+    /// that the row's DELETE must not outrun. Four gates in order, each of which abandons the deletion: the reference
+    /// question, the placement question, whether any placement still holds bytes, and the backend's own answer.
     /// </summary>
     private async Task<ArtifactRetentionDecision> CollectAsync(CodeSpaceDbContext db, SweepClaim claim, CancellationToken cancellationToken)
     {
@@ -498,10 +524,29 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
 
         if (ArtifactRetentionDecision.RefuseUnpurgeable(placement.Purge) is { } unpurgeable) return unpurgeable;
 
+        if (placement.RoutedObjectId is { } routedObjectId && await HoldsBytesElsewhereAsync(db, claim.TeamId, routedObjectId, cancellationToken).ConfigureAwait(false))
+            return ArtifactRetentionDecision.Retry("artifact-routed-placement-remaining",
+                "A placement of this object still holds bytes at its destination; deleting the row now would leave them with nothing that can ever reach them.");
+
         return placement.StorageUrl is { } storageUrl
             ? await PurgeBytesAsync(claim, storageUrl, cancellationToken).ConfigureAwait(false)
             : ArtifactRetentionDecision.Collect();
     }
+
+    /// <summary>
+    /// Whether any placement of this object is still holding bytes at a destination.
+    ///
+    /// <para>Re-asked here, inside the collecting transaction, rather than trusted from the sweep that led here: the
+    /// row about to be deleted is the reaper's ONLY handle on the object — its entry is always a declaration joined
+    /// to <c>workflow_artifact</c> — so a placement that outlives the row is bytes nothing can ever reach again, and
+    /// <c>artifact_location</c> rows are never deleted at all. Until this gate existed the guarantee came from the
+    /// purge claim refusing every multi-placed object outright, which bought it at the price of never purging one.</para>
+    /// </summary>
+    private static async Task<bool> HoldsBytesElsewhereAsync(CodeSpaceDbContext db, Guid teamId, Guid objectId, CancellationToken cancellationToken) =>
+        await db.ArtifactLocation.AsNoTracking()
+            .AnyAsync(location => location.TeamId == teamId && location.ArtifactObjectId == objectId
+                && location.State != ArtifactLocationState.Purged && location.State != ArtifactLocationState.Deleted, cancellationToken)
+            .ConfigureAwait(false);
 
     /// <summary>
     /// Removes the offloaded bytes before the row that names them. A refusal is a budgeted

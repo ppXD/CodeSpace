@@ -23,6 +23,16 @@ public sealed record ArtifactCasPurgeRequest
     public required Guid TeamId { get; init; }
     public required Guid ArtifactObjectId { get; init; }
     public required Guid ActorId { get; init; }
+
+    /// <summary>
+    /// Which placement to purge, when the object has more than one.
+    ///
+    /// <para>Null means "the only one", which is what every caller of a single-placed object wants and what the
+    /// claim refuses to guess for an object with several. Naming it is how a caller draining one destination says
+    /// WHICH destination, without ever implying anything about the object's other placements.</para>
+    /// </summary>
+    public Guid? ArtifactLocationId { get; init; }
+
     public TimeSpan? OperationTimeout { get; init; }
 }
 
