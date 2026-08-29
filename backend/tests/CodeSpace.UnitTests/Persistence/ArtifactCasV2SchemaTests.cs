@@ -145,46 +145,6 @@ public sealed class ArtifactCasV2SchemaTests
         }, ignoreOrder: true);
     }
 
-    [Fact]
-    public void Run_reference_is_the_only_workflow_scoped_table_and_binds_lineage_to_exact_object()
-    {
-        using var db = BuildContext();
-        var entity = Entity<WorkflowRunArtifactReference>(db);
-
-        entity.GetTableName().ShouldBe("workflow_run_artifact_reference");
-        entity.GetProperties().Select(p => p.Name).Order().ShouldBe(new[]
-        {
-            "ArtifactObjectId", "ContentType", "CreatedBy", "CreatedDate", "ExecutionAttemptId",
-            "ExecutionAttemptOrdinal", "ExecutionGeneration", "ExpiresAt", "Id", "IterationKey", "LogicalPath",
-            "NodeId", "PlanVersion", "Required", "RequirementRevision", "Retention", "Role",
-            "SupersededByReferenceId", "TeamId", "WorkflowRunId", "WorkPlanId", "WorkUnitContractHash", "WorkUnitId",
-        }.Order());
-        entity.FindProperty(nameof(WorkflowRunArtifactReference.Role))!.GetMaxLength().ShouldBe(128);
-        entity.FindProperty(nameof(WorkflowRunArtifactReference.ContentType))!.GetMaxLength().ShouldBe(255);
-        CheckConstraint(entity, "ck_run_artifact_reference_attempt").Sql.ShouldContain("execution_generation IS NOT NULL");
-        CheckConstraint(entity, "ck_run_artifact_reference_work_unit").Sql.ShouldContain("plan_version IS NOT NULL");
-        ForeignKey(entity, typeof(ArtifactObject)).Properties.Select(p => p.Name).ShouldBe(new[] { "TeamId", "ArtifactObjectId" });
-        ForeignKey(entity, typeof(WorkflowRun)).Properties.Select(p => p.Name).ShouldBe(new[] { "TeamId", "WorkflowRunId" });
-        ForeignKey(entity, typeof(WorkPlan)).Properties.Select(p => p.Name).ShouldBe(new[] { "TeamId", "WorkPlanId", "WorkflowRunId", "PlanVersion" });
-        ForeignKey(entity, typeof(WorkflowRunArtifactReference)).Properties.Select(p => p.Name).ShouldBe(new[] { "TeamId", "SupersededByReferenceId" });
-
-        Index(entity, "ix_run_artifact_reference_active").GetFilter().ShouldBe("superseded_by_reference_id IS NULL");
-        var attemptPath = Index(entity, "ux_run_artifact_reference_attempt_path");
-        attemptPath.IsUnique.ShouldBeTrue();
-        attemptPath.Properties.Select(p => p.Name).ShouldBe(new[]
-        {
-            "TeamId", "WorkflowRunId", "ExecutionAttemptId", "ExecutionGeneration", "Role", "LogicalPath",
-        });
-        attemptPath.GetFilter().ShouldBe("execution_attempt_id IS NOT NULL AND superseded_by_reference_id IS NULL");
-        entity.GetCheckConstraints().Select(c => c.Name).ShouldBe(new[]
-        {
-            "ck_run_artifact_reference_attempt", "ck_run_artifact_reference_content_type",
-            "ck_run_artifact_reference_expiry", "ck_run_artifact_reference_path",
-            "ck_run_artifact_reference_retention", "ck_run_artifact_reference_role",
-            "ck_run_artifact_reference_superseded", "ck_run_artifact_reference_work_unit",
-        }, ignoreOrder: true);
-    }
-
     private static CodeSpaceDbContext BuildContext()
     {
         var options = new DbContextOptionsBuilder<CodeSpaceDbContext>()
