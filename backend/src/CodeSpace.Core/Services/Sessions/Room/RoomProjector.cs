@@ -39,12 +39,13 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     private readonly ISupervisorDecisionObservationBundle _decisionObservations;
     private readonly IWorkPlanChecklistService _checklists;
     private readonly IPublishManifestStore _manifests;
+    private readonly IArtifactManifestStore _producedFiles;
     private readonly ISupervisorPublishedBranchResolver _publishedBranches;
     private readonly IArtifactRangeReader _artifacts;
     private readonly CodeSpaceDbContext _db;
     private readonly ISessionTurnCache _cache;
 
-    public RoomProjector(ISessionSkeletonReader sessions, IRunPhaseProjector phases, IDecisionQueueService decisions, IRunActionCapabilityResolver actions, ISupervisorDecisionObservationBundle decisionObservations, IWorkPlanChecklistService checklists, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, IArtifactRangeReader artifacts, CodeSpaceDbContext db, ISessionTurnCache cache)
+    public RoomProjector(ISessionSkeletonReader sessions, IRunPhaseProjector phases, IDecisionQueueService decisions, IRunActionCapabilityResolver actions, ISupervisorDecisionObservationBundle decisionObservations, IWorkPlanChecklistService checklists, IPublishManifestStore manifests, IArtifactManifestStore producedFiles, ISupervisorPublishedBranchResolver publishedBranches, IArtifactRangeReader artifacts, CodeSpaceDbContext db, ISessionTurnCache cache)
     {
         _sessions = sessions;
         _phases = phases;
@@ -53,6 +54,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         _decisionObservations = decisionObservations;
         _checklists = checklists;
         _manifests = manifests;
+        _producedFiles = producedFiles;
         _publishedBranches = publishedBranches;
         _artifacts = artifacts;
         _db = db;
@@ -410,6 +412,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             Subtasks = subtasks,
             ChangedFiles = changedFiles,
             ChangedFileIdentities = changedFileIdentities,
+            Deliverables = await DeliverablesAsync(runId, teamId, cancellationToken).ConfigureAwait(false),
             ToolCalls = toolCalls,
             ToolHistogram = toolHistogram,
             ReasoningCount = reasoningCount,
@@ -527,6 +530,28 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         OutcomeJson = decision.OutcomeJson,
         Error = decision.Error,
     };
+
+    /// <summary>
+    /// The files this run produced as files, current copies only.
+    ///
+    /// <para>Superseded rows are excluded here rather than in the store: the ledger is append-only and a superseded
+    /// row pointing at its successor is exactly what makes a re-capture auditable, so a reader that wants "what did
+    /// this run produce" filters, and a reader that wants the chain still has it.</para>
+    /// </summary>
+    private async Task<IReadOnlyList<DeliverableFile>> DeliverablesAsync(Guid runId, Guid teamId, CancellationToken cancellationToken) =>
+        (await _producedFiles.ListForWorkflowRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false))
+            .Where(manifest => manifest.SupersededByManifestId == null)
+            .Take(MaxChangedFiles)
+            .Select(manifest => new DeliverableFile
+            {
+                Path = manifest.LogicalPath,
+                Kind = manifest.Kind.ToString(),
+                SizeBytes = manifest.SizeBytes,
+                ContentType = manifest.ContentType,
+                ArtifactId = manifest.ContentArtifactId,
+                AgentRunId = manifest.AgentRunId,
+            })
+            .ToList();
 
     private async Task<IReadOnlyList<SupervisorPriorDecision>> ReadTerminalDecisionsAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
     {

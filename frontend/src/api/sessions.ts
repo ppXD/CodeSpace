@@ -306,6 +306,22 @@ export interface DeliveryBlock extends RoomBlockBase {
   checksOk?: boolean | null;
   url?: string | null;
 }
+/// One file a turn produced as a file. `artifactId` is what fetches its bytes.
+export interface DeliverableFile {
+  path: string;
+  kind: string;
+  sizeBytes: number;
+  contentType: string;
+  artifactId: string;
+  agentRunId: string;
+}
+/// Files a turn produced as files rather than as a repository change. Absent when it produced none — an empty
+/// list would read as "it produced nothing", which is a claim about the run rather than about this card.
+export interface DeliverablesBlock extends RoomBlockBase {
+  type: "deliverables";
+  title: string;
+  files: DeliverableFile[];
+}
 export interface DiagnosticBlock extends RoomBlockBase {
   type: "diagnostic";
   tone?: NarrativeTone;
@@ -386,6 +402,7 @@ export type RoomBlock =
   | StatBlock
   | PlanChecklistBlock
   | DeliveryBlock
+  | DeliverablesBlock
   | DecisionBlock
   | DiagnosticBlock
   | FinalAnswerBlock

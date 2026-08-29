@@ -32,6 +32,9 @@ public sealed record RoomTurnFacts
     /// <summary>The distinct changed files with repository + producing-attempt identity. Empty on legacy facts, where <see cref="ChangedFiles"/> remains authoritative.</summary>
     public IReadOnlyList<RoomFileIdentity> ChangedFileIdentities { get; init; } = Array.Empty<RoomFileIdentity>();
 
+    /// <summary>Files the turn produced as files rather than as a repository change — the only surviving copy once the workspace is gone.</summary>
+    public IReadOnlyList<DeliverableFile> Deliverables { get; init; } = Array.Empty<DeliverableFile>();
+
     /// <summary>+added / −removed line totals across the turn, when captured (a true data-gap today → null → the row omits "+X −Y").</summary>
     public int? Additions { get; init; }
     public int? Deletions { get; init; }
