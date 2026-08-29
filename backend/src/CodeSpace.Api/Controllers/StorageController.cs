@@ -79,6 +79,13 @@ public class StorageController : ControllerBase
         return Ok(result);
     }
 
+    [HttpPost("profiles/{profileId:guid}/placements/abandon")]
+    public async Task<IActionResult> AbandonProfilePlacements([FromRoute] Guid profileId, [FromBody] AbandonProfilePlacementsCommand command, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(command with { ProfileId = profileId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     [HttpPost("profiles")]
     [RequestSizeLimit(MaxMutationBodyBytes)]
     public async Task<IActionResult> CreateProfile([FromBody] CreateStorageProfileCommand command, CancellationToken cancellationToken)

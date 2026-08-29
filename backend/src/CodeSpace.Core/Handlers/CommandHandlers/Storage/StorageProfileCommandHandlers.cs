@@ -1,5 +1,6 @@
 using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
+using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using CodeSpace.Messages.Commands.Storage;
 using CodeSpace.Messages.Dtos.Storage;
 using MediatR;
@@ -55,4 +56,21 @@ public sealed class SetStorageProfileStateCommandHandler : IRequestHandler<SetSt
 
     public async Task<StorageProfileDetail?> Handle(SetStorageProfileStateCommand request, CancellationToken cancellationToken) =>
         await _service.SetStateAsync(_currentTeam.Id!.Value, _currentUser.Id!.Value, request, cancellationToken).ConfigureAwait(false);
+}
+
+public sealed class AbandonProfilePlacementsCommandHandler : IRequestHandler<AbandonProfilePlacementsCommand, ProfileAbandonmentSummary>
+{
+    private readonly IProfileAbandonmentService _abandonment;
+    private readonly ICurrentTeam _currentTeam;
+    private readonly ICurrentUser _currentUser;
+
+    public AbandonProfilePlacementsCommandHandler(IProfileAbandonmentService abandonment, ICurrentTeam currentTeam, ICurrentUser currentUser)
+    {
+        _abandonment = abandonment;
+        _currentTeam = currentTeam;
+        _currentUser = currentUser;
+    }
+
+    public async Task<ProfileAbandonmentSummary> Handle(AbandonProfilePlacementsCommand request, CancellationToken cancellationToken) =>
+        await _abandonment.AbandonAsync(_currentTeam.Id!.Value, _currentUser.Id!.Value, request.ProfileId, request.BatchSize, cancellationToken).ConfigureAwait(false);
 }
