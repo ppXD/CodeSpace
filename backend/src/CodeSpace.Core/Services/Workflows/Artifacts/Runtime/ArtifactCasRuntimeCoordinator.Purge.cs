@@ -12,11 +12,22 @@ public sealed partial class ArtifactCasRuntimeCoordinator
         var claim = await ClaimAsync(request, cancellationToken).ConfigureAwait(false);
         return claim switch
         {
+            // Corrupt is claimable so it can be abandoned, but this entry point exists to delete bytes. Handing the
+            // claim on would strand the row in Deleting when the delete refused it, which is worse than the refusal.
+            ArtifactCasPurgeClaimResult.Claimed corrupt when corrupt.Claim.ClaimedFrom == ArtifactLocationState.Corrupt
+                => await ReleaseAndRejectAsync(corrupt.Claim, cancellationToken).ConfigureAwait(false),
             ArtifactCasPurgeClaimResult.Claimed claimed => await DeleteAsync(claimed.Claim, cancellationToken).ConfigureAwait(false),
             ArtifactCasPurgeClaimResult.Purged purged => new ArtifactCasPurgeResult.Purged(purged.LocationId, purged.LocationRevision, true),
             ArtifactCasPurgeClaimResult.Rejected rejected => new ArtifactCasPurgeResult.Rejected(rejected.Problem),
             _ => new ArtifactCasPurgeResult.Rejected(Problem(ArtifactCasProblemCode.ProviderFailure)),
         };
+    }
+
+    private async Task<ArtifactCasPurgeResult> ReleaseAndRejectAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken)
+    {
+        await ReleaseAsync(claim, cancellationToken).ConfigureAwait(false);
+
+        return new ArtifactCasPurgeResult.Rejected(Problem(ArtifactCasProblemCode.LocationUnavailable));
     }
 
     public async Task<ArtifactCasPurgeClaimResult> ClaimAsync(ArtifactCasPurgeRequest request, CancellationToken cancellationToken)
@@ -53,8 +64,14 @@ public sealed partial class ArtifactCasRuntimeCoordinator
         // and the delete cannot always be conditioned — a provider without a stable ETag (the local driver, since the
         // recorded one is derived from a modification time) would delete whatever is at that key. A record positively
         // identified as naming someone else's bytes is closed by abandoning the record, never by deleting them.
-        if (location.State is not (ArtifactLocationState.Available or ArtifactLocationState.Deleting or ArtifactLocationState.Missing))
+        // Corrupt is claimable but not deletable: claiming is about taking the row, deleting is about touching bytes.
+        // Without a claim it could never reach Deleting, therefore never Purged, therefore never release its profile
+        // or let that content be written under this revision again — a record with no exit at all.
+        if (location.State is not (ArtifactLocationState.Available or ArtifactLocationState.Deleting
+            or ArtifactLocationState.Missing or ArtifactLocationState.Corrupt))
             return ClaimRejected(ArtifactCasProblemCode.LocationUnavailable);
+
+        var claimedFrom = location.State;
         var profile = await db.StorageProfileRevision.AsNoTracking()
             .Where(value => value.TeamId == request.TeamId && value.Id == location.StorageProfileRevisionId)
             .Select(value => new { value.StorageProfileId, value.Revision })
@@ -74,6 +91,7 @@ public sealed partial class ArtifactCasRuntimeCoordinator
 
         return new ArtifactCasPurgeClaimResult.Claimed(new ArtifactCasPurgeClaim
         {
+            ClaimedFrom = claimedFrom,
             TeamId = request.TeamId, ArtifactObjectId = request.ArtifactObjectId,
             LocationId = location.Id, LocationRevision = location.Revision,
             StorageProfileId = profile.StorageProfileId, StorageProfileRevision = profile.Revision,
@@ -85,6 +103,8 @@ public sealed partial class ArtifactCasRuntimeCoordinator
     public async Task<ArtifactCasPurgeResult> DeleteAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken)
     {
         Validate(claim);
+        if (claim.ClaimedFrom == ArtifactLocationState.Corrupt)
+            return new ArtifactCasPurgeResult.Rejected(Problem(ArtifactCasProblemCode.LocationUnavailable));
         if (!await ClaimIsCurrentAsync(claim, cancellationToken).ConfigureAwait(false))
             return new ArtifactCasPurgeResult.Rejected(Problem(ArtifactCasProblemCode.StaleWorker, true));
         var activation = await OpenDriverAsync(new DriverActivationRequest(claim.TeamId, claim.StorageProfileId,
@@ -111,6 +131,76 @@ public sealed partial class ArtifactCasRuntimeCoordinator
         }
     }
 
+    /// <summary>
+    /// Settles a claimed placement as <c>Purged</c> without deleting anything, once a live HEAD proves the
+    /// destination cannot serve the object.
+    ///
+    /// <para>Proof is taken here, under this claim, with Read eligibility so a Disabled or Retired profile can still
+    /// be asked. It is never inherited from a stored health row: that describes a destination at some past moment and
+    /// against a different eligibility, and the one thing this must never do is close the record of bytes somebody
+    /// can still read.</para>
+    ///
+    /// <para>Every answer that is ABOUT the destination or the credential — the object is not there, the bucket is
+    /// not there, the key is refused — is grounds to close the record. An answer that serves the object is not, and
+    /// releases the claim instead. An answer that is merely a bad moment is neither, and leaves the claim standing
+    /// for a caller to retry or release.</para>
+    /// </summary>
+    public async Task<ArtifactCasAbandonResult> AbandonAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken)
+    {
+        Validate(claim);
+        if (!await ClaimIsCurrentAsync(claim, cancellationToken).ConfigureAwait(false))
+            return new ArtifactCasAbandonResult.Rejected(Problem(ArtifactCasProblemCode.StaleWorker, true));
+
+        var activation = await OpenDriverAsync(new DriverActivationRequest(claim.TeamId, claim.StorageProfileId,
+            claim.StorageProfileRevision, StorageProfileEligibility.Read, claim.OperationTimeout, StorageProviderCapabilities.None), cancellationToken).ConfigureAwait(false);
+
+        // A destination that cannot even be opened — a revoked credential, a profile revision whose config no longer
+        // resolves — is itself the evidence. That is exactly the operator this exists for.
+        if (activation.Problem != null) return await FinalizeAbandonAsync(claim, $"the destination could not be opened ({activation.Problem.Code})", cancellationToken).ConfigureAwait(false);
+
+        StorageRuntimeDriverLease? lease = activation.Lease!;
+        try
+        {
+            var head = await InvokeAsync(token => lease.Driver.HeadAsync(new ArtifactStorageHeadRequest(claim.ObjectKey), token),
+                claim.OperationTimeout, cancellationToken, lease).ConfigureAwait(false);
+
+            if (head.Problem != null) return new ArtifactCasAbandonResult.Rejected(head.Problem);
+            if (head.Timeout) return new ArtifactCasAbandonResult.Rejected(Problem(ArtifactCasProblemCode.ProviderTimeout, true));
+
+            if (head.Value?.Error is { } error)
+                return Settles(error.Code)
+                    ? await FinalizeAbandonAsync(claim, $"the destination answered '{error.Code}' for {claim.ObjectKey}", cancellationToken).ConfigureAwait(false)
+                    : new ArtifactCasAbandonResult.Rejected(Map(error, readMissing: false));
+
+            await ReleaseAsync(claim, cancellationToken).ConfigureAwait(false);
+
+            return new ArtifactCasAbandonResult.StillServed(claim.LocationId, $"the destination served {claim.ObjectKey}");
+        }
+        finally
+        {
+            if (lease != null) await DisposeLeaseQuietlyAsync(lease).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Which provider answers say something durable about the destination rather than about this moment.</summary>
+    private static bool Settles(ArtifactStorageErrorCode code) => code
+        is ArtifactStorageErrorCode.Missing
+        or ArtifactStorageErrorCode.Unavailable
+        or ArtifactStorageErrorCode.Unauthorized
+        or ArtifactStorageErrorCode.Forbidden;
+
+    private async Task<ArtifactCasAbandonResult> FinalizeAbandonAsync(ArtifactCasPurgeClaim claim, string evidence, CancellationToken cancellationToken)
+    {
+        var finalized = await FinalizePurgeAsync(claim, cancellationToken).ConfigureAwait(false);
+
+        return finalized switch
+        {
+            ArtifactCasPurgeResult.Purged purged => new ArtifactCasAbandonResult.Abandoned(purged.LocationId, purged.LocationRevision, evidence),
+            ArtifactCasPurgeResult.Rejected rejected => new ArtifactCasAbandonResult.Rejected(rejected.Problem),
+            _ => new ArtifactCasAbandonResult.Rejected(Problem(ArtifactCasProblemCode.ProviderFailure)),
+        };
+    }
+
     public async Task<bool> ReleaseAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken)
     {
         Validate(claim);
@@ -122,7 +212,10 @@ public sealed partial class ArtifactCasRuntimeCoordinator
         if (location == null || location.State != ArtifactLocationState.Deleting || location.Revision != claim.LocationRevision) return false;
 
         var now = await DatabaseClockAsync(db, cancellationToken).ConfigureAwait(false);
-        location.State = ArtifactLocationState.Available;
+        // Back where the claim found it, not to Available. A row claimed from Missing or Corrupt was not good before
+        // and releasing the claim establishes nothing about it — declaring it good here would put unreadable bytes
+        // back in front of every reader on the strength of a claim that did nothing.
+        location.State = claim.ClaimedFrom;
         location.Revision++;
         location.LastErrorCode = null;
         location.LastErrorMessage = null;
