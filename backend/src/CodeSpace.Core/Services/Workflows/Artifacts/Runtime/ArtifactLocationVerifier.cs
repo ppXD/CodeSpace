@@ -65,12 +65,27 @@ public sealed class ArtifactLocationVerifier : IArtifactLocationVerifier
     /// must not be a one-way door — a destination-wide fault that this verifier mistook for per-object loss has to be
     /// able to correct itself once the destination answers again. <c>Corrupt</c> is NOT swept back: it takes a positive
     /// disagreement to reach, which an outage cannot fabricate, so re-reading it would only risk flapping.</para>
+    ///
+    /// <para>The two populations get separate shares of the batch rather than competing in one ORDER BY. They grow
+    /// independently — an abandoned destination leaves thousands of permanently <c>Missing</c> rows behind, and they
+    /// are the OLDEST rows in the table by construction — so a single ordering would spend the entire budget
+    /// re-asking about bytes already known to be gone while healthy placements went unchecked. Detection is the
+    /// primary job; recovering a wrong demotion is the secondary one, and it gets the smaller share.</para>
     /// </summary>
-    private async Task<IReadOnlyList<ArtifactLocation>> StaleAsync(int batchSize, CancellationToken cancellationToken) =>
-        await _db.ArtifactLocation
-            .Where(location => location.State == ArtifactLocationState.Available || location.State == ArtifactLocationState.Missing)
+    private async Task<IReadOnlyList<ArtifactLocation>> StaleAsync(int batchSize, CancellationToken cancellationToken)
+    {
+        var recoveryShare = Math.Max(1, batchSize / 4);
+        var missing = await OldestAsync(ArtifactLocationState.Missing, recoveryShare, cancellationToken).ConfigureAwait(false);
+        var available = await OldestAsync(ArtifactLocationState.Available, batchSize - missing.Count, cancellationToken).ConfigureAwait(false);
+
+        return [.. available, .. missing];
+    }
+
+    private async Task<List<ArtifactLocation>> OldestAsync(ArtifactLocationState state, int take, CancellationToken cancellationToken) =>
+        take <= 0 ? [] : await _db.ArtifactLocation
+            .Where(location => location.State == state)
             .OrderBy(location => location.VerifiedAt).ThenBy(location => location.Id)
-            .Take(batchSize)
+            .Take(take)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
     private async Task<Verdict> VerifyOneAsync(ArtifactLocation location, CancellationToken cancellationToken)
@@ -133,7 +148,12 @@ public sealed class ArtifactLocationVerifier : IArtifactLocationVerifier
         {
             if (!IsObjectMissing(head) || !destinationLive) return Verdict.Inconclusive;
 
-            if (location.State == ArtifactLocationState.Missing) return Verdict.Missing;
+            if (location.State == ArtifactLocationState.Missing)
+            {
+                await MarkObservedAsync(location, cancellationToken).ConfigureAwait(false);
+
+                return Verdict.Missing;
+            }
 
             await DemoteAsync(location, ArtifactLocationState.Missing, "location-object-missing",
                 $"The destination reports no object at {location.ObjectKey}.", cancellationToken).ConfigureAwait(false);
@@ -213,6 +233,7 @@ public sealed class ArtifactLocationVerifier : IArtifactLocationVerifier
         var now = _clock.GetUtcNow();
         location.State = state;
         location.Revision++;
+        location.VerifiedAt = now;
         location.LastErrorCode = errorCode;
         location.LastErrorMessage = detail;
         location.LastModifiedDate = now;
@@ -246,6 +267,31 @@ public sealed class ArtifactLocationVerifier : IArtifactLocationVerifier
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation("Artifact location {LocationId} answered again at its destination and returned to Available", location.Id);
+    }
+
+    /// <summary>
+    /// Records that a location the sweep already knows is <c>Missing</c> was asked again and answered the same way.
+    ///
+    /// <para>The state does not change, but <c>verified_at</c> does, and that is the entire point: it is also the
+    /// sweep's cursor, so a conclusive answer that did not move it would leave the row pinned at the front of the
+    /// ordering forever. Enough such rows and the batch is permanently full of them and no healthy placement is ever
+    /// examined again. A demotion and a re-confirmation are both answers about the object; only an outcome the
+    /// destination could not answer leaves the column alone.</para>
+    ///
+    /// <para>It is an <c>Observed</c> ledger entry rather than <c>Verified</c>: nothing was verified to be present.
+    /// The row's revision advances because the schema requires every observation of a location to be an entry — which
+    /// is also why the recovery share of the batch is small, since this writes one event per re-check.</para>
+    /// </summary>
+    private async Task MarkObservedAsync(ArtifactLocation location, CancellationToken cancellationToken)
+    {
+        var now = _clock.GetUtcNow();
+        location.Revision++;
+        location.VerifiedAt = now;
+        location.LastModifiedDate = now;
+        location.LastModifiedBy = Messages.Constants.SystemUsers.SeederId;
+        _db.ArtifactLocationEvent.Add(Snapshot(location, ArtifactLocationEventType.Observed, now));
+
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private async Task ConfirmAsync(ArtifactLocation location, CancellationToken cancellationToken)

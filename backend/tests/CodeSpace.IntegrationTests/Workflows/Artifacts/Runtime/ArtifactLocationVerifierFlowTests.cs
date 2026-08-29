@@ -116,9 +116,8 @@ public sealed class ArtifactLocationVerifierFlowTests : IDisposable
 
         File.Move(stashed, path);
 
-        await VerifyAsync();
+        var location = await VerifyUntilAsync(world, ArtifactLocationState.Available);
 
-        var location = await LocationAsync(world);
         location.State.ShouldBe(ArtifactLocationState.Available, "the recorded object is present and matches, which is the same evidence its placement was accepted on");
         location.LastErrorCode.ShouldBeNull("a restored location must not keep advertising the error it no longer has");
 
@@ -146,6 +145,33 @@ public sealed class ArtifactLocationVerifierFlowTests : IDisposable
     }
 
     // ─── World + helpers ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Sweeps until THIS test's location reaches <paramref name="state"/>.
+    ///
+    /// <para>The sweep is deployment-wide and bounded, and the recovery half of its batch is deliberately the smaller
+    /// half, so a Missing row left behind by any earlier test competes for the same slots. Asserting after one pass
+    /// would be asserting that this row won a race it has no reason to win — and would get harder to satisfy as the
+    /// suite grows.</para>
+    /// </summary>
+    private async Task<ArtifactLocation> VerifyUntilAsync(StoredArtifact world, ArtifactLocationState state, TimeSpan? within = null)
+    {
+        var deadline = DateTimeOffset.UtcNow + (within ?? TimeSpan.FromSeconds(10));
+        ArtifactLocation? seen = null;
+
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            await VerifyAsync();
+            seen = await LocationAsync(world);
+
+            if (seen.State == state) return seen;
+        }
+
+        throw new Xunit.Sdk.XunitException(
+            $"The location for artifact {world.ArtifactId} never reached {state} (last seen {seen?.State.ToString() ?? "absent"}, "
+            + $"last error {seen?.LastErrorCode ?? "none"}). The sweep is deployment-wide and its recovery share is bounded, "
+            + "so check whether earlier tests left more Missing rows than that share holds.");
+    }
 
     private async Task<ArtifactLocationVerificationSummary> VerifyAsync()
     {
