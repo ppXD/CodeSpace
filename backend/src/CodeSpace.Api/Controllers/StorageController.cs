@@ -44,6 +44,13 @@ public class StorageController : ControllerBase
         return Ok(result);
     }
 
+    [HttpGet("placements/integrity")]
+    public async Task<IActionResult> GetPlacementIntegrity(CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetPlacementIntegrityQuery(), cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     [HttpGet("profiles/page")]
     public async Task<IActionResult> ListProfilePage([FromQuery] ListStorageProfilePageQuery query, CancellationToken cancellationToken)
     {

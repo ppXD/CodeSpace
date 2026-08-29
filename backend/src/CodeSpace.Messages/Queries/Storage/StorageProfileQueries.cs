@@ -22,3 +22,8 @@ public sealed record GetStorageProfileQuery : IQuery<StorageProfileDetail?>, IRe
     public string RequiredPermission => TeamPermissions.StorageManage;
     public Guid ProfileId { get; init; }
 }
+
+public sealed record GetPlacementIntegrityQuery : IQuery<PlacementIntegritySummary>, IRequireTeamPermission
+{
+    public string RequiredPermission => TeamPermissions.StorageManage;
+}
