@@ -10,6 +10,7 @@ using CodeSpace.Core.Services.Sessions.Room;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Artifacts.Backends;
 using CodeSpace.IntegrationTests.Infrastructure;
+using Microsoft.EntityFrameworkCore;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
@@ -253,6 +254,97 @@ public class RoomFilePreviewFlowTests
         preview.Note!.ShouldContain("stored bytes are missing");
         preview.Note.ShouldNotContain("expired", customMessage: "there is no expiry policy and a topology/integrity fault must not be relabelled as normal expiry");
         preview.Note.ShouldNotContain("pull request", customMessage: "this run has no delivered source URL, so the UI must not recommend an action that does not exist");
+    }
+
+
+    [Fact]
+    public async Task Files_changed_opens_a_patch_whose_bytes_live_at_a_storage_provider()
+    {
+        // The surface an operator actually clicks, over the one shape a configured deployment always has. Every other
+        // test in this file seeds an inline patch or a local storage_url, so before this the routed read behind the
+        // diff drawer had never been proven to render at all.
+        var (teamId, actorId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var destination = await RoutedArtifactSeed.RouteTeamAsync(_fixture, teamId, actorId);
+        var patchArtifactId = await RoutedArtifactSeed.WriteRoutedAsync(_fixture, teamId, AddedFile("docs/routed.md", "from the provider"));
+
+        destination.ObjectCount.ShouldBe(1, "the patch must physically be at the provider, or this proves nothing about a routed read");
+
+        var runId = await SeedRunAsync(teamId);
+        await AddOffloadedAgentAsync(teamId, runId, new[] { "docs/routed.md" }, patchArtifactId);
+
+        var preview = await PreviewAsync(runId, "docs/routed.md", teamId);
+
+        preview.ShouldNotBeNull("a routed patch must render exactly like an inline one");
+        preview!.Kind.ShouldBe("text");
+        preview.ChangeKind.ShouldBe("Added");
+        preview.Text.ShouldBe("from the provider");
+        preview.UnavailableReason.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task Files_changed_still_opens_a_routed_patch_after_the_team_repoints_its_route()
+    {
+        // The guarantee the whole location ledger exists for, checked at the surface a user touches rather than at the
+        // store. A read that consulted today's route would look for these bytes in the NEW destination and find
+        // nothing there.
+        var (teamId, actorId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var first = await RoutedArtifactSeed.RouteTeamAsync(_fixture, teamId, actorId);
+        var patchArtifactId = await RoutedArtifactSeed.WriteRoutedAsync(_fixture, teamId, AddedFile("docs/routed.md", "written before the switch"));
+
+        var runId = await SeedRunAsync(teamId);
+        await AddOffloadedAgentAsync(teamId, runId, new[] { "docs/routed.md" }, patchArtifactId);
+
+        await RepointRouteAsync(teamId, actorId, first.RouteId);
+
+        var preview = await PreviewAsync(runId, "docs/routed.md", teamId);
+
+        preview.ShouldNotBeNull("the patch resolves through the profile revision its own location recorded, never through today's route");
+        preview!.Text.ShouldBe("written before the switch");
+        first.ObjectCount.ShouldBe(1, "the bytes never moved — only the route did");
+    }
+
+    [Fact]
+    public async Task A_routed_patch_whose_object_is_gone_is_an_unavailable_preview_that_names_the_reason()
+    {
+        // The failure a user hits when a destination stops serving. It must arrive as a typed reason the drawer can
+        // render, not as a 500 and not as a blank file.
+        var (teamId, actorId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var destination = await RoutedArtifactSeed.RouteTeamAsync(_fixture, teamId, actorId);
+        var patchArtifactId = await RoutedArtifactSeed.WriteRoutedAsync(_fixture, teamId, AddedFile("docs/routed.md", "about to vanish"));
+
+        Directory.Delete(destination.Root, recursive: true);
+
+        var runId = await SeedRunAsync(teamId);
+        await AddOffloadedAgentAsync(teamId, runId, new[] { "docs/routed.md" }, patchArtifactId);
+
+        var preview = await PreviewAsync(runId, "docs/routed.md", teamId);
+
+        preview.ShouldNotBeNull("bytes that cannot be fetched must still produce a preview that says so");
+        preview!.UnavailableReason.ShouldNotBeNull("without a typed reason the drawer can only apologise, and an operator cannot tell a purged artifact from a broken credential");
+    }
+
+    /// <summary>Points the team's workflow-artifact route at a second, empty destination — the shape of an operator switching provider.</summary>
+    private async Task RepointRouteAsync(Guid teamId, Guid actorId, Guid routeId)
+    {
+        var next = await RoutedArtifactSeed.RouteTeamAsync(_fixture, teamId, actorId, dataClassTypeKey: "unused/v1");
+
+        // APPENDED, never edited: storage_route_revision is immutable by trigger, which is the same property that
+        // makes a stamped location trustworthy. A repoint is a new revision the route's head moves to.
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        // The append and the head advance must land in ONE statement batch: 0134 refuses a revision whose route head
+        // did not move with it, so a two-step edit is rejected rather than leaving a route pointing at a revision it
+        // never adopted.
+        var route = await db.StorageRoute.SingleAsync(value => value.Id == routeId);
+        route.CurrentRevision = 2;
+        route.LastModifiedDate = DateTimeOffset.UtcNow;
+        db.StorageRouteRevision.Add(new StorageRouteRevision
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, StorageRouteId = routeId, Revision = 2, StorageProfileId = next.ProfileId,
+            ProfileRevisionMode = StorageProfileRevisionMode.CurrentAtWrite, PinnedProfileRevision = null,
+            CreatedDate = DateTimeOffset.UtcNow, CreatedBy = actorId,
+        });
+        await db.SaveChangesAsync();
     }
 
     private async Task<RoomFilePreview?> PreviewAsync(Guid runId, string path, Guid teamId, Guid? agentRunId = null)
