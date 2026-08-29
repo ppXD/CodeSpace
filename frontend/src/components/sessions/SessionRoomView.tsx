@@ -56,6 +56,7 @@ import { liveRunSummary } from "./live-run-summary";
 import { partitionForFailureHoist } from "./room-blocks";
 import { RoomRunPane, type PaneView } from "./RoomRunPane";
 import { WorkflowRunModelCallContent, type WorkflowRunModelCallTab } from "./WorkflowRunModelCallContent";
+import { roomFileNote } from "./roomFileUnavailable";
 
 /** What the right-side preview drawer is showing — an agent (its terminal) or a file (its content + download). */
 type DrawerTarget =
@@ -557,7 +558,7 @@ function FilePreviewBody({ file, loading, error, path }: { file?: RoomFilePrevie
   if (!file) return <FilePreviewNotice icon="alert" title={baseName(path)} note={error ? "Couldn't load this file." : "This file isn't part of the turn's change set."} />;
 
   if (file.kind === "binary" || file.kind === "unavailable")
-    return <FilePreviewNotice icon={file.kind === "binary" ? "file" : "alert"} title={baseName(file.path)} note={file.note ?? "Preview isn't available for this file."} sourceUrl={file.sourceUrl} />;
+    return <FilePreviewNotice icon={file.kind === "binary" ? "file" : "alert"} title={baseName(file.path)} note={roomFileNote(file)} sourceUrl={file.sourceUrl} />;
 
   return (
     <div className="room-fprev">
