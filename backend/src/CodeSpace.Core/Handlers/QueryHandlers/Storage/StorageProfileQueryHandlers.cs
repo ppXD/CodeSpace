@@ -1,5 +1,6 @@
 using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
+using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using CodeSpace.Messages.Dtos.Storage;
 using CodeSpace.Messages.Queries.Storage;
 using MediatR;
@@ -49,4 +50,19 @@ public sealed class GetStorageProfileQueryHandler : IRequestHandler<GetStoragePr
 
     public async Task<StorageProfileDetail?> Handle(GetStorageProfileQuery request, CancellationToken cancellationToken) =>
         await _service.GetAsync(_currentTeam.Id!.Value, request.ProfileId, cancellationToken).ConfigureAwait(false);
+}
+
+public sealed class GetPlacementIntegrityQueryHandler : IRequestHandler<GetPlacementIntegrityQuery, PlacementIntegritySummary>
+{
+    private readonly IPlacementIntegrityReader _reader;
+    private readonly ICurrentTeam _currentTeam;
+
+    public GetPlacementIntegrityQueryHandler(IPlacementIntegrityReader reader, ICurrentTeam currentTeam)
+    {
+        _reader = reader;
+        _currentTeam = currentTeam;
+    }
+
+    public async Task<PlacementIntegritySummary> Handle(GetPlacementIntegrityQuery request, CancellationToken cancellationToken) =>
+        await _reader.ReadAsync(_currentTeam.Id!.Value, cancellationToken).ConfigureAwait(false);
 }

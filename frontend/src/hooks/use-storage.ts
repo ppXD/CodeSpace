@@ -9,6 +9,19 @@ export const STORAGE_PROVIDER_MODULES_KEY = ["storage", "provider-modules"] as c
 export const STORAGE_CREDENTIALS_KEY = ["storage", "credentials"] as const;
 export const STORAGE_PROFILES_KEY = ["storage", "profiles"] as const;
 export const storageProfileKey = (profileId: string) => ["storage", "profiles", profileId] as const;
+export const STORAGE_PLACEMENT_INTEGRITY_KEY = ["storage", "placements", "integrity"] as const;
+
+/**
+ * What became of the bytes already stored. Refetched on an interval because it changes without anything on this
+ * page being touched — a sweep confirms or demotes placements while nobody is looking.
+ */
+export function usePlacementIntegrity() {
+  return useQuery({
+    queryKey: STORAGE_PLACEMENT_INTEGRITY_KEY,
+    queryFn: ({ signal }) => storageApi.getPlacementIntegrity(signal),
+    staleTime: 60_000,
+  });
+}
 
 /** Installed provider types are build metadata, so they remain fresh until this deployment changes. */
 export function useStorageProviderModules() {

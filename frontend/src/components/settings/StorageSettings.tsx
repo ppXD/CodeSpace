@@ -4,13 +4,14 @@ import { createPortal } from "react-dom";
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { ApiError } from "@/api/request";
 import type { StorageCredentialMetadata, StorageProfileDetail, StorageProfileProbeResult, StorageProfileState, StorageProfileSummary, StorageProviderModuleSummary } from "@/api/storage";
-import { useAppendStorageProfileRevision, useCreateStorageProfile, useProbeStorageProfile, useSetStorageProfileState, useStorageCredentials, useStorageProfile, useStorageProfiles, useStorageProviderModules } from "@/hooks/use-storage";
+import { useAppendStorageProfileRevision, useCreateStorageProfile, usePlacementIntegrity, useProbeStorageProfile, useSetStorageProfileState, useStorageCredentials, useStorageProfile, useStorageProfiles, useStorageProviderModules } from "@/hooks/use-storage";
 import { useStorageRoutes } from "@/hooks/use-storage-routes";
 import { TeamPermissions, useTeamPermissions } from "@/hooks/use-team-management";
 import { SchemaForm } from "@/components/workflows/SchemaForm";
 import { StorageCredentialSettings } from "./StorageCredentialSettings";
 import { StorageDefaultAdoption } from "./StorageDefaultAdoption";
 import { StorageRouteSettings } from "./StorageRouteSettings";
+import { PlacementIntegrityNotice } from "./PlacementIntegrityNotice";
 import { StorageHealthBadge } from "./StorageHealthBadge";
 import { StorageStep, type StorageStepState } from "./StorageStep";
 
@@ -27,6 +28,7 @@ export function StorageSettings() {
   const credentials = useStorageCredentials();
   const profiles = useStorageProfiles();
   const routes = useStorageRoutes();
+  const integrity = usePlacementIntegrity();
   const mayManage = useTeamPermissions().can(TeamPermissions.StorageManage);
   const [createOpen, setCreateOpen] = useState(false);
   const [managedProfileId, setManagedProfileId] = useState<string | null>(null);
@@ -77,6 +79,9 @@ export function StorageSettings() {
         {/* Deliberately silent about reads: every storage query declares the same permission server-side, so
             promising a read-only view would be a claim this screen cannot keep. */}
         {!mayManage && <div className="cn-banner-p">Changing anything here needs the storage.manage permission, which you do not hold in this team.</div>}
+        {/* The rest of this page describes where the NEXT write goes. This is the only line about what happened to
+            the writes already made, which no amount of probing a healthy destination would reveal. */}
+        <PlacementIntegrityNotice integrity={integrity.data} />
       </div>
 
       {/* Above the flow: adopting means the three steps below are already done for that class. */}

@@ -197,8 +197,26 @@ export interface StorageProfileProbeResult {
   } | null;
 }
 
+/**
+ * Whether the artifact bytes this team already wrote are still at their destinations.
+ *
+ * <p>A different question from profile health, which describes whether a destination answers right now. A
+ * destination can answer perfectly while objects written to it last year are gone.</p>
+ */
+export interface PlacementIntegritySummary {
+  /** Placements the destination no longer holds — work a reader will not get back. */
+  missing: number;
+  /** Placements whose destination now holds something that is not the recorded object. */
+  corrupt: number;
+  /** Placements believed good; the population the two counts above are read against. */
+  available: number;
+  /** When the least recently confirmed placement was last known good, or null when nothing is stored. */
+  oldestVerifiedAt: string | null;
+}
+
 export const storageApi = {
   listProviderModules: () => fetchJson<StorageProviderModuleSummary[]>("/api/storage/provider-modules"),
+  getPlacementIntegrity: (signal?: AbortSignal) => fetchJson<PlacementIntegritySummary>("/api/storage/placements/integrity", { signal }),
   listCredentials: () => fetchJson<StorageCredentialMetadata[]>("/api/storage/credentials"),
   listCredentialPage: (cursor: string | null, limit = 50, signal?: AbortSignal) => {
     const query = new URLSearchParams({ limit: String(limit) });

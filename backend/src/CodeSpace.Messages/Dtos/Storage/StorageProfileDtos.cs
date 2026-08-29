@@ -74,3 +74,33 @@ public enum StorageProfileStateValue
     Disabled = 2,
     Retired = 3,
 }
+
+/// <summary>
+/// Whether the artifact bytes this team has already written are still where they were put.
+///
+/// <para>A separate question from <see cref="StorageProfileHealthSummary"/>, which describes whether a destination can
+/// be reached right now. A destination can answer perfectly while every object written to it last year is gone, and
+/// nothing about probing it would reveal that.</para>
+/// </summary>
+public sealed record PlacementIntegritySummary
+{
+    /// <summary>Placements the destination no longer holds. These are known losses: something a reader will not get.</summary>
+    public required int Missing { get; init; }
+
+    /// <summary>Placements whose destination now holds something that is not the recorded object.</summary>
+    public required int Corrupt { get; init; }
+
+    /// <summary>Placements believed good. The population the two counts above should be read against.</summary>
+    public required int Available { get; init; }
+
+    /// <summary>
+    /// When the least recently confirmed Available placement was last known good, or null when the team has stored
+    /// nothing.
+    ///
+    /// <para>Never null while <see cref="Available"/> is non-zero: the schema requires an Available placement to carry
+    /// a <c>verified_at</c>, which starts life as the instant its bytes were written and moves forward each time the
+    /// verifier confirms them. So this reads the same way whether or not a sweep has reached it yet — the moment that
+    /// placement was last actually observed to be there.</para>
+    /// </summary>
+    public DateTimeOffset? OldestVerifiedAt { get; init; }
+}
