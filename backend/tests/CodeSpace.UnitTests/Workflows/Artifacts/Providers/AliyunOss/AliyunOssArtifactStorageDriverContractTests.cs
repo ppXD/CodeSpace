@@ -3,6 +3,7 @@ using System.Text.Json;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers.AliyunOss;
 using Shouldly;
+using CodeSpace.IntegrationTests.Workflows.Artifacts.Providers.AliyunOss;
 
 namespace CodeSpace.UnitTests.Workflows.Artifacts.Providers.AliyunOss;
 
