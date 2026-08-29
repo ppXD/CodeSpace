@@ -23,12 +23,11 @@ public sealed class ArtifactCasV2PersistenceTests
     public ArtifactCasV2PersistenceTests(PostgresFixture fixture) => _fixture = fixture;
 
     [Fact]
-    public async Task Exact_object_location_event_transfer_and_run_reference_round_trip()
+    public async Task Exact_object_location_event_and_transfer_round_trip()
     {
         var world = await SeedWorldAsync();
         var artifact = Object(world.TeamId, 17, 0x11);
         var location = AvailableLocation(world, artifact, "objects/11/report.md");
-        var reference = Reference(world, artifact, "output.primary", "reports/report.md");
 
         using (var scope = _fixture.BeginScope())
         {
@@ -36,7 +35,6 @@ public sealed class ArtifactCasV2PersistenceTests
             db.ArtifactObject.Add(artifact);
             db.ArtifactLocation.Add(location);
             db.ArtifactLocationEvent.Add(Event(location, 1, ArtifactLocationEventType.Verified, ArtifactLocationState.Available));
-            db.WorkflowRunArtifactReference.Add(reference);
             await db.SaveChangesAsync();
         }
 
@@ -67,13 +65,6 @@ public sealed class ArtifactCasV2PersistenceTests
             storedTransfer.Revision.ShouldBe(6);
             storedTransfer.ArtifactObjectId.ShouldBe(artifact.Id);
             storedTransfer.ArtifactLocationId.ShouldBe(location.Id);
-
-            var storedReference = await db.WorkflowRunArtifactReference.SingleAsync(r => r.Id == reference.Id);
-            storedReference.WorkflowRunId.ShouldBe(world.WorkflowRunId);
-            storedReference.WorkPlanId.ShouldBe(world.WorkPlanId);
-            storedReference.PlanVersion.ShouldBe(1);
-            storedReference.WorkUnitId.ShouldBe("write-report");
-            storedReference.ArtifactObjectId.ShouldBe(artifact.Id);
         }
     }
 
@@ -124,19 +115,6 @@ public sealed class ArtifactCasV2PersistenceTests
             var crossTeam = AvailableLocation(other, artifact, "objects/cross-team.bin");
             db.ArtifactLocation.Add(crossTeam);
             db.ArtifactLocationEvent.Add(Event(crossTeam, 1, ArtifactLocationEventType.Verified, ArtifactLocationState.Available));
-            await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
-        }
-
-        using (var scope = _fixture.BeginScope())
-        {
-            var db = scope.Resolve<CodeSpaceDbContext>();
-            var crossRun = Reference(other, artifact, "output.primary", "cross-team.bin");
-            crossRun.WorkPlanId = null;
-            crossRun.PlanVersion = null;
-            crossRun.WorkUnitId = null;
-            crossRun.WorkUnitContractHash = null;
-            crossRun.RequirementRevision = null;
-            db.WorkflowRunArtifactReference.Add(crossRun);
             await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
         }
     }
@@ -307,27 +285,17 @@ public sealed class ArtifactCasV2PersistenceTests
     }
 
     [Fact]
-    public async Task Transfer_and_reference_state_machines_reject_ghost_identity_illegal_transition_and_rewrite()
+    public async Task Transfer_state_machine_rejects_ghost_identity_and_illegal_transition()
     {
         var world = await SeedWorldAsync();
         var artifact = Object(world.TeamId, 7, 0x44);
         var location = AvailableLocation(world, artifact, "objects/44/final.bin");
-        var reference = Reference(world, artifact, "output.primary", "final.bin");
 
         using (var scope = _fixture.BeginScope())
         {
             var db = scope.Resolve<CodeSpaceDbContext>();
-            db.AddRange(artifact, location, Event(location, 1, ArtifactLocationEventType.Verified, ArtifactLocationState.Available), reference);
+            db.AddRange(artifact, location, Event(location, 1, ArtifactLocationEventType.Verified, ArtifactLocationState.Available));
             await db.SaveChangesAsync();
-        }
-
-        var ghostPlan = Reference(world, artifact, "output.ghost-plan", "ghost-plan.bin");
-        ghostPlan.PlanVersion = null;
-        using (var scope = _fixture.BeginScope())
-        {
-            var db = scope.Resolve<CodeSpaceDbContext>();
-            db.WorkflowRunArtifactReference.Add(ghostPlan);
-            await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
         }
 
         var ghost = Transfer(world, artifact, location, "ghost-attempt");
@@ -360,124 +328,6 @@ public sealed class ArtifactCasV2PersistenceTests
             stored.CompletedAt = DateTimeOffset.UtcNow;
             var illegal = await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
             illegal.InnerException?.Message.ShouldContain("illegal state transition");
-        }
-
-        using (var scope = _fixture.BeginScope())
-        {
-            var db = scope.Resolve<CodeSpaceDbContext>();
-            var stored = await db.WorkflowRunArtifactReference.SingleAsync(r => r.Id == reference.Id);
-            stored.Role = "output.rewritten";
-            var immutable = await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
-            immutable.InnerException?.Message.ShouldContain("stable facts are immutable");
-        }
-
-        var superseding = Reference(world, artifact, reference.Role, reference.LogicalPath);
-        superseding.ExecutionAttemptId = Guid.NewGuid();
-        superseding.ExecutionAttemptOrdinal = 2;
-        superseding.ExecutionGeneration = 2;
-        superseding.CreatedDate = reference.CreatedDate.AddSeconds(1);
-        using (var scope = _fixture.BeginScope())
-        {
-            var db = scope.Resolve<CodeSpaceDbContext>();
-            db.WorkflowRunArtifactReference.Add(superseding);
-            await db.SaveChangesAsync();
-        }
-
-        using (var scope = _fixture.BeginScope())
-        {
-            var db = scope.Resolve<CodeSpaceDbContext>();
-            var stored = await db.WorkflowRunArtifactReference.SingleAsync(r => r.Id == reference.Id);
-            stored.SupersededByReferenceId = superseding.Id;
-            await db.SaveChangesAsync();
-        }
-
-        using (var scope = _fixture.BeginScope())
-        {
-            var db = scope.Resolve<CodeSpaceDbContext>();
-            var stored = await db.WorkflowRunArtifactReference.SingleAsync(r => r.Id == reference.Id);
-            stored.SupersededByReferenceId = Guid.NewGuid();
-            var second = await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
-            second.InnerException?.Message.ShouldContain("one-way");
-        }
-    }
-
-    [Fact]
-    public async Task Supersession_target_cannot_be_seeded_on_insert()
-    {
-        var world = await SeedWorldAsync();
-        var artifact = Object(world.TeamId, 9, 0x51);
-        var target = Reference(world, artifact, "output.primary", "reports/current.md");
-
-        using (var scope = _fixture.BeginScope())
-        {
-            var db = scope.Resolve<CodeSpaceDbContext>();
-            db.AddRange(artifact, target);
-            await db.SaveChangesAsync();
-        }
-
-        var preSuperseded = Reference(world, artifact, "output.unrelated", "reports/unrelated.md");
-        preSuperseded.SupersededByReferenceId = target.Id;
-        using (var scope = _fixture.BeginScope())
-        {
-            var db = scope.Resolve<CodeSpaceDbContext>();
-            db.WorkflowRunArtifactReference.Add(preSuperseded);
-            var failure = await Record.ExceptionAsync(() => db.SaveChangesAsync());
-            failure.ShouldNotBeNull();
-            failure.ToString().ShouldContain("must start active");
-        }
-    }
-
-    [Fact]
-    public async Task Attempt_path_uniqueness_is_active_and_generation_scoped()
-    {
-        var world = await SeedWorldAsync();
-        var artifact = Object(world.TeamId, 10, 0x52);
-        var attemptId = Guid.NewGuid();
-        var createdAt = DateTimeOffset.UtcNow;
-        var firstGeneration = Reference(world, artifact, "output.primary", "reports/versioned.md");
-        firstGeneration.ExecutionAttemptId = attemptId;
-        firstGeneration.ExecutionGeneration = 1;
-        firstGeneration.CreatedDate = createdAt;
-        var secondGeneration = Reference(world, artifact, firstGeneration.Role, firstGeneration.LogicalPath);
-        secondGeneration.ExecutionAttemptId = attemptId;
-        secondGeneration.ExecutionGeneration = 2;
-        secondGeneration.CreatedDate = createdAt.AddSeconds(1);
-
-        using (var scope = _fixture.BeginScope())
-        {
-            var db = scope.Resolve<CodeSpaceDbContext>();
-            db.AddRange(artifact, firstGeneration, secondGeneration);
-            await db.SaveChangesAsync();
-        }
-
-        using (var scope = _fixture.BeginScope())
-        {
-            var db = scope.Resolve<CodeSpaceDbContext>();
-            var stored = await db.WorkflowRunArtifactReference.SingleAsync(r => r.Id == firstGeneration.Id);
-            stored.SupersededByReferenceId = secondGeneration.Id;
-            await db.SaveChangesAsync();
-        }
-
-        var replacement = Reference(world, artifact, firstGeneration.Role, firstGeneration.LogicalPath);
-        replacement.ExecutionAttemptId = attemptId;
-        replacement.ExecutionGeneration = 1;
-        replacement.CreatedDate = createdAt.AddSeconds(2);
-        using (var scope = _fixture.BeginScope())
-        {
-            var db = scope.Resolve<CodeSpaceDbContext>();
-            db.WorkflowRunArtifactReference.Add(replacement);
-            await db.SaveChangesAsync();
-        }
-
-        var duplicateActive = Reference(world, artifact, firstGeneration.Role, firstGeneration.LogicalPath);
-        duplicateActive.ExecutionAttemptId = attemptId;
-        duplicateActive.ExecutionGeneration = 1;
-        duplicateActive.CreatedDate = createdAt.AddSeconds(3);
-        using (var scope = _fixture.BeginScope())
-        {
-            var db = scope.Resolve<CodeSpaceDbContext>();
-            db.WorkflowRunArtifactReference.Add(duplicateActive);
-            await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
         }
     }
 
@@ -931,16 +781,7 @@ public sealed class ArtifactCasV2PersistenceTests
         LastModifiedDate = DateTimeOffset.UtcNow, LastModifiedBy = world.ActorId,
     };
 
-    private static WorkflowRunArtifactReference Reference(World world, ArtifactObject artifact, string role, string path) => new()
-    {
-        Id = Guid.NewGuid(), TeamId = world.TeamId, WorkflowRunId = world.WorkflowRunId, NodeId = "artifact.capture",
-        IterationKey = "", WorkPlanId = world.WorkPlanId, PlanVersion = 1, WorkUnitId = "write-report",
-        WorkUnitContractHash = $"sha256:{new string('b', 64)}", RequirementRevision = 1,
-        ExecutionAttemptId = Guid.NewGuid(), ExecutionAttemptOrdinal = 1, ExecutionGeneration = 1,
-        Role = role, LogicalPath = path, ContentType = "application/octet-stream", Required = true,
-        Retention = ArtifactRetention.Run, ArtifactObjectId = artifact.Id,
-        CreatedDate = DateTimeOffset.UtcNow, CreatedBy = world.ActorId,
-    };
+
 
     private static byte[] Digest(byte value) => Enumerable.Repeat(value, 32).ToArray();
 
