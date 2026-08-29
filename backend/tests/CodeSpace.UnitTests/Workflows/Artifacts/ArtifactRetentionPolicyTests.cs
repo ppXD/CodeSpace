@@ -164,6 +164,10 @@ public sealed class ArtifactRetentionPolicyTests
             Task.FromResult<ArtifactCasPurgeResult>(new ArtifactCasPurgeResult.Rejected(Unsupported));
 
         public Task<bool> ReleaseAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken) => Task.FromResult(false);
+
+        /// <summary>This double exists to refuse, so abandonment refuses too — the retention policy never reaches it.</summary>
+        public Task<ArtifactCasAbandonResult> AbandonAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken) =>
+            Task.FromResult<ArtifactCasAbandonResult>(new ArtifactCasAbandonResult.Rejected(new ArtifactCasProblem(ArtifactCasProblemCode.LocationUnavailable, false)));
         public Task<ArtifactCasPurgeResult> PurgeAsync(ArtifactCasPurgeRequest request, CancellationToken cancellationToken) =>
             Task.FromResult<ArtifactCasPurgeResult>(new ArtifactCasPurgeResult.Rejected(Unsupported));
     }
