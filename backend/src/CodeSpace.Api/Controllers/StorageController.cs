@@ -65,6 +65,20 @@ public class StorageController : ControllerBase
         return result == null ? NotFound() : Ok(result);
     }
 
+    [HttpGet("profiles/{profileId:guid}/placements")]
+    public async Task<IActionResult> ListProfilePlacements([FromRoute] Guid profileId, [FromQuery] ListProfilePlacementsQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query with { ProfileId = profileId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    [HttpGet("profiles/{profileId:guid}/placements/totals")]
+    public async Task<IActionResult> GetProfilePlacementTotals([FromRoute] Guid profileId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetProfilePlacementTotalsQuery { ProfileId = profileId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     [HttpPost("profiles")]
     [RequestSizeLimit(MaxMutationBodyBytes)]
     public async Task<IActionResult> CreateProfile([FromBody] CreateStorageProfileCommand command, CancellationToken cancellationToken)

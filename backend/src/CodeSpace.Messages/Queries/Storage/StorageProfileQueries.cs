@@ -27,3 +27,17 @@ public sealed record GetPlacementIntegrityQuery : IQuery<PlacementIntegritySumma
 {
     public string RequiredPermission => TeamPermissions.StorageManage;
 }
+
+public sealed record ListProfilePlacementsQuery : IQuery<ProfilePlacementPage>, IRequireTeamPermission
+{
+    public string RequiredPermission => TeamPermissions.StorageManage;
+    public Guid ProfileId { get; init; }
+    public string? Cursor { get; init; }
+    public int Limit { get; init; } = StoragePageLimits.DefaultPageSize;
+}
+
+public sealed record GetProfilePlacementTotalsQuery : IQuery<IReadOnlyList<ProfilePlacementTotal>>, IRequireTeamPermission
+{
+    public string RequiredPermission => TeamPermissions.StorageManage;
+    public Guid ProfileId { get; init; }
+}

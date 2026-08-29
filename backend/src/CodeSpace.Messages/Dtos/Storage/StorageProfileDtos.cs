@@ -104,3 +104,50 @@ public sealed record PlacementIntegritySummary
     /// </summary>
     public DateTimeOffset? OldestVerifiedAt { get; init; }
 }
+
+/// <summary>
+/// What a placement's record says about the bytes it names. Mirrors the persistence enum, whose ordinals are pinned
+/// by <c>ck_artifact_location_state</c>; the two are compared by a schema test rather than shared, because Messages
+/// cannot see Core.
+/// </summary>
+public enum ArtifactLocationStateValue
+{
+    Pending = 0,
+    Available = 1,
+    Missing = 2,
+    Corrupt = 3,
+    Deleting = 4,
+    Deleted = 5,
+    Failed = 6,
+    Purged = 7,
+}
+
+/// <summary>One placement still recorded under a storage profile.</summary>
+public sealed record ProfilePlacementSummary
+{
+    public required Guid LocationId { get; init; }
+    public required Guid ArtifactObjectId { get; init; }
+    public required ArtifactLocationStateValue State { get; init; }
+    public required string ObjectKey { get; init; }
+
+    /// <summary>Which revision of the profile placed it. A profile that has been re-pointed holds rows under several.</summary>
+    public required int ProfileRevision { get; init; }
+
+    public long? SizeBytes { get; init; }
+    public DateTimeOffset? VerifiedAt { get; init; }
+    public string? LastErrorCode { get; init; }
+}
+
+/// <summary>How many placements a profile holds in one state, and how many bytes they account for.</summary>
+public sealed record ProfilePlacementTotal
+{
+    public required ArtifactLocationStateValue State { get; init; }
+    public required int Count { get; init; }
+    public required long SizeBytes { get; init; }
+}
+
+public sealed record ProfilePlacementPage
+{
+    public required IReadOnlyList<ProfilePlacementSummary> Items { get; init; }
+    public string? NextCursor { get; init; }
+}

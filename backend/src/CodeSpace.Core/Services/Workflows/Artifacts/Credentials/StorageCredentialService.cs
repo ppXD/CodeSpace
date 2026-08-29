@@ -145,7 +145,7 @@ public sealed class StorageCredentialService : IStorageCredentialService, IScope
         var locations = await CountAvailableLocationsAsync(teamId, credentialId, cancellationToken).ConfigureAwait(false);
 
         if (locations > 0)
-            throw new StorageCredentialConflictException($"Storage credential cannot be revoked while {locations} stored artifact location(s) still resolve through it — revoking would make those bytes permanently unreadable. Migrate or delete those artifacts first.");
+            throw new StorageCredentialConflictException($"Storage credential cannot be revoked while {locations} stored artifact location(s) still resolve through it — revoking would make those bytes permanently unreadable. See GET /api/storage/profiles/{{profileId}}/placements on the profiles that use this credential for what they are.");
 
         var profiles = await CountLiveProfilesAsync(teamId, credentialId, cancellationToken).ConfigureAwait(false);
 
