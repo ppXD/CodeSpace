@@ -112,6 +112,5 @@ public enum ArtifactCasProblemCode
     Unsupported,
     StaleWorker,
     TransferInProgress,
-    MultipleLocationsUnsupported,
     LocationUnavailable,
 }
