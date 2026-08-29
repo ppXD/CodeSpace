@@ -122,22 +122,18 @@ public sealed class AgentRunLogCaptureRecoveryFlowTests
         await MarkTerminalAsync(world, AgentRunStatus.Failed, "{\"status\":\"Failed\"}");
         var recovery = Recovery(new BlockingCompleteLogService(realLogs), new RecoveryTestOptions { OperationTimeout = TimeSpan.FromMilliseconds(75), TerminalGrace = TimeSpan.Zero });
 
-        var summary = await recovery.ReconcileAsync(CancellationToken.None);
+        var intent = await ReconcileUntilAsync(recovery, world, AgentRunLogCaptureIntentState.Expected);
 
-        summary.Retried.ShouldBe(1);
+        intent.State.ShouldBe(AgentRunLogCaptureIntentState.Expected, "a timeout before a durable observation is conservatively retried from the claimed state");
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
-        var intent = await db.AgentRunLogCaptureIntent.SingleAsync(value => value.AgentRunId == world.AgentRunId);
-        intent.State.ShouldBe(AgentRunLogCaptureIntentState.Expected, "a timeout before a durable observation is conservatively retried from the claimed state");
         intent.LastErrorCode.ShouldBe("recovery-operation-timeout");
         intent.RecoveryOwnerId.ShouldBeNull();
         intent.RecoveryLeaseExpiresAt.ShouldBeNull();
         (await db.AgentRun.AsNoTracking().SingleAsync(value => value.Id == world.AgentRunId)).Status.ShouldBe(AgentRunStatus.Failed);
 
         await Task.Delay(120);
-        await setup.ReconcileAsync(CancellationToken.None);
-        db.ChangeTracker.Clear();
-        intent = await db.AgentRunLogCaptureIntent.SingleAsync(value => value.AgentRunId == world.AgentRunId);
+        intent = await ReconcileUntilAsync(setup, world, AgentRunLogCaptureIntentState.Completed);
         intent.State.ShouldBe(AgentRunLogCaptureIntentState.Completed, "a later bounded pass must recover a finalized stream after the backend returns");
         (await db.AgentRun.AsNoTracking().SingleAsync(value => value.Id == world.AgentRunId)).Status.ShouldBe(AgentRunStatus.Failed);
     }
@@ -542,13 +538,8 @@ public sealed class AgentRunLogCaptureRecoveryFlowTests
             BaseDelay = TimeSpan.FromMilliseconds(10), MaxDelay = TimeSpan.FromMilliseconds(20), MaxAttempts = 2,
         });
 
-        (await recovery.ReconcileAsync(CancellationToken.None)).Retried.ShouldBe(1);
-        await Task.Delay(30);
-        var exhausted = await recovery.ReconcileAsync(CancellationToken.None);
+        var intent = await ReconcileUntilAsync(recovery, world, AgentRunLogCaptureIntentState.ExternalStateIndeterminate);
 
-        exhausted.ExternalStateIndeterminate.ShouldBe(1);
-        using var scope = _fixture.BeginScope();
-        var intent = await scope.Resolve<CodeSpaceDbContext>().AgentRunLogCaptureIntent.SingleAsync(value => value.AgentRunId == world.AgentRunId);
         intent.State.ShouldBe(AgentRunLogCaptureIntentState.ExternalStateIndeterminate);
         intent.LastErrorCode.ShouldBe("recovery-exhausted");
         intent.RecoveryAttemptCount.ShouldBe(2);
@@ -648,6 +639,41 @@ public sealed class AgentRunLogCaptureRecoveryFlowTests
         var finalDb = finalScope.Resolve<CodeSpaceDbContext>();
         (await finalDb.AgentRunLogStream.SingleAsync(value => value.Id == opened.Metadata.StreamId)).State.ShouldBe(AgentRunLogStreamState.Completed);
         (await finalDb.AgentRunLogCaptureIntent.SingleAsync(value => value.AgentRunId == world.AgentRunId)).State.ShouldBe(AgentRunLogCaptureIntentState.Completed);
+    }
+
+    /// <summary>
+    /// Reconciles until THIS test's intent reaches <paramref name="state"/>, then returns it.
+    ///
+    /// <para>A single wave is not something a test may assume reaches its target. The sweep takes no team and is
+    /// bounded, so every intent left due by every test that ran before this one competes for the same slots, and the
+    /// summary counts it produces belong to whichever intents the wave happened to claim. Waiting on the target's own
+    /// row is the only formulation that states what these tests mean, and it stops depending on how many other tests
+    /// the suite has accumulated.</para>
+    /// </summary>
+    private async Task<AgentRunLogCaptureIntent> ReconcileUntilAsync(AgentRunLogCaptureRecoveryService recovery, World world, AgentRunLogCaptureIntentState state, TimeSpan? within = null)
+    {
+        var deadline = DateTimeOffset.UtcNow + (within ?? TimeSpan.FromSeconds(10));
+        AgentRunLogCaptureIntent? seen = null;
+
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            await recovery.ReconcileAsync(CancellationToken.None);
+
+            using (var scope = _fixture.BeginScope())
+            {
+                seen = await scope.Resolve<CodeSpaceDbContext>().AgentRunLogCaptureIntent.AsNoTracking()
+                    .SingleAsync(value => value.AgentRunId == world.AgentRunId);
+            }
+
+            if (seen.State == state) return seen;
+
+            await Task.Delay(25);
+        }
+
+        throw new Xunit.Sdk.XunitException(
+            $"The capture intent for agent run {world.AgentRunId} never reached {state} (last seen {seen?.State.ToString() ?? "absent"}, "
+            + $"attempts {seen?.RecoveryAttemptCount}, last error {seen?.LastErrorCode ?? "none"}). "
+            + "Reconcile waves are deployment-wide and bounded, so check whether earlier tests left enough due intents to crowd this one out.");
     }
 
     private AgentRunLogCaptureRecoveryService Recovery(IAgentRunLogService logs, RecoveryTestOptions? options = null)
