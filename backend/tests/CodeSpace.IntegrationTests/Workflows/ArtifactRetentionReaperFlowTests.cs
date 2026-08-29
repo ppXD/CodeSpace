@@ -284,6 +284,101 @@ public sealed class ArtifactRetentionReaperFlowTests
     }
 
     [Fact]
+    public async Task An_artifact_is_not_collected_while_another_destination_still_holds_its_bytes()
+    {
+        // The row is the reaper's ONLY handle on the object — its entry is always a declaration joined to
+        // workflow_artifact, and artifact_location rows are never deleted at all. Deleting the row while a sibling
+        // placement still holds bytes leaves those bytes with nothing that can ever reach them: not a reader, not a
+        // later sweep, not an operator. Until the targeted purge landed this was guaranteed only by the claim
+        // refusing every multi-placed object outright, which bought it at the price of never purging one.
+        var world = await SeedWorldAsync();
+        var artifactId = await DeclareRoutedAsync(world, "bytes at two destinations", "{\"rootPath\":\"/tmp/codespace-primary\"}", "objects/two-a");
+        await AddRoutedPlacementAsync(world, artifactId, "{\"rootPath\":\"/tmp/codespace-secondary\"}", "objects/two-b", ArtifactLocationState.Available);
+        var objectId = await ObjectOfAsync(artifactId);
+        await AgeDeclarationAsync(artifactId, TimeSpan.FromDays(30));
+
+        var drained = await SweepUntilPlacementsDrainedAsync(artifactId, objectId, target: 1);
+
+        drained.ShouldBe(1, "the drain must take one destination at a time, each under its own fence");
+        (await ArtifactExistsAsync(artifactId)).ShouldBeTrue("one destination emptied is not the object gone, and the row is the only way back to the other one");
+        (await DeclarationAsync(artifactId)).ShouldNotBeNull("and the declaration must stay live so a later sweep finishes the job rather than abandoning it");
+    }
+
+    [Fact]
+    public async Task An_artifact_is_collected_once_every_destination_has_been_drained()
+    {
+        // The other half: the loop must actually converge. A drain that stopped one placement short would keep the
+        // row and its bytes forever, which is the failure the old blanket refusal already had.
+        var world = await SeedWorldAsync();
+        var artifactId = await DeclareRoutedAsync(world, "bytes at two destinations to drain", "{\"rootPath\":\"/tmp/codespace-primary\"}", "objects/drain-a");
+        await AddRoutedPlacementAsync(world, artifactId, "{\"rootPath\":\"/tmp/codespace-secondary\"}", "objects/drain-b", ArtifactLocationState.Available);
+        var objectId = await ObjectOfAsync(artifactId);
+        await AgeDeclarationAsync(artifactId, TimeSpan.FromDays(30));
+
+        await SweepUntilPlacementsDrainedAsync(artifactId, objectId, target: 2);
+        await ElapseSweepWaitAsync(artifactId);
+        await SweepAsync();
+
+        (await PlacementStatesAsync(objectId)).ShouldAllBe(state => state == ArtifactLocationState.Purged);
+        (await ArtifactExistsAsync(artifactId)).ShouldBeFalse("with no destination still holding bytes, the row has nothing left to point at");
+    }
+
+    /// <summary>
+    /// Sweeps until at least <paramref name="target"/> of the object's placements are drained, making each scheduled
+    /// wait elapse in between. Returns how many are Purged.
+    ///
+    /// <para>A drain is one placement per sweep by design — each is its own fenced claim-delete-finalize — and every
+    /// step re-queues the declaration with a wait. So the number of sweeps is a property of the object, not something
+    /// a test may hardcode.</para>
+    /// </summary>
+    private async Task<int> SweepUntilPlacementsDrainedAsync(Guid artifactId, Guid objectId, int target)
+    {
+        foreach (var _ in Enumerable.Range(0, 8))
+        {
+            await SweepAsync();
+
+            var purged = (await PlacementStatesAsync(objectId)).Count(state => state == ArtifactLocationState.Purged);
+            if (purged >= target) return purged;
+
+            await ElapseSweepWaitAsync(artifactId);
+        }
+
+        throw new Xunit.Sdk.XunitException(
+            $"Fewer than {target} placements of artifact {artifactId} were drained within eight sweeps "
+            + $"(states: {string.Join(",", await PlacementStatesAsync(objectId))}). "
+            + "Check whether the routed claim is refusing the placement the sweep named.");
+    }
+
+    /// <summary>Brings a scheduled wait forward, whatever state the declaration is resting in, so the next sweep may claim it.</summary>
+    private async Task ElapseSweepWaitAsync(Guid artifactId)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE workflow_artifact_retention
+            SET quarantined_at = LEAST(quarantined_at, clock_timestamp() - INTERVAL '2 days'),
+                next_sweep_at = clock_timestamp() - INTERVAL '2 days', last_modified_at = clock_timestamp()
+            WHERE artifact_id = {artifactId}
+            """);
+    }
+
+    /// <summary>Resolved from the OBJECT, never from the artifact row — the row is what a collection deletes, and these states are exactly what must be true before that happens.</summary>
+    private async Task<List<ArtifactLocationState>> PlacementStatesAsync(Guid objectId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().ArtifactLocation.AsNoTracking()
+            .Where(value => value.ArtifactObjectId == objectId).Select(value => value.State).ToListAsync();
+    }
+
+    private async Task<Guid> ObjectOfAsync(Guid artifactId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return (await scope.Resolve<CodeSpaceDbContext>().WorkflowArtifact.AsNoTracking()
+            .Where(value => value.Id == artifactId).Select(value => value.CasArtifactObjectId).SingleAsync())!.Value;
+    }
+
+    [Fact]
     public async Task A_routed_artifact_is_quarantined_now_that_it_has_a_positive_purge_path()
     {
         // This hand-planted row has no location and cannot reach provider deletion, but the first observation proves
@@ -432,6 +527,63 @@ public sealed class ArtifactRetentionReaperFlowTests
         await db.SaveChangesAsync();
 
         return artifactId;
+    }
+
+    /// <summary>
+    /// Adds a SECOND placement of an artifact's object, at its own destination, in whatever state the test needs.
+    ///
+    /// <para>Reachable in production without any replication feature: one <c>artifact_object</c> is resolved by
+    /// (team, digest) alone while a location is per (profile revision, object key), so one byte-identical payload
+    /// written under two revisions — which is what repointing a route produces — is one object with two placements.</para>
+    /// </summary>
+    private async Task<Guid> AddRoutedPlacementAsync(World world, Guid artifactId, string namespaceConfig, string objectKey, ArtifactLocationState state)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var artifact = await db.WorkflowArtifact.AsNoTracking().SingleAsync(value => value.Id == artifactId);
+        var objectId = artifact.CasArtifactObjectId!.Value;
+        var digest = Convert.FromHexString(artifact.Sha256);
+        var profileId = Guid.NewGuid();
+        var revisionId = Guid.NewGuid();
+        using var document = JsonDocument.Parse(namespaceConfig);
+
+        db.StorageProfile.Add(new StorageProfile
+        {
+            Id = profileId, TeamId = world.TeamId, StableName = $"routed-second-{profileId:N}", CurrentRevision = 1,
+            State = StorageProfileState.Active, CreatedDate = now, CreatedBy = world.ActorId,
+            LastModifiedDate = now, LastModifiedBy = world.ActorId,
+            Revisions =
+            {
+                new StorageProfileRevision
+                {
+                    Id = revisionId, TeamId = world.TeamId, StorageProfileId = profileId, Revision = 1,
+                    ProviderTypeKey = LocalRwxArtifactStorageDriverFactory.TypeKey, NonSecretConfigJson = namespaceConfig, CredentialRef = null,
+                    NamespaceFingerprint = StorageProfileRules.NamespaceFingerprint(LocalRwxArtifactStorageDriverFactory.TypeKey, document.RootElement),
+                    CreatedDate = now, CreatedBy = world.ActorId,
+                },
+            },
+        });
+        await db.SaveChangesAsync();
+
+        var locationId = Guid.NewGuid();
+        db.ArtifactLocationEvent.Add(new ArtifactLocationEvent
+        {
+            Id = Guid.NewGuid(), TeamId = world.TeamId, ArtifactLocationId = locationId, Revision = 1,
+            EventType = ArtifactLocationEventType.Created, State = state, ObservedAt = now,
+            ProviderChecksumAlgorithm = "Sha256", ProviderChecksum = digest, ObservedSizeBytes = artifact.SizeBytes,
+            VerifiedAt = now, CreatedBy = world.ActorId,
+        });
+        db.ArtifactLocation.Add(new ArtifactLocation
+        {
+            Id = locationId, TeamId = world.TeamId, ArtifactObjectId = objectId, StorageProfileRevisionId = revisionId,
+            Locator = objectKey, ObjectKey = objectKey, State = state, Revision = 1,
+            ObservedSizeBytes = artifact.SizeBytes, ProviderChecksumAlgorithm = "Sha256", ProviderChecksum = digest, VerifiedAt = now,
+            CreatedDate = now, CreatedBy = world.ActorId, LastModifiedDate = now, LastModifiedBy = world.ActorId,
+        });
+        await db.SaveChangesAsync();
+
+        return locationId;
     }
 
     /// <summary>The second occupant: a routed artifact in another team, with no declaration of its own — the reaper cannot collect it, so it can only ever be an obstacle.</summary>

@@ -33,8 +33,15 @@ public sealed partial class ArtifactCasRuntimeCoordinator
             """).ToListAsync(cancellationToken).ConfigureAwait(false);
 
         if (locations.Count == 0) return ClaimRejected(ArtifactCasProblemCode.ArtifactMissing);
-        if (locations.Count != 1) return ClaimRejected(ArtifactCasProblemCode.MultipleLocationsUnsupported);
-        var location = locations[0];
+
+        // The FOR UPDATE above stays object-wide on purpose — it is the mutual exclusion two concurrent drains of the
+        // same object need. Only the SELECTION narrows: a caller draining one destination says which row, and a
+        // caller of a single-placed object still says nothing.
+        var location = request.ArtifactLocationId is { } named
+            ? locations.SingleOrDefault(value => value.Id == named)
+            : locations.Count == 1 ? locations[0] : null;
+
+        if (location == null) return ClaimRejected(ArtifactCasProblemCode.ArtifactMissing);
         if (location.State == ArtifactLocationState.Purged)
             return new ArtifactCasPurgeClaimResult.Purged(location.Id, location.Revision);
         if (location.State is not (ArtifactLocationState.Available or ArtifactLocationState.Deleting))
