@@ -29,7 +29,8 @@ internal sealed partial class AliyunOssArtifactStorageDriver : IArtifactStorageD
         | StorageProviderCapabilities.RangeRead
         | StorageProviderCapabilities.ConditionalCreate
         | StorageProviderCapabilities.Delete
-        | StorageProviderCapabilities.HealthProbe;
+        | StorageProviderCapabilities.HealthProbe
+        | StorageProviderCapabilities.StableETag;
 
     private readonly HttpClient _http;
     private readonly AliyunOssTarget _target;

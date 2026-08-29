@@ -26,7 +26,10 @@ public sealed class AliyunOssStorageProviderModuleTests
         module.FactoryType.ShouldBe(typeof(AliyunOssArtifactStorageDriverFactory));
         module.Capabilities.ShouldBe(StorageProviderCapabilities.StreamingWrite | StorageProviderCapabilities.StreamingRead
             | StorageProviderCapabilities.RangeRead | StorageProviderCapabilities.ConditionalCreate
-            | StorageProviderCapabilities.Delete | StorageProviderCapabilities.HealthProbe);
+            | StorageProviderCapabilities.Delete | StorageProviderCapabilities.HealthProbe
+            | StorageProviderCapabilities.StableETag);
+        (module.Capabilities & StorageProviderCapabilities.StableETag).ShouldNotBe(StorageProviderCapabilities.None,
+            "OSS derives an object's ETag from its content — the MD5 for a single-part upload, the hash of the part hashes otherwise — so it still names the same bytes months later and the CAS may keep it as a durable identity");
         (module.Capabilities & StorageProviderCapabilities.ObjectVersioning).ShouldBe(StorageProviderCapabilities.None, "bucket versioning is an operator setting this driver cannot promise");
         (module.Capabilities & StorageProviderCapabilities.MultipartUpload).ShouldBe(StorageProviderCapabilities.None, "the driver publishes with a single streamed upload plus a server-side copy");
         new StorageProviderModuleCatalog([module]).Require(module.TypeKey).ShouldBeSameAs(module);

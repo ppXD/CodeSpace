@@ -59,7 +59,7 @@ public sealed partial class ArtifactCasRuntimeCoordinator
         if (head.Problem != null) return new Invocation<ArtifactStorageObjectMetadata>(null, false, head.Problem);
         if (head.Timeout) return new Invocation<ArtifactStorageObjectMetadata>(null, true, Problem(ArtifactCasProblemCode.ProviderTimeout, true));
         if (head.Value?.Error != null) return new Invocation<ArtifactStorageObjectMetadata>(null, false, Map(head.Value.Error, readMissing: true));
-        if (!MetadataMatches(drive.Stored, head.Value!.Metadata!)) return new Invocation<ArtifactStorageObjectMetadata>(null, false, Problem(ArtifactCasProblemCode.TargetCorrupt));
+        if (!MetadataMatches(drive.Stored, head.Value!.Metadata!, drive.Lease.Driver.Capabilities)) return new Invocation<ArtifactStorageObjectMetadata>(null, false, Problem(ArtifactCasProblemCode.TargetCorrupt));
 
         return new Invocation<ArtifactStorageObjectMetadata>(head.Value.Metadata!, false, null);
     }
@@ -69,7 +69,7 @@ public sealed partial class ArtifactCasRuntimeCoordinator
         var driver = drive.Lease.Driver;
         var opened = await InvokeAsync(token => driver.OpenReadAsync(new ArtifactStorageReadRequest(drive.Stored.ObjectKey)
         {
-            ExpectedETag = drive.Stored.ProviderETag,
+            ExpectedETag = DurableETag(drive.Stored.ProviderETag, driver.Capabilities),
             ExpectedVersion = drive.Stored.ProviderObjectVersion,
             Range = new ArtifactStorageByteRange(drive.Offset, drive.Window),
         }, token), drive.Timeout, cancellationToken, drive.Lease).ConfigureAwait(false);

@@ -26,7 +26,7 @@ public sealed class ArtifactContentUnavailableException : Exception, IFailure
     {
         ArtifactContentUnavailableKind.MetadataMissing => $"Required artifact {artifactId} has no team-visible metadata; the saved work cannot be verified.",
         ArtifactContentUnavailableKind.PhysicalObjectMissing => $"Required artifact {artifactId} metadata exists, but its stored bytes are missing; restore the artifact backend or recover the work from its confirmed branch/PR.",
-        ArtifactContentUnavailableKind.IntegrityFailure => $"Required artifact {artifactId} failed size or SHA-256 verification; refusing to use corrupt work.",
+        ArtifactContentUnavailableKind.IntegrityFailure => $"Required artifact {artifactId} does not match what was recorded for it at its destination; refusing to use content that may not be the artifact.",
         ArtifactContentUnavailableKind.AccessDenied => $"Required artifact {artifactId} could not be read because the storage backend denied access.",
         _ => $"Required artifact {artifactId} is temporarily unavailable from the storage backend.",
     };

@@ -104,7 +104,8 @@ public sealed class AliyunOssStorageProviderModule : IStorageProviderModule, ISt
         | StorageProviderCapabilities.RangeRead
         | StorageProviderCapabilities.ConditionalCreate
         | StorageProviderCapabilities.Delete
-        | StorageProviderCapabilities.HealthProbe;
+        | StorageProviderCapabilities.HealthProbe
+        | StorageProviderCapabilities.StableETag;
 
     public Type FactoryType => typeof(AliyunOssArtifactStorageDriverFactory);
 
