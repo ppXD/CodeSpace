@@ -42,3 +42,16 @@ public sealed record ProbeStorageProfileCommand : ICommand<StorageProfileProbeRe
     public int? ProfileRevision { get; init; }
     public bool VerifyWriteAccess { get; init; } = true;
 }
+
+/// <summary>
+/// Closes one bounded batch of the records a profile still holds, for a destination that can no longer serve them.
+///
+/// <para>Repeatable by design: <c>Remaining</c> says whether to call again. Nothing is taken on the caller's word —
+/// each placement is settled only if the destination itself proves it cannot serve it.</para>
+/// </summary>
+public sealed record AbandonProfilePlacementsCommand : ICommand<ProfileAbandonmentSummary>, IRequireTeamPermission
+{
+    public string RequiredPermission => TeamPermissions.StorageManage;
+    public Guid ProfileId { get; init; }
+    public int BatchSize { get; init; } = 50;
+}

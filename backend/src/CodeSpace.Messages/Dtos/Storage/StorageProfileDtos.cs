@@ -151,3 +151,22 @@ public sealed record ProfilePlacementPage
     public required IReadOnlyList<ProfilePlacementSummary> Items { get; init; }
     public string? NextCursor { get; init; }
 }
+
+/// <summary>What one bounded pass of abandoning a profile's placements did.</summary>
+public sealed record ProfileAbandonmentSummary
+{
+    /// <summary>Placements this pass asked the destination about.</summary>
+    public required int Examined { get; init; }
+
+    /// <summary>Records closed: the destination proved it cannot serve them.</summary>
+    public required int Abandoned { get; init; }
+
+    /// <summary>Placements the destination SERVED. Left exactly as they were — this is the refusal that makes the operation safe.</summary>
+    public required int StillServed { get; init; }
+
+    /// <summary>Placements whose destination gave no usable answer. Left as they were, to be asked again.</summary>
+    public required int Unanswered { get; init; }
+
+    /// <summary>Unreleased placements still under the profile after this pass. Non-zero means call again.</summary>
+    public required int Remaining { get; init; }
+}

@@ -139,6 +139,12 @@ public sealed class StorageCredentialService : IStorageCredentialService, IScope
     /// used to cause, one layer down. Refuse while anything still needs it, and name what to release first. An
     /// operator who genuinely must kill a leaked key does it at the provider, where it takes effect for real rather
     /// than only for this platform's readers.
+    ///
+    /// <para>Killing it at the provider has a cost this used not to say: every placement that resolved through it
+    /// stops answering, so it can no longer be verified, deleted, or proved gone by an ordinary read — and each one
+    /// keeps blocking this credential's revocation. Abandon those placements
+    /// (<c>POST /api/storage/profiles/{id}/placements/abandon</c>) BEFORE killing the key, or accept that the records
+    /// close on a refused credential rather than on a clean answer.</para>
     /// </summary>
     private async Task EnsureCredentialReleasedAsync(Guid teamId, Guid credentialId, CancellationToken cancellationToken)
     {
