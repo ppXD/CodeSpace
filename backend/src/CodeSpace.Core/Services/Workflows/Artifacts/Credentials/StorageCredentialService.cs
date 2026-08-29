@@ -142,7 +142,7 @@ public sealed class StorageCredentialService : IStorageCredentialService, IScope
     /// </summary>
     private async Task EnsureCredentialReleasedAsync(Guid teamId, Guid credentialId, CancellationToken cancellationToken)
     {
-        var locations = await CountAvailableLocationsAsync(teamId, credentialId, cancellationToken).ConfigureAwait(false);
+        var locations = await CountUnreleasedLocationsAsync(teamId, credentialId, cancellationToken).ConfigureAwait(false);
 
         if (locations > 0)
             throw new StorageCredentialConflictException($"Storage credential cannot be revoked while {locations} stored artifact location(s) still resolve through it — revoking would make those bytes permanently unreadable. Migrate or delete those artifacts first.");
@@ -153,13 +153,21 @@ public sealed class StorageCredentialService : IStorageCredentialService, IScope
             throw new StorageCredentialConflictException($"Storage credential cannot be revoked while {profiles} storage profile(s) still reference it. Point those profiles at another credential first.");
     }
 
-    /// <summary>Stored objects whose profile revision resolves through this credential. The reference is the structured <c>db:{id}:{version}</c> form, so the id plus its trailing separator is an exact prefix — no other credential's reference can share it.</summary>
-    private Task<int> CountAvailableLocationsAsync(Guid teamId, Guid credentialId, CancellationToken cancellationToken) =>
+    /// <summary>
+    /// Stored objects whose profile revision resolves through this credential and which nothing has settled.
+    ///
+    /// <para>The reference is the structured <c>db:{id}:{version}</c> form, so the id plus its trailing separator is
+    /// an exact prefix — no other credential's reference can share it. Everything except <c>Purged</c> and
+    /// <c>Deleted</c> counts: a lost placement still needs this credential to be re-checked or closed, and revoking
+    /// while one remains removes the only way to reach it.</para>
+    /// </summary>
+    private Task<int> CountUnreleasedLocationsAsync(Guid teamId, Guid credentialId, CancellationToken cancellationToken) =>
         (from location in _db.ArtifactLocation.AsNoTracking()
          join revision in _db.StorageProfileRevision.AsNoTracking()
              on new { location.TeamId, Id = location.StorageProfileRevisionId }
              equals new { revision.TeamId, revision.Id }
-         where location.TeamId == teamId && location.State == ArtifactLocationState.Available
+         where location.TeamId == teamId
+             && location.State != ArtifactLocationState.Purged && location.State != ArtifactLocationState.Deleted
              && revision.CredentialRef != null && revision.CredentialRef.StartsWith(CredentialRefPrefix(credentialId))
          select location.Id)
         .CountAsync(cancellationToken);
