@@ -164,7 +164,7 @@ public sealed class StorageProfileService : IStorageProfileService, IScopedDepen
         if (routes > 0)
             throw new StorageProfileConflictException($"Storage profile cannot be retired while {routes} active storage route(s) still target it. Repoint or disable those routes first.");
 
-        var locations = await CountAvailableLocationsAsync(teamId, profileId, cancellationToken).ConfigureAwait(false);
+        var locations = await CountUnreleasedLocationsAsync(teamId, profileId, cancellationToken).ConfigureAwait(false);
         if (locations > 0)
             throw new StorageProfileConflictException($"Storage profile cannot be retired while {locations} stored artifact location(s) still live under it. See GET /api/storage/profiles/{profileId}/placements for what they are; retiring is irreversible and would leave them recorded under a profile that can never take another revision.");
     }
@@ -178,12 +178,21 @@ public sealed class StorageProfileService : IStorageProfileService, IScopedDepen
          select route.Id)
         .CountAsync(cancellationToken);
 
-    private Task<int> CountAvailableLocationsAsync(Guid teamId, Guid profileId, CancellationToken cancellationToken) =>
+    /// <summary>
+    /// Placements still recorded under this profile that nothing has settled.
+    ///
+    /// <para>Everything except <c>Purged</c> and <c>Deleted</c>, not just <c>Available</c>. A <c>Missing</c> or
+    /// <c>Corrupt</c> placement is still a record of bytes at this destination — the artifact is lost, not
+    /// accounted for — and counting only the healthy ones let retirement be granted on a lie. Retirement is
+    /// irreversible and forbids any further revision, so it also removes the last repair those records had.</para>
+    /// </summary>
+    private Task<int> CountUnreleasedLocationsAsync(Guid teamId, Guid profileId, CancellationToken cancellationToken) =>
         (from location in _db.ArtifactLocation.AsNoTracking()
          join revision in _db.StorageProfileRevision.AsNoTracking()
              on new { location.TeamId, Id = location.StorageProfileRevisionId }
              equals new { revision.TeamId, revision.Id }
-         where location.TeamId == teamId && revision.StorageProfileId == profileId && location.State == ArtifactLocationState.Available
+         where location.TeamId == teamId && revision.StorageProfileId == profileId
+             && location.State != ArtifactLocationState.Purged && location.State != ArtifactLocationState.Deleted
          select location.Id)
         .CountAsync(cancellationToken);
 
