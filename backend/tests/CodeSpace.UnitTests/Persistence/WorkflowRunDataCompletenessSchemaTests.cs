@@ -36,6 +36,8 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
     private const string InitializationMigration = "0171_workflow_run_data_manifest_initialization.sql";
     /// <summary>The migration that replaced initialization's determinate zero with an indeterminate statement, and taught the advance which NULL absorbs.</summary>
     private const string IndeterminateInitializationMigration = "0172_workflow_run_data_manifest_indeterminate_initialization.sql";
+    /// <summary>The migration that gave the maintenance sweep an un-stating it must prove is still warranted, separate from the producer's unconditional one.</summary>
+    private const string AbandonedExpectationMigration = "0182_workflow_run_data_manifest_abandoned_expectation.sql";
 
     private const string SubjectConstraint = "ck_workflow_run_capture_gap_subject";
 
@@ -261,11 +263,17 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
     /// separate, later, deliberate cutover, and this test is what turns that step into a visible red rather than a quiet
     /// import.
     ///
+    /// <para>The one MAINTENANCE reader is listed for the same reason and is not an exception to any of it. The
+    /// reconciler selects terminal runs whose declared expectation nobody ever met and un-states them through a
+    /// conditional seam beside the producers' one; it decides nothing about a run and, decisively, it never advances a
+    /// count — a sweep that closed a shortfall by counting would manufacture the complete verdict this whole plane
+    /// refuses.</para>
+    ///
     /// <para>Adding each producer turns this list red, which is the list working: the count of producers in the
     /// message below is the number a reader can trust without grepping.</para>
     /// </summary>
     [Fact]
-    public void Only_the_six_producers_and_two_bounded_operator_readers_touch_either_table()
+    public void Only_the_six_producers_two_bounded_operator_readers_and_the_reconciler_touch_either_table()
     {
         var sourceRoot = ProductionSourceRoot();
 
@@ -281,6 +289,14 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
             "CodeSpaceDbContext.cs",
             "IRunDataCompletenessReader.cs",
             "IRunDataCompletenessWriter.cs",
+
+            // The one MAINTENANCE reader: it selects the terminal runs whose declared expectation nobody ever met and
+            // un-states each one through the conditional seam in the writer above -- conditional because it reads in
+            // one transaction and writes in another, so the write has to prove the row still says what it said. It
+            // reads the manifest to CHOOSE a row and for nothing else, no run's outcome answers to it, and it advances
+            // no count -- closing a shortfall by counting is the complete-over-uncounted-data claim the plane exists
+            // to refuse.
+            "IRunDataManifestReconciler.cs",
             "NativeRecordPlane.Completeness.cs",
             "NativeRecordPlane.ExecutionCompleteness.cs",
             "NativeRecordPlane.ProcessCompleteness.cs",
@@ -303,7 +319,7 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
                           "reader, the Agent Run exact-gap reader, and the capture plane's three completeness partials " +
                           "now touches the capture-gap / data-manifest plane. Exactly four producers exist — the " +
                           "native-record, harness-process-attempt, harness-execution and model-call facets — and exactly two bounded, " +
-                          "observation-only readers exist. No reducer folds a gap and terminal authority does not " +
+                          "observation-only readers plus one maintenance reconciler exist. No reducer folds a gap and terminal authority does not " +
                           "consult the manifest. Any new producer or reader is a deliberate step that updates this " +
                           "list — not a silent one.");
     }
@@ -609,21 +625,33 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
 
     /// <summary>
     /// The DRIFT DETECTOR for the seam above. Moving the lock discipline into the database means the only thing holding
-    /// the producer to it is a function NAME resolved at runtime — rename it in 0148 and the C# still compiles, still
-    /// deploys, and fails at the first batch with <c>42883 function does not exist</c>, where the plane's containment
-    /// turns it into a log line and a silently unstated run. Both names are therefore pinned on both sides.
+    /// the producer to it is a function NAME resolved at runtime — rename it in its migration and the C# still compiles,
+    /// still deploys, and fails at the first batch with <c>42883 function does not exist</c>, where the plane's
+    /// containment turns it into a log line and a silently unstated run. Every name is therefore pinned on both sides.
+    ///
+    /// <para>The sweep's conditional un-stating is pinned the same way and matters MORE, not less: it is the only
+    /// caller with no producer behind it to notice, so a 42883 there is a reconciler that quietly stops reconciling
+    /// while every tick still reports a clean pass.</para>
     /// </summary>
     [Theory]
-    [InlineData("workflow_run_data_manifest_advance")]
-    [InlineData("workflow_run_data_manifest_unstate_expectation")]
-    public void The_rendezvous_taking_functions_are_named_identically_in_0148_and_in_the_writer(string function)
+    [InlineData(RendezvousMigration, "workflow_run_data_manifest_advance")]
+    [InlineData(RendezvousMigration, "workflow_run_data_manifest_unstate_expectation")]
+    [InlineData(AbandonedExpectationMigration, "workflow_run_data_manifest_unstate_abandoned_expectation")]
+    public void The_rendezvous_taking_functions_are_named_identically_in_their_migration_and_in_the_writer(string migrationName, string function)
     {
-        var migration = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Persistence", "DbUpFiles", RendezvousMigration));
+        var migration = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Persistence", "DbUpFiles", migrationName));
 
-        DbUpRunner.DiscoverScriptNames().ShouldContain(name => name.EndsWith(RendezvousMigration, StringComparison.OrdinalIgnoreCase),
-            customMessage: $"{RendezvousMigration} must be discoverable by DbUp, or a deployed image has neither function and the producer's every batch is a contained 42883.");
+        DbUpRunner.DiscoverScriptNames().ShouldContain(name => name.EndsWith(migrationName, StringComparison.OrdinalIgnoreCase),
+            customMessage: $"{migrationName} must be discoverable by DbUp, or a deployed image has no such function and its every batch is a contained 42883.");
         migration.ShouldContain($"CREATE OR REPLACE FUNCTION {function}",
-            customMessage: $"'{function}' is not defined by {RendezvousMigration}, so nothing creates the entry point the writer calls");
+            customMessage: $"'{function}' is not defined by {migrationName}, so nothing creates the entry point the writer calls");
+        // Presence FIRST, and not as ceremony: IndexOf answers -1 for a lock that is not there at all, which is less
+        // than every position and would let a migration that took no lock pass the ordering check below.
+        var rendezvous = migration.IndexOf("PERFORM workflow_run_data_completeness_lock(team, run)", StringComparison.Ordinal);
+
+        rendezvous.ShouldBeGreaterThan(-1, customMessage: $"{migrationName} takes no per-run rendezvous at all");
+        rendezvous.ShouldBeLessThan(migration.IndexOf("UPDATE workflow_run_data_manifest", StringComparison.Ordinal),
+            customMessage: $"{migrationName} must rendezvous BEFORE it probes the gap plane or touches a statement. A conditional un-stating is not exempt: its own WHERE clause probes the open-gap count, so without the lock the probe and the write it feeds can be split by a committing gap — the split 0148 exists to make unreachable.");
 
         File.ReadAllText(Path.Combine(ProductionSourceRoot(), "CodeSpace.Core", "Services", "RunData", "IRunDataCompletenessWriter.cs"))
             .ShouldContain(function,
@@ -715,9 +743,9 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
     /// stop being one-to-one the loop would be checking the wrong list without saying so. The swap corrects the source
     /// of truth going forward; it closes no hole that is open today.
     ///
-    /// <para><c>WorkflowRunDataOwnerKinds.NodeOutput</c> is outside its scope either way, and deliberately so — it is
-    /// absent from the registry this reads for the reason that registry's own doc gives, and this loop demands a facet
-    /// for every noun it names, which is the one thing a node-output subject may never have.</para>
+    /// <para>The two run-produced-file nouns are inside its scope now — the registry admits them, so this loop demands
+    /// all three constraints name them. What it demands is that a facet can be SPELLED, not that anything states one:
+    /// no producer advances either noun and the initializer mints no row for a noun outside its required set.</para>
     /// </summary>
     private static IReadOnlyCollection<string> AllRegisteredOwnerKinds() => WorkflowRunDataOwnerKinds.All;
 

@@ -75,8 +75,31 @@ public interface IRunDataCompletenessWriter
     Task<bool> UnstateExpectationAsync(Guid teamId, Guid workflowRunId, string facet, CancellationToken cancellationToken);
 }
 
+/// <summary>
+/// The un-stating a caller that did not OBSERVE the abandonment is allowed to make. A sibling of
+/// <see cref="IRunDataCompletenessWriter"/> rather than a fifth method on it (Rule 7), because the two verbs answer to
+/// different authorities: a producer states abandonment as a fact about ITSELF and nothing may talk it out of that,
+/// while a sweep only ever infers it from a row it read in an earlier transaction, and an inference has to prove it
+/// still holds. Widening the producer seam would have handed every producer a verb whose extra argument means nothing
+/// to it, and handed the sweep the unconditional one it must never reach for.
+/// </summary>
+public interface IRunDataAbandonedExpectationWriter
+{
+    /// <summary>
+    /// Un-states one facet's expectation ONLY IF it still reads exactly as the caller selected it: an unattributed
+    /// shortfall, on a run still terminal, unadvanced since <see cref="RunDataAbandonedExpectation.SettledBefore"/>.
+    /// Every conjunct is re-checked inside the write, so a producer's late accounting, a gap that names the loss, or
+    /// an operator continuing the run between the read and this call keeps what it established.
+    ///
+    /// <para>Returns whether a statement was actually revised. <c>false</c> is the ordinary answer for a row that
+    /// stopped qualifying, and it is not a failure to retry — the answer improved, so there is nothing left to
+    /// un-state.</para>
+    /// </summary>
+    Task<bool> UnstateAbandonedExpectationAsync(RunDataAbandonedExpectation abandoned, CancellationToken cancellationToken);
+}
+
 /// <inheritdoc cref="IRunDataCompletenessWriter"/>
-public sealed class RunDataCompletenessWriter : IRunDataCompletenessWriter, IScopedDependency
+public sealed class RunDataCompletenessWriter : IRunDataCompletenessWriter, IRunDataAbandonedExpectationWriter, IScopedDependency
 {
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<RunDataCompletenessWriter> _logger;
@@ -113,9 +136,23 @@ public sealed class RunDataCompletenessWriter : IRunDataCompletenessWriter, ISco
         return revised > 0;
     }
 
+    public async Task<bool> UnstateAbandonedExpectationAsync(RunDataAbandonedExpectation abandoned, CancellationToken cancellationToken)
+    {
+        var revised = 0L;
+
+        await ContainedAsync(abandoned.WorkflowRunId, abandoned.Facet, async db => revised = await RevisedIfStillAbandoned(db, abandoned, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+
+        return revised > 0;
+    }
+
     /// <summary>How many statements the un-stating revised — read back so the caller can name the run it happened to and stay silent when nothing changed.</summary>
     private static async Task<long> Revised(CodeSpaceDbContext db, Guid teamId, Guid workflowRunId, string facet, CancellationToken cancellationToken) =>
         (await db.Database.SqlQuery<long>($"SELECT workflow_run_data_manifest_unstate_expectation({teamId}, {workflowRunId}, {facet}) AS \"Value\"")
+            .ToListAsync(cancellationToken).ConfigureAwait(false)).Single();
+
+    /// <summary>The compare-and-set half: 0182 re-asks the caller's whole selecting question under the rendezvous lock, so a row whose answer improved comes back as 0 revised rather than as a destroyed accounting.</summary>
+    private static async Task<long> RevisedIfStillAbandoned(CodeSpaceDbContext db, RunDataAbandonedExpectation abandoned, CancellationToken cancellationToken) =>
+        (await db.Database.SqlQuery<long>($"SELECT workflow_run_data_manifest_unstate_abandoned_expectation({abandoned.TeamId}, {abandoned.WorkflowRunId}, {abandoned.Facet}, {abandoned.SettledBefore}) AS \"Value\"")
             .ToListAsync(cancellationToken).ConfigureAwait(false)).Single();
 
     /// <summary>
