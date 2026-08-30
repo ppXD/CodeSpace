@@ -91,6 +91,15 @@ public static class WorkflowRunDataOwnerKinds
         LogSegment, Session, SessionStateRevision, CaptureGap, DataManifest,
     };
 
+    /// <summary>
+    /// The registered OWNER kinds — every noun a manifest facet may be declared over or a data reference may point at.
+    /// <see cref="NodeOutput"/> is deliberately absent: it is a gap SUBJECT and nothing more. A facet needs a declarable
+    /// expected count, and nothing knows in advance how many outputs a run will offload, so a node-output facet would
+    /// sit at expected=0 forever and read as complete — the exact false claim the subject exists to prevent. Admitting a
+    /// noun here is a widening of both tables' check constraints, never a list edit.
+    /// </summary>
+    public static IReadOnlySet<string> All => Registered;
+
     public static bool IsSupported(string? ownerKind) => ownerKind is not null && Registered.Contains(ownerKind);
 }
 
