@@ -239,6 +239,7 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
     [Theory]
     [InlineData(ArtifactStorageErrorCode.ProviderFailure)]   // the destination is having a bad moment
     [InlineData(ArtifactStorageErrorCode.Throttled)]         // it is refusing the pace, not the object
+    [InlineData(ArtifactStorageErrorCode.Unavailable)]       // a 5xx or a network fault — the SAME code a deleted bucket answers with, told apart only by retryability
     public async Task A_destination_having_a_bad_moment_is_not_evidence_that_anything_is_gone(ArtifactStorageErrorCode transient)
     {
         // The predicate that decides what counts as proof is the whole safety of this operation. An answer about the
@@ -257,6 +258,27 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         result.ShouldBeOfType<ArtifactCasAbandonResult.Rejected>();
         (await PlacementStateAsync(world, locationId)).ShouldBe(ArtifactLocationState.Deleting,
             "the claim stands so a caller can retry or release it — what must not happen is the record being closed");
+    }
+
+    [Fact]
+    public async Task A_destination_that_answers_it_is_gone_for_good_settles_the_record()
+    {
+        // The deleted-bucket exit — the dead end the operation exists for. NoSuchBucket classifies to Unavailable
+        // like a 5xx does, but non-retryable, because retrying does not bring a deleted bucket back. That one bit is
+        // the entire difference between "close the record" and "come back later".
+        var world = await SeedWorldAsync();
+        var storage = MultiLocationStorage();
+        var bytes = "bytes in a bucket that was deleted"u8.ToArray();
+        var committed = (await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "abandon-bucket-gone")))
+            .ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        var locationId = await FirstPlacementAsync(world, committed.ArtifactObjectId, exceptId: Guid.Empty);
+        storage.HeadErrors.Enqueue(new ArtifactStorageError(ArtifactStorageErrorCode.Unavailable, "NoSuchBucket", IsRetryable: false));
+
+        var result = await AbandonAsync(world, storage, committed.ArtifactObjectId);
+
+        result.ShouldBeOfType<ArtifactCasAbandonResult.Abandoned>();
+        storage.DeleteCalls.ShouldBe(0);
+        (await PlacementStateAsync(world, locationId)).ShouldBe(ArtifactLocationState.Purged);
     }
 
     [Fact]

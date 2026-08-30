@@ -154,8 +154,11 @@ public sealed partial class ArtifactCasRuntimeCoordinator
         var activation = await OpenDriverAsync(new DriverActivationRequest(claim.TeamId, claim.StorageProfileId,
             claim.StorageProfileRevision, StorageProfileEligibility.Read, claim.OperationTimeout, StorageProviderCapabilities.None), cancellationToken).ConfigureAwait(false);
 
-        // A destination that cannot even be opened — a revoked credential, a profile revision whose config no longer
-        // resolves — is itself the evidence. That is exactly the operator this exists for.
+        // A destination that cannot be opened is evidence only when the refusal is DURABLE — a revoked credential, a
+        // profile revision whose config no longer resolves. A retryable failure (a broker timeout, a resolution blip)
+        // is a statement about the moment, and closing the record on it would settle Purged over bytes one bad second
+        // could not testify about. The broker's mapping already draws this line: transient reasons carry IsRetryable.
+        if (activation.Problem is { } refusal && !Settles(refusal)) return new ArtifactCasAbandonResult.Rejected(refusal);
         if (activation.Problem != null) return await FinalizeAbandonAsync(claim, $"the destination could not be opened ({activation.Problem.Code})", cancellationToken).ConfigureAwait(false);
 
         StorageRuntimeDriverLease? lease = activation.Lease!;
@@ -168,7 +171,7 @@ public sealed partial class ArtifactCasRuntimeCoordinator
             if (head.Timeout) return new ArtifactCasAbandonResult.Rejected(Problem(ArtifactCasProblemCode.ProviderTimeout, true));
 
             if (head.Value?.Error is { } error)
-                return Settles(error.Code)
+                return Settles(error)
                     ? await FinalizeAbandonAsync(claim, $"the destination answered '{error.Code}' for {claim.ObjectKey}", cancellationToken).ConfigureAwait(false)
                     : new ArtifactCasAbandonResult.Rejected(Map(error, readMissing: false));
 
@@ -182,12 +185,27 @@ public sealed partial class ArtifactCasRuntimeCoordinator
         }
     }
 
-    /// <summary>Which provider answers say something durable about the destination rather than about this moment.</summary>
-    private static bool Settles(ArtifactStorageErrorCode code) => code
+    /// <summary>
+    /// Which provider answers say something durable about the destination rather than about this moment.
+    ///
+    /// <para><c>Missing</c>, <c>Unauthorized</c> and <c>Forbidden</c> are statements about the object or the
+    /// credential. <c>Unavailable</c> is two different answers wearing one code — a deleted bucket AND a transient
+    /// 5xx or network fault both classify to it — and retryability is what tells them apart: the classifier marks a
+    /// gone namespace non-retryable because retrying does not bring a deleted bucket back. A retryable Unavailable is
+    /// a bad moment, and a bad moment must never close the record of bytes it could not testify about.</para>
+    /// </summary>
+    /// <summary>
+    /// Whether a failure to even OPEN the destination is durable evidence. The broker's mapping already draws the
+    /// line — a revoked credential or a vanished profile revision is non-retryable, a broker timeout or resolution
+    /// blip is retryable — so retryability IS the moment-versus-destination distinction at this seam.
+    /// </summary>
+    internal static bool Settles(ArtifactCasProblem problem) => !problem.IsRetryable;
+
+    internal static bool Settles(ArtifactStorageError error) => error.Code
         is ArtifactStorageErrorCode.Missing
-        or ArtifactStorageErrorCode.Unavailable
         or ArtifactStorageErrorCode.Unauthorized
-        or ArtifactStorageErrorCode.Forbidden;
+        or ArtifactStorageErrorCode.Forbidden
+        || (error.Code == ArtifactStorageErrorCode.Unavailable && !error.IsRetryable);
 
     private async Task<ArtifactCasAbandonResult> FinalizeAbandonAsync(ArtifactCasPurgeClaim claim, string evidence, CancellationToken cancellationToken)
     {

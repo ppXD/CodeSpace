@@ -23,7 +23,7 @@ internal static class AliyunOssErrors
         var status = (int)response.StatusCode;
         var code = Classify(response.StatusCode, providerCode);
 
-        return new ArtifactStorageError(code, Message(code, objectKey, status, providerCode), IsRetryable(code), providerCode);
+        return new ArtifactStorageError(code, Message(code, objectKey, status, providerCode), IsRetryable(code, providerCode), providerCode);
     }
 
     /// <summary>
@@ -38,7 +38,7 @@ internal static class AliyunOssErrors
 
         var code = Classify(status, providerCode);
 
-        return code == error.Code ? error : new ArtifactStorageError(code, Message(code, objectKey, (int)status, providerCode), IsRetryable(code), providerCode);
+        return code == error.Code ? error : new ArtifactStorageError(code, Message(code, objectKey, (int)status, providerCode), IsRetryable(code, providerCode), providerCode);
     }
 
     public static ArtifactStorageError Transport(Exception exception, string objectKey) =>
@@ -58,7 +58,16 @@ internal static class AliyunOssErrors
         _ => ArtifactStorageErrorCode.ProviderFailure,
     };
 
-    private static bool IsRetryable(ArtifactStorageErrorCode code) => code is ArtifactStorageErrorCode.Throttled or ArtifactStorageErrorCode.Unavailable or ArtifactStorageErrorCode.ProviderFailure;
+    /// <summary>
+    /// Whether retrying the same request could change the answer.
+    ///
+    /// <para><c>NoSuchBucket</c> is carved out of the otherwise-retryable <c>Unavailable</c>: a deleted bucket is a
+    /// durable statement about the namespace, not about the moment, and retrying does not bring it back. The
+    /// distinction is load-bearing — it is the only signal that separates "the destination is GONE" from "the
+    /// destination is having a bad minute", and abandonment is allowed to believe only the first.</para>
+    /// </summary>
+    private static bool IsRetryable(ArtifactStorageErrorCode code, string? providerCode = null) =>
+        providerCode != "NoSuchBucket" && code is ArtifactStorageErrorCode.Throttled or ArtifactStorageErrorCode.Unavailable or ArtifactStorageErrorCode.ProviderFailure;
 
     private static string Message(ArtifactStorageErrorCode code, string objectKey, int status, string? providerCode) => code == ArtifactStorageErrorCode.Missing
         ? $"Object '{objectKey}' does not exist."
