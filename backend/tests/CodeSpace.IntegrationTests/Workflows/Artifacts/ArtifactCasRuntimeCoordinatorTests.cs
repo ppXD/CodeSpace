@@ -261,11 +261,39 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
     }
 
     [Fact]
+    public async Task A_destination_that_cannot_answer_for_itself_closes_nothing_however_gone_the_object_looks()
+    {
+        // The trap the corroboration exists for: a provider cannot tell a deleted object from a namespace it can no
+        // longer see. Missing is what an unmounted volume answers for EVERY key, and closing on it nulls the
+        // checksum, the size, the ETag and the provider version of bytes that are still sitting right there.
+        var world = await SeedWorldAsync();
+        var storage = MultiLocationStorage();
+        var bytes = "bytes behind a mount that went away"u8.ToArray();
+        var committed = (await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "abandon-unmounted")))
+            .ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        var locationId = await FirstPlacementAsync(world, committed.ArtifactObjectId, exceptId: Guid.Empty);
+        storage.HeadErrors.Enqueue(new ArtifactStorageError(ArtifactStorageErrorCode.Missing, "no such key", IsRetryable: false));
+        // The exact answer the local driver gives for a root that is not there: unavailable, and RETRYABLE, because
+        // a volume that was unmounted can be mounted again. That one bit is what separates it from a deleted bucket.
+        storage.ProbeStatus = ArtifactStorageProbeStatus.Unavailable;
+        storage.ProbeError = new ArtifactStorageError(ArtifactStorageErrorCode.Unavailable, "Local storage root does not exist.", IsRetryable: true);
+
+        var result = await AbandonAsync(world, storage, committed.ArtifactObjectId);
+
+        result.ShouldBeOfType<ArtifactCasAbandonResult.Rejected>().Problem.IsRetryable
+            .ShouldBeTrue("an unanswerable destination is a moment to come back from, never a record to close");
+        storage.Objects.ShouldContainKey("cas/abandon-unmounted.bin", "the bytes were never touched — only the answer about them was wrong");
+        (await PlacementStateAsync(world, locationId)).ShouldBe(ArtifactLocationState.Available,
+            "an answer that established nothing hands the claim back and leaves the row exactly as it was");
+    }
+
+    [Fact]
     public async Task A_destination_that_answers_it_is_gone_for_good_settles_the_record()
     {
         // The deleted-bucket exit — the dead end the operation exists for. NoSuchBucket classifies to Unavailable
         // like a 5xx does, but non-retryable, because retrying does not bring a deleted bucket back. That one bit is
-        // the entire difference between "close the record" and "come back later".
+        // the entire difference between "close the record" and "come back later". The destination still answers for
+        // ITSELF here, which is the other half: an answer it cannot corroborate closes nothing.
         var world = await SeedWorldAsync();
         var storage = MultiLocationStorage();
         var bytes = "bytes in a bucket that was deleted"u8.ToArray();
@@ -273,6 +301,30 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
             .ShouldBeOfType<ArtifactCasTransferResult.Committed>();
         var locationId = await FirstPlacementAsync(world, committed.ArtifactObjectId, exceptId: Guid.Empty);
         storage.HeadErrors.Enqueue(new ArtifactStorageError(ArtifactStorageErrorCode.Unavailable, "NoSuchBucket", IsRetryable: false));
+
+        var result = await AbandonAsync(world, storage, committed.ArtifactObjectId);
+
+        result.ShouldBeOfType<ArtifactCasAbandonResult.Abandoned>();
+        storage.DeleteCalls.ShouldBe(0);
+        (await PlacementStateAsync(world, locationId)).ShouldBe(ArtifactLocationState.Purged);
+    }
+
+    [Fact]
+    public async Task A_destination_whose_own_probe_answers_it_is_gone_for_good_corroborates_what_it_said_about_the_object()
+    {
+        // The deleted bucket as it actually presents: NEITHER the key nor the destination can be served, and both
+        // refusals are non-retryable. A probe error that is itself durable IS the destination answering for itself —
+        // it has said it is gone — and demanding a HEALTHY probe instead made the exit this operation exists for
+        // unreachable at exactly the destination that needs it.
+        var world = await SeedWorldAsync();
+        var storage = MultiLocationStorage();
+        var bytes = "bytes in a bucket that answered for itself"u8.ToArray();
+        var committed = (await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "abandon-bucket-answered")))
+            .ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        var locationId = await FirstPlacementAsync(world, committed.ArtifactObjectId, exceptId: Guid.Empty);
+        storage.HeadErrors.Enqueue(new ArtifactStorageError(ArtifactStorageErrorCode.Unavailable, "NoSuchBucket", IsRetryable: false));
+        storage.ProbeStatus = ArtifactStorageProbeStatus.Unavailable;
+        storage.ProbeError = new ArtifactStorageError(ArtifactStorageErrorCode.Unavailable, "NoSuchBucket", IsRetryable: false);
 
         var result = await AbandonAsync(world, storage, committed.ArtifactObjectId);
 
@@ -1614,6 +1666,12 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         public bool BlockFactoryIgnoringCancellation;
         public bool BlockNextDelete;
         public bool CorruptReads;
+
+        /// <summary>Whether the destination can still answer for ITSELF, which is separate from what it answers about any one key — an unmounted volume says Missing for every key and Unavailable for itself.</summary>
+        public ArtifactStorageProbeStatus ProbeStatus = ArtifactStorageProbeStatus.Available;
+
+        /// <summary>What the destination says ABOUT ITSELF when it is not healthy: durable for a namespace that is gone for good, retryable for one that is merely out of reach right now.</summary>
+        public ArtifactStorageError? ProbeError;
         public StorageProviderCapabilities Capabilities = StorageProviderCapabilities.StreamingWrite | StorageProviderCapabilities.StreamingRead | StorageProviderCapabilities.ConditionalCreate;
         public int MetadataRevision = 1;
         public int PutCalls;
@@ -1710,7 +1768,7 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         }
 
         public ValueTask<ArtifactStorageProbeResult> ProbeAsync(ArtifactStorageProbeRequest request, CancellationToken cancellationToken) =>
-            ValueTask.FromResult(new ArtifactStorageProbeResult { Status = ArtifactStorageProbeStatus.Available, Latency = TimeSpan.Zero });
+            ValueTask.FromResult(new ArtifactStorageProbeResult { Status = state.ProbeStatus, Latency = TimeSpan.Zero, Error = state.ProbeError });
 
         public ValueTask DisposeAsync()
         {
