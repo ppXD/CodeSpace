@@ -17,4 +17,7 @@ public sealed record VerifyStaleArtifactLocationsResponse
     public required int Missing { get; init; }
     public required int Corrupt { get; init; }
     public required int Inconclusive { get; init; }
+
+    /// <summary>Rows the provider answered about and the database refused to record. Apart from <see cref="Inconclusive"/> on purpose: a pass that could reach every destination and write none of it down is a different fault from one that could reach nothing.</summary>
+    public required int Unrecorded { get; init; }
 }

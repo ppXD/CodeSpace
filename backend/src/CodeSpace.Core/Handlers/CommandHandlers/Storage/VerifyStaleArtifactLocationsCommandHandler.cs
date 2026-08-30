@@ -21,6 +21,7 @@ public sealed class VerifyStaleArtifactLocationsCommandHandler : IRequestHandler
         {
             Checked = summary.Checked, Confirmed = summary.Confirmed,
             Missing = summary.Missing, Corrupt = summary.Corrupt, Inconclusive = summary.Inconclusive,
+            Unrecorded = summary.Unrecorded,
         };
     }
 }
