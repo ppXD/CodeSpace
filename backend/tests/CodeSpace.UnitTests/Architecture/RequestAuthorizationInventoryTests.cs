@@ -65,6 +65,7 @@ public class RequestAuthorizationInventoryTests
         ["ReapUnreferencedArtifactsCommand"] = "collects artifacts that a producer declared for retention and that no reference site points at, in bounded lease/fence batches; it is dispatched only by the system recurring job, acts for no user, and can never reach an artifact no producer declared.",
         ["ReconcileAgentRunLogCapturesCommand"] = "reconciles exact durable AgentRun log-capture health in bounded lease/fence batches; it is dispatched only by the system recurring job and never acts for a user or changes an AgentRun outcome.",
         ["ResumeAbandonedArtifactTransfersCommand"] = "finishes artifact transfers whose worker died mid-flight, across every team, in bounded fence/lease batches; a parked transfer is unreachable to the team that started it, so this is a question no team can ask on its own behalf, and it starts nothing — it only completes or closes what a caller already began.",
+        ["ReconcileRunDataManifestsCommand"] = "un-states the expectations of terminal runs whose producers declared more records than any of them accounted for, across every team, in bounded batches; whether a run's record was ever established is a question no team can ask on its own behalf, and it removes a claim rather than making one — no run can come out of it reading more complete than it went in.",
         ["ReconcileStuckAgentRunsCommand"] = "sweep",
         ["ReconcileStuckRunsCommand"] = "sweep",
         ["DistillLessonsCommand"] = "sweep",

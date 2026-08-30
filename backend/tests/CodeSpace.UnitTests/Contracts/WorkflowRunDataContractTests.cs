@@ -51,6 +51,22 @@ public sealed class WorkflowRunDataContractTests
         JsonSerializer.Serialize(WorkflowRunCaptureCompleteness.RedactedExact, AgentJson.Options).ShouldBe("\"RedactedExact\"");
     }
 
+    /// <summary>
+    /// The two nouns for a file a RUN produced. Both were held out of the registry on the reasoning migration 0175
+    /// wrote down — a facet nothing advances "would sit at expected=0 forever and read as complete" — and 0172, which
+    /// shipped BEFORE it, had already made that impossible: an unadvanced facet is minted with a NULL expectation under
+    /// <see cref="WorkflowRunCaptureCompleteness.LegacyUnknown"/>, which the database refuses every complete verdict
+    /// over. Registration reserves the noun; it mints no row and states nothing.
+    /// </summary>
+    [Theory]
+    [InlineData(WorkflowRunDataOwnerKinds.NodeOutput)]
+    [InlineData(WorkflowRunDataOwnerKinds.Deliverable)]
+    public void A_file_a_run_produced_is_a_registered_owner_noun(string ownerKind)
+    {
+        WorkflowRunDataOwnerKinds.All.ShouldContain(ownerKind);
+        WorkflowRunDataOwnerKinds.IsSupported(ownerKind).ShouldBeTrue("a reference to a run-produced file must validate, or the only owner it can name is a plane that did not produce it");
+    }
+
     [Fact]
     public void A_valid_artifact_reference_round_trips_with_run_and_attempt_identity()
     {

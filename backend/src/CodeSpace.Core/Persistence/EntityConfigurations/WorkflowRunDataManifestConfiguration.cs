@@ -19,7 +19,7 @@ public sealed class WorkflowRunDataManifestConfiguration : IEntityTypeConfigurat
             // IS NOT NULL is what keeps that true: without it the comparison over a NULL expectation evaluates the
             // constraint to NULL, and PostgreSQL admits exactly the unverifiable claim this line refuses.
             table.HasCheckConstraint("ck_workflow_run_data_manifest_completeness", "verdict NOT IN ('Exact', 'RedactedExact') OR (expected_record_count IS NOT NULL AND present_record_count >= expected_record_count AND known_missing_count = 0)");
-            table.HasCheckConstraint("ck_workflow_run_data_manifest_facet", "facet IN ('model-call', 'model-call-attempt', 'model-call-body-capture', 'harness-execution', 'harness-process-attempt', 'harness-descriptor', 'harness-reduction-checkpoint', 'runner-handle', 'native-record', 'semantic-event', 'tool-call', 'tool-call-attempt', 'log-stream', 'log-segment', 'session', 'session-state-revision', 'capture-gap', 'data-manifest')");
+            table.HasCheckConstraint("ck_workflow_run_data_manifest_facet", "facet IN ('model-call', 'model-call-attempt', 'model-call-body-capture', 'harness-execution', 'harness-process-attempt', 'harness-descriptor', 'harness-reduction-checkpoint', 'runner-handle', 'native-record', 'semantic-event', 'tool-call', 'tool-call-attempt', 'log-stream', 'log-segment', 'session', 'session-state-revision', 'node-output', 'deliverable', 'capture-gap', 'data-manifest')");
             table.HasCheckConstraint("ck_workflow_run_data_manifest_time", "last_modified_at >= created_at");
             table.HasCheckConstraint("ck_workflow_run_data_manifest_verdict", "verdict IN ('Exact', 'RedactedExact', 'Partial', 'Unavailable', 'Corrupt', 'LegacyUnknown')");
         });
