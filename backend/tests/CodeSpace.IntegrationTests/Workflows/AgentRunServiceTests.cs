@@ -717,6 +717,59 @@ public class AgentRunServiceTests
     }
 
     [Fact]
+    public async Task A_storage_failure_at_completion_sheds_the_blobs_and_keeps_the_finished_outcome()
+    {
+        // The worse outcome this replaces shipped once already: the offload's throw escaped to the executor's
+        // catch-all, which rewrote the ENTIRE finished result as Failed/executor-error — a run that did its work and
+        // pushed its branch read as failed, inviting a re-run that re-fires side effects, while the real patch and
+        // transcript were lost anyway. Shedding keeps every small fact; only the payloads the store refused are
+        // absent, and their readers answer that absence with a typed unavailable rather than a crash.
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+            await svc.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        var bigPatch = string.Concat(Enumerable.Range(0, 1000).Select(i => $"+added line {i:D4} to the file\n"));
+
+        using (var scope = _fixture.BeginScope(builder => builder.RegisterInstance<IArtifactOffloader>(new RefusingOffloader())))
+            await scope.Resolve<IAgentRunService>().CompleteAsync(runId, new AgentRunResult
+            {
+                Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = "Shipped.",
+                Patch = bigPatch, ProducedBranch = "codespace/fix-1", ChangedFiles = new[] { "src/a.ts" },
+            }, CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            var stored = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+
+            run.Status.ShouldBe(AgentRunStatus.Succeeded, "the run finished its work; a storage hiccup is not allowed to rewrite that");
+            stored.ProducedBranch.ShouldBe("codespace/fix-1", "the branch was pushed, and losing that fact is what invites a double-side-effect re-run");
+            stored.ChangedFiles.ShouldBe(new[] { "src/a.ts" });
+            stored.Summary.ShouldBe("Shipped.");
+            stored.Patch.ShouldBe("", "the payload the store refused is shed, never inlined unbounded");
+            stored.PatchArtifactId.ShouldBeNull();
+        }
+    }
+
+    /// <summary>An offloader whose destination refuses every large payload — the storage-hiccup shape at completion time.</summary>
+    private sealed class RefusingOffloader : IArtifactOffloader
+    {
+        public Task<OffloadedText> OffloadIfLargeAsync(Guid teamId, string? text, string contentType, CancellationToken cancellationToken) =>
+            string.IsNullOrEmpty(text) || System.Text.Encoding.UTF8.GetByteCount(text) <= ArtifactStoreConfig.InlineThresholdBytes
+                ? Task.FromResult(new OffloadedText(text ?? "", null))
+                : throw new IOException("the destination refused the write");
+
+        public Task<string?> ResolveAsync(Guid teamId, string? inline, Guid? artifactId, CancellationToken cancellationToken) =>
+            Task.FromResult<string?>(inline);
+    }
+
+    [Fact]
     public async Task Completing_with_a_large_patch_offloads_it_to_an_artifact_and_keeps_only_the_ref()
     {
         // D2: a large unified diff must NOT bloat result_jsonb — it's offloaded to the content-addressed artifact
