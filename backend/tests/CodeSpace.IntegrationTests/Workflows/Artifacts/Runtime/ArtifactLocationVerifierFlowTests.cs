@@ -167,6 +167,43 @@ public sealed class ArtifactLocationVerifierFlowTests : IDisposable
         Directory.Exists(world.Root).ShouldBeFalse("checking a destination must never be what creates it");
     }
 
+    [Fact]
+    public async Task A_write_probe_does_not_hand_the_verifier_the_corroboration_it_needs_to_demote()
+    {
+        // The chain that made the two sweeps feed each other: the health sweep probes write-verified every fifteen
+        // minutes and the write arm created the root, so a vanished mount was recreated empty, reported healthy on
+        // the card, and then satisfied the verifier's destination-liveness check — which demoted every placement
+        // underneath it, a hundred an hour, forever. A probe must never make the thing it is checking.
+        var world = await SeedStoredArtifactAsync();
+        var before = await LocationAsync(world);
+
+        Directory.Delete(world.Root, recursive: true);
+        await WriteProbeAsync(world);
+
+        Directory.Exists(world.Root).ShouldBeFalse("a write-verified probe must not provision a destination the operator never provisioned");
+
+        await VerifyAsync();
+
+        var after = await LocationAsync(world);
+        after.State.ShouldBe(ArtifactLocationState.Available, "with the destination honestly unavailable, an absent object is not evidence the object was deleted");
+        after.VerifiedAt.ShouldBe(before.VerifiedAt, "and the row stays visibly unchecked rather than freshly confirmed");
+    }
+
+    /// <summary>Runs the write-verified probe the health sweep runs, against this test's own destination.</summary>
+    private async Task WriteProbeAsync(StoredArtifact world)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var profileId = await db.ArtifactLocation.AsNoTracking()
+            .Where(location => location.TeamId == world.TeamId)
+            .Join(db.StorageProfileRevision.AsNoTracking(), location => location.StorageProfileRevisionId, revision => revision.Id,
+                (location, revision) => revision.StorageProfileId)
+            .FirstAsync();
+
+        await scope.Resolve<IStorageProfileProbeService>().ProbeAsync(
+            new StorageProfileProbeRequest(world.TeamId, profileId, ProfileRevision: null, VerifyWriteAccess: true), CancellationToken.None);
+    }
+
     // ─── World + helpers ─────────────────────────────────────────────────────
 
     /// <summary>
