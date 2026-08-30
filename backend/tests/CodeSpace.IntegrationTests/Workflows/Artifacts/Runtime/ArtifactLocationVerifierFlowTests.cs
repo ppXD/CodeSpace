@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
 using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
+using CodeSpace.Messages.Dtos.Storage;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
@@ -195,24 +196,71 @@ public sealed class ArtifactLocationVerifierFlowTests : IDisposable
         after.VerifiedAt.ShouldBe(before.VerifiedAt, "and the row stays visibly unchecked rather than freshly confirmed");
     }
 
+    [Fact]
+    public async Task An_operators_read_probe_of_a_destination_that_admits_no_write_does_not_provision_it()
+    {
+        // The same door, from the other side. A profile that admits no write is now probed for a READ, so that the
+        // destination its stored objects still live on is actually contacted rather than answered from
+        // storage_profile.state — and the operator's Test action asks to provision. Honouring that on a read is
+        // provisioning-by-probe again: it recreates the vanished root, which is the corroboration the verifier
+        // demotes every placement underneath on.
+        var world = await SeedStoredArtifactAsync();
+        await StopAdmittingWritesAsync(world);
+        var before = await LocationAsync(world);
+
+        Directory.Delete(world.Root, recursive: true);
+
+        var probe = await OperatorReadProbeAsync(world);
+
+        Directory.Exists(world.Root).ShouldBeFalse("only a probe about to prove it can WRITE may create the destination it is checking");
+        probe.Status.ShouldBe(StorageProfileProbeStatusValue.Unavailable, "a destination that is not there is unavailable, and saying so is the whole job of a probe");
+
+        await VerifyAsync();
+
+        var after = await LocationAsync(world);
+        after.State.ShouldBe(ArtifactLocationState.Available, "with the destination honestly unavailable, an absent object is not evidence the object was deleted");
+        after.VerifiedAt.ShouldBe(before.VerifiedAt, "and the row stays visibly unchecked rather than freshly confirmed");
+    }
+
     /// <summary>Runs the provisioning probe an operator's adopt / activate / test action runs.</summary>
-    private Task ProvisioningProbeAsync(StoredArtifact world) => ProbeAsync(world, initialize: true);
+    private Task ProvisioningProbeAsync(StoredArtifact world) => ProbeAsync(world, initialize: true, verifyWriteAccess: true);
 
     /// <summary>Runs the write-verified probe the health sweep runs, against this test's own destination.</summary>
-    private Task WriteProbeAsync(StoredArtifact world) => ProbeAsync(world, initialize: false);
+    private Task WriteProbeAsync(StoredArtifact world) => ProbeAsync(world, initialize: false, verifyWriteAccess: true);
 
-    private async Task ProbeAsync(StoredArtifact world, bool initialize)
+    /// <summary>Runs the operator's Test action with write verification switched off — it still asks to provision.</summary>
+    private Task<StorageProfileProbeResult> OperatorReadProbeAsync(StoredArtifact world) => ProbeAsync(world, initialize: true, verifyWriteAccess: false);
+
+    private async Task<StorageProfileProbeResult> ProbeAsync(StoredArtifact world, bool initialize, bool verifyWriteAccess)
+    {
+        var profileId = await ProfileIdAsync(world);
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<IStorageProfileProbeService>().ProbeAsync(
+            new StorageProfileProbeRequest(world.TeamId, profileId, ProfileRevision: null, verifyWriteAccess, initialize), CancellationToken.None);
+    }
+
+    /// <summary>Disables the profile. That unbinds no route and removes no bytes — it only stops admitting new writes.</summary>
+    private async Task StopAdmittingWritesAsync(StoredArtifact world)
+    {
+        var profileId = await ProfileIdAsync(world);
+        using var scope = _fixture.BeginScope();
+
+        await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE storage_profile SET state = {StorageProfileState.Disabled.ToString()} WHERE id = {profileId}");
+    }
+
+    /// <summary>The profile this world's placement sits under.</summary>
+    private async Task<Guid> ProfileIdAsync(StoredArtifact world)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
-        var profileId = await db.ArtifactLocation.AsNoTracking()
+
+        return await db.ArtifactLocation.AsNoTracking()
             .Where(location => location.TeamId == world.TeamId)
             .Join(db.StorageProfileRevision.AsNoTracking(), location => location.StorageProfileRevisionId, revision => revision.Id,
                 (location, revision) => revision.StorageProfileId)
             .FirstAsync();
-
-        await scope.Resolve<IStorageProfileProbeService>().ProbeAsync(
-            new StorageProfileProbeRequest(world.TeamId, profileId, ProfileRevision: null, VerifyWriteAccess: true, Initialize: initialize), CancellationToken.None);
     }
 
     // ─── World + helpers ─────────────────────────────────────────────────────

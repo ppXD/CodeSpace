@@ -37,6 +37,19 @@ describe("StorageHealthBadge", () => {
     expect(screen.getByTitle(/will not land/i)).toBeInTheDocument();
   });
 
+  it("words a lifecycle gate as a lifecycle gate, never as a destination that cannot be reached", () => {
+    // ProfileNotActive is the profile refusing to admit a WRITE. It is not the destination failing to answer —
+    // reads of every object stored there are still admitted — so rendering it as "unreachable" claims a fact
+    // nothing measured, which is the exact lie this badge exists to prevent.
+    render(<StorageHealthBadge currentRevision={3} health={{
+      ...verified, status: "Unavailable", writeVerified: false, failureStage: "Profile", failureCode: "ProfileNotActive",
+    }} />);
+
+    expect(screen.getByText("writes disabled")).toBeInTheDocument();
+    expect(screen.queryByText("unreachable")).not.toBeInTheDocument();
+    expect(screen.queryByTitle(/will not land/i)).not.toBeInTheDocument();
+  });
+
   it("does not read a read-only pass as writes working", () => {
     // Listing proves the credential reaches the bucket. It does not prove a run's bytes will land, and the two
     // must not render the same.

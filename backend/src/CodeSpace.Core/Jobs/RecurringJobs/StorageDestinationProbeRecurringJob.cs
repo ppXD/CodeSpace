@@ -4,7 +4,9 @@ using MediatR;
 namespace CodeSpace.Core.Jobs.RecurringJobs;
 
 /// <summary>
-/// Keeps the answer to "does my storage still work" no more than one tick out of date.
+/// Keeps the answer to "does my storage still work" from aging out unwatched: every tick re-asks a bounded number of
+/// the destinations whose observation has gone stale, oldest observation first. One tick is not one whole population —
+/// a deployment with more due than a pass takes is covered over the ticks that follow.
 ///
 /// <para>Before this, the only probe anyone ever ran was one an operator clicked. A credential revoked at the provider
 /// — the action <c>StorageCredentialService</c> itself tells operators to take — changed nothing observable: writes

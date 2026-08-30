@@ -47,6 +47,26 @@ public sealed class StorageProfileProbeServiceTests
         result.WriteAccessRequested.ShouldBeTrue();
     }
 
+    [Theory]
+    [InlineData(true, StorageProfileEligibility.Write, true)]
+    [InlineData(false, StorageProfileEligibility.Read, false)]
+    public async Task What_the_probe_asks_the_profile_for_and_whether_it_may_provision_both_follow_what_it_verifies(bool verifyWriteAccess, StorageProfileEligibility expected, bool mayProvision)
+    {
+        // Hardcoding Write made a probe of a Disabled or Retired profile a restatement of storage_profile.state:
+        // the lifecycle gate refused it before any driver opened, so nothing ever contacted the destination that
+        // every one of its stored objects still lives on. That same gate was also the only thing stopping a read
+        // from PROVISIONING one, so the rule it enforced by accident is now stated: you may only create a
+        // destination you are about to prove you can write to.
+        var driver = new StubDriver();
+        var broker = new StubBroker(new StorageRuntimeDriverResolution.Ready(new StorageRuntimeDriverLease(driver)));
+        var service = new StorageProfileProbeService(new StubTargetResolver(Target(4)), broker);
+
+        await service.ProbeAsync(new StorageProfileProbeRequest(_teamId, _profileId, 4, verifyWriteAccess, Initialize: true), CancellationToken.None);
+
+        broker.Request.ShouldBe(new StorageRuntimeDriverRequest(_teamId, _profileId, 4, expected));
+        driver.Request.ShouldNotBeNull().Initialize.ShouldBe(mayProvision, "a probe that is not about to write must report an absent destination, never create it");
+    }
+
     [Fact]
     public async Task Probe_error_is_typed_without_provider_message_code_configuration_or_credential()
     {
@@ -173,9 +193,11 @@ public sealed class StorageProfileProbeServiceTests
         public Exception? ProbeException { get; init; }
         public Exception? DisposeException { get; init; }
         public int DisposeCount { get; private set; }
+        public ArtifactStorageProbeRequest? Request { get; private set; }
 
         public ValueTask<ArtifactStorageProbeResult> ProbeAsync(ArtifactStorageProbeRequest request, CancellationToken cancellationToken)
         {
+            Request = request;
             if (ProbeException != null) throw ProbeException;
             return ValueTask.FromResult(Probe);
         }
