@@ -1,6 +1,8 @@
 import { fireEvent, render } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
+import { roomFileUnavailableNote } from "../sessions/roomFileUnavailable";
+
 import { JsonView } from "./JsonView";
 
 /**
@@ -84,5 +86,29 @@ describe("JsonView", () => {
     fireEvent.keyDown(toggleFor(container, "repo"), { key: "Enter" });
 
     expect(container.textContent).not.toContain('"id"');
+  });
+
+  it("reads a shed offload pointer as the storage reason it carries, not as raw JSON", () => {
+    // The server keeps the pointer and adds why its bytes did not come back. Rendered as a bare object it reads as
+    // machine noise a user cannot act on; the note is the same wording the Room already uses for that reason.
+    const { container } = render(
+      <JsonView
+        data={{ body: { $artifact_ref: { id: "6f1", size_bytes: 9, reason: "AccessDenied" } }, status: 200 }}
+      />,
+    );
+
+    expect(container.querySelector(".wf-jsonv-unavailable")?.textContent).toBe(
+      roomFileUnavailableNote("AccessDenied"),
+    );
+    expect(container.textContent).not.toContain("$artifact_ref");
+    // A healthy sibling in the same cell still renders — shedding is per property, never per cell.
+    expect(container.querySelector(".wf-jsonv-num")?.textContent).toBe("200");
+  });
+
+  it("leaves a healthy offload pointer alone", () => {
+    const { container } = render(<JsonView data={{ body: { $artifact_ref: { id: "6f1", size_bytes: 9 } } }} />);
+
+    expect(container.querySelector(".wf-jsonv-unavailable")).toBeNull();
+    expect(container.textContent).toContain("$artifact_ref");
   });
 });

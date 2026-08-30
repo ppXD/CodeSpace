@@ -44,12 +44,47 @@ public sealed partial class ArtifactStore
     /// </summary>
     private async Task<byte[]> ReadOffloadedAsync(Guid teamId, WorkflowArtifact row, CancellationToken cancellationToken)
     {
-        if (row.StorageUrl is { } url) return await _blobs.ReadAsync(url, cancellationToken).ConfigureAwait(false);
+        if (row.StorageUrl is { } url) return await ReadLocalAsync(row.Id, url, cancellationToken).ConfigureAwait(false);
 
         if (row.CasArtifactObjectId is not { } artifactObjectId)
-            throw new InvalidOperationException($"Artifact {row.Id} has neither inline bytes, a storage_url, nor a routed storage object.");
+            throw NoDestinationRecorded(row.Id);
 
         return await ReadRoutedAsync(new RoutedRead(teamId, row.Id, artifactObjectId), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// What a row that names nowhere actually is: the metadata saying where its bytes went is gone, which is the same
+    /// lane a row that no longer exists reports. Typed at the SOURCE rather than left to the shared table, which sees
+    /// this fault differently on each lane — the whole-object read throws it past no catch that consults the table at
+    /// all, and the bounded read throws it into one that would flatten a bare <see cref="InvalidOperationException"/>
+    /// into an integrity failure. Untyped it went straight out through the whole-object reader and cost the entire run
+    /// detail. The three-way storage CHECK forbids the row, but it was added NOT VALID and never validated, so the
+    /// guard is the app's to keep honest.
+    ///
+    /// <para>ONE factory because that row has TWO readers, each reaching it through its own guard: the whole-object
+    /// read here, and the bounded read's locator check in <c>RoutedReadFor</c>. Typing one of them left the two
+    /// answering differently for a single physical row — a disagreement nothing would have reported, and worse than
+    /// both being wrong the same way. The kind is decided here, once, and both lanes inherit it.</para>
+    /// </summary>
+    private static Exception NoDestinationRecorded(Guid artifactId) =>
+        new ArtifactContentUnavailableException(artifactId, ArtifactContentUnavailableKind.MetadataMissing,
+            new InvalidOperationException($"Artifact {artifactId} has neither inline bytes, a storage_url, nor a routed storage object."));
+
+    /// <summary>
+    /// Whole-object read from the local backend, typed the way the routed path already types itself: a wiped root or a
+    /// revoked permission is a storage-plane FACT, and letting it escape as a raw IO exception is what left the local
+    /// lane — the shipped state of every unrouted team — as the only read with no verdict at all.
+    /// </summary>
+    private async Task<byte[]> ReadLocalAsync(Guid artifactId, string storageUrl, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _blobs.ReadAsync(storageUrl, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ArtifactReadFailureClassifier.TryClassify(ex, out var kind))
+        {
+            throw new ArtifactContentUnavailableException(artifactId, kind, ex);
+        }
     }
 
     /// <summary>Resolves the destination for ONE offloaded write and places the bytes there. Fails closed — never a silent local fallback.</summary>
@@ -120,7 +155,16 @@ public sealed partial class ArtifactStore
         _ => ArtifactCasProblemCode.ProviderFailure,
     };
 
-    /// <summary>Whole-object read for a routed row, verified end-to-end by the CAS stream before the store's own identity check.</summary>
+    /// <summary>
+    /// Whole-object read for a routed row, verified end-to-end by the CAS stream before the store's own identity check.
+    ///
+    /// <para>OPENING the object was already typed; COPYING it was not, and a provider that hands back bytes and then
+    /// stops — a dropped connection, a revoked mount, an object removed under an open handle — is the routed lane's
+    /// everyday failure. Only the verified-identity fault (<see cref="InvalidDataException"/>) had a verdict, so every
+    /// other mid-copy fault escaped untyped and cost the reader the whole run instead of this one cell. Classified with
+    /// the same table the rest of the plane consults, so a dead destination reads as BackendUnavailable rather than
+    /// being flattened into "the stored copy does not match".</para>
+    /// </summary>
     private async Task<byte[]> ReadRoutedAsync(RoutedRead read, CancellationToken cancellationToken)
     {
         var opened = await OpenRoutedAsync(read, cancellationToken).ConfigureAwait(false);
@@ -131,9 +175,13 @@ public sealed partial class ArtifactStore
         {
             await content.CopyToAsync(buffer, cancellationToken).ConfigureAwait(false);
         }
-        catch (InvalidDataException ex)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            throw new ArtifactContentUnavailableException(read.ArtifactId, ArtifactContentUnavailableKind.IntegrityFailure, ex);
+            throw;
+        }
+        catch (Exception ex) when (ArtifactReadFailureClassifier.TryClassify(ex, out var kind))
+        {
+            throw new ArtifactContentUnavailableException(read.ArtifactId, kind, ex);
         }
 
         return buffer.ToArray();

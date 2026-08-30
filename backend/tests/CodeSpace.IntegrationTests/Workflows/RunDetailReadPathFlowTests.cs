@@ -106,6 +106,9 @@ public class RunDetailReadPathFlowTests
     {
         // The verification stays where it belongs — inside ArtifactStore.GetBytesAsync, on every read. Moving the fetch
         // off the shared read changed WHEN bytes are fetched, never WHETHER they are proven before a caller sees them.
+        //
+        // The refusal is DISPLAYED rather than thrown: the reader still never receives unverified bytes, but the one
+        // cell that rotted no longer costs them the other cells of the run.
         var (teamId, runId, _) = await SeedCompletedRunAsync();
 
         using var scope = _fixture.BeginScope();
@@ -113,11 +116,19 @@ public class RunDetailReadPathFlowTests
 
         var tampered = await FlipOneStoredByteAsync(teamId, RefIdsOf(detail!));
 
-        var refusal = await Should.ThrowAsync<InvalidOperationException>(
-            () => scope.Resolve<IRunNodeOutputInflater>().InflateAsync(detail!, teamId, CancellationToken.None));
+        var inflated = await scope.Resolve<IRunNodeOutputInflater>().InflateAsync(detail!, teamId, CancellationToken.None);
 
-        refusal.Message.ShouldContain(tampered.ToString(), Case.Sensitive, "the refusal names the artifact whose bytes stopped matching");
-        refusal.Message.ShouldContain("read-back verification", Case.Sensitive, "the on-demand path refuses unverified bytes rather than returning them");
+        var refused = inflated.Nodes.SelectMany(node => node.Outputs.EnumerateObject())
+            .Where(property => ReadRefId(property.Value) == tampered)
+            .ToList();
+
+        refused.ShouldNotBeEmpty("the cell whose bytes stopped matching keeps its pointer rather than showing content that is not the artifact");
+        refused.ShouldAllBe(property => property.Value.GetProperty(NodeOutputArtifacts.RefKey).GetProperty(NodeOutputArtifacts.ReasonKey).GetString() == "IntegrityFailure",
+            "and it names the lane, so a reader knows the copy was refused rather than never recorded");
+
+        inflated.Nodes.SelectMany(node => node.Outputs.EnumerateObject())
+            .Any(property => ReadRefId(property.Value) is { } id && id != tampered)
+            .ShouldBeFalse("every OTHER offloaded cell still inflated — one rotted blob is not a failed run-detail read");
     }
 
     [Fact]

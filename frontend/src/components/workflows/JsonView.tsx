@@ -1,5 +1,7 @@
 import { useState } from "react";
 
+import { roomFileUnavailableNote } from "../sessions/roomFileUnavailable";
+
 /**
  * Collapsible JSON tree used by RunDetailView for the normalized payload, run outputs and
  * each node's inputs/outputs. Objects and arrays carry a click-to-toggle caret so a reader can
@@ -18,8 +20,39 @@ export function JsonView({ data }: { data: unknown }) {
   );
 }
 
-/** One JSON value — a leaf (primitive) or a branch (object/array). */
+/** The storage lanes a shed offload pointer can name — the artifact plane's own kinds, a subset of the Room's file reasons. */
+const SHED_REASONS = ["MetadataMissing", "PhysicalObjectMissing", "IntegrityFailure", "BackendUnavailable", "AccessDenied"] as const;
+
+/**
+ * The note for a value the server could not read back. It keeps the `$artifact_ref` pointer and adds the lane that
+ * failed; rendered as a bare object that reads as machine noise, so the reason is shown as the sentence the Room
+ * already uses for it. A healthy pointer carries no reason and renders as the object it is.
+ */
+function shedNote(value: unknown): string | null {
+  const marker = value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)["$artifact_ref"]
+    : null;
+  const reason = marker !== null && typeof marker === "object" ? (marker as Record<string, unknown>).reason : null;
+
+  return SHED_REASONS.includes(reason as (typeof SHED_REASONS)[number])
+    ? roomFileUnavailableNote(reason as (typeof SHED_REASONS)[number])
+    : null;
+}
+
+/** One JSON value — a leaf (primitive), a shed pointer, or a branch (object/array). */
 function JsonNode({ name, value, isLast }: { name?: string; value: unknown; isLast: boolean }) {
+  const note = shedNote(value);
+
+  if (note !== null)
+    return (
+      <div className="wf-jsonv-row">
+        <span className="wf-jsonv-caret" aria-hidden />
+        <JsonKey name={name} />
+        <span className="wf-jsonv-unavailable" role="status">{note}</span>
+        {!isLast && <span className="wf-jsonv-punc">,</span>}
+      </div>
+    );
+
   if (value !== null && typeof value === "object")
     return <JsonBranch name={name} value={value} isLast={isLast} />;
 

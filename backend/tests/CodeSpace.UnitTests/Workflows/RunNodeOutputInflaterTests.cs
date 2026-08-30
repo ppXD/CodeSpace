@@ -3,8 +3,10 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Artifacts;
+using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
+using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Workflows;
@@ -32,7 +34,7 @@ public class RunNodeOutputInflaterTests
         var plan = """{ "subtasks": [{ "id": "s1", "title": "First" }] }""";
         var run = RunWith(Cell("planner", await OffloadedOutputsAsync(store, teamId, "json", plan)));
 
-        var inflated = await new RunNodeOutputInflater(store).InflateAsync(run, teamId, CancellationToken.None);
+        var inflated = await Inflater(store).InflateAsync(run, teamId, CancellationToken.None);
 
         NodeOutputArtifacts.IsRef(inflated.Nodes[0].Outputs.GetProperty("json")).ShouldBeFalse("the pointer was exchanged for the value");
         inflated.Nodes[0].Outputs.GetProperty("json").GetProperty("subtasks").GetArrayLength().ShouldBe(1, "the caller that needs the content gets the real content");
@@ -52,7 +54,7 @@ public class RunNodeOutputInflaterTests
             Cell("agent-b", await OffloadedOutputsAsync(store, teamId, "text", "\"b\"")));
         store.ResetReads();
 
-        var inflated = await new RunNodeOutputInflater(store).InflateAsync(run, teamId, Ids("planner"), CancellationToken.None);
+        var inflated = await Inflater(store).InflateAsync(run, teamId, Ids("planner"), CancellationToken.None);
 
         store.Reads.ShouldBe(1, "three cells carry a ref; the caller named one, so exactly one blob was fetched");
         NodeOutputArtifacts.IsRef(inflated.Nodes[0].Outputs.GetProperty("json")).ShouldBeFalse("the named cell was inflated");
@@ -65,7 +67,7 @@ public class RunNodeOutputInflaterTests
         var store = new CountingArtifactStore();
         var run = RunWith(Cell("emit", Json("""{ "body": "small" }""")), Cell("end", Json("""{ "final": 1 }""")));
 
-        var inflated = await new RunNodeOutputInflater(store).InflateAsync(run, Guid.NewGuid(), CancellationToken.None);
+        var inflated = await Inflater(store).InflateAsync(run, Guid.NewGuid(), CancellationToken.None);
 
         store.Reads.ShouldBe(0, "nothing is offloaded, so nothing is fetched");
         inflated.ShouldBeSameAs(run, "an unaffected run is not rewritten at all");
@@ -79,7 +81,7 @@ public class RunNodeOutputInflaterTests
         var inline = Cell("emit", Json("""{ "body": "small", "status": 200 }"""), NodeStatus.Failure, error: "boom");
         var run = RunWith(inline, Cell("big", await OffloadedOutputsAsync(store, teamId, "body", "\"xxxxx\"")));
 
-        var inflated = await new RunNodeOutputInflater(store).InflateAsync(run, teamId, CancellationToken.None);
+        var inflated = await Inflater(store).InflateAsync(run, teamId, CancellationToken.None);
 
         inflated.Nodes[0].ShouldBe(inline, "a cell with nothing to inflate is the SAME summary — status, error, timings and outputs all untouched");
         inflated.Nodes.Count.ShouldBe(run.Nodes.Count);
@@ -94,9 +96,30 @@ public class RunNodeOutputInflaterTests
         var run = RunWith(Cell("planner", await OffloadedOutputsAsync(store, teamId, "json", """{ "subtasks": [] }""")));
 
         // A different team cannot see the artifact — the structure must survive, not vanish.
-        var inflated = await new RunNodeOutputInflater(store).InflateAsync(run, Guid.NewGuid(), CancellationToken.None);
+        var inflated = await Inflater(store).InflateAsync(run, Guid.NewGuid(), CancellationToken.None);
 
         NodeOutputArtifacts.IsRef(inflated.Nodes[0].Outputs.GetProperty("json")).ShouldBeTrue("fail-safe: an unreadable ref is kept, never silently emptied");
+    }
+
+    [Fact]
+    public async Task One_rotted_cell_does_not_cost_the_reader_the_rest_of_the_run()
+    {
+        // The defect this pins: ONE offloaded output whose bytes no longer verify used to take the whole run-detail
+        // read down with it. A reader inspecting a 40-step run lost all 40 steps because one of them rotted.
+        var store = new CountingArtifactStore();
+        var teamId = Guid.NewGuid();
+        var healthy = Cell("planner", await OffloadedOutputsAsync(store, teamId, "json", """{ "subtasks": [] }"""));
+        var rotted = Cell("agent", await OffloadedOutputsAsync(store, teamId, "text", "\"transcript\""));
+        var run = RunWith(healthy, rotted);
+        store.FailRead(ArtifactIdOf(rotted, "text"), ArtifactContentUnavailableKind.IntegrityFailure);
+
+        var inflated = await Inflater(store).InflateAsync(run, teamId, CancellationToken.None);
+
+        inflated.Nodes[0].Outputs.GetProperty("json").GetProperty("subtasks").GetArrayLength().ShouldBe(0, "the healthy cell is inflated as it always was");
+        var shed = inflated.Nodes[1].Outputs.GetProperty("text");
+        NodeOutputArtifacts.IsRef(shed).ShouldBeTrue("the rotted cell keeps its pointer rather than failing the read");
+        shed.GetProperty(NodeOutputArtifacts.RefKey).GetProperty(NodeOutputArtifacts.ReasonKey).GetString()
+            .ShouldBe(nameof(ArtifactContentUnavailableKind.IntegrityFailure), "and the pointer says which storage lane failed");
     }
 
     [Fact]
@@ -111,12 +134,17 @@ public class RunNodeOutputInflaterTests
 
         MapPlan.PlannersOf(run).ShouldBeEmpty("precondition: behind a ref, the plan is unreadable — this is what the fetch was protecting");
 
-        var planned = await new RunNodeOutputInflater(store).InflateAsync(run, teamId, MapPlan.ProducerNodeIds(run), CancellationToken.None);
+        var planned = await Inflater(store).InflateAsync(run, teamId, MapPlan.ProducerNodeIds(run), CancellationToken.None);
 
         MapPlan.PlannersOf(planned).Single().Subtasks.GetArrayLength().ShouldBe(2, "the on-demand fetch restores exactly what the shared read used to hand this caller");
     }
 
     private static IReadOnlySet<string> Ids(params string[] nodeIds) => nodeIds.ToHashSet(StringComparer.Ordinal);
+
+    private static RunNodeOutputInflater Inflater(IArtifactStore store) => new(store, NullLogger<RunNodeOutputInflater>.Instance);
+
+    private static Guid ArtifactIdOf(WorkflowRunNodeSummary node, string key) =>
+        node.Outputs.GetProperty(key).GetProperty(NodeOutputArtifacts.RefKey).GetProperty("id").GetGuid();
 
     private static JsonElement Json(string raw) => JsonDocument.Parse(raw).RootElement.Clone();
 
@@ -175,16 +203,19 @@ public class RunNodeOutputInflaterTests
         };
     }
 
-    /// <summary>Hermetic content-addressed store that COUNTS its byte reads — the assertion surface for "this path no longer fetches per cell".</summary>
+    /// <summary>Hermetic content-addressed store that COUNTS its byte reads — the assertion surface for "this path no longer fetches per cell" — and can be told that ONE artifact's bytes no longer verify, which is what a rotted destination looks like from here.</summary>
     private sealed class CountingArtifactStore : IArtifactStore
     {
         private readonly ConcurrentDictionary<(Guid Team, string Sha), Guid> _idByContent = new();
         private readonly ConcurrentDictionary<(Guid Team, Guid Id), (string Sha, byte[] Bytes, string ContentType)> _byId = new();
+        private readonly ConcurrentDictionary<Guid, ArtifactContentUnavailableKind> _rotted = new();
         private int _reads;
 
         public int Reads => Volatile.Read(ref _reads);
 
         public void ResetReads() => Volatile.Write(ref _reads, 0);
+
+        public void FailRead(Guid artifactId, ArtifactContentUnavailableKind kind) => _rotted[artifactId] = kind;
 
         public Task<Guid> PutAsync(Guid teamId, ReadOnlyMemory<byte> bytes, string contentType, CancellationToken cancellationToken)
         {
@@ -201,6 +232,9 @@ public class RunNodeOutputInflaterTests
         public Task<ArtifactBytes?> GetBytesAsync(Guid teamId, Guid artifactId, CancellationToken cancellationToken)
         {
             Interlocked.Increment(ref _reads);
+
+            if (_rotted.TryGetValue(artifactId, out var kind))
+                return Task.FromException<ArtifactBytes?>(new ArtifactContentUnavailableException(artifactId, kind));
 
             return Task.FromResult(_byId.TryGetValue((teamId, artifactId), out var row)
                 ? new ArtifactBytes { Id = artifactId, Sha256 = row.Sha, ContentType = row.ContentType, Bytes = row.Bytes }
