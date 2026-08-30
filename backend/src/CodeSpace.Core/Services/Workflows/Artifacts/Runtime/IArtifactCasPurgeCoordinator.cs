@@ -22,10 +22,12 @@ public interface IArtifactCasPurgeCoordinator : IScopedDependency
     /// Settles a claimed placement as <c>Purged</c> WITHOUT asking the destination to delete anything, after proving
     /// the destination cannot serve the object.
     ///
-    /// <para>The exit for a destination that is already gone — a deleted bucket, a revoked key, a vanished mount.
-    /// Nothing else can close those records: the verifier leaves them untouched because an unanswerable destination
-    /// is not evidence about an object, and a delete cannot be attempted against a destination that will not answer.
-    /// Proof is a live HEAD taken inside this call, never a health row read from somewhere else.</para>
+    /// <para>The exit for a destination that is genuinely gone — a deleted bucket, which says that about ITSELF as
+    /// readily as about the key. Nothing else can close those records: the verifier leaves them untouched because an
+    /// unanswerable destination is not evidence about an object, and a delete cannot be attempted against a
+    /// destination that will not answer. Proof is a live HEAD taken inside this call, believed only once the
+    /// destination has answered for itself as well — a revoked key and a vanished mount are not that answer — and
+    /// never a health row read from somewhere else.</para>
     /// </summary>
     Task<ArtifactCasAbandonResult> AbandonAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken);
 }

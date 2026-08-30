@@ -3,6 +3,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
 using CodeSpace.Core.Services.Workflows.Artifacts.Profiles.Exceptions;
+using CodeSpace.Core.Services.Workflows.Artifacts.Providers;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers.Local;
 using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -26,18 +27,63 @@ namespace CodeSpace.IntegrationTests.Workflows.Artifacts;
 [Trait("Category", "Integration")]
 public sealed class ProfileAbandonmentFlowTests : IDisposable
 {
+    /// <summary>The service's own cap, so cleanup can close everything any one test seeded in a single pass.</summary>
+    private const int MaxDrainableBatch = 200;
+
     private readonly PostgresFixture _fixture;
     private readonly List<string> _roots = [];
+    private readonly List<RoutedWorld> _worlds = [];
 
     public ProfileAbandonmentFlowTests(PostgresFixture fixture) => _fixture = fixture;
 
     [Fact]
-    public async Task An_operator_drains_a_vanished_destination_and_can_then_retire_the_profile()
+    public async Task An_unmounted_volume_closes_no_record_and_stops_the_pass_rather_than_asking_on()
     {
-        // The journey the two 409s used to describe and no code implemented: the destination is gone, the records
-        // are closed on the destination's own answer, and only then does the irreversible step become available.
+        // The one answer that must never be believed per-object. The mount is gone, so the destination reports every
+        // key Missing while the bytes sit untouched one directory over. Closing those records nulls the checksum, the
+        // size and the ETag, and nothing in the system could afterwards say what the bytes were or where they are.
+        var world = await SeedRoutedProfileAsync(placements: 50);
+        var hidden = Unmount(world);
+
+        var summary = await AbandonAsync(world, batchSize: 50);
+
+        summary.Abandoned.ShouldBe(0, "a destination that cannot answer for itself may not close a single record");
+        summary.Unanswered.ShouldBe(summary.Examined);
+        summary.Examined.ShouldBeLessThan(50, "one answer repeated across unrelated objects is about the destination; the pass must stop asking");
+        summary.StoppedBy.ShouldBe(nameof(ArtifactCasProblemCode.ProviderUnavailableTransient),
+            "a pass that stopped early has to name why, or a short Examined is indistinguishable from a small profile");
+        (await PlacementStatesAsync(world)).ShouldAllBe(state => state == ArtifactLocationState.Available);
+        Directory.GetFiles(Path.Combine(hidden, "objects"), "*", SearchOption.AllDirectories).Length
+            .ShouldBe(50, "the bytes never went anywhere — only the mount did");
+    }
+
+    [Theory]
+    [InlineData(5, 20, null)]                                                        // twenty placements failing for five unrelated reasons are twenty objects with their own problems
+    [InlineData(1, 5, nameof(ArtifactCasProblemCode.ProviderTimeout))]               // one answer for a quarter of the batch is the destination talking, not the objects
+    public async Task A_pass_stops_only_when_one_answer_comes_back_for_much_of_the_batch(int distinctAnswers, int expectedExamined, string? expectedStop)
+    {
+        // The breaker generalizes from UNIFORMITY, never from failure. Stopping on a genuinely mixed batch would
+        // report a destination fault nothing observed and leave placements unasked that nobody asked it to skip.
+        var world = await SeedRoutedProfileAsync(placements: 20);
+        var destination = new ScriptedDestination(MixedAnswers.Take(distinctAnswers).ToArray());
+
+        var summary = await AbandonAsync(world, batchSize: 20, destination);
+
+        summary.StoppedBy.ShouldBe(expectedStop);
+        summary.Examined.ShouldBe(expectedExamined);
+        summary.Unanswered.ShouldBe(expectedExamined, "a refusal is never a closed record, however many of them arrive");
+        summary.Abandoned.ShouldBe(0);
+        destination.Asked.ShouldBe(expectedExamined, "the pass must stop ASKING, not merely stop counting");
+    }
+
+    [Fact]
+    public async Task An_operator_drains_an_emptied_destination_and_can_then_retire_the_profile()
+    {
+        // The journey the two 409s used to describe and no code implemented: the objects are gone, the destination
+        // says so about itself as well as about them, the records are closed on that answer, and only then does the
+        // irreversible step become available. The corroboration must not break the operation it guards.
         var world = await SeedRoutedProfileAsync(placements: 3);
-        Directory.Delete(world.Root, recursive: true);
+        DeleteEveryObject(world);
 
         var summary = await AbandonAsync(world, batchSize: 50);
 
@@ -48,6 +94,101 @@ public sealed class ProfileAbandonmentFlowTests : IDisposable
 
         await RetireAsync(world);
         (await StateAsync(world)).ShouldBe(StorageProfileState.Retired);
+    }
+
+    [Fact]
+    public async Task A_destination_whose_own_probe_answers_it_is_gone_for_good_still_drains_to_zero()
+    {
+        // The deleted bucket, which is the destination this whole operation exists for. It cannot serve the object
+        // and it cannot serve ITSELF, and both refusals are durable. Demanding a HEALTHY probe as corroboration made
+        // this exit unreachable: the one operator who genuinely cannot get the bytes back could never drain the
+        // profile, and therefore could never retire it.
+        var world = await SeedRoutedProfileAsync(placements: 3);
+
+        var summary = await AbandonAsync(world, batchSize: 50, ScriptedProvider.GoneForGood());
+
+        summary.Abandoned.ShouldBe(3);
+        summary.StoppedBy.ShouldBeNull("nothing stopped the pass — the destination answered, and its answer was conclusive");
+        summary.Remaining.ShouldBe(0, "a destination that says it is gone for good is exactly what abandonment is for");
+        (await PlacementStatesAsync(world)).ShouldAllBe(state => state == ArtifactLocationState.Purged);
+    }
+
+    [Theory]
+    [InlineData(ArtifactStorageErrorCode.Unauthorized)] // the access key was rotated out from under the profile
+    [InlineData(ArtifactStorageErrorCode.Forbidden)]    // the policy that granted the key its access was withdrawn
+    public async Task A_credential_that_lost_its_permission_corroborates_nothing_and_closes_no_record(ArtifactStorageErrorCode refusal)
+    {
+        // The guard's own case, re-entering through the widening that admits a durably-gone bucket. A refused
+        // credential is durable, and about the CREDENTIAL: it says nothing whatever about whether the objects are
+        // there, which is precisely what a namespace you can no longer see also says. Every per-object HEAD agrees
+        // that the object is gone for the very same reason — one refused key answering both questions — so the
+        // per-object answer cannot be its own corroboration.
+        var world = await SeedRoutedProfileAsync(placements: 3);
+
+        var summary = await AbandonAsync(world, batchSize: 50, ScriptedProvider.WithARefusedKey(refusal));
+
+        summary.Abandoned.ShouldBe(0, "the bytes are intact behind a permission somebody can grant back");
+        summary.Examined.ShouldBe(3);
+        summary.Unanswered.ShouldBe(3, "an answer nothing corroborated is no answer, and the pass has to report it as one");
+        summary.Remaining.ShouldBe(3, "nothing was released, so the profile is exactly as un-retirable as before the pass");
+        (await PlacementStatesAsync(world)).ShouldAllBe(state => state == ArtifactLocationState.Available,
+            "every claim goes back where it was found; closing these rows would null the checksum, the size and the ETag of readable bytes");
+    }
+
+    [Fact]
+    public async Task A_destination_this_worker_could_not_open_closes_no_record_however_gone_the_objects_look()
+    {
+        // The same harm one stage earlier. The provider module is absent from THIS worker's image, which the catalog
+        // answers from its own registry — the destination is never contacted, so it never said anything. Every
+        // object really is gone from disk here, so had the module been present each HEAD would have answered Missing
+        // against a probe that answers for itself, and every record would close on THAT. The module's absence is not
+        // that answer, and one worker deployed without it must not close records placed through the profile.
+        var world = await SeedRoutedProfileAsync(placements: 20);
+        DeleteEveryObject(world);
+
+        var summary = await AbandonAsync(world, batchSize: 20, new MissingProviderModule());
+
+        summary.Abandoned.ShouldBe(0, "a destination that never opened never spoke, and only the destination may close a record");
+        summary.Unanswered.ShouldBe(summary.Examined, "the honest report is that the pass got no answer at all");
+        summary.Remaining.ShouldBe(20, "nothing was released, so the profile is exactly as un-retirable as before the pass");
+        summary.StoppedBy.ShouldBe(nameof(ArtifactCasProblemCode.ProviderUnavailable),
+            "the refusal is kept as it came so an operator is told WHY the pass got nowhere, and not merely that it did");
+        (await PlacementStatesAsync(world)).ShouldAllBe(state => state == ArtifactLocationState.Available,
+            "closing these rows nulls the checksum, the size and the ETag on nothing but a deployment mistake");
+    }
+
+    [Fact]
+    public async Task A_pass_reaches_the_placements_ordered_behind_ones_that_always_refuse()
+    {
+        // Head-of-line starvation. The breaker stops the pass, and a batch that always starts at the same place
+        // stops at the same placements every time — so everything ordered behind a handful of persistent refusers
+        // is never examined again and Remaining never falls. A refusal must cost that placement its turn, not the
+        // whole rest of the profile.
+        var world = await SeedRoutedProfileAsync(placements: 20);
+        var refused = await FirstKeysAsync(world, count: 5);
+
+        var first = await AbandonAsync(world, batchSize: 20, ScriptedProvider.LosingEverythingExcept(refused));
+        var second = await AbandonAsync(world, batchSize: 20, ScriptedProvider.LosingEverythingExcept(refused));
+
+        first.StoppedBy.ShouldBe(nameof(ArtifactCasProblemCode.Throttled), "one answer for a quarter of the batch still stops the pass — that part is the point");
+        (first.Abandoned + second.Abandoned).ShouldBe(15, "every placement that was not itself refusing has to be reachable across successive passes");
+        second.Remaining.ShouldBe(refused.Count, "only the placements that actually refuse may still be held");
+    }
+
+    [Fact]
+    public async Task A_batch_of_claims_that_all_went_stale_is_not_a_destination_talking()
+    {
+        // Every one of these refusals was decided before the destination was asked anything: the claim was taken and
+        // then lost to another worker. Two drains racing each other agree on that answer for every row they race
+        // over, and reading the agreement as a broken destination stops a pass on evidence no destination produced.
+        var world = await SeedRoutedProfileAsync(placements: 20);
+        var destination = new ScriptedDestination(ArtifactCasProblemCode.StaleWorker);
+
+        var summary = await AbandonAsync(world, batchSize: 20, destination);
+
+        summary.StoppedBy.ShouldBeNull("a uniform answer is evidence about a destination only if the destination produced it");
+        summary.Examined.ShouldBe(20);
+        destination.Asked.ShouldBe(20, "the pass had no reason to stop asking");
     }
 
     [Fact]
@@ -71,7 +212,7 @@ public sealed class ProfileAbandonmentFlowTests : IDisposable
         // Bounded and repeatable rather than one long job: a call that dies halfway leaves everything it did not
         // reach exactly as it was, so resumption is a property of the ledger rather than of a job row.
         var world = await SeedRoutedProfileAsync(placements: 3);
-        Directory.Delete(world.Root, recursive: true);
+        DeleteEveryObject(world);
 
         var first = await AbandonAsync(world, batchSize: 2);
 
@@ -104,13 +245,13 @@ public sealed class ProfileAbandonmentFlowTests : IDisposable
     }
 
     [Fact]
-    public async Task An_orphaned_claim_on_a_dead_destination_is_closed_rather_than_released()
+    public async Task An_orphaned_claim_on_a_destination_that_lost_the_object_is_closed_rather_than_released()
     {
-        // The same orphan on a destination that cannot answer for it. Abandonment is its exit, and it is the only
-        // one: the claim was taken from the marker, so no release can establish anything to put back.
+        // The same orphan, where the destination answers for itself and has lost the object. Abandonment is its exit,
+        // and it is the only one: the claim was taken from the marker, so no release can establish anything to put back.
         var world = await SeedRoutedProfileAsync(placements: 1);
         var orphaned = await OrphanOneClaimAsync(world);
-        Directory.Delete(world.Root, recursive: true);
+        DeleteEveryObject(world);
 
         (await LocationStateAsync(orphaned)).ShouldBe(ArtifactLocationState.Deleting);
 
@@ -136,7 +277,7 @@ public sealed class ProfileAbandonmentFlowTests : IDisposable
         first.Remaining.ShouldBe(1, "a served placement is still held, and a drain that claimed otherwise would be the unsafe answer");
         (await LocationStateAsync(orphaned)).ShouldBe(ArtifactLocationState.Available);
 
-        Directory.Delete(world.Root, recursive: true);
+        DeleteEveryObject(world);
 
         var second = await AbandonAsync(world, batchSize: 50);
 
@@ -146,11 +287,36 @@ public sealed class ProfileAbandonmentFlowTests : IDisposable
 
     // ─── World ───────────────────────────────────────────────────────────────
 
-    private async Task<ProfileAbandonmentSummary> AbandonAsync(RoutedWorld world, int batchSize)
+    /// <summary>The answers a mixed batch gives, first-listed first — five unrelated problems that no one destination fault could produce together.</summary>
+    private static readonly ArtifactCasProblemCode[] MixedAnswers =
+    [
+        ArtifactCasProblemCode.ProviderTimeout, ArtifactCasProblemCode.Throttled, ArtifactCasProblemCode.ProviderFailure,
+        ArtifactCasProblemCode.StaleWorker, ArtifactCasProblemCode.ProviderUnavailableTransient,
+    ];
+
+    private async Task<ProfileAbandonmentSummary> AbandonAsync(RoutedWorld world, int batchSize) => await DrainAsync(world, batchSize, null);
+
+    private async Task<ProfileAbandonmentSummary> AbandonAsync(RoutedWorld world, int batchSize, IArtifactCasPurgeCoordinator destination) =>
+        await DrainAsync(world, batchSize, builder => builder.RegisterInstance(destination).As<IArtifactCasPurgeCoordinator>().SingleInstance());
+
+    private async Task<ProfileAbandonmentSummary> AbandonAsync(RoutedWorld world, int batchSize, IArtifactStorageDriverFactoryCatalog catalog) =>
+        await DrainAsync(world, batchSize, builder => builder.RegisterInstance(catalog).As<IArtifactStorageDriverFactoryCatalog>().SingleInstance());
+
+    private async Task<ProfileAbandonmentSummary> DrainAsync(RoutedWorld world, int batchSize, Action<ContainerBuilder>? overrides)
+    {
+        using var scope = overrides == null ? _fixture.BeginScope() : _fixture.BeginScope(overrides);
+
+        return await scope.Resolve<IProfileAbandonmentService>().AbandonAsync(world.TeamId, world.ActorId, world.ProfileId, batchSize, CancellationToken.None);
+    }
+
+    /// <summary>The object keys of the placements a pass meets first. Any fixed set would prove the same property — these are simply the ones an id-ordered batch hands out at the head.</summary>
+    private async Task<IReadOnlyCollection<string>> FirstKeysAsync(RoutedWorld world, int count)
     {
         using var scope = _fixture.BeginScope();
 
-        return await scope.Resolve<IProfileAbandonmentService>().AbandonAsync(world.TeamId, world.ActorId, world.ProfileId, batchSize, CancellationToken.None);
+        return await scope.Resolve<CodeSpaceDbContext>().ArtifactLocation.AsNoTracking()
+            .Where(location => location.TeamId == world.TeamId).OrderBy(location => location.Id)
+            .Select(location => location.ObjectKey).Take(count).ToListAsync();
     }
 
     private async Task RetireAsync(RoutedWorld world)
@@ -189,6 +355,32 @@ public sealed class ProfileAbandonmentFlowTests : IDisposable
         }, CancellationToken.None)).ShouldBeOfType<ArtifactCasPurgeClaimResult.Claimed>();
 
         return placement.Id;
+    }
+
+    /// <summary>
+    /// Empties the destination without taking it away: the objects are genuinely gone and the root still answers a
+    /// probe. This is a deleted bucket, which is the operation abandonment exists for — and it is NOT what
+    /// <see cref="Unmount"/> stages, which the corroboration has to tell apart from it.
+    /// </summary>
+    private static void DeleteEveryObject(RoutedWorld world) => Directory.Delete(Path.Combine(world.Root, "objects"), recursive: true);
+
+    /// <summary>Takes the destination away without touching a byte — what an unmounted volume looks like from above: the root is not there, and every object under it still is.</summary>
+    private string Unmount(RoutedWorld world)
+    {
+        var hidden = world.Root + "-unmounted";
+        Directory.Move(world.Root, hidden);
+        _roots.Add(hidden);
+
+        return hidden;
+    }
+
+    /// <summary>The states of the placements THIS test seeded. Never a deployment-wide tally: other classes share the database and drain their own profiles.</summary>
+    private async Task<List<ArtifactLocationState>> PlacementStatesAsync(RoutedWorld world)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().ArtifactLocation.AsNoTracking()
+            .Where(location => location.TeamId == world.TeamId).Select(location => location.State).ToListAsync();
     }
 
     private async Task<ArtifactLocationState> LocationStateAsync(Guid locationId)
@@ -234,7 +426,10 @@ public sealed class ProfileAbandonmentFlowTests : IDisposable
 
         foreach (var index in Enumerable.Range(0, placements)) await PlaceAsync(db, teamId, actorId, revisionId, root, index);
 
-        return new RoutedWorld(teamId, actorId, profileId, root);
+        var world = new RoutedWorld(teamId, actorId, profileId, root);
+        _worlds.Add(world);
+
+        return world;
     }
 
     private static async Task PlaceAsync(CodeSpaceDbContext db, Guid teamId, Guid actorId, Guid revisionId, string root, int index)
@@ -274,11 +469,125 @@ public sealed class ProfileAbandonmentFlowTests : IDisposable
 
     public void Dispose()
     {
+        foreach (var world in _worlds) CloseSeededPlacements(world);
+
         foreach (var root in _roots.Where(Directory.Exists))
         {
             try { Directory.Delete(root, recursive: true); }
             catch (IOException) { }
         }
+    }
+
+    /// <summary>
+    /// Drains every placement this class seeded, best effort, before the roots go.
+    ///
+    /// <para>An <c>artifact_location</c> row can never be deleted — the ledger is durable identity — so a seeded
+    /// placement left <c>Available</c> stays in the location verifier's DEPLOYMENT-WIDE sweep for the rest of the
+    /// run, and enough of them crowd out the one row a sibling class is waiting on. Draining to <c>Purged</c> is the
+    /// only cleanup this table has. Emptying the destination first is what makes the drain able to close them.</para>
+    /// </summary>
+    private void CloseSeededPlacements(RoutedWorld world)
+    {
+        try
+        {
+            if (Directory.Exists(Path.Combine(world.Root, "objects"))) DeleteEveryObject(world);
+            Directory.CreateDirectory(world.Root);
+
+            AbandonAsync(world, MaxDrainableBatch).GetAwaiter().GetResult();
+        }
+        catch (Exception) { }
+    }
+
+    /// <summary>
+    /// A destination that answers the drain with a scripted cycle of refusals. Medium-mock fidelity, and only here:
+    /// one local driver cannot be made to give five different provider errors across one batch, and whether the
+    /// answers AGREE is the entire question the breaker asks. The placement selection, the ordering and the summary
+    /// all still come from the real service against the real database.
+    /// </summary>
+    private sealed class ScriptedDestination(params ArtifactCasProblemCode[] codes) : IArtifactCasPurgeCoordinator
+    {
+        public int Asked { get; private set; }
+
+        public Task<ArtifactCasPurgeClaimResult> ClaimAsync(ArtifactCasPurgeRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult<ArtifactCasPurgeClaimResult>(new ArtifactCasPurgeClaimResult.Claimed(new ArtifactCasPurgeClaim
+            {
+                TeamId = request.TeamId, ArtifactObjectId = request.ArtifactObjectId, LocationId = request.ArtifactLocationId!.Value,
+                LocationRevision = 1, StorageProfileId = Guid.NewGuid(), StorageProfileRevision = 1, ObjectKey = "scripted",
+                ProviderETag = null, ProviderObjectVersion = null, ActorId = request.ActorId, OperationTimeout = TimeSpan.FromSeconds(1),
+            }));
+
+        public Task<ArtifactCasAbandonResult> AbandonAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken) =>
+            Task.FromResult<ArtifactCasAbandonResult>(new ArtifactCasAbandonResult.Rejected(new ArtifactCasProblem(codes[Asked++ % codes.Length], true)));
+
+        public Task<ArtifactCasPurgeResult> DeleteAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<ArtifactCasReleaseOutcome> ReleaseAsync(ArtifactCasPurgeClaim claim, ArtifactCasReleaseEvidence evidence, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<ArtifactCasPurgeResult> PurgeAsync(ArtifactCasPurgeRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    /// <summary>
+    /// A worker whose image does not carry the profile's provider module — the deployment mistake, not a
+    /// destination. The catalog answers it from this process's own registry, having contacted nothing.
+    /// </summary>
+    private sealed class MissingProviderModule : IArtifactStorageDriverFactoryCatalog
+    {
+        public IArtifactStorageDriverFactory? Get(string providerTypeKey) => null;
+        public IArtifactStorageDriverFactory Require(string providerTypeKey) => throw new NotSupportedException();
+    }
+
+    /// <summary>
+    /// A destination scripted at the PROVIDER seam, for the two answers a local root cannot give: a DURABLE "I am
+    /// gone" about itself — a vanished local root is retryable, because an unmounted volume can be mounted back —
+    /// and a refusal aimed at named keys while every other key is answered normally.
+    ///
+    /// <para>Medium-mock fidelity, and only below the seam: the coordinator, the claims it takes, the ledger they
+    /// move and the summary the service reports are all real, which is what makes an ordering property observable.</para>
+    /// </summary>
+    private sealed class ScriptedProvider : IArtifactStorageDriverFactoryCatalog, IArtifactStorageDriverFactory, IArtifactStorageDriver
+    {
+        private static readonly ArtifactStorageError BucketDeleted = new(ArtifactStorageErrorCode.Unavailable, "NoSuchBucket", IsRetryable: false);
+        private static readonly ArtifactStorageError KeyGone = new(ArtifactStorageErrorCode.Missing, "no such key", IsRetryable: false);
+        private static readonly ArtifactStorageError NotNow = new(ArtifactStorageErrorCode.Throttled, "slow down", IsRetryable: true);
+
+        private readonly ArtifactStorageProbeResult _probe;
+        private readonly ArtifactStorageError _answer;
+        private readonly HashSet<string> _refused;
+
+        private ScriptedProvider(ArtifactStorageProbeResult probe, ArtifactStorageError answer, IEnumerable<string> refused)
+        {
+            _probe = probe;
+            _answer = answer;
+            _refused = refused.ToHashSet(StringComparer.Ordinal);
+        }
+
+        /// <summary>A bucket the operator deleted: it cannot serve the object and says the same about itself, durably — which is the one thing that separates it from a mount that will come back.</summary>
+        public static ScriptedProvider GoneForGood() => new(Probe(ArtifactStorageProbeStatus.Unavailable, BucketDeleted), BucketDeleted, []);
+
+        /// <summary>A destination that has lost every object except the named keys, which refuse for a reason that is never grounds to close anything — however many passes ask them.</summary>
+        public static ScriptedProvider LosingEverythingExcept(IEnumerable<string> refused) => new(Probe(ArtifactStorageProbeStatus.Available, null), KeyGone, refused);
+
+        /// <summary>A key that lost its permission: the refusal is durable, like a deleted bucket's, but it is about the CREDENTIAL — every object is still there, and every HEAD the same key makes looks exactly as if none of them were.</summary>
+        public static ScriptedProvider WithARefusedKey(ArtifactStorageErrorCode refusal) =>
+            new(Probe(ArtifactStorageProbeStatus.Unavailable, new ArtifactStorageError(refusal, "the key no longer has access", IsRetryable: false)), KeyGone, []);
+
+        public string ProviderTypeKey => LocalRwxArtifactStorageDriverFactory.TypeKey;
+        public StorageProviderCapabilities Capabilities => StorageProviderCapabilities.StreamingRead;
+
+        public IArtifactStorageDriverFactory? Get(string providerTypeKey) => string.Equals(providerTypeKey, ProviderTypeKey, StringComparison.Ordinal) ? this : null;
+        public IArtifactStorageDriverFactory Require(string providerTypeKey) => Get(providerTypeKey) ?? throw new NotSupportedException();
+        public ValueTask<IArtifactStorageDriver> CreateAsync(ArtifactStorageDriverCreateRequest request, CancellationToken cancellationToken) => ValueTask.FromResult<IArtifactStorageDriver>(this);
+
+        public ValueTask<ArtifactStorageProbeResult> ProbeAsync(ArtifactStorageProbeRequest request, CancellationToken cancellationToken) => ValueTask.FromResult(_probe);
+
+        public ValueTask<ArtifactStorageHeadResult> HeadAsync(ArtifactStorageHeadRequest request, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(ArtifactStorageHeadResult.Failed(_refused.Contains(request.ObjectKey) ? NotNow : _answer));
+
+        public ValueTask<ArtifactStoragePutResult> PutAsync(ArtifactStoragePutRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public ValueTask<ArtifactStorageReadResult> OpenReadAsync(ArtifactStorageReadRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public ValueTask<ArtifactStorageDeleteResult> DeleteAsync(ArtifactStorageDeleteRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+
+        private static ArtifactStorageProbeResult Probe(ArtifactStorageProbeStatus status, ArtifactStorageError? error) =>
+            new() { Status = status, Latency = TimeSpan.Zero, Error = error };
     }
 
     private sealed record RoutedWorld(Guid TeamId, Guid ActorId, Guid ProfileId, string Root);
