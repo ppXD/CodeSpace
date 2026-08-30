@@ -1,3 +1,5 @@
+using System.Text;
+using System.Text.RegularExpressions;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Capture;
@@ -34,6 +36,18 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
     private const string InitializationMigration = "0171_workflow_run_data_manifest_initialization.sql";
     /// <summary>The migration that replaced initialization's determinate zero with an indeterminate statement, and taught the advance which NULL absorbs.</summary>
     private const string IndeterminateInitializationMigration = "0172_workflow_run_data_manifest_indeterminate_initialization.sql";
+
+    private const string SubjectConstraint = "ck_workflow_run_capture_gap_subject";
+
+    /// <summary>
+    /// A constraint 0168 ADDs and 0170 DROPs on its way to a renamed replacement, with nothing re-stating it since. The
+    /// database does not have it, and the corpus still carries the ADD — which is what makes it the fixture for the
+    /// other way a "last writer wins" comparison can be fooled.
+    /// </summary>
+    private const string RevokedConstraint = "ck_workflow_run_sensitive_record_payload_ciphertext";
+
+    /// <summary>The 0151 spelling of the subject constraint. A later migration supersedes it, and 0151 still carries it — which is exactly what makes it the fixture the detector has to refuse.</summary>
+    private const string SupersededSubjectSpelling = "subject_kind IN ('model-call', 'model-call-attempt', 'model-call-body-capture', 'harness-execution', 'harness-process-attempt', 'harness-descriptor', 'harness-reduction-checkpoint', 'runner-handle', 'native-record', 'semantic-event', 'tool-call', 'tool-call-attempt', 'log-stream', 'log-segment', 'session', 'session-state-revision', 'capture-gap', 'data-manifest') AND (subject_id IS NULL OR btrim(subject_id) <> '') AND btrim(capture_source) <> ''";
 
     [Fact]
     public void A_gap_is_one_known_missing_span_with_a_subject_a_coordinate_a_typed_reason_and_a_notice_time()
@@ -319,14 +333,19 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
 
     /// <summary>
     /// The DRIFT DETECTOR, and the reason every other assertion in this class is worth anything. Those read the EF
-    /// model, but production runs 0146 — the model's check constraints are a MIRROR, never their source. Let the two
-    /// diverge and this suite stays green describing a fail-closed rule the database does not have, which is precisely
-    /// how a manifest that read complete over an indeterminate would ship with its own pin passing.
+    /// model, but production runs the migrations — the model's check constraints are a MIRROR, never their source. Let
+    /// the two diverge and this suite stays green describing a fail-closed rule the database does not have, which is
+    /// precisely how a manifest that read complete over an indeterminate would ship with its own pin passing.
+    ///
+    /// <para>Two things make it able to see that. The corpus is DISCOVERED, so a migration written after this test is
+    /// in it without being named here. And the comparison is against the LAST statement of each constraint in DbUp
+    /// order, because that is the one the database ends up enforcing: a superseded spelling is still in the corpus, so
+    /// "appears somewhere in the concatenated migrations" reads as agreement with a database that has moved on.</para>
     /// </summary>
     [Fact]
     public void Every_modelled_check_constraint_is_spelled_identically_in_its_migration()
     {
-        var migration = NormalizeWhitespace(File.ReadAllText(MigrationPath()) + Environment.NewLine + File.ReadAllText(BodyCaptureMigrationPath()) + Environment.NewLine + File.ReadAllText(AttemptAttributionMigrationPath()));
+        var corpus = MigrationCorpus();
 
         using var db = BuildContext();
         var modelled = new[] { Entity<WorkflowRunCaptureGap>(db), Entity<WorkflowRunDataManifest>(db) }
@@ -335,12 +354,225 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
 
         modelled.ShouldNotBeEmpty();
         foreach (var constraint in modelled)
-        {
-            migration.ShouldContain(NormalizeWhitespace(constraint.Sql!),
-                customMessage: $"'{constraint.Name}' differs from the effective 0146+0151 migration sequence. The database is what " +
-                               "database actually enforces, so a mirror that drifts leaves this suite asserting a " +
-                               "constraint production does not have. Reconcile the two spellings, not the test.");
-        }
+            ShouldEqualTheLastMigratedSpelling(corpus, constraint.Name!, constraint.Sql!);
+    }
+
+    /// <summary>
+    /// The detector's own pin, because a drift detector that cannot fail is worse than none: it is a green light with
+    /// a reassuring name. The fixture is a REAL superseded spelling — the one an earlier migration still carries — so
+    /// the assertion above it proves the old "appears anywhere in the concatenation" comparison accepted exactly this
+    /// text, and the assertion below it proves the replacement refuses it.
+    /// </summary>
+    [Fact]
+    public void A_mirror_left_on_a_superseded_spelling_is_refused_even_though_the_corpus_still_carries_it()
+    {
+        var corpus = MigrationCorpus();
+
+        WholeCorpusText(corpus).ShouldContain(NormalizeWhitespace(SupersededSubjectSpelling),
+            customMessage: "the fixture must be a spelling some migration really carries, or this test proves nothing: what it " +
+                           "exists to demonstrate is that a mirror can agree with the corpus somewhere and still disagree " +
+                           "with the database.");
+
+        Should.Throw<ShouldAssertException>(() => ShouldEqualTheLastMigratedSpelling(corpus, SubjectConstraint, SupersededSubjectSpelling),
+            customMessage: "a mirror one migration behind must be REFUSED. Anything that accepts it is the comparison this " +
+                           "detector replaced, and it will be just as green over the next superseded constraint.");
+    }
+
+    /// <summary>
+    /// The other way last-writer-wins can be fooled, and the one that reads GREEN. A DROP is a writer too: it is the
+    /// database FORGETTING a constraint. A detector that only looks for statements skips over it, falls back to the ADD
+    /// that DROP revoked, and reports a model in agreement with a rule production stopped enforcing — a mirror checked
+    /// against a ghost. Refusing is the only honest answer, because there is no spelling in the database to agree with.
+    /// </summary>
+    [Fact]
+    public void A_constraint_whose_last_word_is_a_bare_DROP_is_refused_rather_than_read_off_the_ADD_it_revoked()
+    {
+        var corpus = MigrationCorpus();
+        var text = WholeCorpusText(corpus);
+
+        var stated = text.LastIndexOf($"CONSTRAINT {RevokedConstraint} CHECK", StringComparison.Ordinal);
+        var revoked = text.LastIndexOf($"DROP CONSTRAINT {RevokedConstraint}", StringComparison.Ordinal);
+
+        stated.ShouldBeGreaterThanOrEqualTo(0,
+            customMessage: "the fixture must be a constraint some migration really ADDs, or this test proves nothing: an older " +
+                           "ADD to fall back ON is the whole hazard being demonstrated.");
+
+        revoked.ShouldBeGreaterThan(stated,
+            customMessage: $"'{RevokedConstraint}' must still be DROPped after its last ADD. If a migration has brought the name " +
+                           "back, this fixture has stopped being one — pick another revoked constraint rather than deleting the test.");
+
+        Should.Throw<InvalidOperationException>(() => LastStatementOf(corpus, RevokedConstraint),
+            customMessage: "a constraint the database no longer has must be REFUSED. Reading its body off the ADD a later DROP " +
+                           "revoked is how a model states a rule nothing enforces and this suite calls it agreement.");
+    }
+
+    /// <summary>
+    /// A DROP revokes exactly the constraint it NAMES. This codebase names constraints by shared prefix, and two live
+    /// pairs already differ only by a suffix — <c>ck_workflow_run_harness_execution_terminal</c> against
+    /// <c>..._terminal_lease</c>, and the same shape on the process-attempt table. A matcher that stopped at the
+    /// shorter name would read the longer one's DROP as the shorter one's, and report a constraint gone that the
+    /// database still enforces.
+    /// </summary>
+    [Fact]
+    public void Dropping_a_longer_name_does_not_revoke_the_shorter_one_it_starts_with()
+    {
+        var script = new MigrationScript("9999_neighbours.sql", "ALTER TABLE t ADD CONSTRAINT ck_terminal CHECK (x > 0);\nALTER TABLE t DROP CONSTRAINT ck_terminal_lease;");
+
+        LastStatementOf(new[] { script }, "ck_terminal").Body.ShouldBe("x > 0",
+            customMessage: "'ck_terminal_lease' is a different constraint. Revoking 'ck_terminal' because a longer name that " +
+                           "starts with it was dropped is a false alarm about a rule production still has.");
+    }
+
+    /// <summary>
+    /// Counting DROPs is only safe if a DROP has to be a STATEMENT. This corpus discusses its own DDL in prose — 0145
+    /// and 0160 each spell an <c>ALTER TABLE ... DROP CONSTRAINT ck_...</c> inside a comment — so a detector that read
+    /// comments would announce a live constraint revoked and send someone to reconcile a model that was already right.
+    /// The mirror image matters just as much: <c>--</c> inside a literal is DATA, and cutting the line there would
+    /// truncate a constraint body into a comparison that fails for no reason.
+    /// </summary>
+    [Fact]
+    public void A_DROP_written_in_a_comment_is_prose_and_a_dash_dash_inside_a_literal_is_not_a_comment()
+    {
+        const string script = "-- ALTER TABLE t DROP CONSTRAINT ck_kept;\nALTER TABLE t ADD CONSTRAINT ck_kept CHECK (note <> 'a -- b' AND note <> 'it''s -- fine');";
+
+        var stripped = WithoutLineComments("9999_prose.sql", script);
+
+        stripped.ShouldNotContain("DROP CONSTRAINT",
+            customMessage: "a DROP a migration only TALKS about has not revoked anything. Reading prose as DDL turns this " +
+                           "detector into a source of false alarms about constraints that are perfectly current.");
+
+        LastStatementOf(new[] { new MigrationScript("9999_prose.sql", stripped) }, "ck_kept").Body
+            .ShouldBe("note <> 'a -- b' AND note <> 'it''s -- fine'",
+                customMessage: "the literals must survive whole. A '--' inside one is part of the value, and a body cut off at " +
+                               "it would be compared against a rule no migration wrote.");
+
+        MigrationCorpus().ShouldAllBe(script => WithoutLineComments(script.Name, script.Text) == script.Text,
+            customMessage: "the corpus must ARRIVE stripped — stripped text is a fixed point, unstripped text is not. A helper " +
+                           "the read path skips protects nothing: the migrations reach the matcher with their prose intact.");
+    }
+
+    /// <summary>
+    /// SQL escapes a quote by DOUBLING it, so <c>'it''s'</c> is one literal and not two. A scanner that takes every
+    /// apostrophe as a delimiter is a scanner ordinary SQL can desynchronise, and the parentheses it counts afterwards
+    /// decide where a constraint body ends — which is the entire comparison this class rests on. The first assertion is
+    /// the one that discriminates: the body below survives naive pairing by luck, because an escape's two quotes are
+    /// adjacent and the halves happen to re-cover the same span. Luck is not a foundation for a trust check.
+    /// </summary>
+    [Fact]
+    public void A_quote_doubled_inside_a_literal_does_not_end_it()
+    {
+        const string literal = "'it''s (not) done'";
+
+        ClosingQuote("9999_escaped_quote.sql", literal, 0).ShouldBe(literal.Length - 1,
+            customMessage: "a doubled quote is an ESCAPE, not a close. Ending the literal at the first half leaves every " +
+                           "parenthesis after it counted on the wrong side of the fence.");
+
+        var script = new MigrationScript("9999_escaped_quote.sql", $"ALTER TABLE t ADD CONSTRAINT ck_escaped CHECK (note <> {literal} AND kind IN ('a', 'b'));");
+
+        LastStatementOf(new[] { script }, "ck_escaped").Body.ShouldBe($"note <> {literal} AND kind IN ('a', 'b')",
+            customMessage: "a CHECK body must be read to its OWN closing parenthesis. The parentheses inside the literal are " +
+                           "data, and a body cut short at one of them would be compared against a truncated rule.");
+    }
+
+    /// <summary>
+    /// The stripper understands <c>--</c> and NOTHING else, and this is the pin that keeps that admission honest. A
+    /// <c>/* */</c> block survives stripping whole, so a DROP a migration merely TALKS about inside one is read as DDL
+    /// — and an apostrophe inside one ("don't", the way prose is written) opens a literal that eats the rest of the
+    /// file, the identical desynchronisation the doubled-quote test prevents, arriving through the one door the scanner
+    /// does not watch. No migration writes a block comment today, so refusing one costs nothing; the day that changes,
+    /// teach <see cref="WithoutLineComments"/> block comments and retire this together with its guard.
+    /// </summary>
+    [Fact]
+    public void A_block_comment_is_refused_because_this_scanner_only_understands_dash_dash()
+    {
+        const string name = "9999_block_comment.sql";
+        const string prose = "ALTER TABLE t ADD CONSTRAINT ck_live CHECK (kind IN ('a'));\n/* don't reinstate what 0170 dropped: ALTER TABLE t DROP CONSTRAINT ck_live; it can't come back */";
+
+        Should.Throw<InvalidOperationException>(() => LastStatementOf(new[] { new MigrationScript(name, WithoutLineComments(name, prose)) }, "ck_live")).Message
+            .ShouldContain("DROPped",
+                customMessage: "the fixture must really be a hazard, or the refusal below is decoration: a block comment is not " +
+                               "stripped at all, so a DROP this migration only TALKS about takes the last word and a live " +
+                               "constraint reads as revoked.");
+
+        Should.Throw<InvalidOperationException>(() => WithoutLineComments(name, "/* don't */ ALTER TABLE t ADD CONSTRAINT ck_live CHECK (kind IN ('a'));")).Message
+            .ShouldStartWith(name,
+                customMessage: "one apostrophe inside a block comment leaves every quote after it paired on the wrong side of " +
+                               "the fence. Whatever that costs, it must cost it BY NAME.");
+
+        Should.Throw<InvalidOperationException>(() => ScannableText(name, prose)).Message.ShouldStartWith(name,
+            customMessage: "a migration this scanner cannot read must be REFUSED, not scanned anyway. A trust check that " +
+                           "mis-parses is worse than none: it answers confidently about rules production may not have.");
+
+        MigrationCorpus().ShouldAllBe(script => ScannableText(script.Name, script.Text) == script.Text,
+            customMessage: "no migration writes /* */ today, which is what makes refusing one free — and the corpus must ARRIVE " +
+                           "refused rather than merely be refusable, because a guard the read path can skip protects nothing. " +
+                           "The day one lands, teach the stripper block comments — do not merely delete what caught it.");
+    }
+
+    /// <summary>
+    /// The refusal above is scoped to what the scanner actually READS. A <c>/*</c> written inside a <c>--</c> comment is
+    /// already handled — the line goes away whole — so refusing it would be a false alarm, and one whose remediation
+    /// ("teach the stripper block comments") is advice for a hazard that is not present. A trust check that cries wolf
+    /// about correct input gets its guard deleted the first time it blocks someone, which is how the real hazard the
+    /// pin exists for walks in later.
+    /// </summary>
+    [Fact]
+    public void A_block_comment_marker_written_inside_a_line_comment_is_read_not_refused()
+    {
+        const string name = "9999_marker_in_line_comment.sql";
+        const string prose = "-- 0170 dropped it; do not /* reinstate */ it here\nALTER TABLE t ADD CONSTRAINT ck_kept CHECK (kind IN ('a'));";
+
+        var scannable = ScannableText(name, prose);
+
+        scannable.ShouldNotContain("/*",
+            customMessage: "the stripper removes the whole line, marker included, so there is nothing left for the pin to " +
+                           "refuse. A pin that reads the RAW text refuses input the scanner handles perfectly.");
+
+        LastStatementOf(new[] { new MigrationScript(name, scannable) }, "ck_kept").Body.ShouldBe("kind IN ('a')",
+            customMessage: "the migration must still be SCANNED after the marker is stripped — being accepted is worth " +
+                           "nothing if the constraint it states is then unreadable.");
+    }
+
+    /// <summary>
+    /// A parse failure has to say WHICH migration it choked on. This corpus is 183 files and discovered rather than
+    /// listed, so a bare character offset — into the STRIPPED text at that, which no editor can show — is not a lead but
+    /// a scavenger hunt. Both refusals are the detector giving up on one file, so both name it first (house rule 12.10).
+    /// </summary>
+    [Fact]
+    public void A_migration_this_scanner_cannot_parse_is_named_by_the_failure_it_raises()
+    {
+        const string name = "9999_unparseable.sql";
+
+        Should.Throw<InvalidOperationException>(() => WithoutLineComments(name, "ALTER TABLE t ADD CONSTRAINT ck_x CHECK (note <> 'unclosed);")).Message
+            .ShouldStartWith(name,
+                customMessage: "an unterminated literal makes a whole FILE unreadable. An offset without the file leaves the " +
+                               "reader grepping 183 migrations for a character position.");
+
+        var unclosedBody = new MigrationScript(name, "ALTER TABLE t ADD CONSTRAINT ck_x CHECK (kind IN ('a', 'b');");
+
+        Should.Throw<InvalidOperationException>(() => LastStatementOf(new[] { unclosedBody }, "ck_x")).Message
+            .ShouldStartWith(name,
+                customMessage: "the same one level down: a CHECK body that never closes belongs to a file, and the message " +
+                               "that omits it is the one nobody can act on.");
+    }
+
+    /// <summary>
+    /// The corpus is discovered rather than listed, and this is the evidence: the migration with the LAST word on the
+    /// subject constraint is one no list in this file names. The detector this replaced read three hardcoded files, so
+    /// the migration that superseded them was not wrong to it — it was absent, and absence is what a hardcoded corpus
+    /// turns into agreement.
+    /// </summary>
+    [Fact]
+    public void The_last_word_on_the_subject_constraint_comes_from_a_migration_no_list_here_names()
+    {
+        var hardcoded = new[] { "0146_workflow_run_data_completeness.sql", BodyCaptureMigration, AttemptAttributionMigration };
+
+        var last = LastStatementOf(MigrationCorpus(), SubjectConstraint).Script.Name;
+
+        hardcoded.ShouldNotContain(last,
+            customMessage: $"the subject constraint's last stater is '{last}', which the hardcoded corpus already named. " +
+                           "Either a later migration was reverted, or discovery has stopped reaching past the three files " +
+                           "the old detector listed — and a corpus that stops growing stops detecting.");
     }
 
     /// <summary>
@@ -476,13 +708,212 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
         throw new DirectoryNotFoundException($"'backend/src' was not found above '{AppContext.BaseDirectory}', so the isolation of this slice was never checked. Run the unit suite from the repository checkout.");
     }
 
-    /// <summary>The contract's registered nouns, read off the registry so a plane added later cannot be forgotten by both tables at once.</summary>
-    private static IReadOnlyList<string> AllRegisteredOwnerKinds() =>
-        WorkflowRunDataNames.All.Select(name => name[WorkflowRunDataNames.Prefix.Length..].Replace('_', '-')).ToList();
+    /// <summary>
+    /// The contract's registered owner NOUNS, read off the noun registry itself rather than derived from the table
+    /// names. The two lists agree today, which is exactly what made the derivation look harmless: it left this check
+    /// reading a DIFFERENT registry from the one the constraints are written against, so the day a noun and a table
+    /// stop being one-to-one the loop would be checking the wrong list without saying so. The swap corrects the source
+    /// of truth going forward; it closes no hole that is open today.
+    ///
+    /// <para><c>WorkflowRunDataOwnerKinds.NodeOutput</c> is outside its scope either way, and deliberately so — it is
+    /// absent from the registry this reads for the reason that registry's own doc gives, and this loop demands a facet
+    /// for every noun it names, which is the one thing a node-output subject may never have.</para>
+    /// </summary>
+    private static IReadOnlyCollection<string> AllRegisteredOwnerKinds() => WorkflowRunDataOwnerKinds.All;
 
-    private static string MigrationPath() => Path.Combine(AppContext.BaseDirectory, "Persistence", "DbUpFiles", "0146_workflow_run_data_completeness.sql");
-    private static string BodyCaptureMigrationPath() => Path.Combine(AppContext.BaseDirectory, "Persistence", "DbUpFiles", BodyCaptureMigration);
-    private static string AttemptAttributionMigrationPath() => Path.Combine(AppContext.BaseDirectory, "Persistence", "DbUpFiles", AttemptAttributionMigration);
+    /// <summary>One migration as DbUp would apply it: the name it journals, and the text it runs.</summary>
+    private sealed record MigrationScript(string Name, string Text);
+
+    /// <summary>
+    /// Every migration DbUp would apply, in the order it would apply them, DISCOVERED rather than listed. A hardcoded
+    /// corpus is one that silently stops growing: the migration that supersedes a constraint is exactly the one nobody
+    /// remembers to add, and the detector then reads a superseded database as the current one.
+    /// </summary>
+    private static IReadOnlyList<MigrationScript> MigrationCorpus() => DbUpRunner.DiscoverScriptNames()
+        .Select(JournalledFileName)
+        .Order(StringComparer.Ordinal)
+        .Select(name => new MigrationScript(name, ScannableText(name, ReadScript(name))))
+        .ToList();
+
+    private static string ReadScript(string name) => File.ReadAllText(Path.Combine(AppContext.BaseDirectory, DbUpRunner.ScriptFolder, name));
+
+    /// <summary>
+    /// One migration as this scanner is ALLOWED to read it. The stripper below understands <c>--</c> and nothing else,
+    /// so a <c>/* */</c> block is refused by name rather than scanned around: it survives stripping whole, which turns
+    /// any DROP it merely discusses into DDL, and an apostrophe inside one opens a literal that eats the rest of the
+    /// file. No migration writes one today, so the refusal costs nothing and buys a loud failure the day that changes —
+    /// at which point the answer is to teach <see cref="WithoutLineComments"/> block comments, not to delete this.
+    ///
+    /// <para>The refusal reads the STRIPPED text, which is the text the scanner goes on to read. A <c>/*</c> written
+    /// inside a <c>--</c> comment is already gone by then and was never a hazard, so refusing it would be a false alarm
+    /// carrying remediation advice for a problem the migration does not have.</para>
+    /// </summary>
+    private static string ScannableText(string scriptName, string text)
+    {
+        // Stripping reads literals to know which `--` is a comment, so a block comment holding an odd number of
+        // apostrophes desynchronises it and it dies BEFORE the refusal below is reached. Its message would then name
+        // an unterminated literal and send the reader hunting for a quote — the block comment is the real cause, and
+        // saying so is the whole value of refusing it.
+        string stripped;
+        try { stripped = WithoutLineComments(scriptName, text); }
+        catch (InvalidOperationException) when (text.Contains("/*", StringComparison.Ordinal)) { throw BlockComment(scriptName); }
+
+        if (stripped.Contains("/*", StringComparison.Ordinal)) throw BlockComment(scriptName);
+
+        return stripped;
+    }
+
+    private static InvalidOperationException BlockComment(string scriptName)
+    {
+        return new InvalidOperationException($"{scriptName}: writes a /* */ block comment, which this scanner does not understand — it would read the block's prose as DDL, and an apostrophe inside it would desynchronise every literal after it. Teach WithoutLineComments block comments before adding this migration.");
+    }
+
+    /// <summary>
+    /// A migration's text with its line comments removed, because this corpus writes PROSE about dropping constraints:
+    /// 0145 and 0160 each spell an <c>ALTER TABLE ... DROP CONSTRAINT ck_...</c> inside a <c>--</c> block, and 0136's
+    /// header discusses one it never issues. Once a DROP counts as a word on a constraint, reading those would call a
+    /// live constraint revoked. Quoted text is kept whole — a <c>--</c> inside a literal is data, and 0121 and 0173 are
+    /// full of it.
+    /// </summary>
+    private static string WithoutLineComments(string scriptName, string text)
+    {
+        var kept = new StringBuilder(text.Length);
+
+        for (var index = 0; index < text.Length; index++)
+        {
+            if (text[index] == '\'')
+            {
+                var closing = ClosingQuote(scriptName, text, index);
+                kept.Append(text[index..(closing + 1)]);
+                index = closing;
+                continue;
+            }
+
+            if (!StartsComment(text, index))
+            {
+                kept.Append(text[index]);
+                continue;
+            }
+
+            var newline = text.IndexOf('\n', index);
+            if (newline < 0) break;
+
+            index = newline - 1;
+        }
+
+        return kept.ToString();
+    }
+
+    /// <summary>A <c>--</c> outside a literal runs to the end of its line; the caller has already skipped every literal.</summary>
+    private static bool StartsComment(string text, int index) => text[index] == '-' && index + 1 < text.Length && text[index + 1] == '-';
+
+    /// <summary>DbUp journals a file-system script under its bare file name; a provider that ever prefixed one still resolves to the same file here.</summary>
+    private static string JournalledFileName(string scriptName) => scriptName.Split('.', '/', '\\')[^2] + ".sql";
+
+    /// <summary>The old comparison's haystack — every migration concatenated — kept only so the fixture can be shown to be in it.</summary>
+    private static string WholeCorpusText(IReadOnlyList<MigrationScript> corpus) =>
+        NormalizeWhitespace(string.Join(Environment.NewLine, corpus.Select(script => script.Text)));
+
+    private static void ShouldEqualTheLastMigratedSpelling(IReadOnlyList<MigrationScript> corpus, string constraintName, string modelledSql)
+    {
+        var last = LastStatementOf(corpus, constraintName);
+
+        last.Body.ShouldBe(NormalizeWhitespace(modelledSql),
+            customMessage: $"'{constraintName}' in the EF model is not what {last.Script.Name} — the LAST migration to state it — " +
+                           "gives the database. The database is what actually enforces this, so a mirror that drifts leaves " +
+                           "this suite asserting a constraint production does not have. Reconcile the two spellings, not the test.");
+    }
+
+    /// <summary>One migration's word on a constraint, and where it says it: a body when it states one, NULL when it revokes it.</summary>
+    private sealed record ConstraintWord(MigrationScript Script, int Index, string? Body);
+
+    /// <summary>
+    /// The last migration in DbUp order to have a word on this check constraint, and the body it leaves the database
+    /// with. Last writer wins is what the database ends up with, and it is the whole difference between a mirror that
+    /// is checked and one that is merely mentioned somewhere in the history.
+    ///
+    /// <para>A DROP is a writer. When it has the last word the database has NO such constraint, so there is nothing to
+    /// compare a mirror against and falling back to the ADD it revoked would manufacture agreement with a ghost.</para>
+    /// </summary>
+    private static (MigrationScript Script, string Body) LastStatementOf(IReadOnlyList<MigrationScript> corpus, string constraintName)
+    {
+        var words = corpus.SelectMany(script => WordsOn(script, constraintName)).ToList();
+
+        if (words.Count == 0)
+            throw new InvalidOperationException($"no migration states a check constraint named '{constraintName}', so the EF model mirrors something no database was ever given.");
+
+        var last = words[^1];
+
+        if (last.Body is null)
+            throw new InvalidOperationException($"'{constraintName}' is DROPped by {last.Script.Name} and no later migration re-states it, so the model states a constraint the database no longer has. Drop it from the model too, or add the migration that brings it back.");
+
+        return (last.Script, last.Body);
+    }
+
+    /// <summary>
+    /// Every word one migration has on a constraint, in the order it says them. A statement is the inline
+    /// <c>CONSTRAINT x CHECK</c> of a CREATE TABLE or the <c>ADD CONSTRAINT x CHECK</c> of an ALTER alike; a DROP is
+    /// counted too, because revoking is the other way the database's answer changes. A COMMENT names it without either.
+    /// </summary>
+    private static IEnumerable<ConstraintWord> WordsOn(MigrationScript script, string constraintName)
+    {
+        var stated = new Regex($@"\bCONSTRAINT\s+{Regex.Escape(constraintName)}\s+CHECK\s*\(", RegexOptions.IgnoreCase);
+        var revoked = new Regex($@"\bDROP\s+CONSTRAINT\s+(IF\s+EXISTS\s+)?{Regex.Escape(constraintName)}\b", RegexOptions.IgnoreCase);
+
+        var statements = stated.Matches(script.Text).Select(match => new ConstraintWord(script, match.Index, BodyAt(script, match)));
+        var revocations = revoked.Matches(script.Text).Select(match => new ConstraintWord(script, match.Index, null));
+
+        return statements.Concat(revocations).OrderBy(word => word.Index).ToList();
+    }
+
+    /// <summary>The CHECK body the matched statement opens, normalized the way the model's own spelling is.</summary>
+    private static string BodyAt(MigrationScript script, Match match) => NormalizeWhitespace(BalancedBody(script.Name, script.Text, match.Index + match.Length - 1));
+
+    /// <summary>
+    /// The text between the CHECK's own parentheses. Depth is tracked because a nested <c>IN (...)</c> would otherwise
+    /// end the body early, and quoted literals are skipped because a parenthesis inside one is not a parenthesis.
+    /// </summary>
+    private static string BalancedBody(string scriptName, string text, int openIndex)
+    {
+        var depth = 0;
+
+        for (var index = openIndex; index < text.Length; index++)
+        {
+            if (text[index] == '\'')
+            {
+                index = ClosingQuote(scriptName, text, index);
+                continue;
+            }
+
+            if (text[index] == '(') depth++;
+            if (text[index] == ')' && --depth == 0) return text[(openIndex + 1)..index];
+        }
+
+        throw new InvalidOperationException($"{scriptName}: a CHECK body opening at offset {openIndex} of its comment-stripped text is never closed, so this migration does not parse as SQL. Read the file with its comments removed — the offset counts nothing else.");
+    }
+
+    /// <summary>
+    /// The index of the quote that ENDS this literal. SQL escapes a quote by doubling it, so <c>'it''s'</c> is one
+    /// literal and not two, and a scan that stopped at the first half would resume reading the literal's own text as
+    /// SQL — parentheses included.
+    /// </summary>
+    private static int ClosingQuote(string scriptName, string text, int openIndex)
+    {
+        for (var index = openIndex + 1; index < text.Length; index++)
+        {
+            if (text[index] != '\'') continue;
+
+            if (index + 1 < text.Length && text[index + 1] == '\'')
+            {
+                index++;
+                continue;
+            }
+
+            return index;
+        }
+
+        throw new InvalidOperationException($"{scriptName}: a string literal opening at offset {openIndex} is never closed, so this migration does not parse as SQL. Count quotes from there — a doubled '' is one escaped quote, not two.");
+    }
 
     /// <summary>The migration wraps its constraints over several indented lines; the model states them on one. Only the whitespace may differ.</summary>
     private static string NormalizeWhitespace(string sql) => string.Join(' ', sql.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
