@@ -18,5 +18,5 @@ public sealed class ProbeStorageProfileCommandHandler : IRequestHandler<ProbeSto
     }
 
     public Task<StorageProfileProbeResult> Handle(ProbeStorageProfileCommand request, CancellationToken cancellationToken) =>
-        _service.ProbeAsync(new StorageProfileProbeRequest(_currentTeam.Id!.Value, request.ProfileId, request.ProfileRevision, request.VerifyWriteAccess), cancellationToken);
+        _service.ProbeAsync(new StorageProfileProbeRequest(_currentTeam.Id!.Value, request.ProfileId, request.ProfileRevision, request.VerifyWriteAccess, Initialize: true), cancellationToken);
 }

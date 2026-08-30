@@ -31,18 +31,18 @@ public sealed class StorageProfileProbeService : IStorageProfileProbeService
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            return Result(new ProbeResultContext(request.ProfileId, request.ProfileRevision, null, request.VerifyWriteAccess, stopwatch), StorageProfileProbeStatusValue.Cancelled, Failure(StorageProfileProbeFailureStageValue.Cancellation, StorageProfileProbeFailureCodeValue.CancelledProfileResolution, true));
+            return Result(new ProbeResultContext(request.ProfileId, request.ProfileRevision, null, request.VerifyWriteAccess, stopwatch, request.Initialize), StorageProfileProbeStatusValue.Cancelled, Failure(StorageProfileProbeFailureStageValue.Cancellation, StorageProfileProbeFailureCodeValue.CancelledProfileResolution, true));
         }
         catch (Exception exception) when (IsRecoverable(exception))
         {
-            return Result(new ProbeResultContext(request.ProfileId, request.ProfileRevision, null, request.VerifyWriteAccess, stopwatch), StorageProfileProbeStatusValue.Unavailable, Failure(StorageProfileProbeFailureStageValue.Profile, StorageProfileProbeFailureCodeValue.ProfileResolutionFailed, true));
+            return Result(new ProbeResultContext(request.ProfileId, request.ProfileRevision, null, request.VerifyWriteAccess, stopwatch, request.Initialize), StorageProfileProbeStatusValue.Unavailable, Failure(StorageProfileProbeFailureStageValue.Profile, StorageProfileProbeFailureCodeValue.ProfileResolutionFailed, true));
         }
 
         if (target == null)
-            return Result(new ProbeResultContext(request.ProfileId, request.ProfileRevision, null, request.VerifyWriteAccess, stopwatch), StorageProfileProbeStatusValue.Unavailable, Failure(StorageProfileProbeFailureStageValue.Profile, StorageProfileProbeFailureCodeValue.ProfileMissing, false));
+            return Result(new ProbeResultContext(request.ProfileId, request.ProfileRevision, null, request.VerifyWriteAccess, stopwatch, request.Initialize), StorageProfileProbeStatusValue.Unavailable, Failure(StorageProfileProbeFailureStageValue.Profile, StorageProfileProbeFailureCodeValue.ProfileMissing, false));
 
         var revision = target.ProfileRevision;
-        var context = new ProbeResultContext(request.ProfileId, revision, target.ProviderTypeKey, request.VerifyWriteAccess, stopwatch);
+        var context = new ProbeResultContext(request.ProfileId, revision, target.ProviderTypeKey, request.VerifyWriteAccess, stopwatch, request.Initialize);
         if (revision <= 0)
             return Result(context, StorageProfileProbeStatusValue.Unavailable, Failure(StorageProfileProbeFailureStageValue.Profile, StorageProfileProbeFailureCodeValue.ProfileRevisionInvalid, false));
 
@@ -87,7 +87,7 @@ public sealed class StorageProfileProbeService : IStorageProfileProbeService
     {
         try
         {
-            var probe = await lease.Driver.ProbeAsync(new ArtifactStorageProbeRequest { VerifyWriteAccess = context.WriteAccessRequested }, cancellationToken).ConfigureAwait(false);
+            var probe = await lease.Driver.ProbeAsync(new ArtifactStorageProbeRequest { VerifyWriteAccess = context.WriteAccessRequested, Initialize = context.Initialize }, cancellationToken).ConfigureAwait(false);
             return MapProbe(context, probe);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -227,5 +227,5 @@ public sealed class StorageProfileProbeService : IStorageProfileProbeService
 
     private static bool IsRecoverable(Exception exception) => exception is not OutOfMemoryException and not AccessViolationException;
 
-    private sealed record ProbeResultContext(Guid ProfileId, int? ProfileRevision, string? ProviderTypeKey, bool WriteAccessRequested, Stopwatch Stopwatch);
+    private sealed record ProbeResultContext(Guid ProfileId, int? ProfileRevision, string? ProviderTypeKey, bool WriteAccessRequested, Stopwatch Stopwatch, bool Initialize = false);
 }

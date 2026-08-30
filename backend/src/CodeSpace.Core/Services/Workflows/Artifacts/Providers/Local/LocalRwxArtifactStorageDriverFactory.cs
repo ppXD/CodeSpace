@@ -224,11 +224,19 @@ internal sealed class LocalRwxArtifactStorageDriver : IArtifactStorageDriver
 
         try
         {
-            // A read-only probe must not MAKE the destination healthy. Creating the root here answered "yes, reachable"
-            // for a volume that had vanished, which is the one answer that must never be invented: the verifier asks
-            // this exact question to decide whether an absent object is evidence the object is gone, and a recreated
-            // empty root turns "the mount is missing" into "every object under it was deleted".
-            if (!request.VerifyWriteAccess && !Directory.Exists(_root))
+            // A probe must never MAKE the destination healthy — neither arm. Creating the root answered "yes,
+            // reachable" for a volume that had vanished, which is the one answer that must never be invented: the
+            // verifier asks this exact question to decide whether an absent object is evidence the object is gone,
+            // and a recreated empty root turns "the mount is missing" into "every object under it was deleted".
+            //
+            // Exempting the write arm did not make it safe, it made it the SOURCE: the health sweep probes
+            // write-verified every fifteen minutes, so it recreated the vanished root, went green on the card, and
+            // then handed the hourly verifier the corroboration it needed to demote every placement underneath.
+            // A destination the operator has not provisioned is unavailable, and saying so is the whole job —
+            // provisioning it is a different request, and only a caller that IS provisioning may make it.
+            if (request.Initialize) Directory.CreateDirectory(_root);
+
+            if (!Directory.Exists(_root))
                 return new ArtifactStorageProbeResult
                 {
                     Status = ArtifactStorageProbeStatus.Unavailable, Latency = stopwatch.Elapsed,
@@ -237,8 +245,6 @@ internal sealed class LocalRwxArtifactStorageDriver : IArtifactStorageDriver
 
             if (request.VerifyWriteAccess)
             {
-                Directory.CreateDirectory(_root);
-
                 var probePath = Path.Combine(_root, ".codespace-probe-" + Guid.NewGuid().ToString("N"));
                 try
                 {

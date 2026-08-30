@@ -116,9 +116,18 @@ public sealed class StorageDestinationHealthSweepTests : IDisposable
             $"UPDATE storage_profile_health SET observed_at = observed_at - {by} WHERE storage_profile_id = {world.ProfileId}");
     }
 
+    /// <summary>
+    /// A destination an operator has PROVISIONED — the directory exists before anything watches it.
+    ///
+    /// <para>It used to be a path nobody had created, and the sweep's own write probe made it on first contact. That
+    /// is exactly the behaviour a monitoring sweep must not have: it is what let a vanished mount go green and then
+    /// supply the integrity verifier with corroboration to demote everything underneath. Provisioning belongs to the
+    /// operator's adopt / activate / test actions, so the fixture does it here.</para>
+    /// </summary>
     private string NewRoot()
     {
         var root = Path.Combine(Path.GetTempPath(), "codespace-sweep", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
         _roots.Add(root);
         return root;
     }
