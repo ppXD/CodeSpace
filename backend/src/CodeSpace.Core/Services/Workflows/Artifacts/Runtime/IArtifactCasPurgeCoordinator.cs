@@ -15,7 +15,7 @@ public interface IArtifactCasPurgeCoordinator : IScopedDependency
 {
     Task<ArtifactCasPurgeClaimResult> ClaimAsync(ArtifactCasPurgeRequest request, CancellationToken cancellationToken);
     Task<ArtifactCasPurgeResult> DeleteAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken);
-    Task<bool> ReleaseAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken);
+    Task<ArtifactCasReleaseOutcome> ReleaseAsync(ArtifactCasPurgeClaim claim, ArtifactCasReleaseEvidence evidence, CancellationToken cancellationToken);
     Task<ArtifactCasPurgeResult> PurgeAsync(ArtifactCasPurgeRequest request, CancellationToken cancellationToken);
 
     /// <summary>
@@ -46,6 +46,43 @@ public sealed record ArtifactCasPurgeRequest
     public Guid? ArtifactLocationId { get; init; }
 
     public TimeSpan? OperationTimeout { get; init; }
+}
+
+/// <summary>
+/// What a caller established about the destination while it held the claim it is now handing back.
+///
+/// <para>Releasing is not itself an observation, so the two answers cannot restore the same thing. Only a caller
+/// that has just watched the destination serve the object may put the row back into a state it LEFT; a caller that
+/// touched nothing may only put it back where the claim found it.</para>
+/// </summary>
+public enum ArtifactCasReleaseEvidence
+{
+    /// <summary>No driver call was made under this claim. Nothing about the placement is known that was not known before it.</summary>
+    Untouched,
+
+    /// <summary>A HEAD taken under this claim served the object.</summary>
+    Served,
+}
+
+/// <summary>
+/// What became of a claim that was handed back.
+///
+/// <para>Two unrelated failures hide inside a bare "not released", and a caller that cannot tell them apart has to
+/// treat both as worth waiting on — which is an unbounded wait for the one that can never succeed. <see cref="Raced"/>
+/// is about the MOMENT: the row moved under this caller, and the next attempt looks at a row this one never held.
+/// <see cref="NoEvidence"/> is about the CALL: this claim carries nothing that could name a resting state, so
+/// repeating it word for word has the same answer forever. Only the second one must be budgeted.</para>
+/// </summary>
+public enum ArtifactCasReleaseOutcome
+{
+    /// <summary>The placement is back in a state it can leave, and the claim is gone.</summary>
+    Released,
+
+    /// <summary>The claim was not the current one when the release ran, so it changed nothing.</summary>
+    Raced,
+
+    /// <summary>The claim is current, and nothing this call can reach establishes where the placement rests — an <see cref="ArtifactCasReleaseEvidence.Untouched"/> release of a claim taken from a <c>Deleting</c> orphan.</summary>
+    NoEvidence,
 }
 
 public abstract record ArtifactCasPurgeResult
@@ -102,8 +139,8 @@ public sealed record ArtifactCasPurgeClaim
     ///
     /// <para>Claiming is about taking the row; deleting is about touching bytes, and the two need different answers
     /// for the same row. A claim taken from <c>Corrupt</c> may not delete — that state asserts the destination holds
-    /// something which is NOT this object — and releasing any claim must put the row back where it came from rather
-    /// than declaring it good.</para>
+    /// something which is NOT this object — and a release that established nothing puts the row back here rather
+    /// than declaring it good. It is not always an answer: see <see cref="ArtifactCasReleaseEvidence"/>.</para>
     /// </summary>
     public ArtifactLocationState ClaimedFrom { get; init; } = ArtifactLocationState.Available;
 }

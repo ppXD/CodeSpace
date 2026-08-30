@@ -451,7 +451,7 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
             (await db.ArtifactLocation.AsNoTracking().SingleAsync(value => value.TeamId == teamId)).State.ShouldBe(ArtifactLocationState.Deleting);
         }
         using var releaseScope = _fixture.BeginScope();
-        (await releaseScope.Resolve<IArtifactCasPurgeCoordinator>().ReleaseAsync(physical, CancellationToken.None)).ShouldBeTrue();
+        (await releaseScope.Resolve<IArtifactCasPurgeCoordinator>().ReleaseAsync(physical, ArtifactCasReleaseEvidence.Untouched, CancellationToken.None)).ShouldBe(ArtifactCasReleaseOutcome.Released);
     }
 
     [Fact]
@@ -672,6 +672,56 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
         File.Exists(ObjectPath(root, sha)).ShouldBeFalse();
         using var verifyScope = _fixture.BeginScope();
         (await verifyScope.Resolve<CodeSpaceDbContext>().WorkflowArtifact.AnyAsync(value => value.Id == artifactId)).ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task A_placement_claimed_from_an_orphaned_marker_spends_the_budget_instead_of_waiting_for_a_race_that_never_comes()
+    {
+        // Releasing a claim taken from a Deleting marker can establish NOTHING — the marker IS the claim — so the
+        // sweep's hand-back always fails on this placement. Reported as a race it becomes an UNBUDGETED wait, and the
+        // declaration is re-claimed every retry delay for good: the placement's revision climbs on every pass and the
+        // row never reaches a terminal state. The budget is what turns a permanent failure into an ending.
+        var (teamId, actorId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var root = NewRoot();
+        await SeedRouteAsync(teamId, await SeedProfileAsync(teamId, root));
+        var content = Encoding.UTF8.GetBytes(new string('k', 20_000));
+        var sha = ArtifactStore.ComputeSha256Hex(content);
+        Guid artifactId;
+        Guid objectId;
+        using (var writeScope = _fixture.BeginScope())
+        {
+            var write = await writeScope.Resolve<IArtifactRetentionWriter>().PutDeclaredAsync(new ArtifactRetentionWriteRequest(
+                teamId, content, "application/octet-stream", ArtifactRetentionClass.ArtifactManifestContent, "artifact_manifest", actorId), CancellationToken.None);
+            write.Declared.ShouldBeTrue();
+            artifactId = write.ArtifactId;
+            objectId = (await writeScope.Resolve<CodeSpaceDbContext>().WorkflowArtifact.AsNoTracking().SingleAsync(value => value.Id == artifactId)).CasArtifactObjectId!.Value;
+        }
+        await AgeRoutedDeclarationAsync(artifactId);
+        using (var quarantineScope = _fixture.BeginScope())
+            await quarantineScope.Resolve<IArtifactRetentionReaper>().SweepAsync(CancellationToken.None);
+        await AgeRoutedQuarantineAsync(artifactId);
+
+        var orphaned = await OrphanThePhysicalClaimAsync(teamId, objectId, actorId);
+
+        using var sweepScope = _fixture.BeginScope();
+        var reaper = BudgetedReaper(sweepScope, new RefusedDeletePurgeCoordinator(sweepScope.Resolve<IArtifactCasPurgeCoordinator>()), attempts: 2);
+
+        var spent = await SweepUntilSettledAsync(reaper, artifactId, fromAttempt: 0);
+
+        spent.AttemptCount.ShouldBe(1, "a release this path can never complete must SPEND an attempt, not wait out a race that cannot happen");
+        spent.LastErrorCode.ShouldBe("artifact-routed-release-orphaned-claim");
+        spent.LastErrorMessage.ShouldContain(nameof(ProfileAbandonmentService), Case.Sensitive, "the settlement has to name the only exit this placement has left");
+        spent.State.ShouldBe(ArtifactRetentionState.Quarantined, "one spent attempt is not the end of the budget");
+
+        var exhausted = await SweepUntilSettledAsync(reaper, artifactId, fromAttempt: spent.AttemptCount);
+
+        exhausted.State.ShouldBe(ArtifactRetentionState.Indeterminate, "with the budget gone the declaration must settle as a terminal keep rather than be re-claimed forever");
+        exhausted.LastErrorCode.ShouldBe("retention-sweep-exhausted");
+        exhausted.TerminalAt.ShouldNotBeNull();
+        var stranded = await LocationAsync(teamId);
+        stranded.State.ShouldBe(ArtifactLocationState.Deleting, "nothing released it, and the settlement said so: the profile drain is its exit");
+        stranded.Revision.ShouldBeGreaterThan(orphaned, "each sweep really did re-claim the same row — which is exactly why the passes have to be counted");
+        File.Exists(ObjectPath(root, sha)).ShouldBeTrue("the destination refused before any effect, so the bytes are still there for the drain to find");
     }
 
     [Fact]
@@ -1032,6 +1082,62 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
             """);
     }
 
+    /// <summary>A worker that took the physical claim and died before it could delete or release it. Returns the revision the marker was left at.</summary>
+    private async Task<long> OrphanThePhysicalClaimAsync(Guid teamId, Guid objectId, Guid actorId)
+    {
+        using var scope = _fixture.BeginScope();
+        var claimed = (await scope.Resolve<IArtifactCasPurgeCoordinator>().ClaimAsync(new ArtifactCasPurgeRequest
+        {
+            TeamId = teamId, ArtifactObjectId = objectId, ActorId = actorId,
+        }, CancellationToken.None)).ShouldBeOfType<ArtifactCasPurgeClaimResult.Claimed>();
+
+        (await LocationAsync(teamId)).State.ShouldBe(ArtifactLocationState.Deleting, "a fixture that did not actually start from the marker would prove nothing");
+
+        return claimed.Claim.LocationRevision;
+    }
+
+    /// <summary>The shipped reaper over a substituted purge coordinator, with a short attempt budget so exhausting it is two sweeps rather than eight.</summary>
+    private static ArtifactRetentionReaper BudgetedReaper(ILifetimeScope scope, IArtifactCasPurgeCoordinator routed, int attempts) =>
+        new(new ArtifactRetentionReaperServices(scope.Resolve<DbContextOptions<CodeSpaceDbContext>>(), scope.Resolve<IArtifactReferenceOracle>(),
+                scope.Resolve<IArtifactBlobBackend>(), routed, NullLogger<ArtifactRetentionReaper>.Instance),
+            new ArtifactRetentionReaperOptions(BatchSize: 200, ClaimSize: 25, MaxAttempts: attempts, LeaseDuration: TimeSpan.FromSeconds(60),
+                OperationTimeout: TimeSpan.FromSeconds(15), RetryDelay: TimeSpan.FromMinutes(30)));
+
+    /// <summary>
+    /// Sweeps until the declaration this test owns has been settled once more, bringing its scheduled wait forward in
+    /// between. The sweep is a bounded global batch shared with every other team in the database, so "one sweep moved
+    /// my row" is not something a test may assume — but "my row eventually moved" is exactly what is under test.
+    /// </summary>
+    private async Task<WorkflowArtifactRetention> SweepUntilSettledAsync(ArtifactRetentionReaper reaper, Guid artifactId, int fromAttempt)
+    {
+        foreach (var _ in Enumerable.Range(0, 8))
+        {
+            await reaper.SweepAsync(CancellationToken.None);
+            var row = await RetentionAsync(artifactId);
+            if (row.AttemptCount > fromAttempt || row.TerminalAt != null) return row;
+
+            await AgeRoutedQuarantineAsync(artifactId);
+        }
+
+        var stuck = await RetentionAsync(artifactId);
+        throw new Xunit.Sdk.XunitException(
+            $"Declaration {artifactId} never moved past attempt {fromAttempt} in eight sweeps "
+            + $"(state {stuck.State}, attempts {stuck.AttemptCount}, last code '{stuck.LastErrorCode}'). "
+            + "An unbudgeted wait is the expected cause: check whether the routed release is reporting a race for a claim it can never release.");
+    }
+
+    private async Task<WorkflowArtifactRetention> RetentionAsync(Guid artifactId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().WorkflowArtifactRetention.AsNoTracking().SingleAsync(value => value.ArtifactId == artifactId);
+    }
+
+    private async Task<ArtifactLocation> LocationAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().ArtifactLocation.AsNoTracking().SingleAsync(value => value.TeamId == teamId);
+    }
+
     private async Task<Guid> SeedAgentRunAsync(Guid teamId, Guid actorId)
     {
         using var scope = _fixture.BeginScope();
@@ -1194,7 +1300,7 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
         }
 
         public Task<ArtifactCasPurgeResult> DeleteAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken) => _inner.DeleteAsync(claim, cancellationToken);
-        public Task<bool> ReleaseAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken) => _inner.ReleaseAsync(claim, cancellationToken);
+        public Task<ArtifactCasReleaseOutcome> ReleaseAsync(ArtifactCasPurgeClaim claim, ArtifactCasReleaseEvidence evidence, CancellationToken cancellationToken) => _inner.ReleaseAsync(claim, evidence, cancellationToken);
 
         public Task<ArtifactCasAbandonResult> AbandonAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken) => _inner.AbandonAsync(claim, cancellationToken);
         public Task<ArtifactCasPurgeResult> PurgeAsync(ArtifactCasPurgeRequest request, CancellationToken cancellationToken) => _inner.PurgeAsync(request, cancellationToken);
@@ -1213,14 +1319,33 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
         public Task<ArtifactCasPurgeResult> DeleteAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken) =>
             Task.FromResult<ArtifactCasPurgeResult>(new ArtifactCasPurgeResult.Rejected(new ArtifactCasProblem(ArtifactCasProblemCode.ProviderTimeout, true), EffectMayHaveOccurred: true));
 
-        public Task<bool> ReleaseAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken)
+        public Task<ArtifactCasReleaseOutcome> ReleaseAsync(ArtifactCasPurgeClaim claim, ArtifactCasReleaseEvidence evidence, CancellationToken cancellationToken)
         {
             ReleaseCalls++;
-            return _inner.ReleaseAsync(claim, cancellationToken);
+            return _inner.ReleaseAsync(claim, evidence, cancellationToken);
         }
 
         public Task<ArtifactCasAbandonResult> AbandonAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken) => _inner.AbandonAsync(claim, cancellationToken);
 
+        public Task<ArtifactCasPurgeResult> PurgeAsync(ArtifactCasPurgeRequest request, CancellationToken cancellationToken) => _inner.PurgeAsync(request, cancellationToken);
+    }
+
+    /// <summary>A destination that refuses deletion outright and answers BEFORE touching anything — a revoked delete grant, not a bad moment.</summary>
+    private sealed class RefusedDeletePurgeCoordinator : IArtifactCasPurgeCoordinator
+    {
+        private readonly IArtifactCasPurgeCoordinator _inner;
+
+        public RefusedDeletePurgeCoordinator(IArtifactCasPurgeCoordinator inner) => _inner = inner;
+
+        public Task<ArtifactCasPurgeClaimResult> ClaimAsync(ArtifactCasPurgeRequest request, CancellationToken cancellationToken) => _inner.ClaimAsync(request, cancellationToken);
+
+        public Task<ArtifactCasPurgeResult> DeleteAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken) =>
+            Task.FromResult<ArtifactCasPurgeResult>(new ArtifactCasPurgeResult.Rejected(new ArtifactCasProblem(ArtifactCasProblemCode.Forbidden, false)));
+
+        public Task<ArtifactCasReleaseOutcome> ReleaseAsync(ArtifactCasPurgeClaim claim, ArtifactCasReleaseEvidence evidence, CancellationToken cancellationToken) =>
+            _inner.ReleaseAsync(claim, evidence, cancellationToken);
+
+        public Task<ArtifactCasAbandonResult> AbandonAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken) => _inner.AbandonAsync(claim, cancellationToken);
         public Task<ArtifactCasPurgeResult> PurgeAsync(ArtifactCasPurgeRequest request, CancellationToken cancellationToken) => _inner.PurgeAsync(request, cancellationToken);
     }
 

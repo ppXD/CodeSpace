@@ -285,13 +285,15 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
         {
             _logger.LogWarning(ex, "Artifact {ArtifactId}: post-claim reference verification failed; provider delete was not attempted", claim.ArtifactId);
             var released = await ReleaseRoutedAsync(physical).ConfigureAwait(false);
-            return await SettleRoutedAsync(claim, released
-                ? ArtifactRetentionDecision.Retry("artifact-routed-pre-delete-verification", "The post-claim reference verification failed before provider I/O.")
-                : RoutedWait("artifact-routed-release-race", "The physical claim changed while the safe release was attempted."), cancellationToken).ConfigureAwait(false);
+            var verification = ArtifactRetentionDecision.Retry("artifact-routed-pre-delete-verification", "The post-claim reference verification failed before provider I/O.");
+
+            return await SettleRoutedAsync(claim, AfterRelease(released, verification, "The physical claim changed while the safe release was attempted."), cancellationToken).ConfigureAwait(false);
         }
 
         if (authorization.LostLease)
         {
+            // Discarded deliberately: this sweep no longer owns the declaration, so it settles nothing and has no
+            // outcome to carry the distinction into. Whoever holds the lease re-asks all of it.
             await ReleaseRoutedAsync(physical).ConfigureAwait(false);
             return SweepSettlement.Lost;
         }
@@ -299,8 +301,8 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
         if (authorization.Outcome.Action != ArtifactRetentionAction.Collect)
         {
             var released = await ReleaseRoutedAsync(physical).ConfigureAwait(false);
-            return await SettleRoutedAsync(claim, released ? authorization.Outcome
-                : RoutedWait("artifact-routed-release-race", "The physical claim changed while a stopped delete was being released."), cancellationToken).ConfigureAwait(false);
+
+            return await SettleRoutedAsync(claim, AfterRelease(released, authorization.Outcome, "The physical claim changed while a stopped delete was being released."), cancellationToken).ConfigureAwait(false);
         }
 
         ArtifactCasPurgeResult deletion;
@@ -323,9 +325,9 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
             return await SettleRoutedAsync(claim, RoutedWait("artifact-routed-delete-uncertain", $"The provider delete returned '{failed.Problem.Code}' after an effect may have occurred; a later sweep will reconcile it."), cancellationToken).ConfigureAwait(false);
 
         var safeRelease = await ReleaseRoutedAsync(physical).ConfigureAwait(false);
-        return await SettleRoutedAsync(claim, safeRelease
-            ? ArtifactRetentionDecision.Retry("artifact-routed-delete-refused", $"The provider refused routed deletion with '{failed.Problem.Code}' before any effect; the location was released.")
-            : RoutedWait("artifact-routed-release-race", "The physical claim changed before a no-effect delete could release it."), cancellationToken).ConfigureAwait(false);
+        var refused = ArtifactRetentionDecision.Retry("artifact-routed-delete-refused", $"The provider refused routed deletion with '{failed.Problem.Code}' before any effect; the location was released.");
+
+        return await SettleRoutedAsync(claim, AfterRelease(safeRelease, refused, "The physical claim changed before a no-effect delete could release it."), cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>The post-location-claim gate. Its transaction ends before the provider call; no provider I/O can inherit this row lock.</summary>
@@ -356,16 +358,43 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
         catch (Exception) { return SweepSettlement.Lost; }
     }
 
-    private async Task<bool> ReleaseRoutedAsync(ArtifactCasPurgeClaim claim)
+    /// <summary>
+    /// Hands the physical claim back. The reaper never inspects the destination while holding it, so the evidence is
+    /// always <see cref="ArtifactCasReleaseEvidence.Untouched"/> and a claim taken from a <c>Deleting</c> orphan has
+    /// no resting state to be put back into.
+    ///
+    /// <para>A release that THREW is a bad moment, not a barren path: the database was unreachable, and the next
+    /// sweep asks a world that has moved. It reports <see cref="ArtifactCasReleaseOutcome.Raced"/> so infrastructure
+    /// never spends the budget reserved for a call that can only ever fail.</para>
+    /// </summary>
+    private async Task<ArtifactCasReleaseOutcome> ReleaseRoutedAsync(ArtifactCasPurgeClaim claim)
     {
         using var cleanup = new CancellationTokenSource(_options.OperationTimeout);
-        try { return await _routedPurge.ReleaseAsync(claim, cleanup.Token).ConfigureAwait(false); }
+        try { return await _routedPurge.ReleaseAsync(claim, ArtifactCasReleaseEvidence.Untouched, cleanup.Token).ConfigureAwait(false); }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Routed location {LocationId}: release failed; a later sweep will reconcile Deleting", claim.LocationId);
-            return false;
+            return ArtifactCasReleaseOutcome.Raced;
         }
     }
+
+    /// <summary>
+    /// What the sweep settles once the physical claim has been handed back, given what the hand-back could establish.
+    ///
+    /// <para>The distinction is the whole point of the three-way answer. A race is the design working and must NOT be
+    /// budgeted: the next sweep meets a row this one never held, so waiting costs nothing and spending an attempt on
+    /// it would exhaust the allowance reserved for real failures. An orphaned claim is the opposite — the identical
+    /// call has the identical answer forever, so it MUST be budgeted or the declaration is re-claimed every retry
+    /// delay for good, bumping the placement's revision each time and never reaching a terminal state.</para>
+    /// </summary>
+    private ArtifactRetentionDecision AfterRelease(ArtifactCasReleaseOutcome outcome, ArtifactRetentionDecision released, string racedMessage) => outcome switch
+    {
+        ArtifactCasReleaseOutcome.Released => released,
+        ArtifactCasReleaseOutcome.Raced => RoutedWait("artifact-routed-release-race", racedMessage),
+        _ => ArtifactRetentionDecision.Retry("artifact-routed-release-orphaned-claim",
+            "The placement was claimed from a Deleting marker an earlier worker left behind, so releasing it can establish no state to put it back into. "
+            + "This sweep cannot close it at all; the profile drain (ProfileAbandonmentService) is its only exit, and the declaration is kept once the attempts run out."),
+    };
 
     private ArtifactRetentionDecision RoutedWait(string code, string message) => ArtifactRetentionDecision.WaitForRetry(code, message);
 

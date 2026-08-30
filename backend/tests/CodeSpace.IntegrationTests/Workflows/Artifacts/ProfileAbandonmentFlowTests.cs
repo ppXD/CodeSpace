@@ -84,6 +84,66 @@ public sealed class ProfileAbandonmentFlowTests : IDisposable
         second.Remaining.ShouldBe(0);
     }
 
+    [Fact]
+    public async Task An_orphaned_claim_on_a_serving_destination_is_released_to_the_state_it_rests_in()
+    {
+        // A worker that dies between claiming and deleting leaves the marker on the row. The drain re-claims it, the
+        // destination serves the object, and the release has to put the row back where it was BEFORE any claim:
+        // writing the marker back records a live object as mid-delete forever, which is the one state it cannot leave.
+        var world = await SeedRoutedProfileAsync(placements: 1);
+        var orphaned = await OrphanOneClaimAsync(world);
+
+        (await LocationStateAsync(orphaned)).ShouldBe(ArtifactLocationState.Deleting, "a fixture that did not start in the marker would prove nothing");
+
+        var summary = await AbandonAsync(world, batchSize: 50);
+
+        summary.StillServed.ShouldBe(1);
+        summary.Abandoned.ShouldBe(0);
+        (await LocationStateAsync(orphaned)).ShouldBe(ArtifactLocationState.Available,
+            "a serving HEAD is the one thing that may restore Available, and it was taken under this claim");
+    }
+
+    [Fact]
+    public async Task An_orphaned_claim_on_a_dead_destination_is_closed_rather_than_released()
+    {
+        // The same orphan on a destination that cannot answer for it. Abandonment is its exit, and it is the only
+        // one: the claim was taken from the marker, so no release can establish anything to put back.
+        var world = await SeedRoutedProfileAsync(placements: 1);
+        var orphaned = await OrphanOneClaimAsync(world);
+        Directory.Delete(world.Root, recursive: true);
+
+        (await LocationStateAsync(orphaned)).ShouldBe(ArtifactLocationState.Deleting);
+
+        var summary = await AbandonAsync(world, batchSize: 50);
+
+        summary.Abandoned.ShouldBe(1);
+        summary.Remaining.ShouldBe(0);
+        (await LocationStateAsync(orphaned)).ShouldBe(ArtifactLocationState.Purged);
+    }
+
+    [Fact]
+    public async Task A_worker_that_died_mid_purge_does_not_wedge_the_drain_across_repeated_passes()
+    {
+        // The operator's whole loop: drain, remove what the destination still serves, drain again. The first pass has
+        // to hand the orphan back to a state the second pass can move it out of, or the record is stuck at the front
+        // of every batch for good and the count it reports never moves.
+        var world = await SeedRoutedProfileAsync(placements: 1);
+        var orphaned = await OrphanOneClaimAsync(world);
+
+        var first = await AbandonAsync(world, batchSize: 50);
+
+        first.StillServed.ShouldBe(1);
+        first.Remaining.ShouldBe(1, "a served placement is still held, and a drain that claimed otherwise would be the unsafe answer");
+        (await LocationStateAsync(orphaned)).ShouldBe(ArtifactLocationState.Available);
+
+        Directory.Delete(world.Root, recursive: true);
+
+        var second = await AbandonAsync(world, batchSize: 50);
+
+        second.Remaining.ShouldBeLessThan(first.Remaining);
+        (await LocationStateAsync(orphaned)).ShouldBe(ArtifactLocationState.Purged);
+    }
+
     // ─── World ───────────────────────────────────────────────────────────────
 
     private async Task<ProfileAbandonmentSummary> AbandonAsync(RoutedWorld world, int batchSize)
@@ -113,6 +173,30 @@ public sealed class ProfileAbandonmentFlowTests : IDisposable
 
         return await scope.Resolve<CodeSpaceDbContext>().StorageProfile.AsNoTracking()
             .Where(profile => profile.Id == world.ProfileId).Select(profile => profile.State).SingleAsync();
+    }
+
+    /// <summary>A worker that claimed a placement and died before it could delete or release it: the marker is all it left.</summary>
+    private async Task<Guid> OrphanOneClaimAsync(RoutedWorld world)
+    {
+        using var scope = _fixture.BeginScope();
+        var placement = await scope.Resolve<CodeSpaceDbContext>().ArtifactLocation.AsNoTracking()
+            .Where(location => location.TeamId == world.TeamId).OrderBy(location => location.Id)
+            .Select(location => new { location.Id, location.ArtifactObjectId }).FirstAsync();
+
+        (await scope.Resolve<IArtifactCasPurgeCoordinator>().ClaimAsync(new ArtifactCasPurgeRequest
+        {
+            TeamId = world.TeamId, ArtifactObjectId = placement.ArtifactObjectId, ActorId = world.ActorId, ArtifactLocationId = placement.Id,
+        }, CancellationToken.None)).ShouldBeOfType<ArtifactCasPurgeClaimResult.Claimed>();
+
+        return placement.Id;
+    }
+
+    private async Task<ArtifactLocationState> LocationStateAsync(Guid locationId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().ArtifactLocation.AsNoTracking()
+            .Where(location => location.Id == locationId).Select(location => location.State).SingleAsync();
     }
 
     /// <summary>A profile whose objects really exist on disk, so "the destination still serves it" is a fact rather than a fixture flag.</summary>
