@@ -39,6 +39,22 @@ public sealed record ArtifactLocationVerificationSummary
     /// <summary>Present, but not the object that was recorded. Demoted to Corrupt rather than served.</summary>
     public required int Corrupt { get; init; }
 
-    /// <summary>The provider could not answer. Left untouched — including its stale <c>verified_at</c>, which is the honest record of when it was last actually known good.</summary>
+    /// <summary>
+    /// Nothing was established about the object. The provider could not answer — or the pass could not even find out
+    /// WHICH destination to ask, because the read that resolves it was itself refused. Left untouched, including its
+    /// stale <c>verified_at</c>, which is the honest record of when it was last actually known good.
+    ///
+    /// <para>Distinct from <see cref="Unrecorded"/> in the direction that matters to whoever reads the number: this
+    /// says the answer never arrived, that one says the answer arrived and could not be written down.</para>
+    /// </summary>
     public required int Inconclusive { get; init; }
+
+    /// <summary>
+    /// The provider answered, and the database refused to record it. Left untouched, exactly as an
+    /// <see cref="Inconclusive"/> row is — but counted apart from one, because the two say different things about the
+    /// deployment. A handful here is passes racing each other over the same rows, which is expected and harmless. A
+    /// number close to <see cref="Checked"/> is a pass that observed a whole batch and wrote none of it down, and
+    /// folding that into <see cref="Inconclusive"/> would leave it indistinguishable from a destination being offline.
+    /// </summary>
+    public required int Unrecorded { get; init; }
 }
