@@ -714,13 +714,91 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         (await db.ArtifactTransferIntent.CountAsync(value => value.TeamId == world.TeamId && value.State == ArtifactTransferState.Committed)).ShouldBe(1);
     }
 
+    /// <summary>
+    /// That the durable backoff a failed write schedules is stamped by the DATABASE's clock — the same one the claim
+    /// statement judges it against, and the same one the recovery sweep selects and orders on.
+    ///
+    /// <para>This deployment is multi-worker and multi-node, so a pod whose wall clock disagrees with the database is
+    /// an ordinary condition rather than an accident, and the pod that STAMPS a deadline is routinely not the pod that
+    /// later reads it. A deadline written from a pod running behind is already over the moment it lands, and the next
+    /// attempt jumps a wait that has not elapsed; one written from a pod running ahead outlives its own backoff, and
+    /// the transfer waits out the drift on top of it. Both are the same defect — a value written by one clock and
+    /// judged by another — so all three acts here drive one row across both skews.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_scheduled_retry_deadline_is_stamped_by_the_database_clock_so_a_skewed_pod_neither_jumps_nor_extends_the_wait()
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState();
+        storage.PutErrors.Enqueue(new ArtifactStorageError(ArtifactStorageErrorCode.Throttled, "throttled", true));
+        var bytes = RandomNumberGenerator.GetBytes(1024);
+
+        var deferred = (await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "retry-clock"), new SkewedClock(TimeSpan.FromMinutes(-15))))
+            .ShouldBeOfType<ArtifactCasTransferResult.Deferred>();
+        deferred.Problem.Code.ShouldBe(ArtifactCasProblemCode.Throttled);
+
+        (await BackoffElapsedAsync(deferred.IntentId)).ShouldBeFalse(
+            "a backoff stamped from a pod running fifteen minutes behind is already in the database's past before it is written, so the wait it records is no wait at all; "
+            + $"compare next_attempt_at against clock_timestamp() for intent {deferred.IntentId}");
+
+        var early = await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "retry-clock"), new SkewedClock(TimeSpan.FromMinutes(15)));
+
+        early.ShouldBeOfType<ArtifactCasTransferResult.Deferred>().Problem.Code.ShouldBe(ArtifactCasProblemCode.Throttled,
+            "the database says this backoff is still running, so no pod may take the transfer however its own clock reads");
+        (await IntentAsync(deferred.IntentId)).WorkerFenceEpoch.ShouldBe(1, "a claim the wait refuses must not have written, so the fence it would have advanced is untouched");
+
+        await WaitForElapsedBackoffAsync(deferred.IntentId);
+        var late = await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "retry-clock"), new SkewedClock(TimeSpan.FromMinutes(-15)));
+
+        late.ShouldBeOfType<ArtifactCasTransferResult.Committed>(
+            "the database says this wait is over, so a pod running behind must not be the one clause that keeps refusing it");
+        var intent = await IntentAsync(deferred.IntentId);
+        intent.State.ShouldBe(ArtifactTransferState.Committed);
+        intent.WorkerFenceEpoch.ShouldBe(2);
+        intent.RetryCount.ShouldBe(1);
+    }
+
+    /// <summary>
+    /// That the two ends of a transfer's own lifetime are stamped by the SAME clock, so closing one cannot break the
+    /// shipped ordering check between them.
+    ///
+    /// <para><c>ck_artifact_transfer_intent_revision</c> (0127) demands <c>completed_at &gt;= created_date</c>, and a
+    /// non-retryable failure settles a transfer within milliseconds of minting it. On this multi-node deployment a
+    /// pod's wall clock is routinely not the database's, so reading those two timestamps from different clocks means
+    /// a pod running ahead stamps a creation instant that the database's own completion instant precedes — and the
+    /// write that records the failure is itself rejected, turning a typed rejection into a crash on the write path.
+    /// The skew is driven explicitly rather than waited for, and fifteen minutes of it is smaller than the pod drift
+    /// this deployment tolerates.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_fast_non_retryable_failure_settles_from_a_pod_running_ahead_without_breaking_the_completion_ordering_check()
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState();
+        storage.PutErrors.Enqueue(new ArtifactStorageError(ArtifactStorageErrorCode.Forbidden, "forbidden", false));
+        var bytes = RandomNumberGenerator.GetBytes(1024);
+
+        // A throw here IS the failure this guards: HandleProblemAsync only translates a concurrency conflict, so a
+        // constraint the row cannot satisfy leaves PutAsync as a DbUpdateException instead of a typed rejection.
+        var result = await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "ahead-settle"), new SkewedClock(TimeSpan.FromMinutes(15)));
+
+        var rejected = result.ShouldBeOfType<ArtifactCasTransferResult.Rejected>();
+        rejected.Problem.Code.ShouldBe(ArtifactCasProblemCode.Forbidden);
+        var intent = await IntentAsync(rejected.IntentId!.Value);
+        intent.State.ShouldBe(ArtifactTransferState.Failed);
+        intent.CompletedAt!.Value.ShouldBeGreaterThanOrEqualTo(intent.CreatedDate,
+            "ck_artifact_transfer_intent_revision (0127) compares these two directly, so neither may be read from a clock the other is not");
+    }
+
     [Fact]
     public async Task Throttle_schedules_durable_retry_and_late_retry_reclaims_then_commits()
     {
         var world = await SeedWorldAsync();
         var storage = new FakeStorageState();
         storage.PutErrors.Enqueue(new ArtifactStorageError(ArtifactStorageErrorCode.Throttled, "provider-secret-must-not-persist", true));
-        var clock = new ManualTimeProvider(DateTimeOffset.Parse("2026-08-15T00:00:00Z"));
+        // A pod whose wall clock is a fortnight from the database's, to show the durable backoff is neither shortened
+        // nor extended by it. The wait is therefore waited out rather than fast-forwarded: it belongs to the database.
+        var clock = new SkewedClock(TimeSpan.FromDays(-15));
         var bytes = RandomNumberGenerator.GetBytes(8192);
 
         var first = await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "throttle"), clock);
@@ -732,7 +810,7 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
             stored.LastErrorMessage.ShouldNotContain("provider-secret-must-not-persist");
             stored.LastErrorMessage.ShouldContain(nameof(ArtifactCasProblemCode.Throttled));
         }
-        clock.Advance(TimeSpan.FromMinutes(1));
+        await WaitForElapsedBackoffAsync(deferred.IntentId);
 
         var second = await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "throttle"), clock);
         second.ShouldBeOfType<ArtifactCasTransferResult.Committed>();
@@ -1431,6 +1509,36 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
             .ExecuteUpdateAsync(setters => setters.SetProperty(value => value.State, state));
     }
 
+    private async Task<ArtifactTransferIntent> IntentAsync(Guid intentId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().ArtifactTransferIntent.AsNoTracking().SingleAsync(value => value.Id == intentId);
+    }
+
+    /// <summary>Whether the row's own backoff has elapsed, asked of the clock the claim statement judges it by rather than of this process's.</summary>
+    private async Task<bool> BackoffElapsedAsync(Guid intentId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().Database
+            .SqlQuery<bool>($"SELECT (next_attempt_at <= clock_timestamp()) AS \"Value\" FROM artifact_transfer_intent WHERE id = {intentId}")
+            .SingleAsync();
+    }
+
+    private async Task WaitForElapsedBackoffAsync(Guid intentId)
+    {
+        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(40);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (await BackoffElapsedAsync(intentId)) return;
+
+            await Task.Delay(100);
+        }
+
+        throw new TimeoutException($"The backoff scheduled on intent {intentId} never elapsed within 40s, so a claim refusing it would be refusing it for the right reason and would prove nothing. Check next_attempt_at against clock_timestamp() for that row.");
+    }
+
     private static ArtifactCasTransferRequest Request(World world, Stream content, byte[] bytes, string key) => new()
     {
         TeamId = world.TeamId, StorageProfileId = world.ProfileId, StorageProfileRevision = 1,
@@ -1647,10 +1755,9 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         }
     }
 
-    private sealed class ManualTimeProvider(DateTimeOffset now) : TimeProvider
+    /// <summary>A pod whose wall clock sits a fixed offset away from the database's — the ordinary condition on a multi-node deployment, driven explicitly here rather than waited on.</summary>
+    private sealed class SkewedClock(TimeSpan skew) : TimeProvider
     {
-        private long _utcTicks = now.UtcTicks;
-        public override DateTimeOffset GetUtcNow() => new(Interlocked.Read(ref _utcTicks), TimeSpan.Zero);
-        public void Advance(TimeSpan value) => Interlocked.Add(ref _utcTicks, value.Ticks);
+        public override DateTimeOffset GetUtcNow() => TimeProvider.System.GetUtcNow() + skew;
     }
 }
