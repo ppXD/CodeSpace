@@ -144,9 +144,35 @@ public sealed partial class ArtifactCasRuntimeCoordinator
     /// can still read.</para>
     ///
     /// <para>Every answer that is ABOUT the destination or the credential — the object is not there, the bucket is
-    /// not there, the key is refused — is grounds to close the record. An answer that serves the object is not, and
+    /// not there, the key is refused — is grounds to close the record, but only once the destination has answered
+    /// for ITSELF as well: see <see cref="WeighAsync"/>. An answer that serves the object is not grounds at all, and
     /// releases the claim instead. An answer that is merely a bad moment is neither, and leaves the claim standing
     /// for a caller to retry or release.</para>
+    ///
+    /// <para>The activation refusal below closes NOTHING, and needs no corroboration because it never had an answer
+    /// to corroborate. Every refusal that can arrive there was decided inside this worker before a request left it:
+    /// the broker reads the profile snapshot from our own database, finds the provider factory in this process's own
+    /// registry, decrypts the credential with this process's own key, and constructs the driver locally. Code by
+    /// code, for every refusal <c>OpenDriverAsync</c> can produce:</para>
+    /// <list type="bullet">
+    /// <item><c>ProfileMissing</c>, <c>ProfileRevisionMissing</c> — no. Our own records lost the config; the
+    /// destination that config named is untouched, and it is no longer even known which one it was.</item>
+    /// <item><c>ProfileNotActive</c> — no. Our own governance state, and this call asks with Read eligibility
+    /// precisely so a Disabled or Retired profile still opens.</item>
+    /// <item><c>ProfileInvalid</c>, <c>Unsupported</c> — no. A stored config THIS build cannot parse, or a factory
+    /// that rejected it; a rolled-back image gives them for a destination that was serving a minute ago.</item>
+    /// <item><c>ProviderUnavailable</c> — no, and most sharply. The provider module is absent from THIS worker's
+    /// image. Read as evidence, one worker deployed without it closes every record placed through the profile.</item>
+    /// <item><c>CredentialUnavailable</c>, <c>CredentialInvalid</c> — NEVER, for the reason
+    /// <see cref="ReportsItselfGone"/> refuses the same answer from a probe: a key this worker could not obtain or
+    /// decrypt says nothing about whether the bytes exist, and they sit intact behind a permission somebody can
+    /// grant back.</item>
+    /// <item><c>ProviderTimeout</c>, <c>ProviderUnavailableTransient</c>, <c>CredentialBrokerUnavailable</c>,
+    /// <c>ProviderFailure</c> — no, and never were. Answers about the moment.</item>
+    /// </list>
+    /// <para>So the claim is handed back and the refusal reported retryable, exactly as an uncorroborated HEAD is:
+    /// nothing about the placement was established, and the next pass has to ask again. The code is kept, so an
+    /// operator can still be told WHY the pass got nowhere.</para>
     /// </summary>
     public async Task<ArtifactCasAbandonResult> AbandonAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken)
     {
@@ -157,12 +183,7 @@ public sealed partial class ArtifactCasRuntimeCoordinator
         var activation = await OpenDriverAsync(new DriverActivationRequest(claim.TeamId, claim.StorageProfileId,
             claim.StorageProfileRevision, StorageProfileEligibility.Read, claim.OperationTimeout, StorageProviderCapabilities.None), cancellationToken).ConfigureAwait(false);
 
-        // A destination that cannot be opened is evidence only when the refusal is DURABLE — a revoked credential, a
-        // profile revision whose config no longer resolves. A retryable failure (a broker timeout, a resolution blip)
-        // is a statement about the moment, and closing the record on it would settle Purged over bytes one bad second
-        // could not testify about. The broker's mapping already draws this line: transient reasons carry IsRetryable.
-        if (activation.Problem is { } refusal && !Settles(refusal)) return new ArtifactCasAbandonResult.Rejected(refusal);
-        if (activation.Problem != null) return await FinalizeAbandonAsync(claim, $"the destination could not be opened ({activation.Problem.Code})", cancellationToken).ConfigureAwait(false);
+        if (activation.Problem is { } refusal) return await ReleaseUnansweredAsync(claim, refusal, cancellationToken).ConfigureAwait(false);
 
         StorageRuntimeDriverLease? lease = activation.Lease!;
         try
@@ -174,9 +195,7 @@ public sealed partial class ArtifactCasRuntimeCoordinator
             if (head.Timeout) return new ArtifactCasAbandonResult.Rejected(Problem(ArtifactCasProblemCode.ProviderTimeout, true));
 
             if (head.Value?.Error is { } error)
-                return Settles(error)
-                    ? await FinalizeAbandonAsync(claim, $"the destination answered '{error.Code}' for {claim.ObjectKey}", cancellationToken).ConfigureAwait(false)
-                    : new ArtifactCasAbandonResult.Rejected(Map(error, readMissing: false));
+                return await WeighAsync(claim, lease, error, cancellationToken).ConfigureAwait(false);
 
             // A successful HEAD proves something is AT the key, not that the key holds THIS object. For a placement
             // already recorded Corrupt that distinction is the whole question: the destination is healthy and serving
@@ -195,6 +214,143 @@ public sealed partial class ArtifactCasRuntimeCoordinator
         {
             if (lease != null) await DisposeLeaseQuietlyAsync(lease).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Turns one per-object answer into an outcome, after asking the destination whether it can still speak at all.
+    ///
+    /// <para>A provider cannot tell a deleted object from a namespace it can no longer see: the local driver resolves
+    /// both with <c>File.Exists</c>, and a credential that lost its permission refuses every key alike. So an answer
+    /// that <see cref="Settles(ArtifactStorageError)"/> is evidence about THIS object only once the destination has
+    /// answered for itself — the corroboration <c>ArtifactLocationVerifier</c> takes before it demotes a placement to
+    /// <c>Missing</c>, against the same trap, and widened by <see cref="AnswersForItself"/> only far enough that a
+    /// destination reporting ITSELF gone still counts as having answered. Without it an unmounted volume closes every
+    /// record under its profile in one pass, and closing a record is not undoable: the checksum, the size, the ETag
+    /// and the provider version are nulled, and nothing left can say what those bytes were.</para>
+    ///
+    /// <para>Uncorroborated, the claim is handed back rather than kept. Nothing was established that was not known
+    /// before it, so the row belongs exactly where it was, for the next pass to ask again.</para>
+    /// </summary>
+    private async Task<ArtifactCasAbandonResult> WeighAsync(ArtifactCasPurgeClaim claim, StorageRuntimeDriverLease lease, ArtifactStorageError error, CancellationToken cancellationToken)
+    {
+        // Probed ONLY for an answer that would otherwise close the record: a destination having a bad moment must not
+        // also be asked to prove it, and every extra call lands on one that is already struggling.
+        var corroborated = Settles(error) && await DestinationAnswersAsync(claim, lease, cancellationToken).ConfigureAwait(false);
+
+        return Weigh(error, corroborated) switch
+        {
+            AbandonmentEvidence.Conclusive => await FinalizeAbandonAsync(claim, $"the destination answered '{error.Code}' for {claim.ObjectKey} while still answering for itself", cancellationToken).ConfigureAwait(false),
+            AbandonmentEvidence.Uncorroborated => await ReleaseUnansweredAsync(claim, Problem(ArtifactCasProblemCode.ProviderUnavailableTransient, true), cancellationToken).ConfigureAwait(false),
+            _ => new ArtifactCasAbandonResult.Rejected(Map(error, readMissing: false)),
+        };
+    }
+
+    /// <summary>
+    /// What one per-object answer is worth, once the destination has been asked whether it still answers for itself.
+    ///
+    /// <para>Kept as a total function over the two inputs so the middle case cannot be lost in a refactor: an answer
+    /// that settles and an answer that settles WITH corroboration are different answers, and only the second one may
+    /// close a record.</para>
+    /// </summary>
+    internal static AbandonmentEvidence Weigh(ArtifactStorageError error, bool destinationAnswers) => !Settles(error)
+        ? AbandonmentEvidence.Inconclusive
+        : destinationAnswers ? AbandonmentEvidence.Conclusive : AbandonmentEvidence.Uncorroborated;
+
+    /// <summary>What one per-object answer proves about the placement it names.</summary>
+    public enum AbandonmentEvidence
+    {
+        /// <summary>The destination answered for itself AND could not serve this object. The only outcome that may close a record.</summary>
+        Conclusive,
+
+        /// <summary>An answer that would close the record, from a destination that could not answer for itself — which is what a vanished namespace and a revoked credential both look like from here.</summary>
+        Uncorroborated,
+
+        /// <summary>An answer about the moment or about the request, which was never grounds to close anything.</summary>
+        Inconclusive,
+    }
+
+    /// <summary>
+    /// Asks whether the destination is still answering for ITSELF, never for the object.
+    ///
+    /// <para>Never <c>Initialize</c>: a probe that provisions what is missing manufactures its own corroboration,
+    /// which is exactly how a vanished mount came to testify that every object beneath it had been deleted.</para>
+    /// </summary>
+    private async Task<bool> DestinationAnswersAsync(ArtifactCasPurgeClaim claim, StorageRuntimeDriverLease lease, CancellationToken cancellationToken)
+    {
+        var probe = await InvokeAsync(token => lease.Driver.ProbeAsync(new ArtifactStorageProbeRequest(), token),
+            claim.OperationTimeout, cancellationToken, lease).ConfigureAwait(false);
+
+        return AnswersForItself(probe.Value);
+    }
+
+    /// <summary>
+    /// Whether a probe is the destination ANSWERING for itself. Answering and being healthy are not the same thing.
+    ///
+    /// <para>A destination that is reachable answers — <c>Available</c>, and <c>ReadOnly</c>, which is a read that
+    /// succeeded and a write that was refused, a refusal this never needs. So does one that says IT IS GONE: the
+    /// deleted bucket this whole operation exists for reports <c>NoSuchBucket</c> about itself as readily as about
+    /// the key, and demanding a healthy probe instead made that exit unreachable at precisely the destination that
+    /// needs it. That second arm is <see cref="ReportsItselfGone"/>, and nothing wider.</para>
+    ///
+    /// <para>Every other refusal corroborates nothing — a credential that lost its permission, a namespace out of
+    /// reach for the moment — and so does a probe that produced no result at all. Nothing is closed on any of them,
+    /// which is the safe direction for a step whose effect cannot be undone.</para>
+    /// </summary>
+    internal static bool AnswersForItself(ArtifactStorageProbeResult? probe) => probe != null
+        && (probe.Status is ArtifactStorageProbeStatus.Available or ArtifactStorageProbeStatus.ReadOnly
+            || (probe.Error is { } refusal && ReportsItselfGone(refusal)));
+
+    /// <summary>
+    /// Whether a probe's own refusal is the destination saying THAT IT ITSELF IS GONE — the only refusal that may
+    /// corroborate a per-object answer.
+    ///
+    /// <para>Deliberately not <see cref="Settles(ArtifactStorageError)"/>, and never to be derived from it. That
+    /// predicate answers a PER-OBJECT question, where <c>Forbidden</c> means "you may not read THIS key" and is a
+    /// durable fact about the key. Asked at DESTINATION granularity the identical code means "your credential lost
+    /// its permission", which says nothing whatever about whether the objects exist — it is indistinguishable from a
+    /// namespace you can no longer see, which is the case this corroboration was built for. The two questions differ,
+    /// and sharing one helper is what made them look like one.</para>
+    ///
+    /// <para>Code by code, as an answer a probe gives about the destination itself:</para>
+    /// <list type="bullet">
+    /// <item><c>Unavailable</c> non-retryable — YES, and only this. It is where the classifier puts a namespace that
+    /// is gone for good: <c>NoSuchBucket</c> is carved out of the otherwise-retryable code precisely because
+    /// retrying does not bring a deleted bucket back.</item>
+    /// <item><c>Unavailable</c> retryable — no. A 5xx, a network fault, an unmounted volume; the local driver
+    /// answers exactly this for a root that is not there, because mounting it back is a thing that happens.</item>
+    /// <item><c>Unauthorized</c>, <c>Forbidden</c> — NEVER. A rotated or de-scoped key refuses every key alike and
+    /// reveals nothing about what is behind it. Read as corroboration it closes every record under the profile while
+    /// the bytes sit intact behind a permission somebody can grant back.</item>
+    /// <item><c>Missing</c> — no. It is the contract's word for an OBJECT that is not there, and a probe names no
+    /// object; a driver answering it about the destination has said something the contract cannot attribute.</item>
+    /// <item><c>Throttled</c>, <c>ProviderFailure</c> — no. Answers about the moment, which is what retrying is
+    /// for.</item>
+    /// <item><c>InvalidRequest</c>, <c>Unsupported</c>, <c>AlreadyExists</c>, <c>ConditionNotMet</c>,
+    /// <c>IntegrityMismatch</c>, <c>Corrupt</c> — no. Answers about a REQUEST or about content, neither of which a
+    /// probe makes or carries.</item>
+    /// </list>
+    /// </summary>
+    internal static bool ReportsItselfGone(ArtifactStorageError error) =>
+        error.Code == ArtifactStorageErrorCode.Unavailable && !error.IsRetryable;
+
+    /// <summary>
+    /// Hands the claim back and refuses, for a pass that got no answer it may act on — a settling per-object answer
+    /// the destination could not corroborate, or a destination this worker could not open at all.
+    ///
+    /// <para>The release outcome is discarded deliberately: the refusal is the answer whatever the release did.
+    /// <c>Untouched</c> is the honest evidence — neither caller established anything that was not known before the
+    /// claim — so the row goes back exactly where the claim found it. A claim taken from a <c>Deleting</c> orphan has
+    /// no such place and stays the marker it already was, which is also exactly as it was.</para>
+    ///
+    /// <para>Retryable whatever the caller's code says: the placement is exactly as it was, so the next pass has to
+    /// ask again. A refusal that reads durable here would tell an operator to stop asking about a row nothing has
+    /// answered for yet.</para>
+    /// </summary>
+    private async Task<ArtifactCasAbandonResult> ReleaseUnansweredAsync(ArtifactCasPurgeClaim claim, ArtifactCasProblem refusal, CancellationToken cancellationToken)
+    {
+        await ReleaseAsync(claim, ArtifactCasReleaseEvidence.Untouched, cancellationToken).ConfigureAwait(false);
+
+        return new ArtifactCasAbandonResult.Rejected(refusal with { IsRetryable = true });
     }
 
     /// <summary>
@@ -231,13 +387,6 @@ public sealed partial class ArtifactCasRuntimeCoordinator
 
         return metadata.Sha256 is { } observed && !string.Equals(observed, Convert.ToHexStringLower(identity.Digest), StringComparison.OrdinalIgnoreCase);
     }
-
-    /// <summary>
-    /// Whether a failure to even OPEN the destination is durable evidence. The broker's mapping already draws the
-    /// line — a revoked credential or a vanished profile revision is non-retryable, a broker timeout or resolution
-    /// blip is retryable — so retryability IS the moment-versus-destination distinction at this seam.
-    /// </summary>
-    internal static bool Settles(ArtifactCasProblem problem) => !problem.IsRetryable;
 
     internal static bool Settles(ArtifactStorageError error) => error.Code
         is ArtifactStorageErrorCode.Missing

@@ -169,4 +169,13 @@ public sealed record ProfileAbandonmentSummary
 
     /// <summary>Unreleased placements still under the profile after this pass. Non-zero means call again.</summary>
     public required int Remaining { get; init; }
+
+    /// <summary>
+    /// The problem code that stopped the pass before its batch was done, or null when the whole batch was examined.
+    ///
+    /// <para>Set when one answer came back for so much of the batch that it is a statement about the destination
+    /// rather than about any object under it. Without it a short <c>Examined</c> is silent, and an operator reading
+    /// "examined 13, abandoned 0" cannot tell a pass that stopped from a profile that only had 13 placements.</para>
+    /// </summary>
+    public string? StoppedBy { get; init; }
 }
