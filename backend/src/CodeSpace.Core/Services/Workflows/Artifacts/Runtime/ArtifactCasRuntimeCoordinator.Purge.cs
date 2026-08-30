@@ -175,6 +175,13 @@ public sealed partial class ArtifactCasRuntimeCoordinator
                     ? await FinalizeAbandonAsync(claim, $"the destination answered '{error.Code}' for {claim.ObjectKey}", cancellationToken).ConfigureAwait(false)
                     : new ArtifactCasAbandonResult.Rejected(Map(error, readMissing: false));
 
+            // A successful HEAD proves something is AT the key, not that the key holds THIS object. For a placement
+            // already recorded Corrupt that distinction is the whole question: the destination is healthy and serving
+            // something, and treating presence as service released the claim, while the delete path refuses Corrupt
+            // outright — leaving the record with no exit at all and its profile permanently un-retirable.
+            if (await ServesSomethingElseAsync(claim, head.Value!.Metadata!, cancellationToken).ConfigureAwait(false))
+                return await FinalizeAbandonAsync(claim, $"the destination holds something other than this object at {claim.ObjectKey}", cancellationToken).ConfigureAwait(false);
+
             await ReleaseAsync(claim, cancellationToken).ConfigureAwait(false);
 
             return new ArtifactCasAbandonResult.StillServed(claim.LocationId, $"the destination served {claim.ObjectKey}");
@@ -194,6 +201,32 @@ public sealed partial class ArtifactCasRuntimeCoordinator
     /// gone namespace non-retryable because retrying does not bring a deleted bucket back. A retryable Unavailable is
     /// a bad moment, and a bad moment must never close the record of bytes it could not testify about.</para>
     /// </summary>
+    /// <summary>
+    /// Whether the destination is demonstrably holding something OTHER than this object.
+    ///
+    /// <para>Compared against the CAS object's own identity — its size and digest — rather than against the
+    /// placement row, because the row is what is under suspicion. Only content-derived evidence counts: size always
+    /// is, and a provider-computed hash is when the provider returns one. <c>ProviderETag</c> is deliberately not
+    /// compared; it is provider-defined and a local destination derives it from a modification time, so a restore or
+    /// a migration would read as a different object.</para>
+    ///
+    /// <para>Absence of proof is not proof: a provider that returns no hash and a matching size yields false, and
+    /// the claim is released. Closing a record needs a positive disagreement.</para>
+    /// </summary>
+    private async Task<bool> ServesSomethingElseAsync(ArtifactCasPurgeClaim claim, ArtifactStorageObjectMetadata metadata, CancellationToken cancellationToken)
+    {
+        await using var db = CreateDb();
+        var identity = await db.ArtifactObject.AsNoTracking()
+            .Where(value => value.TeamId == claim.TeamId && value.Id == claim.ArtifactObjectId)
+            .Select(value => new { value.SizeBytes, value.Digest })
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (identity == null) return false;
+        if (metadata.Length != identity.SizeBytes) return true;
+
+        return metadata.Sha256 is { } observed && !string.Equals(observed, Convert.ToHexStringLower(identity.Digest), StringComparison.OrdinalIgnoreCase);
+    }
+
     /// <summary>
     /// Whether a failure to even OPEN the destination is durable evidence. The broker's mapping already draws the
     /// line — a revoked credential or a vanished profile revision is non-retryable, a broker timeout or resolution

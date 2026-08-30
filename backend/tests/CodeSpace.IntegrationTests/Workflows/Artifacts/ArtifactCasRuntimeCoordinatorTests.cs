@@ -282,6 +282,48 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
     }
 
     [Fact]
+    public async Task A_corrupt_placement_on_a_healthy_destination_can_still_be_closed()
+    {
+        // The dead end this closes: Corrupt means the destination holds something that is NOT this object. The
+        // destination is fine, so the HEAD succeeds — and treating presence as service released the claim, while the
+        // delete path refuses Corrupt outright. The record had NO exit, and it blocked its profile's retirement
+        // forever. Presence is not service; identity is.
+        var world = await SeedWorldAsync();
+        var storage = MultiLocationStorage();
+        var bytes = "bytes replaced at a healthy destination"u8.ToArray();
+        var committed = (await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "abandon-usurped")))
+            .ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        var locationId = await FirstPlacementAsync(world, committed.ArtifactObjectId, exceptId: Guid.Empty);
+        await DemoteAsync(world, locationId, ArtifactLocationState.Corrupt);
+        storage.Objects["cas/abandon-usurped.bin"] = "an entirely different object living at that key"u8.ToArray();
+
+        var result = await AbandonAsync(world, storage, committed.ArtifactObjectId);
+
+        result.ShouldBeOfType<ArtifactCasAbandonResult.Abandoned>().Evidence.ShouldContain("something other than this object");
+        storage.DeleteCalls.ShouldBe(0, "closing the record must never touch bytes we have positively identified as not ours");
+        (await PlacementStateAsync(world, locationId)).ShouldBe(ArtifactLocationState.Purged);
+    }
+
+    [Fact]
+    public async Task A_destination_serving_the_real_object_is_still_a_refusal()
+    {
+        // The other side of the same predicate. Identity is what distinguishes "not ours" from "ours" — a size and
+        // digest that agree must keep protecting the record, or the fix would close records over readable bytes.
+        var world = await SeedWorldAsync();
+        var storage = MultiLocationStorage();
+        var bytes = "bytes that are genuinely still there"u8.ToArray();
+        var committed = (await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "abandon-genuine")))
+            .ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        var locationId = await FirstPlacementAsync(world, committed.ArtifactObjectId, exceptId: Guid.Empty);
+        await DemoteAsync(world, locationId, ArtifactLocationState.Corrupt);
+
+        var result = await AbandonAsync(world, storage, committed.ArtifactObjectId);
+
+        result.ShouldBeOfType<ArtifactCasAbandonResult.StillServed>();
+        (await PlacementStateAsync(world, locationId)).ShouldBe(ArtifactLocationState.Corrupt, "a refused abandonment gives the row back as it found it");
+    }
+
+    [Fact]
     public async Task A_placement_is_never_abandoned_while_its_destination_still_serves_it()
     {
         // The invariant the whole operation rests on. Abandoning closes the record without deleting anything, so if
