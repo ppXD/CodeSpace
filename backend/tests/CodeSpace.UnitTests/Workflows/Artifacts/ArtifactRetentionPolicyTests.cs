@@ -163,7 +163,7 @@ public sealed class ArtifactRetentionPolicyTests
         public Task<ArtifactCasPurgeResult> DeleteAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken) =>
             Task.FromResult<ArtifactCasPurgeResult>(new ArtifactCasPurgeResult.Rejected(Unsupported));
 
-        public Task<bool> ReleaseAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken) => Task.FromResult(false);
+        public Task<ArtifactCasReleaseOutcome> ReleaseAsync(ArtifactCasPurgeClaim claim, ArtifactCasReleaseEvidence evidence, CancellationToken cancellationToken) => Task.FromResult(ArtifactCasReleaseOutcome.Raced);
 
         /// <summary>This double exists to refuse, so abandonment refuses too — the retention policy never reaches it.</summary>
         public Task<ArtifactCasAbandonResult> AbandonAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken) =>

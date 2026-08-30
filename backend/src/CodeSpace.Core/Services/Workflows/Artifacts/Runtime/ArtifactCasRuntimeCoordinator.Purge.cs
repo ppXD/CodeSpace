@@ -1,3 +1,4 @@
+using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers;
@@ -25,7 +26,9 @@ public sealed partial class ArtifactCasRuntimeCoordinator
 
     private async Task<ArtifactCasPurgeResult> ReleaseAndRejectAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken)
     {
-        await ReleaseAsync(claim, cancellationToken).ConfigureAwait(false);
+        // Discarded deliberately: the refusal is the answer whatever the release did. NoEvidence cannot arise here —
+        // this arm only runs for a claim taken from Corrupt, which is a state the row can be put straight back into.
+        await ReleaseAsync(claim, ArtifactCasReleaseEvidence.Untouched, cancellationToken).ConfigureAwait(false);
 
         return new ArtifactCasPurgeResult.Rejected(Problem(ArtifactCasProblemCode.LocationUnavailable));
     }
@@ -182,7 +185,9 @@ public sealed partial class ArtifactCasRuntimeCoordinator
             if (await ServesSomethingElseAsync(claim, head.Value!.Metadata!, cancellationToken).ConfigureAwait(false))
                 return await FinalizeAbandonAsync(claim, $"the destination holds something other than this object at {claim.ObjectKey}", cancellationToken).ConfigureAwait(false);
 
-            await ReleaseAsync(claim, cancellationToken).ConfigureAwait(false);
+            // Discarded deliberately: "the destination served it" is what this call answers, and it is true whether or
+            // not the row could be handed back. A release that did not take leaves the marker for the next drain pass.
+            await ReleaseAsync(claim, ArtifactCasReleaseEvidence.Served, cancellationToken).ConfigureAwait(false);
 
             return new ArtifactCasAbandonResult.StillServed(claim.LocationId, $"the destination served {claim.ObjectKey}");
         }
@@ -252,7 +257,7 @@ public sealed partial class ArtifactCasRuntimeCoordinator
         };
     }
 
-    public async Task<bool> ReleaseAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken)
+    public async Task<ArtifactCasReleaseOutcome> ReleaseAsync(ArtifactCasPurgeClaim claim, ArtifactCasReleaseEvidence evidence, CancellationToken cancellationToken)
     {
         Validate(claim);
         await using var db = CreateDb();
@@ -260,13 +265,13 @@ public sealed partial class ArtifactCasRuntimeCoordinator
             && value.Id == claim.LocationId && value.ArtifactObjectId == claim.ArtifactObjectId
             && value.ObjectKey == claim.ObjectKey && value.ProviderETag == claim.ProviderETag
             && value.ProviderObjectVersion == claim.ProviderObjectVersion, cancellationToken).ConfigureAwait(false);
-        if (location == null || location.State != ArtifactLocationState.Deleting || location.Revision != claim.LocationRevision) return false;
+        if (location == null || location.State != ArtifactLocationState.Deleting || location.Revision != claim.LocationRevision) return ArtifactCasReleaseOutcome.Raced;
+
+        var resting = await RestingStateAsync(db, claim, evidence, cancellationToken).ConfigureAwait(false);
+        if (resting is not { } restored) return ArtifactCasReleaseOutcome.NoEvidence;
 
         var now = await DatabaseClockAsync(db, cancellationToken).ConfigureAwait(false);
-        // Back where the claim found it, not to Available. A row claimed from Missing or Corrupt was not good before
-        // and releasing the claim establishes nothing about it — declaring it good here would put unreadable bytes
-        // back in front of every reader on the strength of a claim that did nothing.
-        location.State = claim.ClaimedFrom;
+        location.State = restored;
         location.Revision++;
         location.LastErrorCode = null;
         location.LastErrorMessage = null;
@@ -276,10 +281,40 @@ public sealed partial class ArtifactCasRuntimeCoordinator
         try
         {
             await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-            return true;
+            return ArtifactCasReleaseOutcome.Released;
         }
-        catch (DbUpdateConcurrencyException) { return false; }
+        catch (DbUpdateConcurrencyException) { return ArtifactCasReleaseOutcome.Raced; }
     }
+
+    /// <summary>
+    /// Where the placement goes once the claim is gone, or null when nothing can be established and the row is left
+    /// exactly as it is.
+    ///
+    /// <para>Without evidence the answer is where the claim found it, and no better: a row claimed from Missing or
+    /// Corrupt was not good before, and declaring it good on the strength of a claim that touched nothing would put
+    /// unreadable bytes back in front of every reader. That answer runs out when the claim was taken from an orphan
+    /// a crashed worker left behind, because <c>Deleting</c> is the claim marker itself — writing it back releases
+    /// the row into a state it can never leave.</para>
+    ///
+    /// <para>A HEAD that served the object is the one evidence that can restore a state the row LEFT, and it reads
+    /// that state from the history rather than inventing one: the newest revision that is not the marker. The exit
+    /// for an orphan is therefore the abandon path, which always holds a fresh HEAD.</para>
+    /// </summary>
+    private async Task<ArtifactLocationState?> RestingStateAsync(CodeSpaceDbContext db, ArtifactCasPurgeClaim claim, ArtifactCasReleaseEvidence evidence, CancellationToken cancellationToken)
+    {
+        if (evidence != ArtifactCasReleaseEvidence.Served)
+            return claim.ClaimedFrom == ArtifactLocationState.Deleting ? null : claim.ClaimedFrom;
+
+        var history = db.ArtifactLocationEvent.AsNoTracking()
+            .Where(entry => entry.TeamId == claim.TeamId && entry.ArtifactLocationId == claim.LocationId);
+
+        return await RestingStates(history).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>The states a placement has actually rested in, newest first. Every <c>Deleting</c> event is a claim marker rather than a state.</summary>
+    internal static IQueryable<ArtifactLocationState?> RestingStates(IQueryable<ArtifactLocationEvent> history) =>
+        history.Where(entry => entry.State != ArtifactLocationState.Deleting)
+            .OrderByDescending(entry => entry.Revision).Select(entry => (ArtifactLocationState?)entry.State);
 
     private async Task<bool> ClaimIsCurrentAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken)
     {

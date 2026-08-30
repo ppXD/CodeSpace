@@ -172,7 +172,7 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         {
             TeamId = world.TeamId, ArtifactObjectId = committed.ArtifactObjectId, ActorId = world.ActorId,
         }, CancellationToken.None)).ShouldBeOfType<ArtifactCasPurgeClaimResult.Claimed>();
-        (await coordinator.ReleaseAsync(claimed.Claim, CancellationToken.None)).ShouldBeTrue();
+        (await coordinator.ReleaseAsync(claimed.Claim, ArtifactCasReleaseEvidence.Untouched, CancellationToken.None)).ShouldBe(ArtifactCasReleaseOutcome.Released);
 
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
