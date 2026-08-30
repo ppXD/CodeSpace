@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 
 namespace CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
@@ -12,7 +13,7 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 /// Profile-pinned streaming transfer/read coordinator for the additive CAS v2 tables. Provider I/O is deliberately
 /// outside database transactions; durable intent + monotonic revision/fence claims make every commit replay-safe.
 /// </summary>
-public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinator, IArtifactCasRangeReader, IArtifactCasPurgeCoordinator
+public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeCoordinator, IArtifactCasRangeReader, IArtifactCasPurgeCoordinator, IArtifactCasTransferResumer
 {
     private static readonly TimeSpan DefaultOperationTimeout = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan MaximumOperationTimeout = TimeSpan.FromMinutes(10);
@@ -22,12 +23,14 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
     private readonly DbContextOptions<CodeSpaceDbContext> _dbOptions;
     private readonly IStorageRuntimeDriverBroker _driverBroker;
     private readonly TimeProvider _clock;
+    private readonly ILogger<ArtifactCasRuntimeCoordinator> _logger;
 
-    public ArtifactCasRuntimeCoordinator(DbContextOptions<CodeSpaceDbContext> dbOptions, IStorageRuntimeDriverBroker driverBroker, TimeProvider clock)
+    public ArtifactCasRuntimeCoordinator(DbContextOptions<CodeSpaceDbContext> dbOptions, IStorageRuntimeDriverBroker driverBroker, TimeProvider clock, ILogger<ArtifactCasRuntimeCoordinator> logger)
     {
         _dbOptions = dbOptions;
         _driverBroker = driverBroker;
         _clock = clock;
+        _logger = logger;
     }
 
     public async Task<ArtifactCasTransferResult> PutAsync(ArtifactCasTransferRequest request, CancellationToken cancellationToken)
@@ -46,19 +49,17 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
             return new ArtifactCasTransferResult.Committed(intent.Id, intent.ArtifactObjectId!.Value, intent.ArtifactLocationId!.Value, true);
         if (intent.State is ArtifactTransferState.Failed or ArtifactTransferState.Cancelled)
             return new ArtifactCasTransferResult.Rejected(intent.Id, StoredProblem(intent));
-        if (intent.State == ArtifactTransferState.RetryScheduled && intent.NextAttemptAt > _clock.GetUtcNow())
-            return new ArtifactCasTransferResult.Deferred(intent.Id, intent.NextAttemptAt!.Value, StoredProblem(intent));
 
+        // A scheduled retry's backoff is deliberately NOT pre-checked here. next_attempt_at is stamped by the
+        // database, and the claim statement below judges it against that same clock inside one statement; a second
+        // gate read against this pod's wall clock could only ever disagree with the one that decides.
         var claimed = await ClaimAsync(request.TeamId, intent.Id, request.ActorId, input.Timeout, cancellationToken).ConfigureAwait(false);
         var claim = claimed.Intent;
         if (claim.State == ArtifactTransferState.Committed)
             return new ArtifactCasTransferResult.Committed(claim.Id, claim.ArtifactObjectId!.Value, claim.ArtifactLocationId!.Value, true);
         if (claim.State is ArtifactTransferState.Failed or ArtifactTransferState.Cancelled)
             return new ArtifactCasTransferResult.Rejected(claim.Id, StoredProblem(claim));
-        if (claim.State == ArtifactTransferState.RetryScheduled && claim.NextAttemptAt > _clock.GetUtcNow())
-            return new ArtifactCasTransferResult.Deferred(claim.Id, claim.NextAttemptAt!.Value, StoredProblem(claim));
-        if (!claimed.Acquired)
-            return new ArtifactCasTransferResult.Deferred(claim.Id, claim.LeaseExpiresAt ?? _clock.GetUtcNow(), Problem(ArtifactCasProblemCode.TransferInProgress, true));
+        if (!claimed.Acquired) return Refused(claimed);
 
         StorageRuntimeDriverLease? driverLease = null;
         try
@@ -358,13 +359,57 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
         return await HandleProblemAsync(claim, actorId, Problem(code), cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Records what went wrong and either parks the transfer on a backoff or closes it, on the DATABASE's clock.
+    ///
+    /// <para><c>next_attempt_at</c> is the one timestamp this ledger writes that is later JUDGED rather than merely
+    /// displayed: <see cref="ClaimAsync"/> compares it against <c>clock_timestamp()</c>, and the recovery sweep
+    /// selects and orders on that same clock. Stamping it from this pod's wall clock would make that comparison a
+    /// cross-clock one on a deployment where the pod that writes a deadline is routinely not the pod that reads it —
+    /// a writer running behind would record a wait that is already over, and one running ahead a wait no reader can
+    /// see the end of. The delay is a DURATION and so carries no clock of its own; only its anchor has to be the
+    /// database's, and the reading this method already took for the lease check is exactly that anchor.</para>
+    ///
+    /// <para><c>completed_at</c> is anchored there for a second, sharper reason: it is not merely judged later, it is
+    /// judged against another column of the same row. <c>ck_artifact_transfer_intent_revision</c> (0127) demands
+    /// <c>completed_at &gt;= created_date</c>, and this method can close a transfer milliseconds after
+    /// <see cref="EnsureIntentAsync"/> minted it — so the two have to be read from ONE clock or a pod running ahead
+    /// makes the write that records a failure fail. Every timestamp this class ASSIGNS to the row is the database's
+    /// for that reason: <c>created_date</c>, <c>completed_at</c> and <c>next_attempt_at</c> from a
+    /// <c>clock_timestamp()</c> reading, <c>worker_lease_expires_at</c> computed in SQL.</para>
+    ///
+    /// <para>One column is this pod's nonetheless, and knowing which is where the boundary actually runs:
+    /// <c>last_modified_date</c>. <c>CodeSpaceDbContext</c>'s auditing pass overwrites it from
+    /// <c>DateTimeOffset.UtcNow</c> on every EF UPDATE, discarding whatever this class assigned. The INSERT is
+    /// spared, because for an added row that pass fills the column only when it is still unset and
+    /// <see cref="EnsureIntentAsync"/> has already set it from the same reading as the rest of the row. So the
+    /// column holds the database's instant on three paths — the mint, and the raw claim and lease-renewal
+    /// statements below which set it in SQL — and this pod's on every EF update after them. That is survivable only because nothing judges it: no CHECK, trigger,
+    /// index or sweep on <c>artifact_transfer_intent</c> reads <c>last_modified_date</c>. A reader that wanted to
+    /// would have to move the column onto the database's clock first.</para>
+    ///
+    /// <para>The audit behind that boundary found ONE other live cross-column timestamp CHECK on this schema, and
+    /// there it is NOT closed: <c>ck_artifact_location_observation</c> (<c>0127_artifact_cas_v2.sql:80-82</c>)
+    /// demands <c>verified_at &gt;= created_date</c> on <c>artifact_location</c>, and its two sides are stamped by
+    /// different components — <c>created_date</c> by <see cref="CommitAsync"/> from the database's
+    /// <c>clock_timestamp()</c>, <c>verified_at</c> afterwards by <see cref="ArtifactLocationVerifier"/> from the
+    /// VERIFYING pod's <c>TimeProvider</c>. It is pre-existing and belongs to that component, so nothing here touches
+    /// it, but it is reachable and the honest bound is narrow: that sweep takes the OLDEST rows by <c>verified_at</c>,
+    /// so a row old enough to be selected carries a gap no realistic skew closes — while a deployment holding fewer
+    /// Available placements than one batch takes (100 a pass) selects even the row committed moments ago, and there a
+    /// verifier pod running behind the database by more than that row's age writes a <c>verified_at</c> the CHECK
+    /// refuses. The refusal is contained rather than fatal: that verifier settles each row under its own guard, which
+    /// counts the refused one <c>Unrecorded</c> and leaves it exactly as it was. The containment is also the cost —
+    /// <c>verified_at</c> never moves, so under a persistent skew that row stays at the head of the sweep's ordering
+    /// and is never verified. (0127's third such CHECK, <c>ck_run_artifact_reference_expiry</c>, went with the table
+    /// 0179 dropped.)</para>
+    /// </summary>
     private async Task<ArtifactCasTransferResult> HandleProblemAsync(IntentSnapshot claim, Guid actorId, ArtifactCasProblem problem, CancellationToken cancellationToken)
     {
         await using var db = CreateDb();
         var intent = await db.ArtifactTransferIntent.SingleAsync(value => value.TeamId == claim.TeamId && value.Id == claim.Id, cancellationToken).ConfigureAwait(false);
-        var leaseNow = await DatabaseClockAsync(db, cancellationToken).ConfigureAwait(false);
-        if (!LeaseIsCurrent(intent, claim.Fence, leaseNow)) return Stale(claim.Id);
-        var now = _clock.GetUtcNow();
+        var now = await DatabaseClockAsync(db, cancellationToken).ConfigureAwait(false);
+        if (!LeaseIsCurrent(intent, claim.Fence, now)) return Stale(claim.Id);
         if (intent.State == ArtifactTransferState.Committed)
             return new ArtifactCasTransferResult.Committed(intent.Id, intent.ArtifactObjectId!.Value, intent.ArtifactLocationId!.Value, true);
 
@@ -402,6 +447,15 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
             : new ArtifactCasTransferResult.Rejected(intent.Id, problem);
     }
 
+    /// <summary>
+    /// Mints the durable intent, or hands back the one this idempotency key already names.
+    ///
+    /// <para>Its birth instant is the DATABASE's, like every other timestamp on the row. That is not a preference:
+    /// <c>ck_artifact_transfer_intent_revision</c> (0127) compares <c>completed_at &gt;= created_date</c> directly, and
+    /// a non-retryable failure stamps <c>completed_at</c> from the database within milliseconds of this insert — so a
+    /// pod running even slightly ahead would write a birth its own death precedes and the settling write would be
+    /// rejected outright. Reading it here costs the one round trip that makes the whole row answer to a single clock.</para>
+    /// </summary>
     private async Task<IntentSnapshot> EnsureIntentAsync(ArtifactCasTransferRequest request, Guid profileRevisionId, byte[] digest, CancellationToken cancellationToken)
     {
         var key = await IdempotencyKeyAsync(request, profileRevisionId, cancellationToken).ConfigureAwait(false);
@@ -411,7 +465,7 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
             var existing = await db.ArtifactTransferIntent.AsNoTracking().SingleOrDefaultAsync(value => value.TeamId == request.TeamId && value.StorageProfileRevisionId == profileRevisionId && value.IdempotencyKey == key, cancellationToken).ConfigureAwait(false);
             if (existing != null) return Snapshot(existing, await ReusableProblemAsync(existing, request, digest, cancellationToken).ConfigureAwait(false));
 
-            var now = _clock.GetUtcNow();
+            var now = await DatabaseClockAsync(db, cancellationToken).ConfigureAwait(false);
             var intent = new ArtifactTransferIntent
             {
                 Id = Guid.NewGuid(), TeamId = request.TeamId, StorageProfileRevisionId = profileRevisionId,
@@ -552,10 +606,25 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
     /// </summary>
     internal static string IdempotencyKeyFor(string scope, int generation) => generation == 0 ? scope : $"{scope}/g{generation}";
 
+    /// <summary>
+    /// Takes the fenced worker claim, on a lease and a backoff judged by ONE clock — the database's.
+    ///
+    /// <para>Every timestamp this statement judges is anchored on <c>clock_timestamp()</c>: the lease by this UPDATE
+    /// and by <see cref="RenewLeaseAsync"/>, which compute it in SQL; the backoff by <see cref="HandleProblemAsync"/>,
+    /// which adds its delay to a <c>clock_timestamp()</c> reading taken from the database rather than to a local now
+    /// — so a recorded wait is short by one round trip, and never by a pod's drift. The recovery sweep selects and
+    /// orders its batch on that same clock. Reading any single clause against this pod's wall clock instead makes a
+    /// claim answer two questions from two clocks: on a multi-node deployment a pod running behind would refuse a
+    /// backoff the database says is over — WITHOUT writing anything, so the row keeps the head of the sweep's
+    /// lease-ordered batch and starves every intent queued behind it — and a pod running ahead would jump a wait that
+    /// has not elapsed.</para>
+    ///
+    /// <para>Because this is the only judge, a refusal is also the only place the reason for one can be told apart,
+    /// which is what <see cref="ClaimResult.DatabaseNow"/> is read for.</para>
+    /// </summary>
     private async Task<ClaimResult> ClaimAsync(Guid teamId, Guid intentId, Guid actorId, TimeSpan timeout, CancellationToken cancellationToken)
     {
         await using var db = CreateDb();
-        var scheduleNow = _clock.GetUtcNow();
         var leaseMilliseconds = (long)Math.Ceiling(LeaseDuration(timeout).TotalMilliseconds);
         var affected = await db.Database.ExecuteSqlInterpolatedAsync($$"""
             UPDATE artifact_transfer_intent
@@ -566,11 +635,31 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
                 last_modified_by = {{actorId}}
             WHERE team_id = {{teamId}} AND id = {{intentId}}
               AND state IN ('Intended', 'Uploading', 'Uploaded', 'Verifying', 'RetryScheduled')
-              AND (state <> 'RetryScheduled' OR next_attempt_at <= {{scheduleNow}})
+              AND (state <> 'RetryScheduled' OR next_attempt_at <= clock_timestamp())
               AND (worker_lease_expires_at IS NULL OR worker_lease_expires_at <= clock_timestamp())
             """, cancellationToken).ConfigureAwait(false);
         var intent = await db.ArtifactTransferIntent.AsNoTracking().SingleAsync(value => value.TeamId == teamId && value.Id == intentId, cancellationToken).ConfigureAwait(false);
-        return new ClaimResult(Snapshot(intent, null), affected == 1);
+        if (affected == 1) return new ClaimResult(Snapshot(intent, null), true, null);
+
+        return new ClaimResult(Snapshot(intent, null), false, await DatabaseClockAsync(db, cancellationToken).ConfigureAwait(false));
+    }
+
+    /// <summary>
+    /// Why the database refused this claim, in the caller's terms, decided on the clock the refusal was made by.
+    ///
+    /// <para>The two reasons need different answers and only the database can tell them apart. A backoff still
+    /// running is a wait the caller may poll out, and its own deadline is when to come back. Anything else is another
+    /// worker holding a live lease, and the caller is told to come back when THAT lapses — telling it to come back at
+    /// a backoff instant already in the past would spin it.</para>
+    /// </summary>
+    private ArtifactCasTransferResult Refused(ClaimResult claimed)
+    {
+        var claim = claimed.Intent;
+        var now = claimed.DatabaseNow!.Value;
+
+        return claim.State == ArtifactTransferState.RetryScheduled && claim.NextAttemptAt > now
+            ? new ArtifactCasTransferResult.Deferred(claim.Id, claim.NextAttemptAt.Value, StoredProblem(claim))
+            : new ArtifactCasTransferResult.Deferred(claim.Id, claim.LeaseExpiresAt ?? now, Problem(ArtifactCasProblemCode.TransferInProgress, true));
     }
 
     private async Task<bool> RenewLeaseAsync(IntentSnapshot claim, Guid actorId, TimeSpan timeout, CancellationToken cancellationToken)
@@ -1132,7 +1221,8 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
     private sealed record DriverActivationRequest(Guid TeamId, Guid ProfileId, int ProfileRevision, StorageProfileEligibility Eligibility, TimeSpan Timeout, StorageProviderCapabilities RequiredCapabilities);
     private sealed record DriverCreation(StorageRuntimeDriverLease? Lease, ArtifactCasProblem? Problem);
     private sealed record ProfileRevisionRow(StorageProfileState State, Guid? RevisionId);
-    private sealed record ClaimResult(IntentSnapshot Intent, bool Acquired);
+    /// <summary><c>DatabaseNow</c> is read only when the claim was refused — it is the instant that refusal was made at, and the only clock allowed to say which clause made it.</summary>
+    private sealed record ClaimResult(IntentSnapshot Intent, bool Acquired, DateTimeOffset? DatabaseNow);
     private sealed record ValidTransfer(byte[] Digest, long Size, TimeSpan Timeout);
     private sealed record LeaseRenewal(IntentSnapshot Claim, Guid ActorId);
     private sealed record Verification(ArtifactStorageObjectMetadata? Metadata, ArtifactCasProblem? Problem);
