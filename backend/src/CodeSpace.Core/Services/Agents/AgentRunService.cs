@@ -437,10 +437,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         // D2/D3: large fields (the unified diff, the faithful raw transcript) are offloaded to the content-addressed
         // artifact store (team-scoped) and only the ref kept — so result_jsonb stays bounded instead of carrying an
         // unbounded blob. Small fields stay inline. Done BEFORE serialize so the persisted result carries the refs.
-        result = await OffloadLargePatchAsync(result, snapshot.TeamId, cancellationToken).ConfigureAwait(false);
-        result = await OffloadLargeRepositoryPatchesAsync(result, snapshot.TeamId, cancellationToken).ConfigureAwait(false);
-        result = await OffloadLargeTranscriptAsync(result, snapshot.TeamId, cancellationToken).ConfigureAwait(false);
-        result = await OffloadLargeSessionTranscriptAsync(result, snapshot.TeamId, cancellationToken).ConfigureAwait(false);
+        result = await OffloadOrShedAsync(result, snapshot.TeamId, cancellationToken).ConfigureAwait(false);
 
         var resultJson = JsonSerializer.Serialize(result, AgentJson.Options);
 
@@ -473,6 +470,71 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
     /// diff without an existing artifact stays inline. Idempotent: the store dedups by sha, so a re-completion
     /// (reattach) reuses the same artifact id.
     /// </summary>
+    /// <summary>
+    /// Offloads the result's large payloads, and when the store cannot take them, SHEDS them rather than letting the
+    /// completion throw.
+    ///
+    /// <para>The throw was the worse outcome by every measure: it escaped to the executor's catch-all, which replaced
+    /// the ENTIRE finished result — status, produced branch, pushed commit, acceptance verdict, changed files, usage —
+    /// with a synthetic <c>Failed/executor-error</c>. A run that did its work and pushed its branch read as failed,
+    /// inviting a re-run that re-fires side effects, while the workspace was disposed and the spool reaped, so the
+    /// blobs were lost anyway. Shedding keeps the truth: the outcome and every small fact survive, only the payloads
+    /// the store refused are absent — and their readers already answer that absence with a typed unavailable, not a
+    /// crash.</para>
+    ///
+    /// <para>Shedding cannot keep the bytes inline: unbounded <c>result_jsonb</c> is the exact thing offloading
+    /// exists to prevent. Partial success is preserved — fields whose offload committed before the failure keep their
+    /// refs, because the <c>with</c>-chain reassigns <paramref name="result"/> after each step.</para>
+    /// </summary>
+    private async Task<AgentRunResult> OffloadOrShedAsync(AgentRunResult result, Guid teamId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            result = await OffloadLargePatchAsync(result, teamId, cancellationToken).ConfigureAwait(false);
+            result = await OffloadLargeRepositoryPatchesAsync(result, teamId, cancellationToken).ConfigureAwait(false);
+            result = await OffloadLargeTranscriptAsync(result, teamId, cancellationToken).ConfigureAwait(false);
+            result = await OffloadLargeSessionTranscriptAsync(result, teamId, cancellationToken).ConfigureAwait(false);
+
+            return result;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            var shed = ShedUnoffloadedPayloads(result);
+            _logger.LogError(exception,
+                "Agent run completion could not offload large payloads and shed them to preserve the run's outcome: patch={PatchShed}, repositoryPatches={RepositoryPatchesShed}, transcript={TranscriptShed}, sessionTranscript={SessionTranscriptShed}. The run's status, branch, acceptance and changed files are intact; the shed bytes remain in the spool until the reaper's window closes.",
+                shed.PatchShed, shed.RepositoryPatchesShed, shed.TranscriptShed, shed.SessionTranscriptShed);
+
+            return shed.Result;
+        }
+    }
+
+    /// <summary>Drops every large payload that did not get an artifact ref, keeping everything else byte-identical. Small payloads stay: they were never going to the store.</summary>
+    private static ShedOutcome ShedUnoffloadedPayloads(AgentRunResult result)
+    {
+        static bool TooLarge(string? text) => text is not null && System.Text.Encoding.UTF8.GetByteCount(text) > ArtifactStoreConfig.InlineThresholdBytes;
+
+        var patchShed = result.PatchArtifactId is null && TooLarge(result.Patch);
+        var transcriptShed = result.TranscriptArtifactId is null && TooLarge(result.Transcript);
+        var sessionShed = result.SessionTranscriptArtifactId is null && TooLarge(result.SessionTranscript);
+        var repositories = result.RepositoryResults.Count == 0 ? result.RepositoryResults
+            : result.RepositoryResults.Select(repo => repo.PatchArtifactId is null && TooLarge(repo.Patch) ? repo with { Patch = string.Empty } : repo).ToList();
+        var repositoriesShed = result.RepositoryResults.Where(repo => repo.PatchArtifactId is null && TooLarge(repo.Patch)).Count();
+
+        return new ShedOutcome(result with
+        {
+            Patch = patchShed ? string.Empty : result.Patch,
+            Transcript = transcriptShed ? string.Empty : result.Transcript,
+            SessionTranscript = sessionShed ? string.Empty : result.SessionTranscript,
+            RepositoryResults = repositories,
+        }, patchShed, repositoriesShed, transcriptShed, sessionShed);
+    }
+
+    private sealed record ShedOutcome(AgentRunResult Result, bool PatchShed, int RepositoryPatchesShed, bool TranscriptShed, bool SessionTranscriptShed);
+
     private async Task<AgentRunResult> OffloadLargePatchAsync(AgentRunResult result, Guid teamId, CancellationToken cancellationToken)
     {
         if (result.PatchArtifactId is not null)
