@@ -41,10 +41,12 @@ export function useStorageProviderModules() {
 }
 
 /**
- * Profiles carry the health badge, and health is written by background sweeps — the destination probe runs every
- * fifteen minutes against a ten-minute staleness window, so "red within fifteen minutes" is only true end to end if
- * an OPEN page actually asks again. Nothing else would: refetch-on-focus is disabled app-wide, and staleTime never
- * initiates a request by itself.
+ * Profiles carry the health badge, and health is written by background sweeps — every fifteen minutes the backend
+ * re-probes a BOUNDED number of the destinations whose observation has gone stale, oldest observation first. So this
+ * poll is not the bottleneck, and it is also not the only remaining condition: a deployment with more due destinations
+ * than one pass takes is covered over the passes that follow, and no poll can show an observation the backend has not
+ * taken yet. The poll is still necessary — nothing else here would ask again: refetch-on-focus is disabled app-wide,
+ * and staleTime never initiates a request by itself.
  */
 export function useStorageProfiles() {
   return useInfiniteQuery({

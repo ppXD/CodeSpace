@@ -12,6 +12,18 @@ export function StorageHealthBadge({ health, currentRevision }: { health?: Stora
 
   const stale = health.profileRevision < currentRevision;
 
+  // A profile that admits no write refused the probe before anything opened a driver, so nothing here observed the
+  // destination. Reads of every object stored under it are still admitted, and may be perfectly fine — wording this
+  // as "unreachable" would assert a destination fact no probe measured.
+  if (health.failureCode === "ProfileNotActive") {
+    return (
+      <span className="cn-status cn-status-warn" title={`Checked ${when(health.observedAt)}: this profile's state admits no new writes, so none was attempted. Nothing here says whether the destination itself answers.`}>
+        <span className="cn-status-dot" aria-hidden="true" />
+        writes disabled
+      </span>
+    );
+  }
+
   if (health.status !== "Available") {
     return (
       <span className={`cn-status cn-status-error`} title={failureTitle(health)}>
