@@ -191,9 +191,12 @@ public sealed partial class ArtifactStore : IArtifactStore, IArtifactStreamStore
         // claims about the content. A blob that no longer matches (a corrupted/truncated file, a foreign write
         // under the content-addressed path, a size drift) must never flow silently into a prompt, a patch apply,
         // or an evidence read. Verified on EVERY read — inline rows included, so a mutated row can't lie either.
+        //
+        // The verdict is TYPED, exactly as the bounded read's is. Untyped, it read to the failure classifier as the
+        // caller's fault, so one rotted output answered an operator's run-detail read with "your request was
+        // malformed" plus the sha; the detail that is genuinely diagnostic rides the inner exception instead.
         if (bytes.Length != row.SizeBytes || !string.Equals(ComputeSha256Hex(bytes), row.Sha256, StringComparison.Ordinal))
-            throw new InvalidOperationException(
-                $"Artifact {artifactId} failed its read-back verification: stored claim sha256={row.Sha256} size={row.SizeBytes}, observed size={bytes.Length} — the underlying {(row.InlineBytes is null ? "blob" : "inline row")} no longer matches the store's identity claim; refusing to return unverified bytes.");
+            throw new ArtifactContentUnavailableException(artifactId, ArtifactContentUnavailableKind.IntegrityFailure, ReadBackMismatch(row, bytes.Length));
 
         return new ArtifactBytes
         {
@@ -203,6 +206,11 @@ public sealed partial class ArtifactStore : IArtifactStore, IArtifactStreamStore
             Bytes = bytes,
         };
     }
+
+    /// <summary>What the read actually saw versus what the row claims — never shown to a caller, kept so an operator triaging the log still gets the sha and the sizes.</summary>
+    private static Exception ReadBackMismatch(WorkflowArtifact row, long observedSize) =>
+        new InvalidOperationException(
+            $"Artifact {row.Id} failed its read-back verification: stored claim sha256={row.Sha256} size={row.SizeBytes}, observed size={observedSize} — the underlying {(row.InlineBytes is null ? "blob" : "inline row")} no longer matches the store's identity claim; refusing to return unverified bytes.");
 
     public async Task<ArtifactMetadata?> GetMetadataAsync(Guid teamId, Guid artifactId, CancellationToken cancellationToken)
     {
@@ -303,45 +311,38 @@ public sealed partial class ArtifactStore : IArtifactStore, IArtifactStreamStore
         {
             throw;
         }
-        catch (ArtifactContentUnavailableException ex)
+        catch (Exception ex) when (IsBoundedReadFact(ex, out var state))
         {
-            // The routed path already classified the storage-plane fact; a bounded read reports it, never throws.
-            return Unavailable(RangeStateOf(ex.Kind), row.SizeBytes, row.Sha256, row.ContentType);
+            // A bounded read REPORTS the storage-plane fact, never raises it. Only the verdict is shared with the
+            // reads that fail closed or shed on the same fact — what to do about it stays each caller's own.
+            return Unavailable(state, row.SizeBytes, row.Sha256, row.ContentType);
         }
-        catch (InvalidDataException)
+    }
+
+    /// <summary>
+    /// The shared verdict, plus the ONE exception only this reader may claim. A bounded read is the only reader that
+    /// hands a provider an offset, so a rejected window (<see cref="ArgumentOutOfRangeException"/>) is its own fact to
+    /// report rather than raise. Every other reader that meets that exception met a bug, which is why the shared table
+    /// refuses it.
+    ///
+    /// <para>What this reader never raises is a storage-plane FACT — not "anything at all". A cancel already leaves as
+    /// itself, and so does a defect the shared table refuses: an <see cref="ObjectDisposedException"/> from a stream
+    /// read after its lease was let go used to be reported here as an integrity failure, purely because it derives
+    /// from the locator refusal the table does claim. Reported, it sends an operator to restore a destination that is
+    /// perfectly healthy while the leak keeps rotting cells; raised, it lands where the other two readers already put
+    /// it, and all three name one defect the same way.</para>
+    /// </summary>
+    private static bool IsBoundedReadFact(Exception exception, out ArtifactRangeReadState state)
+    {
+        if (ArtifactReadFailureClassifier.TryClassify(exception, out var kind))
         {
-            // A verifying stream reports a truncated or digest-mismatched object this way, and InvalidDataException
-            // derives from SystemException — the IOException arm below would never have caught it.
-            return Unavailable(ArtifactRangeReadState.IntegrityFailure, row.SizeBytes, row.Sha256, row.ContentType);
+            state = RangeStateOf(kind);
+            return true;
         }
-        catch (FileNotFoundException)
-        {
-            return Unavailable(ArtifactRangeReadState.PhysicalObjectMissing, row.SizeBytes, row.Sha256, row.ContentType);
-        }
-        catch (DirectoryNotFoundException)
-        {
-            return Unavailable(ArtifactRangeReadState.PhysicalObjectMissing, row.SizeBytes, row.Sha256, row.ContentType);
-        }
-        catch (UnauthorizedAccessException)
-        {
-            return Unavailable(ArtifactRangeReadState.AccessDenied, row.SizeBytes, row.Sha256, row.ContentType);
-        }
-        catch (InvalidOperationException)
-        {
-            return Unavailable(ArtifactRangeReadState.IntegrityFailure, row.SizeBytes, row.Sha256, row.ContentType);
-        }
-        catch (ArgumentOutOfRangeException)
-        {
-            return Unavailable(ArtifactRangeReadState.IntegrityFailure, row.SizeBytes, row.Sha256, row.ContentType);
-        }
-        catch (EndOfStreamException)
-        {
-            return Unavailable(ArtifactRangeReadState.IntegrityFailure, row.SizeBytes, row.Sha256, row.ContentType);
-        }
-        catch (IOException)
-        {
-            return Unavailable(ArtifactRangeReadState.BackendUnavailable, row.SizeBytes, row.Sha256, row.ContentType);
-        }
+
+        state = ArtifactRangeReadState.IntegrityFailure;
+
+        return exception is ArgumentOutOfRangeException;
     }
 
     private static ArtifactRangeReadResult Unavailable(ArtifactRangeReadState state, long totalLength, string sha256, string contentType) =>
@@ -349,8 +350,9 @@ public sealed partial class ArtifactStore : IArtifactStore, IArtifactStreamStore
 
     private sealed record ArtifactRangeRow(Guid Id, string Sha256, string ContentType, long SizeBytes, byte[]? InlineBytes, string? StorageUrl, Guid? CasArtifactObjectId);
 
+    /// <summary>The bounded read's half of the destinationless row — the SAME typed fact the whole-object read throws, so the shared classifier sees one fact and the two lanes cannot drift apart.</summary>
     private static RoutedRead RoutedReadFor(Guid teamId, Guid artifactId, Guid? artifactObjectId) =>
-        new(teamId, artifactId, artifactObjectId ?? throw new InvalidOperationException("Artifact storage locator is missing."));
+        new(teamId, artifactId, artifactObjectId ?? throw NoDestinationRecorded(artifactId));
 
     /// <summary>
     /// SHA-256 of <paramref name="bytes"/> as hex-lowercase. Deterministic, no salt — the

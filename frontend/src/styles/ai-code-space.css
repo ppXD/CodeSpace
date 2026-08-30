@@ -2297,6 +2297,7 @@ textarea:-webkit-autofill {
 .acs-root .wf-jsonv-null { color: var(--muted); font-style: italic; }
 .acs-root .wf-jsonv-ellipsis { color: var(--muted); margin: 0 3px; }
 .acs-root .wf-jsonv-count { color: var(--muted); margin-left: 8px; font-size: 10.5px; }
+.acs-root .wf-jsonv-unavailable { color: var(--muted); font-style: italic; }
 
 /* ── Workflow canvas editor (Dify-style three-pane) ───────────────────────────
  * Full-bleed take-over of the ct viewport: top bar (40px), then three columns —

@@ -64,25 +64,9 @@ public static class ArtifactOffloaderExtensions
         {
             throw;
         }
-        catch (FileNotFoundException ex)
+        catch (Exception ex) when (ArtifactReadFailureClassifier.TryClassify(ex, out var kind))
         {
-            throw new ArtifactContentUnavailableException(id, ArtifactContentUnavailableKind.PhysicalObjectMissing, ex);
-        }
-        catch (DirectoryNotFoundException ex)
-        {
-            throw new ArtifactContentUnavailableException(id, ArtifactContentUnavailableKind.PhysicalObjectMissing, ex);
-        }
-        catch (UnauthorizedAccessException ex)
-        {
-            throw new ArtifactContentUnavailableException(id, ArtifactContentUnavailableKind.AccessDenied, ex);
-        }
-        catch (InvalidOperationException ex)
-        {
-            throw new ArtifactContentUnavailableException(id, ArtifactContentUnavailableKind.IntegrityFailure, ex);
-        }
-        catch (IOException ex)
-        {
-            throw new ArtifactContentUnavailableException(id, ArtifactContentUnavailableKind.BackendUnavailable, ex);
+            throw new ArtifactContentUnavailableException(id, kind, ex);
         }
     }
 }

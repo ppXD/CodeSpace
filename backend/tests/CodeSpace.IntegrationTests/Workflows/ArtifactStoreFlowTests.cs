@@ -3,6 +3,8 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows.Artifacts;
+using CodeSpace.Core.Services.Workflows.Artifacts.Backends;
+using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Constants;
@@ -77,10 +79,109 @@ public class ArtifactStoreFlowTests
 
         using (var scope = _fixture.BeginScope())
         {
-            var ex = await Should.ThrowAsync<InvalidOperationException>(
+            var ex = await Should.ThrowAsync<ArtifactContentUnavailableException>(
                 scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, artifactId, CancellationToken.None));
-            ex.Message.ShouldContain("read-back verification", customMessage: "same size, different bytes — the sha catches what the size cannot");
+            ex.Kind.ShouldBe(ArtifactContentUnavailableKind.IntegrityFailure, "same size, different bytes — the sha catches what the size cannot");
+            ex.InnerException!.Message.ShouldContain("read-back verification", customMessage: "the diagnostic survives on the inner exception, where it reaches the log and not the caller");
         }
+    }
+
+    [Fact]
+    public async Task A_deleted_offloaded_blob_reads_as_a_missing_physical_object()
+    {
+        // The local lane is the shipped state of every unrouted team, and it was the one whole-object read with no
+        // verdict at all: a wiped root escaped as a raw FileNotFoundException, so nothing downstream could tell
+        // "the bytes are gone" from "this code has a bug".
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var content = Encoding.UTF8.GetBytes(new string('m', 20_000));   // over the inline threshold → offloaded
+
+        Guid artifactId;
+        using (var scope = _fixture.BeginScope())
+            artifactId = await scope.Resolve<IArtifactStore>().PutAsync(teamId, content, "text/plain", CancellationToken.None);
+
+        string storageUrl;
+        using (var scope = _fixture.BeginScope())
+            storageUrl = (await scope.Resolve<CodeSpaceDbContext>().WorkflowArtifact.AsNoTracking().SingleAsync(a => a.Id == artifactId)).StorageUrl!;
+
+        File.Delete(new Uri(storageUrl).LocalPath);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var ex = await Should.ThrowAsync<ArtifactContentUnavailableException>(
+                scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, artifactId, CancellationToken.None));
+            ex.ArtifactId.ShouldBe(artifactId);
+            ex.Kind.ShouldBe(ArtifactContentUnavailableKind.PhysicalObjectMissing,
+                "the row's identity claim survives its bytes — the read must say WHICH of the two is gone");
+        }
+    }
+
+    [Fact]
+    public async Task A_storage_url_the_backend_refuses_to_follow_is_a_storage_fact_not_an_escaping_bug()
+    {
+        // The local backend GUARDS its locator: a url resolving outside the configured root is refused before any
+        // filesystem touch (LocalFileArtifactBlobBackend.ResolveUnderRoot), and it says so with an
+        // InvalidOperationException. That is a storage-plane fact — the stored copy cannot be produced — not a bug in
+        // the reading code, which is why the shared table must keep claiming it. Untyped it escapes the whole-object
+        // read, the failure classifier reads it as the caller's fault, and the run-detail read answers 400 again:
+        // the very defect this slice closes, reached by a moved mount instead of a rotted file.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var content = Encoding.UTF8.GetBytes(new string('o', 20_000) + Guid.NewGuid());   // over the inline threshold → offloaded; guid-unique so the object it leaves in the shared sha-keyed root is nobody else's file
+
+        Guid artifactId;
+        using (var scope = _fixture.BeginScope())
+            artifactId = await scope.Resolve<IArtifactStore>().PutAsync(teamId, content, "text/plain", CancellationToken.None);
+
+        // The operator repointed the durable mount. The row's own file:// url now names a place this backend will
+        // not follow — the real production trigger, staged without touching the immutable row.
+        var movedRoot = Path.Combine(Path.GetTempPath(), $"artifact-root-{Guid.NewGuid():N}");
+
+        using var moved = _fixture.BeginScope(builder => builder
+            .RegisterInstance(new LocalFileArtifactBlobBackend(movedRoot)).As<IArtifactBlobBackend>().SingleInstance());
+
+        var ex = await Should.ThrowAsync<ArtifactContentUnavailableException>(
+            moved.Resolve<IArtifactStore>().GetBytesAsync(teamId, artifactId, CancellationToken.None));
+
+        ex.ArtifactId.ShouldBe(artifactId);
+        ex.Kind.ShouldBe(ArtifactContentUnavailableKind.IntegrityFailure,
+            "the row's own locator no longer describes an object the backend will produce — a refusal the reader must be able to shed, not an exception that kills the run");
+    }
+
+    [Fact]
+    public async Task A_bounded_read_hands_back_a_disposal_defect_rather_than_dressing_it_as_a_storage_fact()
+    {
+        // What the bounded read never RAISES is a storage-plane FACT — which is not the same as "never throws": a
+        // cancel already leaves as itself, and so does our own defect. An ObjectDisposedException used to come back
+        // from here as an IntegrityFailure purely because it derives from the locator refusal the shared table does
+        // claim. Reported, it sends an operator to restore a destination that is perfectly healthy while the leaked
+        // lease keeps rotting cells; raised, it lands exactly where the whole-object read already puts it.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        // Over the inline threshold, so the read has to go to the backend — and content-addressed with a fresh guid,
+        // because the local blob root is one shared directory keyed by sha: fixed filler makes this test's leftover
+        // object the very file a routed sibling asserts is absent.
+        var content = Encoding.UTF8.GetBytes(new string('d', 20_000) + Guid.NewGuid());
+
+        Guid artifactId;
+        using (var scope = _fixture.BeginScope())
+            artifactId = await scope.Resolve<IArtifactStore>().PutAsync(teamId, content, "text/plain", CancellationToken.None);
+
+        using var leaked = _fixture.BeginScope(builder => builder
+            .RegisterInstance(new AskedAfterItsLeaseWasLetGo()).As<IArtifactBlobBackend>().SingleInstance());
+
+        await Should.ThrowAsync<ObjectDisposedException>(
+            leaked.Resolve<IArtifactRangeReader>().ReadRangeAsync(teamId, artifactId, 0, 512, CancellationToken.None));
+    }
+
+    /// <summary>A backend asked for bytes after its own lease was let go. Our defect, whatever it derives from — never a verdict about the destination.</summary>
+    private sealed class AskedAfterItsLeaseWasLetGo : IArtifactBlobBackend
+    {
+        public Task<string> WriteAsync(string sha256, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public Task<bool> ExistsAsync(string storageUrl, CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public Task<byte[]> ReadAsync(string storageUrl, CancellationToken cancellationToken) => throw new ObjectDisposedException(nameof(Stream));
+
+        public Task<ArtifactBlobRange> ReadRangeAsync(string storageUrl, long offset, int length, CancellationToken cancellationToken) => throw new ObjectDisposedException(nameof(Stream));
     }
 
     [Fact]
