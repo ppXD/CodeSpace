@@ -126,7 +126,7 @@ public sealed partial class ArtifactCasRuntimeCoordinator
             if (deletion.Value?.Error is { Code: not ArtifactStorageErrorCode.Missing } error)
                 return new ArtifactCasPurgeResult.Rejected(Map(error, readMissing: true));
 
-            return await FinalizePurgeAsync(claim, cancellationToken).ConfigureAwait(false);
+            return await FinalizePurgeAsync(claim, ArtifactLocationClosureDetails.Deleted(), cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -202,7 +202,7 @@ public sealed partial class ArtifactCasRuntimeCoordinator
             // something, and treating presence as service released the claim, while the delete path refuses Corrupt
             // outright — leaving the record with no exit at all and its profile permanently un-retirable.
             if (await ServesSomethingElseAsync(claim, head.Value!.Metadata!, cancellationToken).ConfigureAwait(false))
-                return await FinalizeAbandonAsync(claim, $"the destination holds something other than this object at {claim.ObjectKey}", cancellationToken).ConfigureAwait(false);
+                return await FinalizeAbandonAsync(claim, ArtifactLocationAbandonment.HoldsSomethingElse(claim.ObjectKey), cancellationToken).ConfigureAwait(false);
 
             // Discarded deliberately: "the destination served it" is what this call answers, and it is true whether or
             // not the row could be handed back. A release that did not take leaves the marker for the next drain pass.
@@ -239,7 +239,7 @@ public sealed partial class ArtifactCasRuntimeCoordinator
 
         return Weigh(error, corroborated) switch
         {
-            AbandonmentEvidence.Conclusive => await FinalizeAbandonAsync(claim, $"the destination answered '{error.Code}' for {claim.ObjectKey} while still answering for itself", cancellationToken).ConfigureAwait(false),
+            AbandonmentEvidence.Conclusive => await FinalizeAbandonAsync(claim, ArtifactLocationAbandonment.Unservable(error.Code, claim.ObjectKey), cancellationToken).ConfigureAwait(false),
             AbandonmentEvidence.Uncorroborated => await ReleaseUnansweredAsync(claim, Problem(ArtifactCasProblemCode.ProviderUnavailableTransient, true), cancellationToken).ConfigureAwait(false),
             _ => new ArtifactCasAbandonResult.Rejected(Map(error, readMissing: false)),
         };
@@ -394,13 +394,13 @@ public sealed partial class ArtifactCasRuntimeCoordinator
         or ArtifactStorageErrorCode.Forbidden
         || (error.Code == ArtifactStorageErrorCode.Unavailable && !error.IsRetryable);
 
-    private async Task<ArtifactCasAbandonResult> FinalizeAbandonAsync(ArtifactCasPurgeClaim claim, string evidence, CancellationToken cancellationToken)
+    private async Task<ArtifactCasAbandonResult> FinalizeAbandonAsync(ArtifactCasPurgeClaim claim, ArtifactLocationAbandonment abandonment, CancellationToken cancellationToken)
     {
-        var finalized = await FinalizePurgeAsync(claim, cancellationToken).ConfigureAwait(false);
+        var finalized = await FinalizePurgeAsync(claim, ArtifactLocationClosureDetails.Abandoned(abandonment), cancellationToken).ConfigureAwait(false);
 
         return finalized switch
         {
-            ArtifactCasPurgeResult.Purged purged => new ArtifactCasAbandonResult.Abandoned(purged.LocationId, purged.LocationRevision, evidence),
+            ArtifactCasPurgeResult.Purged purged => new ArtifactCasAbandonResult.Abandoned(purged.LocationId, purged.LocationRevision, abandonment.Observed),
             ArtifactCasPurgeResult.Rejected rejected => new ArtifactCasAbandonResult.Rejected(rejected.Problem),
             _ => new ArtifactCasAbandonResult.Rejected(Problem(ArtifactCasProblemCode.ProviderFailure)),
         };
@@ -479,7 +479,11 @@ public sealed partial class ArtifactCasRuntimeCoordinator
             && value.State == ArtifactLocationState.Deleting && value.Revision == claim.LocationRevision, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<ArtifactCasPurgeResult> FinalizePurgeAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken)
+    /// <summary>
+    /// Closes the placement, recording in <paramref name="closureDetails"/> WHICH closure this was — the one thing
+    /// the two callers do not otherwise leave behind, since both land on <c>Purged</c> with the same event.
+    /// </summary>
+    private async Task<ArtifactCasPurgeResult> FinalizePurgeAsync(ArtifactCasPurgeClaim claim, string closureDetails, CancellationToken cancellationToken)
     {
         await using var db = CreateDb();
         var location = await db.ArtifactLocation.SingleOrDefaultAsync(value => value.TeamId == claim.TeamId
@@ -505,7 +509,7 @@ public sealed partial class ArtifactCasRuntimeCoordinator
         location.LastErrorMessage = null;
         location.LastModifiedDate = now;
         location.LastModifiedBy = claim.ActorId;
-        db.ArtifactLocationEvent.Add(PurgeEvent(location, claim.ActorId, now));
+        db.ArtifactLocationEvent.Add(PurgeEvent(location, claim.ActorId, now, closureDetails));
         try
         {
             await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
@@ -517,7 +521,10 @@ public sealed partial class ArtifactCasRuntimeCoordinator
         }
     }
 
-    private static ArtifactLocationEvent PurgeEvent(ArtifactLocation location, Guid actorId, DateTimeOffset now) => new()
+    /// <summary>A claim marker or a release: the state moved, and neither of them closed anything there is a verb for.</summary>
+    private static ArtifactLocationEvent PurgeEvent(ArtifactLocation location, Guid actorId, DateTimeOffset now) => PurgeEvent(location, actorId, now, "{}");
+
+    private static ArtifactLocationEvent PurgeEvent(ArtifactLocation location, Guid actorId, DateTimeOffset now, string detailsJson) => new()
     {
         Id = Guid.NewGuid(), TeamId = location.TeamId, ArtifactLocationId = location.Id, Revision = location.Revision,
         EventType = ArtifactLocationEventType.StateChanged, State = location.State, ObservedAt = now,
@@ -525,7 +532,7 @@ public sealed partial class ArtifactCasRuntimeCoordinator
         ProviderChecksumAlgorithm = location.ProviderChecksumAlgorithm, ProviderChecksum = location.ProviderChecksum,
         ObservedSizeBytes = location.ObservedSizeBytes, VerifiedAt = location.VerifiedAt,
         ContentEncoding = location.ContentEncoding, EncryptionKeyVersion = location.EncryptionKeyVersion,
-        ErrorCode = location.LastErrorCode, ErrorMessage = location.LastErrorMessage, DetailsJson = "{}", CreatedBy = actorId,
+        ErrorCode = location.LastErrorCode, ErrorMessage = location.LastErrorMessage, DetailsJson = detailsJson, CreatedBy = actorId,
     };
 
     private static TimeSpan Validate(ArtifactCasPurgeRequest request)
