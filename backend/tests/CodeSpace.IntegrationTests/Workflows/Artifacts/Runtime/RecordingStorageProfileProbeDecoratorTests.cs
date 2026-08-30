@@ -178,6 +178,10 @@ private async Task<StorageProfileSummary> SummaryAsync(World world)
     {
         var root = Path.Combine(Path.GetTempPath(), "codespace-probe-health", Guid.NewGuid().ToString("N"));
         _roots.Add(root);
+
+        // A destination the operator has provisioned. The probe reports on it and never creates it — the two tests
+        // that want an unusable destination name one explicitly rather than relying on absence.
+        Directory.CreateDirectory(root);
         return root;
     }
 

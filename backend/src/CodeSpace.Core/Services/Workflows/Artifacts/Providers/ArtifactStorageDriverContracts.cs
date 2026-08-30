@@ -99,6 +99,16 @@ public sealed record ArtifactStorageDeleteRequest(string ObjectKey)
 public sealed record ArtifactStorageProbeRequest
 {
     public bool VerifyWriteAccess { get; init; }
+
+    /// <summary>
+    /// Whether this probe is part of PROVISIONING the destination, and may therefore create what is missing.
+    ///
+    /// <para>Separate from <see cref="VerifyWriteAccess"/> on purpose. Write-verification is a question, and letting
+    /// it also be an action is what let a monitoring sweep recreate a vanished mount, report it healthy, and then
+    /// supply the integrity verifier with the corroboration it needed to demote every placement underneath. An
+    /// operator adopting a destination is provisioning it; a sweep watching one never is.</para>
+    /// </summary>
+    public bool Initialize { get; init; }
 }
 
 public readonly record struct ArtifactStorageByteRange(long Offset, long? Length = null);

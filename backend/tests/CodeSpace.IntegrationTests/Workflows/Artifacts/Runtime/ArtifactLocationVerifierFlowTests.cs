@@ -182,6 +182,12 @@ public sealed class ArtifactLocationVerifierFlowTests : IDisposable
 
         Directory.Exists(world.Root).ShouldBeFalse("a write-verified probe must not provision a destination the operator never provisioned");
 
+        // The distinction that keeps provisioning possible: the operator's own adopt/activate/test actions DO create
+        // the root, and only they do. Write-verification is a question; provisioning is a different request.
+        await ProvisioningProbeAsync(world);
+        Directory.Exists(world.Root).ShouldBeTrue("an operator provisioning a destination must still be able to create it");
+        Directory.Delete(world.Root, recursive: true);
+
         await VerifyAsync();
 
         var after = await LocationAsync(world);
@@ -189,8 +195,13 @@ public sealed class ArtifactLocationVerifierFlowTests : IDisposable
         after.VerifiedAt.ShouldBe(before.VerifiedAt, "and the row stays visibly unchecked rather than freshly confirmed");
     }
 
+    /// <summary>Runs the provisioning probe an operator's adopt / activate / test action runs.</summary>
+    private Task ProvisioningProbeAsync(StoredArtifact world) => ProbeAsync(world, initialize: true);
+
     /// <summary>Runs the write-verified probe the health sweep runs, against this test's own destination.</summary>
-    private async Task WriteProbeAsync(StoredArtifact world)
+    private Task WriteProbeAsync(StoredArtifact world) => ProbeAsync(world, initialize: false);
+
+    private async Task ProbeAsync(StoredArtifact world, bool initialize)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -201,7 +212,7 @@ public sealed class ArtifactLocationVerifierFlowTests : IDisposable
             .FirstAsync();
 
         await scope.Resolve<IStorageProfileProbeService>().ProbeAsync(
-            new StorageProfileProbeRequest(world.TeamId, profileId, ProfileRevision: null, VerifyWriteAccess: true), CancellationToken.None);
+            new StorageProfileProbeRequest(world.TeamId, profileId, ProfileRevision: null, VerifyWriteAccess: true, Initialize: initialize), CancellationToken.None);
     }
 
     // ─── World + helpers ─────────────────────────────────────────────────────

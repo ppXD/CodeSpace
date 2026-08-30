@@ -232,7 +232,10 @@ internal sealed class LocalRwxArtifactStorageDriver : IArtifactStorageDriver
             // Exempting the write arm did not make it safe, it made it the SOURCE: the health sweep probes
             // write-verified every fifteen minutes, so it recreated the vanished root, went green on the card, and
             // then handed the hourly verifier the corroboration it needed to demote every placement underneath.
-            // A destination the operator has not provisioned is unavailable, and saying so is the whole job.
+            // A destination the operator has not provisioned is unavailable, and saying so is the whole job —
+            // provisioning it is a different request, and only a caller that IS provisioning may make it.
+            if (request.Initialize) Directory.CreateDirectory(_root);
+
             if (!Directory.Exists(_root))
                 return new ArtifactStorageProbeResult
                 {

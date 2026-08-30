@@ -131,7 +131,7 @@ public sealed partial class StorageDefaultMaterializer
     /// </summary>
     private async Task ProveDestinationWritableAsync(CancellationToken cancellationToken)
     {
-        var result = await _probe.ProbeAsync(new StorageProfileProbeRequest(_ctx.TeamId, _ctx.ProfileId, _ctx.ProfileRevision, VerifyWriteAccess: true), cancellationToken)
+        var result = await _probe.ProbeAsync(new StorageProfileProbeRequest(_ctx.TeamId, _ctx.ProfileId, _ctx.ProfileRevision, VerifyWriteAccess: true, Initialize: true), cancellationToken)
             .ConfigureAwait(false);
 
         // Exhaustive by CASE, and Available ONLY. ReadOnly means reads work and writes do not, which is precisely the

@@ -204,7 +204,7 @@ public sealed class StorageRouteService : IStorageRouteService, IScopedDependenc
     private async Task ProveDestinationWritableAsync(Guid teamId, StorageRouteRevision revision, CancellationToken cancellationToken)
     {
         var result = await _probe.ProbeAsync(
-            new Runtime.StorageProfileProbeRequest(teamId, revision.StorageProfileId, revision.PinnedProfileRevision, VerifyWriteAccess: true), cancellationToken)
+            new Runtime.StorageProfileProbeRequest(teamId, revision.StorageProfileId, revision.PinnedProfileRevision, VerifyWriteAccess: true, Initialize: true), cancellationToken)
             .ConfigureAwait(false);
 
         if (result.Status == StorageProfileProbeStatusValue.Available) return;

@@ -106,6 +106,10 @@ public sealed class LocalRwxArtifactStorageDriverContractTests : ArtifactStorage
 
     protected override async ValueTask<IArtifactStorageDriver> CreateDriverAsync()
     {
+        // The conformance suite's premise is a destination that EXISTS. Provisioning it is the operator's step, not
+        // something a probe does on their behalf — a probe that creates its own destination can never report it gone.
+        Directory.CreateDirectory(_root);
+
         var factory = new LocalRwxArtifactStorageDriverFactory();
         return await factory.CreateAsync(new ArtifactStorageDriverCreateRequest(Profile()), CancellationToken.None);
     }
