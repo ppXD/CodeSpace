@@ -3,11 +3,8 @@ using CodeSpace.Messages.Dtos.Storage;
 namespace CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 
 /// <summary>
-/// The precondition a later minting pass has to clear before it may write a single <c>artifact_location</c> row for
-/// the pre-CAS tier.
-///
-/// <para>Stated here and now, while the pass that would violate it does not exist yet, because it is the one thing
-/// the report-only pass is FOR: its numbers are worth gathering only if something is gated on them.</para>
+/// The precondition both the survey and each bounded phase-two command must clear before phase two may write a single
+/// <c>artifact_location</c> row for the pre-CAS tier.
 /// </summary>
 public static class LegacyAdoptionRules
 {

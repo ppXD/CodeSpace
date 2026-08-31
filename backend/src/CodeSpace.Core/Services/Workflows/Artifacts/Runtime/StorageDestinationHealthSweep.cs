@@ -17,13 +17,11 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 /// write fails and whose every stored object is unwatched, which is precisely what a health card must not stay green
 /// through.</para>
 ///
-/// <para><b>The strongest question each destination still admits.</b> An Active profile is asked whether a run's bytes
-/// will LAND — it writes and discards one object, because reachability is a weaker claim than the one a route depends
-/// on. A Disabled or Retired profile admits no write by design, so asking for one would resolve to its own lifecycle
-/// state without a single provider round trip; it is asked for a read instead, which is admitted in every state and is
-/// exactly what its remaining stored objects depend on. The two never collapse into one recorded fact: a read-verified
-/// pass is <c>WriteVerified: false</c>, which the health row, the DTO and the badge each keep distinct from a proof
-/// that bytes land.</para>
+/// <para><b>The question follows why the destination is monitored.</b> An Active route requires proof that bytes land,
+/// even when the profile lifecycle now makes that proof fail before provider I/O — that mismatch is precisely a broken
+/// write path. A profile admitted only because it holds an unsettled placement is read-probed, including an Active
+/// read-only legacy profile: lifecycle state alone does not make it a write destination. When both reasons apply, the
+/// Active route wins. Read and write evidence remain distinct through <c>WriteVerified</c>.</para>
 /// </summary>
 public sealed class StorageDestinationHealthSweep : IStorageDestinationHealthSweep
 {
@@ -108,7 +106,8 @@ public sealed class StorageDestinationHealthSweep : IStorageDestinationHealthSwe
     /// </summary>
     internal static IQueryable<MonitoredDestination> StaleDestinations(PopulationTables tables, DateTimeOffset cutoff)
     {
-        var monitored = BoundByAnActiveRoute(tables).Union(HoldingUnsettledPlacements(tables));
+        var writeDestinations = BoundByAnActiveRoute(tables);
+        var monitored = writeDestinations.Union(HoldingUnsettledPlacements(tables));
 
         return (from profile in tables.Profiles
             join health in tables.Health
@@ -119,7 +118,7 @@ public sealed class StorageDestinationHealthSweep : IStorageDestinationHealthSwe
             where monitored.Contains(profile.Id)
                 && (observedAt == null || observedAt < cutoff)
             orderby observedAt != null, observedAt, profile.CreatedDate descending
-            select new MonitoredDestination(profile.TeamId, profile.Id, profile.State == StorageProfileState.Active))
+            select new MonitoredDestination(profile.TeamId, profile.Id, writeDestinations.Contains(profile.Id)))
             .Take(MaxPerPass);
     }
 
@@ -214,10 +213,9 @@ public sealed class StorageDestinationHealthSweep : IStorageDestinationHealthSwe
     }
 
     /// <summary>
-    /// One destination and the strongest question it still admits. <paramref name="VerifyWrite"/> is the profile's own
-    /// Active-ness and nothing else: only an Active profile admits placing new bytes, so only there can a pass prove
-    /// bytes land. Everywhere else the pass verifies a read, which is admitted in every lifecycle state and which is
-    /// what the destination's remaining stored objects actually depend on.
+    /// One destination and the question its production dependency asks. <paramref name="VerifyWrite"/> is true only
+    /// when an Active route's current revision names the profile; merely holding an unsettled placement asks a read.
+    /// If both are true, write evidence wins because the route will send the next bytes here.
     /// </summary>
     internal sealed record MonitoredDestination(Guid TeamId, Guid StorageProfileId, bool VerifyWrite);
 }

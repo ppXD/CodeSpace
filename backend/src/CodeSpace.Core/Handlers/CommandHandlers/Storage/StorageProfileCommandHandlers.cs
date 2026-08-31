@@ -74,3 +74,21 @@ public sealed class AbandonProfilePlacementsCommandHandler : IRequestHandler<Aba
     public async Task<ProfileAbandonmentSummary> Handle(AbandonProfilePlacementsCommand request, CancellationToken cancellationToken) =>
         await _abandonment.AbandonAsync(_currentTeam.Id!.Value, _currentUser.Id!.Value, request.ProfileId, request.BatchSize, cancellationToken).ConfigureAwait(false);
 }
+
+public sealed class AdoptLegacyPlacementsCommandHandler : IRequestHandler<AdoptLegacyPlacementsCommand, LegacyPlacementAdoptionSummary>
+{
+    private readonly ILegacyPlacementAdopter _adopter;
+    private readonly ICurrentTeam _currentTeam;
+    private readonly ICurrentUser _currentUser;
+
+    public AdoptLegacyPlacementsCommandHandler(ILegacyPlacementAdopter adopter, ICurrentTeam currentTeam, ICurrentUser currentUser)
+    {
+        _adopter = adopter;
+        _currentTeam = currentTeam;
+        _currentUser = currentUser;
+    }
+
+    public async Task<LegacyPlacementAdoptionSummary> Handle(AdoptLegacyPlacementsCommand request, CancellationToken cancellationToken) =>
+        await _adopter.AdoptAsync(new LegacyPlacementAdoptionRequest(_currentTeam.Id!.Value, _currentUser.Id!.Value, request.ProfileId,
+            request.BatchSize, request.Cursor), cancellationToken).ConfigureAwait(false);
+}

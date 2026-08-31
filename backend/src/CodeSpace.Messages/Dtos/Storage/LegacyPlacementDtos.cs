@@ -13,6 +13,64 @@ public static class LegacyPlacementSurveyLimits
     public const int MaxRowsPerPass = 1000;
 }
 
+public static class LegacyPlacementAdoptionLimits
+{
+    public const int DefaultRowsPerPass = 50;
+    public const int MaxRowsPerPass = 200;
+}
+
+public enum LegacyPlacementAdoptionPhaseValue
+{
+    Evidence = 0,
+    Minting = 1,
+    Cleaning = 2,
+}
+
+public enum LegacyPlacementAdoptionRefusalValue
+{
+    None = 0,
+    ProfileMissing = 1,
+    ProfileRetired = 2,
+    ProviderHasNoLegacyLayout = 3,
+    ProviderHasNoStreamingRead = 4,
+    DestinationUnavailable = 5,
+    AdmissionEvidenceMissing = 6,
+    CursorStale = 7,
+    CursorInvalid = 8,
+    ProviderHasNoHealthProbe = 9,
+    ArcAlreadyActive = 10,
+    CursorSuperseded = 11,
+    ArcBusy = 12,
+}
+
+/// <summary>
+/// One bounded phase-two pass. Evidence pages write no CAS data-plane rows; they do advance a durable control-plane
+/// arc over a closed source manifest. Bounded Evidence passes validate every member and retain the smallest confirmed
+/// witness; only the final Evidence page admits Minting. Minting revalidates that witness and each source before adding sidecar CAS rows,
+/// without changing a legacy <c>workflow_artifact</c> row or its reader. Cleaning removes a bounded manifest page.
+/// </summary>
+public sealed record LegacyPlacementAdoptionSummary
+{
+    public required Guid ProfileId { get; init; }
+    public string? ProviderTypeKey { get; init; }
+    public int? ProfileRevision { get; init; }
+    public required LegacyPlacementAdoptionPhaseValue Phase { get; init; }
+    public required int Examined { get; init; }
+    public required int Resolved { get; init; }
+    public required int Confirmed { get; init; }
+    public required int Unresolved { get; init; }
+    public required int Available { get; init; }
+    public required int Missing { get; init; }
+    public required int Corrupt { get; init; }
+    public required int AlreadyRecorded { get; init; }
+    public required int Conflicts { get; init; }
+    public required int Retryable { get; init; }
+    public required bool DestinationConfirmed { get; init; }
+    public required bool AdoptionAdmissible { get; init; }
+    public string? NextCursor { get; init; }
+    public required LegacyPlacementAdoptionRefusalValue Refusal { get; init; }
+}
+
 /// <summary>Why a survey could establish nothing, or <c>None</c> when it ran.</summary>
 public enum LegacyPlacementSurveyRefusalValue
 {

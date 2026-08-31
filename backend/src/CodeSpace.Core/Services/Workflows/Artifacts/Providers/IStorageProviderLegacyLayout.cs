@@ -3,8 +3,10 @@ using System.Text.Json;
 namespace CodeSpace.Core.Services.Workflows.Artifacts.Providers;
 
 /// <summary>
-/// A provider that can name blobs written BEFORE the CAS plane existed, so a report-only pass can ask whether the
-/// rows that predate <c>artifact_location</c> are still where their own records say they are.
+/// A provider that can name blobs written BEFORE the CAS plane existed. The report-only survey uses the mapping to
+/// establish adoption evidence; phase two combines it with provider-neutral StreamingRead and HealthProbe to mint
+/// sidecar CAS observations without changing an immutable legacy row or its reader. HealthProbe is part of this
+/// contract because a Missing or thrown per-object answer is safe to record only after the destination itself answers.
 ///
 /// <para>A sibling of <see cref="IStorageProviderModule"/> (Rule 7): almost no destination has a pre-CAS population,
 /// and one that does not must not have to answer for one.</para>
