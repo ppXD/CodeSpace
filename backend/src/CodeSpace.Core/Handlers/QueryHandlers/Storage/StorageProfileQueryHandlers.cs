@@ -96,3 +96,18 @@ public sealed class GetProfilePlacementTotalsQueryHandler : IRequestHandler<GetP
     public async Task<IReadOnlyList<ProfilePlacementTotal>> Handle(GetProfilePlacementTotalsQuery request, CancellationToken cancellationToken) =>
         await _reader.TotalsAsync(_currentTeam.Id!.Value, request.ProfileId, cancellationToken).ConfigureAwait(false);
 }
+
+public sealed class GetLegacyPlacementSurveyQueryHandler : IRequestHandler<GetLegacyPlacementSurveyQuery, LegacyPlacementSurvey>
+{
+    private readonly ILegacyPlacementSurveyor _surveyor;
+    private readonly ICurrentTeam _currentTeam;
+
+    public GetLegacyPlacementSurveyQueryHandler(ILegacyPlacementSurveyor surveyor, ICurrentTeam currentTeam)
+    {
+        _surveyor = surveyor;
+        _currentTeam = currentTeam;
+    }
+
+    public async Task<LegacyPlacementSurvey> Handle(GetLegacyPlacementSurveyQuery request, CancellationToken cancellationToken) =>
+        await _surveyor.SurveyAsync(_currentTeam.Id!.Value, request.ProfileId, request.Limit, cancellationToken).ConfigureAwait(false);
+}

@@ -79,6 +79,17 @@ public class StorageController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>
+    /// What this profile can still say about the artifact rows written before the CAS plane. Report-only: the pass
+    /// resolves and asks, and writes nothing.
+    /// </summary>
+    [HttpGet("profiles/{profileId:guid}/legacy-placements")]
+    public async Task<IActionResult> GetLegacyPlacementSurvey([FromRoute] Guid profileId, [FromQuery] GetLegacyPlacementSurveyQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query with { ProfileId = profileId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     [HttpPost("profiles/{profileId:guid}/placements/abandon")]
     public async Task<IActionResult> AbandonProfilePlacements([FromRoute] Guid profileId, [FromBody] AbandonProfilePlacementsCommand command, CancellationToken cancellationToken)
     {

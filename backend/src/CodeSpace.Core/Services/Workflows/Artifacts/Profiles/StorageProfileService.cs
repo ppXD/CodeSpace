@@ -114,12 +114,16 @@ public sealed class StorageProfileService : IStorageProfileService, IScopedDepen
 
     public async Task<StorageProfileDetail?> AppendRevisionAsync(Guid teamId, Guid actorId, AppendStorageProfileRevisionCommand command, CancellationToken cancellationToken)
     {
+        await using var owned = await StorageProfileHeadLock.TakeAsync(_db.Database, command.ProfileId, cancellationToken).ConfigureAwait(false);
+
         var profile = await _db.StorageProfile.SingleOrDefaultAsync(value => value.TeamId == teamId && value.Id == command.ProfileId, cancellationToken).ConfigureAwait(false);
         if (profile == null) return null;
         EnsureExpected(profile, command.ExpectedXmin, command.ExpectedCurrentRevision);
         ExecuteRule(() => StorageProfileRules.EnsureRevisionAllowed(profile.State));
 
         var prepared = await PrepareRevisionAsync(teamId, command.ProviderTypeKey, command.NonSecretConfig, command.CredentialRef, cancellationToken).ConfigureAwait(false);
+        await EnsureWritersKeepAWritableProviderAsync(teamId, profile.Id, prepared.ProviderTypeKey, cancellationToken).ConfigureAwait(false);
+
         var now = DateTimeOffset.UtcNow;
         var next = checked(profile.CurrentRevision + 1);
         _db.StorageProfileRevision.Add(Revision(profile, next, actorId, now, prepared));
@@ -128,7 +132,11 @@ public sealed class StorageProfileService : IStorageProfileService, IScopedDepen
         profile.LastModifiedBy = actorId;
 
         await SaveConcurrentAsync("The storage profile changed before this revision could be appended.", cancellationToken).ConfigureAwait(false);
-        return await GetAsync(teamId, profile.Id, cancellationToken).ConfigureAwait(false);
+        var detail = await GetAsync(teamId, profile.Id, cancellationToken).ConfigureAwait(false);
+
+        if (owned != null) await owned.CommitAsync(cancellationToken).ConfigureAwait(false);
+
+        return detail;
     }
 
     public async Task<StorageProfileDetail?> SetStateAsync(Guid teamId, Guid actorId, SetStorageProfileStateCommand command, CancellationToken cancellationToken)
@@ -168,6 +176,50 @@ public sealed class StorageProfileService : IStorageProfileService, IScopedDepen
         if (locations > 0)
             throw new StorageProfileConflictException($"Storage profile cannot be retired while {locations} stored artifact location(s) still live under it. Release them first; retiring is irreversible and would leave them recorded under a profile that can never take another revision.");
     }
+
+    /// <summary>
+    /// Refuses a revision that would turn a profile an Active route already writes through into a provider that
+    /// accepts no new bytes.
+    ///
+    /// <para>This is where that fact is decided. A profile revision may change provider type freely, so the route-side
+    /// refusal in <c>StorageRouteService.EnsureProviderAcceptsBytesAsync</c> — which will not let a route BIND such a
+    /// provider — cannot be the rule's only reading: an operator could bind a data class to an ordinary profile and
+    /// then repoint the PROFILE, reaching the identical permanent write failure at the first artifact write with no
+    /// operator standing. Both sites read one rule off one marker, <see cref="IStorageProviderAcceptsNoNewBytes"/>.</para>
+    ///
+    /// <para>Only routes that would resolve the new head, which is exactly the condition for that failure. A Draft
+    /// route writes nothing and re-reads this rule at its own activation; a Pinned route keeps resolving the revision
+    /// it named, so a head it never reads cannot change where its bytes land. Creation needs no such guard at all:
+    /// nothing can name a profile that does not exist yet.</para>
+    ///
+    /// <para>The count below is a snapshot, so this guard is only a rule while <see cref="StorageProfileHeadLock"/> is
+    /// held — <see cref="AppendRevisionAsync"/> takes it before reading and holds it through the commit, and the route
+    /// side takes the same lock on the same profile before it binds an active writer. Without it the two ends each
+    /// pass their own guard against rows the other is about to change.</para>
+    /// </summary>
+    private async Task EnsureWritersKeepAWritableProviderAsync(Guid teamId, Guid profileId, string providerTypeKey, CancellationToken cancellationToken)
+    {
+        if (_catalog.Get(providerTypeKey) is not IStorageProviderAcceptsNoNewBytes) return;
+
+        var writers = await CountFollowingActiveRoutesAsync(teamId, profileId, cancellationToken).ConfigureAwait(false);
+        if (writers == 0) return;
+
+        throw new StorageProfileConflictException($"Storage provider '{providerTypeKey}' accepts no new bytes, and {writers} active storage route(s) write through this profile's current revision. Every write they make would fail at the destination, so repoint or disable those routes first.");
+    }
+
+    /// <summary>
+    /// Active routes in this team whose current revision names this profile AND follows its head. A pinned route is
+    /// excluded because it resolves the revision it named, never the one being appended.
+    /// </summary>
+    private Task<int> CountFollowingActiveRoutesAsync(Guid teamId, Guid profileId, CancellationToken cancellationToken) =>
+        (from route in _db.StorageRoute.AsNoTracking()
+         join revision in _db.StorageRouteRevision.AsNoTracking()
+             on new { route.TeamId, StorageRouteId = route.Id, Revision = route.CurrentRevision }
+             equals new { revision.TeamId, revision.StorageRouteId, revision.Revision }
+         where route.TeamId == teamId && route.State == StorageRouteState.Active && revision.StorageProfileId == profileId
+             && revision.ProfileRevisionMode == StorageProfileRevisionMode.CurrentAtWrite
+         select route.Id)
+        .CountAsync(cancellationToken);
 
     private Task<int> CountActiveRoutesAsync(Guid teamId, Guid profileId, CancellationToken cancellationToken) =>
         (from route in _db.StorageRoute.AsNoTracking()
