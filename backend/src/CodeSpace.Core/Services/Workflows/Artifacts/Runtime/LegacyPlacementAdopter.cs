@@ -228,7 +228,7 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
             return await RetryClaimAsync(request.Target, request.Claim, request.Page.Rows.Count, cancellationToken).ConfigureAwait(false);
 
         var unresolved = request.Page.Rows.Count - evidence.Resolved;
-        var durableWitness = request.Claim.WitnessArtifactId ?? evidence.WitnessArtifactId;
+        var durableWitness = request.Claim.WitnessSourceWorkflowRowId ?? evidence.WitnessSourceWorkflowRowId;
         var admissible = !request.Page.HasMore && unresolved == 0 && evidence.Retryable == 0 && !evidence.DestinationUnavailable
             && LegacyAdoptionRules.AdmitsAdoption(LegacyPlacementSurveyRefusalValue.None, evidence.Resolved, durableWitness == null ? 0 : 1);
         var refusal = evidence.DestinationUnavailable
@@ -258,13 +258,13 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
             return await AdvanceEvidenceAsync(new EvidenceAdvance
             {
                 Target = request.Target, Claim = request.Claim, Page = request.Page,
-                WitnessArtifactId = evidence.WitnessArtifactId, Summary = input,
+                WitnessSourceWorkflowRowId = evidence.WitnessSourceWorkflowRowId, Summary = input,
             }, cancellationToken).ConfigureAwait(false);
         if (admissible)
             return await AdvanceEvidenceAsync(new EvidenceAdvance
             {
                 Target = request.Target, Claim = request.Claim, Page = request.Page,
-                WitnessArtifactId = evidence.WitnessArtifactId, BeginMinting = true, Summary = input,
+                WitnessSourceWorkflowRowId = evidence.WitnessSourceWorkflowRowId, BeginMinting = true, Summary = input,
             }, cancellationToken).ConfigureAwait(false);
 
         return await AbortAsync(new AbortRequest
@@ -379,17 +379,17 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
                 || row.SizeBytes == witness.SizeBytes && row.Position < witness.Position) witness = row;
         }
 
-        return new EvidenceResult(resolved, confirmed, retryable, witness?.Id, destinationUnavailable);
+        return new EvidenceResult(resolved, confirmed, retryable, witness?.SourceWorkflowRowId, destinationUnavailable);
     }
 
     private async Task<WitnessVerdict> WitnessAsync(MintRequest request, CancellationToken cancellationToken)
     {
         await using var db = CreateDb();
         var row = await db.LegacyPlacementAdoptionMember.AsNoTracking()
-            .Where(value => value.ArcId == request.Claim.Cursor.ArcId && value.WorkflowArtifactId == request.Claim.WitnessArtifactId)
+            .Where(value => value.ArcId == request.Claim.Cursor.ArcId && value.SourceWorkflowRowId == request.Claim.WitnessSourceWorkflowRowId)
             .Select(value => new LegacyRow
             {
-                Position = value.Position, Id = value.WorkflowArtifactId, CreatedAt = value.SourceCreatedAt,
+                Position = value.Position, SourceWorkflowRowId = value.SourceWorkflowRowId, CreatedAt = value.SourceCreatedAt,
                 Sha256 = value.Sha256, SizeBytes = value.SizeBytes, StorageUrl = value.StorageUrl,
             })
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
@@ -600,9 +600,9 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
         var now = await DatabaseClockAsync(db, cancellationToken).ConfigureAwait(false);
         var counts = default(AdoptionCounts);
         var witness = await db.LegacyPlacementAdoptionMember.AsNoTracking()
-            .SingleOrDefaultAsync(value => value.ArcId == arc!.Id && value.WorkflowArtifactId == arc.WitnessWorkflowArtifactId,
+            .SingleOrDefaultAsync(value => value.ArcId == arc!.Id && value.SourceWorkflowRowId == arc.WitnessSourceWorkflowRowId,
                 cancellationToken).ConfigureAwait(false);
-        if (witness == null || request.Claim.WitnessArtifactId != witness.WorkflowArtifactId)
+        if (witness == null || request.Claim.WitnessSourceWorkflowRowId != witness.SourceWorkflowRowId)
         {
             var terminal = Summary(request.Summary with
             {
@@ -619,7 +619,8 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
         }
 
         var witnessRow = Row(witness);
-        var sourceIds = request.Page.Rows.Select(value => value.Id).Append(witnessRow.Id).Distinct().Order().ToArray();
+        var sourceWorkflowRowIds = request.Page.Rows.Select(value => value.SourceWorkflowRowId)
+            .Append(witnessRow.SourceWorkflowRowId).Distinct().Order().ToArray();
 
         // Retention's destructive transaction locks its declaration first, removes physical bytes, then deletes the
         // immutable source row. Take that same first lock in SHARE mode before revalidating the source: if retention
@@ -627,14 +628,14 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
         // the Available sidecar and its provenance event commit. Reversing these two locks deadlocks the real reaper.
         await db.WorkflowArtifactRetention.FromSqlInterpolated($$"""
             SELECT retention.*, retention.xmin FROM workflow_artifact_retention retention
-            WHERE retention.artifact_id = ANY ({{sourceIds}})
+            WHERE retention.artifact_id = ANY ({{sourceWorkflowRowIds}})
             ORDER BY retention.artifact_id
             FOR SHARE
             """).AsNoTracking().ToListAsync(cancellationToken).ConfigureAwait(false);
 
         var sourceRows = await db.WorkflowArtifact.FromSqlInterpolated($$"""
             SELECT artifact.* FROM workflow_artifact artifact
-            WHERE artifact.team_id = {{request.TeamId}} AND artifact.id = ANY ({{sourceIds}})
+            WHERE artifact.team_id = {{request.TeamId}} AND artifact.id = ANY ({{sourceWorkflowRowIds}})
             ORDER BY artifact.id
             FOR KEY SHARE
             """).AsNoTracking().ToDictionaryAsync(value => value.Id, cancellationToken).ConfigureAwait(false);
@@ -699,7 +700,7 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
 
             var location = Location(request, observation, artifact.Id, now);
             db.ArtifactLocation.Add(location);
-            db.ArtifactLocationEvent.Add(Event(location, request.ActorId, observation.Candidate.Row.Id));
+            db.ArtifactLocationEvent.Add(Event(location, request.ActorId, observation.Candidate.Row.SourceWorkflowRowId));
             existingLocations.Add(observation.Candidate.ObjectKey, location);
             counts += observation.State switch
             {
@@ -764,7 +765,7 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
         CreatedDate = now, CreatedBy = request.ActorId, LastModifiedDate = now, LastModifiedBy = request.ActorId,
     };
 
-    private static ArtifactLocationEvent Event(ArtifactLocation location, Guid actorId, Guid sourceArtifactId) => new()
+    private static ArtifactLocationEvent Event(ArtifactLocation location, Guid actorId, Guid sourceWorkflowRowId) => new()
     {
         Id = Guid.NewGuid(), TeamId = location.TeamId, ArtifactLocationId = location.Id, Revision = 1,
         EventType = location.State == ArtifactLocationState.Available ? ArtifactLocationEventType.Verified : ArtifactLocationEventType.Observed,
@@ -775,7 +776,7 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
         DetailsJson = JsonSerializer.Serialize(new
         {
             source = "legacy-placement-adoption/v1",
-            workflow_artifact_id = sourceArtifactId,
+            workflow_artifact_id = sourceWorkflowRowId,
         }),
         CreatedBy = actorId,
     };
@@ -874,7 +875,7 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await db.Database.ExecuteSqlInterpolatedAsync($$"""
             INSERT INTO legacy_placement_adoption_member
-                (arc_id, workflow_artifact_id, source_created_at, sha256, size_bytes, storage_url)
+                (arc_id, source_workflow_row_id, source_created_at, sha256, size_bytes, storage_url)
             SELECT {{arc.Id}}, artifact.id, artifact.created_at, artifact.sha256, artifact.size_bytes, artifact.storage_url
             FROM workflow_artifact artifact
             WHERE artifact.team_id = {{request.TeamId}} AND artifact.storage_url IS NOT NULL
@@ -975,7 +976,7 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
             .OrderBy(value => value.Position).Take(take + 1)
             .Select(value => new LegacyRow
             {
-                Position = value.Position, Id = value.WorkflowArtifactId, CreatedAt = value.SourceCreatedAt,
+                Position = value.Position, SourceWorkflowRowId = value.SourceWorkflowRowId, CreatedAt = value.SourceCreatedAt,
                 Sha256 = value.Sha256, SizeBytes = value.SizeBytes, StorageUrl = value.StorageUrl,
             })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
@@ -1017,7 +1018,7 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
         arc.Revision++;
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new ClaimResolution(new ArcClaim(CursorFor(arc), token, arc.WitnessWorkflowArtifactId), null, null, LegacyPlacementAdoptionRefusalValue.None);
+        return new ClaimResolution(new ArcClaim(CursorFor(arc), token, arc.WitnessSourceWorkflowRowId), null, null, LegacyPlacementAdoptionRefusalValue.None);
     }
 
     private async Task<LegacyPlacementAdoptionSummary> AdvanceEvidenceAsync(EvidenceAdvance request, CancellationToken cancellationToken)
@@ -1045,20 +1046,20 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
         }
 
         var now = await DatabaseClockAsync(db, cancellationToken).ConfigureAwait(false);
-        if (request.WitnessArtifactId != null)
+        if (request.WitnessSourceWorkflowRowId != null)
         {
-            var candidates = arc!.WitnessWorkflowArtifactId == null
-                ? [request.WitnessArtifactId.Value]
-                : new[] { arc.WitnessWorkflowArtifactId.Value, request.WitnessArtifactId.Value };
-            arc.WitnessWorkflowArtifactId = await db.LegacyPlacementAdoptionMember.AsNoTracking()
-                .Where(value => value.ArcId == arc.Id && candidates.Contains(value.WorkflowArtifactId))
+            var candidates = arc!.WitnessSourceWorkflowRowId == null
+                ? [request.WitnessSourceWorkflowRowId.Value]
+                : new[] { arc.WitnessSourceWorkflowRowId.Value, request.WitnessSourceWorkflowRowId.Value };
+            arc.WitnessSourceWorkflowRowId = await db.LegacyPlacementAdoptionMember.AsNoTracking()
+                .Where(value => value.ArcId == arc.Id && candidates.Contains(value.SourceWorkflowRowId))
                 .OrderBy(value => value.SizeBytes).ThenBy(value => value.Position)
-                .Select(value => value.WorkflowArtifactId).FirstAsync(cancellationToken).ConfigureAwait(false);
+                .Select(value => value.SourceWorkflowRowId).FirstAsync(cancellationToken).ConfigureAwait(false);
         }
         if (request.BeginMinting)
         {
             arc!.Phase = LegacyPlacementAdoptionArcPhase.Minting;
-            if (arc.WitnessWorkflowArtifactId == null)
+            if (arc.WitnessSourceWorkflowRowId == null)
                 throw new InvalidOperationException($"Legacy adoption arc {arc.Id} cannot mint without a confirmed durable witness.");
             arc.CurrentPosition = 0;
         }
@@ -1351,7 +1352,7 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
         left.Row.SizeBytes == right.Row.SizeBytes && CryptographicOperations.FixedTimeEquals(left.ExpectedDigest, right.ExpectedDigest);
 
     private static bool SourceIsCurrent(LegacyRow expected, IReadOnlyDictionary<Guid, WorkflowArtifact> sources) =>
-        sources.TryGetValue(expected.Id, out var current)
+        sources.TryGetValue(expected.SourceWorkflowRowId, out var current)
         && current.CreatedAt == expected.CreatedAt
         && current.SizeBytes == expected.SizeBytes
         && string.Equals(current.Sha256, expected.Sha256, StringComparison.Ordinal)
@@ -1359,7 +1360,7 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
 
     private static LegacyRow Row(LegacyPlacementAdoptionMember member) => new()
     {
-        Position = member.Position, Id = member.WorkflowArtifactId, CreatedAt = member.SourceCreatedAt,
+        Position = member.Position, SourceWorkflowRowId = member.SourceWorkflowRowId, CreatedAt = member.SourceCreatedAt,
         Sha256 = member.Sha256, SizeBytes = member.SizeBytes, StorageUrl = member.StorageUrl,
     };
 
@@ -1450,7 +1451,7 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
     private sealed class LegacyRow
     {
         public required long Position { get; init; }
-        public required Guid Id { get; init; }
+        public required Guid SourceWorkflowRowId { get; init; }
         public required DateTimeOffset CreatedAt { get; init; }
         public required string Sha256 { get; init; }
         public required long SizeBytes { get; init; }
@@ -1459,11 +1460,11 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
     private sealed record LegacyPage(List<LegacyRow> Rows, bool HasMore);
     private sealed record ResolvedRow(LegacyRow Row, string ObjectKey, byte[] ExpectedDigest);
     private sealed record ExistingPlacement(string ObjectKey, string Locator, byte[] Digest, long SizeBytes);
-    private sealed record EvidenceResult(int Resolved, int Confirmed, int Retryable, Guid? WitnessArtifactId, bool DestinationUnavailable);
+    private sealed record EvidenceResult(int Resolved, int Confirmed, int Retryable, Guid? WitnessSourceWorkflowRowId, bool DestinationUnavailable);
     private sealed record HashObservation(byte[] Digest, long Size, bool ExceededExpected);
     private sealed record ArcResolution(LegacyPlacementAdoptionCursor? Cursor, LegacyPlacementAdoptionSummary? Summary,
         LegacyPlacementAdoptionRefusalValue Refusal, LegacyPlacementAdoptionPhaseValue Phase, bool ResumeOnly);
-    private sealed record ArcClaim(LegacyPlacementAdoptionCursor Cursor, Guid Token, Guid? WitnessArtifactId);
+    private sealed record ArcClaim(LegacyPlacementAdoptionCursor Cursor, Guid Token, Guid? WitnessSourceWorkflowRowId);
     private sealed record ClaimResolution(ArcClaim? Claim, LegacyPlacementAdoptionCursor? Cursor,
         LegacyPlacementAdoptionSummary? Summary, LegacyPlacementAdoptionRefusalValue Refusal);
     private sealed class DiscoveryRequest
@@ -1493,7 +1494,7 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
         public required AdoptionTarget Target { get; init; }
         public required ArcClaim Claim { get; init; }
         public required LegacyPage Page { get; init; }
-        public Guid? WitnessArtifactId { get; init; }
+        public Guid? WitnessSourceWorkflowRowId { get; init; }
         public bool BeginMinting { get; init; }
         public required SummaryInput Summary { get; init; }
     }

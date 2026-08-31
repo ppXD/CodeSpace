@@ -44,6 +44,6 @@ public sealed class LegacyPlacementAdoptionMemberConfiguration : IEntityTypeConf
         builder.Property(value => value.Position).UseIdentityAlwaysColumn();
         builder.Property(value => value.Sha256).HasMaxLength(64);
         builder.HasOne(value => value.Arc).WithMany(value => value.Members).HasForeignKey(value => value.ArcId).OnDelete(DeleteBehavior.Cascade);
-        builder.HasIndex(value => new { value.ArcId, value.WorkflowArtifactId }).IsUnique().HasDatabaseName("ux_legacy_placement_adoption_member_source");
+        builder.HasIndex(value => new { value.ArcId, value.SourceWorkflowRowId }).IsUnique().HasDatabaseName("ux_legacy_placement_adoption_member_source");
     }
 }

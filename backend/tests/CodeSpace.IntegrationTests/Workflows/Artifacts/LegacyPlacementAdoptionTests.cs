@@ -279,7 +279,7 @@ public sealed class LegacyPlacementAdoptionTests : IDisposable
         var protector = cursorScope.Resolve<IDataProtectionProvider>().CreateProtector(LegacyPlacementAdoptionCursor.ProtectorPurpose);
         LegacyPlacementAdoptionCursor.TryDecode(evidence.NextCursor!, world.ProfileId, protector, out var cursor).ShouldBeTrue();
         var witness = await cursorScope.Resolve<CodeSpaceDbContext>().LegacyPlacementAdoptionArc.AsNoTracking()
-            .Where(value => value.Id == cursor.ArcId).Select(value => value.WitnessWorkflowArtifactId).SingleAsync();
+            .Where(value => value.Id == cursor.ArcId).Select(value => value.WitnessSourceWorkflowRowId).SingleAsync();
         var blocked = world.Artifacts.Single(value => value.Id != witness);
 
         LegacyPlacementAdoptionSummary first;
@@ -718,17 +718,17 @@ public sealed class LegacyPlacementAdoptionTests : IDisposable
             LegacyPlacementAdoptionCursor.TryDecode(firstMint.NextCursor!, world.ProfileId, protector, out var cursor).ShouldBeTrue();
             var db = censusScope.Resolve<CodeSpaceDbContext>();
             var arc = await db.LegacyPlacementAdoptionArc.AsNoTracking().SingleAsync(value => value.Id == cursor.ArcId);
-            witnessId = arc.WitnessWorkflowArtifactId.ShouldNotBeNull();
+            witnessId = arc.WitnessSourceWorkflowRowId.ShouldNotBeNull();
             witnessId.ShouldBe(second.ArtifactId, "the smallest confirmed member is position two, never the manifest's first row");
             var witnessPosition = await db.LegacyPlacementAdoptionMember.AsNoTracking()
-                .Where(value => value.ArcId == arc.Id && value.WorkflowArtifactId == witnessId).Select(value => value.Position).SingleAsync();
+                .Where(value => value.ArcId == arc.Id && value.SourceWorkflowRowId == witnessId).Select(value => value.Position).SingleAsync();
             var later = await db.LegacyPlacementAdoptionMember.AsNoTracking()
                 .Where(value => value.ArcId == arc.Id && value.Position > cursor.Position).OrderBy(value => value.Position)
-                .Select(value => new { value.Position, value.WorkflowArtifactId }).SingleAsync();
+                .Select(value => new { value.Position, value.SourceWorkflowRowId }).SingleAsync();
             witnessPosition.ShouldBeLessThanOrEqualTo(cursor.Position,
                 "the evidence witness must be retained behind the durable mint cursor, not be part of the current page");
             later.Position.ShouldBeGreaterThan(cursor.Position);
-            laterId = later.WorkflowArtifactId;
+            laterId = later.SourceWorkflowRowId;
         }
 
         var retained = new[] { first, second, third }.Single(value => value.ArtifactId == witnessId);
@@ -868,7 +868,7 @@ public sealed class LegacyPlacementAdoptionTests : IDisposable
         var protector = scope.Resolve<IDataProtectionProvider>().CreateProtector(LegacyPlacementAdoptionCursor.ProtectorPurpose);
         LegacyPlacementAdoptionCursor.TryDecode(finalEvidence.NextCursor!, world.ProfileId, protector, out var cursor).ShouldBeTrue();
         var witness = await scope.Resolve<CodeSpaceDbContext>().LegacyPlacementAdoptionArc.AsNoTracking()
-            .Where(value => value.Id == cursor.ArcId).Select(value => value.WitnessWorkflowArtifactId).SingleAsync();
+            .Where(value => value.Id == cursor.ArcId).Select(value => value.WitnessSourceWorkflowRowId).SingleAsync();
         witness.ShouldBe(small.Id, "every mint page re-hashes the witness, so Evidence must minimize (size, position) across the whole manifest");
         witness.ShouldNotBe(large.Id);
     }
@@ -1208,7 +1208,7 @@ public sealed class LegacyPlacementAdoptionTests : IDisposable
         var protector = scope.Resolve<IDataProtectionProvider>().CreateProtector(LegacyPlacementAdoptionCursor.ProtectorPurpose);
         LegacyPlacementAdoptionCursor.TryDecode(encodedCursor, world.ProfileId, protector, out var cursor).ShouldBeTrue();
         (await scope.Resolve<CodeSpaceDbContext>().LegacyPlacementAdoptionMember.AsNoTracking()
-            .AnyAsync(value => value.ArcId == cursor.ArcId && value.WorkflowArtifactId == artifactId)).ShouldBeFalse(
+            .AnyAsync(value => value.ArcId == cursor.ArcId && value.SourceWorkflowRowId == artifactId)).ShouldBeFalse(
             "membership is materialized by one SQL statement; later rows cannot enter regardless of pod timestamp or UUID order");
     }
 

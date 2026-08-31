@@ -63,6 +63,39 @@ public sealed class ArtifactReferenceOracleTests
     }
 
     [Fact]
+    public void Legacy_adoption_copies_source_identity_without_creating_a_retention_reference()
+    {
+        using var db = BuildContext();
+        var arc = db.Model.FindEntityType(typeof(LegacyPlacementAdoptionArc)).ShouldNotBeNull();
+        var member = db.Model.FindEntityType(typeof(LegacyPlacementAdoptionMember)).ShouldNotBeNull();
+        var arcColumn = ColumnNameOf(arc, arc.FindProperty(nameof(LegacyPlacementAdoptionArc.WitnessSourceWorkflowRowId)).ShouldNotBeNull());
+        var memberColumn = ColumnNameOf(member, member.FindProperty(nameof(LegacyPlacementAdoptionMember.SourceWorkflowRowId)).ShouldNotBeNull());
+
+        arcColumn.ShouldBe("witness_source_workflow_row_id");
+        memberColumn.ShouldBe("source_workflow_row_id");
+        IsArtifactSoftLink(arc.GetTableName()!, arcColumn!).ShouldBeFalse("a copied witness identity must not tell retention to keep its source row alive");
+        IsArtifactSoftLink(member.GetTableName()!, memberColumn!).ShouldBeFalse("sealed membership survives source retention and therefore is provenance, not a soft link");
+        new[] { arc, member }.SelectMany(entity => entity.GetForeignKeys())
+            .ShouldAllBe(foreignKey => foreignKey.PrincipalEntityType.ClrType != typeof(WorkflowArtifact),
+                "legacy adoption exact-revalidates sources at commit but deliberately has no runtime or retention FK to workflow_artifact");
+        ArtifactReferenceOracle.ReferenceSites.ShouldNotContain(site => site.Table.StartsWith("legacy_placement_adoption_", StringComparison.Ordinal),
+            "the oracle must not keep a source alive merely because an unfinished or terminal adoption arc copied its identity");
+    }
+
+    [Fact]
+    public void Legacy_adoption_migration_declares_copied_source_rows_without_a_workflow_artifact_foreign_key()
+    {
+        var migration = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Persistence", "DbUpFiles", "0186_legacy_placement_adoption_arc.sql"));
+
+        migration.ShouldContain("witness_source_workflow_row_id");
+        migration.ShouldContain("source_workflow_row_id");
+        migration.ShouldNotContain("witness_workflow_artifact_id");
+        migration.ShouldNotContain("workflow_artifact_id");
+        migration.ShouldNotContain("REFERENCES workflow_artifact",
+            customMessage: "a manifest row is copied provenance that retention may outlive, never a database reference keeping its source alive");
+    }
+
+    [Fact]
     public async Task An_unreadable_reference_site_reads_as_indeterminate_never_as_unreferenced()
     {
         // Fail-closed at the boundary: the probe cannot even reach a server here, so the question is UNANSWERED.

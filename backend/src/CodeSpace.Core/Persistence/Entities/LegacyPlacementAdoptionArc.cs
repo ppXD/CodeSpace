@@ -31,8 +31,8 @@ public sealed class LegacyPlacementAdoptionArc
     public LegacyPlacementAdoptionArcPhase Phase { get; set; }
     public LegacyPlacementAdoptionArcState State { get; set; }
     public LegacyPlacementAdoptionArcState? TerminalState { get; set; }
-    /// <summary>The smallest confirmed (size, position) member seen by Evidence; immutable after Minting starts.</summary>
-    public Guid? WitnessWorkflowArtifactId { get; set; }
+    /// <summary>The smallest confirmed (size, position) copied source identity; not a retention reference.</summary>
+    public Guid? WitnessSourceWorkflowRowId { get; set; }
     public long CurrentPosition { get; set; }
     public long MemberCount { get; set; }
     public long Revision { get; set; }
@@ -54,14 +54,14 @@ public sealed class LegacyPlacementAdoptionArc
     public ICollection<LegacyPlacementAdoptionMember> Members { get; set; } = [];
 }
 
-/// <summary>A copied immutable source identity. Deliberately no FK to workflow_artifact: retention may delete it.</summary>
+/// <summary>A copied immutable source identity, not a reference. Deliberately no FK: retention may delete its source.</summary>
 public sealed class LegacyPlacementAdoptionMember
 {
     public Guid ArcId { get; set; }
 
     /// <summary>Database-allocated keyset position. It is an arc-local ordering key only through the composite PK.</summary>
     public long Position { get; set; }
-    public Guid WorkflowArtifactId { get; set; }
+    public Guid SourceWorkflowRowId { get; set; }
     public DateTimeOffset SourceCreatedAt { get; set; }
     public string Sha256 { get; set; } = default!;
     public long SizeBytes { get; set; }

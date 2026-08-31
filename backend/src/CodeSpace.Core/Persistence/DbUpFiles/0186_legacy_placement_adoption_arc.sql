@@ -5,7 +5,8 @@
 -- writer can commit behind an already-issued (created_at,id) cursor and be skipped by Evidence or enter Minting
 -- without having supplied evidence. These two tables materialize exactly the source identities visible to ONE SQL
 -- statement. They are control-plane work state only: no FK points from workflow_artifact, no reader follows them, and
--- no immutable artifact row is updated.
+-- no immutable artifact row is updated. The source_workflow_row_id names are copied provenance, NOT retention
+-- references: neither the database nor ArtifactReferenceOracle may keep a workflow_artifact alive because of them.
 --
 -- At most one Active/Cleaning arc exists per team, so trying several profiles cannot copy an N-row legacy population
 -- N times. Members have a DB identity used only as an immutable keyset; INSERT ... SELECT explicitly orders sources
@@ -32,7 +33,7 @@ CREATE TABLE legacy_placement_adoption_arc (
     phase                        VARCHAR(16) NOT NULL,
     state                        VARCHAR(16) NOT NULL,
     terminal_state               VARCHAR(16) NULL,
-    witness_workflow_artifact_id UUID        NULL,
+    witness_source_workflow_row_id UUID      NULL,
     current_position             BIGINT      NOT NULL DEFAULT 0,
     member_count                 BIGINT      NOT NULL DEFAULT 0,
     revision                     BIGINT      NOT NULL DEFAULT 1,
@@ -62,7 +63,7 @@ CREATE TABLE legacy_placement_adoption_arc (
         OR (state = 'Cleaning' AND phase = 'Cleaning')
         OR state IN ('Completed', 'Expired', 'Stale')),
     CONSTRAINT ck_legacy_adoption_arc_witness CHECK (
-        phase = 'Evidence' OR (phase = 'Minting' AND witness_workflow_artifact_id IS NOT NULL) OR phase = 'Cleaning'),
+        phase = 'Evidence' OR (phase = 'Minting' AND witness_source_workflow_row_id IS NOT NULL) OR phase = 'Cleaning'),
     CONSTRAINT ck_legacy_adoption_arc_final_summary_object CHECK (
         final_summary_jsonb IS NULL OR jsonb_typeof(final_summary_jsonb) = 'object'),
     CONSTRAINT ck_legacy_adoption_arc_bounds CHECK (
@@ -84,13 +85,13 @@ CREATE INDEX ix_legacy_placement_adoption_arc_terminal_cleanup
 CREATE TABLE legacy_placement_adoption_member (
     arc_id                UUID        NOT NULL REFERENCES legacy_placement_adoption_arc(id) ON DELETE CASCADE,
     position              BIGINT      GENERATED ALWAYS AS IDENTITY,
-    workflow_artifact_id  UUID        NOT NULL,
+    source_workflow_row_id UUID       NOT NULL,
     source_created_at     TIMESTAMPTZ NOT NULL,
     sha256                TEXT        NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
     size_bytes            BIGINT      NOT NULL CHECK (size_bytes >= 0),
     storage_url           TEXT        NOT NULL CHECK (btrim(storage_url) <> ''),
     PRIMARY KEY (arc_id, position),
-    CONSTRAINT ux_legacy_placement_adoption_member_source UNIQUE (arc_id, workflow_artifact_id)
+    CONSTRAINT ux_legacy_placement_adoption_member_source UNIQUE (arc_id, source_workflow_row_id)
 );
 
 CREATE OR REPLACE FUNCTION legacy_placement_adoption_arc_guard() RETURNS TRIGGER AS $$
@@ -120,7 +121,7 @@ BEGIN
 
     IF TG_OP = 'INSERT' THEN
         IF NEW.revision <> 1 OR NEW.state <> 'Active' OR NEW.phase <> 'Evidence'
-           OR NEW.terminal_state IS NOT NULL OR NEW.witness_workflow_artifact_id IS NOT NULL
+           OR NEW.terminal_state IS NOT NULL OR NEW.witness_source_workflow_row_id IS NOT NULL
            OR NEW.current_position <> 0 OR NEW.member_count <> 0
            OR NEW.claim_token IS NOT NULL OR NEW.claim_expires_at IS NOT NULL
            OR NEW.sealed_at IS NOT NULL OR NEW.completed_at IS NOT NULL OR NEW.final_summary_jsonb IS NOT NULL
@@ -159,20 +160,20 @@ BEGIN
         RAISE EXCEPTION 'legacy adoption seal and original member count are immutable (arc=%).', OLD.id;
     END IF;
 
-    IF OLD.witness_workflow_artifact_id IS NOT NULL
-       AND NEW.witness_workflow_artifact_id IS DISTINCT FROM OLD.witness_workflow_artifact_id THEN
-        IF OLD.phase <> 'Evidence' OR NEW.phase NOT IN ('Evidence', 'Minting') OR NEW.witness_workflow_artifact_id IS NULL
+    IF OLD.witness_source_workflow_row_id IS NOT NULL
+       AND NEW.witness_source_workflow_row_id IS DISTINCT FROM OLD.witness_source_workflow_row_id THEN
+        IF OLD.phase <> 'Evidence' OR NEW.phase NOT IN ('Evidence', 'Minting') OR NEW.witness_source_workflow_row_id IS NULL
            OR NOT EXISTS (
                SELECT 1
                FROM legacy_placement_adoption_member prior
                JOIN legacy_placement_adoption_member candidate ON candidate.arc_id = prior.arc_id
                WHERE prior.arc_id = OLD.id
-                 AND prior.workflow_artifact_id = OLD.witness_workflow_artifact_id
-                 AND candidate.workflow_artifact_id = NEW.witness_workflow_artifact_id
+                 AND prior.source_workflow_row_id = OLD.witness_source_workflow_row_id
+                 AND candidate.source_workflow_row_id = NEW.witness_source_workflow_row_id
                  AND (candidate.size_bytes, candidate.position) < (prior.size_bytes, prior.position)
            ) THEN
             RAISE EXCEPTION 'legacy adoption witness may only move to a smaller confirmed Evidence member (arc=%, old=%, new=%).',
-                OLD.id, OLD.witness_workflow_artifact_id, NEW.witness_workflow_artifact_id;
+                OLD.id, OLD.witness_source_workflow_row_id, NEW.witness_source_workflow_row_id;
         END IF;
     END IF;
     IF OLD.terminal_state IS NOT NULL AND NEW.terminal_state IS DISTINCT FROM OLD.terminal_state THEN
@@ -225,7 +226,7 @@ BEGIN
     IF NEW.claim_token IS NOT NULL
        AND (NEW.phase IS DISTINCT FROM OLD.phase OR NEW.state IS DISTINCT FROM OLD.state
             OR NEW.terminal_state IS DISTINCT FROM OLD.terminal_state
-            OR NEW.witness_workflow_artifact_id IS DISTINCT FROM OLD.witness_workflow_artifact_id
+            OR NEW.witness_source_workflow_row_id IS DISTINCT FROM OLD.witness_source_workflow_row_id
             OR NEW.current_position IS DISTINCT FROM OLD.current_position
             OR NEW.member_count IS DISTINCT FROM OLD.member_count OR NEW.sealed_at IS DISTINCT FROM OLD.sealed_at
             OR NEW.completed_at IS DISTINCT FROM OLD.completed_at
@@ -282,7 +283,7 @@ DECLARE
     arc_position BIGINT;
     arc_witness UUID;
 BEGIN
-    SELECT deleted.arc_id, deleted.position, arc.phase, arc.current_position, arc.witness_workflow_artifact_id
+    SELECT deleted.arc_id, deleted.position, arc.phase, arc.current_position, arc.witness_source_workflow_row_id
     INTO invalid_arc, invalid_position, arc_phase, arc_position, arc_witness
     FROM deleted_members deleted
     JOIN legacy_placement_adoption_arc arc ON arc.id = deleted.arc_id
@@ -290,7 +291,7 @@ BEGIN
         arc.phase = 'Evidence'
         OR arc.phase = 'Minting' AND (
             arc.sealed_at IS NULL OR deleted.position > arc.current_position
-            OR deleted.workflow_artifact_id = arc.witness_workflow_artifact_id))
+            OR deleted.source_workflow_row_id = arc.witness_source_workflow_row_id))
     LIMIT 1;
 
     IF FOUND THEN
@@ -327,10 +328,10 @@ BEGIN
     IF arc.state = 'Active' AND arc.phase = 'Minting' AND NOT EXISTS (
         SELECT 1 FROM legacy_placement_adoption_member member
         WHERE member.arc_id = target_arc_id
-          AND member.workflow_artifact_id = arc.witness_workflow_artifact_id
+          AND member.source_workflow_row_id = arc.witness_source_workflow_row_id
     ) THEN
         RAISE EXCEPTION 'live legacy adoption Minting must retain the exact evidence witness until terminal commit (arc=%, witness=%).',
-            target_arc_id, arc.witness_workflow_artifact_id;
+            target_arc_id, arc.witness_source_workflow_row_id;
     END IF;
     IF arc.state = 'Cleaning'
        AND (arc.phase <> 'Cleaning' OR arc.terminal_state IS NULL OR arc.final_summary_jsonb IS NULL) THEN
@@ -357,4 +358,4 @@ CREATE CONSTRAINT TRIGGER legacy_placement_adoption_arc_require_committed_shape
 COMMENT ON TABLE legacy_placement_adoption_arc IS
     'Lease-fenced control-plane state and terminal tombstone for one closed, team-wide legacy placement adoption population. Never a runtime artifact link.';
 COMMENT ON TABLE legacy_placement_adoption_member IS
-    'Closed source-identity snapshot for one adoption arc. No workflow_artifact FK by design: retention may delete the source before exact commit revalidation.';
+    'Closed source-identity snapshot for one adoption arc. source_workflow_row_id is copied provenance, not a retention reference; no workflow_artifact FK exists by design.';
