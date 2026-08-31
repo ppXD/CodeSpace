@@ -678,6 +678,42 @@ public sealed class WorkflowRunDataCompletenessPersistenceTests
             definitions[0].ShouldContain(expectedFilter, customMessage: $"index '{indexName}' must stay partial, or it grows with the rows it was never meant to see.");
     }
 
+    /// <summary>
+    /// EVERY run key a gap can name is proved COMPOSITELY with the team, and only the database can say so. A model
+    /// mirror asserts what EF believes; a migration that wrote either foreign key SINGLE-column would leave that
+    /// belief green while admitting rows nobody proved belong to the team whose operator reads them, which is the
+    /// entire point of the composite.
+    ///
+    /// <para>It carries twice the weight since both run keys became nullable. The all-or-none attempt quad used to be
+    /// what proved a gap's Agent Run belonged to its team, and the gaps that most need to name a run — a refused
+    /// attempt insert's, whose subject IS the row those columns reference — are exactly the ones that cannot carry it.
+    /// </para>
+    /// </summary>
+    [Theory]
+    [InlineData("fk_workflow_run_capture_gap_run", "FOREIGN KEY (team_id, workflow_run_id) REFERENCES workflow_run(team_id, id)")]
+    [InlineData("fk_workflow_run_capture_gap_agent_run", "FOREIGN KEY (team_id, agent_run_id) REFERENCES agent_run(team_id, id)")]
+    public async Task Each_run_key_a_gap_can_name_is_proved_composite_with_its_team(string constraintName, string expectedDefinition)
+    {
+        var definition = await ConstraintDefinitionAsync("workflow_run_capture_gap", constraintName);
+
+        definition.ShouldNotBeNull(
+            customMessage: $"constraint '{constraintName}' must exist on workflow_run_capture_gap. Diagnose with: psql -c '\\d workflow_run_capture_gap'.");
+        definition.ShouldStartWith(expectedDefinition,
+            customMessage: $"constraint '{constraintName}' does not prove its run key together with the team, so a gap keyed by that run alone is one nobody proved belongs to the team reading it. Diagnose with: psql -c \"SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = '{constraintName}'\".");
+    }
+
+    private async Task<string?> ConstraintDefinitionAsync(string tableName, string constraintName)
+    {
+        await using var connection = new NpgsqlConnection(_fixture.ConnectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand(
+            "SELECT pg_get_constraintdef(constraint_.oid) FROM pg_constraint AS constraint_ JOIN pg_class AS table_ ON table_.oid = constraint_.conrelid WHERE table_.relname = @table AND constraint_.conname = @constraint", connection);
+        command.Parameters.AddWithValue("table", tableName);
+        command.Parameters.AddWithValue("constraint", constraintName);
+
+        return await command.ExecuteScalarAsync() as string;
+    }
+
     private async Task<IReadOnlyList<string>> IndexDefinitionsAsync(string tableName, string indexName)
     {
         await using var connection = new NpgsqlConnection(_fixture.ConnectionString);

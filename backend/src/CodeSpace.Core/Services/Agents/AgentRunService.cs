@@ -803,9 +803,16 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
     }
 
     /// <summary>
-    /// Read only gaps whose producer admission proved this exact Agent Run/process coordinate. Legacy workflow-only
-    /// gaps are deliberately absent: assigning those here would recreate the path/native-row inference 0155 removed.
-    /// A failed observation is typed unavailable and cannot hide or change the authoritative Agent Run summary.
+    /// Read the gaps whose producer NAMED this exact Agent Run. Legacy workflow-only gaps are deliberately absent:
+    /// assigning those here would recreate the path/native-row inference 0155 removed. A failed observation is typed
+    /// unavailable and cannot hide or change the authoritative Agent Run summary.
+    ///
+    /// <para>Owner identity is the whole admission test, and the process coordinate is reported rather than required.
+    /// 0155's quad made the two the same question; 0184 split them so a gap whose subject IS a refused attempt insert
+    /// can name its run at all — and that gap can never carry the coordinate, because the columns hard-reference the
+    /// row the refusal is the absence of. Demanding one here would have left exactly the gap class 0184 made
+    /// recordable reachable by nobody, which is the same silence one layer further out. "We cannot say which attempt"
+    /// is a fact this read states, by handing back the three coordinates as null.</para>
     /// </summary>
     private async Task<AgentRunCaptureGapObservation> ReadCaptureGapsAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
     {
@@ -850,9 +857,9 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
                 {
                     Id = row.Id,
                     AgentRunId = row.AgentRunId!.Value,
-                    HarnessExecutionId = row.HarnessExecutionId!.Value,
-                    HarnessProcessAttemptId = row.HarnessProcessAttemptId!.Value,
-                    AttemptWorkerFenceEpoch = row.AttemptWorkerFenceEpoch!.Value,
+                    HarnessExecutionId = row.HarnessExecutionId,
+                    HarnessProcessAttemptId = row.HarnessProcessAttemptId,
+                    AttemptWorkerFenceEpoch = row.AttemptWorkerFenceEpoch,
                     SubjectKind = row.SubjectKind,
                     SubjectId = row.SubjectId,
                     StreamId = row.StreamId,

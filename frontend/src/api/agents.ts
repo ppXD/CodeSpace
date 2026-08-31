@@ -98,13 +98,17 @@ export interface AgentRunHarnessExecutionSummary {
 
 export type AgentRunCaptureGapReadAvailability = "Available" | "BackendUnavailable";
 
-/** One known-missing span exactly attributed to this Agent Run and frozen harness process attempt. */
+/**
+ * One known-missing span this Agent Run owns, with the frozen harness-process coordinate where there is one. The
+ * three coordinate fields are null for the gap whose subject IS a refused process-attempt insert: they reference the
+ * very row that refusal is the absence of, so "we cannot say which attempt" is what the gap honestly reports.
+ */
 export interface AgentRunCaptureGapSummary {
   id: string;
   agentRunId: string;
-  harnessExecutionId: string;
-  harnessProcessAttemptId: string;
-  attemptWorkerFenceEpoch: number;
+  harnessExecutionId: string | null;
+  harnessProcessAttemptId: string | null;
+  attemptWorkerFenceEpoch: number | null;
   subjectKind: string;
   subjectId: string | null;
   streamId: string | null;

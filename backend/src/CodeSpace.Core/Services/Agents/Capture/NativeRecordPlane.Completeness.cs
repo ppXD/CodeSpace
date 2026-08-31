@@ -49,15 +49,17 @@ namespace CodeSpace.Core.Services.Agents.Capture;
 /// honestly promise. A shortfall bigger than one batch is carried by the gap plane and by the indeterminate
 /// expectation, not by a difference the two counters could reach on their own.</para>
 ///
-/// <para><b>Which runs get no statement at all.</b> Both tables are keyed to a workflow run, so a STANDALONE Agent Run
-/// — <see cref="NativeRecordCaptureHandle.WorkflowRunId"/> null — states nothing rather than stating it against an
+/// <para><b>Which runs get no statement at all.</b> The MANIFEST is keyed to a workflow run, so a STANDALONE Agent Run
+/// — <see cref="NativeRecordCaptureHandle.WorkflowRunId"/> null — states no facet rather than stating one against an
 /// invented parent, the same named keying gap 0137/0141 already carry. An absent row is the INDETERMINATE answer, and
-/// <see cref="WorkflowRunDataManifest"/> already says a later per-run fold must treat it as one. A batch the contract
-/// check refuses before it reaches the database also leaves no gap: that is a writer defect rather than a shortfall the
-/// source suffered.</para>
+/// <see cref="WorkflowRunDataManifest"/> already says a later per-run fold must treat it as one. Its GAPS are a
+/// different matter since 0184: they are keyed to the run that owns the record, so a standalone run's known-missing
+/// spans are recorded rather than swallowed — the silence a gap plane exists to break does not become acceptable
+/// because the run has no workflow parent. A batch the contract check refuses before it reaches the database still
+/// leaves no gap: that is a writer defect rather than a shortfall the source suffered.</para>
 ///
-/// <para><b>No authority reads either table.</b> A bounded, team-scoped Agent Run operator summary observes exactly
-/// attributed capture gaps, failure-contained from the authoritative run summary. It neither reads the manifest nor
+/// <para><b>No authority reads either table.</b> A bounded, team-scoped Agent Run operator summary observes the
+/// capture gaps that NAME the run, failure-contained from the authoritative run summary. It neither reads the manifest nor
 /// changes completion, terminal, planning, oracle or routing behavior. That sequencing remains deliberate: wiring a
 /// terminal verdict to the manifest while most facets have no producer would park every run, because a facet with no
 /// row and a row written before this producer are both indeterminate. What would consume it authoritatively is the
@@ -139,18 +141,19 @@ public sealed partial class NativeRecordPlane
     }
 
     /// <summary>
-    /// The batch did not become durable. Its expectation is already declared, so the shortfall is in the counts
-    /// already; what this adds is the span a human can locate. Today that refusal is a log warning and a round that
-    /// quietly stops capturing, which is exactly the silence the gap plane exists to break.
+    /// The batch did not become durable. Where an expectation was declared the shortfall is in the counts already; what
+    /// this adds is the span a human can locate. Today that refusal is a log warning and a round that quietly stops
+    /// capturing, which is exactly the silence the gap plane exists to break — and a run with no workflow parent, whose
+    /// facet no manifest could carry, is the run where that silence was total.
     ///
     /// <para>Nothing is advanced here, and that is not an omission: advancing the expectation a second time would
     /// count the batch twice and leave a shortfall of its own that no frame is missing from.</para>
     /// </summary>
     private async Task NoticeRefusedBatchAsync(NativeRecordBatch batch, Exception refusal, CancellationToken cancellationToken)
     {
-        if (batch.Handle.WorkflowRunId is not { } workflowRunId || batch.Records.Count == 0) return;
+        if (batch.Records.Count == 0) return;
 
-        await _completeness.NoticeAsync(RefusedGap(batch, workflowRunId, refusal), cancellationToken).ConfigureAwait(false);
+        await _completeness.NoticeAsync(RefusedGap(batch, refusal), cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -193,14 +196,14 @@ public sealed partial class NativeRecordPlane
     /// <para>No subject id: the rows this span would name are exactly the ones that do not exist, and the stream plus
     /// the ordinal is the coordinate that does locate it.</para>
     /// </summary>
-    private static WorkflowRunCaptureGap RefusedGap(NativeRecordBatch batch, Guid workflowRunId, Exception refusal)
+    private static WorkflowRunCaptureGap RefusedGap(NativeRecordBatch batch, Exception refusal)
     {
         var now = DateTimeOffset.UtcNow;
         var first = batch.Records.Min(capture => capture.Frame.Ordinal);
 
         return new WorkflowRunCaptureGap
         {
-            Id = Guid.NewGuid(), TeamId = batch.Handle.TeamId, WorkflowRunId = workflowRunId,
+            Id = Guid.NewGuid(), TeamId = batch.Handle.TeamId, WorkflowRunId = batch.Handle.WorkflowRunId,
             AgentRunId = batch.Handle.AgentRunId, HarnessExecutionId = batch.Handle.ExecutionId,
             HarnessProcessAttemptId = batch.Handle.AttemptId, AttemptWorkerFenceEpoch = batch.Handle.WorkerFenceEpoch,
             SubjectKind = WorkflowRunDataOwnerKinds.NativeRecord, StreamId = batch.Handle.StreamId,

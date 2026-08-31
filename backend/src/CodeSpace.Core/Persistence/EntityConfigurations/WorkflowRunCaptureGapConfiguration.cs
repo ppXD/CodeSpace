@@ -13,7 +13,12 @@ public sealed class WorkflowRunCaptureGapConfiguration : IEntityTypeConfiguratio
         {
             table.HasCheckConstraint("ck_workflow_run_capture_gap_bounds", "schema_version > 0");
             table.HasCheckConstraint("ck_workflow_run_capture_gap_channel", "channel IS NULL OR channel IN ('Stdout', 'Stderr', 'Protocol', 'Control', 'SessionState', 'ModelWire', 'ToolWire', 'Hook', 'Metric', 'Debug')");
-            table.HasCheckConstraint("ck_workflow_run_capture_gap_attempt_attribution", "(agent_run_id IS NULL AND harness_execution_id IS NULL AND harness_process_attempt_id IS NULL AND attempt_worker_fence_epoch IS NULL) OR (agent_run_id IS NOT NULL AND harness_execution_id IS NOT NULL AND harness_process_attempt_id IS NOT NULL AND attempt_worker_fence_epoch IS NOT NULL AND attempt_worker_fence_epoch > 0)");
+            table.HasCheckConstraint("ck_workflow_run_capture_gap_attempt_attribution", "(harness_execution_id IS NULL AND harness_process_attempt_id IS NULL AND attempt_worker_fence_epoch IS NULL) OR (agent_run_id IS NOT NULL AND harness_execution_id IS NOT NULL AND harness_process_attempt_id IS NOT NULL AND attempt_worker_fence_epoch IS NOT NULL AND attempt_worker_fence_epoch > 0)");
+
+            // Owner identity, and the reason both keys may be null one at a time but never together: a gap that names
+            // no run is a hole nobody can locate, which is no better than the gap a NOT NULL workflow run stopped a
+            // standalone Agent Run from recording at all. Kept spelled identically to 0184.
+            table.HasCheckConstraint("ck_workflow_run_capture_gap_owner", "workflow_run_id IS NOT NULL OR agent_run_id IS NOT NULL");
 
             // Four exhaustive, mutually exclusive coordinate systems, so no combination of bounds means nothing. Every
             // comparison on a nullable column carries its own IS NOT NULL: a PostgreSQL CHECK admits a row that
@@ -44,6 +49,13 @@ public sealed class WorkflowRunCaptureGapConfiguration : IEntityTypeConfiguratio
         builder.HasOne<Team>().WithMany().HasForeignKey(gap => gap.TeamId).OnDelete(DeleteBehavior.Restrict);
         builder.HasOne<WorkflowRun>().WithMany().HasForeignKey(gap => new { gap.TeamId, gap.WorkflowRunId })
             .HasPrincipalKey(run => new { run.TeamId, run.Id }).OnDelete(DeleteBehavior.Restrict);
+
+        // The Agent Run key carries the same tenant scope the workflow run key does. The attempt quad used to be what
+        // proved a gap's Agent Run belonged to its team, and the gaps that most need naming a run are exactly the ones
+        // that cannot carry the quad.
+        builder.HasOne<AgentRun>().WithMany().HasForeignKey(gap => new { gap.TeamId, gap.AgentRunId })
+            .HasPrincipalKey(run => new { run.TeamId, run.Id }).OnDelete(DeleteBehavior.Restrict)
+            .HasConstraintName("fk_workflow_run_capture_gap_agent_run");
         builder.HasOne(gap => gap.HarnessProcessAttempt).WithMany().HasForeignKey(gap => gap.HarnessProcessAttemptId)
             .OnDelete(DeleteBehavior.Restrict).HasConstraintName("fk_workflow_run_capture_gap_harness_process_attempt");
 

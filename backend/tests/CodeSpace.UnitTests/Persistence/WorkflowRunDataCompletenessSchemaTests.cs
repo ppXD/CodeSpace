@@ -82,15 +82,12 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
         Enum.GetNames<CaptureGapRangeKind>().ShouldBe(new[] { "Ordinal", "ByteOffset", "Time", "Unbounded" });
         Enum.GetNames<CaptureGapResolution>().ShouldBe(new[] { "Open", "Recovered" });
 
-        ForeignKey(entity, typeof(WorkflowRun)).Properties.Select(property => property.Name).ShouldBe(new[] { "TeamId", "WorkflowRunId" });
         ForeignKey(entity, typeof(WorkflowRunHarnessProcessAttempt)).Properties.Select(property => property.Name).ShouldBe(new[] { "HarnessProcessAttemptId" });
-        entity.FindProperty(nameof(WorkflowRunCaptureGap.WorkflowRunId))!.IsNullable.ShouldBeFalse(
-            customMessage: "the plane is keyed as the tool-call plane is, so one reader asks every run-owned plane the same question");
 
         entity.GetCheckConstraints().Select(constraint => constraint.Name).ShouldBe(new[]
         {
             "ck_workflow_run_capture_gap_bounds", "ck_workflow_run_capture_gap_channel",
-            "ck_workflow_run_capture_gap_attempt_attribution",
+            "ck_workflow_run_capture_gap_attempt_attribution", "ck_workflow_run_capture_gap_owner",
             "ck_workflow_run_capture_gap_range", "ck_workflow_run_capture_gap_reason",
             "ck_workflow_run_capture_gap_resolution", "ck_workflow_run_capture_gap_subject",
             "ck_workflow_run_capture_gap_time",
@@ -112,10 +109,48 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
         using var db = BuildContext();
         var attribution = Constraint(Entity<WorkflowRunCaptureGap>(db), "ck_workflow_run_capture_gap_attempt_attribution");
 
-        attribution.ShouldContain("agent_run_id IS NULL AND harness_execution_id IS NULL AND harness_process_attempt_id IS NULL AND attempt_worker_fence_epoch IS NULL",
-            customMessage: "legacy and non-harness gaps stay representable only as a wholly unattributed arm");
+        attribution.ShouldContain("harness_execution_id IS NULL AND harness_process_attempt_id IS NULL AND attempt_worker_fence_epoch IS NULL",
+            customMessage: "legacy and non-harness gaps stay representable only as a wholly unattributed arm, and OWNER identity is not part of it: the attempt columns hard-reference the very write a refused attempt could not make, so a gap that had to surrender its Agent Run to stay legal could name no run at all");
         attribution.ShouldContain("agent_run_id IS NOT NULL AND harness_execution_id IS NOT NULL AND harness_process_attempt_id IS NOT NULL AND attempt_worker_fence_epoch IS NOT NULL AND attempt_worker_fence_epoch > 0",
             customMessage: "a half-coordinate would make a reader guess which process the gap belongs to");
+        attribution.ShouldNotContain("agent_run_id IS NULL",
+            customMessage: "no arm may REQUIRE the owner to be absent. That is what forced a refused attempt's gap — whose subject is the attempt row itself — to drop the Agent Run it knew perfectly well");
+    }
+
+    /// <summary>
+    /// EVERY gap names a run, and both keys it can name one by stay COMPOSITE with the team.
+    ///
+    /// <para>The workflow run key was NOT NULL, which made a STANDALONE Agent Run's gap unrepresentable — and a plane
+    /// that cannot represent an absence is the silence this whole table exists to break, so its producer answered by
+    /// recording nothing at all. Nullable alone would have gone one step too far the other way: a row with neither key
+    /// is a hole with no address, which is no better than the one that was never written. The CHECK is what makes
+    /// "every gap names a run" true; the doc-comment that said so before enforced nothing.</para>
+    ///
+    /// <para>The composite is the other half. A single-column key would let a gap become readable across teams the
+    /// moment its other key went null, so the plane would have traded an unrepresentable gap for a leaked one.</para>
+    ///
+    /// <para>What this tier can and cannot say: it reads the MODEL, so it catches EF generating the wrong query shape
+    /// and nothing else. The database is what refuses the cross-team row, and a migration that wrote either key
+    /// single-column would leave every line below green — so the catalog is read back in
+    /// <c>WorkflowRunDataCompletenessPersistenceTests.Each_run_key_a_gap_can_name_is_proved_composite_with_its_team</c>,
+    /// and that assertion is the enforcing one.</para>
+    /// </summary>
+    [Fact]
+    public void A_gap_names_at_least_one_run_and_each_key_it_can_name_is_team_scoped()
+    {
+        using var db = BuildContext();
+        var entity = Entity<WorkflowRunCaptureGap>(db);
+
+        entity.FindProperty(nameof(WorkflowRunCaptureGap.WorkflowRunId))!.IsNullable.ShouldBeTrue(
+            customMessage: "a standalone Agent Run has no workflow run, so a NOT NULL key here makes its every known-missing span unrecordable");
+        entity.GetCheckConstraints().Select(constraint => constraint.Name).ShouldContain("ck_workflow_run_capture_gap_owner",
+            customMessage: "with the workflow run nullable and nothing demanding the other key, a producer that forgot both writes a hole nobody can locate and the plane admits it");
+        Constraint(entity, "ck_workflow_run_capture_gap_owner").ShouldBe("workflow_run_id IS NOT NULL OR agent_run_id IS NOT NULL",
+            customMessage: "a gap that names no run is a hole nobody can locate; only the CHECK makes the alternative impossible");
+
+        ForeignKey(entity, typeof(WorkflowRun)).Properties.Select(property => property.Name).ShouldBe(new[] { "TeamId", "WorkflowRunId" });
+        ForeignKey(entity, typeof(AgentRun)).Properties.Select(property => property.Name).ShouldBe(new[] { "TeamId", "AgentRunId" },
+            customMessage: "the Agent Run key carries the same tenant scope the workflow run key does, or a gap keyed only by its Agent Run is one nobody proved belongs to the team reading it");
     }
 
     /// <summary>
@@ -550,7 +585,7 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
     }
 
     /// <summary>
-    /// A parse failure has to say WHICH migration it choked on. This corpus is 183 files and discovered rather than
+    /// A parse failure has to say WHICH migration it choked on. This corpus is 184 files and discovered rather than
     /// listed, so a bare character offset — into the STRIPPED text at that, which no editor can show — is not a lead but
     /// a scavenger hunt. Both refusals are the detector giving up on one file, so both name it first (house rule 12.10).
     /// </summary>
