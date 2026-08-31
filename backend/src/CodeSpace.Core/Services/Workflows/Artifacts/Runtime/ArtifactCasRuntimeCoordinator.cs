@@ -775,21 +775,12 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
     /// index or sweep on <c>artifact_transfer_intent</c> reads <c>last_modified_date</c>. A reader that wanted to
     /// would have to move the column onto the database's clock first.</para>
     ///
-    /// <para>The audit behind that boundary found ONE other live cross-column timestamp CHECK on this schema, and
-    /// there it is NOT closed: <c>ck_artifact_location_observation</c> (<c>0127_artifact_cas_v2.sql:80-82</c>)
-    /// demands <c>verified_at &gt;= created_date</c> on <c>artifact_location</c>, and its two sides are stamped by
-    /// different components — <c>created_date</c> by <see cref="CommitAsync"/> from the database's
-    /// <c>clock_timestamp()</c>, <c>verified_at</c> afterwards by <see cref="ArtifactLocationVerifier"/> from the
-    /// VERIFYING pod's <c>TimeProvider</c>. It is pre-existing and belongs to that component, so nothing here touches
-    /// it, but it is reachable and the honest bound is narrow: that sweep takes the OLDEST rows by <c>verified_at</c>,
-    /// so a row old enough to be selected carries a gap no realistic skew closes — while a deployment holding fewer
-    /// Available placements than one batch takes (100 a pass) selects even the row committed moments ago, and there a
-    /// verifier pod running behind the database by more than that row's age writes a <c>verified_at</c> the CHECK
-    /// refuses. The refusal is contained rather than fatal: that verifier settles each row under its own guard, which
-    /// counts the refused one <c>Unrecorded</c> and leaves it exactly as it was. The containment is also the cost —
-    /// <c>verified_at</c> never moves, so under a persistent skew that row stays at the head of the sweep's ordering
-    /// and is never verified. (0127's third such CHECK, <c>ck_run_artifact_reference_expiry</c>, went with the table
-    /// 0179 dropped.)</para>
+    /// <para>The audit behind that boundary also found a cross-clock comparison on <c>artifact_location</c>:
+    /// 0127's <c>ck_artifact_location_observation</c> compared this class's database-stamped <c>created_date</c> with
+    /// the later verifier pod's <c>TimeProvider</c>-stamped <c>verified_at</c>. Migration 0185 removes only that invalid
+    /// ordering while preserving every intrinsic observation check. The ledger's revision and matching append-only
+    /// event establish causality; moving an honest observation forward to agree with another machine's clock would
+    /// fabricate when the destination answered.</para>
     /// </summary>
     private async Task<ArtifactCasTransferResult> HandleProblemAsync(IntentSnapshot claim, Guid actorId, ArtifactCasProblem problem, CancellationToken cancellationToken)
     {

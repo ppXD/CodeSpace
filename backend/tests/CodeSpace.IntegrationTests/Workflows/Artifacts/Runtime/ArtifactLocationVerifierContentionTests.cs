@@ -28,11 +28,10 @@ namespace CodeSpace.IntegrationTests.Workflows.Artifacts.Runtime;
 /// <c>artifact_location_event_guard</c> admits an entry only at the location's current or immediately next revision,
 /// and the deferred <c>artifact_location_event_require_location</c> rejects any entry the committed row has not reached.
 /// A ledger that could be pre-poisoned is a ledger with a hole in it, so there is nothing to pre-poison. The competing
-/// writer therefore runs on the pass's first driver activation — after the batch is read, before any row is
-/// settled — the refused restore is produced by faulting the verifier's own clock between the two halves of that
-/// restore, and the refused commit by advancing the row once more on the settle's own transaction, which the deferred
-/// constraint then rejects at COMMIT. Each is the real production statement failing against the real production
-/// constraint.</para>
+/// writer therefore runs on the pass's first driver activation — after the batch is read, before any row is settled.
+/// The refused restore executes a statement the real server rejects on its second location write, and the refused
+/// commit advances the row once more on the settle's own transaction, which the deferred constraint rejects at COMMIT.
+/// Each failure arrives from the real database at the exact production boundary the test names.</para>
 ///
 /// <para>Assertions are about rows this class seeded, never about the summary's counts — <c>StaleAsync</c> takes the
 /// oldest rows across every team, so any leftover in this suite satisfies a bound on a tally. The exceptions are the
@@ -126,7 +125,7 @@ public sealed class ArtifactLocationVerifierContentionTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task A_restore_whose_second_half_is_refused_leaves_the_row_exactly_as_it_found_it()
+    public async Task A_restore_whose_second_location_write_is_refused_leaves_the_row_exactly_as_it_found_it()
     {
         // A restore is TWO advances of the row — the confirmation, then the return to Available — and they have to be
         // one unit. Settled separately, a second write the database refuses leaves the first standing: the row the pass
@@ -138,12 +137,13 @@ public sealed class ArtifactLocationVerifierContentionTests : IAsyncLifetime
         Materialize(refused);
 
         var before = await LocationAsync(refused.Id);
-        var clock = new RewoundClock(before.CreatedDate - TimeSpan.FromDays(1));
+        var refusal = new RefusedSecondLocationWrite();
 
-        using var pass = FaultedClockScope(clock);
+        using var pass = FaultedScope(refusal);
         var summary = await pass.Resolve<IArtifactLocationVerifier>().VerifyStaleAsync(batchSize: 1, CancellationToken.None);
 
-        clock.Reads.ShouldBe(2, "the restore has to have got past its first half and attempted its second, or nothing below is about atomicity at all");
+        refusal.LocationWrites.ShouldBe(2, "the restore has to have completed its first save and attempted its second, or nothing below is about atomicity at all");
+        refusal.Refusals.ShouldBe(1, "the real database failure must land on exactly the second location write");
 
         var after = await LocationAsync(refused.Id);
         after.VerifiedAt.ShouldBe(before.VerifiedAt, "the first half of a refused restore must not survive the second half being refused: an outcome that recorded nothing has to leave verified_at where it was");
@@ -161,6 +161,62 @@ public sealed class ArtifactLocationVerifierContentionTests : IAsyncLifetime
         summary.Checked.ShouldBe(1);
         summary.Unrecorded.ShouldBe(1, "a row the provider answered about and the database would not record is its own outcome");
         summary.Inconclusive.ShouldBe(0, "and must not be filed as a destination that could not answer — it answered perfectly well");
+    }
+
+    [Fact]
+    public async Task A_verifier_behind_the_writer_records_its_honest_observation_instead_of_silently_losing_the_row()
+    {
+        var isolated = new PostgresFixture();
+        Destination? team = null;
+
+        try
+        {
+            await isolated.InitializeAsync();
+            team = await SeedTeamAsync(isolated);
+            var placed = await PlaceAsync(isolated, team, TimeSpan.FromHours(13), ArtifactLocationState.Available);
+            Materialize(placed);
+
+            using (var census = isolated.BeginScope())
+            {
+                var locationIds = await census.Resolve<CodeSpaceDbContext>().ArtifactLocation.AsNoTracking()
+                    .Select(location => location.Id).ToListAsync();
+                locationIds.ShouldBe([placed.Id],
+                    "this verifier runs against a database containing exactly its target; no deployment-wide neighbour can crowd it out");
+            }
+
+            var before = await LocationAsync(isolated, placed.Id);
+            var observedAt = before.CreatedDate - TimeSpan.FromMinutes(7);
+            var clock = new FixedClock(observedAt);
+
+            using var pass = ClockScope(isolated, clock);
+            await pass.Resolve<IArtifactLocationVerifier>().VerifyStaleAsync(batchSize: 1, CancellationToken.None);
+
+            pass.Resolve<RecordingBroker>().Teams.ShouldBe([team.TeamId],
+                "the production selector must have opened this exact controlled placement, independently of any sweep tally");
+            clock.Reads.ShouldBe(1, "one successful HEAD of an Available placement records one observation");
+
+            var after = await LocationAsync(isolated, placed.Id);
+            after.State.ShouldBe(ArtifactLocationState.Available);
+            after.Revision.ShouldBe(before.Revision + 1);
+            after.VerifiedAt.ShouldBe(observedAt,
+                "verified_at is the verifier's honest observation time, not a value moved forward to appease another machine's creation clock");
+            (await EventCountAsync(isolated, placed.Id)).ShouldBe(2,
+                "the accepted cross-clock observation must still have its exact append-only snapshot");
+        }
+        finally
+        {
+            await isolated.DisposeAsync();
+
+            if (team is not null)
+            {
+                try
+                {
+                    if (Directory.Exists(team.Root)) Directory.Delete(team.Root, recursive: true);
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+        }
     }
 
     [Fact]
@@ -282,16 +338,10 @@ public sealed class ArtifactLocationVerifierContentionTests : IAsyncLifetime
         .InstancePerLifetimeScope());
 
     /// <summary>
-    /// A scope whose verifier — and only the verifier — reads a clock that goes backwards after its first answer.
-    ///
-    /// <para>It is a stand-in for any refusal of the SECOND write, staged where no other refusal can be staged: the
-    /// settle holds a row lock for its whole transaction, so a real competing writer would block rather than land, and
-    /// every constraint reachable from a legitimate row is satisfied by both halves of a restore. A verified_at behind
-    /// the row's own created_date is refused by <c>ck_artifact_location_observation</c> — the real check, on the real
-    /// statement, raising the real exception — and only ever on the second advance, because the first one is given an
-    /// honest timestamp.</para>
+    /// A scope whose verifier — and only the verifier — reads a fixed wall clock.
+    /// The broker recorder independently names the exact destination the production selector visited.
     /// </summary>
-    private ILifetimeScope FaultedClockScope(TimeProvider clock) => _fixture.BeginScope(builder =>
+    private static ILifetimeScope ClockScope(PostgresFixture fixture, TimeProvider clock) => fixture.BeginScope(builder =>
     {
         RecordDestinations(builder);
         builder.Register<IArtifactLocationVerifier>(context => new ArtifactLocationVerifier(
@@ -368,17 +418,21 @@ public sealed class ArtifactLocationVerifierContentionTests : IAsyncLifetime
         ErrorCode = location.LastErrorCode, ErrorMessage = location.LastErrorMessage, DetailsJson = "{}",
     };
 
-    private async Task<ArtifactLocation> LocationAsync(Guid locationId)
+    private Task<ArtifactLocation> LocationAsync(Guid locationId) => LocationAsync(_fixture, locationId);
+
+    private static async Task<ArtifactLocation> LocationAsync(PostgresFixture fixture, Guid locationId)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = fixture.BeginScope();
 
         return await scope.Resolve<CodeSpaceDbContext>().ArtifactLocation.AsNoTracking().SingleAsync(location => location.Id == locationId);
     }
 
     /// <summary>How many entries this row's append-only ledger holds, which is the only place half of a refused write could still be hiding.</summary>
-    private async Task<int> EventCountAsync(Guid locationId)
+    private Task<int> EventCountAsync(Guid locationId) => EventCountAsync(_fixture, locationId);
+
+    private static async Task<int> EventCountAsync(PostgresFixture fixture, Guid locationId)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = fixture.BeginScope();
 
         return await scope.Resolve<CodeSpaceDbContext>().ArtifactLocationEvent.AsNoTracking().CountAsync(entry => entry.ArtifactLocationId == locationId);
     }
@@ -396,10 +450,17 @@ public sealed class ArtifactLocationVerifierContentionTests : IAsyncLifetime
 
     private async Task<Destination> SeedTeamAsync()
     {
-        var (teamId, actorId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var routed = await RoutedArtifactSeed.RouteTeamAsync(_fixture, teamId, actorId);
+        var destination = await SeedTeamAsync(_fixture);
 
-        _roots.Add(routed.Root);
+        _roots.Add(destination.Root);
+
+        return destination;
+    }
+
+    private static async Task<Destination> SeedTeamAsync(PostgresFixture fixture)
+    {
+        var (teamId, actorId) = await WorkflowsTestSeed.SeedTeamAsync(fixture);
+        var routed = await RoutedArtifactSeed.RouteTeamAsync(fixture, teamId, actorId);
 
         return new Destination(teamId, routed.ProfileId, routed.Root);
     }
@@ -422,7 +483,15 @@ public sealed class ArtifactLocationVerifierContentionTests : IAsyncLifetime
     /// </summary>
     private async Task<Placed> PlaceAsync(Destination destination, TimeSpan age, ArtifactLocationState state)
     {
-        using var scope = _fixture.BeginScope();
+        var placed = await PlaceAsync(_fixture, destination, age, state);
+        _placed.Add(placed.Id);
+
+        return placed;
+    }
+
+    private static async Task<Placed> PlaceAsync(PostgresFixture fixture, Destination destination, TimeSpan age, ArtifactLocationState state)
+    {
+        using var scope = fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         var revisionId = await db.StorageProfileRevision.AsNoTracking().Where(revision => revision.StorageProfileId == destination.ProfileId)
             .OrderByDescending(revision => revision.Revision).Select(revision => revision.Id).FirstAsync();
@@ -443,8 +512,6 @@ public sealed class ArtifactLocationVerifierContentionTests : IAsyncLifetime
         db.ArtifactLocationEvent.Add(Snapshot(location));
 
         await db.SaveChangesAsync();
-        _placed.Add(location.Id);
-
         return new Placed(location.Id, location.ObjectKey, destination.Root);
     }
 
@@ -568,6 +635,35 @@ public sealed class ArtifactLocationVerifierContentionTests : IAsyncLifetime
     }
 
     /// <summary>
+    /// Refuses the second real location UPDATE of a restore from inside its real transaction.
+    ///
+    /// <para>The first UPDATE and event have already been accepted when this fires. Executing a division by zero on
+    /// the same connection and transaction produces a real Postgres <see cref="DbException"/> and aborts that block,
+    /// so the test proves transaction rollback rather than relying on an unrelated schema check as its fault source.</para>
+    /// </summary>
+    private sealed class RefusedSecondLocationWrite : DbCommandInterceptor
+    {
+        public int LocationWrites { get; private set; }
+        public int Refusals { get; private set; }
+
+        public override async ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        {
+            if (!command.CommandText.Contains("UPDATE artifact_location", StringComparison.OrdinalIgnoreCase)) return result;
+
+            LocationWrites++;
+            if (LocationWrites != 2) return result;
+
+            Refusals++;
+            await using var poison = command.Connection!.CreateCommand();
+            poison.Transaction = command.Transaction;
+            poison.CommandText = "SELECT 1 / 0";
+            await poison.ExecuteScalarAsync(cancellationToken);
+
+            return result;
+        }
+    }
+
+    /// <summary>
     /// Makes the read that OPENS a row's work fail, for one named team's rows and nothing else.
     ///
     /// <para>Selective on purpose: the point of the test is that the rows BEHIND the refused one are still checked, so
@@ -634,17 +730,21 @@ public sealed class ArtifactLocationVerifierContentionTests : IAsyncLifetime
         }
     }
 
-    /// <summary>Answers honestly once, then reports a moment the row it is about had not been created yet.</summary>
-    private sealed class RewoundClock : TimeProvider
+    /// <summary>A verifier pod's fixed wall-clock reading, including one legitimately behind the writer pod.</summary>
+    private sealed class FixedClock : TimeProvider
     {
-        private readonly DateTimeOffset _rewound;
+        private readonly DateTimeOffset _now;
         private int _reads;
 
-        public RewoundClock(DateTimeOffset rewound) => _rewound = rewound;
+        public FixedClock(DateTimeOffset now) => _now = now;
 
         public int Reads => _reads;
 
-        public override DateTimeOffset GetUtcNow() => Interlocked.Increment(ref _reads) == 1 ? DateTimeOffset.UtcNow : _rewound;
+        public override DateTimeOffset GetUtcNow()
+        {
+            Interlocked.Increment(ref _reads);
+            return _now;
+        }
     }
 
     /// <summary>A team and the routed destination its placements are expected to sit at.</summary>

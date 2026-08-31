@@ -503,7 +503,7 @@ public sealed class ArtifactLocationVerifierDestinationFairnessTests : IAsyncLif
     /// Puts these placements back where the seed left them, which is what the next hour looks like to a row nothing has
     /// answered for since.
     ///
-    /// <para>Their <c>created_date</c> is the oldest instant the schema will accept for <c>verified_at</c>, and the
+    /// <para>The seed gives <c>created_date</c> and the original <c>verified_at</c> the same ancient instant, and the
     /// revision has to advance carrying a byte-identical ledger entry, because the schema admits no other way to move a
     /// location at all.</para>
     /// </summary>
