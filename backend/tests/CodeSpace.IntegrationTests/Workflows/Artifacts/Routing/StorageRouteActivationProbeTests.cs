@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers.Local;
+using CodeSpace.Core.Services.Workflows.Artifacts.Providers.Local.Legacy;
 using CodeSpace.Core.Services.Workflows.Artifacts.Routing;
 using CodeSpace.Core.Services.Workflows.Artifacts.Routing.Exceptions;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -72,6 +73,20 @@ public sealed class StorageRouteActivationProbeTests : IDisposable
     }
 
     [Fact]
+    public async Task A_data_class_cannot_be_bound_to_a_provider_that_accepts_no_new_bytes()
+    {
+        // The first catalog provider that cannot write at all. Every gate here asks a destination whether it is
+        // taking bytes TODAY, so a provider type that never takes any slipped through as an ordinary target and the
+        // refusal surfaced at the first artifact write — at runtime, where no operator is standing.
+        var world = await SeedProfileAsync(NewRoot(), LocalLegacyArtifactStorageDriverFactory.TypeKey);
+
+        var refused = await Should.ThrowAsync<StorageRouteInvalidException>(() => BindRouteAsync(world));
+
+        refused.Message.ShouldContain(LocalLegacyArtifactStorageDriverFactory.TypeKey, Case.Sensitive, "an operator is told which provider, not merely that something was wrong");
+        refused.Message.ShouldContain("accepts no new bytes", Case.Sensitive, "and told the reason is permanent rather than a destination having a bad day");
+    }
+
+    [Fact]
     public async Task The_probe_that_gates_activation_leaves_its_answer_behind()
     {
         // The gate and the observability plane are the same probe: an operator who was refused can see WHY on the
@@ -120,6 +135,25 @@ public sealed class StorageRouteActivationProbeTests : IDisposable
 
     private async Task<World> SeedAsync(string rootPath)
     {
+        var world = await SeedProfileAsync(rootPath, LocalRwxArtifactStorageDriverFactory.TypeKey);
+
+        return world with { RouteId = (await BindRouteAsync(world)).Id };
+    }
+
+    /// <summary>Binds one data class to this world's profile. Separate from the seed because being allowed to bind at all is itself under test.</summary>
+    private async Task<StorageRouteDetail> BindRouteAsync(World world)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<IStorageRouteService>().CreateAsync(world.TeamId, world.ActorId, new CreateStorageRouteCommand
+        {
+            DataClassTypeKey = "agent-run-log/v1", StorageProfileId = world.ProfileId,
+        }, CancellationToken.None);
+    }
+
+    /// <summary>A team, an actor and one Active profile on <paramref name="providerTypeKey"/> — and no route yet.</summary>
+    private async Task<World> SeedProfileAsync(string rootPath, string providerTypeKey)
+    {
         var actorId = Guid.NewGuid();
         var teamId = Guid.NewGuid();
 
@@ -134,22 +168,17 @@ public sealed class StorageRouteActivationProbeTests : IDisposable
         var profiles = scope.Resolve<IStorageProfileService>();
         var created = await profiles.CreateAsync(teamId, actorId, new CreateStorageProfileCommand
         {
-            StableName = "activation-target", ProviderTypeKey = LocalRwxArtifactStorageDriverFactory.TypeKey,
+            StableName = "activation-target", ProviderTypeKey = providerTypeKey,
             NonSecretConfig = JsonDocument.Parse(JsonSerializer.Serialize(new { rootPath })).RootElement,
         }, CancellationToken.None);
 
-        var active = (await profiles.SetStateAsync(teamId, actorId, new SetStorageProfileStateCommand
+        (await profiles.SetStateAsync(teamId, actorId, new SetStorageProfileStateCommand
         {
             ProfileId = created.Id, ExpectedXmin = created.Xmin, ExpectedCurrentRevision = created.CurrentRevision,
             State = StorageProfileStateValue.Active,
         }, CancellationToken.None)).ShouldNotBeNull();
 
-        var route = await scope.Resolve<IStorageRouteService>().CreateAsync(teamId, actorId, new CreateStorageRouteCommand
-        {
-            DataClassTypeKey = "agent-run-log/v1", StorageProfileId = active.Id,
-        }, CancellationToken.None);
-
-        return new World(teamId, actorId, created.Id, route.Id);
+        return new World(teamId, actorId, created.Id, RouteId: Guid.Empty);
     }
 
     public void Dispose()
