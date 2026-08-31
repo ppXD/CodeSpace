@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Security.Cryptography;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
+using CodeSpace.Core.Services.Workflows.Artifacts.Retention;
 using CodeSpace.Core.Services.Workflows.Artifacts.Routing;
 using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using CodeSpace.Messages.Constants;
@@ -17,7 +18,10 @@ public sealed partial class ArtifactStore
 {
     private const int StreamingBufferBytes = 128 * 1024;
 
-    public async Task<Guid> PutAsync(ArtifactStreamWriteRequest request, CancellationToken cancellationToken)
+    public async Task<Guid> PutAsync(ArtifactStreamWriteRequest request, CancellationToken cancellationToken) =>
+        (await WriteStreamAsync(request, null, cancellationToken).ConfigureAwait(false)).ArtifactId;
+
+    private async Task<ArtifactStreamRetentionWrite> WriteStreamAsync(ArtifactStreamWriteRequest request, ArtifactRetentionDeclaration? declaration, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(request.Source);
@@ -31,7 +35,7 @@ public sealed partial class ArtifactStore
         {
             if (existing.StorageUrl is { } url && !await _blobs.ExistsAsync(url, cancellationToken).ConfigureAwait(false))
                 await RestoreLocalStreamAsync(request, admission.Sha256, cancellationToken).ConfigureAwait(false);
-            return existing.Id;
+            return new ArtifactStreamRetentionWrite(existing.Id, false, admission.Sha256, request.Source.LengthBytes);
         }
 
         var placement = admission.InlineBytes is null
@@ -51,18 +55,21 @@ public sealed partial class ArtifactStore
         };
 
         _db.WorkflowArtifact.Add(artifact);
+        var declared = declaration is null ? null : DeclarationFor(declaration, artifact);
+        if (declared is not null) _db.WorkflowArtifactRetention.Add(declared);
         try
         {
             await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-            return artifact.Id;
+            return new ArtifactStreamRetentionWrite(artifact.Id, declared is not null, admission.Sha256, request.Source.LengthBytes);
         }
         catch (DbUpdateException ex) when (IsUniqueViolation(ex))
         {
             _db.Entry(artifact).State = EntityState.Detached;
+            if (declared is not null) _db.Entry(declared).State = EntityState.Detached;
             var raceWinner = await FindDedupTargetAsync(request.TeamId, admission.Sha256, cancellationToken).ConfigureAwait(false);
             if (raceWinner is null)
                 throw new ArtifactStorageDestinationUnavailableException(request.TeamId, ArtifactCasProblemCode.TargetMissing);
-            return raceWinner.Id;
+            return new ArtifactStreamRetentionWrite(raceWinner.Id, false, admission.Sha256, request.Source.LengthBytes);
         }
     }
 

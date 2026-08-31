@@ -1,11 +1,15 @@
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark.Graders;
 using CodeSpace.Core.Services.Agents.Publish;
+using CodeSpace.Core.Services.Workflows.Artifacts;
+using CodeSpace.Core.Services.Workflows.Artifacts.Retention;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
+using CodeSpace.Messages.Artifacts;
 using CodeSpace.Messages.Enums;
 using Microsoft.Extensions.Logging;
 using Shouldly;
+using System.Text;
 using System.Text.Json;
 
 namespace CodeSpace.UnitTests.Agents;
@@ -57,10 +61,50 @@ public class ArtifactManifestCaptureTests
         bytes.Length.ShouldBe(64);
     }
 
+    [Fact]
+    public void An_intermediate_directory_symlink_cannot_escape_the_workspace()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        using var root = new TempDir();
+        using var outside = new TempDir();
+        File.WriteAllText(Path.Combine(outside.Path, "secret.txt"), "outside");
+        Directory.CreateSymbolicLink(Path.Combine(root.Path, "linked"), outside.Path);
+
+        WorkspaceArtifactGuard.ExistsWithin(root.Path, "linked/secret.txt").ShouldBeFalse(
+            "checking only the leaf misses an escaping symlink in a parent component");
+    }
+
+    [Fact]
+    public async Task A_parent_symlink_swap_after_file_admission_cannot_redirect_streaming_capture()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        using var root = new TempDir();
+        using var outside = new TempDir();
+        var docs = Path.Combine(root.Path, "docs");
+        var admitted = Path.Combine(root.Path, "admitted-docs");
+        Directory.CreateDirectory(docs);
+        File.WriteAllBytes(Path.Combine(docs, "report.md"), "inside!"u8.ToArray());
+        File.WriteAllBytes(Path.Combine(outside.Path, "report.md"), "secret!"u8.ToArray());
+        var retention = new GatedRetentionWriter();
+        var capture = new ArtifactManifestStore(null!, retention, new CapturingLogger()).CaptureDeclaredAsync(
+            TaskDeclaring("docs/report.md"), root.Path, Guid.NewGuid(), null, Guid.NewGuid(), 1, CancellationToken.None);
+
+        await retention.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+        Directory.Move(docs, admitted);
+        Directory.CreateSymbolicLink(docs, outside.Path);
+        retention.Release();
+
+        await Should.ThrowAsync<CaptureProbeCompletedException>(capture);
+        retention.Observed.Count.ShouldBe(2, "the real source is reopened for admission and placement");
+        retention.Observed.ShouldAllBe(bytes => Encoding.UTF8.GetString(bytes) == "inside!",
+            "both passes must read the already-admitted file handle, never a workspace path redirected after containment validation");
+    }
+
     /// <summary>
-    /// Every refusal is a DISTINCT member, because the capture branches on them: only the over-cap arm is bytes the run
-    /// produced and the capture failed to take, and only that arm is recorded as a known-missing span. A shared string
-    /// makes that distinction a substring match nobody performs.
+    /// Every refusal stays a DISTINCT member for the bounded byte-reader's callers. The manifest store now uses the
+    /// file resolver instead, so a real file never reaches its historical over-cap arm.
     /// </summary>
     [Fact]
     public void Each_guard_refusal_is_its_own_enum_member()
@@ -153,41 +197,28 @@ public class ArtifactManifestCaptureTests
 
     /// <summary>
     /// On the Missing and NotAFile arms this warning is the ONLY account a lost deliverable ever gets — no gap row, no
-    /// fact, nothing else. Naming the per-file capture cap on all three arms points two of them at a bound that had no
-    /// part in the refusal: the file the agent never wrote is not a file that was too big, and an operator sent to
-    /// check a size limit is an operator not looking at the acceptance list.
+    /// fact, nothing else. Streaming capture has no byte-array cap arm; a large real file takes the streaming path.
     /// <para>The null collaborators are unreachable BY PROOF, not by luck: no declared path here yields bytes, so
-    /// neither the CAS declaring write nor the manifest upsert runs, and a STANDALONE attempt (no workflow run) has
-    /// nowhere to record a gap — so the db, the retention writer and the completeness writer are untouched on every
-    /// arm this drives.</para>
+    /// neither the CAS declaring write nor the manifest upsert runs, so the db and retention writer are untouched on
+    /// every arm this drives.</para>
     /// </summary>
     [Fact]
-    public async Task The_skip_warning_blames_the_cap_only_where_a_cap_was_the_cause()
+    public async Task Every_non_file_refusal_is_logged_without_touching_storage()
     {
         using var dir = new TempDir();
         Directory.CreateDirectory(Path.Combine(dir.Path, "docs"));
-        using (var big = File.Create(Path.Combine(dir.Path, "big.csv"))) big.SetLength(ArtifactManifestStore.MaxArtifactBytes + 1);
-
         var logger = new CapturingLogger();
 
-        var captured = await new ArtifactManifestStore(null!, null!, null!, logger).CaptureDeclaredAsync(
-            TaskDeclaring("never-written.md", "docs", "big.csv"), dir.Path, Guid.NewGuid(), null, Guid.NewGuid(), 1, CancellationToken.None);
+        var captured = await new ArtifactManifestStore(null!, null!, logger).CaptureDeclaredAsync(
+            TaskDeclaring("never-written.md", "docs"), dir.Path, Guid.NewGuid(), null, Guid.NewGuid(), 1, CancellationToken.None);
 
         captured.ShouldBe(0, "no declared path here is capturable, so the store reached neither the CAS nor the database");
-        logger.Warnings.Count.ShouldBe(3, "every skipped deliverable gets its own line — a skip nobody logged is a loss nobody can see");
+        logger.Warnings.Count.ShouldBe(2, "every skipped deliverable gets its own line — a skip nobody logged is a loss nobody can see");
 
         logger.Warnings[0].ShouldContain(nameof(WorkspaceArtifactReadFailure.Missing));
-        logger.Warnings[0].ShouldNotContain(Cap, customMessage: "a deliverable the agent never wrote was not stopped by a bound");
 
         logger.Warnings[1].ShouldContain(nameof(WorkspaceArtifactReadFailure.NotAFile));
-        logger.Warnings[1].ShouldNotContain(Cap, customMessage: "a directory is not readable content — no bound was consulted");
-
-        logger.Warnings[2].ShouldContain(nameof(WorkspaceArtifactReadFailure.OverCap));
-        logger.Warnings[2].ShouldContain(Cap, customMessage: "the ONE arm a cap decided names the cap it hit");
     }
-
-    /// <summary>The per-file cap as it renders into a log line — the token that must appear on exactly one arm.</summary>
-    private static string Cap => ArtifactManifestStore.MaxArtifactBytes.ToString();
 
     private static WorkspaceArtifactReadFailure? Refusal(TempDir dir, string path, long maxBytes)
     {
@@ -224,6 +255,36 @@ public class ArtifactManifestCaptureTests
 
         private sealed class NullScope : IDisposable { public static readonly NullScope Instance = new(); public void Dispose() { } }
     }
+
+    private sealed class GatedRetentionWriter : IArtifactStreamRetentionWriter
+    {
+        private readonly TaskCompletionSource _entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task Entered => _entered.Task;
+        public List<byte[]> Observed { get; } = new();
+
+        public void Release() => _released.TrySetResult();
+
+        public async Task<ArtifactStreamRetentionWrite> PutDeclaredAsync(ArtifactStreamRetentionWriteRequest request, CancellationToken cancellationToken)
+        {
+            _entered.TrySetResult();
+            await _released.Task.WaitAsync(cancellationToken);
+            Observed.Add(await ReadAsync(request.Artifact.Source, cancellationToken));
+            Observed.Add(await ReadAsync(request.Artifact.Source, cancellationToken));
+            throw new CaptureProbeCompletedException();
+        }
+
+        private static async Task<byte[]> ReadAsync(IArtifactWriteSource source, CancellationToken cancellationToken)
+        {
+            await using var stream = await source.OpenReadAsync(cancellationToken);
+            var bytes = new byte[checked((int)source.LengthBytes)];
+            await stream.ReadExactlyAsync(bytes, cancellationToken);
+            return bytes;
+        }
+    }
+
+    private sealed class CaptureProbeCompletedException : Exception;
 
     private sealed class TempDir : IDisposable
     {

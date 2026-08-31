@@ -284,22 +284,19 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
     }
 
     /// <summary>
-    /// The same pin for the declared-deliverable capture, the gap plane's newest producer. Renaming this constant
-    /// retires every filter written against the rows already stored under the old value — the auditor's saved
-    /// "which producer noticed this" query, and this suite's own reconciler fixture, which spells the literal
-    /// <c>artifact-manifest-store</c> to seed an open deliverable gap. A rename must be a decision somebody made on
-    /// purpose, which is what a red test turns it into.
+    /// Streaming retired this producer, not the rows it already wrote. Keeping the literal stable preserves saved
+    /// audit filters and lets a reader identify historical bound-exceeded gaps without pretending new ones are made.
     /// </summary>
     [Fact]
-    public void The_declared_deliverable_captures_capture_source_is_pinned()
+    public void The_retired_declared_deliverable_capture_source_remains_pinned_for_historical_rows()
     {
         ArtifactManifestStore.CompletenessCaptureSource.ShouldBe("artifact-manifest-store");
     }
 
     /// <summary>
-    /// The isolation that still holds, checked rather than asserted in prose: SEVEN production producers and TWO
-    /// observation-only bounded readers. Four are in the capture plane; three more only WRITE a gap, on paths that
-    /// swallow a storage failure — or a capture bound — and settle anyway, so the loss is accounted rather than silent. The only files in <c>backend/src</c> that may mention
+    /// The isolation that still holds, checked rather than asserted in prose: SIX production producers and TWO
+    /// observation-only bounded readers. Four are in the capture plane; two more only WRITE a gap on paths that
+    /// swallow a storage failure and settle anyway, so the loss is accounted rather than silent. The only files in <c>backend/src</c> that may mention
     /// either table are the two entities, their two configurations, the DbContext that registers them, the shared
     /// completeness writer, the Workflow Run manifest reader, the Agent Run exact-gap reader, and the capture plane's
     /// three capture partials plus the in-process model-call recorder — the native-record, harness-process-attempt,
@@ -322,7 +319,7 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
     /// message below is the number a reader can trust without grepping.</para>
     /// </summary>
     [Fact]
-    public void Only_the_seven_producers_two_bounded_operator_readers_and_the_reconciler_touch_either_table()
+    public void Only_the_six_producers_two_bounded_operator_readers_and_the_reconciler_touch_either_table()
     {
         var sourceRoot = ProductionSourceRoot();
 
@@ -336,11 +333,6 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
         {
             "AgentRunService.cs",
 
-            // The third gap-only producer: the declared-deliverable capture, whose per-file cap is the ONE loss no
-            // other plane could ever notice — the bytes existed, the run produced them, and nobody took them. It
-            // records the span and returns; the run's verdict is the acceptance oracle's, and a capture bound is
-            // deliberately not an execution authority over work that was actually done.
-            "ArtifactManifestStore.cs",
             "CodeSpaceDbContext.cs",
             "IRunDataCompletenessReader.cs",
             "IRunDataCompletenessWriter.cs",

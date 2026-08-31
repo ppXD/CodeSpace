@@ -2,15 +2,12 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark.Graders;
-using CodeSpace.Core.Services.RunData;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Artifacts.Retention;
 using CodeSpace.Messages.Artifacts;
 using CodeSpace.Messages.Agents;
-using CodeSpace.Messages.Contracts;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
-using System.Security.Cryptography;
 
 namespace CodeSpace.Core.Services.Agents.Publish;
 
@@ -26,8 +23,8 @@ public interface IArtifactManifestStore
     /// Returns how many artifacts were captured — what was OWED is not this method's to answer. The capture promise
     /// states the declared list at intent time and its facts re-derive that count from the SAME acceptance, so a
     /// shortfall stays visible on an attempt whose capture never ran at all, which no answer from here could cover.
-    /// Every skip is accounted for where its loss is legible: a warning naming the cause, plus a
-    /// <c>BoundExceeded</c> capture-gap row for the one arm no other plane would notice.
+    /// Every non-file refusal is accounted for with a warning naming the cause. A real file has no capture-size
+    /// ceiling at this seam: it streams through the artifact store, so there is no bound-exceeded loss to record.
     /// </summary>
     Task<int> CaptureDeclaredAsync(AgentTask task, string workspaceDirectory, Guid agentRunId, Guid? workflowRunId, Guid teamId, long fenceEpoch, CancellationToken cancellationToken);
 
@@ -40,30 +37,29 @@ public interface IArtifactManifestStore
 /// DC-4 slice 1: the typed-artifact ledger — the first path that puts an agent-produced FILE into the store as
 /// itself (every prior write site stored byproducts: patches, transcripts, evidence blobs). Capture rides the
 /// same hardened containment the graders use (<see cref="WorkspaceArtifactGuard"/> — <c>../</c>, absolute paths
-/// and escaping symlinks all read as missing), the same size clamp, and the run's own declared paths — no
-/// workspace walker, no new security surface.
+/// and escaping symlinks all read as missing), and the run's own declared paths — no workspace walker, no new
+/// security surface. Exact files stream through a re-readable source, so capture memory is fixed instead of
+/// proportional to deliverable size.
 /// </summary>
 public sealed class ArtifactManifestStore : IArtifactManifestStore, IScopedDependency
 {
-    /// <summary>Per-file capture cap. Past it the file is SKIPPED with a warning, never truncated — a captured artifact's bytes ARE the deliverable, and a silently-clipped dataset is a lie; absence is honest.</summary>
+    /// <summary>Legacy byte-guard threshold kept for compatibility tests; durable manifest capture is streaming and does not impose this former heap bound.</summary>
     public const long MaxArtifactBytes = 4 * 1024 * 1024;
 
     /// <summary>The holder this store's retention declarations name. Diagnostic only — the reaper checks every reference site regardless of what a declaration claims.</summary>
     public const string HolderKind = "artifact_manifest";
 
-    /// <summary>Which producer noticed a span this store could not capture, in the same capture-source vocabulary the other planes record under.</summary>
+    /// <summary>Historical capture-source value retained for readers of pre-streaming bound-exceeded rows; this store no longer produces new gaps.</summary>
     public const string CompletenessCaptureSource = "artifact-manifest-store";
 
     private readonly CodeSpaceDbContext _db;
-    private readonly IArtifactRetentionWriter _retention;
-    private readonly IRunDataCompletenessWriter _completeness;
+    private readonly IArtifactStreamRetentionWriter _retention;
     private readonly ILogger<ArtifactManifestStore> _logger;
 
-    public ArtifactManifestStore(CodeSpaceDbContext db, IArtifactRetentionWriter retention, IRunDataCompletenessWriter completeness, ILogger<ArtifactManifestStore> logger)
+    public ArtifactManifestStore(CodeSpaceDbContext db, IArtifactStreamRetentionWriter retention, ILogger<ArtifactManifestStore> logger)
     {
         _db = db;
         _retention = retention;
-        _completeness = completeness;
         _logger = logger;
     }
 
@@ -77,9 +73,9 @@ public sealed class ArtifactManifestStore : IArtifactManifestStore, IScopedDepen
 
         foreach (var path in paths)
         {
-            if (!WorkspaceArtifactGuard.TryReadBytesWithin(workspaceDirectory, path, MaxArtifactBytes, out var bytes, out var failure))
+            if (!WorkspaceArtifactGuard.TryResolveFileWithin(workspaceDirectory, path, out var file, out var failure))
             {
-                await NoticeSkipAsync(new DeclaredDeliverableSkip(teamId, workflowRunId, agentRunId, path, failure!.Value), cancellationToken).ConfigureAwait(false);
+                NoticeSkip(new DeclaredDeliverableSkip(agentRunId, path, failure!.Value));
                 continue;
             }
 
@@ -88,7 +84,9 @@ public sealed class ArtifactManifestStore : IArtifactManifestStore, IScopedDepen
             // pointed at. The declaration is what lets the retention reaper reclaim exactly those. A dedup hit declares
             // nothing — the bytes are then shared with a producer whose references are not enumerable — so this call is
             // safe to make unconditionally.
-            var write = await _retention.PutDeclaredAsync(Declaration(teamId, bytes, path, agentRunId), cancellationToken).ConfigureAwait(false);
+            ArtifactStreamRetentionWrite write;
+            using (var source = new WorkspaceArtifactSource(file))
+                write = await _retention.PutDeclaredAsync(Declaration(teamId, source, path, agentRunId), cancellationToken).ConfigureAwait(false);
             var artifactId = write.ArtifactId;
 
             await UpsertAsync(new ArtifactManifest
@@ -101,8 +99,8 @@ public sealed class ArtifactManifestStore : IArtifactManifestStore, IScopedDepen
                 Kind = KindFor(path),
                 LogicalPath = path,
                 ContentArtifactId = artifactId,
-                Sha256 = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant(),
-                SizeBytes = bytes.LongLength,
+                Sha256 = write.Sha256,
+                SizeBytes = write.SizeBytes,
                 ContentType = ContentTypeFor(path),
             }, cancellationToken).ConfigureAwait(false);
 
@@ -113,8 +111,8 @@ public sealed class ArtifactManifestStore : IArtifactManifestStore, IScopedDepen
     }
 
     /// <summary>The declaring write's request for one captured deliverable. The holder it names is the <c>artifact_manifest</c> row the caller writes next.</summary>
-    private static ArtifactRetentionWriteRequest Declaration(Guid teamId, byte[] bytes, string path, Guid agentRunId) =>
-        new(teamId, bytes, ContentTypeFor(path), ArtifactRetentionClass.ArtifactManifestContent, HolderKind, agentRunId);
+    private static ArtifactStreamRetentionWriteRequest Declaration(Guid teamId, WorkspaceArtifactSource source, string path, Guid agentRunId) =>
+        new(new ArtifactStreamWriteRequest(teamId, ContentTypeFor(path), source), ArtifactRetentionClass.ArtifactManifestContent, HolderKind, agentRunId);
 
     /// <summary>The workspace-relative deliverable list a non-<c>TestsPass</c> acceptance declares — <c>TestsPass</c> (or an absent kind, which defaults to it) carries an ARGV, never paths, so it declares nothing capturable.</summary>
     internal static IReadOnlyList<string> DeclaredDeliverablePaths(AgentTask task) =>
@@ -123,54 +121,22 @@ public sealed class ArtifactManifestStore : IArtifactManifestStore, IScopedDepen
             : Array.Empty<string>();
 
     /// <summary>
-    /// Every skip is LOGGED; exactly one is RECORDED. A deliverable past <see cref="MaxArtifactBytes"/> is bytes that
-    /// EXISTED and were never taken, which is what <see cref="CaptureGapReason.BoundExceeded"/> means — and the only
-    /// arm whose loss no other plane would ever notice. A missing or non-file path is the acceptance oracle's verdict
-    /// to give, not a capture loss, so it stays a log line. The notice is contained by its writer and never changes
-    /// what the run resolves to.
+    /// Missing and non-file paths are the acceptance oracle's verdict to give, not a capture loss, so each stays a
+    /// warning. Size is deliberately absent: a file that resolves here takes the streaming path regardless of length.
     /// </summary>
-    private async Task NoticeSkipAsync(DeclaredDeliverableSkip skip, CancellationToken cancellationToken)
-    {
+    private void NoticeSkip(DeclaredDeliverableSkip skip) =>
         _logger.LogWarning("Agent run {RunId}: declared deliverable '{Path}' not captured — {Failure}: {Cause}", skip.AgentRunId, skip.Path, skip.Failure, CauseOf(skip.Failure));
 
-        if (skip.Failure != WorkspaceArtifactReadFailure.OverCap) return;
-
-        // The gap plane is keyed by workflow run, so a STANDALONE attempt has nowhere to record one — the same named
-        // limit the capture-gap row already carries. The warning above stays its only record.
-        if (skip.WorkflowRunId is not { } workflowRunId) return;
-
-        await _completeness.NoticeAsync(BoundExceededGap(skip, workflowRunId), cancellationToken).ConfigureAwait(false);
-    }
-
     /// <summary>
-    /// What the guard's refusal actually was, one sentence per arm. On the <see cref="WorkspaceArtifactReadFailure.Missing"/>
-    /// and <see cref="WorkspaceArtifactReadFailure.NotAFile"/> arms the warning above is the ONLY account the lost
-    /// deliverable ever gets, so <see cref="MaxArtifactBytes"/> is named on the ONE arm a cap decided and nowhere else:
-    /// a bound blamed for an absence sends the reader to check a size limit instead of the acceptance list.
+    /// What the resolver's refusal actually was, one sentence per reachable arm. <c>OverCap</c> remains in the shared
+    /// byte-reader enum for bounded graders, but this streaming capture never asks that reader to impose a cap.
     /// </summary>
     private static string CauseOf(WorkspaceArtifactReadFailure failure) => failure switch
     {
         WorkspaceArtifactReadFailure.Missing => "nothing readable exists at that path inside the workspace",
         WorkspaceArtifactReadFailure.NotAFile => "the path resolves to a directory, which is not readable content",
-        WorkspaceArtifactReadFailure.OverCap => $"it is larger than the {MaxArtifactBytes}-byte per-file capture cap, so none of its bytes were taken",
         _ => "the workspace guard refused to read it",
     };
-
-    /// <summary>The span itself: unbounded, because what is missing is the whole file rather than a locatable stretch of one, and the path IS the subject a reader goes and looks at.</summary>
-    private static WorkflowRunCaptureGap BoundExceededGap(DeclaredDeliverableSkip skip, Guid workflowRunId)
-    {
-        var now = DateTimeOffset.UtcNow;
-
-        return new WorkflowRunCaptureGap
-        {
-            Id = Guid.NewGuid(), TeamId = skip.TeamId, WorkflowRunId = workflowRunId,
-            SubjectKind = WorkflowRunDataOwnerKinds.Deliverable, SubjectId = skip.Path,
-            RangeKind = CaptureGapRangeKind.Unbounded, Reason = CaptureGapReason.BoundExceeded,
-            ReasonDetail = $"The declared deliverable is larger than the {MaxArtifactBytes}-byte per-file capture cap, so none of its bytes were captured.",
-            CaptureSource = CompletenessCaptureSource, NoticedAt = now, Resolution = CaptureGapResolution.Open,
-            SchemaVersion = WorkflowRunDataContract.CurrentVersion, CreatedAt = now,
-        };
-    }
 
     /// <summary>Idempotent per <c>(attempt, epoch, path)</c>: an existing CURRENT row for the same coordinates is superseded by the fresh one — a pointer, never a rewrite (the #1352 discipline), so history stays intact and consumers follow the unsuperseded row.</summary>
     private async Task UpsertAsync(ArtifactManifest fresh, CancellationToken cancellationToken)
@@ -243,5 +209,31 @@ public sealed class ArtifactManifestStore : IArtifactManifestStore, IScopedDepen
     /// five-parameter cap, and it is private and single-use. Publishing it would widen the message contract with a
     /// type no consumer can name, which is the cost the rule exists to avoid, not incur.</para>
     /// </summary>
-    private sealed record DeclaredDeliverableSkip(Guid TeamId, Guid? WorkflowRunId, Guid AgentRunId, string Path, WorkspaceArtifactReadFailure Failure);
+    private sealed record DeclaredDeliverableSkip(Guid AgentRunId, string Path, WorkspaceArtifactReadFailure Failure);
+
+    /// <summary>
+    /// Re-reads the exact handle the workspace guard admitted, never its mutable path. Each pass gets an independent
+    /// positional cursor; local and routed writers still verify the admitted digest before committing placement, so a
+    /// same-inode content mutation between passes also fails closed.
+    /// </summary>
+    private sealed class WorkspaceArtifactSource : IArtifactWriteSource, IDisposable
+    {
+        private WorkspaceArtifactFile? _file;
+
+        public WorkspaceArtifactSource(WorkspaceArtifactFile file)
+        {
+            _file = file;
+            LengthBytes = file.LengthBytes;
+        }
+
+        public long LengthBytes { get; }
+
+        public ValueTask<Stream> OpenReadAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult(_file?.OpenRead() ?? throw new ObjectDisposedException(nameof(WorkspaceArtifactSource)));
+        }
+
+        public void Dispose() => Interlocked.Exchange(ref _file, null)?.Dispose();
+    }
 }

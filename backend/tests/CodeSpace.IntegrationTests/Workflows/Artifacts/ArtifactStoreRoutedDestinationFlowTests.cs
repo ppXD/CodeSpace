@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Autofac;
@@ -144,6 +145,138 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IAsyncLifetime
 
         using var scope = _fixture.BeginScope();
         (await scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, artifactId, CancellationToken.None))!.Bytes.ShouldBe(content);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_declared_stream_mints_its_retention_row_with_the_artifact_insert(bool routed)
+    {
+        var (teamId, actorId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        if (routed) await SeedRouteAsync(teamId, await SeedProfileAsync(teamId, NewRoot()));
+        var content = Encoding.UTF8.GetBytes(new string(routed ? 'R' : 'L', 600_000));
+        var source = new ReopenableByteSource(content);
+
+        ArtifactStreamRetentionWrite write;
+        using (var scope = _fixture.BeginScope())
+        {
+            var request = new ArtifactStreamRetentionWriteRequest(new ArtifactStreamWriteRequest(teamId, "application/octet-stream", source),
+                ArtifactRetentionClass.ArtifactManifestContent, "artifact_manifest", actorId);
+            write = await scope.Resolve<IArtifactStreamRetentionWriter>().PutDeclaredAsync(request, CancellationToken.None);
+        }
+
+        write.Declared.ShouldBeTrue();
+        write.Sha256.ShouldBe(ArtifactStore.ComputeSha256Hex(content));
+        write.SizeBytes.ShouldBe(content.LongLength);
+        using var verify = _fixture.BeginScope();
+        var retention = await verify.Resolve<CodeSpaceDbContext>().WorkflowArtifactRetention.AsNoTracking().SingleAsync(row => row.ArtifactId == write.ArtifactId);
+        retention.State.ShouldBe(ArtifactRetentionState.Declared);
+        retention.HolderId.ShouldBe(actorId);
+    }
+
+    [Fact]
+    public async Task A_later_plain_writer_of_declared_stream_content_revokes_the_declaration()
+    {
+        var (teamId, actorId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var content = Encoding.UTF8.GetBytes(new string('d', 600_000));
+        Guid declaredId;
+        using (var declaredScope = _fixture.BeginScope())
+        {
+            var request = new ArtifactStreamRetentionWriteRequest(new ArtifactStreamWriteRequest(teamId, "application/octet-stream", new ReopenableByteSource(content)),
+                ArtifactRetentionClass.ArtifactManifestContent, "artifact_manifest", actorId);
+            declaredId = (await declaredScope.Resolve<IArtifactStreamRetentionWriter>().PutDeclaredAsync(request, CancellationToken.None)).ArtifactId;
+        }
+
+        (await PutAsync(teamId, content)).ShouldBe(declaredId);
+
+        using var verify = _fixture.BeginScope();
+        (await verify.Resolve<CodeSpaceDbContext>().WorkflowArtifactRetention.AsNoTracking().SingleAsync(row => row.ArtifactId == declaredId)).State
+            .ShouldBe(ArtifactRetentionState.Revoked, "a shared identity is never eligible for collection through one producer's declaration");
+    }
+
+    [Fact]
+    public async Task A_later_plain_stream_writer_of_declared_stream_content_revokes_the_declaration()
+    {
+        var (teamId, actorId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var content = Encoding.UTF8.GetBytes(new string('s', 600_000));
+        Guid declaredId;
+        using (var declaredScope = _fixture.BeginScope())
+        {
+            var request = new ArtifactStreamRetentionWriteRequest(new ArtifactStreamWriteRequest(teamId, "application/octet-stream", new ReopenableByteSource(content)),
+                ArtifactRetentionClass.ArtifactManifestContent, "artifact_manifest", actorId);
+            declaredId = (await declaredScope.Resolve<IArtifactStreamRetentionWriter>().PutDeclaredAsync(request, CancellationToken.None)).ArtifactId;
+        }
+
+        (await PutStreamAsync(teamId, new ReopenableByteSource(content))).ShouldBe(declaredId);
+
+        using var verify = _fixture.BeginScope();
+        (await verify.Resolve<CodeSpaceDbContext>().WorkflowArtifactRetention.AsNoTracking().SingleAsync(row => row.ArtifactId == declaredId)).State
+            .ShouldBe(ArtifactRetentionState.Revoked, "the additive streaming face must pass through the same dedup/revocation fence as byte writes");
+    }
+
+    [Fact]
+    public async Task A_declared_stream_dedup_hit_never_mints_a_declaration()
+    {
+        var (teamId, actorId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var content = Encoding.UTF8.GetBytes(new string('p', 600_000));
+        var plainId = await PutAsync(teamId, content);
+
+        ArtifactStreamRetentionWrite write;
+        using (var scope = _fixture.BeginScope())
+        {
+            var request = new ArtifactStreamRetentionWriteRequest(new ArtifactStreamWriteRequest(teamId, "application/octet-stream", new ReopenableByteSource(content)),
+                ArtifactRetentionClass.ArtifactManifestContent, "artifact_manifest", actorId);
+            write = await scope.Resolve<IArtifactStreamRetentionWriter>().PutDeclaredAsync(request, CancellationToken.None);
+        }
+
+        write.ArtifactId.ShouldBe(plainId);
+        write.Declared.ShouldBeFalse();
+        using var verify = _fixture.BeginScope();
+        (await verify.Resolve<CodeSpaceDbContext>().WorkflowArtifactRetention.AnyAsync(row => row.ArtifactId == plainId)).ShouldBeFalse(
+            "a declaration cannot be attached after an id may already have escaped to an unenumerated holder");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_same_length_source_change_is_refused_before_declared_metadata_commits(bool routed)
+    {
+        var (teamId, actorId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var routedRoot = NewRoot();
+        if (routed) await SeedRouteAsync(teamId, await SeedProfileAsync(teamId, routedRoot));
+        var admitted = RandomNumberGenerator.GetBytes(600_000);
+        var changed = admitted.ToArray();
+        changed[^1] ^= 0xff;
+        var source = new ChangingByteSource(admitted, changed);
+
+        async Task WriteAsync()
+        {
+            using var scope = _fixture.BeginScope();
+            var request = new ArtifactStreamRetentionWriteRequest(new ArtifactStreamWriteRequest(teamId, "application/octet-stream", source),
+                ArtifactRetentionClass.ArtifactManifestContent, "artifact_manifest", actorId);
+            await scope.Resolve<IArtifactStreamRetentionWriter>().PutDeclaredAsync(request, CancellationToken.None);
+        }
+
+        if (routed)
+        {
+            var failure = await Should.ThrowAsync<ArtifactStorageDestinationUnavailableException>(WriteAsync);
+            failure.TransferProblem.ShouldBe(ArtifactCasProblemCode.TargetCorrupt);
+            File.Exists(ObjectPath(routedRoot, ArtifactStore.ComputeSha256Hex(admitted))).ShouldBeFalse(
+                "the routed driver must reject the changed second pass before publishing the admitted object's key");
+        }
+        else
+        {
+            await Should.ThrowAsync<InvalidDataException>(WriteAsync);
+            File.Exists(new Uri(LocalUrlFor(ArtifactStore.ComputeSha256Hex(admitted))).LocalPath).ShouldBeFalse(
+                "the local stream writer must delete its temporary file before the digest-mismatched source can become canonical");
+        }
+
+        source.OpenCount.ShouldBe(2, "the deterministic mutation occurs exactly between identity admission and placement");
+        using var verify = _fixture.BeginScope();
+        (await verify.Resolve<CodeSpaceDbContext>().WorkflowArtifact.AnyAsync(row => row.TeamId == teamId)).ShouldBeFalse(
+            "metadata cannot claim bytes whose placement rejected the admitted digest");
+        (await verify.Resolve<CodeSpaceDbContext>().WorkflowArtifactRetention.AnyAsync(row => row.TeamId == teamId)).ShouldBeFalse(
+            "the declaration rides the metadata transaction and therefore cannot outlive a rejected placement");
     }
 
     [Fact]
@@ -1611,6 +1744,29 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IAsyncLifetime
             cancellationToken.ThrowIfCancellationRequested();
             OpenCount++;
             return ValueTask.FromResult<Stream>(new ObservedReadStream(_bytes, requested => LargestReadRequest = Math.Max(LargestReadRequest, requested)));
+        }
+    }
+
+    private sealed class ChangingByteSource : IArtifactWriteSource
+    {
+        private readonly byte[] _admitted;
+        private readonly byte[] _changed;
+
+        public ChangingByteSource(byte[] admitted, byte[] changed)
+        {
+            if (admitted.Length != changed.Length) throw new ArgumentException("The mutation must preserve length.", nameof(changed));
+            _admitted = admitted;
+            _changed = changed;
+        }
+
+        public long LengthBytes => _admitted.LongLength;
+        public int OpenCount { get; private set; }
+
+        public ValueTask<Stream> OpenReadAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var bytes = OpenCount++ == 0 ? _admitted : _changed;
+            return ValueTask.FromResult<Stream>(new MemoryStream(bytes, writable: false));
         }
     }
 

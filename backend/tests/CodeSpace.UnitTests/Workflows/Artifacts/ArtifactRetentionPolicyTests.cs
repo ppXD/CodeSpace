@@ -92,7 +92,9 @@ public sealed class ArtifactRetentionPolicyTests
         // Rule 7: the declaring write is a SIBLING face on the store, not a widening of IArtifactStore — so every
         // existing PutAsync caller keeps writing bytes that are permanently unreapable.
         typeof(ArtifactStore).GetInterfaces().ShouldContain(typeof(IArtifactRetentionWriter));
+        typeof(ArtifactStore).GetInterfaces().ShouldContain(typeof(IArtifactStreamRetentionWriter));
         typeof(IArtifactStore).GetMethods().Select(method => method.Name).ShouldNotContain(nameof(IArtifactRetentionWriter.PutDeclaredAsync));
+        typeof(IArtifactStreamStore).GetMethods().Select(method => method.Name).ShouldNotContain(nameof(IArtifactStreamRetentionWriter.PutDeclaredAsync));
     }
 
     [Fact]

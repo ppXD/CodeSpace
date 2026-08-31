@@ -28,31 +28,30 @@ namespace CodeSpace.IntegrationTests.Agents;
 /// <summary>
 /// 🟢 Integration (real Postgres + real executor + real OS process + real filesystem): the capture promise now states
 /// WHAT WAS OWED, so a shortfall has something to be short of. A run declaring three deliverables, one of them past
-/// the per-file capture cap, captures two — and both halves of that fact are durable: the promise carries the declared
-/// list, its facts carry the counts, and the bytes nobody took are a <c>BoundExceeded</c> span on the completeness
-/// plane rather than a silence.
+/// the former byte-array cap, captures all three through the streaming retention seam: the promise carries the
+/// declared list, its facts carry the count, and no false <c>BoundExceeded</c> span remains.
 ///
 /// <para>The invariant under test alongside them is what the bound must NOT do: the deliverable EXISTS, so the
-/// acceptance oracle passes and the run lands Succeeded. A capture bound is an accounting fact about the record, never
-/// an execution authority over work that was actually done.</para>
+/// acceptance oracle passes and the run lands Succeeded. Changing the capture transport must remain observation-only
+/// and must not become execution authority over work that was actually done.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
 public class DeclaredDeliverablePromiseFlowTests
 {
-    /// <summary>One byte past the store's per-file cap — the smallest deliverable that is honestly over it.</summary>
-    private const long OverCapBytes = ArtifactManifestStore.MaxArtifactBytes + 1;
+    /// <summary>One byte past the former byte-array cap, proving the capture seam no longer allocates by file size.</summary>
+    private const long LargeDeliverableBytes = ArtifactManifestStore.MaxArtifactBytes + 1;
 
     private readonly PostgresFixture _fixture;
 
     public DeclaredDeliverablePromiseFlowTests(PostgresFixture fixture) => _fixture = fixture;
 
     [Fact]
-    public async Task A_capture_that_fell_short_of_what_was_declared_is_visible()
+    public async Task The_capture_promise_reports_all_streamed_declared_deliverables()
     {
         if (OperatingSystem.IsWindows()) return;   // the scripted harness is a /bin/sh invocation
 
-        var world = await RunDeclaringAnOverCapDeliverableAsync();
+        var world = await RunDeclaringALargeDeliverableAsync();
 
         using var scope = _fixture.BeginScope();
         var promise = await scope.Resolve<CodeSpaceDbContext>().CaptureIntent.AsNoTracking()
@@ -65,48 +64,44 @@ public class DeclaredDeliverablePromiseFlowTests
 
         var facts = JsonDocument.Parse(promise.FactsJson!).RootElement;
         facts.GetProperty("declaredDeliverables").GetInt32().ShouldBe(3);
-        facts.GetProperty("typedArtifacts").GetInt32().ShouldBe(2, "the over-cap deliverable's bytes were never taken");
+        facts.GetProperty("typedArtifacts").GetInt32().ShouldBe(3, "the large deliverable is retained without a payload-sized allocation");
         facts.GetProperty("empty").GetBoolean().ShouldBeFalse();
     }
 
     [Fact]
-    public async Task An_over_cap_deliverable_is_a_bound_exceeded_gap_and_the_run_still_succeeds()
+    public async Task A_large_deliverable_is_retained_without_regrading_the_run()
     {
         if (OperatingSystem.IsWindows()) return;
 
-        var world = await RunDeclaringAnOverCapDeliverableAsync();
+        var world = await RunDeclaringALargeDeliverableAsync();
 
         using var scope = _fixture.BeginScope();
         var run = await scope.Resolve<IAgentRunService>().GetAsync(world.AgentRunId, CancellationToken.None);
 
         run.Status.ShouldBe(AgentRunStatus.Succeeded,
-            $"the deliverable EXISTS, so the oracle passes — a capture bound must never re-grade work that was done. Error: {run.ResultJson}");
+            $"the deliverable EXISTS, so the oracle passes — the former heap guard must not survive as a durable capture limit. Error: {run.ResultJson}");
 
-        var gap = (await scope.Resolve<CodeSpaceDbContext>().WorkflowRunCaptureGap.AsNoTracking()
+        var gaps = await scope.Resolve<CodeSpaceDbContext>().WorkflowRunCaptureGap.AsNoTracking()
                 .Where(candidate => candidate.WorkflowRunId == world.WorkflowRunId && candidate.SubjectKind == WorkflowRunDataOwnerKinds.Deliverable)
-                .ToListAsync())
-            .ShouldHaveSingleItem("exactly the one deliverable past the cap is a known-missing span; the two captured ones are not");
-
-        gap.SubjectId.ShouldBe("big.csv");
-        gap.Reason.ShouldBe(CaptureGapReason.BoundExceeded, "the bytes past the cut were never taken from the source — that is what this reason means");
-        gap.Resolution.ShouldBe(CaptureGapResolution.Open);
-        gap.ReasonDetail.ShouldNotBeNullOrWhiteSpace("a human reading one row must learn WHICH bound stopped the capture");
+                .ToListAsync();
+        gaps.ShouldBeEmpty("streaming capture took every declared byte, so recording a known-missing span would be false");
 
         var manifests = await scope.Resolve<IArtifactManifestStore>().ListForAgentRunAsync(world.AgentRunId, world.TeamId, CancellationToken.None);
         manifests.Select(manifest => manifest.LogicalPath).OrderBy(path => path, StringComparer.Ordinal).ToArray()
-            .ShouldBe(new[] { "notes.md", "report.md" }, customMessage: "an over-cap deliverable is SKIPPED, never clipped into a manifest row that lies about its bytes");
+            .ShouldBe(new[] { "big.csv", "notes.md", "report.md" });
+        manifests.Single(manifest => manifest.LogicalPath == "big.csv").SizeBytes.ShouldBe(LargeDeliverableBytes);
     }
 
-    // ─── The world: a workflow-bound agent run whose acceptance declares three deliverables, one past the cap ───
+    // ─── The world: a workflow-bound agent run whose acceptance declares three deliverables, one past the former cap ───
 
-    private async Task<RunWorld> RunDeclaringAnOverCapDeliverableAsync()
+    private async Task<RunWorld> RunDeclaringALargeDeliverableAsync()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var workflowRunId = await SeedWorkflowRunAsync(teamId, userId);
         var agentRunId = await CreateRunAsync(teamId, workflowRunId);
 
         await ExecuteAsync(agentRunId, new ScriptedHarness(
-            $"printf '# findings\\n' > report.md; printf 'notes\\n' > notes.md; head -c {OverCapBytes} /dev/zero > big.csv"));
+            $"printf '# findings\\n' > report.md; printf 'notes\\n' > notes.md; head -c {LargeDeliverableBytes} /dev/zero > big.csv"));
 
         return new RunWorld(teamId, workflowRunId, agentRunId);
     }
