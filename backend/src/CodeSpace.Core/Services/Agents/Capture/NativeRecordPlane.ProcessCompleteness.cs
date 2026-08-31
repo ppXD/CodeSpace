@@ -36,7 +36,9 @@ namespace CodeSpace.Core.Services.Agents.Capture;
 /// at all (<c>LoadRunScopeAsync</c> returning null, which happens before anything is declared), leave this facet with no
 /// statement — and an absent statement is the indeterminate answer, not a complete one. A STANDALONE Agent Run is the
 /// same case by keying: the manifest is keyed to a workflow run, so a run bound to none states nothing rather than
-/// stating it against an invented parent, the same named gap 0137/0141 already carry.</para>
+/// stating it against an invented parent, the same named gap 0137/0141 already carry. Its GAP is not the same case,
+/// since 0184: a refused launch of a standalone run is exactly as locatable a span, and it is recorded against the
+/// Agent Run that owns it.</para>
 ///
 /// <para><b>Why a refusal is not always a missing record, which is the one thing this producer must get right.</b> 0137
 /// refuses a superseded worker's attempt insert BY DESIGN — that is the intended outcome of reclaim-for-reattach, not a
@@ -68,8 +70,7 @@ public sealed partial class NativeRecordPlane
         }
         catch (Exception refusal) when (refusal is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
-            if (workflowRunId is { } runId)
-                await NoticeRefusedAttemptAsync(db, new RefusedAttempt(request.TeamId, request.AgentRunId, runId, attemptId, request.WorkerFenceEpoch), refusal, cancellationToken).ConfigureAwait(false);
+            await NoticeRefusedAttemptAsync(db, new RefusedAttempt(request.TeamId, request.AgentRunId, workflowRunId, attemptId, request.WorkerFenceEpoch), refusal, cancellationToken).ConfigureAwait(false);
 
             throw;
         }
@@ -163,6 +164,7 @@ public sealed partial class NativeRecordPlane
         return new WorkflowRunCaptureGap
         {
             Id = Guid.NewGuid(), TeamId = refused.TeamId, WorkflowRunId = refused.WorkflowRunId,
+            AgentRunId = refused.AgentRunId,
             SubjectKind = WorkflowRunDataOwnerKinds.HarnessProcessAttempt, SubjectId = refused.AttemptId.ToString(),
             RangeKind = CaptureGapRangeKind.Unbounded, Reason = CaptureGapReason.WriteRefused,
             ReasonDetail = $"The durable write of this harness process attempt was refused ({refusal.GetType().Name}) while the run was still this worker's at fence {refused.WorkerFenceEpoch}, so the process it identifies has no record of its own.",
@@ -175,14 +177,19 @@ public sealed partial class NativeRecordPlane
     /// How many processes this run should hold a record for stops being knowable. Reached when the attempt write was
     /// refused after the run was reclaimed: the plane cannot tell whether a process ran unrecorded or whether the row
     /// was never this worker's to write, and an expectation nobody could establish must not read as complete.
+    ///
+    /// <para>A standalone run has no statement to revise, which is not an omission: no expectation was ever declared
+    /// for it, so there is nothing an un-stating could make less certain.</para>
     /// </summary>
     private async Task MarkAttemptsIndeterminateAsync(RefusedAttempt refused, CancellationToken cancellationToken)
     {
-        if (!await _completeness.UnstateExpectationAsync(refused.TeamId, refused.WorkflowRunId, WorkflowRunDataOwnerKinds.HarnessProcessAttempt, cancellationToken).ConfigureAwait(false)) return;
+        if (refused.WorkflowRunId is not { } workflowRunId) return;
 
-        _logger.LogWarning("The harness process attempt of workflow run {WorkflowRunId} was refused after the run left this worker's fence {Fence}, so how many processes the run should hold a record for is unstated rather than assumed satisfied", refused.WorkflowRunId, refused.WorkerFenceEpoch);
+        if (!await _completeness.UnstateExpectationAsync(refused.TeamId, workflowRunId, WorkflowRunDataOwnerKinds.HarnessProcessAttempt, cancellationToken).ConfigureAwait(false)) return;
+
+        _logger.LogWarning("The harness process attempt of workflow run {WorkflowRunId} was refused after the run left this worker's fence {Fence}, so how many processes the run should hold a record for is unstated rather than assumed satisfied", workflowRunId, refused.WorkerFenceEpoch);
     }
 
-    /// <summary>The launch whose process record was refused, carried as one value so the refusal path stays inside the parameter cap.</summary>
-    private sealed record RefusedAttempt(Guid TeamId, Guid AgentRunId, Guid WorkflowRunId, Guid AttemptId, long WorkerFenceEpoch);
+    /// <summary>The launch whose process record was refused, carried as one value so the refusal path stays inside the parameter cap. The workflow run is nullable because a standalone launch's refusal is just as locatable a span, even though no manifest can carry its facet.</summary>
+    private sealed record RefusedAttempt(Guid TeamId, Guid AgentRunId, Guid? WorkflowRunId, Guid AttemptId, long WorkerFenceEpoch);
 }

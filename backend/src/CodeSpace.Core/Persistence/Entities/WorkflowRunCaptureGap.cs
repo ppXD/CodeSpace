@@ -26,11 +26,17 @@ namespace CodeSpace.Core.Persistence.Entities;
 /// thereby never appear as missing. A recovery must CITE what now covers the span; what no schema can check is whether
 /// the cited row's bytes actually do.</para>
 ///
-/// <para>Keyed as the tool-call plane is, which is why <see cref="WorkflowRunId"/> is non-nullable: a gap noticed by a
-/// STANDALONE Agent Run has no row here yet, the same named gap the harness execution plane carries.
-/// <see cref="SubjectId"/>, <see cref="StreamId"/> and <see cref="RecoveredById"/> are SOFT references — the rows they
-/// name arrive through bounded sweepers, and refusing a gap because its subject is not projected yet would be the one
-/// answer this table must never give.</para>
+/// <para>Keyed to the run that OWNS the record, which for a STANDALONE Agent Run is the Agent Run itself: a NOT NULL
+/// <see cref="WorkflowRunId"/> made such a run's gap unrepresentable, so its producer recorded nothing — the exact
+/// silence this table exists to break. Both keys are nullable and at least one is present, enforced by a CHECK because
+/// a gap that names no run is a hole nobody can locate; each is proved against its run COMPOSITELY with
+/// <see cref="TeamId"/>, so neither key going null makes a gap readable across teams. Nullable does not mean either
+/// key is a producer's to omit: 0184's guard DERIVES <see cref="WorkflowRunId"/> from the Agent Run a gap names, so a
+/// gap of a workflow-bound run can never be filed where that run's own readers do not look. This is the shape
+/// <see cref="WorkflowRunHarnessExecution"/> already has, mirror included. <see cref="SubjectId"/>,
+/// <see cref="StreamId"/> and <see cref="RecoveredById"/> are SOFT references — the rows they name arrive through
+/// bounded sweepers, and refusing a
+/// gap because its subject is not projected yet would be the one answer this table must never give.</para>
 ///
 /// <para><b>Who records and reads one.</b> The native-record capture plane (<c>NativeRecordPlane</c>) records a
 /// <see cref="CaptureGapReason.WriteRefused"/> span when a batch of captured frames, a process-attempt identity, or a
@@ -39,9 +45,12 @@ namespace CodeSpace.Core.Persistence.Entities;
 /// has to survive whatever happens to the claim it contradicts,
 /// and a shared transaction would let a refused statement take the gap down with it. The other three reasons are
 /// representable and unproduced — no plane yet notices its own bound, its own torn re-attach or its own unreadable
-/// frame. The Agent Run operator summary is the first production reader, and only for gaps carrying the exact attempt
-/// attribution this row can prove; it is bounded, team-scoped and observation-only. No completion, terminal decision,
-/// planner, oracle or router reads or folds one.</para>
+/// frame. All THREE of that plane's spans name the run that owns them, for either key shape the run can have. The
+/// Agent Run operator summary is the first production reader, over the gaps that NAME this Agent Run — including the
+/// ones whose subject IS the refused write itself, a process attempt or an execution identity, which therefore carry
+/// no attempt coordinate at all: a reader that demanded one would leave exactly those gaps recorded and unreachable.
+/// It is bounded, team-scoped and observation-only. No completion, terminal decision, planner, oracle or router reads
+/// or folds one.</para>
 /// </summary>
 public sealed class WorkflowRunCaptureGap : IEntity<Guid>
 {
@@ -50,17 +59,18 @@ public sealed class WorkflowRunCaptureGap : IEntity<Guid>
     /// <summary>Tenant scope on every recorded gap.</summary>
     public Guid TeamId { get; set; }
 
-    /// <summary>The owning workflow run, proved by a composite foreign key as the tool-call plane's is.</summary>
-    public Guid WorkflowRunId { get; set; }
+    /// <summary>The owning workflow run, proved by a composite foreign key as the tool-call plane's is; NULL for a gap noticed by a standalone Agent Run, which has none.</summary>
+    public Guid? WorkflowRunId { get; set; }
 
     /// <summary>
-    /// Exact Agent Run coordinate when the producer noticed this gap while observing one harness process. This and the
-    /// three attempt coordinates below are all null or all present; a partial attribution is refused rather than left
-    /// for a reader to guess.
+    /// The owning Agent Run, proved by a composite foreign key of its own so this key carries the same tenant scope the
+    /// workflow run key does. It is deliberately NOT part of the all-or-none attempt attribution below: those columns
+    /// hard-reference the process attempt row, so a gap whose subject IS a refused attempt insert would have had to
+    /// surrender its owner to stay legal — leaving the most important gap on this plane the one that could name no run.
     /// </summary>
     public Guid? AgentRunId { get; set; }
 
-    /// <summary>The durable harness execution that owns the attributed process attempt.</summary>
+    /// <summary>The durable harness execution that owns the attributed process attempt. This and the two coordinates below are all null or all present, over an <see cref="AgentRunId"/> that must then be present too; a partial attribution is refused rather than left for a reader to guess.</summary>
     public Guid? HarnessExecutionId { get; set; }
 
     /// <summary>

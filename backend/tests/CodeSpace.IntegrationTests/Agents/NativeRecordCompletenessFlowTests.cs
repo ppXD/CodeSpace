@@ -153,8 +153,18 @@ public sealed class NativeRecordCompletenessFlowTests
         var handle = await OpenAsync(plane, run);
 
         await RejectsAttributedGapAsync(handle, gap => gap.AgentRunId = null, "all-or-none");
-        await RejectsAttributedGapAsync(handle, gap => gap.TeamId = Guid.NewGuid(), "does not match one frozen harness process attempt");
-        await RejectsAttributedGapAsync(handle, gap => gap.AgentRunId = Guid.NewGuid(), "does not match one frozen harness process attempt");
+
+        // The first two are caught by the OWNER derivation, which runs first because everything after it keys off the
+        // workflow run that derivation settles. Neither is admitted, and each is now told which coordinate disagreed:
+        // a gap whose team does not own the Agent Run it names is a tenancy claim, not an attempt-attribution one.
+        await RejectsAttributedGapAsync(handle, gap => gap.TeamId = Guid.NewGuid(), "requires its tenant-bound AgentRun");
+        await RejectsAttributedGapAsync(handle, gap => gap.AgentRunId = Guid.NewGuid(), "requires its tenant-bound AgentRun");
+
+        // A parent that DISAGREES is refused rather than corrected: an omitted one is a producer that did not carry a
+        // value it never had, while a wrong one is a producer that believes this gap belongs to another run, and
+        // quietly rewriting that would hide the disagreement instead of reporting it.
+        await RejectsAttributedGapAsync(handle, gap => gap.WorkflowRunId = Guid.NewGuid(), "must name its AgentRun's workflow run exactly");
+
         await RejectsAttributedGapAsync(handle, gap => gap.HarnessExecutionId = Guid.NewGuid(), "does not match one frozen harness process attempt");
         await RejectsAttributedGapAsync(handle, gap => gap.HarnessProcessAttemptId = Guid.NewGuid(), "does not match one frozen harness process attempt");
         await RejectsAttributedGapAsync(handle, gap => gap.AttemptWorkerFenceEpoch++, "does not match one frozen harness process attempt");
@@ -363,10 +373,12 @@ public sealed class NativeRecordCompletenessFlowTests
     }
 
     /// <summary>
-    /// A STANDALONE Agent Run belongs to no workflow run, and both completeness tables are keyed to one. Its frames are
-    /// still recorded and NO statement is invented for them — the same named keying gap 0137/0141 already carry, and a
-    /// row against an invented parent would be worse than none. A reader must therefore treat an absent statement as
-    /// indeterminate, which is what the manifest entity already says a later fold has to do.
+    /// A STANDALONE Agent Run belongs to no workflow run, and the MANIFEST is keyed to one. Its frames are still
+    /// recorded and NO statement is invented for them — the same named keying gap 0137/0141 already carry, and a row
+    /// against an invented parent would be worse than none. A reader must therefore treat an absent statement as
+    /// indeterminate, which is what the manifest entity already says a later fold has to do. The gap plane is keyed to
+    /// the run that OWNS the record instead, so nothing here rests on a run's losses being unrecordable — this run
+    /// simply lost nothing.
     /// </summary>
     [Fact]
     public async Task A_run_that_belongs_to_no_workflow_run_records_its_frames_and_states_no_manifest()
@@ -386,8 +398,144 @@ public sealed class NativeRecordCompletenessFlowTests
         (await db.WorkflowRunNativeRecord.CountAsync(candidate => candidate.AgentRunId == run.AgentRunId)).ShouldBe(1,
             customMessage: "the capture floor is untouched: the frame is recorded whether or not a workflow run exists to key a statement to");
         (await db.WorkflowRunDataManifest.CountAsync(candidate => candidate.TeamId == run.TeamId)).ShouldBe(0,
-            customMessage: "the plane is keyed to a workflow run, so a standalone run states nothing rather than stating it against an invented parent");
+            customMessage: "the manifest is keyed to a workflow run, so a standalone run states nothing rather than stating it against an invented parent");
         (await db.WorkflowRunCaptureGap.CountAsync(candidate => candidate.TeamId == run.TeamId)).ShouldBe(0);
+    }
+
+    /// <summary>
+    /// THE RUN THIS PRODUCER USED TO BE SILENT ABOUT. A standalone Agent Run has no workflow run, and while the gap
+    /// plane demanded one its producer's only legal answer to a refused batch was to record nothing — so the run whose
+    /// facet no manifest can carry was also the run whose losses left no trace at all. A gap has to be recordable
+    /// wherever a producer can notice one, or "complete because nothing said otherwise" comes back through the one door
+    /// the plane never closed.
+    ///
+    /// <para>The manifest stays absent on purpose: it is keyed to a workflow run and this run has none, and an absent
+    /// statement is the indeterminate answer. The gap is not the same case — it is keyed to the run that OWNS the
+    /// record.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_standalone_run_whose_batch_is_refused_records_a_gap_against_the_agent_run_that_owns_it()
+    {
+        var run = await SeedStandaloneRunAsync();
+        var plane = Plane(out var planeScope);
+        using var _ = planeScope;
+
+        var handle = await OpenAsync(plane, run);
+        handle.WorkflowRunId.ShouldBeNull(customMessage: "the premise: the opening reads its scope off the Agent Run, and this run belongs to no workflow run");
+
+        await plane.WriteAsync(Batch(handle, Frame(handle, 0), Frame(handle, 1)), CancellationToken.None);
+
+        // Ordinal 1 is already recorded on this stream, and ux_workflow_run_native_record_ordinal refuses the second
+        // copy — a real refusal of a real durable write, not a mocked one.
+        await Should.ThrowAsync<DbUpdateException>(() =>
+            plane.WriteAsync(Batch(handle, Frame(handle, 1), Frame(handle, 2)), CancellationToken.None));
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var gap = await db.WorkflowRunCaptureGap.AsNoTracking().SingleAsync(candidate => candidate.TeamId == run.TeamId);
+        gap.WorkflowRunId.ShouldBeNull(customMessage: "there is no workflow run, and inventing one would key the span to a parent that does not exist");
+        gap.AgentRunId.ShouldBe(run.AgentRunId, customMessage: "the run that owns the record is the run the gap names");
+        gap.HarnessProcessAttemptId.ShouldBe(handle.AttemptId,
+            customMessage: "the exact process attribution is admitted for a standalone run too — the guard's execution join has to be NULL-safe, or every attributed gap of exactly these runs is refused");
+        gap.AttemptWorkerFenceEpoch.ShouldBe(handle.WorkerFenceEpoch);
+        gap.SubjectKind.ShouldBe(WorkflowRunDataOwnerKinds.NativeRecord);
+        gap.Reason.ShouldBe(CaptureGapReason.WriteRefused);
+        gap.RangeStart.ShouldBe(1);
+        gap.Resolution.ShouldBe(CaptureGapResolution.Open);
+
+        (await db.WorkflowRunDataManifest.CountAsync(candidate => candidate.TeamId == run.TeamId)).ShouldBe(0,
+            customMessage: "the manifest is still keyed to a workflow run; a gap that can be recorded does not make a statement that cannot");
+
+        var observed = (await scope.Resolve<IAgentRunService>().GetSummaryForTeamAsync(run.AgentRunId, run.TeamId, CancellationToken.None))!.CaptureGaps;
+        observed.Availability.ShouldBe(AgentRunCaptureGapReadAvailability.Available);
+        observed.Items.ShouldHaveSingleItem().Id.ShouldBe(gap.Id,
+            customMessage: "the only production reader of this plane keys on the Agent Run, so a standalone run's gap reaches an operator through exactly the query that was already there");
+    }
+
+    /// <summary>
+    /// A gap that names NO run is a hole nobody can locate — no worse than the gap a NOT NULL workflow run stopped a
+    /// standalone run from recording, but no better either. Nullability had to be bought with the CHECK: the doc-comment
+    /// that says "every gap names a run" enforces nothing, and the database is where this plane's other invariants all
+    /// live.
+    /// </summary>
+    [Fact]
+    public async Task A_gap_that_names_neither_run_is_refused()
+    {
+        var run = await SeedStandaloneRunAsync();
+        var now = DateTimeOffset.UtcNow;
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.WorkflowRunCaptureGap.Add(new WorkflowRunCaptureGap
+        {
+            Id = Guid.NewGuid(), TeamId = run.TeamId, WorkflowRunId = null, AgentRunId = null,
+            SubjectKind = WorkflowRunDataOwnerKinds.NativeRecord, RangeKind = CaptureGapRangeKind.Unbounded,
+            Reason = CaptureGapReason.BoundExceeded, ReasonDetail = "a span belonging to nobody",
+            CaptureSource = "test-harness/v1", NoticedAt = now, Resolution = CaptureGapResolution.Open,
+            SchemaVersion = WorkflowRunDataContract.CurrentVersion, CreatedAt = now,
+        });
+
+        var refused = await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
+        refused.InnerException?.Message.ShouldContain("ck_workflow_run_capture_gap_owner",
+            customMessage: "the at-least-one rule has to be the database's, or a producer that forgot both keys writes an unattributable hole and nothing notices");
+    }
+
+    /// <summary>
+    /// THE OTHER WAY A NULLABLE KEY GOES WRONG, and the one that reads as good news. Every consequence a gap has —
+    /// 0146's downgrade, its open-gap floor, the complete verdict it refuses — is reached through the WORKFLOW run. So
+    /// a gap that named only its Agent Run while that run HAS a parent would sit in the table looking recorded while
+    /// its run went on reading complete: the exact false-complete this plane exists to prevent, arrived at through the
+    /// door the standalone shape opened.
+    ///
+    /// <para>A writer that knows the Agent Run already knows its parent, so this may not rest on producers remembering:
+    /// the database derives the parent from the Agent Run the gap names, the same value 0137 already makes the harness
+    /// execution mirror. The gap below names ONLY its Agent Run, and its run still stops reading complete.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_workflow_bound_runs_gap_that_names_only_its_agent_run_still_downgrades_its_run()
+    {
+        var run = await SeedWorkflowBoundRunAsync();
+        var plane = Plane(out var planeScope);
+        using var _ = planeScope;
+
+        var handle = await OpenAsync(plane, run);
+        await plane.WriteAsync(Batch(handle, Frame(handle, 0)), CancellationToken.None);
+
+        (await StatementAsync(run)).Verdict.IsStrictlyReadable().ShouldBeTrue(
+            customMessage: "the premise: the run reads complete before the gap arrives, or there is no downgrade below to observe");
+
+        await NoticeOwnerOnlyGapAsync(run);
+
+        using var scope = _fixture.BeginScope();
+        var stored = await scope.Resolve<CodeSpaceDbContext>().WorkflowRunCaptureGap.AsNoTracking()
+            .SingleAsync(candidate => candidate.TeamId == run.TeamId);
+
+        stored.WorkflowRunId.ShouldBe(run.WorkflowRunId,
+            customMessage: "the parent is recorded because the row's own Agent Run has one — left to a convention, a producer that omitted it would file this loss where none of the run's readers look");
+
+        (await StatementAsync(run)).Verdict.IsStrictlyReadable().ShouldBeFalse(
+            customMessage: "the run has a known-missing span and must stop reading complete. If this passes with the gap stored against no workflow run, the plane admitted the loss and let the run claim a whole record anyway.");
+    }
+
+    /// <summary>Records a gap naming ONLY its Agent Run — the shape a refused attempt insert leaves behind, since its subject is the very row the attempt columns would reference.</summary>
+    private async Task NoticeOwnerOnlyGapAsync(SeededRun run)
+    {
+        var now = DateTimeOffset.UtcNow;
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.WorkflowRunCaptureGap.Add(new WorkflowRunCaptureGap
+        {
+            Id = Guid.NewGuid(), TeamId = run.TeamId, WorkflowRunId = null, AgentRunId = run.AgentRunId,
+            SubjectKind = WorkflowRunDataOwnerKinds.HarnessProcessAttempt, SubjectId = Guid.NewGuid().ToString(),
+            RangeKind = CaptureGapRangeKind.Unbounded, Reason = CaptureGapReason.WriteRefused,
+            ReasonDetail = "a span whose producer named the run that owns it and nothing else",
+            CaptureSource = "test-harness/v1", NoticedAt = now, Resolution = CaptureGapResolution.Open,
+            SchemaVersion = WorkflowRunDataContract.CurrentVersion, CreatedAt = now,
+        });
+
+        await db.SaveChangesAsync();
     }
 
     /// <summary>
