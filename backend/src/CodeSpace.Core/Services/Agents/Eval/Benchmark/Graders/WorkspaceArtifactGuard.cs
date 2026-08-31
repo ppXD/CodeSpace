@@ -1,3 +1,5 @@
+using CodeSpace.Messages.Agents;
+
 namespace CodeSpace.Core.Services.Agents.Eval.Benchmark.Graders;
 
 /// <summary>
@@ -80,16 +82,18 @@ internal static class WorkspaceArtifactGuard
     /// Read a deliverable FILE's exact BYTES under the same containment rules as <see cref="ExistsWithin"/> —
     /// the typed-artifact capture's variant (DC-4). Unlike <see cref="TryReadWithin"/> an over-cap file is
     /// SKIPPED, never truncated: a judged prompt tolerates a truncation marker, but a captured artifact's bytes
-    /// ARE the deliverable — a silently-clipped dataset is a lie, absence is honest.
+    /// ARE the deliverable — a silently-clipped dataset is a lie, absence is honest. The refusal is TYPED
+    /// (<paramref name="failure"/>) because a caller has to tell "the agent never wrote it" — the acceptance
+    /// oracle's business — apart from "it exists and we did not take it", which is the caller's own capture loss.
     /// </summary>
-    public static bool TryReadBytesWithin(string root, string relativePath, long maxBytes, out byte[] bytes, out string? error)
+    public static bool TryReadBytesWithin(string root, string relativePath, long maxBytes, out byte[] bytes, out WorkspaceArtifactReadFailure? failure)
     {
         bytes = Array.Empty<byte>();
-        error = null;
+        failure = null;
 
         if (!ExistsWithin(root, relativePath))
         {
-            error = $"artifact-missing: {relativePath}";
+            failure = WorkspaceArtifactReadFailure.Missing;
             return false;
         }
 
@@ -97,15 +101,13 @@ internal static class WorkspaceArtifactGuard
 
         if (Directory.Exists(full))
         {
-            error = $"artifact-not-a-file: {relativePath}";
+            failure = WorkspaceArtifactReadFailure.NotAFile;
             return false;
         }
 
-        var info = new FileInfo(full);
-
-        if (info.Length > maxBytes)
+        if (new FileInfo(full).Length > maxBytes)
         {
-            error = $"artifact-over-cap: {relativePath} is {info.Length} bytes (cap {maxBytes})";
+            failure = WorkspaceArtifactReadFailure.OverCap;
             return false;
         }
 

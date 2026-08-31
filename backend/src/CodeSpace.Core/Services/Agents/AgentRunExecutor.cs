@@ -347,7 +347,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // P2 (capture-intent saga): the harness exited — the capture window opens HERE, before any of its
             // individually best-effort side effects (diff, offload, push, manifest). A crash inside the window
             // leaves this promise Intended; recovery marks it INDETERMINATE — visible, never a silent Succeeded.
-            await _captureIntents.OpenAsync(agentRunId, run.TeamId, run.WorkflowRunId, claimedEpoch, expectationsJson: null, cancellationToken).ConfigureAwait(false);
+            await _captureIntents.OpenAsync(agentRunId, run.TeamId, run.WorkflowRunId, claimedEpoch, CaptureExpectationsOf(effectiveTask), cancellationToken).ConfigureAwait(false);
 
             result = await VerifyProducedWorkAsync(agentRunId, run, harness, effectiveTask, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
 
@@ -411,7 +411,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // The capture sequence ran to its persist (a CONFIRMED empty included) — commit the promise with the
             // observed facts before the terminal CAS, so a crash between the two replays as re-verify + idempotent
             // re-commit, never as a terminal run with an unresolved promise.
-            await _captureIntents.CommitAsync(agentRunId, claimedEpoch, CaptureFactsOf(result), cancellationToken).ConfigureAwait(false);
+            await _captureIntents.CommitAsync(agentRunId, claimedEpoch, CaptureFactsOf(result, effectiveTask), cancellationToken).ConfigureAwait(false);
 
             await CompleteAndNotifyAsync(agentRunId, run.TeamId, result, claimedEpoch, cancellationToken).ConfigureAwait(false);
         }
@@ -502,7 +502,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             // P2 (capture-intent saga): the re-attach observed a finished process — ITS capture window opens here,
             // under the reclaim-bumped epoch this pass runs at (one promise per attempt).
-            await _captureIntents.OpenAsync(agentRunId, run.TeamId, run.WorkflowRunId, expectedEpoch, expectationsJson: null, cancellationToken).ConfigureAwait(false);
+            await _captureIntents.OpenAsync(agentRunId, run.TeamId, run.WorkflowRunId, expectedEpoch, CaptureExpectationsOf(task), cancellationToken).ConfigureAwait(false);
 
             result = await EnrichWithReattachWorkspaceChangesAsync(agentRunId, run.TeamId, handle, result, cancellationToken).ConfigureAwait(false);
 
@@ -518,7 +518,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // Publish-or-park (I1/I2): record what the re-attach path recovered, exactly like the live path.
             await PersistPublishManifestAsync(agentRunId, run, task, result, expectedEpoch, cancellationToken).ConfigureAwait(false);
 
-            await _captureIntents.CommitAsync(agentRunId, expectedEpoch, CaptureFactsOf(result), cancellationToken).ConfigureAwait(false);
+            await _captureIntents.CommitAsync(agentRunId, expectedEpoch, CaptureFactsOf(result, task), cancellationToken).ConfigureAwait(false);
 
             await CompleteAndNotifyAsync(agentRunId, run.TeamId, result, expectedEpoch, cancellationToken).ConfigureAwait(false);
         }
@@ -1408,8 +1408,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// <summary>
     /// DC-4: capture the DECLARED deliverable files (a non-TestsPass acceptance's path list) as TYPED artifact-manifest
     /// rows — inside the already-open capture-intent window, best-effort like every sibling capture step (a store
-    /// hiccup must never flip an otherwise-successful run). The count rides the result so the promise's facts stop
-    /// reading a typed capture as "empty".
+    /// hiccup must never flip an otherwise-successful run). What was TAKEN rides the result, so the promise's facts
+    /// stop reading a typed capture as "empty"; what was OWED is never read from here — the facts derive it from the
+    /// acceptance, the same place the promise did. A skipped deliverable is an accounting fact — it never re-grades
+    /// the run.
     /// </summary>
     private async Task<AgentRunResult> CaptureDeclaredArtifactsAsync(Guid runId, AgentRun run, AgentTask task, AgentRunResult result, IWorkspaceHandle? workspace, long claimedEpoch, CancellationToken cancellationToken)
     {
@@ -1428,18 +1430,46 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
     }
 
-    /// <summary>The capture promise's commit-time observation (P2 saga) — the compact JSON facts of what the capture sequence actually persisted, INCLUDING the explicit empty (a confirmed fact, never an absence). Pure + internal so it is unit-pinned without a database.</summary>
-    internal static string CaptureFactsOf(AgentRunResult result) => JsonSerializer.Serialize(new
+    /// <summary>
+    /// The capture promise's INTENT-time statement (P2 saga) — the deliverable paths THIS attempt undertook to
+    /// capture, written with the promise and before any capture side effect, so a shortfall has something to be short
+    /// OF. Null when the acceptance declares no paths, which is the honest "nothing was owed" rather than a silence a
+    /// total loss could hide behind. Pure + internal so it is unit-pinned without a database.
+    /// </summary>
+    internal static string? CaptureExpectationsOf(AgentTask task)
     {
-        changedFiles = result.ChangedFiles.Count,
-        patchInline = !string.IsNullOrEmpty(result.Patch),
-        patchArtifactId = result.PatchArtifactId,
-        branch = result.ProducedBranch,
-        pushedCommitSha = result.PushedCommitSha,
-        repos = result.RepositoryResults.Count,
-        typedArtifacts = result.CapturedArtifactCount,
-        empty = result.ChangedFiles.Count == 0 && string.IsNullOrEmpty(result.Patch) && result.PatchArtifactId is null && result.RepositoryResults.Count == 0 && result.CapturedArtifactCount == 0,
-    }, AgentJson.Options);
+        var declared = ArtifactManifestStore.DeclaredDeliverablePaths(task);
+
+        return declared.Count == 0 ? null : JsonSerializer.Serialize(new { deliverables = declared }, AgentJson.Options);
+    }
+
+    /// <summary>
+    /// The capture promise's commit-time observation (P2 saga) — the compact JSON facts of what the capture sequence
+    /// actually persisted, INCLUDING the explicit empty (a confirmed fact, never an absence). A run that owed
+    /// deliverables and took none is NOT that empty: it is a shortfall against <c>declaredDeliverables</c>.
+    /// <para><c>declaredDeliverables</c> is read off THE SAME acceptance <see cref="CaptureExpectationsOf"/> read, not
+    /// off the capture pass — an attempt whose capture never ran at all (the re-attach: the live workspace died with
+    /// the worker) would otherwise commit "none were owed" beside a promise naming three files, and a plane whose
+    /// whole value is that its two numbers can be compared cannot ship two numbers that disagree by construction.</para>
+    /// Pure + internal so it is unit-pinned without a database.
+    /// </summary>
+    internal static string CaptureFactsOf(AgentRunResult result, AgentTask task)
+    {
+        var declared = ArtifactManifestStore.DeclaredDeliverablePaths(task).Count;
+
+        return JsonSerializer.Serialize(new
+        {
+            changedFiles = result.ChangedFiles.Count,
+            patchInline = !string.IsNullOrEmpty(result.Patch),
+            patchArtifactId = result.PatchArtifactId,
+            branch = result.ProducedBranch,
+            pushedCommitSha = result.PushedCommitSha,
+            repos = result.RepositoryResults.Count,
+            declaredDeliverables = declared,
+            typedArtifacts = result.CapturedArtifactCount,
+            empty = result.ChangedFiles.Count == 0 && string.IsNullOrEmpty(result.Patch) && result.PatchArtifactId is null && result.RepositoryResults.Count == 0 && result.CapturedArtifactCount == 0 && declared == 0,
+        }, AgentJson.Options);
+    }
 
     /// <summary>Pure mapping from a run's produced-artifact facts to the manifest upsert shape — the PublishState/AcceptanceState derivation this pins: <see cref="PublishState.Pushed"/> is a CONFIRMED claim (review hole 2) — it requires BOTH the produced branch AND the readback-confirmed remote tip (P3b-2's <paramref name="pushedCommitSha"/>); a branch whose readback failed or mismatched maps PatchOnly with a named PublishError, because a push command that RAN proves intent, not arrival — and Pushed flows straight into Delivered/Delivery-Passed. Everything else unchanged: no branch means PatchOnly (PublishError distinguishes an intentional FAILED attempt from a BY-CHOICE guard skip, whose reason lands on Summary); acceptance mirrors the grader's tri-state verbatim. Internal so it's unit-pinned without a database.</summary>
     internal static PublishManifestUpsert BuildManifestUpsert(AgentRun run, string alias, Guid? repositoryId, string? baseSha, Guid? patchArtifactId, IReadOnlyList<string> changedFiles, string? producedBranch, string? publishError, string? publishSkipReason, bool? acceptancePassed, string? pushedCommitSha = null) => new()
