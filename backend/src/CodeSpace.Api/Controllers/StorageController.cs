@@ -90,6 +90,19 @@ public class StorageController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>
+    /// Runs one bounded phase-two pass. Evidence validates every member of one sealed manifest and retains its
+    /// smallest confirmed destination witness; only the final Evidence page admits idempotent sidecar minting.
+    /// Neither phase relinks an immutable legacy row.
+    /// </summary>
+    [HttpPost("profiles/{profileId:guid}/legacy-placements/adopt")]
+    [RequestSizeLimit(MaxMutationBodyBytes)]
+    public async Task<IActionResult> AdoptLegacyPlacements([FromRoute] Guid profileId, [FromBody] AdoptLegacyPlacementsCommand command, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(command with { ProfileId = profileId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     [HttpPost("profiles/{profileId:guid}/placements/abandon")]
     public async Task<IActionResult> AbandonProfilePlacements([FromRoute] Guid profileId, [FromBody] AbandonProfilePlacementsCommand command, CancellationToken cancellationToken)
     {

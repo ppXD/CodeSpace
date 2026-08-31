@@ -136,6 +136,78 @@ public sealed class LegacyLocalPlacementTests : IDisposable
     }
 
     [Fact]
+    public void Phase_two_has_one_generic_streaming_read_capability_without_admitting_writes_or_deletes()
+    {
+        var module = new LocalLegacyStorageProviderModule();
+
+        module.Capabilities.HasFlag(StorageProviderCapabilities.StreamingRead).ShouldBeTrue("phase two must re-hash bytes through the provider-neutral driver rather than cast back to the local backend");
+        module.Capabilities.HasFlag(StorageProviderCapabilities.StreamingWrite).ShouldBeFalse();
+        module.Capabilities.HasFlag(StorageProviderCapabilities.Delete).ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task The_driver_streams_the_exact_legacy_blob_without_turning_the_tier_writable()
+    {
+        var backend = new LocalFileArtifactBlobBackend(_root);
+        var payload = Encoding.UTF8.GetBytes("phase two reads every byte before it records a placement");
+        var sha = ArtifactStore.ComputeSha256Hex(payload);
+        await backend.WriteAsync(sha, payload, CancellationToken.None);
+        await using var driver = await new LocalLegacyArtifactStorageDriverFactory()
+            .CreateAsync(new ArtifactStorageDriverCreateRequest(Snapshot(DurableRoots.ArtifactStore(_root))), CancellationToken.None);
+
+        var opened = await driver.OpenReadAsync(new ArtifactStorageReadRequest(LegacyLocalObjectKeys.For(sha)!), CancellationToken.None);
+
+        opened.IsSuccess.ShouldBeTrue(opened.Error?.Message);
+        opened.ContentLength.ShouldBe(payload.LongLength);
+        opened.TotalLength.ShouldBe(payload.LongLength);
+        await using var content = opened.Content!;
+        using var copy = new MemoryStream();
+        await content.CopyToAsync(copy);
+        copy.ToArray().ShouldBe(payload);
+    }
+
+    [Fact]
+    public async Task A_missing_object_is_missing_only_while_the_configured_root_still_answers()
+    {
+        Directory.CreateDirectory(_root);
+        await using var driver = await new LocalLegacyArtifactStorageDriverFactory()
+            .CreateAsync(new ArtifactStorageDriverCreateRequest(Snapshot(_root)), CancellationToken.None);
+        var key = $"aa/bb/{new string('a', 64)}";
+
+        var head = await driver.HeadAsync(new ArtifactStorageHeadRequest(key), CancellationToken.None);
+        var read = await driver.OpenReadAsync(new ArtifactStorageReadRequest(key), CancellationToken.None);
+        var probe = await driver.ProbeAsync(new ArtifactStorageProbeRequest(), CancellationToken.None);
+
+        head.Error!.Code.ShouldBe(ArtifactStorageErrorCode.Missing);
+        read.Error!.Code.ShouldBe(ArtifactStorageErrorCode.Missing);
+        probe.Status.ShouldBe(ArtifactStorageProbeStatus.Available,
+            "the readable root is the independent fact that makes the two object-level Missing answers durable");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_missing_or_non_directory_root_never_impersonates_a_page_of_missing_objects(bool rootIsAFile)
+    {
+        if (rootIsAFile) await File.WriteAllTextAsync(_root, "this path is not a mounted directory");
+        await using var driver = await new LocalLegacyArtifactStorageDriverFactory()
+            .CreateAsync(new ArtifactStorageDriverCreateRequest(Snapshot(_root)), CancellationToken.None);
+        var key = $"aa/bb/{new string('b', 64)}";
+
+        var head = await driver.HeadAsync(new ArtifactStorageHeadRequest(key), CancellationToken.None);
+        var read = await driver.OpenReadAsync(new ArtifactStorageReadRequest(key), CancellationToken.None);
+        var readProbe = await driver.ProbeAsync(new ArtifactStorageProbeRequest(), CancellationToken.None);
+        var writeProbe = await driver.ProbeAsync(new ArtifactStorageProbeRequest { VerifyWriteAccess = true }, CancellationToken.None);
+
+        head.Error!.Code.ShouldBe(ArtifactStorageErrorCode.Unavailable);
+        read.Error!.Code.ShouldBe(ArtifactStorageErrorCode.Unavailable);
+        readProbe.Status.ShouldBe(ArtifactStorageProbeStatus.Unavailable);
+        writeProbe.Status.ShouldBe(ArtifactStorageProbeStatus.Unavailable,
+            "read-only is a capability answer only after the configured root has answered for its own liveness");
+        Directory.Exists(_root).ShouldBeFalse("a read probe must never provision the mount it was asked to verify");
+    }
+
+    [Fact]
     public async Task The_driver_refuses_to_remove_bytes_and_says_the_keys_are_shared()
     {
         await using var driver = await new LocalLegacyArtifactStorageDriverFactory()
@@ -170,14 +242,25 @@ public sealed class LegacyLocalPlacementTests : IDisposable
 
     [Theory]
     [InlineData(LegacyPlacementSurveyRefusalValue.None, 100, 99, true)]
-    [InlineData(LegacyPlacementSurveyRefusalValue.None, 0, 0, false)]   // resolves nothing: a key-mapping bug far more often than a lost destination
-    [InlineData(LegacyPlacementSurveyRefusalValue.None, 100, 0, false)] // resolves everything, confirms nothing: an unmounted or emptied root
+    [InlineData(LegacyPlacementSurveyRefusalValue.None, 0, 0, false)]
     [InlineData(LegacyPlacementSurveyRefusalValue.ProviderHasNoLegacyLayout, 0, 0, false)]
     [InlineData(LegacyPlacementSurveyRefusalValue.DestinationUnavailable, 0, 0, false)]
     [InlineData(LegacyPlacementSurveyRefusalValue.ProfileMissing, 0, 0, false)]
     public void Adoption_is_admitted_only_when_the_layout_named_rows_and_the_destination_answered(LegacyPlacementSurveyRefusalValue refusal, int resolved, int confirmed, bool expected)
     {
         LegacyAdoptionRules.AdmitsAdoption(refusal, resolved, confirmed).ShouldBe(expected);
+    }
+
+    [Fact]
+    public void Zero_resolved_keys_never_admits_phase_two_even_if_a_destination_answer_was_reported()
+    {
+        LegacyAdoptionRules.AdmitsAdoption(LegacyPlacementSurveyRefusalValue.None, resolved: 0, confirmed: 1).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void Zero_destination_confirmations_never_admits_phase_two_even_when_every_key_resolved()
+    {
+        LegacyAdoptionRules.AdmitsAdoption(LegacyPlacementSurveyRefusalValue.None, resolved: 100, confirmed: 0).ShouldBeFalse();
     }
 
     [Fact]

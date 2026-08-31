@@ -55,18 +55,32 @@ public sealed class StorageDestinationHealthSweepPopulationTests
         Swept(tables).ShouldBeEmpty();
     }
 
-    [Theory]
-    [InlineData(StorageProfileState.Active, true)]
-    [InlineData(StorageProfileState.Disabled, false)]
-    [InlineData(StorageProfileState.Retired, false)]
-    public void What_the_pass_verifies_follows_what_the_profile_still_admits(StorageProfileState state, bool verifyWrite)
+    [Fact]
+    public void An_active_holding_only_profile_is_read_probed_because_no_active_route_can_send_it_bytes()
     {
-        // Widening the population bought nothing while every pass asked to verify a WRITE: the lifecycle gate refuses
-        // that before any driver opens, so the row recorded for a Disabled or Retired destination restated
-        // storage_profile.state and never observed the destination at all. A read is admitted in every state.
+        var tables = Tables(StorageProfileState.Active, StorageRouteState.Draft, ArtifactLocationState.Available);
+
+        Destinations(tables).Single().VerifyWrite.ShouldBeFalse();
+    }
+
+    [Fact]
+    public void An_active_route_wins_when_the_same_profile_also_holds_a_placement()
+    {
+        var tables = Tables(StorageProfileState.Active, StorageRouteState.Active, ArtifactLocationState.Available);
+
+        Destinations(tables).Single().VerifyWrite.ShouldBeTrue();
+    }
+
+    [Theory]
+    [InlineData(StorageProfileState.Active)]
+    [InlineData(StorageProfileState.Disabled)]
+    [InlineData(StorageProfileState.Retired)]
+    public void An_active_route_always_asks_the_write_question_even_when_profile_lifecycle_will_refuse_it(StorageProfileState state)
+    {
+        // A lifecycle refusal is itself the broken route answer: the next run still resolves the Active route here.
         var tables = Tables(state, StorageRouteState.Active, ArtifactLocationState.Available);
 
-        Destinations(tables).Single().VerifyWrite.ShouldBe(verifyWrite);
+        Destinations(tables).Single().VerifyWrite.ShouldBeTrue();
     }
 
     [Fact]

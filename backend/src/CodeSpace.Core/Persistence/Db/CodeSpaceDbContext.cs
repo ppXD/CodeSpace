@@ -79,6 +79,8 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork, IDataProtectionKeyCont
     public DbSet<ArtifactTransferIntent> ArtifactTransferIntent => Set<ArtifactTransferIntent>();
     public DbSet<WorkflowArtifact> WorkflowArtifact => Set<WorkflowArtifact>();
     public DbSet<WorkflowArtifactRetention> WorkflowArtifactRetention => Set<WorkflowArtifactRetention>();
+    public DbSet<LegacyPlacementAdoptionArc> LegacyPlacementAdoptionArc => Set<LegacyPlacementAdoptionArc>();
+    public DbSet<LegacyPlacementAdoptionMember> LegacyPlacementAdoptionMember => Set<LegacyPlacementAdoptionMember>();
     public DbSet<WorkflowRunNode> WorkflowRunNode => Set<WorkflowRunNode>();
     public DbSet<WorkflowRunVariable> WorkflowRunVariable => Set<WorkflowRunVariable>();
     public DbSet<WorkflowRunMapInput> WorkflowRunMapInput => Set<WorkflowRunMapInput>();

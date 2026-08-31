@@ -55,3 +55,16 @@ public sealed record AbandonProfilePlacementsCommand : ICommand<ProfileAbandonme
     public Guid ProfileId { get; init; }
     public int BatchSize { get; init; } = 50;
 }
+
+/// <summary>
+/// Validates one bounded page of a sealed legacy manifest. Evidence must cover the whole manifest and retain a
+/// confirmed destination witness before Minting can add a bounded page of sidecar CAS observations. The cursor is
+/// bound to the profile's exact current revision; a changed revision is refused rather than silently adopted.
+/// </summary>
+public sealed record AdoptLegacyPlacementsCommand : ICommand<LegacyPlacementAdoptionSummary>, IRequireTeamPermission
+{
+    public string RequiredPermission => TeamPermissions.StorageManage;
+    public Guid ProfileId { get; init; }
+    public int BatchSize { get; init; } = LegacyPlacementAdoptionLimits.DefaultRowsPerPass;
+    public string? Cursor { get; init; }
+}

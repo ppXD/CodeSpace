@@ -11,8 +11,8 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts.Providers.Local.Legacy;
 /// because these blobs are keyed by digest alone and therefore SHARED by every team that ever stored those bytes —
 /// see <see cref="IStorageProviderTenantSharedObjectKeys"/>, whose marker this module carries and which the catalog
 /// enforces against ever declaring Delete beside it. It carries <see cref="IStorageProviderAcceptsNoNewBytes"/> for
-/// the other direction: the tier exists to be surveyed and eventually adopted, never to receive new bytes, so route
-/// binding refuses it outright instead of letting an operator discover that at the first artifact write.</para>
+/// the other direction: the tier exists to be surveyed, streamed for sidecar adoption, and drained, never to receive
+/// new bytes, so route binding refuses it outright instead of letting an operator discover that at the first artifact write.</para>
 ///
 /// <para>It also declares no <see cref="IStorageProviderTeamNamespace"/>, so it cannot be a deployment default: one
 /// root with no team segment is exactly the shared namespace that refusal exists for.</para>
@@ -49,7 +49,7 @@ public sealed class LocalLegacyStorageProviderModule : IStorageProviderModule, I
     public string DisplayName => "Local filesystem (pre-CAS layout)";
     public JsonElement ConfigSchema => Config;
     public JsonElement SecretSchema => Secrets;
-    public StorageProviderCapabilities Capabilities => StorageProviderCapabilities.HealthProbe;
+    public StorageProviderCapabilities Capabilities => StorageProviderCapabilities.HealthProbe | StorageProviderCapabilities.StreamingRead;
     public Type FactoryType => typeof(LocalLegacyArtifactStorageDriverFactory);
 
     public string? ResolveLegacyObjectKey(JsonElement nonSecretConfiguration, string sha256, string recordedLocator)

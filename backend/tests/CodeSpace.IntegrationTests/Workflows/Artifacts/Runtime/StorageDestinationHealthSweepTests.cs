@@ -5,6 +5,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers.Local;
+using CodeSpace.Core.Services.Workflows.Artifacts.Providers.Local.Legacy;
 using CodeSpace.Core.Services.Workflows.Artifacts.Routing;
 using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -67,24 +68,23 @@ public sealed class StorageDestinationHealthSweepTests : IDisposable
     }
 
     [Fact]
-    public async Task A_disabled_profile_an_active_route_still_binds_writes_to_is_really_contacted()
+    public async Task A_disabled_profile_an_active_route_still_binds_writes_to_is_reported_as_a_broken_route()
     {
-        // Disabling a profile unbinds no route, so this destination is still in the population. What it must NOT
-        // produce is ProfileNotActive: that answer never opens a driver, so the row would restate the lifecycle
-        // state the settings page already shows and no round trip would ever have happened.
+        // Disabling a profile unbinds no route. The next run still asks that route to land bytes here, so the health
+        // answer must preserve the write question and surface the contradictory control-plane state.
         var world = await SeedAsync(NewRoot(), routeState: StorageRouteState.Active, profileState: StorageProfileState.Disabled);
         (await HealthAsync(world)).ShouldBeNull("the sweep must be what writes this row; the fixture leaves it unprobed");
 
         await SweepAsync();
 
         var health = (await HealthAsync(world)).ShouldNotBeNull();
-        health.Status.ShouldBe(StorageProfileProbeStatusValue.Available, "a destination that answers is reachable whatever its profile's lifecycle state says");
-        health.FailureCode.ShouldBeNull();
-        health.WriteVerified.ShouldBeFalse("no write was attempted, and a read-qualified pass must never be recorded as one that proved bytes land");
+        health.Status.ShouldBe(StorageProfileProbeStatusValue.Unavailable);
+        health.FailureCode.ShouldBe(StorageProfileProbeFailureCodeValue.ProfileNotActive);
+        health.WriteVerified.ShouldBeFalse("the Active route made this a write probe, but a lifecycle refusal before provider I/O cannot claim that a byte landed");
     }
 
     [Fact]
-    public async Task A_disabled_profiles_vanished_destination_is_recorded_as_unreachable_not_as_disabled()
+    public async Task An_active_route_to_a_disabled_profile_is_rejected_before_destination_liveness_can_be_claimed()
     {
         // The pair to the case above, and the one the widened population exists for: the lifecycle gate would have
         // answered ProfileNotActive for a directory that no longer exists, which reads on the settings page exactly
@@ -95,7 +95,8 @@ public sealed class StorageDestinationHealthSweepTests : IDisposable
 
         var health = (await HealthAsync(world)).ShouldNotBeNull();
         health.Status.ShouldBe(StorageProfileProbeStatusValue.Unavailable);
-        health.FailureStage.ShouldBe(StorageProfileProbeFailureStageValue.Probe, "the answer must come from the destination, not from storage_profile.state");
+        health.FailureStage.ShouldBe(StorageProfileProbeFailureStageValue.Profile);
+        health.FailureCode.ShouldBe(StorageProfileProbeFailureCodeValue.ProfileNotActive);
     }
 
     [Fact]
@@ -113,6 +114,19 @@ public sealed class StorageDestinationHealthSweepTests : IDisposable
         var health = (await SummaryAsync(world)).Health.ShouldNotBeNull();
         health.Status.ShouldBe(StorageProfileProbeStatusValue.Available);
         health.WriteVerified.ShouldBeFalse("a terminal profile admits no write, so no pass may claim one landed");
+    }
+
+    [Fact]
+    public async Task An_active_legacy_profile_that_only_holds_a_sidecar_placement_gets_a_real_read_probe()
+    {
+        var world = await SeedAsync(NewRoot(), routeState: StorageRouteState.Draft, providerTypeKey: LocalLegacyArtifactStorageDriverFactory.TypeKey);
+        await PlaceAsync(world, ArtifactLocationState.Available);
+
+        await SweepAsync();
+
+        var health = (await HealthAsync(world)).ShouldNotBeNull();
+        health.Status.ShouldBe(StorageProfileProbeStatusValue.Available, "the read-only legacy destination answers the read question its sidecar placement makes relevant");
+        health.WriteVerified.ShouldBeFalse("no active route names this profile, so the sweep must not ask a permanently read-only tier to accept bytes");
     }
 
     [Fact]
@@ -252,7 +266,7 @@ public sealed class StorageDestinationHealthSweepTests : IDisposable
         return root;
     }
 
-    private async Task<World> SeedAsync(string rootPath, StorageRouteState routeState, StorageProfileState profileState = StorageProfileState.Active)
+    private async Task<World> SeedAsync(string rootPath, StorageRouteState routeState, StorageProfileState profileState = StorageProfileState.Active, string providerTypeKey = LocalRwxArtifactStorageDriverFactory.TypeKey)
     {
         var actorId = Guid.NewGuid();
         var teamId = Guid.NewGuid();
@@ -275,7 +289,7 @@ public sealed class StorageDestinationHealthSweepTests : IDisposable
         profile.Revisions.Add(new StorageProfileRevision
         {
             Id = profileRevisionId, TeamId = teamId, StorageProfileId = profileId, Revision = 1,
-            ProviderTypeKey = LocalRwxArtifactStorageDriverFactory.TypeKey,
+            ProviderTypeKey = providerTypeKey,
             NonSecretConfigJson = JsonSerializer.Serialize(new { rootPath }), CredentialRef = null,
             NamespaceFingerprint = $"sha256:{new string('f', 64)}", CreatedDate = now, CreatedBy = actorId,
         });
@@ -315,12 +329,16 @@ public sealed class StorageDestinationHealthSweepTests : IDisposable
         var now = DateTimeOffset.UtcNow;
         var objectId = Guid.NewGuid();
         var objectKey = $"objects/{objectId:N}";
+        var digest = SHA256.HashData(objectId.ToByteArray());
 
-        db.ArtifactObject.Add(new ArtifactObject { Id = objectId, TeamId = world.TeamId, Digest = SHA256.HashData(objectId.ToByteArray()), SizeBytes = 12, CreatedDate = now });
+        db.ArtifactObject.Add(new ArtifactObject { Id = objectId, TeamId = world.TeamId, Digest = digest, SizeBytes = 12, CreatedDate = now });
         db.ArtifactLocation.Add(new ArtifactLocation
         {
             Id = Guid.NewGuid(), TeamId = world.TeamId, ArtifactObjectId = objectId, StorageProfileRevisionId = world.ProfileRevisionId,
             Locator = objectKey, ObjectKey = objectKey, State = state, Revision = 1, VerifiedAt = now,
+            ObservedSizeBytes = state == ArtifactLocationState.Available ? 12 : null,
+            ProviderChecksumAlgorithm = state == ArtifactLocationState.Available ? "Sha256" : null,
+            ProviderChecksum = state == ArtifactLocationState.Available ? digest : null,
             CreatedDate = now, CreatedBy = world.ActorId, LastModifiedDate = now, LastModifiedBy = world.ActorId,
             Events =
             {
@@ -328,6 +346,9 @@ public sealed class StorageDestinationHealthSweepTests : IDisposable
                 {
                     Id = Guid.NewGuid(), TeamId = world.TeamId, Revision = 1, EventType = ArtifactLocationEventType.Created,
                     State = state, ObservedAt = now, VerifiedAt = now, DetailsJson = "{}", CreatedBy = world.ActorId,
+                    ObservedSizeBytes = state == ArtifactLocationState.Available ? 12 : null,
+                    ProviderChecksumAlgorithm = state == ArtifactLocationState.Available ? "Sha256" : null,
+                    ProviderChecksum = state == ArtifactLocationState.Available ? digest : null,
                 },
             },
         });
