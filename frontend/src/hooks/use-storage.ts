@@ -2,7 +2,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 
 import { ApiError } from "@/api/request";
 import { storageApi } from "@/api/storage";
-import type { AppendStorageCredentialRevisionInput, AppendStorageProfileRevisionInput, CreateStorageCredentialInput, CreateStorageProfileInput, ProbeStorageProfileInput, RevokeStorageCredentialInput, SetStorageProfileStateInput } from "@/api/storage";
+import type { AbandonProfilePlacementsInput, AppendStorageCredentialRevisionInput, AppendStorageProfileRevisionInput, CreateStorageCredentialInput, CreateStorageProfileInput, ProbeStorageProfileInput, RevokeStorageCredentialInput, SetStorageProfileStateInput } from "@/api/storage";
 import { refreshStorageRouteQueries } from "@/hooks/use-storage-routes";
 
 export const STORAGE_PROVIDER_MODULES_KEY = ["storage", "provider-modules"] as const;
@@ -10,6 +10,8 @@ export const STORAGE_CREDENTIALS_KEY = ["storage", "credentials"] as const;
 export const STORAGE_PROFILES_KEY = ["storage", "profiles"] as const;
 export const storageProfileKey = (profileId: string) => ["storage", "profiles", profileId] as const;
 export const STORAGE_PLACEMENT_INTEGRITY_KEY = ["storage", "placements", "integrity"] as const;
+export const profilePlacementTotalsKey = (profileId: string) => ["storage", "profiles", profileId, "placements", "totals"] as const;
+export const profilePlacementsKey = (profileId: string) => ["storage", "profiles", profileId, "placements"] as const;
 
 /**
  * How often an open storage page re-asks for what the background sweeps observed. One minute is far inside the
@@ -146,6 +148,42 @@ export function useSetStorageProfileState() {
       ]);
     },
     onError: (error, variables) => refreshAfterConflict(queryClient, error, variables.profileId),
+  });
+}
+
+/** How much a profile still holds, by state. The number an irreversible retirement is decided on, so it is read fresh. */
+export function useProfilePlacementTotals(profileId: string) {
+  return useQuery({
+    queryKey: profilePlacementTotalsKey(profileId),
+    queryFn: ({ signal }) => storageApi.getProfilePlacementTotals(profileId, signal),
+  });
+}
+
+export function useProfilePlacements(profileId: string) {
+  return useInfiniteQuery({
+    queryKey: profilePlacementsKey(profileId),
+    queryFn: ({ pageParam, signal }) => storageApi.listProfilePlacementPage(profileId, pageParam, 50, signal),
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
+    select: (data) => data.pages.flatMap((page) => page.items),
+  });
+}
+
+/**
+ * One bounded drain pass. Every cached count of this profile's placements is stale the moment it returns, including
+ * the team-wide integrity summary — a pass that closes records moves rows out of the population that one counts.
+ */
+export function useAbandonProfilePlacements() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ profileId, input }: { profileId: string; input: AbandonProfilePlacementsInput }) => storageApi.abandonProfilePlacements(profileId, input),
+    onSuccess: async (_summary, variables) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: profilePlacementTotalsKey(variables.profileId), exact: true }),
+        queryClient.invalidateQueries({ queryKey: profilePlacementsKey(variables.profileId), exact: true }),
+        queryClient.invalidateQueries({ queryKey: STORAGE_PLACEMENT_INTEGRITY_KEY, exact: true }),
+      ]);
+    },
   });
 }
 

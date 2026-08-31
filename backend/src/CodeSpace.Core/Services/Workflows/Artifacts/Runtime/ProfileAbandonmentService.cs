@@ -50,7 +50,7 @@ public sealed class ProfileAbandonmentService : IProfileAbandonmentService
             if (stoppedBy != null) break;
         }
 
-        return Summarize(answers, stoppedBy, await CountUnreleasedAsync(teamId, revisions, cancellationToken).ConfigureAwait(false));
+        return Summarize(Outcomes(batch, answers), stoppedBy, await CountUnreleasedAsync(teamId, revisions, cancellationToken).ConfigureAwait(false));
     }
 
     /// <summary>
@@ -86,14 +86,55 @@ public sealed class ProfileAbandonmentService : IProfileAbandonmentService
     /// </summary>
     private static bool OneFaultCouldExplain(ArtifactCasProblemCode code) => code != ArtifactCasProblemCode.StaleWorker;
 
-    private static ProfileAbandonmentSummary Summarize(List<ArtifactCasAbandonResult?> answers, ArtifactCasProblemCode? stoppedBy, int remaining) => new()
+    private static ProfileAbandonmentSummary Summarize(List<ProfilePlacementOutcome> outcomes, ArtifactCasProblemCode? stoppedBy, int remaining) => new()
     {
-        Examined = answers.Count,
-        Abandoned = answers.OfType<ArtifactCasAbandonResult.Abandoned>().Count(),
-        StillServed = answers.OfType<ArtifactCasAbandonResult.StillServed>().Count(),
-        Unanswered = answers.Count(answer => answer is not (ArtifactCasAbandonResult.Abandoned or ArtifactCasAbandonResult.StillServed)),
+        Examined = outcomes.Count,
+        Abandoned = Count(outcomes, ProfilePlacementAbandonOutcomeValue.Abandoned),
+        StillServed = Count(outcomes, ProfilePlacementAbandonOutcomeValue.StillServed),
+        Unanswered = Count(outcomes, ProfilePlacementAbandonOutcomeValue.Unanswered),
         Remaining = remaining,
         StoppedBy = stoppedBy?.ToString(),
+        Outcomes = outcomes,
+    };
+
+    /// <summary>
+    /// One entry per placement the pass reached, paired with the answer it got. The answers are appended in batch
+    /// order, so a pass the breaker stopped simply has fewer of them than the batch it was handed.
+    /// </summary>
+    private static List<ProfilePlacementOutcome> Outcomes(List<Placement> batch, List<ArtifactCasAbandonResult?> answers) =>
+        batch.Zip(answers, Outcome).ToList();
+
+    private static int Count(List<ProfilePlacementOutcome> outcomes, ProfilePlacementAbandonOutcomeValue outcome) =>
+        outcomes.Count(candidate => candidate.Outcome == outcome);
+
+    private static ProfilePlacementOutcome Outcome(Placement placement, ArtifactCasAbandonResult? answer) => new()
+    {
+        LocationId = placement.LocationId,
+        ObjectKey = placement.ObjectKey,
+        Outcome = OutcomeOf(answer),
+        Detail = DetailOf(answer),
+    };
+
+    private static ProfilePlacementAbandonOutcomeValue OutcomeOf(ArtifactCasAbandonResult? answer) => answer switch
+    {
+        ArtifactCasAbandonResult.Abandoned => ProfilePlacementAbandonOutcomeValue.Abandoned,
+        ArtifactCasAbandonResult.StillServed => ProfilePlacementAbandonOutcomeValue.StillServed,
+        _ => ProfilePlacementAbandonOutcomeValue.Unanswered,
+    };
+
+    /// <summary>
+    /// What the destination said, in its own words where it gave any — never this service's summary of them.
+    ///
+    /// <para>Absent means ONE thing: no destination was asked, because the row was already settled while this pass
+    /// walked it. That is another drain racing this one, and it is answered by waiting rather than by repairing
+    /// anything — see <see cref="AbandonOneAsync"/> for why no other shape reaches here.</para>
+    /// </summary>
+    private static string? DetailOf(ArtifactCasAbandonResult? answer) => answer switch
+    {
+        ArtifactCasAbandonResult.Abandoned abandoned => abandoned.Evidence,
+        ArtifactCasAbandonResult.StillServed served => served.Evidence,
+        ArtifactCasAbandonResult.Rejected rejected => rejected.Problem.Code.ToString(),
+        _ => null,
     };
 
     /// <summary>
@@ -103,6 +144,21 @@ public sealed class ProfileAbandonmentService : IProfileAbandonmentService
     /// else, or has already been settled. Either way the honest count is "no answer", and the next call sees it. It
     /// is also not an ANSWER — the race decided it, not any fault — so it is kept apart from the refusals the circuit
     /// breaker may generalize from: see <see cref="OneFaultCouldExplain"/>.</para>
+    ///
+    /// <para>Claiming can also REFUSE, in four ways, and none of them is worth a carrier of its own — but for two
+    /// different reasons, and the distinction is what a future reader needs. The claim refuses an unclaimable STATE,
+    /// and that arm is unreachable from here: every state <see cref="Unreleased"/> selects is one the claim admits,
+    /// and the rows it would refuse instead (<c>Pending</c>, <c>Failed</c>) are permitted by the schema but written
+    /// by no production path. The other three — the object holds no placement, the named placement is gone, its
+    /// profile revision is gone — ARE reachable, because this pass selects and then claims, and a sibling pass or
+    /// the reaper can settle a row in between. They need no carrier because they are the same fact as the race
+    /// above: the row moved under us, nothing was learned about the destination, and the next call sees whatever it
+    /// became.</para>
+    ///
+    /// <para>So a carrier becomes necessary the moment a refusal can mean something a later pass will NOT resolve
+    /// on its own. Widening <see cref="Unreleased"/> to a state the claim rejects, or narrowing the claim, produces
+    /// exactly that — and so would any new refusal arm that is neither "someone else got there first" nor a state
+    /// this pass chose to select.</para>
     /// </summary>
     private async Task<ArtifactCasAbandonResult?> AbandonOneAsync(Guid teamId, Guid actorId, Placement placement, CancellationToken cancellationToken)
     {
@@ -135,7 +191,7 @@ public sealed class ProfileAbandonmentService : IProfileAbandonmentService
         revisions.Count == 0 ? [] : await Unreleased(teamId, revisions)
             .OrderBy(location => location.LastModifiedDate).ThenBy(location => location.Id)
             .Take(take)
-            .Select(location => new Placement(location.Id, location.ArtifactObjectId))
+            .Select(location => new Placement(location.Id, location.ArtifactObjectId, location.ObjectKey))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
     private async Task<int> CountUnreleasedAsync(Guid teamId, List<Guid> revisions, CancellationToken cancellationToken) =>
@@ -147,5 +203,5 @@ public sealed class ProfileAbandonmentService : IProfileAbandonmentService
             && revisions.Contains(location.StorageProfileRevisionId)
             && location.State != ArtifactLocationState.Purged && location.State != ArtifactLocationState.Deleted);
 
-    private sealed record Placement(Guid LocationId, Guid ArtifactObjectId);
+    private sealed record Placement(Guid LocationId, Guid ArtifactObjectId, string ObjectKey);
 }

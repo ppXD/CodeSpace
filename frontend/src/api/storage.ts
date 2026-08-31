@@ -214,6 +214,59 @@ export interface PlacementIntegritySummary {
   oldestVerifiedAt: string | null;
 }
 
+/** What a placement's record says about the bytes it names. */
+export type ArtifactLocationState = "Pending" | "Available" | "Missing" | "Corrupt" | "Deleting" | "Deleted" | "Failed" | "Purged";
+
+/** One placement still recorded under a storage profile. */
+export interface ProfilePlacementSummary {
+  locationId: string;
+  artifactObjectId: string;
+  state: ArtifactLocationState;
+  objectKey: string;
+  /** Which revision of the profile placed it. A profile that has been re-pointed holds rows under several. */
+  profileRevision: number;
+  sizeBytes?: number | null;
+  verifiedAt?: string | null;
+  lastErrorCode?: string | null;
+}
+
+/** How many placements a profile holds in one state, and how many bytes they account for. */
+export interface ProfilePlacementTotal {
+  state: ArtifactLocationState;
+  count: number;
+  sizeBytes: number;
+}
+
+/** What one abandonment pass established about one placement. */
+export type ProfilePlacementAbandonOutcome = "Abandoned" | "StillServed" | "Unanswered";
+
+export interface ProfilePlacementOutcome {
+  locationId: string;
+  objectKey: string;
+  outcome: ProfilePlacementAbandonOutcome;
+  /** What the destination answered, or null when nothing was asked because the claim was held elsewhere. */
+  detail?: string | null;
+}
+
+/** What one bounded pass of abandoning a profile's placements did. */
+export interface ProfileAbandonmentSummary {
+  examined: number;
+  abandoned: number;
+  /** Placements the destination SERVED. Left exactly as they were — the refusal that makes the operation safe. */
+  stillServed: number;
+  /** Placements whose destination gave no usable answer. A revoked key or an unmounted volume lands here. */
+  unanswered: number;
+  /** Unreleased placements still under the profile after this pass. */
+  remaining: number;
+  /** The problem code that stopped the pass before its batch was done, or null when the whole batch was examined. */
+  stoppedBy?: string | null;
+  outcomes: ProfilePlacementOutcome[];
+}
+
+export interface AbandonProfilePlacementsInput {
+  batchSize: number;
+}
+
 export const storageApi = {
   listProviderModules: () => fetchJson<StorageProviderModuleSummary[]>("/api/storage/provider-modules"),
   getPlacementIntegrity: (signal?: AbortSignal) => fetchJson<PlacementIntegritySummary>("/api/storage/placements/integrity", { signal }),
@@ -258,5 +311,15 @@ export const storageApi = {
     method: "POST",
     body: JSON.stringify(input),
     signal,
+  }),
+  getProfilePlacementTotals: (profileId: string, signal?: AbortSignal) => fetchJson<ProfilePlacementTotal[]>(`/api/storage/profiles/${encodeURIComponent(profileId)}/placements/totals`, { signal }),
+  listProfilePlacementPage: (profileId: string, cursor: string | null, limit = 50, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (cursor) query.set("cursor", cursor);
+    return fetchJson<StoragePage<ProfilePlacementSummary>>(`/api/storage/profiles/${encodeURIComponent(profileId)}/placements?${query}`, { signal });
+  },
+  abandonProfilePlacements: (profileId: string, input: AbandonProfilePlacementsInput) => fetchJson<ProfileAbandonmentSummary>(`/api/storage/profiles/${encodeURIComponent(profileId)}/placements/abandon`, {
+    method: "POST",
+    body: JSON.stringify(input),
   }),
 };

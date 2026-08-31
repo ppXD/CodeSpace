@@ -1,4 +1,27 @@
 import type { RoomFilePreview } from "@/api/sessions";
+import { ApiError } from "@/api/request";
+
+/**
+ * The lanes the artifact plane itself can fail in — the backend's ArtifactContentUnavailableKind, a subset of the
+ * Room's file reasons. A runtime list because it is also the guard that narrows an untrusted error body.
+ */
+export const STORAGE_UNAVAILABLE_REASONS = ["MetadataMissing", "PhysicalObjectMissing", "IntegrityFailure", "BackendUnavailable", "AccessDenied"] as const;
+
+export type StorageUnavailableReason = (typeof STORAGE_UNAVAILABLE_REASONS)[number];
+
+/**
+ * The reason a failed artifact fetch carried, or null when it carried none.
+ *
+ * <p>Read off the error BODY rather than guessed from the status: the storage plane distinguishes five lanes and a
+ * client that invents one sends the operator to fix the wrong thing. Anything unrecognised is null, because a
+ * sentence the server did not authorise is worse than no sentence.</p>
+ */
+export function artifactUnavailableReason(error: unknown): StorageUnavailableReason | null {
+  const body = error instanceof ApiError ? error.body : null;
+  const reason = body !== null && typeof body === "object" ? (body as Record<string, unknown>).reason : null;
+
+  return STORAGE_UNAVAILABLE_REASONS.includes(reason as StorageUnavailableReason) ? reason as StorageUnavailableReason : null;
+}
 
 /**
  * Why a file could not be shown, in words that say what to do about it.

@@ -30,6 +30,9 @@ public sealed class ProfileAbandonmentFlowTests : IDisposable
     /// <summary>The service's own cap, so cleanup can close everything any one test seeded in a single pass.</summary>
     private const int MaxDrainableBatch = 200;
 
+    /// <summary>Where the breaker stops a uniformly-refusing batch of twelve: a quarter of twelve is three, and below five identical answers there is no population to generalize from.</summary>
+    private const int StopsAfter = 5;
+
     private readonly PostgresFixture _fixture;
     private readonly List<string> _roots = [];
     private readonly List<RoutedWorld> _worlds = [];
@@ -204,6 +207,42 @@ public sealed class ProfileAbandonmentFlowTests : IDisposable
         summary.Abandoned.ShouldBe(0);
         summary.Remaining.ShouldBe(2);
         await Should.ThrowAsync<StorageProfileConflictException>(() => RetireAsync(world));
+    }
+
+    [Fact]
+    public async Task A_pass_names_the_placements_it_could_not_close_and_what_the_destination_said()
+    {
+        // "still served: 3" is a number nobody can act on. Which object is still there, and the answer that kept it,
+        // is the difference between finding a live object and staring at a count that will not move.
+        var world = await SeedRoutedProfileAsync(placements: 2);
+        var keys = await FirstKeysAsync(world, 2);
+
+        var summary = await AbandonAsync(world, batchSize: 50);
+
+        summary.Outcomes.Select(outcome => outcome.ObjectKey).ShouldBe(keys, ignoreOrder: true);
+        summary.Outcomes.ShouldAllBe(outcome => outcome.Outcome == ProfilePlacementAbandonOutcomeValue.StillServed);
+        summary.Outcomes.ShouldAllBe(outcome => outcome.Detail != null);
+        summary.Outcomes.Select(outcome => outcome.LocationId).Distinct().Count().ShouldBe(2, "one entry per placement, or the list cannot name any of them");
+    }
+
+    [Fact]
+    public async Task A_pass_the_destination_stopped_still_names_every_placement_it_reached()
+    {
+        // The pass an operator most needs explained: it closed nothing and stopped early. Without the per-placement
+        // answers, "examined 5, abandoned 0" is indistinguishable from a profile that only held five.
+        var world = await SeedRoutedProfileAsync(placements: 12);
+        var placed = await FirstKeysAsync(world, 12);
+        var destination = new ScriptedDestination(ArtifactCasProblemCode.CredentialInvalid);
+
+        var summary = await AbandonAsync(world, batchSize: 12, destination);
+
+        summary.StoppedBy.ShouldBe(nameof(ArtifactCasProblemCode.CredentialInvalid));
+        summary.Outcomes.Count.ShouldBe(StopsAfter, "an entry per placement the pass reached — counting them against Examined only asks the summary to agree with itself");
+        summary.Outcomes.Count.ShouldBeLessThan(12, "a pass that named its whole batch never stopped, so this fixture would be proving nothing");
+        summary.Outcomes.Select(outcome => outcome.ObjectKey).Distinct().Count().ShouldBe(StopsAfter, "a key repeated across entries names fewer objects than the pass actually touched");
+        summary.Outcomes.Select(outcome => outcome.ObjectKey).ShouldBeSubsetOf(placed, "every key named has to be a placement of this profile rather than a label the summary composed");
+        summary.Outcomes.ShouldAllBe(outcome => outcome.Outcome == ProfilePlacementAbandonOutcomeValue.Unanswered);
+        summary.Outcomes.ShouldAllBe(outcome => outcome.Detail == nameof(ArtifactCasProblemCode.CredentialInvalid));
     }
 
     [Fact]

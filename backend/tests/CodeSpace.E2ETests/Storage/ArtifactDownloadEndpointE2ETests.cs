@@ -5,6 +5,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.E2ETests.Infrastructure;
 using CodeSpace.Core.Services.Workflows.Artifacts;
+using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers.Local;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Failures;
@@ -64,6 +65,8 @@ public sealed class ArtifactDownloadEndpointE2ETests : IClassFixture<TaskLaunchA
         var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
         body.GetProperty("code").GetString().ShouldBe(FailureCodes.ArtifactContentUnavailable,
             "the wire code is what lets a client tell 'the destination is not serving' from 'you may not have this'");
+        body.GetProperty("reason").GetString().ShouldBe(nameof(ArtifactContentUnavailableKind.PhysicalObjectMissing),
+            "one code covers five very different situations; without the reason a client can only guess, and its guess sends the operator to fix the wrong thing");
     }
 
     [Fact]

@@ -59,7 +59,7 @@ import { liveRunSummary } from "./live-run-summary";
 import { partitionForFailureHoist } from "./room-blocks";
 import { RoomRunPane, type PaneView } from "./RoomRunPane";
 import { WorkflowRunModelCallContent, type WorkflowRunModelCallTab } from "./WorkflowRunModelCallContent";
-import { roomFileNote } from "./roomFileUnavailable";
+import { artifactUnavailableReason, roomFileNote, roomFileUnavailableNote, type StorageUnavailableReason } from "./roomFileUnavailable";
 
 /** What the right-side preview drawer is showing — an agent (its terminal) or a file (its content + download). */
 type DrawerTarget =
@@ -1896,13 +1896,13 @@ function PrCard({ delivery }: { delivery: DeliveryBlock }) {
  * workspace it was written in is deleted when the run ends. Each row fetches the stored copy.</p>
  */
 export function ProducedFilesCard({ block }: { block: DeliverablesBlock }) {
-  const [failed, setFailed] = useState<string | null>(null);
+  const [failed, setFailed] = useState<{ path: string; reason: StorageUnavailableReason | null } | null>(null);
 
   // Named, because "nothing happened" on a click is the failure mode this card exists to end: the bytes live at a
   // storage destination that can stop serving them, and the row must say so rather than go quiet.
   const save = (file: DeliverableFile) => {
     setFailed(null);
-    downloadArtifact(file.artifactId, baseName(file.path)).catch(() => setFailed(file.path));
+    downloadArtifact(file.artifactId, baseName(file.path)).catch((error) => setFailed({ path: file.path, reason: artifactUnavailableReason(error) }));
   };
 
   return (
@@ -1919,7 +1919,7 @@ export function ProducedFilesCard({ block }: { block: DeliverablesBlock }) {
             <span className="room-muted">{formatBytes(file.sizeBytes)}</span>
           </div>
         ))}
-        {failed && <div className="room-pr-sub room-danger">Could not fetch {baseName(failed)}. It may have been removed from its storage destination.</div>}
+        {failed && <div className="room-pr-sub room-danger">Could not fetch {baseName(failed.path)}. {failed.reason ? roomFileUnavailableNote(failed.reason) : "The storage plane gave no reason."}</div>}
       </div>
     </div>
   );

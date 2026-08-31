@@ -12,6 +12,7 @@ import { StorageCredentialSettings } from "./StorageCredentialSettings";
 import { StorageDefaultAdoption } from "./StorageDefaultAdoption";
 import { StorageRouteSettings } from "./StorageRouteSettings";
 import { PlacementIntegrityNotice } from "./PlacementIntegrityNotice";
+import { StoragePlacementDrain } from "./StoragePlacementDrain";
 import { StorageHealthBadge } from "./StorageHealthBadge";
 import { StorageStep, type StorageStepState } from "./StorageStep";
 
@@ -529,6 +530,8 @@ function StorageProfileEditor({ detail, providers, credentials, onActionError }:
           <button type="button" className="btn btn-danger" disabled={retired || pending} onClick={() => setConfirmRetire(true)}>Retire profile</button>
         </div>
       </div>
+
+      <StoragePlacementDrain profileId={detail.id} disabled={retired || pending} />
 
       {confirmRetire && <RetireConfirmation stableName={detail.stableName} onCancel={() => setConfirmRetire(false)} onConfirm={() => { setConfirmRetire(false); transition("Retired"); }} />}
     </>
