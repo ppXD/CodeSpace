@@ -142,16 +142,15 @@ public sealed class StorageCredentialService : IStorageCredentialService, IScope
     ///
     /// <para>Killing it at the provider has a cost this used not to say: every placement that resolved through it
     /// stops answering, so it can no longer be verified, deleted, or proved gone by an ordinary read — and each one
-    /// keeps blocking this credential's revocation. Abandon those placements
-    /// (<c>POST /api/storage/profiles/{id}/placements/abandon</c>) BEFORE killing the key, or accept that the records
-    /// close on a refused credential rather than on a clean answer.</para>
+    /// keeps blocking this credential's revocation. Drain those placements from the profiles that hold them BEFORE
+    /// killing the key, or accept that the records close on a refused credential rather than on a clean answer.</para>
     /// </summary>
     private async Task EnsureCredentialReleasedAsync(Guid teamId, Guid credentialId, CancellationToken cancellationToken)
     {
         var locations = await CountUnreleasedLocationsAsync(teamId, credentialId, cancellationToken).ConfigureAwait(false);
 
         if (locations > 0)
-            throw new StorageCredentialConflictException($"Storage credential cannot be revoked while {locations} stored artifact location(s) still resolve through it — revoking would make those bytes permanently unreadable. See GET /api/storage/profiles/{{profileId}}/placements on the profiles that use this credential for what they are.");
+            throw new StorageCredentialConflictException($"Storage credential cannot be revoked while {locations} stored artifact location(s) still resolve through it — revoking would make those bytes permanently unreadable. Release them from the profiles that use this credential first.");
 
         var profiles = await CountLiveProfilesAsync(teamId, credentialId, cancellationToken).ConfigureAwait(false);
 

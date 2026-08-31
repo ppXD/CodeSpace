@@ -152,6 +152,38 @@ public sealed record ProfilePlacementPage
     public string? NextCursor { get; init; }
 }
 
+/// <summary>What one abandonment pass established about one placement.</summary>
+public enum ProfilePlacementAbandonOutcomeValue
+{
+    /// <summary>The record is closed: the destination proved it cannot serve the object.</summary>
+    Abandoned = 0,
+
+    /// <summary>The destination SERVED it. Left exactly as it was.</summary>
+    StillServed = 1,
+
+    /// <summary>Nothing usable came back. A revoked key and a claim held elsewhere both land here.</summary>
+    Unanswered = 2,
+}
+
+/// <summary>
+/// What one pass established about one placement, and the answer it established it from.
+///
+/// <para>The counts alone say how many, never which. An operator told "still served: 3" cannot tell a live object
+/// from a destination answering wrongly about three it no longer has, and has nothing to go and look at.</para>
+/// </summary>
+public sealed record ProfilePlacementOutcome
+{
+    public required Guid LocationId { get; init; }
+
+    /// <summary>The key at the destination — what an operator can actually go and check.</summary>
+    public required string ObjectKey { get; init; }
+
+    public required ProfilePlacementAbandonOutcomeValue Outcome { get; init; }
+
+    /// <summary>What the destination answered. Null only when another drain had already settled the row before this pass reached it.</summary>
+    public string? Detail { get; init; }
+}
+
 /// <summary>What one bounded pass of abandoning a profile's placements did.</summary>
 public sealed record ProfileAbandonmentSummary
 {
@@ -178,4 +210,7 @@ public sealed record ProfileAbandonmentSummary
     /// "examined 13, abandoned 0" cannot tell a pass that stopped from a profile that only had 13 placements.</para>
     /// </summary>
     public string? StoppedBy { get; init; }
+
+    /// <summary>One entry per placement this pass reached, in the order it reached them. Exactly <see cref="Examined"/> long.</summary>
+    public required IReadOnlyList<ProfilePlacementOutcome> Outcomes { get; init; }
 }

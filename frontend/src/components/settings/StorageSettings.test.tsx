@@ -142,6 +142,10 @@ function renderSettings(handler: FetchHandler, options: RenderOptions = {}) {
     if (path === "/api/storage/routes/page") return json(page(options.routes ?? []));
     if (path === "/api/storage/data-classes") return json(routedDataClasses);
     if (path === "/api/storage/adoptions" && (init.method ?? "GET") === "GET") return json(options.adoptions ?? []);
+    // Opening a profile asks what it still holds — the population its retirement guard counts. Answered here rather
+    // than in every per-test handler; the drain's own behaviour is covered by StoragePlacementDrain.test.tsx.
+    if (/^\/api\/storage\/profiles\/[^/]+\/placements\/totals$/.test(path)) return json([]);
+    if (/^\/api\/storage\/profiles\/[^/]+\/placements$/.test(path)) return json(page([]));
     return handler(path, init);
   }));
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } } });

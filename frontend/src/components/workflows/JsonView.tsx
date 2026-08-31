@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import { roomFileUnavailableNote } from "../sessions/roomFileUnavailable";
+import { roomFileUnavailableNote, STORAGE_UNAVAILABLE_REASONS, type StorageUnavailableReason } from "../sessions/roomFileUnavailable";
 
 /**
  * Collapsible JSON tree used by RunDetailView for the normalized payload, run outputs and
@@ -20,9 +20,6 @@ export function JsonView({ data }: { data: unknown }) {
   );
 }
 
-/** The storage lanes a shed offload pointer can name — the artifact plane's own kinds, a subset of the Room's file reasons. */
-const SHED_REASONS = ["MetadataMissing", "PhysicalObjectMissing", "IntegrityFailure", "BackendUnavailable", "AccessDenied"] as const;
-
 /**
  * The note for a value the server could not read back. It keeps the `$artifact_ref` pointer and adds the lane that
  * failed; rendered as a bare object that reads as machine noise, so the reason is shown as the sentence the Room
@@ -34,8 +31,8 @@ function shedNote(value: unknown): string | null {
     : null;
   const reason = marker !== null && typeof marker === "object" ? (marker as Record<string, unknown>).reason : null;
 
-  return SHED_REASONS.includes(reason as (typeof SHED_REASONS)[number])
-    ? roomFileUnavailableNote(reason as (typeof SHED_REASONS)[number])
+  return STORAGE_UNAVAILABLE_REASONS.includes(reason as StorageUnavailableReason)
+    ? roomFileUnavailableNote(reason as StorageUnavailableReason)
     : null;
 }
 

@@ -22,6 +22,13 @@ public sealed class ArtifactContentUnavailableException : Exception, IFailure
     string IFailure.Code => FailureCodes.ArtifactContentUnavailable;
     string? IFailure.ClientMessage => "Required saved content is unavailable or could not be verified.";
 
+    /// <summary>
+    /// The lane that failed, which is what a caller ACTS on: an emptied bucket is a loss to accept, a refused
+    /// credential is a key to fix, and an unreachable destination is an outage to wait out. One code covers all
+    /// three, so a client without this can only guess — and its guess sends the operator to the wrong place.
+    /// </summary>
+    IReadOnlyDictionary<string, object?> IFailure.Details => new Dictionary<string, object?> { ["reason"] = Kind.ToString() };
+
     private static string MessageFor(Guid artifactId, ArtifactContentUnavailableKind kind) => kind switch
     {
         ArtifactContentUnavailableKind.MetadataMissing => $"Required artifact {artifactId} has no team-visible metadata; the saved work cannot be verified.",

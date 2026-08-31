@@ -5,7 +5,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@/api/artifacts", () => ({ downloadArtifact: vi.fn() }));
 
 import { downloadArtifact } from "@/api/artifacts";
+import { ApiError } from "@/api/request";
 import type { DeliverablesBlock } from "@/api/sessions";
+
+import { roomFileUnavailableNote, STORAGE_UNAVAILABLE_REASONS } from "./roomFileUnavailable";
 
 import { ProducedFilesCard } from "./SessionRoomView";
 
@@ -43,6 +46,28 @@ describe("ProducedFilesCard", () => {
     await waitFor(() => expect(screen.getByText(/Could not fetch report\.md/)).toBeInTheDocument());
   });
 
+  it.each(STORAGE_UNAVAILABLE_REASONS)("tells the operator what the storage plane actually said: %s", async (reason) => {
+    // The card used to guess "it may have been removed from its storage destination" for every failure, which is a
+    // lie for four of the five reasons the server distinguishes — a revoked key sent the operator hunting deleted
+    // data. The typed reason travels on the error body; render THAT.
+    vi.mocked(downloadArtifact).mockRejectedValueOnce(new ApiError(502, "artifact_content_unavailable", "unavailable", { code: "artifact_content_unavailable", reason }));
+    render(<ProducedFilesCard block={block()} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "docs/report.md" }));
+
+    await waitFor(() => expect(screen.getByText(new RegExp(escapeRegExp(roomFileUnavailableNote(reason))))).toBeInTheDocument());
+  });
+
+  it("does not guess at a removal when the failure carried no reason", async () => {
+    vi.mocked(downloadArtifact).mockRejectedValueOnce(new ApiError(503, "http_503", "Service Unavailable"));
+    render(<ProducedFilesCard block={block()} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "docs/report.md" }));
+
+    await waitFor(() => expect(screen.getByText(/Could not fetch report\.md/)).toBeInTheDocument());
+    expect(screen.queryByText(/removed from its storage destination/)).not.toBeInTheDocument();
+  });
+
   it("shows what each file is and how big, so a list of paths is readable", () => {
     render(<ProducedFilesCard block={block({
       title: "Produced 2 files",
@@ -58,3 +83,7 @@ describe("ProducedFilesCard", () => {
     expect(screen.getByText("dataset")).toBeInTheDocument();
   });
 });
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
