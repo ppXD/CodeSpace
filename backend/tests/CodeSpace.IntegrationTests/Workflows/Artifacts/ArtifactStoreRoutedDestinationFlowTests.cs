@@ -7,6 +7,7 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
 using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
+using CodeSpace.Core.Services.Workflows.Artifacts.Providers;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers.Local;
 using CodeSpace.Core.Services.Workflows.Artifacts.Retention;
 using CodeSpace.Core.Services.Workflows.Artifacts.Routing;
@@ -36,10 +37,11 @@ namespace CodeSpace.IntegrationTests.Workflows.Artifacts;
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
-public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
+public sealed class ArtifactStoreRoutedDestinationFlowTests : IAsyncLifetime
 {
     private readonly PostgresFixture _fixture;
     private readonly List<string> _roots = [];
+    private readonly List<Guid> _destinations = [];
 
     public ArtifactStoreRoutedDestinationFlowTests(PostgresFixture fixture) => _fixture = fixture;
 
@@ -486,6 +488,144 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
         var location = await db.ArtifactLocation.AsNoTracking().SingleAsync(l => l.TeamId == teamId);
         location.State.ShouldBe(ArtifactLocationState.Available, "the purged row was revived; a second row for this key is not allowed");
         (await db.ArtifactObject.CountAsync(o => o.TeamId == teamId)).ShouldBe(1, "artifact_object rows can never be deleted, so the same content keeps the same object");
+    }
+
+    /// <summary>
+    /// The exit a placement whose destination stopped serving it never had, through the entry point a workflow
+    /// actually writes with. A <c>Missing</c> row was unreadable and stayed unreadable however often a run re-emitted
+    /// the identical payload, because a producer cannot vary the one thing that decides this: the intent scope is the
+    /// content's own sha, so every re-presentation lands on the first write's <c>Committed</c> intent, and that intent
+    /// was answered from the ledger — <c>TargetMissing</c>, before a byte of provider I/O — for every location state
+    /// except <c>Available</c>.
+    /// </summary>
+    [Fact]
+    public async Task A_missing_placement_is_put_back_by_the_producer_that_re_presents_the_same_bytes()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var root = NewRoot();
+        await SeedRouteAsync(teamId, await SeedProfileAsync(teamId, root));
+        var content = Encoding.UTF8.GetBytes(new string('m', 20_000));
+        var sha = ArtifactStore.ComputeSha256Hex(content);
+        var first = await PutAsync(teamId, content);
+        File.Delete(ObjectPath(root, sha));
+        var lost = await DemoteLocationAsync(teamId, ArtifactLocationState.Missing);
+
+        var again = await PutAsync(teamId, content);
+
+        again.ShouldBe(first, "the placement is back in service, so dedup answers with the row that already names this content");
+        (await File.ReadAllBytesAsync(ObjectPath(root, sha))).ShouldBe(content,
+            "the object was gone, so only a real re-upload onto the operator's storage could have put it back");
+        await AssertIntentsAsync(teamId, [(IntentKeyFor(sha, 0), ArtifactTransferState.Committed)]);
+
+        using var scope = _fixture.BeginScope();
+        var location = await scope.Resolve<CodeSpaceDbContext>().ArtifactLocation.AsNoTracking().SingleAsync(value => value.TeamId == teamId);
+        location.State.ShouldBe(ArtifactLocationState.Available);
+        location.Revision.ShouldBe(lost.Revision + 1, "one observation, appended to the one durable placement identity");
+        location.LastErrorCode.ShouldBeNull("a placement back in service must not keep advertising the error it no longer has");
+        (await scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, first, CancellationToken.None))!.Bytes.ShouldBe(content);
+    }
+
+    /// <summary>
+    /// The first exit <c>Corrupt</c> has ever had, staged the ONE way production reaches that state: the destination
+    /// is caught holding an object that is not this artifact, and <see cref="ArtifactLocationVerifier"/> — its only
+    /// writer — records the disagreement. Nothing could return such a placement to service afterwards: the sweep
+    /// deliberately never re-examines a <c>Corrupt</c> row, and every re-presentation of the content was refused by
+    /// the ledger before it reached the provider.
+    ///
+    /// <para>The demotion writes state, revision and error and nothing else, so the recorded observation a genuine
+    /// <c>Corrupt</c> row carries is the CORRECT one — asserted below, because it is what makes this repair an
+    /// overwrite rather than a re-record. The object is present at the key, so a revival that HEADs first and uploads
+    /// only when the destination reports nothing there would skip its upload entirely, fail its digest on the foreign
+    /// bytes, and refuse — leaving the artifact unreadable with somebody else's bytes still being served.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_corrupt_placement_is_put_back_by_the_producer_that_re_presents_the_same_bytes()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var root = NewRoot();
+        await SeedRouteAsync(teamId, await SeedProfileAsync(teamId, root));
+        var content = Encoding.UTF8.GetBytes(new string('x', 20_000));
+        var sha = ArtifactStore.ComputeSha256Hex(content);
+        var first = await PutAsync(teamId, content);
+        await File.WriteAllBytesAsync(ObjectPath(root, sha), Encoding.UTF8.GetBytes(new string('z', 19_000)));
+
+        var lost = await VerifyUntilAsync(teamId, ArtifactLocationState.Corrupt);
+
+        lost.LastErrorCode.ShouldBe("location-object-mismatch", "the sweep is the only writer of Corrupt, and only a positive disagreement about the object gets it there");
+        lost.ObservedSizeBytes.ShouldBe(content.LongLength, "a demotion records the disagreement in state and error alone, so the observation it was taken against stays true");
+        lost.ProviderChecksum.ShouldBe(Convert.FromHexString(sha), "which is what the revival's whole difficulty is: the record is right and the DESTINATION is wrong");
+        (await ReadFailureAsync(teamId, first)).Kind.ShouldBe(ArtifactContentUnavailableKind.PhysicalObjectMissing,
+            "precondition: a Corrupt placement is off the read path entirely, which is the state this test exists to get the artifact out of");
+
+        var again = await PutAsync(teamId, content);
+
+        again.ShouldBe(first);
+        (await File.ReadAllBytesAsync(ObjectPath(root, sha))).ShouldBe(content,
+            "the key was holding a foreign object, so only overwriting it could put this artifact back");
+        await AssertIntentsAsync(teamId, [(IntentKeyFor(sha, 0), ArtifactTransferState.Committed)]);
+
+        using var scope = _fixture.BeginScope();
+        var location = await scope.Resolve<CodeSpaceDbContext>().ArtifactLocation.AsNoTracking().SingleAsync(value => value.TeamId == teamId);
+        location.State.ShouldBe(ArtifactLocationState.Available);
+        location.Revision.ShouldBe(lost.Revision + 1, "one observation, appended to the one durable placement identity");
+        location.LastErrorCode.ShouldBeNull("a placement back in service must not keep advertising the error it no longer has");
+        (await scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, first, CancellationToken.None))!.Bytes.ShouldBe(content,
+            "and the artifact must read its ORIGINAL content again, not merely be marked healthy");
+    }
+
+    /// <summary>
+    /// What a LOSING reviver leaves behind, now that the <c>Corrupt</c> repair is the first CAS write that rewrites an
+    /// object a COMMITTED placement already records. Two producers revive one broken placement: the winner overwrites,
+    /// verifies, and commits the provider conditions its readback reported, and the loser's unconditional PUT of the
+    /// SAME bytes lands after that. The loser's own commit is refused — pinned separately in
+    /// <c>ArtifactCasRuntimeCoordinatorTests</c> — so its PUT is the whole of what it leaves, and this asks what still
+    /// depends on the conditions it made stale.
+    ///
+    /// <para>Nothing does, and this destination is what makes the question real rather than theoretical: the local
+    /// driver derives its ETag from the file's modification time, so the rewrite genuinely changes it and the winner's
+    /// recorded value is genuinely stale for the rest of the placement's life. That is asserted before anything else,
+    /// because a rewrite that happened to reproduce the ETag would make every assertion after it vacuous.</para>
+    ///
+    /// <para>The read survives because a recorded ETag is compared only when its provider declares <c>StableETag</c> —
+    /// content-derived — which this one does not; the sweep survives because it compares content-derived evidence
+    /// alone. The remaining fence, <c>provider_object_version</c>, has nothing to invalidate: no shipped module
+    /// declares <c>ObjectVersioning</c> and the driver conformance kit refuses a version from one that does not, so
+    /// the column is never populated.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_losing_revivers_overwrite_leaves_the_winners_placement_readable_and_verifiable()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var root = NewRoot();
+        var profileId = await SeedProfileAsync(teamId, root);
+        await SeedRouteAsync(teamId, profileId);
+        var content = Encoding.UTF8.GetBytes(new string('r', 20_000));
+        var sha = ArtifactStore.ComputeSha256Hex(content);
+        var artifactId = await PutAsync(teamId, content);
+        await File.WriteAllBytesAsync(ObjectPath(root, sha), Encoding.UTF8.GetBytes(new string('s', 19_000)));
+        await VerifyUntilAsync(teamId, ArtifactLocationState.Corrupt);
+        (await PutAsync(teamId, content)).ShouldBe(artifactId);
+        var winner = await PlacementAsync(teamId);
+        winner.State.ShouldBe(ArtifactLocationState.Available, "precondition: the winning reviver overwrote the foreign object and committed its own readback");
+        winner.ProviderETag.ShouldNotBeNullOrWhiteSpace("and recorded the provider conditions that readback reported");
+
+        var rewritten = await OverwriteThroughDriverAsync(teamId, profileId, ObjectKeyFor(sha), content);
+
+        rewritten.ShouldNotBe(winner.ProviderETag, "this destination derives its ETag from the file's mtime, so a rewrite of identical bytes really does change it — without that, nothing below is being tested at all");
+        var stale = await PlacementAsync(teamId);
+        stale.Revision.ShouldBe(winner.Revision, "nothing re-observes a committed placement, so the row keeps the conditions the winner read BEFORE the loser's write");
+        stale.ProviderETag.ShouldBe(winner.ProviderETag);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            (await scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, artifactId, CancellationToken.None))!.Bytes.ShouldBe(content,
+                "a stale ETag must not cost the artifact its readability: a recorded one is compared only from a provider that promises it identifies the bytes, and this one does not");
+        }
+
+        var swept = await VerifyUntilObservedAsync(teamId, winner.Revision);
+
+        swept.State.ShouldBe(ArtifactLocationState.Available, "and the sweep has to confirm it rather than demote it — a verifier that compared ETags would mark every rewritten object Corrupt");
+        swept.LastErrorCode.ShouldBeNull();
     }
 
     [Fact]
@@ -997,6 +1137,108 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
         await RecordLocationStateAsync(db, location, ArtifactLocationState.Purged);
     }
 
+    /// <summary>
+    /// Moves the team's one placement to a state the VERIFIER produces, carrying the error it would have recorded
+    /// alongside it and leaving the observation itself untouched — which is what a demotion does: it says the
+    /// destination stopped agreeing with the record, never that the record was wrong.
+    /// </summary>
+    private async Task<ArtifactLocation> DemoteLocationAsync(Guid teamId, ArtifactLocationState state)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var location = await db.ArtifactLocation.SingleAsync(value => value.TeamId == teamId);
+        location.LastErrorCode = "seeded-demotion";
+        location.LastErrorMessage = "Seeded by a test to reach a state the verifier produces.";
+
+        await RecordLocationStateAsync(db, location, state);
+
+        return location;
+    }
+
+    /// <summary>Sweeps until THIS team's placement reaches <paramref name="state"/>.</summary>
+    private Task<ArtifactLocation> VerifyUntilAsync(Guid teamId, ArtifactLocationState state) =>
+        SweepUntilAsync(teamId, location => location.State == state, $"reach {state}");
+
+    /// <summary>
+    /// Sweeps until THIS team's placement has been re-examined since <paramref name="revision"/> — a confirmation
+    /// advances the row, so a moved revision is the only proof the sweep actually looked at it rather than at the
+    /// hundreds of other rows this collection leaves behind.
+    /// </summary>
+    private Task<ArtifactLocation> VerifyUntilObservedAsync(Guid teamId, long revision) =>
+        SweepUntilAsync(teamId, location => location.Revision > revision, $"be re-examined past revision {revision}");
+
+    /// <summary>
+    /// Sweeps until this team's placement satisfies <paramref name="settled"/>, and says what to look at when it never
+    /// does.
+    ///
+    /// <para>A pass is deployment-wide and bounded, over a table every test in this collection writes to, and it
+    /// orders by <c>verified_at</c> — so a freshly written row is the LAST one a batch would reach. Asserting after a
+    /// single pass, or on that pass's tally, would be asserting that this row won a race it has no reason to win, and
+    /// would get harder to satisfy as the suite grows.</para>
+    /// </summary>
+    private async Task<ArtifactLocation> SweepUntilAsync(Guid teamId, Func<ArtifactLocation, bool> settled, string expectation)
+    {
+        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(20);
+        ArtifactLocation? seen = null;
+
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            using var scope = _fixture.BeginScope();
+            await scope.Resolve<IArtifactLocationVerifier>().VerifyStaleAsync(200, CancellationToken.None);
+            seen = await scope.Resolve<CodeSpaceDbContext>().ArtifactLocation.AsNoTracking().SingleAsync(value => value.TeamId == teamId);
+
+            if (settled(seen)) return seen;
+        }
+
+        throw new Xunit.Sdk.XunitException(
+            $"The placement for team {teamId} never came to {expectation} within 20s (last seen {seen?.State.ToString() ?? "absent"} at revision {seen?.Revision}). "
+            + "The sweep is deployment-wide and bounded, so check whether earlier tests left more stale locations behind than one batch holds, "
+            + "and whether this team's destination root still exists — an unreachable destination is deliberately never demoted.");
+    }
+
+    /// <summary>This team's one placement row, read fresh and untracked.</summary>
+    private async Task<ArtifactLocation> PlacementAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().ArtifactLocation.AsNoTracking().SingleAsync(value => value.TeamId == teamId);
+    }
+
+    /// <summary>
+    /// The write a losing reviver leaves at the destination: the same bytes, at the same key, under the same
+    /// unconditional condition the <c>Corrupt</c> repair uses — issued through the very driver the CAS would have
+    /// opened for it, so this IS that call rather than a stand-in for it. Returns the ETag the destination reports
+    /// afterwards.
+    /// </summary>
+    private async Task<string?> OverwriteThroughDriverAsync(Guid teamId, Guid profileId, string objectKey, byte[] content)
+    {
+        using var scope = _fixture.BeginScope();
+        var resolution = await scope.Resolve<IStorageRuntimeDriverBroker>().OpenAsync(new StorageRuntimeDriverRequest(teamId, profileId, 1, StorageProfileEligibility.Write), CancellationToken.None);
+        await using var lease = resolution.ShouldBeOfType<StorageRuntimeDriverResolution.Ready>().Lease;
+        await using var input = new MemoryStream(content, writable: false);
+
+        var put = await lease.Driver.PutAsync(new ArtifactStoragePutRequest(objectKey, input)
+        {
+            ContentLength = content.LongLength,
+            ExpectedSha256 = ArtifactStore.ComputeSha256Hex(content),
+            ContentType = "text/plain",
+            Condition = ArtifactStorageWriteCondition.None,
+        }, CancellationToken.None);
+
+        put.IsSuccess.ShouldBeTrue(put.Error?.Message);
+
+        return put.Metadata!.ETag;
+    }
+
+    /// <summary>The typed verdict a whole-object read gives when it cannot serve the row — asserted rather than let escape, so a test that expected a failure cannot pass on the wrong one.</summary>
+    private async Task<ArtifactContentUnavailableException> ReadFailureAsync(Guid teamId, Guid artifactId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await Should.ThrowAsync<ArtifactContentUnavailableException>(
+            () => scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, artifactId, CancellationToken.None));
+    }
+
     /// <summary>One location observation, as the schema demands it: revision advances exactly once and carries a matching append-only event.</summary>
     private static async Task RecordLocationStateAsync(CodeSpaceDbContext db, ArtifactLocation location, ArtifactLocationState state)
     {
@@ -1204,6 +1446,7 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
         });
         db.StorageProfile.Add(profile);
         await db.SaveChangesAsync();
+        _destinations.Add(profile.Revisions.Single().Id);
         return profile.Id;
     }
 
@@ -1409,11 +1652,63 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IDisposable
         }
     }
 
-    public void Dispose()
+    public Task InitializeAsync() => Task.CompletedTask;
+
+    /// <summary>
+    /// Takes every placement this class made permanently out of the verifier's sweep, and removes the destination
+    /// roots behind them.
+    ///
+    /// <para>A pass is deployment-wide and takes ONE TURN PER DESTINATION under a fixed bound, so every destination
+    /// left behind here is a turn some neighbouring class's placement no longer gets — and a placement that never
+    /// gets a turn is a placement whose <c>verified_at</c> never moves, which is a silent failure in a test that has
+    /// nothing to do with this one. <c>Available</c> and <c>Missing</c> are the only two states a pass selects, and
+    /// <c>Deleted</c> is terminal, so one observation per row is the whole of it. Best-effort, and on the failure
+    /// path too: a failing test that leaks these breaks its neighbours rather than itself.</para>
+    /// </summary>
+    public async Task DisposeAsync()
     {
-        foreach (var root in _roots)
+        // The roots are removed in the finally, because the placement release reaches the database and the root
+        // removal does not: letting a fault there escape would both redden a test that had already passed and leak
+        // the very roots this cleanup replaced. Best-effort means best-effort on both halves.
+        try
         {
-            try { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); } catch { /* best-effort */ }
+            foreach (var locationId in await SweepablePlacementsAsync())
+            {
+                try
+                {
+                    await ReleasePlacementAsync(locationId);
+                }
+                catch (DbUpdateException) { }
+            }
         }
+        catch (Exception) { /* best-effort: a destination this class cannot release is a neighbour's problem, not this test's verdict */ }
+        finally
+        {
+            foreach (var root in _roots)
+            {
+                try { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); } catch { /* best-effort */ }
+            }
+        }
+    }
+
+    /// <summary>The placements under this class's destinations that a verifier pass would still select.</summary>
+    private async Task<List<Guid>> SweepablePlacementsAsync()
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().ArtifactLocation.AsNoTracking()
+            .Where(location => _destinations.Contains(location.StorageProfileRevisionId))
+            .Where(location => location.State == ArtifactLocationState.Available || location.State == ArtifactLocationState.Missing)
+            .Select(location => location.Id).ToListAsync();
+    }
+
+    /// <summary>Retires one placement, as the single revision-advancing observation the schema demands.</summary>
+    private async Task ReleasePlacementAsync(Guid locationId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var location = await db.ArtifactLocation.SingleAsync(value => value.Id == locationId);
+
+        await RecordLocationStateAsync(db, location, ArtifactLocationState.Deleted);
     }
 }
