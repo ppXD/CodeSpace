@@ -11,8 +11,10 @@ public interface IWorkflowRunModelCallBodyMaterializer : IScopedDependency
 public interface IWorkflowRunModelCallBodyArtifactWriter
 {
     Task<ArtifactMetadata?> ReadMetadataAsync(Guid teamId, Guid artifactId, CancellationToken cancellationToken);
-    Task<ArtifactMetadata> PutAsync(Guid teamId, ReadOnlyMemory<byte> bytes, string contentType, CancellationToken cancellationToken);
+    Task<ArtifactMetadata> PutAsync(WorkflowRunModelCallBodyArtifactWrite request, CancellationToken cancellationToken);
 }
+
+public sealed record WorkflowRunModelCallBodyArtifactWrite(Guid TeamId, Guid CaptureId, ReadOnlyMemory<byte> Bytes, string ContentType);
 
 public sealed class WorkflowRunModelCallBodyMaterializationSummary
 {

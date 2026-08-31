@@ -7,6 +7,7 @@ using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.ModelCalls;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
+using CodeSpace.Messages.Artifacts;
 using CodeSpace.Messages.Commands.Workflows;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows.ModelCalls;
@@ -72,6 +73,12 @@ public sealed class WorkflowRunModelCallBodyMaterializerTests
         var captures = await db.WorkflowRunModelCallBodyCapture.AsNoTracking().Where(value => value.ModelCallAttemptId == attempt.Id).ToListAsync();
         captures.ShouldAllBe(value => value.State == WorkflowRunModelCallBodyCaptureState.Available && value.LeaseOwnerId == null
             && value.TerminalAt != null && value.MaterializationFormat == WorkflowRunModelCallBodyMaterializationFormats.Utf8StringEnvelope);
+        var artifactIds = new[] { call.RequestArtifactId.Value, attempt.ResponseArtifactId.Value };
+        var declarations = await db.WorkflowArtifactRetention.AsNoTracking().Where(value => artifactIds.Contains(value.ArtifactId)).ToListAsync();
+        declarations.Count.ShouldBe(2, "each newly inserted body is declared before its separately committed reference, so a crash in that gap stays reclaimable");
+        declarations.Select(value => value.HolderId).Order().ShouldBe(captures.Select(value => value.Id).Order(),
+            "the declaration names the exact durable capture intent that will receive the artifact reference");
+        declarations.ShouldAllBe(value => value.RetentionClass == "ModelCallBodyCapture" && value.State == ArtifactRetentionState.Declared);
         var metadata = await scope.Resolve<IWorkflowRunModelCallReader>().ReadByIdAsync(world.RunId, call.Id, world.TeamId, CancellationToken.None);
         metadata!.Bodies.Single().CaptureHealth.ShouldBe(WorkflowRunModelCallBodyCaptureHealth.Available);
         metadata.Bodies.Single().MaterializationFormat.ShouldBe(WorkflowRunModelCallBodyMaterializationFormats.Utf8StringEnvelope);
@@ -102,10 +109,10 @@ public sealed class WorkflowRunModelCallBodyMaterializerTests
             var numberBytes = "CSMCB1J\n123"u8.ToArray();
             var first = reversePreseed ? numberBytes : stringBytes;
             var second = reversePreseed ? stringBytes : numberBytes;
-            var firstMetadata = await writer.PutAsync(world.TeamId, first,
-                WorkflowRunModelCallBodyMaterializationFormats.EnvelopeContentType, CancellationToken.None);
-            var secondMetadata = await writer.PutAsync(world.TeamId, second,
-                WorkflowRunModelCallBodyMaterializationFormats.EnvelopeContentType, CancellationToken.None);
+            var firstMetadata = await writer.PutAsync(new WorkflowRunModelCallBodyArtifactWrite(world.TeamId, Guid.NewGuid(), first,
+                WorkflowRunModelCallBodyMaterializationFormats.EnvelopeContentType), CancellationToken.None);
+            var secondMetadata = await writer.PutAsync(new WorkflowRunModelCallBodyArtifactWrite(world.TeamId, Guid.NewGuid(), second,
+                WorkflowRunModelCallBodyMaterializationFormats.EnvelopeContentType), CancellationToken.None);
             stringArtifactId = reversePreseed ? secondMetadata.Id : firstMetadata.Id;
             numberArtifactId = reversePreseed ? firstMetadata.Id : secondMetadata.Id;
         }
@@ -120,6 +127,11 @@ public sealed class WorkflowRunModelCallBodyMaterializerTests
         stringAttempt.ResponseArtifactId.ShouldBe(stringArtifactId);
         numberAttempt.ResponseArtifactId.ShouldBe(numberArtifactId);
         stringArtifactId.ShouldNotBe(numberArtifactId, "typed envelope bytes domain-separate JSON strings from JSON scalars");
+        var deduplicatedDeclarations = await db.WorkflowArtifactRetention.AsNoTracking()
+            .Where(value => value.ArtifactId == stringArtifactId || value.ArtifactId == numberArtifactId).ToListAsync();
+        deduplicatedDeclarations.Count.ShouldBe(2);
+        deduplicatedDeclarations.ShouldAllBe(value => value.State == ArtifactRetentionState.Revoked,
+            "once a later capture takes an existing id, its original declaration no longer enumerates every holder and must permanently fail closed");
         var reader = readScope.Resolve<IWorkflowRunModelCallReader>();
         (await ReadBodyAsync(reader, world, stringCall.Id, stringAttempt.Id, WorkflowRunModelCallBody.AttemptResponse))
             .ShouldBe(("123", "text/plain; charset=utf-8"));
@@ -335,6 +347,26 @@ public sealed class WorkflowRunModelCallBodyMaterializerTests
     }
 
     [Fact]
+    public async Task A_body_write_that_loses_settlement_leaves_a_declared_orphan_instead_of_permanent_bytes()
+    {
+        var world = await SeedRunAsync();
+        await AddRecordsAsync(Record(world.RunId, WorkflowRunRecordTypes.InteractionCompleted, Guid.NewGuid(),
+            """{"kind":"lost-settlement","output":"durable before the reference"}"""));
+        await ProjectAsync();
+        using var scope = _fixture.BeginScope();
+
+        var result = await MaterializeAsync(world.RunId, new ThrowAfterWriteWriter(scope.Resolve<IWorkflowRunModelCallBodyArtifactWriter>()));
+
+        result.RetryScheduled.ShouldBe(1, "losing settlement keeps the source retryable and never changes the run verdict");
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var capture = await db.WorkflowRunModelCallBodyCapture.AsNoTracking().SingleAsync(value => value.WorkflowRunId == world.RunId);
+        capture.ArtifactId.ShouldBeNull();
+        var declaration = await db.WorkflowArtifactRetention.AsNoTracking().SingleAsync(value => value.HolderId == capture.Id);
+        declaration.State.ShouldBe(ArtifactRetentionState.Declared);
+        (await db.WorkflowRunModelCallAttempt.AsNoTracking().SingleAsync(value => value.Id == capture.ModelCallAttemptId)).ResponseArtifactId.ShouldBeNull();
+    }
+
+    [Fact]
     public async Task Database_refuses_live_claim_theft_and_cross_team_available_settlement()
     {
         var world = await SeedRunAsync();
@@ -522,7 +554,7 @@ public sealed class WorkflowRunModelCallBodyMaterializerTests
     private sealed class ThrowingWriter : IWorkflowRunModelCallBodyArtifactWriter
     {
         public Task<ArtifactMetadata?> ReadMetadataAsync(Guid teamId, Guid artifactId, CancellationToken cancellationToken) => Task.FromResult<ArtifactMetadata?>(null);
-        public Task<ArtifactMetadata> PutAsync(Guid teamId, ReadOnlyMemory<byte> bytes, string contentType, CancellationToken cancellationToken) =>
+        public Task<ArtifactMetadata> PutAsync(WorkflowRunModelCallBodyArtifactWrite request, CancellationToken cancellationToken) =>
             throw new InvalidOperationException("synthetic object-store outage");
     }
 
@@ -533,11 +565,27 @@ public sealed class WorkflowRunModelCallBodyMaterializerTests
         public Task Started => _started.Task;
         public Task<ArtifactMetadata?> ReadMetadataAsync(Guid teamId, Guid artifactId, CancellationToken cancellationToken) => Task.FromResult<ArtifactMetadata?>(null);
 
-        public async Task<ArtifactMetadata> PutAsync(Guid teamId, ReadOnlyMemory<byte> bytes, string contentType, CancellationToken cancellationToken)
+        public async Task<ArtifactMetadata> PutAsync(WorkflowRunModelCallBodyArtifactWrite request, CancellationToken cancellationToken)
         {
             _started.TrySetResult();
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
             throw new InvalidOperationException("unreachable blocking writer continuation");
+        }
+    }
+
+    private sealed class ThrowAfterWriteWriter : IWorkflowRunModelCallBodyArtifactWriter
+    {
+        private readonly IWorkflowRunModelCallBodyArtifactWriter _inner;
+
+        public ThrowAfterWriteWriter(IWorkflowRunModelCallBodyArtifactWriter inner) => _inner = inner;
+
+        public Task<ArtifactMetadata?> ReadMetadataAsync(Guid teamId, Guid artifactId, CancellationToken cancellationToken) =>
+            _inner.ReadMetadataAsync(teamId, artifactId, cancellationToken);
+
+        public async Task<ArtifactMetadata> PutAsync(WorkflowRunModelCallBodyArtifactWrite request, CancellationToken cancellationToken)
+        {
+            await _inner.PutAsync(request, cancellationToken);
+            throw new InvalidOperationException("synthetic crash after bytes commit and before holder settlement");
         }
     }
 }
