@@ -324,6 +324,73 @@ public sealed class ProfileAbandonmentFlowTests : IDisposable
         (await LocationStateAsync(orphaned)).ShouldBe(ArtifactLocationState.Purged);
     }
 
+    [Fact]
+    public async Task A_record_closed_by_deleting_the_bytes_reads_differently_from_one_merely_abandoned()
+    {
+        // Both closures land on Purged, through the same finalize, writing the same StateChanged event. The operator
+        // reading the ledger afterwards is asking one question — did the bytes go? — and until the verb is written
+        // down the two rows are identical answers to it.
+        var world = await SeedRoutedProfileAsync(placements: 2);
+        var deleted = await PurgeOneAsync(world);
+        DeleteEveryObject(world);
+
+        (await AbandonAsync(world, batchSize: 50)).Abandoned.ShouldBe(1);
+
+        var closures = await ClosuresAsync(world);
+
+        closures.Count.ShouldBe(2, "both placements are closed, so the ledger holds both closures");
+        closures[deleted.LocationId].Verb.ShouldBe("deleted", "the destination was asked to remove the bytes and did not refuse");
+
+        var abandoned = closures.Single(entry => entry.Key != deleted.LocationId).Value;
+
+        abandoned.Verb.ShouldBe("abandoned", "nothing was deleted here — the record was closed on what the destination said");
+        abandoned.Observed.ShouldNotBeNullOrWhiteSpace("an abandonment that records no observation leaves the operator exactly where they were");
+    }
+
+    [Fact]
+    public async Task After_a_drain_an_operator_can_name_every_key_that_may_still_hold_bytes()
+    {
+        // A drained profile is not an emptied destination. Abandonment closes the record WITHOUT deleting anything,
+        // so a bucket that answered it is gone for good leaves every one of its objects exactly where it was, under
+        // keys nothing points at any more. The row keeps the coordinate; only the ledger can say the bytes were never
+        // asked to go.
+        var world = await SeedRoutedProfileAsync(placements: 3);
+        var deleted = await PurgeOneAsync(world);
+
+        File.Exists(BytesAt(world, deleted.ObjectKey)).ShouldBeFalse("a delete that removed nothing would make the rest of this prove nothing");
+        (await KeysClosedWithoutDeletingAsync(world)).ShouldBeEmpty("nothing has been abandoned yet");
+
+        (await AbandonAsync(world, batchSize: 50, ScriptedProvider.GoneForGood())).Abandoned.ShouldBe(2);
+
+        var stranded = await KeysClosedWithoutDeletingAsync(world);
+
+        stranded.Count.ShouldBe(2, "every record closed without a delete has to be nameable, or the leak is silent");
+        stranded.ShouldNotContain(deleted.ObjectKey, "the one destination that was asked to delete answered, and its key holds nothing");
+        stranded.ShouldAllBe(key => File.Exists(BytesAt(world, key)), "an operator handed these keys must find the bytes still sitting there");
+    }
+
+    [Fact]
+    public async Task A_record_closed_because_its_key_holds_someone_elses_object_says_so()
+    {
+        // The other conclusive closure, and the one the ledger has to keep apart from the first. Here the destination
+        // is healthy and it IS serving something at the key — just not this object. Both closures land on Purged
+        // through the same finalize, so an operator triaging what may still be out there reads the observation or
+        // nothing: bytes stranded because a destination went away are not the problem that somebody else's bytes
+        // sitting under our coordinate is.
+        var world = await SeedRoutedProfileAsync(placements: 1);
+        var usurped = await FirstPlacementAsync(world);
+
+        await File.WriteAllTextAsync(BytesAt(world, usurped.ObjectKey), "an entirely different object living at that key");
+
+        (await AbandonAsync(world, batchSize: 50)).Abandoned.ShouldBe(1, "a healthy destination holding something that is not ours is grounds to close the record");
+
+        var closure = (await ClosuresAsync(world))[usurped.LocationId];
+
+        closure.Verb.ShouldBe("abandoned", "nothing was deleted — those bytes were positively identified as not ours");
+        closure.Observed.ShouldBe($"the destination holds something other than this object at {usurped.ObjectKey}",
+            "the two conclusive closures have to be told apart in the ledger, not by reading the code that wrote them");
+    }
+
     // ─── World ───────────────────────────────────────────────────────────────
 
     /// <summary>The answers a mixed batch gives, first-listed first — five unrelated problems that no one destination fault could produce together.</summary>
@@ -429,6 +496,62 @@ public sealed class ProfileAbandonmentFlowTests : IDisposable
         return await scope.Resolve<CodeSpaceDbContext>().ArtifactLocation.AsNoTracking()
             .Where(location => location.Id == locationId).Select(location => location.State).SingleAsync();
     }
+
+    /// <summary>Removes one placement's bytes for real, through the delete path — the closure an abandonment has to be distinguishable from.</summary>
+    private async Task<SeededPlacement> PurgeOneAsync(RoutedWorld world)
+    {
+        var placement = await FirstPlacementAsync(world);
+
+        using var scope = _fixture.BeginScope();
+        (await scope.Resolve<IArtifactCasPurgeCoordinator>().PurgeAsync(new ArtifactCasPurgeRequest
+        {
+            TeamId = world.TeamId, ArtifactObjectId = placement.ArtifactObjectId, ActorId = world.ActorId, ArtifactLocationId = placement.LocationId,
+        }, CancellationToken.None)).ShouldBeOfType<ArtifactCasPurgeResult.Purged>();
+
+        return placement;
+    }
+
+    /// <summary>The placement a fixture stages against, by the same ordering the seeding used — never a scan of the table, which sibling classes are writing to.</summary>
+    private async Task<SeededPlacement> FirstPlacementAsync(RoutedWorld world)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().ArtifactLocation.AsNoTracking()
+            .Where(location => location.TeamId == world.TeamId).OrderBy(location => location.Id)
+            .Select(location => new SeededPlacement(location.Id, location.ArtifactObjectId, location.ObjectKey)).FirstAsync();
+    }
+
+    /// <summary>How each of THIS world's placements was closed, read off the ledger. Never a deployment-wide scan: sibling classes close their own rows in the same table.</summary>
+    private async Task<Dictionary<Guid, Closure>> ClosuresAsync(RoutedWorld world)
+    {
+        using var scope = _fixture.BeginScope();
+        var entries = await scope.Resolve<CodeSpaceDbContext>().ArtifactLocationEvent.AsNoTracking()
+            .Where(entry => entry.TeamId == world.TeamId && entry.State == ArtifactLocationState.Purged)
+            .Select(entry => new { entry.ArtifactLocationId, entry.DetailsJson }).ToListAsync();
+
+        return entries.ToDictionary(entry => entry.ArtifactLocationId, entry => Closure.Read(entry.DetailsJson));
+    }
+
+    /// <summary>
+    /// The operator's question, asked of the ledger the way an operator asks it: which keys were closed WITHOUT
+    /// anything being deleted, and so may still hold bytes. Scoped to this world's team, never deployment-wide.
+    /// </summary>
+    private async Task<List<string>> KeysClosedWithoutDeletingAsync(RoutedWorld world)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().Database.SqlQuery<string>($"""
+            SELECT location.object_key AS "Value"
+            FROM artifact_location_event closure
+            JOIN artifact_location location ON location.id = closure.artifact_location_id
+            WHERE closure.team_id = {world.TeamId} AND closure.details_jsonb ->> 'closure' = 'abandoned'
+            ORDER BY location.object_key
+            """).ToListAsync();
+    }
+
+    /// <summary>Where the local driver actually keeps the bytes for a key — it namespaces every one of them under an "objects" directory of its own.</summary>
+    private static string BytesAt(RoutedWorld world, string objectKey) =>
+        Path.Combine(world.Root, "objects", objectKey.Replace('/', Path.DirectorySeparatorChar));
 
     /// <summary>A profile whose objects really exist on disk, so "the destination still serves it" is a fact rather than a fixture flag.</summary>
     private async Task<RoutedWorld> SeedRoutedProfileAsync(int placements)
@@ -630,4 +753,20 @@ public sealed class ProfileAbandonmentFlowTests : IDisposable
     }
 
     private sealed record RoutedWorld(Guid TeamId, Guid ActorId, Guid ProfileId, string Root);
+
+    private sealed record SeededPlacement(Guid LocationId, Guid ArtifactObjectId, string ObjectKey);
+
+    /// <summary>What one closure's ledger entry says about itself, as an operator reads it back out of the details column.</summary>
+    private sealed record Closure(string? Verb, string? Observed)
+    {
+        public static Closure Read(string detailsJson)
+        {
+            var details = JsonDocument.Parse(detailsJson).RootElement;
+
+            return new Closure(Text(details, "closure"), Text(details, "observed"));
+        }
+
+        private static string? Text(JsonElement details, string name) =>
+            details.TryGetProperty(name, out var value) ? value.GetString() : null;
+    }
 }

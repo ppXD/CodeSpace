@@ -79,8 +79,11 @@ public static class WorkflowRunDataOwnerKinds
     public const string Session = "session";
     public const string SessionStateRevision = "session-state-revision";
 
-    /// <summary>Bytes a node produced that a storage failure kept out of their destination. A gap subject only: nothing can declare in advance how many outputs a run will offload, so there is no facet to count.</summary>
+    /// <summary>Bytes a node produced that a storage failure kept out of their destination.</summary>
     public const string NodeOutput = "node-output";
+
+    /// <summary>A file the run was asked to produce and that the publish path captured into the store — the run's own output, as opposed to the byproducts of executing it.</summary>
+    public const string Deliverable = "deliverable";
     public const string CaptureGap = "capture-gap";
     public const string DataManifest = "data-manifest";
 
@@ -88,15 +91,19 @@ public static class WorkflowRunDataOwnerKinds
     {
         ModelCall, ModelCallAttempt, ModelCallBodyCapture, HarnessExecution, HarnessProcessAttempt, HarnessDescriptor,
         HarnessReductionCheckpoint, RunnerHandle, NativeRecord, SemanticEvent, ToolCall, ToolCallAttempt, LogStream,
-        LogSegment, Session, SessionStateRevision, CaptureGap, DataManifest,
+        LogSegment, Session, SessionStateRevision, NodeOutput, Deliverable, CaptureGap, DataManifest,
     };
 
     /// <summary>
     /// The registered OWNER kinds — every noun a manifest facet may be declared over or a data reference may point at.
-    /// <see cref="NodeOutput"/> is deliberately absent: it is a gap SUBJECT and nothing more. A facet needs a declarable
-    /// expected count, and nothing knows in advance how many outputs a run will offload, so a node-output facet would
-    /// sit at expected=0 forever and read as complete — the exact false claim the subject exists to prevent. Admitting a
-    /// noun here is a widening of both tables' check constraints, never a list edit.
+    /// Admitting a noun here is a widening of both tables' check constraints, never a list edit.
+    ///
+    /// <para><see cref="NodeOutput"/> and <see cref="Deliverable"/> — the two nouns for a file the RUN produced — were
+    /// held out on the reasoning migration 0175 wrote down: a facet nothing advances "would sit at expected=0 forever
+    /// and read as complete". Migration 0172 shipped before it and had already removed that possibility. Registration
+    /// mints no statement, and one a producer never advances has no row at all; one the initializer mints carries a
+    /// NULL expectation under <see cref="WorkflowRunCaptureCompleteness.LegacyUnknown"/>, which the manifest's own
+    /// completeness constraint refuses every complete verdict over.</para>
     /// </summary>
     public static IReadOnlySet<string> All => Registered;
 

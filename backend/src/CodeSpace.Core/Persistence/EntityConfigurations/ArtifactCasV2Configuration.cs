@@ -64,6 +64,7 @@ public sealed class ArtifactLocationConfiguration : IEntityTypeConfiguration<Art
         builder.HasIndex(l => new { l.TeamId, l.StorageProfileRevisionId, l.ObjectKey }).IsUnique().HasDatabaseName("ux_artifact_location_profile_object_key");
         builder.HasIndex(l => new { l.TeamId, l.ArtifactObjectId, l.State }).HasDatabaseName("ix_artifact_location_object_state");
         builder.HasIndex(l => new { l.TeamId, l.State, l.VerifiedAt, l.Id }).HasDatabaseName("ix_artifact_location_state_verified");
+        builder.HasIndex(l => new { l.State, l.TeamId, l.StorageProfileRevisionId, l.VerifiedAt, l.Id }).HasDatabaseName("ix_artifact_location_state_destination_verified");
     }
 }
 
