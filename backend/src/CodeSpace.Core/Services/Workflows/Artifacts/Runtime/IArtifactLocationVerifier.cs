@@ -57,4 +57,15 @@ public sealed record ArtifactLocationVerificationSummary
     /// folding that into <see cref="Inconclusive"/> would leave it indistinguishable from a destination being offline.
     /// </summary>
     public required int Unrecorded { get; init; }
+
+    /// <summary>
+    /// Selected into the batch and then dropped unasked, because the destination behind the row had ALREADY failed to
+    /// answer earlier in this same pass. Left untouched exactly as an <see cref="Inconclusive"/> row is, including its
+    /// stale <c>verified_at</c>.
+    ///
+    /// <para>Its own count rather than more <see cref="Inconclusive"/>, because a destination that is down costs one
+    /// round trip and N drops, not N round trips. Folded together, forty dropped rows would read as forty destinations
+    /// that were asked and said nothing — a deployment-wide outage reported for a fault one bucket wide.</para>
+    /// </summary>
+    public required int Skipped { get; init; }
 }

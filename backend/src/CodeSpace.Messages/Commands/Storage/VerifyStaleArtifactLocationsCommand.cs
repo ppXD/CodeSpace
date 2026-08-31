@@ -20,4 +20,12 @@ public sealed record VerifyStaleArtifactLocationsResponse
 
     /// <summary>Rows the provider answered about and the database refused to record. Apart from <see cref="Inconclusive"/> on purpose: a pass that could reach every destination and write none of it down is a different fault from one that could reach nothing.</summary>
     public required int Unrecorded { get; init; }
+
+    /// <summary>
+    /// Rows the pass selected and then dropped unasked, because their destination had already failed to answer for
+    /// itself earlier in the same pass. The count this response would otherwise lose entirely: one destination going
+    /// quiet drops rows by the dozen and answers for exactly one, so a response without this number reports a batch of
+    /// a hundred as a pass that examined two.
+    /// </summary>
+    public required int Skipped { get; init; }
 }
