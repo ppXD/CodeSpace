@@ -19,11 +19,19 @@ namespace CodeSpace.IntegrationTests.Workflows.Artifacts;
 
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
-public sealed class ArtifactCasRuntimeCoordinatorTests
+public sealed class ArtifactCasRuntimeCoordinatorTests : IAsyncLifetime
 {
     private readonly PostgresFixture _fixture;
+    private readonly List<Guid> _destinations = [];
 
     public ArtifactCasRuntimeCoordinatorTests(PostgresFixture fixture) => _fixture = fixture;
+
+    /// <summary>The CONTENT fields a HEAD and the readback it licensed can disagree about. Every one of them is a property of the bytes, so no rewrite of identical bytes can produce one.</summary>
+    public enum ReadbackDisagreement
+    {
+        Length,
+        Sha256,
+    }
 
     [Fact]
     public async Task Routed_purge_claims_the_exact_recorded_location_before_provider_io_and_finalizes_it_monotonically()
@@ -585,17 +593,29 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
     }
 
     /// <summary>
-    /// The dedup short-circuit is the whole cost case for content-addressed storage AND the one place a purge can hand
-    /// a writer an object whose bytes are gone. <c>Available</c> is the only location state that means "these bytes
-    /// were verified present here", so it is the only one that may satisfy a write without provider I/O.
+    /// What a second write of the same content, on the same scope, is answered with — per state of the location the
+    /// committed intent names. Three outcomes, and the whole table is one whitelist read twice.
+    ///
+    /// <para><c>Available</c> is the only state that means "these bytes were verified present here", so it is the only
+    /// one that may satisfy a write from the LEDGER, with no provider I/O at all — the whole cost case for
+    /// content-addressed storage. Two states mean the placement lost its bytes and may be put back, and those cost a
+    /// real transfer onto the SAME intent. The rest are refused, and <c>Deleting</c> is the one that matters: it is a
+    /// purge's own claim over bytes it is about to remove.</para>
+    ///
+    /// <para>The destination is left holding the object in every row, which is what makes the upload counts here say
+    /// something. A <c>Missing</c> revival HEADs, finds this exact content and uploads nothing. A <c>Corrupt</c> one
+    /// uploads anyway, on the same staging and against the same agreeing HEAD, because its record says the key holds
+    /// a foreign object and a repair that trusted the HEAD would be the dead end this arm removes. What that repair is
+    /// FOR — a key that really is serving somebody else's bytes — is driven end to end against a real driver in
+    /// <c>ArtifactStoreRoutedDestinationFlowTests</c>.</para>
     /// </summary>
     [Theory]
-    [InlineData(ArtifactLocationState.Available, null)]
-    [InlineData(ArtifactLocationState.Deleting, ArtifactCasProblemCode.TargetMissing)]
-    [InlineData(ArtifactLocationState.Deleted, ArtifactCasProblemCode.TargetMissing)]
-    [InlineData(ArtifactLocationState.Missing, ArtifactCasProblemCode.TargetMissing)]
-    [InlineData(ArtifactLocationState.Corrupt, ArtifactCasProblemCode.TargetMissing)]
-    public async Task Dedup_hit_satisfies_a_write_only_while_the_committed_location_is_still_available(ArtifactLocationState state, ArtifactCasProblemCode? expected)
+    [InlineData(ArtifactLocationState.Available, null, false, 1)]
+    [InlineData(ArtifactLocationState.Deleting, ArtifactCasProblemCode.TargetMissing, false, 1)]
+    [InlineData(ArtifactLocationState.Deleted, ArtifactCasProblemCode.TargetMissing, false, 1)]
+    [InlineData(ArtifactLocationState.Missing, null, true, 1)]
+    [InlineData(ArtifactLocationState.Corrupt, null, true, 2)]
+    public async Task Dedup_hit_satisfies_a_write_only_while_the_committed_location_is_still_available(ArtifactLocationState state, ArtifactCasProblemCode? expected, bool revives, int puts)
     {
         var world = await SeedWorldAsync();
         var storage = new FakeStorageState();
@@ -609,8 +629,8 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         if (expected == null)
         {
             var hit = second.ShouldBeOfType<ArtifactCasTransferResult.Committed>();
-            hit.WasAlreadyCommitted.ShouldBeTrue();
-            hit.IntentId.ShouldBe(committed.IntentId);
+            hit.WasAlreadyCommitted.ShouldBe(!revives, "a revival is a fresh readback, not a claim that the ledger already answered this");
+            hit.IntentId.ShouldBe(committed.IntentId, "a revival re-drives the intent that already names this content, never a new generation of it");
             hit.ArtifactObjectId.ShouldBe(committed.ArtifactObjectId);
             hit.ArtifactLocationId.ShouldBe(committed.ArtifactLocationId);
         }
@@ -621,15 +641,73 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
             rejected.IntentId.ShouldBe(committed.IntentId);
         }
 
-        // Either way the dedup decision costs no provider I/O: one driver and one upload for the whole test.
-        storage.FactoryCreateCalls.ShouldBe(1);
-        storage.PutCalls.ShouldBe(1);
+        // A ledger answer — hit or refusal — costs no provider I/O at all; a revival has to open the destination and
+        // read the object back.
+        storage.FactoryCreateCalls.ShouldBe(revives ? 2 : 1);
+        storage.PutCalls.ShouldBe(puts,
+            "a revival may upload only what its placement's own record licenses: nothing when the record says the key is empty and the object is already there, and an unconditional overwrite when it says the key holds something else");
     }
 
     /// <summary>
-    /// The write-back half of a purge. A purged location is the only non-<c>Available</c> state a write may revive,
-    /// and reviving it is what stops a purge from being data loss: the object key cannot take a second location row
-    /// (<c>ux_artifact_location_profile_object_key</c>) and the commit only ever re-verifies the row that is there.
+    /// The same widened whitelist, reached from the ORDINARY transfer instead of from a revival — and the verdict it
+    /// changes there. This is not a revival: the writer's own scope has no intent, so it mints a fresh one and drives
+    /// the plain upload-verify-commit path, which reads its fence off the object KEY rather than off a committed
+    /// intent's location id. That fence is what <c>Reusable</c> hands to the whitelist at commit time.
+    ///
+    /// <para>Two scopes on ONE key is the shape that gets there, and it is already the shape
+    /// <see cref="Purge_that_moves_the_location_between_upload_and_commit_admits_no_committed_artifact"/> is built on:
+    /// nothing binds a producer's idempotency scope to the key it writes, so a second producer of the same content
+    /// arrives with no intent of its own onto a placement the first one left behind.</para>
+    ///
+    /// <para>Before the whitelist was widened this ended in <c>IdempotencyConflict</c>, non-retryably: the row was not
+    /// <c>Available</c> so it could not be re-verified, and not <c>Purged</c> so it could not be revived, and the
+    /// commit refused it. That refusal was permanent for the content — the failure burns this scope's generation, the
+    /// next attempt mints a fresh intent, drives the identical transfer and is refused identically, for as long as the
+    /// placement stays lost. Admitting the readback is the point of the change, and the placement is put back into
+    /// service by the write that proved it good.</para>
+    ///
+    /// <para>Both lost states, because the ordinary path repairs them with the SAME create-only upload: it never
+    /// overwrites, so a <c>Corrupt</c> row is repaired here only because the key is genuinely empty. The overwrite a
+    /// <c>Corrupt</c> record licenses stays confined to the revival arm, where its evidence is read.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(ArtifactLocationState.Missing)]
+    [InlineData(ArtifactLocationState.Corrupt)]
+    public async Task An_ordinary_write_onto_a_lost_placement_commits_it_back_instead_of_being_refused_forever(ArtifactLocationState lost)
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState();
+        var bytes = RandomNumberGenerator.GetBytes(4096);
+        var objectKey = $"cas/ordinary-onto-lost-{lost}.bin";
+        var seed = Request(world, new MemoryStream(bytes), bytes, $"ordinary-onto-lost-seed-{lost}") with { TargetObjectKey = objectKey };
+        var seeded = (await PutAsync(world, storage, seed)).ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        storage.Objects.TryRemove(objectKey, out _).ShouldBeTrue("the destination has to have actually lost the bytes, or this writer would dedup on a HEAD");
+        var lostRevision = await MoveLocationAsync(seeded.ArtifactLocationId, lost);
+
+        var writer = await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, $"ordinary-onto-lost-writer-{lost}") with { TargetObjectKey = objectKey });
+
+        var committed = writer.ShouldBeOfType<ArtifactCasTransferResult.Committed>(
+            "an ordinary write reaches the commit with a lost placement's fence, and this is the dead end the widened whitelist removes");
+        committed.WasAlreadyCommitted.ShouldBeFalse("nothing was in the ledger for this scope — the bytes were uploaded and read back");
+        committed.IntentId.ShouldNotBe(seeded.IntentId, "a different scope mints its own intent; this writer never touched the seed's");
+        committed.ArtifactObjectId.ShouldBe(seeded.ArtifactObjectId, "same content, same artifact object");
+        committed.ArtifactLocationId.ShouldBe(seeded.ArtifactLocationId, "the unique index forbids a second row for this key, so the lost row is what took the readback");
+        storage.PutCalls.ShouldBe(2, "the ordinary path is create-only on both lost states — it found the key empty and filled it");
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var location = await db.ArtifactLocation.AsNoTracking().SingleAsync(value => value.Id == seeded.ArtifactLocationId);
+        location.State.ShouldBe(ArtifactLocationState.Available);
+        location.Revision.ShouldBe(lostRevision + 1, "one write, one observation appended onto the placement it proved good");
+        location.LastErrorCode.ShouldBeNull();
+        (await db.ArtifactLocation.CountAsync(value => value.TeamId == world.TeamId)).ShouldBe(1);
+        (await db.ArtifactTransferIntent.CountAsync(value => value.TeamId == world.TeamId && value.State == ArtifactTransferState.Committed)).ShouldBe(2);
+    }
+
+    /// <summary>
+    /// The write-back half of a purge. A purged location is one of the states a write may revive, and reviving it is
+    /// what stops a purge from being data loss: the object key cannot take a second location row
+    /// (<c>ux_artifact_location_profile_object_key</c>), and the commit only ever writes onto the row that is there.
     ///
     /// <para>The re-put also has to get PAST the intent ledger to reach that commit. The first write's intent is
     /// <c>Committed</c> for good (0131 whitelists no transition out), so the repair is a fresh generation — the same
@@ -727,9 +805,9 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
     /// observation onto the row, because the bytes it verified are exactly the ones that purge is entitled to remove.
     ///
     /// <para>Two shapes, from both pre-upload states. A purge still HOLDING the row is refused on the state — that is
-    /// the <c>Deleting</c> claim #1532 already pinned. A purge that COMPLETED leaves the row back in the one state a
-    /// write may revive, and then the only thing between this writer and a location claiming bytes nobody has is the
-    /// revision it fenced on before uploading. This staging deliberately leaves the bytes in place for that case: the
+    /// the <c>Deleting</c> claim #1532 already pinned. A purge that COMPLETED leaves the row in a state a write may
+    /// revive, and then the only thing between this writer and a location claiming bytes nobody has is the revision
+    /// it fenced on before uploading. This staging deliberately leaves the bytes in place for that case: the
     /// writer's readback succeeds and the row alone says a purge ran, which is all a writer can ever know.</para>
     /// </summary>
     [Theory]
@@ -765,6 +843,620 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         (await db.ArtifactLocation.CountAsync(value => value.TeamId == world.TeamId)).ShouldBe(1);
         (await db.ArtifactTransferIntent.CountAsync(value => value.TeamId == world.TeamId && value.State == ArtifactTransferState.Committed)).ShouldBe(1);
     }
+
+    /// <summary>
+    /// The claim a purge takes before it touches a byte is NOT a placement a write may re-drive, however completely
+    /// that write would have verified what it found.
+    ///
+    /// <para>This is the interleaving the whitelist exists for, and no fence can see it. The purge claimed the row
+    /// before this writer looked, so state and revision are whatever they will still be when it commits. The bytes
+    /// are also still at the key — the delete has not run — so a writer allowed through would HEAD them, skip its
+    /// upload entirely, pass its readback on exactly the bytes about to be removed, and publish a freshly verified
+    /// <c>Available</c> row over nothing while answering the producer <c>Committed</c>.</para>
+    ///
+    /// <para>The second write re-presents the content on the producer's OWN scope, which is the only shape a workflow
+    /// makes: the intent scope is derived from the content, so a re-presentation always lands on the first write's
+    /// committed intent. The refusal therefore has to come from the ledger, and it has to cost no provider I/O at
+    /// all.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_write_that_lands_inside_an_open_purge_claim_is_refused_before_it_reaches_the_provider()
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState
+        {
+            Capabilities = StorageProviderCapabilities.StreamingWrite | StorageProviderCapabilities.StreamingRead
+                | StorageProviderCapabilities.ConditionalCreate | StorageProviderCapabilities.Delete,
+            BlockNextDelete = true,
+        };
+        var bytes = RandomNumberGenerator.GetBytes(4096);
+        var seeded = (await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "open-claim")))
+            .ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+
+        using var purgeScope = Scope(storage);
+        var purge = purgeScope.Resolve<IArtifactCasPurgeCoordinator>().PurgeAsync(new ArtifactCasPurgeRequest
+        {
+            TeamId = world.TeamId, ArtifactObjectId = seeded.ArtifactObjectId, ActorId = world.ActorId,
+        }, CancellationToken.None);
+        await AwaitBlockedCallAsync(storage.DeleteEntered.Task, purge, "FakeStorageState.DeleteEntered (the purge's provider delete, taken under its Deleting claim)");
+        (await PlacementStateAsync(world, seeded.ArtifactLocationId)).ShouldBe(ArtifactLocationState.Deleting,
+            "the claim has to be durable while the bytes are still there, or this is not the race at all");
+        var driversBefore = storage.FactoryCreateCalls;
+
+        var writer = await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "open-claim"));
+
+        writer.ShouldBeOfType<ArtifactCasTransferResult.Rejected>().Problem.Code.ShouldBe(ArtifactCasProblemCode.TargetMissing,
+            "an open purge claim reads as an untouched placement to every writer that arrives after it, so only the whitelist keeps this write off the row");
+        storage.FactoryCreateCalls.ShouldBe(driversBefore, "a Deleting placement must not cost even a driver, let alone the readback that would have passed");
+        storage.PutCalls.ShouldBe(1);
+
+        storage.ReleaseDelete.TrySetResult();
+        (await purge).ShouldBeOfType<ArtifactCasPurgeResult.Purged>();
+        (await PlacementStateAsync(world, seeded.ArtifactLocationId)).ShouldBe(ArtifactLocationState.Purged);
+        storage.Objects.ShouldNotContainKey("cas/open-claim.bin", "and the bytes that write would have said it verified are gone");
+    }
+
+    /// <summary>
+    /// A revival that cannot complete costs the LEDGER nothing, and that is the whole reason the repair re-drives the
+    /// committed intent instead of stepping a generation. Under generations, a placement whose destination stays
+    /// broken mints an intent row for every attempt any producer of that content ever makes — an unbounded run of
+    /// them for one payload — and the newest of those is <c>Failed</c>, so a later writer arriving after the placement
+    /// finally comes back is answered from a dead intent instead of the healthy object.
+    ///
+    /// <para>A foreign object of the wrong length at the target key is the cheapest non-retryable fault a revival can
+    /// meet: the readback is refused before anything is written, exactly where a first write of new content would be
+    /// refused.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_revival_that_cannot_complete_leaves_the_ledger_and_the_placement_exactly_as_they_were()
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState();
+        var bytes = RandomNumberGenerator.GetBytes(4096);
+        var request = Request(world, new MemoryStream(bytes), bytes, "revive-fault");
+        var committed = (await PutAsync(world, storage, request)).ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        var lostRevision = await MoveLocationAsync(committed.ArtifactLocationId, ArtifactLocationState.Missing);
+        storage.Objects[request.TargetObjectKey] = RandomNumberGenerator.GetBytes(64);
+
+        var first = await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "revive-fault"));
+        var second = await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "revive-fault"));
+
+        foreach (var attempt in new[] { first, second })
+            attempt.ShouldBeOfType<ArtifactCasTransferResult.Rejected>().Problem.Code.ShouldBe(ArtifactCasProblemCode.TargetCorrupt,
+                "the revival has to report the fault it actually met, not the ledger's stale verdict on the placement");
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        (await db.ArtifactTransferIntent.Where(value => value.TeamId == world.TeamId).Select(value => value.IdempotencyKey).ToListAsync())
+            .ShouldBe(new[] { "revive-fault" }, ignoreOrder: false,
+                customMessage: "two failed revivals, still one intent — a repair that burns a generation per attempt is what this shape exists to avoid");
+        var location = await db.ArtifactLocation.SingleAsync(value => value.Id == committed.ArtifactLocationId);
+        location.State.ShouldBe(ArtifactLocationState.Missing);
+        location.Revision.ShouldBe(lostRevision, "nothing was verified, so nothing may be recorded on the placement");
+    }
+
+    /// <summary>
+    /// Two producers of the same content revive one placement at once — the ordinary case for a fan-out whose
+    /// branches emit the same payload. The placement takes exactly ONE observation, and the writer that lost the
+    /// fence is told to come back rather than handed a hard failure for content that is by then perfectly stored.
+    ///
+    /// <para>No lease can arbitrate this. The intent both writers re-drive is terminally <c>Committed</c>, so 0131
+    /// lets neither claim it and the placement fence is the whole mechanism. The staging is what makes the race real:
+    /// the first writer's upload LANDS and then blocks, so the second finds the object already at the key, verifies
+    /// it and commits while the first is still mid-flight.</para>
+    /// </summary>
+    [Fact]
+    public async Task Two_revivals_of_one_placement_record_one_observation_and_send_the_loser_back()
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState();
+        var bytes = RandomNumberGenerator.GetBytes(4096);
+        var request = Request(world, new MemoryStream(bytes), bytes, "revive-race");
+        var committed = (await PutAsync(world, storage, request)).ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        storage.Objects.TryRemove(request.TargetObjectKey, out _).ShouldBeTrue();
+        var lostRevision = await MoveLocationAsync(committed.ArtifactLocationId, ArtifactLocationState.Missing);
+
+        storage.BlockAfterNextPut = true;
+        using var firstScope = Scope(storage);
+        var first = firstScope.Resolve<IArtifactCasRuntimeCoordinator>().PutAsync(Request(world, new MemoryStream(bytes), bytes, "revive-race"), CancellationToken.None);
+        await AwaitBlockedCallAsync(storage.BlockedAfterPutEntered.Task, first, "FakeStorageState.BlockedAfterPutEntered (the first reviver's upload, landed but not yet committed)");
+
+        var second = await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "revive-race"));
+        storage.ReleaseBlockedAfterPut.TrySetResult();
+
+        second.ShouldBeOfType<ArtifactCasTransferResult.Committed>().ArtifactLocationId.ShouldBe(committed.ArtifactLocationId);
+        (await first).ShouldBeOfType<ArtifactCasTransferResult.Deferred>().Problem.Code.ShouldBe(ArtifactCasProblemCode.StaleWorker,
+            "the loser has to be sent back to the ledger, where the placement it wanted is now Available");
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var location = await db.ArtifactLocation.AsNoTracking().SingleAsync(value => value.Id == committed.ArtifactLocationId);
+        location.State.ShouldBe(ArtifactLocationState.Available);
+        location.Revision.ShouldBe(lostRevision + 1, "one revival, one observation — the loser must not append a second");
+        (await db.ArtifactTransferIntent.CountAsync(value => value.TeamId == world.TeamId)).ShouldBe(1,
+            "and neither writer may mint an intent: both are re-driving the one this content already has");
+    }
+
+    /// <summary>
+    /// The same race one step earlier — inside the winner's own verification, between the HEAD it took and the
+    /// readback that HEAD licensed. That window is fenced too, and unlike the four fences a committed placement
+    /// carries it compares RAW provider metadata rather than a recorded identity, so nothing filters out a
+    /// destination whose ETag is not derived from the content. Every destination that ships is one: the local driver
+    /// derives its ETag from the file's mtime, and the double above models that.
+    ///
+    /// <para>So the trip is reachable, and what it means is only that the object moved between the two calls — which
+    /// is no evidence whatever about the bytes. Answering it with a verdict about the bytes is what this pins shut:
+    /// the attempt has to come out exactly as it does when the same overwrite lands one step earlier, sent back to a
+    /// ledger where the placement is now <c>Available</c>, and not with a non-retryable claim that a destination
+    /// holding precisely these bytes is serving somebody else's.</para>
+    ///
+    /// <para>Both faces of that fence, because they are one fence with two enforcers and the conformance kit picks
+    /// neither: it pins only that a MATCHING condition succeeds, so a driver may accept the pin and refuse the read,
+    /// or accept it, ignore it, and hand back metadata that disagrees with the HEAD's. Answering one and not the
+    /// other would leave the identical false failure available on half the drivers that can ship.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_concurrent_overwrite_of_identical_bytes_inside_a_verification_does_not_fail_it(bool providerRefusesThePinnedRead)
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState { EnforcesReadConditions = providerRefusesThePinnedRead };
+        var bytes = RandomNumberGenerator.GetBytes(4096);
+        var request = Request(world, new MemoryStream(bytes), bytes, "verify-race");
+        var committed = (await PutAsync(world, storage, request)).ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        var lostRevision = await MoveLocationAsync(committed.ArtifactLocationId, ArtifactLocationState.Corrupt);
+
+        storage.BlockAfterNextHead = true;
+        using var firstScope = Scope(storage);
+        var first = firstScope.Resolve<IArtifactCasRuntimeCoordinator>().PutAsync(Request(world, new MemoryStream(bytes), bytes, "verify-race"), CancellationToken.None);
+        await AwaitBlockedCallAsync(storage.BlockedAfterHeadEntered.Task, first, "FakeStorageState.BlockedAfterHeadEntered (the first reviver's verification HEAD, taken after its own overwrite landed)");
+        var pinned = storage.MetadataRevision;
+
+        var second = await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "verify-race"));
+        storage.ReleaseBlockedAfterHead.TrySetResult();
+
+        storage.MetadataRevision.ShouldBeGreaterThan(pinned,
+            "the second reviver's overwrite has to have moved the conditions the first one pinned, or the fence under test was never tripped at all");
+        second.ShouldBeOfType<ArtifactCasTransferResult.Committed>().ArtifactLocationId.ShouldBe(committed.ArtifactLocationId);
+        (await first).ShouldBeOfType<ArtifactCasTransferResult.Deferred>().Problem.Code.ShouldBe(ArtifactCasProblemCode.StaleWorker,
+            "a concurrent writer of IDENTICAL content may not fail an attempt: it re-observes, and then loses only where losing is decided — the placement fence");
+        storage.Objects[request.TargetObjectKey].ShouldBe(bytes,
+            "every write in this test is the same bytes, so nothing that happened is evidence about the content");
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var location = await db.ArtifactLocation.AsNoTracking().SingleAsync(value => value.Id == committed.ArtifactLocationId);
+        location.State.ShouldBe(ArtifactLocationState.Available);
+        location.Revision.ShouldBe(lostRevision + 1, "one revival, one observation — the re-observing writer must not append a second");
+        (await db.ArtifactTransferIntent.CountAsync(value => value.TeamId == world.TeamId)).ShouldBe(1);
+    }
+
+    /// <summary>
+    /// The bound on that re-observation, and the verdict it gives up with. A destination that publishes fresh
+    /// conditions on every HEAD moves the fence under every readback this attempt could ever pin, so re-observing has
+    /// to stop — and what it stops with is a RETRYABLE provider fault, never a claim about the content.
+    ///
+    /// <para>Which is the distinction the whole loop rests on: a moved fence is evidence about the DESTINATION, and
+    /// the only thing that ever convicts the content is the digest of the stream actually read. A destination
+    /// genuinely holding another object is still refused outright and non-retryably, on that digest, by
+    /// <see cref="A_revival_that_cannot_complete_leaves_the_ledger_and_the_placement_exactly_as_they_were"/>.</para>
+    ///
+    /// <para>Both faces again, and this is where the second one earns its row: a driver that ignores the pin never
+    /// reports a refusal at all, so the ONLY thing that can notice the move is the metadata comparison — and if that
+    /// still convicted the content, every such driver would keep the exact failure this closes.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_destination_that_never_holds_still_is_reported_as_a_provider_fault_and_not_as_corruption(bool providerRefusesThePinnedRead)
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState { EnforcesReadConditions = providerRefusesThePinnedRead };
+        var bytes = RandomNumberGenerator.GetBytes(4096);
+        var request = Request(world, new MemoryStream(bytes), bytes, "verify-churn");
+        var committed = (await PutAsync(world, storage, request)).ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        var lostRevision = await MoveLocationAsync(committed.ArtifactLocationId, ArtifactLocationState.Corrupt);
+        storage.ShiftConditionsEveryHead = true;
+
+        var revival = await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, "verify-churn"));
+
+        var rejected = revival.ShouldBeOfType<ArtifactCasTransferResult.Rejected>();
+        rejected.Problem.Code.ShouldBe(ArtifactCasProblemCode.ProviderUnavailableTransient,
+            "a destination that will not hold still between a HEAD and the read it licensed is a provider fault, and re-observing it forever is not an option either");
+        rejected.Problem.IsRetryable.ShouldBeTrue(
+            "and a retryable one — the content was never in doubt, so nothing here may be terminal for the producer");
+        storage.Objects[request.TargetObjectKey].ShouldBe(bytes, "the correct bytes were at the key throughout");
+
+        using var scope = _fixture.BeginScope();
+        var location = await scope.Resolve<CodeSpaceDbContext>().ArtifactLocation.AsNoTracking().SingleAsync(value => value.Id == committed.ArtifactLocationId);
+        location.State.ShouldBe(ArtifactLocationState.Corrupt);
+        location.Revision.ShouldBe(lostRevision, "nothing was verified, so nothing may be recorded on the placement");
+    }
+
+    /// <summary>
+    /// The SAME destination, put to an ordinary write, which has to answer it exactly as it did before revival
+    /// existed: one observation, and then the non-retryable <c>TargetCorrupt</c> that closes the intent.
+    ///
+    /// <para>An ordinary write CAN reach the interleaving re-observing was built for: its worker lease claims the
+    /// intent, never the key, and
+    /// <see cref="An_ordinary_write_refused_by_a_concurrent_revivers_overwrite_commits_on_its_next_generation"/>
+    /// drives it. So what keeps the loop out of here is the VERDICT, not impossibility — extending it moves this
+    /// path's terminal answer from <c>Failed</c> to an unbounded retry, on a path no repair reaches, to spare an
+    /// attempt the writer's own next generation re-drives anyway.</para>
+    ///
+    /// <para>The HEAD count is asserted for that reason and is the discriminator: a widened loop still ends up
+    /// refusing this destination eventually, so only the number of round trips it spends first — and the verdict it
+    /// spends them to reach — tells the two shapes apart.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task An_ordinary_write_against_a_destination_that_never_holds_still_fails_exactly_as_it_always_did(bool providerRefusesThePinnedRead)
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState { EnforcesReadConditions = providerRefusesThePinnedRead, ShiftConditionsEveryHead = true };
+        var bytes = RandomNumberGenerator.GetBytes(4096);
+
+        var result = await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, $"ordinary-churn-{providerRefusesThePinnedRead}"));
+
+        var rejected = result.ShouldBeOfType<ArtifactCasTransferResult.Rejected>(
+            "an ordinary write's verdict for a destination that will not hold still is the one it had before this arc, and moving it to a retry is a breaking change to the write path");
+        rejected.Problem.Code.ShouldBe(ArtifactCasProblemCode.TargetCorrupt);
+        rejected.Problem.IsRetryable.ShouldBeFalse();
+        storage.HeadCalls.ShouldBe(2,
+            "one HEAD to find the key empty before the upload and one to license the verification's readback — an ordinary write takes its observation once and then answers");
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        (await db.ArtifactTransferIntent.SingleAsync(value => value.TeamId == world.TeamId)).State.ShouldBe(ArtifactTransferState.Failed,
+            "and the intent it leaves behind is closed, not parked on a backoff for a caller to keep polling");
+        (await db.ArtifactLocation.CountAsync(value => value.TeamId == world.TeamId)).ShouldBe(0);
+    }
+
+    /// <summary>
+    /// The interleaving the paragraph above declines to re-observe, actually driven — because the reason it is
+    /// declined has to be the verdict and not a claim that it cannot happen. A worker lease claims the INTENT row
+    /// (0131); nothing binds an idempotency scope to an object key, which is why the placement fence is keyed on the
+    /// key at all, and a revival holds no lease whatever. So the ordinary writer here is standing inside its own
+    /// verification, between the HEAD it took and the readback that HEAD licensed, while a DIFFERENT scope's revival
+    /// overwrites the same key with the same bytes.
+    ///
+    /// <para>The two scopes on one key are the shape
+    /// <see cref="An_ordinary_write_onto_a_lost_placement_commits_it_back_instead_of_being_refused_forever"/> and
+    /// <see cref="Purge_that_moves_the_location_between_upload_and_commit_admits_no_committed_artifact"/> are already
+    /// built on. The <c>Corrupt</c> record is what licenses the reviver's unconditional PUT, and the empty key is what
+    /// lets the ordinary writer past its own create-only upload into the verification where it can be met.</para>
+    ///
+    /// <para>What it is answered with is the non-retryable <c>TargetCorrupt</c>, and BOTH halves of why that is safe
+    /// are pinned, because only the second one distinguishes this from the dead end the widened whitelist removes.
+    /// Nothing wrong is recorded — the placement carries the reviver's observation and not this writer's. And the
+    /// refusal does not stick to the CONTENT: the failure spends this scope's generation, so the very next
+    /// presentation of the same bytes mints a fresh intent, finds the placement <c>Available</c> and commits on it
+    /// without uploading anything. A regression that made this refusal permanent would leave the first half green.</para>
+    ///
+    /// <para>Both faces of the fence, for the reason its siblings give: the conformance kit pins only that a MATCHING
+    /// condition succeeds, so a driver may refuse the pinned read or accept the pin, ignore it, and hand back metadata
+    /// that disagrees with the HEAD's.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task An_ordinary_write_refused_by_a_concurrent_revivers_overwrite_commits_on_its_next_generation(bool providerRefusesThePinnedRead)
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState { EnforcesReadConditions = providerRefusesThePinnedRead };
+        var bytes = RandomNumberGenerator.GetBytes(4096);
+        var objectKey = $"cas/ordinary-vs-revival-{providerRefusesThePinnedRead}.bin";
+        var reviverScope = $"ordinary-vs-revival-reviver-{providerRefusesThePinnedRead}";
+        var writerScope = $"ordinary-vs-revival-writer-{providerRefusesThePinnedRead}";
+        var seeded = (await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, reviverScope) with { TargetObjectKey = objectKey }))
+            .ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+        storage.Objects.TryRemove(objectKey, out _).ShouldBeTrue("the key has to be empty, or the ordinary writer dedups on its first HEAD and never reaches a verification");
+        var lostRevision = await MoveLocationAsync(seeded.ArtifactLocationId, ArtifactLocationState.Corrupt);
+
+        storage.BlockAfterNextHead = true;
+        using var writerScopeHandle = Scope(storage);
+        var writer = writerScopeHandle.Resolve<IArtifactCasRuntimeCoordinator>()
+            .PutAsync(Request(world, new MemoryStream(bytes), bytes, writerScope) with { TargetObjectKey = objectKey }, CancellationToken.None);
+        await AwaitBlockedCallAsync(storage.BlockedAfterHeadEntered.Task, writer, "FakeStorageState.BlockedAfterHeadEntered (the ordinary writer's verification HEAD, taken after its own create-only upload landed)");
+        var pinned = storage.MetadataRevision;
+
+        var revival = await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, reviverScope) with { TargetObjectKey = objectKey });
+        storage.ReleaseBlockedAfterHead.TrySetResult();
+
+        storage.MetadataRevision.ShouldBeGreaterThan(pinned,
+            "the reviver's unconditional overwrite has to have moved the conditions the ordinary writer pinned, or the interleaving under test never happened");
+        revival.ShouldBeOfType<ArtifactCasTransferResult.Committed>().ArtifactLocationId.ShouldBe(seeded.ArtifactLocationId);
+        var rejected = (await writer).ShouldBeOfType<ArtifactCasTransferResult.Rejected>(
+            "an ordinary transfer is not shielded from a concurrent overwrite by its lease — the lease claims its intent, not the key — and this path answers the moved fence terminally");
+        rejected.Problem.Code.ShouldBe(ArtifactCasProblemCode.TargetCorrupt);
+        rejected.Problem.IsRetryable.ShouldBeFalse();
+
+        using (var refused = _fixture.BeginScope())
+        {
+            var db = refused.Resolve<CodeSpaceDbContext>();
+            (await db.ArtifactTransferIntent.SingleAsync(value => value.TeamId == world.TeamId && value.IdempotencyKey == writerScope)).State.ShouldBe(ArtifactTransferState.Failed);
+            var location = await db.ArtifactLocation.AsNoTracking().SingleAsync(value => value.Id == seeded.ArtifactLocationId);
+            location.State.ShouldBe(ArtifactLocationState.Available, "the reviver repaired the placement; the refused writer recorded nothing on it");
+            location.Revision.ShouldBe(lostRevision + 1, "one repair, one observation — a refused attempt may not append a second");
+        }
+
+        var again = await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, writerScope) with { TargetObjectKey = objectKey });
+
+        var committed = again.ShouldBeOfType<ArtifactCasTransferResult.Committed>(
+            "the refusal was about a momentary overwrite and not about the content, so the next generation has to get through — a refusal that stuck here would be the forever-refusal this arc exists to remove");
+        committed.WasAlreadyCommitted.ShouldBeFalse("the failed generation is spent, so this is a fresh intent driven to a commit and not a ledger hit");
+        rejected.IntentId.ShouldNotBe(committed.IntentId, "the refused generation is spent, so the retry drove a different intent row");
+        committed.ArtifactLocationId.ShouldBe(seeded.ArtifactLocationId);
+        storage.PutCalls.ShouldBe(3, "seed, the ordinary writer's create-only fill and the reviver's overwrite — the retry found the object already there and uploaded nothing");
+
+        using var verify = _fixture.BeginScope();
+        var settled = await verify.Resolve<CodeSpaceDbContext>().ArtifactLocation.AsNoTracking().SingleAsync(value => value.Id == seeded.ArtifactLocationId);
+        settled.State.ShouldBe(ArtifactLocationState.Available);
+        settled.Revision.ShouldBe(lostRevision + 2, "and it re-verified the placement it committed onto");
+    }
+
+    /// <summary>
+    /// The other half of that same fence, and the half re-observing may never be extended to. A HEAD and the readback
+    /// it licensed can disagree about five things; only the ETag and the object version are minted by the destination
+    /// for a particular write, and only those two can therefore move when identical bytes are written again. The key,
+    /// the length and the provider's hash are properties of the BYTES — a rewrite of the same content reproduces every
+    /// one of them — so a disagreement there is a destination genuinely serving another object, and it has to keep
+    /// failing the attempt exactly as it did before any of this became re-observable.
+    ///
+    /// <para>Relaxing the whole comparison rather than those two fields masks precisely that. The wrong length or the
+    /// wrong hash stops being a verdict and becomes "observe again", and a destination that then holds still hands the
+    /// commit a readback nothing ever convicted — a placement recorded <c>Available</c>, and a producer told
+    /// <c>Committed</c>, over an object that was never this one.</para>
+    ///
+    /// <para>Driven through the ORDINARY write, not a revival, because that is where the verdict being preserved was
+    /// established and where a regression would be a breaking change rather than a new feature behaving oddly.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(ReadbackDisagreement.Length)]
+    [InlineData(ReadbackDisagreement.Sha256)]
+    public async Task A_readback_describing_other_content_than_its_own_head_did_still_fails_the_write(ReadbackDisagreement disagreement)
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState { ReadbackDisagrees = disagreement, Capabilities = WritableCapabilities | Reporting(disagreement) };
+        var bytes = RandomNumberGenerator.GetBytes(4096);
+
+        var result = await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, $"observe-{disagreement}"));
+
+        var rejected = result.ShouldBeOfType<ArtifactCasTransferResult.Rejected>(
+            $"a readback whose {disagreement} disagrees with the HEAD that licensed it is a destination holding another object, which no concurrent repair can produce");
+        rejected.Problem.Code.ShouldBe(ArtifactCasProblemCode.TargetCorrupt);
+        rejected.Problem.IsRetryable.ShouldBeFalse("and the producer must be told so terminally, not sent back to poll a destination that is wrong");
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        (await db.ArtifactLocation.CountAsync(value => value.TeamId == world.TeamId && value.State == ArtifactLocationState.Available)).ShouldBe(0,
+            "nothing was verified, so no placement may be advertised as holding these bytes");
+        (await db.ArtifactTransferIntent.SingleAsync(value => value.TeamId == world.TeamId)).State.ShouldBe(ArtifactTransferState.Failed);
+    }
+
+    /// <summary>
+    /// The same raw HEAD-versus-readback fence, at the two sites that are not a write at all. Both reads compare the
+    /// metadata their own HEAD reported against the metadata the open returned, raw — no recorded value between them
+    /// and therefore nothing that discards a destination whose ETag is not content-derived — and a revival's
+    /// unconditional overwrite is the first write in this system that can move it.
+    ///
+    /// <para>Reachable because a reader snapshots its placement row BEFORE it touches the provider: the row is
+    /// <c>Available</c> when it is loaded, and the demotion and the repair both land while the reader is between its
+    /// two provider calls. What that produced is worse than a failed write — a consumer told, non-retryably, that
+    /// correct bytes are somebody else's, because a second party was busy putting those very bytes back.</para>
+    ///
+    /// <para>Both reads, because they are two implementations of one rule and the window read is the one with no
+    /// safety net underneath: the whole-object read verifies the recorded digest as the caller drains it, and a
+    /// window cannot, so a rule that held for only one of them would leave the weaker site holding the defect.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_concurrent_overwrite_of_identical_bytes_inside_a_read_does_not_fail_it(bool windowed)
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState { Capabilities = ReadableCapabilities };
+        var bytes = RandomNumberGenerator.GetBytes(4096);
+        var request = Request(world, new MemoryStream(bytes), bytes, $"read-race-{windowed}");
+        var committed = (await PutAsync(world, storage, request)).ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+
+        storage.BlockAfterNextHead = true;
+        using var readScope = Scope(storage);
+        var read = ReadBytesAsync(readScope, world, committed.ArtifactObjectId, bytes.LongLength, windowed);
+        await AwaitBlockedCallAsync(storage.BlockedAfterHeadEntered.Task, read, "FakeStorageState.BlockedAfterHeadEntered (the reader's HEAD, taken while its placement was still Available)");
+        await MoveLocationAsync(committed.ArtifactLocationId, ArtifactLocationState.Corrupt);
+        var pinned = storage.MetadataRevision;
+
+        (await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, $"read-race-{windowed}")))
+            .ShouldBeOfType<ArtifactCasTransferResult.Committed>("precondition: the repair this reader is racing has to actually happen");
+        storage.ReleaseBlockedAfterHead.TrySetResult();
+
+        storage.MetadataRevision.ShouldBeGreaterThan(pinned,
+            "the reviver's overwrite has to have moved the conditions the reader's HEAD reported, or the fence under test was never tripped at all");
+        (await read).ShouldBe(bytes,
+            "a reader must not be told that correct bytes are another object because a concurrent repair rewrote them while it was mid-call");
+    }
+
+    /// <summary>
+    /// And the content half of that fence at those same two sites, which no repair can move and which therefore keeps
+    /// refusing. Without this, relaxing the read sites reads as "a moved fence never fails a read", and a destination
+    /// answering a HEAD about one object and an open about another would be served straight to the consumer.
+    /// </summary>
+    [Theory]
+    [InlineData(false, ReadbackDisagreement.Length)]
+    [InlineData(false, ReadbackDisagreement.Sha256)]
+    [InlineData(true, ReadbackDisagreement.Length)]
+    [InlineData(true, ReadbackDisagreement.Sha256)]
+    public async Task A_readback_describing_other_content_than_its_own_head_did_still_fails_the_read(bool windowed, ReadbackDisagreement disagreement)
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState { Capabilities = ReadableCapabilities | Reporting(disagreement) };
+        var bytes = RandomNumberGenerator.GetBytes(4096);
+        var committed = (await PutAsync(world, storage, Request(world, new MemoryStream(bytes), bytes, $"read-corrupt-{windowed}-{disagreement}")))
+            .ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+
+        storage.ReadbackDisagrees = disagreement;
+        var heads = storage.HeadCalls;
+        using var readScope = Scope(storage);
+        var problem = await ReadProblemAsync(readScope, world, committed.ArtifactObjectId, bytes.LongLength, windowed);
+
+        problem.Code.ShouldBe(ArtifactCasProblemCode.TargetCorrupt,
+            $"a readback whose {disagreement} disagrees with the HEAD that licensed it is a destination serving another object, and no repair produces that");
+        problem.IsRetryable.ShouldBeFalse("and the consumer must be told so terminally rather than sent back to poll");
+        storage.HeadCalls.ShouldBe(heads + 1,
+            "and refused on the FIRST observation: a destination stating plainly that it holds another object is not something to re-observe, "
+            + "so routing this half through the re-observation loop would spend the whole budget before giving the same answer");
+    }
+
+    /// <summary>
+    /// The NAMED COST of answering a moved token with another observation, pinned rather than argued. A destination
+    /// that swaps the object for a DIFFERENT one of the SAME length between a HEAD and the open that HEAD licensed
+    /// used to be convicted by the raw ETag comparison; now that comparison sends the call round again, the second
+    /// observation finds the stranger settled, and a WINDOW read serves it.
+    ///
+    /// <para>Nothing else on the window path can catch it. The length agrees by construction. <c>MetadataMatches</c>
+    /// re-runs on every attempt but has only the recorded size and hash to compare, and the hash half is skipped
+    /// unless the destination reports one. The recorded ETag is discarded by <c>DurableETag</c> on a destination that
+    /// does not declare <c>StableETag</c>, so the open carries no pin the provider could refuse. And a window carries
+    /// no digest claim — the recorded digest covers the whole object, so no amount of hashing the bytes returned here
+    /// decides anything.</para>
+    ///
+    /// <para>What CLOSES it is the destination identifying its own content, which is why the theory runs both ways:
+    /// a <c>ProviderChecksum</c> destination is convicted on the first observation, and a <c>StableETag</c> one has
+    /// its recorded ETag sent as the open's pin, which the swapped object cannot meet. The loss therefore lands on
+    /// exactly one kind of destination — one that identifies its objects by neither — and local RWX is that kind
+    /// today. This test exists so a later change cannot quietly widen or quietly close the gap.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_same_length_swap_inside_a_window_read_is_caught_only_where_the_destination_identifies_its_content(bool identifies)
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState { Capabilities = ReadableCapabilities | (identifies ? StorageProviderCapabilities.ProviderChecksum : StorageProviderCapabilities.None) };
+        var bytes = RandomNumberGenerator.GetBytes(4096);
+        var stranger = RandomNumberGenerator.GetBytes(bytes.Length);
+        var request = Request(world, new MemoryStream(bytes), bytes, $"swap-window-{identifies}");
+        var committed = (await PutAsync(world, storage, request)).ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+
+        storage.BlockAfterNextHead = true;
+        var heads = storage.HeadCalls;
+        using var readScope = Scope(storage);
+        var window = readScope.Resolve<IArtifactCasRangeReader>().ReadRangeAsync(RangeRequest(world, committed.ArtifactObjectId, bytes.LongLength), CancellationToken.None);
+        await AwaitBlockedCallAsync(storage.BlockedAfterHeadEntered.Task, window, "FakeStorageState.BlockedAfterHeadEntered (the window read's HEAD, taken while its own object was still at the key)");
+        storage.Objects[request.TargetObjectKey] = stranger;
+        storage.ReleaseBlockedAfterHead.TrySetResult();
+
+        var result = await window;
+        if (identifies)
+        {
+            result.ShouldBeOfType<ArtifactCasRangeResult.Unavailable>(Detail(result)).Problem.Code.ShouldBe(ArtifactCasProblemCode.TargetCorrupt,
+                "a destination that reports a per-object hash convicts the stranger on the first observation, before the moved token is ever consulted");
+            storage.HeadCalls.ShouldBe(heads + 1, "and does it without spending the re-observation budget");
+            return;
+        }
+
+        result.ShouldBeOfType<ArtifactCasRangeResult.Available>(Detail(result)).Bytes.ShouldBe(stranger,
+            "DOCUMENTED CONSEQUENCE: on a destination that identifies its objects by neither a content-derived ETag nor a hash, "
+            + "a same-length swap landing between the HEAD and its open is no longer caught on the window path");
+        storage.HeadCalls.ShouldBe(heads + 2,
+            "and the loss is exactly this: the moved token sent the call round again instead of convicting, and the second observation found the stranger settled");
+    }
+
+    /// <summary>
+    /// The same swap, on the WHOLE-object path, where the detector is not lost but moved. The recorded digest covers
+    /// the whole object, so the verifying stream hashes every byte it hands out and refuses at EOF — an unconditional
+    /// check that does not care whether the swap landed inside the head-to-open window or an hour earlier, which the
+    /// raw ETag comparison never covered at all.
+    /// </summary>
+    [Fact]
+    public async Task A_same_length_swap_inside_a_whole_object_read_is_still_caught_by_the_recorded_digest()
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState { Capabilities = ReadableCapabilities };
+        var bytes = RandomNumberGenerator.GetBytes(4096);
+        var stranger = RandomNumberGenerator.GetBytes(bytes.Length);
+        var request = Request(world, new MemoryStream(bytes), bytes, "swap-whole");
+        var committed = (await PutAsync(world, storage, request)).ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+
+        storage.BlockAfterNextHead = true;
+        using var readScope = Scope(storage);
+        var read = ReadBytesAsync(readScope, world, committed.ArtifactObjectId, bytes.LongLength, windowed: false);
+        await AwaitBlockedCallAsync(storage.BlockedAfterHeadEntered.Task, read, "FakeStorageState.BlockedAfterHeadEntered (the whole-object read's HEAD, taken while its own object was still at the key)");
+        storage.Objects[request.TargetObjectKey] = stranger;
+        storage.ReleaseBlockedAfterHead.TrySetResult();
+
+        await Should.ThrowAsync<InvalidDataException>(read,
+            "a consumer must never receive another object's bytes as this artifact, and on the whole-object path the recorded digest is what guarantees that");
+    }
+
+    /// <summary>Everything an ordinary write needs of a destination, and nothing a shipped module does not declare.</summary>
+    private const StorageProviderCapabilities WritableCapabilities = StorageProviderCapabilities.StreamingWrite | StorageProviderCapabilities.StreamingRead
+        | StorageProviderCapabilities.ConditionalCreate;
+
+    /// <summary>Everything a read of an already-written object needs, whole or windowed, so one seeded destination serves both halves of a theory.</summary>
+    private const StorageProviderCapabilities ReadableCapabilities = WritableCapabilities | StorageProviderCapabilities.RangeRead;
+
+    /// <summary>
+    /// What a destination must be able to REPORT before it can exhibit a given disagreement. A hash the destination
+    /// never returns cannot disagree with anything, and no shipped module returns one — so the checksum half of this
+    /// fence is only reachable on a destination that declares <c>ProviderChecksum</c>, and saying so here is what
+    /// keeps the length half from being read as covering both.
+    /// </summary>
+    private static StorageProviderCapabilities Reporting(ReadbackDisagreement disagreement) =>
+        disagreement == ReadbackDisagreement.Sha256 ? StorageProviderCapabilities.ProviderChecksum : StorageProviderCapabilities.None;
+
+    /// <summary>The object's bytes, read whole or as one window covering it, so both read paths answer the same question about the same content.</summary>
+    private static async Task<byte[]> ReadBytesAsync(ILifetimeScope scope, World world, Guid artifactObjectId, long size, bool windowed)
+    {
+        if (windowed)
+        {
+            var window = await scope.Resolve<IArtifactCasRangeReader>().ReadRangeAsync(RangeRequest(world, artifactObjectId, size), CancellationToken.None);
+            return window.ShouldBeOfType<ArtifactCasRangeResult.Available>(Detail(window)).Bytes;
+        }
+
+        var read = await scope.Resolve<IArtifactCasRuntimeCoordinator>().OpenReadAsync(ReadRequest(world, artifactObjectId), CancellationToken.None);
+        await using var content = read.ShouldBeOfType<ArtifactCasReadResult.Opened>(Detail(read)).Content;
+        using var received = new MemoryStream();
+        await content.CopyToAsync(received);
+
+        return received.ToArray();
+    }
+
+    /// <summary>Why the same read was refused, from whichever of the two paths refused it.</summary>
+    private static async Task<ArtifactCasProblem> ReadProblemAsync(ILifetimeScope scope, World world, Guid artifactObjectId, long size, bool windowed)
+    {
+        if (windowed)
+        {
+            var window = await scope.Resolve<IArtifactCasRangeReader>().ReadRangeAsync(RangeRequest(world, artifactObjectId, size), CancellationToken.None);
+            return window.ShouldBeOfType<ArtifactCasRangeResult.Unavailable>().Problem;
+        }
+
+        var read = await scope.Resolve<IArtifactCasRuntimeCoordinator>().OpenReadAsync(ReadRequest(world, artifactObjectId), CancellationToken.None);
+        return read.ShouldBeOfType<ArtifactCasReadResult.Unavailable>().Problem;
+    }
+
+    private static ArtifactCasReadRequest ReadRequest(World world, Guid artifactObjectId) => new()
+    {
+        TeamId = world.TeamId, ArtifactObjectId = artifactObjectId,
+        StorageProfileId = world.ProfileId, StorageProfileRevision = 1,
+    };
+
+    private static ArtifactCasRangeRequest RangeRequest(World world, Guid artifactObjectId, long size) => new()
+    {
+        TeamId = world.TeamId, ArtifactObjectId = artifactObjectId,
+        StorageProfileId = world.ProfileId, StorageProfileRevision = 1, Offset = 0, Length = (int)size,
+    };
+
+    /// <summary>Names the refusal a read that was supposed to succeed came back with, so the failure says WHY rather than only which type arrived.</summary>
+    private static string Detail(object result) => result switch
+    {
+        ArtifactCasReadResult.Unavailable unavailable => $"the read was refused with {unavailable.Problem.Code}",
+        ArtifactCasRangeResult.Unavailable unavailable => $"the window read was refused with {unavailable.Problem.Code}",
+        _ => "the read did not open",
+    };
 
     /// <summary>
     /// That the durable backoff a failed write schedules is stamped by the DATABASE's clock — the same one the claim
@@ -1063,7 +1755,9 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
             var db = scope.Resolve<CodeSpaceDbContext>();
             var location = await db.ArtifactLocation.SingleAsync(value => value.Id == committed.ArtifactLocationId);
             location.Revision.ShouldBe(2);
-            location.ProviderObjectVersion.ShouldBe("v2");
+            location.ProviderETag.ShouldBe($"etag-{Convert.ToHexStringLower(SHA256.HashData(bytes))}-v2",
+                "the condition the destination published for the SECOND observation is the one a later read has to pin against");
+            location.ProviderObjectVersion.ShouldBeNull("this destination does not declare ObjectVersioning, so it reports no version to record");
             (await db.ArtifactLocationEvent.CountAsync(value => value.ArtifactLocationId == location.Id)).ShouldBe(2);
         }
 
@@ -1401,6 +2095,7 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         });
         db.StorageProfile.Add(profile);
         await db.SaveChangesAsync();
+        _destinations.Add(profileRevisionId);
         return new World(teamId, actorId, profileId, profileRevisionId);
     }
 
@@ -1535,6 +2230,27 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
             .Select(value => value.State).ToListAsync();
     }
 
+    /// <summary>
+    /// Blocks until a fake provider call signals it has entered its block, and says what to look at instead of raising
+    /// a bare <see cref="TimeoutException"/> that names nothing. Two ways this wait fails and they need different
+    /// answers: the operation settled without ever reaching that call — its outcome is named, or its fault re-raised —
+    /// or nothing settled at all and the operation is stuck somewhere earlier.
+    /// </summary>
+    private static async Task AwaitBlockedCallAsync<T>(Task entered, Task<T> operation, string signal)
+    {
+        Task first;
+        try
+        {
+            first = await Task.WhenAny(entered, operation).WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        catch (TimeoutException exception)
+        {
+            throw new TimeoutException($"{signal} never signalled within 5s and the operation it belongs to never settled either, so that operation is stuck BEFORE this provider call: read artifact_location for the object under test and check which FakeStorageDriver call it is sitting in.", exception);
+        }
+
+        first.ShouldBe(entered, $"{signal} had to be reached with its operation still in flight, but the operation settled first as {(first == operation ? await operation : default)}");
+    }
+
     private async Task<ArtifactLocationState> PlacementStateAsync(World world, Guid locationId)
     {
         using var scope = _fixture.BeginScope();
@@ -1652,6 +2368,8 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         public TaskCompletionSource ReleaseBlockedPut { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource BlockedAfterPutEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ReleaseBlockedAfterPut { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource BlockedAfterHeadEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseBlockedAfterHead { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource IgnoringCancellationPutEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ReleaseIgnoringCancellationPut { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource DriverDisposed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1661,7 +2379,18 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         public TaskCompletionSource ReleaseDelete { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public bool BlockNextPut;
         public bool BlockAfterNextPut;
+        public bool BlockAfterNextHead;
         public bool BlockIgnoringCancellationNextPut;
+
+        /// <summary>A destination that publishes fresh conditions for the same bytes on every HEAD, so whatever a caller pins a read to is already superseded.</summary>
+        public bool ShiftConditionsEveryHead;
+
+        /// <summary>Which CONTENT field a readback misreports, describing an object that is not the one this destination's own HEAD just described. The opposite of a shifted condition: no rewrite of identical bytes can move either of these, so neither is ever a repair.</summary>
+        public ReadbackDisagreement? ReadbackDisagrees;
+
+        /// <summary>Whether the destination HONOURS the read conditions it accepts. A driver may take an ExpectedETag and ignore it and still pass the conformance kit, which pins only that a MATCHING condition succeeds — so a moved object reaches the caller as disagreeing metadata rather than as a refusal.</summary>
+        public bool EnforcesReadConditions = true;
+
         public bool BlockFactoryCreate;
         public bool BlockFactoryIgnoringCancellation;
         public bool BlockNextDelete;
@@ -1675,6 +2404,7 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
         public StorageProviderCapabilities Capabilities = StorageProviderCapabilities.StreamingWrite | StorageProviderCapabilities.StreamingRead | StorageProviderCapabilities.ConditionalCreate;
         public int MetadataRevision = 1;
         public int PutCalls;
+        public int HeadCalls;
         public int DeleteCalls;
         public int FactoryCreateCalls;
         public int DisposeCalls;
@@ -1722,8 +2452,23 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
             }
 
             var bytes = destination.ToArray();
-            if (!state.Objects.TryAdd(request.ObjectKey, bytes))
+            // The condition decides, exactly as it does in the local-rwx driver: CreateOnly refuses an occupied key,
+            // every other condition replaces what is there. A double that is create-only whatever it is asked answers
+            // AlreadyExists to the one write that MUST overwrite — a Corrupt placement's revival — so the arm that
+            // repairs a destination holding a foreign object could not be driven through here at all.
+            var createOnly = request.Condition == ArtifactStorageWriteCondition.CreateOnly;
+
+            if (createOnly && !state.Objects.TryAdd(request.ObjectKey, bytes))
                 return ArtifactStoragePutResult.Failed(new ArtifactStorageError(ArtifactStorageErrorCode.AlreadyExists, "exists"));
+
+            // A rewrite publishes fresh conditions for the same bytes, exactly as the local-rwx driver's mtime-derived
+            // ETag does. A double whose ETag held still across an overwrite could not stage a losing reviver at all.
+            if (!createOnly)
+            {
+                state.Objects[request.ObjectKey] = bytes;
+                Interlocked.Increment(ref state.MetadataRevision);
+            }
+
             if (state.BlockAfterNextPut)
             {
                 state.BlockAfterNextPut = false;
@@ -1733,20 +2478,36 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
             return ArtifactStoragePutResult.Stored(Metadata(request.ObjectKey, bytes));
         }
 
-        public ValueTask<ArtifactStorageHeadResult> HeadAsync(ArtifactStorageHeadRequest request, CancellationToken cancellationToken) =>
-            state.HeadErrors.TryDequeue(out var injected)
-                ? ValueTask.FromResult(ArtifactStorageHeadResult.Failed(injected))
-                : ValueTask.FromResult(state.Objects.TryGetValue(request.ObjectKey, out var bytes)
-                ? ArtifactStorageHeadResult.Found(Metadata(request.ObjectKey, bytes))
-                : ArtifactStorageHeadResult.Failed(new ArtifactStorageError(ArtifactStorageErrorCode.Missing, "missing")));
+        public async ValueTask<ArtifactStorageHeadResult> HeadAsync(ArtifactStorageHeadRequest request, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref state.HeadCalls);
+            if (state.HeadErrors.TryDequeue(out var injected)) return ArtifactStorageHeadResult.Failed(injected);
+            if (!state.Objects.TryGetValue(request.ObjectKey, out var bytes))
+                return ArtifactStorageHeadResult.Failed(new ArtifactStorageError(ArtifactStorageErrorCode.Missing, "missing"));
+
+            var metadata = Metadata(request.ObjectKey, bytes);
+
+            // Reported first and superseded immediately, so a read pinned to this answer can never be met.
+            if (state.ShiftConditionsEveryHead) Interlocked.Increment(ref state.MetadataRevision);
+
+            if (state.BlockAfterNextHead)
+            {
+                state.BlockAfterNextHead = false;
+                state.BlockedAfterHeadEntered.TrySetResult();
+                await state.ReleaseBlockedAfterHead.Task.WaitAsync(cancellationToken);
+            }
+
+            return ArtifactStorageHeadResult.Found(metadata);
+        }
 
         public ValueTask<ArtifactStorageReadResult> OpenReadAsync(ArtifactStorageReadRequest request, CancellationToken cancellationToken)
         {
             if (!state.Objects.TryGetValue(request.ObjectKey, out var stored))
                 return ValueTask.FromResult(ArtifactStorageReadResult.Failed(new ArtifactStorageError(ArtifactStorageErrorCode.Missing, "missing")));
-            var metadata = Metadata(request.ObjectKey, stored);
-            if ((request.ExpectedETag != null && !string.Equals(request.ExpectedETag, metadata.ETag, StringComparison.Ordinal))
-                || (request.ExpectedVersion != null && !string.Equals(request.ExpectedVersion, metadata.Version, StringComparison.Ordinal)))
+            var metadata = Misreport(Metadata(request.ObjectKey, stored));
+            if (state.EnforcesReadConditions
+                && ((request.ExpectedETag != null && !string.Equals(request.ExpectedETag, metadata.ETag, StringComparison.Ordinal))
+                || (request.ExpectedVersion != null && !string.Equals(request.ExpectedVersion, metadata.Version, StringComparison.Ordinal))))
                 return ValueTask.FromResult(ArtifactStorageReadResult.Failed(new ArtifactStorageError(ArtifactStorageErrorCode.ConditionNotMet, "condition")));
             var bytes = stored.ToArray();
             if (state.CorruptReads && bytes.Length > 0) bytes[0] ^= 0xff;
@@ -1777,10 +2538,37 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
             return ValueTask.CompletedTask;
         }
 
+        /// <summary>A destination whose readback describes different CONTENT than its own HEAD did — one object's HEAD answered against another object's open, which is what a mix-up at the destination looks like from here.</summary>
+        private ArtifactStorageObjectMetadata Misreport(ArtifactStorageObjectMetadata metadata) => state.ReadbackDisagrees switch
+        {
+            ReadbackDisagreement.Length => metadata with { Length = metadata.Length + 1 },
+            ReadbackDisagreement.Sha256 => metadata with { Sha256 = new string('a', 64) },
+            _ => metadata,
+        };
+
         private ArtifactStorageObjectMetadata Metadata(string key, byte[] bytes)
         {
             var sha = Convert.ToHexStringLower(SHA256.HashData(bytes));
-            return new ArtifactStorageObjectMetadata { ObjectKey = key, Length = bytes.LongLength, Sha256 = sha, ETag = $"etag-{sha}-v{state.MetadataRevision}", Version = $"v{state.MetadataRevision}" };
+
+            // A driver that does not declare ObjectVersioning must report NO version — the conformance kit refuses
+            // one, because callers round-trip this field back as ExpectedVersion and the CAS records it as a durable
+            // identity. A double that reported one regardless would arm a recorded-value fence that no shipped
+            // destination can arm, and that fence would pre-empt the ones these tests are actually about.
+            var versioned = state.Capabilities.HasFlag(StorageProviderCapabilities.ObjectVersioning);
+
+            // The same argument, for the field that turned out to matter more. NEITHER shipped module declares
+            // ProviderChecksum, and neither reports a per-object hash from a HEAD or an open — local RWX stats the
+            // file (O(1), it does not read it) and OSS projects response headers that carry none. A double that
+            // reported one anyway arms MetadataMatches, HeadCanMatch and ContentAgrees on a field no real destination
+            // supplies, which silently answers every question these tests ask about a swapped object before the
+            // fence under test is ever reached.
+            var hashes = state.Capabilities.HasFlag(StorageProviderCapabilities.ProviderChecksum);
+
+            return new ArtifactStorageObjectMetadata
+            {
+                ObjectKey = key, Length = bytes.LongLength, Sha256 = hashes ? sha : null,
+                ETag = $"etag-{sha}-v{state.MetadataRevision}", Version = versioned ? $"v{state.MetadataRevision}" : null,
+            };
         }
     }
 
@@ -1817,5 +2605,40 @@ public sealed class ArtifactCasRuntimeCoordinatorTests
     private sealed class SkewedClock(TimeSpan skew) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => TimeProvider.System.GetUtcNow() + skew;
+    }
+
+    public Task InitializeAsync() => Task.CompletedTask;
+
+    /// <summary>
+    /// Takes every placement this class made permanently out of the verifier's sweep.
+    ///
+    /// <para>A pass is deployment-wide and takes ONE TURN PER DESTINATION under a fixed bound, so every destination
+    /// left behind here is a turn some neighbouring class's placement no longer gets — and a placement that never
+    /// gets a turn is a placement whose <c>verified_at</c> never moves, which is a silent failure in a test that has
+    /// nothing to do with this one. <c>Available</c> and <c>Missing</c> are the only two states a pass selects, and
+    /// <c>Deleted</c> is terminal, so one observation per row is the whole of it. Best-effort, and on the failure
+    /// path too: a failing test that leaks these breaks its neighbours rather than itself.</para>
+    /// </summary>
+    public async Task DisposeAsync()
+    {
+        foreach (var locationId in await SweepablePlacementsAsync())
+        {
+            try
+            {
+                await MoveLocationAsync(locationId, ArtifactLocationState.Deleted);
+            }
+            catch (DbUpdateException) { }
+        }
+    }
+
+    /// <summary>The placements under this class's destinations that a verifier pass would still select.</summary>
+    private async Task<List<Guid>> SweepablePlacementsAsync()
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().ArtifactLocation.AsNoTracking()
+            .Where(location => _destinations.Contains(location.StorageProfileRevisionId))
+            .Where(location => location.State == ArtifactLocationState.Available || location.State == ArtifactLocationState.Missing)
+            .Select(location => location.Id).ToListAsync();
     }
 }

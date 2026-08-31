@@ -39,15 +39,44 @@ public sealed partial class ArtifactCasRuntimeCoordinator
         }
     }
 
+    /// <summary>
+    /// The window, re-observing for as long as the destination rewrites the object between the HEAD and the open that
+    /// HEAD licensed. Bounded by the same count the verification loop uses, and giving up with the same
+    /// <c>TargetCorrupt</c> this path has always given a destination that never settles.
+    ///
+    /// <para>What re-observing is FOR is the rewrite of IDENTICAL bytes that made two agreeing readings disagree
+    /// about the tokens the destination minted for them — a concurrent revival, which used to fail a healthy window
+    /// read outright. What it COSTS is stated in the paragraph below, because the same relaxation is not free here
+    /// the way it is on the whole-object path.</para>
+    ///
+    /// <para>NAMED CONSEQUENCE. A window carries no digest claim (see <see cref="WindowBytesAsync"/>), so this is the
+    /// one read path with nothing behind the head-to-open fence. On a destination that identifies its objects by
+    /// NEITHER a content-derived ETag (<c>StableETag</c>, which would make <see cref="DurableETag"/> yield the
+    /// recorded pin and the provider refuse the open) NOR a per-object hash in its metadata (which would make
+    /// <see cref="MetadataMatches"/> and <see cref="ContentAgrees"/> convict), a swap of the object for a DIFFERENT
+    /// one of the SAME length landing between the HEAD and its open is no longer caught: the moved token sends the
+    /// call round again instead of convicting, and the next observation finds the stranger settled and serves its
+    /// window. Local RWX is exactly such a destination today. The raw comparison caught that swap before this change
+    /// — but only in the instant between the two calls; a swap a moment earlier was served then too, and still is.
+    /// Either capability closes it, and both are facts a driver reports rather than anything special-cased here.
+    /// <c>A_same_length_swap_inside_a_window_read_is_caught_only_where_the_destination_identifies_its_content</c>
+    /// pins both halves so neither can move in silence.</para>
+    /// </summary>
     private static async Task<ArtifactCasRangeResult> DriveRangeAsync(RangeDrive drive, CancellationToken cancellationToken)
     {
-        var head = await HeadForRangeAsync(drive, cancellationToken).ConfigureAwait(false);
-        if (head.Problem != null) return new ArtifactCasRangeResult.Unavailable(head.Problem);
+        for (var attempt = 0; attempt < MaximumObservationAttempts; attempt++)
+        {
+            var head = await HeadForRangeAsync(drive, cancellationToken).ConfigureAwait(false);
+            if (head.Problem != null) return new ArtifactCasRangeResult.Unavailable(head.Problem);
 
-        var opened = await OpenWindowAsync(drive, head.Value!, cancellationToken).ConfigureAwait(false);
-        if (opened.Problem != null) return new ArtifactCasRangeResult.Unavailable(opened.Problem);
+            var opened = await OpenWindowAsync(drive, head.Value!, cancellationToken).ConfigureAwait(false);
+            if (opened == null) continue;
+            if (opened.Problem != null) return new ArtifactCasRangeResult.Unavailable(opened.Problem);
 
-        return await WindowBytesAsync(drive, opened.Value!, cancellationToken).ConfigureAwait(false);
+            return await WindowBytesAsync(drive, opened.Value!, cancellationToken).ConfigureAwait(false);
+        }
+
+        return new ArtifactCasRangeResult.Unavailable(Problem(ArtifactCasProblemCode.TargetCorrupt));
     }
 
     /// <summary>Confirms the provider still holds the object the ledger recorded before any window is requested.</summary>
@@ -64,7 +93,8 @@ public sealed partial class ArtifactCasRuntimeCoordinator
         return new Invocation<ArtifactStorageObjectMetadata>(head.Value.Metadata!, false, null);
     }
 
-    private static async Task<Invocation<Stream>> OpenWindowAsync(RangeDrive drive, ArtifactStorageObjectMetadata head, CancellationToken cancellationToken)
+    /// <summary>The window's stream, or null when the object moved between the HEAD and this open and the pair has to be taken again.</summary>
+    private static async Task<Invocation<Stream>?> OpenWindowAsync(RangeDrive drive, ArtifactStorageObjectMetadata head, CancellationToken cancellationToken)
     {
         var driver = drive.Lease.Driver;
         var opened = await InvokeAsync(token => driver.OpenReadAsync(new ArtifactStorageReadRequest(drive.Stored.ObjectKey)
@@ -78,14 +108,9 @@ public sealed partial class ArtifactCasRuntimeCoordinator
         if (opened.Timeout) return new Invocation<Stream>(null, true, Problem(ArtifactCasProblemCode.ProviderTimeout, true));
         if (opened.Value?.Error != null) return new Invocation<Stream>(null, false, Map(opened.Value.Error, readMissing: true));
 
-        if (opened.Value!.TotalLength != drive.Stored.Size || opened.Value.ContentLength != drive.Window
-            || !MetadataAgrees(head, opened.Value.Metadata!, drive.Stored.ObjectKey))
-        {
-            await opened.Value.Content!.DisposeAsync().ConfigureAwait(false);
-            return new Invocation<Stream>(null, false, Problem(ArtifactCasProblemCode.TargetCorrupt));
-        }
+        var lengthAgrees = opened.Value!.TotalLength == drive.Stored.Size && opened.Value.ContentLength == drive.Window;
 
-        return new Invocation<Stream>(opened.Value.Content!, false, null);
+        return await LicensedStreamAsync(opened.Value, head, drive.Stored.ObjectKey, lengthAgrees).ConfigureAwait(false);
     }
 
     /// <summary>

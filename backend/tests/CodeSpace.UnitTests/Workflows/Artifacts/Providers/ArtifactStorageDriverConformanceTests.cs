@@ -137,6 +137,39 @@ public abstract class ArtifactStorageDriverConformanceTests
         (await ReadUtf8Async(driver, "conditional/value")).ShouldBe("first");
     }
 
+    /// <summary>
+    /// The promise <see cref="StorageProviderCapabilities.StableETag"/> makes, held to rather than taken on trust: an
+    /// ETag a driver declares durable is derived from the CONTENT, so rewriting the same bytes at the same key has to
+    /// reproduce it.
+    ///
+    /// <para>Load-bearing rather than descriptive. That declaration is the only thing that lets the CAS persist an
+    /// ETag, compare a later HEAD against it, and send it as a delete's precondition — and the CAS now rewrites
+    /// objects it has already recorded, to repair a placement the destination stopped serving. A driver that minted a
+    /// fresh value per write would leave every object anything ever rewrote — a repaired placement, a restore, a
+    /// migration — unreadable AND undeletable at once, on evidence that never said the bytes had changed.</para>
+    ///
+    /// <para>Vacuous for a driver that does not declare the flag, which is right: its recorded ETag is discarded
+    /// before any comparison, so it owes this nothing.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_durable_etag_survives_a_rewrite_of_the_same_bytes()
+    {
+        if (!StoreIsReachable) return;
+
+        await using var driver = await CreateDriverAsync();
+        if ((driver.Capabilities & StorageProviderCapabilities.StableETag) == 0) return;
+
+        var key = $"stable-etag/{Guid.NewGuid():N}";
+        var bytes = RandomNumberGenerator.GetBytes(4096);
+
+        var created = await PutBytesAsync(driver, key, bytes, ArtifactStorageWriteCondition.CreateOnly);
+        var rewritten = await PutBytesAsync(driver, key, bytes, ArtifactStorageWriteCondition.None);
+
+        rewritten.ETag.ShouldBe(created.ETag, "an ETag declared content-derived may not change when the content has not");
+        (await driver.HeadAsync(new ArtifactStorageHeadRequest(key), CancellationToken.None)).Metadata!.ETag.ShouldBe(created.ETag,
+            "and a HEAD is where a recorded ETag is actually compared, so it is the value that has to match");
+    }
+
     [Fact]
     public async Task Concurrent_conditional_creates_publish_exactly_one_complete_object()
     {
@@ -229,6 +262,22 @@ public abstract class ArtifactStorageDriverConformanceTests
             Condition = ArtifactStorageWriteCondition.CreateOnly
         }, CancellationToken.None);
         result.IsSuccess.ShouldBeTrue(result.Error?.Message);
+    }
+
+    /// <summary>One write under an explicit condition, answered with the metadata the driver published for it.</summary>
+    private static async Task<ArtifactStorageObjectMetadata> PutBytesAsync(IArtifactStorageDriver driver, string key, byte[] bytes, ArtifactStorageWriteCondition condition)
+    {
+        await using var input = new MemoryStream(bytes, writable: false);
+        var result = await driver.PutAsync(new ArtifactStoragePutRequest(key, input)
+        {
+            ContentLength = bytes.LongLength,
+            ExpectedSha256 = Sha256(bytes),
+            Condition = condition
+        }, CancellationToken.None);
+
+        result.IsSuccess.ShouldBeTrue(result.Error?.Message);
+
+        return result.Metadata!;
     }
 
     private static async Task<string> ReadUtf8Async(IArtifactStorageDriver driver, string key)
