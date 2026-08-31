@@ -78,6 +78,17 @@ public sealed class ArtifactCasV2SchemaTests
     }
 
     [Fact]
+    public void Location_observation_does_not_order_independent_wall_clocks()
+    {
+        using var db = BuildContext();
+
+        var observation = CheckConstraint(Entity<ArtifactLocation>(db), "ck_artifact_location_observation").Sql;
+
+        observation.ShouldNotContain("created_date",
+            customMessage: "created_date and verified_at are stamped by different workers, so their wall clocks cannot be a database causal invariant");
+    }
+
+    [Fact]
     public void Location_event_is_an_append_only_tenant_bound_revision_history()
     {
         using var db = BuildContext();

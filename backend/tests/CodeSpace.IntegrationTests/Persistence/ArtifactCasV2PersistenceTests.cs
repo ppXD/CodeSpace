@@ -222,6 +222,78 @@ public sealed class ArtifactCasV2PersistenceTests
         }
     }
 
+    [Fact]
+    public async Task A_location_observation_may_precede_its_creation_on_an_independent_wall_clock()
+    {
+        var world = await SeedWorldAsync();
+        var artifact = Object(world.TeamId, 31, 0x34);
+        var location = AvailableLocation(world, artifact, "objects/34/cross-clock.bin");
+        // PostgreSQL persists timestamptz at microsecond precision. Keep the fixture on that same boundary so the
+        // equality below tests clock provenance, not whether this host's UtcNow exposed sub-microsecond ticks.
+        var writerClock = new DateTimeOffset(2026, 7, 22, 13, 22, 58, TimeSpan.Zero).AddTicks(1_234_560);
+        var verifierClock = writerClock - TimeSpan.FromMinutes(7);
+
+        artifact.CreatedDate = writerClock;
+        location.CreatedDate = writerClock;
+        location.LastModifiedDate = writerClock;
+        location.VerifiedAt = verifierClock;
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.AddRange(artifact, location, Event(location, 1, ArtifactLocationEventType.Verified, ArtifactLocationState.Available));
+            await db.SaveChangesAsync();
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var stored = await scope.Resolve<CodeSpaceDbContext>().ArtifactLocation.AsNoTracking().SingleAsync(row => row.Id == location.Id);
+            stored.CreatedDate.ShouldBe(writerClock);
+            stored.VerifiedAt.ShouldBe(verifierClock,
+                "the ledger records the verifier's honest clock reading; moving it forward would fabricate when the destination answered");
+        }
+    }
+
+    [Fact]
+    public async Task An_available_location_without_a_verified_instant_is_still_refused()
+    {
+        var world = await SeedWorldAsync();
+        var artifact = Object(world.TeamId, 32, 0x35);
+        var location = AvailableLocation(world, artifact, "objects/35/unverified-available.bin");
+        location.VerifiedAt = null;
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.AddRange(artifact, location, Event(location, 1, ArtifactLocationEventType.Verified, ArtifactLocationState.Available));
+
+        var refusal = await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
+        refusal.InnerException?.Message.ShouldContain("ck_artifact_location_observation",
+            customMessage: "removing the cross-clock comparison must not remove the intrinsic fact that Available means an observation actually occurred");
+    }
+
+    [Fact]
+    public async Task The_weaker_observation_check_avoids_a_table_validation_scan_under_the_single_transaction_migrator()
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var definition = await db.Database.SqlQueryRaw<string>("""
+            SELECT pg_get_constraintdef(oid) AS "Value"
+            FROM pg_constraint
+            WHERE conrelid = 'artifact_location'::regclass AND conname = 'ck_artifact_location_observation'
+            """).SingleAsync();
+        var validated = await db.Database.SqlQueryRaw<bool>("""
+            SELECT convalidated AS "Value"
+            FROM pg_constraint
+            WHERE conrelid = 'artifact_location'::regclass AND conname = 'ck_artifact_location_observation'
+            """).SingleAsync();
+
+        validated.ShouldBeFalse("the predecessor was stronger and already proved every existing row; rescanning the table while DbUp holds one upgrade transaction would only extend its schema lock");
+        definition.ShouldNotContain("created_date");
+        definition.ShouldContain("observed_size_bytes");
+        definition.ShouldContain("provider_checksum_algorithm");
+    }
+
     /// <summary>
     /// Purged is the one non-terminal state a purge may leave behind, and the CAS commit treats "still Purged at the
     /// revision I read before uploading" as proof that no purge touched the bytes it verified. That proof is only worth
