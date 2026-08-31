@@ -59,5 +59,11 @@ public sealed class StorageProviderModuleCatalog : IStorageProviderModuleCatalog
             throw new InvalidOperationException($"Storage provider module '{module.TypeKey}' {nameof(IStorageProviderModule.SecretSchema)} must be a JSON object schema.");
         if (module.FactoryType == null || !module.FactoryType.IsClass || module.FactoryType.IsAbstract || !typeof(IArtifactStorageDriverFactory).IsAssignableFrom(module.FactoryType))
             throw new InvalidOperationException($"Storage provider module '{module.TypeKey}' FactoryType must be a concrete {nameof(IArtifactStorageDriverFactory)} implementation.");
+
+        // Every delete path in the plane requires Delete of the driver before it asks the destination for anything,
+        // so refusing the pair here is what makes the marker mean something: a provider whose keys are shared across
+        // teams can never declare its way into removing bytes a team it has never heard of is still pointing at.
+        if (module is IStorageProviderTenantSharedObjectKeys && module.Capabilities.HasFlag(StorageProviderCapabilities.Delete))
+            throw new InvalidOperationException($"Storage provider module '{module.TypeKey}' declares {nameof(IStorageProviderTenantSharedObjectKeys)} and {nameof(StorageProviderCapabilities)}.{nameof(StorageProviderCapabilities.Delete)} together. One object key names bytes every team shares, so removing one is a cross-team act no team-scoped caller can authorize.");
     }
 }

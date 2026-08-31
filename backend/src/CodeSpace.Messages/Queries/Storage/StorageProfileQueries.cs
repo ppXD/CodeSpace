@@ -41,3 +41,14 @@ public sealed record GetProfilePlacementTotalsQuery : IQuery<IReadOnlyList<Profi
     public string RequiredPermission => TeamPermissions.StorageManage;
     public Guid ProfileId { get; init; }
 }
+
+/// <summary>
+/// A report-only pass over the artifact rows this team wrote BEFORE the CAS plane, asking whether one storage
+/// profile can still name them. It writes nothing — no placement is minted, no row relinked, no byte moved.
+/// </summary>
+public sealed record GetLegacyPlacementSurveyQuery : IQuery<LegacyPlacementSurvey>, IRequireTeamPermission
+{
+    public string RequiredPermission => TeamPermissions.StorageManage;
+    public Guid ProfileId { get; init; }
+    public int Limit { get; init; } = LegacyPlacementSurveyLimits.MaxRowsPerPass;
+}
