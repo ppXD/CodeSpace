@@ -132,9 +132,9 @@ public sealed partial class NativeRecordPlane : INativeRecordPlane, IScopedDepen
         {
             await AppendAttemptAsync(db, request, run.WorkflowRunId, attempt.Id, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception refusal) when (opensExecution && run.WorkflowRunId.HasValue && (refusal is not OperationCanceledException || !cancellationToken.IsCancellationRequested))
+        catch (Exception refusal) when (opensExecution && (refusal is not OperationCanceledException || !cancellationToken.IsCancellationRequested))
         {
-            await NoticeRefusedExecutionAsync(db, new RefusedExecution(request.TeamId, request.AgentRunId, run.WorkflowRunId!.Value, execution.Id, request.WorkerFenceEpoch), refusal, cancellationToken).ConfigureAwait(false);
+            await NoticeRefusedExecutionAsync(db, new RefusedExecution(request.TeamId, request.AgentRunId, run.WorkflowRunId, execution.Id, request.WorkerFenceEpoch), refusal, cancellationToken).ConfigureAwait(false);
 
             throw;
         }

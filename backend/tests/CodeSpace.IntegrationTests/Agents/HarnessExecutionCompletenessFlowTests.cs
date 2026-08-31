@@ -11,6 +11,7 @@ using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Commands.Workflows;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Contracts;
+using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Dtos.Workflows;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -191,6 +192,57 @@ public sealed class HarnessExecutionCompletenessFlowTests
         using var scope = _fixture.BeginScope();
         (await scope.Resolve<CodeSpaceDbContext>().WorkflowRunCaptureGap.CountAsync(candidate => candidate.WorkflowRunId == run.WorkflowRunId
             && candidate.SubjectKind == WorkflowRunDataOwnerKinds.HarnessExecution)).ShouldBe(0);
+    }
+
+    /// <summary>
+    /// THE THIRD PRODUCER, on the run it could say nothing about. A refused new generation of a STANDALONE Agent Run is
+    /// exactly as locatable a loss as a workflow-bound one — a minted execution identity with no row of its own — but
+    /// while this write was gated on the run having a workflow parent it recorded NOTHING, so the run whose facet no
+    /// manifest can carry was also the run whose refusal left no trace anywhere. That is the same silence the two
+    /// sibling producers were opened up for, surviving in the one this plane's own nullable key had already unblocked.
+    ///
+    /// <para>The gap carries its OWNER and no attempt coordinate: the launch's attempt insert is the write that was
+    /// refused, so the three columns naming it would reference a row that does not exist. Written down is half of it,
+    /// which is why this READS — a gap an operator cannot reach is a loss recorded into a place nobody looks.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_refused_execution_of_a_standalone_run_is_a_locatable_gap_against_its_agent_run()
+    {
+        var run = await SeedStandaloneRunAsync();
+        var plane = Plane(out var planeScope);
+        using var _ = planeScope;
+
+        await Should.ThrowAsync<DbUpdateException>(() => OpenRawAsync(plane, run, run.FenceEpoch, MalformedLocator));
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var gap = await db.WorkflowRunCaptureGap.AsNoTracking().SingleAsync(candidate => candidate.TeamId == run.TeamId
+            && candidate.SubjectKind == WorkflowRunDataOwnerKinds.HarnessExecution);
+        gap.WorkflowRunId.ShouldBeNull(customMessage: "this run has no workflow parent, and a gap keyed to an invented one would be worse than none");
+        gap.AgentRunId.ShouldBe(run.AgentRunId, customMessage: "the run that owns the record is the run the gap names, and it is the only key this run has");
+        gap.SubjectId.ShouldNotBeNullOrWhiteSpace(customMessage: "the minted execution identity is the coordinate that locates the row that does not exist");
+        gap.HarnessExecutionId.ShouldBeNull(
+            customMessage: "that column hard-references the execution row this refusal is the absence of, so naming the run may never be paid for with a dangling one");
+        gap.HarnessProcessAttemptId.ShouldBeNull();
+        gap.RangeKind.ShouldBe(CaptureGapRangeKind.Unbounded);
+        gap.Reason.ShouldBe(CaptureGapReason.WriteRefused);
+        gap.Resolution.ShouldBe(CaptureGapResolution.Open);
+
+        (await db.WorkflowRunHarnessExecution.CountAsync(candidate => candidate.Id == Guid.Parse(gap.SubjectId!))).ShouldBe(0,
+            customMessage: "the span names the exact execution identity whose transaction was refused, so the row it points at must genuinely be absent");
+        (await db.WorkflowRunDataManifest.CountAsync(candidate => candidate.TeamId == run.TeamId)).ShouldBe(0,
+            customMessage: "the manifest keying is untouched: what this closes is the gap plane's silence, not the absent statement, which is honestly indeterminate");
+
+        var observed = (await scope.Resolve<IAgentRunService>().GetSummaryForTeamAsync(run.AgentRunId, run.TeamId, CancellationToken.None))!.CaptureGaps;
+        observed.Availability.ShouldBe(AgentRunCaptureGapReadAvailability.Available);
+
+        var shown = observed.Items.Where(candidate => candidate.SubjectKind == WorkflowRunDataOwnerKinds.HarnessExecution).ShouldHaveSingleItem(
+            customMessage: "the drawer selects by Agent Run, and this gap names one — a row an operator cannot reach is a loss recorded into a place nobody looks");
+        shown.Id.ShouldBe(gap.Id);
+        shown.HarnessExecutionId.ShouldBeNull();
+        shown.AttemptWorkerFenceEpoch.ShouldBeNull(
+            customMessage: "the reader states 'we cannot say which attempt' rather than hiding the whole gap behind a coordinate that cannot exist");
     }
 
     [Fact]

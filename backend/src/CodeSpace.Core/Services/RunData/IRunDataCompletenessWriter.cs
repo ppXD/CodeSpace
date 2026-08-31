@@ -30,10 +30,10 @@ namespace CodeSpace.Core.Services.RunData;
 /// <c>false</c> rather than thrown.</para>
 ///
 /// <para><b>Production reads are observation-only.</b> <see cref="IRunDataCompletenessReader"/> exposes bounded
-/// manifest metadata to Workflow Run operators, while the Agent Run summary exposes bounded gaps carrying exact
-/// process-attempt attribution. Neither read is an execution authority, and no terminal verdict, planner, oracle,
-/// completion or routing path consumes either one. Wiring a terminal verdict before every facet has a producer would
-/// park every run, since a facet with no statement is indeterminate.</para>
+/// manifest metadata to Workflow Run operators, while the Agent Run summary exposes the bounded gaps that NAME one
+/// Agent Run, reporting each one's process attribution where it has one. Neither read is an execution authority, and
+/// no terminal verdict, planner, oracle, completion or routing path consumes either one. Wiring a terminal verdict
+/// before every facet has a producer would park every run, since a facet with no statement is indeterminate.</para>
 /// </summary>
 public interface IRunDataCompletenessWriter
 {
@@ -111,17 +111,17 @@ public sealed class RunDataCompletenessWriter : IRunDataCompletenessWriter, IRun
     }
 
     public async Task<bool> InitializeAsync(RunDataManifestInitialization initialization, CancellationToken cancellationToken) =>
-        await ContainedAsync(initialization.WorkflowRunId, WorkflowRunDataOwnerKinds.DataManifest, async db => await db.Database.ExecuteSqlAsync(
+        await ContainedAsync(LostClaimSubject.Of(initialization.WorkflowRunId), WorkflowRunDataOwnerKinds.DataManifest, async db => await db.Database.ExecuteSqlAsync(
             $"SELECT workflow_run_data_manifest_initialize({initialization.TeamId}, {initialization.WorkflowRunId}, {RunDataManifestCoverage.RequiredFacets.ToArray()}, {WorkflowRunDataContract.CurrentVersion})",
             cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
 
     public async Task<bool> AdvanceAsync(RunDataFacetAdvance advance, CancellationToken cancellationToken) =>
-        await ContainedAsync(advance.WorkflowRunId, advance.Facet, async db => await db.Database.ExecuteSqlAsync(
+        await ContainedAsync(LostClaimSubject.Of(advance.WorkflowRunId), advance.Facet, async db => await db.Database.ExecuteSqlAsync(
             $"SELECT workflow_run_data_manifest_advance({advance.TeamId}, {advance.WorkflowRunId}, {advance.Facet}, {advance.Expected}, {advance.Present}, {advance.Masked}, {WorkflowRunDataContract.CurrentVersion})",
             cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
 
     public async Task<bool> NoticeAsync(WorkflowRunCaptureGap gap, CancellationToken cancellationToken) =>
-        await ContainedAsync(gap.WorkflowRunId, gap.SubjectKind, async db =>
+        await ContainedAsync(LostClaimSubject.Of(gap), gap.SubjectKind, async db =>
         {
             db.WorkflowRunCaptureGap.Add(gap);
             await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
@@ -131,7 +131,7 @@ public sealed class RunDataCompletenessWriter : IRunDataCompletenessWriter, IRun
     {
         var revised = 0L;
 
-        await ContainedAsync(workflowRunId, facet, async db => revised = await Revised(db, teamId, workflowRunId, facet, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+        await ContainedAsync(LostClaimSubject.Of(workflowRunId), facet, async db => revised = await Revised(db, teamId, workflowRunId, facet, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
 
         return revised > 0;
     }
@@ -140,7 +140,7 @@ public sealed class RunDataCompletenessWriter : IRunDataCompletenessWriter, IRun
     {
         var revised = 0L;
 
-        await ContainedAsync(abandoned.WorkflowRunId, abandoned.Facet, async db => revised = await RevisedIfStillAbandoned(db, abandoned, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+        await ContainedAsync(LostClaimSubject.Of(abandoned.WorkflowRunId), abandoned.Facet, async db => revised = await RevisedIfStillAbandoned(db, abandoned, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
 
         return revised > 0;
     }
@@ -161,7 +161,7 @@ public sealed class RunDataCompletenessWriter : IRunDataCompletenessWriter, IRun
     /// containment at all: a cancellation while cancellation was requested is the round ending, and re-reporting it as
     /// a lost claim would log noise for every torn-down worker.
     /// </summary>
-    private async Task<bool> ContainedAsync(Guid workflowRunId, string facet, Func<CodeSpaceDbContext, Task> write, CancellationToken cancellationToken)
+    private async Task<bool> ContainedAsync(LostClaimSubject subject, string facet, Func<CodeSpaceDbContext, Task> write, CancellationToken cancellationToken)
     {
         try
         {
@@ -173,9 +173,22 @@ public sealed class RunDataCompletenessWriter : IRunDataCompletenessWriter, IRun
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
-            _logger.LogWarning(exception, "The {Facet} facet of workflow run {WorkflowRunId} could not state its completeness; the statement is lost, the records it describes are untouched, and the run resolves exactly as it does with no statement at all", facet, workflowRunId);
+            _logger.LogWarning(exception, "The {Facet} claim of workflow run {WorkflowRunId} / agent run {AgentRunId} could not be stated; the claim is lost, the records it describes are untouched, and the run resolves exactly as it does with no claim at all", facet, subject.WorkflowRunId, subject.AgentRunId);
 
             return false;
         }
+    }
+
+    /// <summary>
+    /// WHICH RUN the lost claim was about, carried as one value because either key alone can be the only one present.
+    /// A gap may name a standalone Agent Run and no workflow run; every manifest verb names a workflow run and no
+    /// agent run. Passing only the workflow run left a standalone gap's warning naming nothing at all — an account of
+    /// a lost record that cannot say which record it was, which is the same silence the gap itself was meant to break.
+    /// </summary>
+    private readonly record struct LostClaimSubject(Guid? WorkflowRunId, Guid? AgentRunId)
+    {
+        public static LostClaimSubject Of(Guid workflowRunId) => new(workflowRunId, null);
+
+        public static LostClaimSubject Of(WorkflowRunCaptureGap gap) => new(gap.WorkflowRunId, gap.AgentRunId);
     }
 }

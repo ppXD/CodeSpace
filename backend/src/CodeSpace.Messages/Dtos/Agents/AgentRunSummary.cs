@@ -36,7 +36,7 @@ public enum AgentRunCaptureGapReadAvailability
     BackendUnavailable,
 }
 
-/// <summary>Newest-first bounded observation of gaps exactly attributed to one Agent Run.</summary>
+/// <summary>Newest-first bounded observation of the gaps that name one Agent Run.</summary>
 public sealed record AgentRunCaptureGapObservation
 {
     public required AgentRunCaptureGapReadAvailability Availability { get; init; }
@@ -45,14 +45,27 @@ public sealed record AgentRunCaptureGapObservation
     public string? ErrorCode { get; init; }
 }
 
-/// <summary>One known-missing span and its exact frozen harness-process coordinate. Display only; never outcome authority.</summary>
+/// <summary>
+/// One known-missing span of this Agent Run, with the exact frozen harness-process coordinate WHERE THERE IS ONE.
+/// Display only; never outcome authority.
+///
+/// <para>The three process coordinates are nullable because TWO classes of gap cannot have them, and they are the
+/// classes most worth showing. A refused process-attempt insert's subject IS the attempt row, and a refused execution
+/// insert's subject IS the execution row, so columns hard-referencing either would have to name a write that never
+/// happened. "We cannot say which attempt" is a fact about the loss, not a reason to withhold a real gap about a real
+/// run — and one refused launch can leave both spans at once, because the execution identity and the attempt are
+/// separately lost by the same refusal.</para>
+/// </summary>
 public sealed record AgentRunCaptureGapSummary
 {
     public required Guid Id { get; init; }
     public required Guid AgentRunId { get; init; }
-    public required Guid HarnessExecutionId { get; init; }
-    public required Guid HarnessProcessAttemptId { get; init; }
-    public required long AttemptWorkerFenceEpoch { get; init; }
+
+    /// <summary>The durable harness execution that owns the attributed attempt. This and the two below are all null or all present — a partial coordinate would make a reader guess.</summary>
+    public Guid? HarnessExecutionId { get; init; }
+
+    public Guid? HarnessProcessAttemptId { get; init; }
+    public long? AttemptWorkerFenceEpoch { get; init; }
     public required string SubjectKind { get; init; }
     public string? SubjectId { get; init; }
     public Guid? StreamId { get; init; }
