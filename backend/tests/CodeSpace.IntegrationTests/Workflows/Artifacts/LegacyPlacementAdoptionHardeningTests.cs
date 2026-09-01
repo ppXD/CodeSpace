@@ -17,6 +17,21 @@ namespace CodeSpace.IntegrationTests.Workflows.Artifacts;
 public sealed partial class LegacyPlacementAdoptionTests
 {
     [Fact]
+    public async Task Invalid_runtime_interval_order_is_rejected_before_arc_or_provider_work()
+    {
+        var world = await SeedAsync(Candidate("invalid runtime intervals"));
+        using var scope = RuntimeScope(TimeProvider.System, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(5),
+            lease => new TrackingReadDriver(lease, new ReadTracker()));
+
+        var exception = await Should.ThrowAsync<InvalidOperationException>(() => scope.Resolve<ILegacyPlacementAdopter>().AdoptAsync(
+            new LegacyPlacementAdoptionRequest(world.TeamId, world.ActorId, world.ProfileId, 1, null), CancellationToken.None));
+
+        exception.Message.ShouldContain("claim renewal < provider operation timeout < claim TTL");
+        using var verification = _fixture.BeginScope();
+        (await verification.Resolve<CodeSpaceDbContext>().LegacyPlacementAdoptionArc.CountAsync(value => value.TeamId == world.TeamId)).ShouldBe(0);
+    }
+
+    [Fact]
     public async Task A_single_object_larger_than_the_byte_budget_still_advances_as_one_honest_oversize_pass()
     {
         var world = await SeedAsync(Candidate(new string('x', 4096)), Candidate(new string('y', 4096)));
@@ -295,6 +310,23 @@ public sealed partial class LegacyPlacementAdoptionTests
         System.Text.Json.JsonSerializer.Serialize(audit).ShouldNotContain("credential-value");
     }
 
+    [Theory]
+    [InlineData(ProviderFailureSurface.Head)]
+    [InlineData(ProviderFailureSurface.Read)]
+    [InlineData(ProviderFailureSurface.Probe)]
+    [InlineData(ProviderFailureSurface.Thrown)]
+    public async Task Typed_provider_rejection_has_one_boundary_across_head_read_probe_and_thrown_paths(ProviderFailureSurface surface)
+    {
+        var world = await SeedAsync(Candidate($"provider rejection {surface}"));
+        using var scope = DecoratingScope(lease => new SurfaceFailureDriver(lease, surface));
+
+        var result = await scope.Resolve<ILegacyPlacementAdopter>().AdoptAsync(
+            new LegacyPlacementAdoptionRequest(world.TeamId, world.ActorId, world.ProfileId, 1, null), CancellationToken.None);
+
+        result.Refusal.ShouldBe(LegacyPlacementAdoptionRefusalValue.ProviderRejected);
+        result.NextCursor.ShouldBeNull();
+    }
+
     [Fact]
     public async Task An_empty_manifest_has_an_exact_zero_progress_tombstone()
     {
@@ -323,6 +355,22 @@ public sealed partial class LegacyPlacementAdoptionTests
         await Should.ThrowAsync<Exception>(() => db.LegacyPlacementAdoptionPassAudit.Where(value => value.ArcId == arcId).ExecuteDeleteAsync());
         db.ChangeTracker.Clear();
         await Should.ThrowAsync<Exception>(() => db.LegacyPlacementAdoptionArc.Where(value => value.Id == arcId).ExecuteDeleteAsync());
+        await db.Database.ExecuteSqlRawAsync("ALTER TABLE legacy_placement_adoption_pass_audit DISABLE TRIGGER USER");
+        try
+        {
+            await db.Database.ExecuteSqlInterpolatedAsync($$"""
+                INSERT INTO legacy_placement_adoption_pass_audit
+                SELECT audit.arc_id, gen_random_uuid(), audit.phase, audit.outcome, audit.yield_reason, audit.failure_code,
+                    audit.start_position, audit.end_position, audit.examined, audit.resolved, audit.confirmed,
+                    audit.evidence_examined_delta, audit.evidence_resolved_delta, audit.evidence_confirmed_delta,
+                    audit.mint_examined_delta, audit.available_delta, audit.missing_delta, audit.corrupt_delta,
+                    audit.already_recorded_delta, audit.conflicts_delta, audit.retryable_delta, audit.read_bytes_delta,
+                    audit.oversized_item, audit.started_at, audit.completed_at
+                FROM legacy_placement_adoption_pass_audit audit CROSS JOIN generate_series(1, 19)
+                WHERE audit.arc_id = {{arcId}}
+                """);
+        }
+        finally { await db.Database.ExecuteSqlRawAsync("ALTER TABLE legacy_placement_adoption_pass_audit ENABLE TRIGGER USER"); }
         await db.Database.ExecuteSqlRawAsync("ALTER TABLE legacy_placement_adoption_arc DISABLE TRIGGER USER");
         try
         {
@@ -335,8 +383,13 @@ public sealed partial class LegacyPlacementAdoptionTests
         finally { await db.Database.ExecuteSqlRawAsync("ALTER TABLE legacy_placement_adoption_arc ENABLE TRIGGER USER"); }
         var cleanupWorld = await SeedAsync();
         await AdoptAsync(cleanupWorld);
+        (await db.LegacyPlacementAdoptionPassAudit.AsNoTracking().CountAsync(value => value.ArcId == arcId)).ShouldBe(8,
+            "one cleanup call must never drain more than the fixed 32-row cap");
+        (await db.LegacyPlacementAdoptionArc.AsNoTracking().CountAsync(value => value.Id == arcId)).ShouldBe(1);
+        var secondCleanupWorld = await SeedAsync();
+        await AdoptAsync(secondCleanupWorld);
         (await db.LegacyPlacementAdoptionArc.AsNoTracking().CountAsync(value => value.Id == arcId)).ShouldBe(0,
-            "bounded cleanup must drain retained audit before deleting the RESTRICTed parent");
+            "a later bounded cleanup drains the remainder before deleting the RESTRICTed parent");
         (await db.LegacyPlacementAdoptionPassAudit.AsNoTracking().CountAsync(value => value.ArcId == arcId)).ShouldBe(0);
     }
 
@@ -407,6 +460,25 @@ public sealed partial class LegacyPlacementAdoptionTests
         }
     }
 
+    [Theory]
+    [InlineData("Minting", 0, 0, 0, "phase")]
+    [InlineData("Evidence", -1, 0, 0, "position")]
+    [InlineData("Evidence", 0, 1, 0, "delta")]
+    public async Task Coordinated_forgery_with_a_held_token_still_cannot_lie_about_phase_position_or_delta(
+        string phase, long startOffset, long auditReadDelta, long arcReadDelta, string expected)
+    {
+        var world = await SeedAsync(Candidate($"forged {expected} first"), Candidate($"forged {expected} second"));
+        await AdoptAsync(world, batchSize: 1);
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var arcId = await db.LegacyPlacementAdoptionArc.Where(value => value.TeamId == world.TeamId).Select(value => value.Id).SingleAsync();
+
+        var failure = await Should.ThrowAsync<Exception>(() => ForgeSettlementAsync(db, arcId,
+            new Forgery(phase, startOffset, auditReadDelta, arcReadDelta)));
+
+        failure.ToString().ShouldContain(expected);
+    }
+
     [Fact]
     public async Task Bounded_cleaning_is_unclaimed_and_does_not_rewrite_the_terminal_audit_summary()
     {
@@ -460,6 +532,43 @@ public sealed partial class LegacyPlacementAdoptionTests
                 FALSE, clock_timestamp(), clock_timestamp())
             """);
 
+    private static async Task ForgeSettlementAsync(CodeSpaceDbContext db, Guid arcId, Forgery forgery)
+    {
+        var claimToken = Guid.NewGuid();
+        await using var transaction = await db.Database.BeginTransactionAsync();
+        await db.Database.ExecuteSqlInterpolatedAsync($$"""
+            UPDATE legacy_placement_adoption_arc
+            SET claim_token = {{claimToken}}, claim_started_at = clock_timestamp(),
+                claim_expires_at = clock_timestamp() + INTERVAL '30 seconds', expires_at = GREATEST(expires_at, clock_timestamp() + INTERVAL '7 days'),
+                revision = revision + 1, last_modified_at = GREATEST(last_modified_at, clock_timestamp())
+            WHERE id = {{arcId}}
+            """);
+        await db.Database.ExecuteSqlInterpolatedAsync($$"""
+            INSERT INTO legacy_placement_adoption_pass_audit (
+                arc_id, claim_token, phase, outcome, yield_reason, failure_code,
+                start_position, end_position, examined, resolved, confirmed,
+                evidence_examined_delta, evidence_resolved_delta, evidence_confirmed_delta,
+                mint_examined_delta, available_delta, missing_delta, corrupt_delta,
+                already_recorded_delta, conflicts_delta, retryable_delta, read_bytes_delta,
+                oversized_item, started_at, completed_at)
+            SELECT id, {{claimToken}}, {{forgery.Phase}}, 'Interrupted', 'None', 'ProgrammingFault',
+                current_position + {{forgery.StartOffset}}, current_position, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {{forgery.AuditReadDelta}},
+                FALSE, claim_started_at, clock_timestamp()
+            FROM legacy_placement_adoption_arc WHERE id = {{arcId}}
+            """);
+        await db.Database.ExecuteSqlInterpolatedAsync($$"""
+            UPDATE legacy_placement_adoption_arc
+            SET read_bytes = read_bytes + {{forgery.ArcReadDelta}}, completed_passes = completed_passes + 1,
+                last_settled_claim_token = {{claimToken}}, claim_token = NULL, claim_started_at = NULL, claim_expires_at = NULL,
+                revision = revision + 1, last_modified_at = GREATEST(last_modified_at, clock_timestamp())
+            WHERE id = {{arcId}}
+            """);
+        await transaction.CommitAsync();
+    }
+
+    private sealed record Forgery(string Phase, long StartOffset, long AuditReadDelta, long ArcReadDelta);
+
     private sealed class ThrowingHeadDriver : DelegatingDriver
     {
         private readonly Exception _exception;
@@ -468,6 +577,32 @@ public sealed partial class LegacyPlacementAdoptionTests
 
         public override ValueTask<ArtifactStorageHeadResult> HeadAsync(ArtifactStorageHeadRequest request, CancellationToken cancellationToken) =>
             ValueTask.FromException<ArtifactStorageHeadResult>(_exception);
+    }
+
+    public enum ProviderFailureSurface { Head, Read, Probe, Thrown }
+
+    private sealed class SurfaceFailureDriver : DelegatingDriver
+    {
+        private static readonly ArtifactStorageError Rejected = new(ArtifactStorageErrorCode.Forbidden, "credential-value");
+        private readonly ProviderFailureSurface _surface;
+
+        public SurfaceFailureDriver(StorageRuntimeDriverLease lease, ProviderFailureSurface surface) : base(lease) => _surface = surface;
+
+        public override ValueTask<ArtifactStorageHeadResult> HeadAsync(ArtifactStorageHeadRequest request, CancellationToken cancellationToken) => _surface switch
+        {
+            ProviderFailureSurface.Head => ValueTask.FromResult(ArtifactStorageHeadResult.Failed(Rejected)),
+            ProviderFailureSurface.Probe => ValueTask.FromResult(ArtifactStorageHeadResult.Failed(new ArtifactStorageError(ArtifactStorageErrorCode.Missing, "missing"))),
+            ProviderFailureSurface.Thrown => ValueTask.FromException<ArtifactStorageHeadResult>(new RejectedStorageException()),
+            _ => base.HeadAsync(request, cancellationToken),
+        };
+
+        public override ValueTask<ArtifactStorageReadResult> OpenReadAsync(ArtifactStorageReadRequest request, CancellationToken cancellationToken) =>
+            _surface == ProviderFailureSurface.Read ? ValueTask.FromResult(ArtifactStorageReadResult.Failed(Rejected)) : base.OpenReadAsync(request, cancellationToken);
+
+        public override ValueTask<ArtifactStorageProbeResult> ProbeAsync(ArtifactStorageProbeRequest request, CancellationToken cancellationToken) =>
+            _surface == ProviderFailureSurface.Probe
+                ? ValueTask.FromResult(new ArtifactStorageProbeResult { Status = ArtifactStorageProbeStatus.Unavailable, Latency = TimeSpan.Zero, Error = Rejected })
+                : base.ProbeAsync(request, cancellationToken);
     }
 
     private sealed class RejectedStorageException : Exception, IArtifactStorageOperationalException

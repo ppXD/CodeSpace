@@ -944,14 +944,19 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await TakeTeamArcLockAsync(db, request.TeamId, cancellationToken).ConfigureAwait(false);
         var terminalCutoff = await DatabaseClockAsync(db, cancellationToken).ConfigureAwait(false) - TerminalRetention;
-        var retainedTerminalIds = db.LegacyPlacementAdoptionArc
-            .Where(value => (value.State == LegacyPlacementAdoptionArcState.Completed
-                    || value.State == LegacyPlacementAdoptionArcState.Expired || value.State == LegacyPlacementAdoptionArcState.Stale)
-                && value.CompletedAt < terminalCutoff)
-            .Select(value => value.Id);
-        await db.LegacyPlacementAdoptionPassAudit.Where(value => retainedTerminalIds.Contains(value.ArcId))
-            .OrderBy(value => value.CompletedAt).ThenBy(value => value.ArcId).ThenBy(value => value.ClaimToken)
-            .Take(TerminalCleanupBatch).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
+        await db.Database.ExecuteSqlInterpolatedAsync($$"""
+            WITH claimed AS (
+                SELECT audit.ctid
+                FROM legacy_placement_adoption_pass_audit audit
+                JOIN legacy_placement_adoption_arc arc ON arc.id = audit.arc_id
+                WHERE arc.state IN ('Completed', 'Expired', 'Stale') AND arc.completed_at < {{terminalCutoff}}
+                ORDER BY audit.completed_at, audit.arc_id, audit.claim_token
+                FOR UPDATE OF audit SKIP LOCKED
+                LIMIT {{TerminalCleanupBatch}}
+            )
+            DELETE FROM legacy_placement_adoption_pass_audit audit USING claimed
+            WHERE audit.ctid = claimed.ctid
+            """).ConfigureAwait(false);
         await db.LegacyPlacementAdoptionArc.Where(value => (value.State == LegacyPlacementAdoptionArcState.Completed
                 || value.State == LegacyPlacementAdoptionArcState.Expired || value.State == LegacyPlacementAdoptionArcState.Stale)
             && value.CompletedAt < terminalCutoff && !value.PassAudits.Any())
