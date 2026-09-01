@@ -13,6 +13,7 @@ import {
   schemaMaxLength,
   schemaOptions,
   schemaToFieldType,
+  schemaTypeLabel,
 } from "@/lib/inputFieldSchema";
 
 interface AddInputFieldModalProps {
@@ -36,7 +37,9 @@ const NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
  * needs a bespoke default control) one branch here. Warm-theme `.mdl` shell.
  */
 export function AddInputFieldModal({ initial, takenNames, onSave, onClose }: AddInputFieldModalProps) {
-  const [type, setType] = useState<InputFieldType>(initial ? schemaToFieldType(initial.schema) : "text");
+  const initialType = initial ? schemaToFieldType(initial.schema) : "text";
+  const [type, setType] = useState<InputFieldType | null>(initialType);
+  const [schemaTouched, setSchemaTouched] = useState(initial === undefined);
   const [name, setName] = useState(initial?.name ?? "");
   const [displayName, setDisplayName] = useState(initial?.label ?? "");
   const [maxLength, setMaxLength] = useState<string>(() => {
@@ -45,6 +48,11 @@ export function AddInputFieldModal({ initial, takenNames, onSave, onClose }: Add
   });
   const [options, setOptions] = useState<string[]>(() => (initial ? schemaOptions(initial.schema) : []));
   // Text/number/select share a string default box; boolean uses a tri-state select.
+  // Whether the operator actually used a default control in this session. The editor's controls
+  // cannot represent every default a workflow can hold -- the plan projector writes an array of
+  // subtask objects, and `resolveDefault` answers `undefined` for anything it cannot round-trip -- so
+  // writing its answer unconditionally erased those. Untouched means untouched: keep what is stored.
+  const [defaultTouched, setDefaultTouched] = useState(false);
   const [defaultText, setDefaultText] = useState(() => (typeof initial?.default === "boolean" ? "" : defaultToString(initial?.default)));
   const [defaultBool, setDefaultBool] = useState<"" | "true" | "false">(() =>
     typeof initial?.default === "boolean" ? (initial.default ? "true" : "false") : "");
@@ -72,16 +80,53 @@ export function AddInputFieldModal({ initial, takenNames, onSave, onClose }: Add
   const optionsError = type === "select" && usableOptions.length === 0 ? "Add at least one option" : null;
   const canSave = nameError === null && optionsError === null;
 
+  const markDefaultTouched = (next: string) => { setDefaultTouched(true); setDefaultText(next); };
+  const markDefaultBoolTouched = (next: "" | "true" | "false") => { setDefaultTouched(true); setDefaultBool(next); };
+  const changeType = (next: InputFieldType) => {
+    setType(next);
+    setSchemaTouched(true);
+    // A type conversion is an explicit destructive edit. Reflect the removal in the visible control
+    // immediately and never carry an incompatible value (for example array → string) behind its back.
+    setDefaultTouched(true);
+    setDefaultText("");
+    setDefaultBool("");
+  };
+  const changeOptions = (next: string[]) => {
+    setOptions(next);
+    setSchemaTouched(true);
+    const usable = next.map((option) => option.trim()).filter((option) => option !== "");
+    if (type === "select" && defaultText !== "" && !usable.includes(defaultText)) {
+      setDefaultTouched(true);
+      setDefaultText("");
+    }
+  };
+
   const save = () => {
     if (!canSave) return;
     const maxLen = maxLength.trim() === "" ? null : Number(maxLength);
-    const schema = buildFieldSchema({ type, maxLength: Number.isFinite(maxLen) ? maxLen : null, options: usableOptions, hidden });
+    // Patch over the stored fragment, not a fresh object: a schema can carry keywords this modal has
+    // no control for (a description, a format, an x-* a planner wrote) and rebuilding from {} deletes
+    // every one of them.
+    const storedSchema = typeof initial?.schema === "object" && initial.schema !== null && !Array.isArray(initial.schema)
+      ? (initial.schema as Record<string, unknown>)
+      : undefined;
+    const schema = type === null
+      ? initial?.schema
+      : initial && !schemaTouched
+        ? initial.schema
+        : buildFieldSchema({ type, maxLength: Number.isFinite(maxLen) ? maxLen : null, options: usableOptions, hidden }, storedSchema);
 
     onSave({
+      // Spread first so a facet this modal does not edit -- today `description` -- survives being
+      // edited through it. The named fields below are the ones it owns.
+      ...initial,
       name: trimmedName,
       label: displayName.trim() === "" ? null : displayName.trim(),
       schema,
-      default: resolveDefault(type, defaultText, defaultBool, usableOptions),
+      // Only when the operator used a default control. Otherwise the stored default stands, whatever
+      // shape it is -- these controls are strings and booleans, and a default can be an array of
+      // objects a planner wrote.
+      default: type !== null && defaultTouched ? resolveDefault(type, defaultText, defaultBool, usableOptions) : initial?.default,
       required,
     });
   };
@@ -103,10 +148,11 @@ export function AddInputFieldModal({ initial, takenNames, onSave, onClose }: Add
             <div className="wf-form-row">
               <span className="wf-form-label">Field type</span>
               <div className="wf-type-pick">
-                <select className="wf-form-input" value={type} onChange={(e) => setType(e.target.value as InputFieldType)}>
+                <select className="wf-form-input" value={type ?? "__custom__"} onChange={(e) => changeType(e.target.value as InputFieldType)}>
+                  {type === null && <option value="__custom__" disabled>{`Custom (${schemaTypeLabel(initial?.schema)}) — preserved`}</option>}
                   {INPUT_FIELD_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
                 </select>
-                <span className="wf-type-badge">{jsonTypeOf(type)}</span>
+                <span className="wf-type-badge">{type === null ? schemaTypeLabel(initial?.schema) : jsonTypeOf(type)}</span>
               </div>
             </div>
 
@@ -142,15 +188,15 @@ export function AddInputFieldModal({ initial, takenNames, onSave, onClose }: Add
                       <input
                         className="wf-form-input"
                         value={opt}
-                        onChange={(e) => setOptions(options.map((o, j) => (j === i ? e.target.value : o)))}
+                        onChange={(e) => changeOptions(options.map((o, j) => (j === i ? e.target.value : o)))}
                         placeholder={`Option ${i + 1}`}
                       />
-                      <button type="button" className="btn btn-ghost wf-opt-x" onClick={() => setOptions(options.filter((_, j) => j !== i))} title="Remove option">
+                      <button type="button" className="btn btn-ghost wf-opt-x" onClick={() => changeOptions(options.filter((_, j) => j !== i))} title="Remove option">
                         <Ic.Trash size={11} />
                       </button>
                     </div>
                   ))}
-                  <button type="button" className="btn btn-ghost wf-opt-add" onClick={() => setOptions([...options, ""])}>
+                  <button type="button" className="btn btn-ghost wf-opt-add" onClick={() => changeOptions([...options, ""])}>
                     <Ic.Plus size={12} /> Add option
                   </button>
                 </div>
@@ -166,7 +212,7 @@ export function AddInputFieldModal({ initial, takenNames, onSave, onClose }: Add
                   type="number"
                   min={1}
                   value={maxLength}
-                  onChange={(e) => setMaxLength(e.target.value)}
+                  onChange={(e) => { setSchemaTouched(true); setMaxLength(e.target.value); }}
                   placeholder="Optional"
                 />
               </div>
@@ -184,11 +230,11 @@ export function AddInputFieldModal({ initial, takenNames, onSave, onClose }: Add
               </div>
             )}
 
-            {!isSelectorFieldType(type) && (
+            {type !== null && !isSelectorFieldType(type) && (
             <div className="wf-form-row">
               <span className="wf-form-label">Default value</span>
               {type === "boolean" ? (
-                <select className="wf-form-input" value={defaultBool} onChange={(e) => setDefaultBool(e.target.value as "" | "true" | "false")}>
+                <select className="wf-form-input" value={defaultBool} onChange={(e) => markDefaultBoolTouched(e.target.value as "" | "true" | "false")}>
                   <option value="">No default</option>
                   <option value="true">Checked</option>
                   <option value="false">Unchecked</option>
@@ -197,7 +243,7 @@ export function AddInputFieldModal({ initial, takenNames, onSave, onClose }: Add
                 <select
                   className="wf-form-input"
                   value={usableOptions.includes(defaultText) ? defaultText : ""}
-                  onChange={(e) => setDefaultText(e.target.value)}
+                  onChange={(e) => markDefaultTouched(e.target.value)}
                 >
                   <option value="">No default</option>
                   {usableOptions.map((o) => <option key={o} value={o}>{o}</option>)}
@@ -207,7 +253,7 @@ export function AddInputFieldModal({ initial, takenNames, onSave, onClose }: Add
                   className="wf-form-input"
                   type={type === "number" ? "number" : "text"}
                   value={defaultText}
-                  onChange={(e) => setDefaultText(e.target.value)}
+                  onChange={(e) => markDefaultTouched(e.target.value)}
                   placeholder="Optional — used when the runner leaves it blank"
                 />
               )}
@@ -219,10 +265,10 @@ export function AddInputFieldModal({ initial, takenNames, onSave, onClose }: Add
               <span>Required</span>
             </label>
 
-            <label className="wf-form-check">
-              <input type="checkbox" checked={hidden} onChange={(e) => setHidden(e.target.checked)} />
+            {type !== null && <label className="wf-form-check">
+              <input type="checkbox" checked={hidden} onChange={(e) => { setSchemaTouched(true); setHidden(e.target.checked); }} />
               <span>Hidden <span className="wf-form-help-inline">— set via default, not shown on the run form</span></span>
-            </label>
+            </label>}
           </div>
         </div>
 

@@ -2,7 +2,7 @@ import { useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { WorkflowVariable } from "@/api/workflows";
-import { schemaToFieldType } from "@/lib/inputFieldSchema";
+import { schemaToFieldType, schemaTypeLabel } from "@/lib/inputFieldSchema";
 
 import { AddInputFieldModal } from "./AddInputFieldModal";
 
@@ -22,7 +22,10 @@ export function StartNodeInputsEditor({ inputs, onChange }: StartNodeInputsEdito
   const [editing, setEditing] = useState<{ index: number | null } | null>(null);
 
   const upsert = (field: WorkflowVariable) => {
-    onChange(editing?.index == null ? [...inputs, field] : inputs.map((v, i) => (i === editing.index ? field : v)));
+    // Merge onto the stored row rather than swapping it out. The modal already carries the untouched
+    // facets through, so this is belt-and-braces -- but it is the half that keeps a future control
+    // added to that modal from silently dropping a field it does not know about.
+    onChange(editing?.index == null ? [...inputs, field] : inputs.map((v, i) => (i === editing.index ? { ...v, ...field } : v)));
     setEditing(null);
   };
 
@@ -48,7 +51,7 @@ export function StartNodeInputsEditor({ inputs, onChange }: StartNodeInputsEdito
               <Ic.Key size={12} />
               <span className="wf-inputs-row-name">{v.name}</span>
               {v.label && <span className="wf-inputs-row-label">· {v.label}</span>}
-              <span className="wf-inputs-row-type">{schemaToFieldType(v.schema)}</span>
+              <span className="wf-inputs-row-type">{schemaToFieldType(v.schema) ?? schemaTypeLabel(v.schema)}</span>
               {v.required && <span className="wf-inputs-row-req">required</span>}
               <button
                 type="button"

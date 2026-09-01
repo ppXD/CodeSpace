@@ -47,9 +47,30 @@ export interface InputFieldDraft {
   hidden?: boolean;
 }
 
-/** Build the per-field JSON Schema for an input field from the editor draft. */
-export function buildFieldSchema(draft: InputFieldDraft): Record<string, unknown> {
-  const schema: Record<string, unknown> = { type: jsonTypeOf(draft.type) };
+/**
+ * The keywords this editor OWNS — the ones its controls can turn on, and therefore the only ones it
+ * may turn off. Everything else in a stored schema belongs to whoever wrote it and is carried
+ * through untouched.
+ *
+ * <p>The list exists because the alternative is rebuilding the schema from `{}`, which silently
+ * deletes any keyword the editor has no control for: a `description`, a `format`, a `pattern`, an
+ * `x-*` a planner wrote. Clearing only what you own is the difference between "I unticked Hidden"
+ * and "I erased everything I did not know about".</p>
+ */
+const EDITOR_OWNED_KEYWORDS = ["type", "x-selector", "x-long", "enum", "maxLength", "x-hidden"] as const;
+
+/**
+ * The draft as a PATCH over `base` — the fragment currently stored, when there is one.
+ *
+ * <p>Owned keywords are dropped first so unticking a box really clears it; everything else survives.
+ * Called with no base (a new field) this is identical to building from scratch.</p>
+ */
+export function buildFieldSchema(draft: InputFieldDraft, base?: Record<string, unknown>): Record<string, unknown> {
+  const schema: Record<string, unknown> = { ...(base ?? {}) };
+
+  for (const owned of EDITOR_OWNED_KEYWORDS) delete schema[owned];
+
+  schema.type = jsonTypeOf(draft.type);
 
   // An entity-picker field is a string id rendered by its selector (x-selector dispatch); the
   // selector key is the type name (repository → project→repo picker, conversation → conversation picker).
@@ -71,16 +92,33 @@ export function buildFieldSchema(draft: InputFieldDraft): Record<string, unknown
   return schema;
 }
 
-/** Infer the editor field type from a stored schema (for editing an existing input). */
-export function schemaToFieldType(schema: unknown): InputFieldType {
+/**
+ * Infer an editor field type only when every discriminator that selects a bespoke control is
+ * representable. Null means "custom": callers must preserve the stored schema until the operator
+ * explicitly converts it instead of silently presenting and saving it as Text.
+ */
+export function schemaToFieldType(schema: unknown): InputFieldType | null {
+  if (schema !== null && schema !== undefined && (typeof schema !== "object" || Array.isArray(schema))) return null;
   const s = asObject(schema);
+  const rawSelector = s["x-selector"];
   const selector = SELECTOR_FIELD_TYPES.find((t) => t === s["x-selector"]);
   if (selector) return selector;
-  if (Array.isArray(s.enum)) return "select";
+  if (rawSelector !== undefined) return null;
+  if (Array.isArray(s.enum)) {
+    if ((s.type !== undefined && s.type !== "string") || !s.enum.every((value) => typeof value === "string")) return null;
+    return "select";
+  }
   if (s.type === "boolean") return "boolean";
-  if (s.type === "number" || s.type === "integer") return "number";
+  if (s.type === "number") return "number";
+  if (s.type !== undefined && s.type !== "string") return null;
   if (s["x-long"] === true) return "paragraph";
   return "text";
+}
+
+/** Stable, honest label for a schema the friendly editor cannot represent. */
+export function schemaTypeLabel(schema: unknown): string {
+  const type = asObject(schema).type;
+  return typeof type === "string" && type.trim() !== "" ? type : "custom";
 }
 
 export function schemaMaxLength(schema: unknown): number | null {
