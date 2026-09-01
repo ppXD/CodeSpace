@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
@@ -6,6 +7,7 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Artifacts;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Dtos.Agents;
@@ -207,12 +209,172 @@ public class AgentRunServiceTests
         persisted.DataJson.ShouldBeNull();
         persisted.DataArtifactId.ShouldBe(appended.DataArtifactId);
 
+        var declaration = await verify.Resolve<CodeSpaceDbContext>().WorkflowArtifactRetention.AsNoTracking()
+            .SingleAsync(row => row.ArtifactId == appended.DataArtifactId);
+        declaration.RetentionClass.ShouldBe("AgentRunEventData");
+        declaration.HolderKind.ShouldBe("agent_run_event");
+        declaration.HolderId.ShouldBe(appended.Id, "the holder identity is the event id minted before its bytes were declared");
+
         var artifact = await verify.Resolve<IArtifactStore>().GetBytesAsync(teamId, appended.DataArtifactId!.Value, CancellationToken.None);
         artifact.ShouldNotBeNull();
         artifact!.ContentType.ShouldBe("application/json");
         var recovered = System.Text.Encoding.UTF8.GetString(artifact.Bytes);
         JsonDocument.Parse(recovered).RootElement.GetProperty("tag").GetString().ShouldBe("single-large-tool-result");
         recovered.ShouldContain("SENTINEL", customMessage: "the single-row path preserves the complete structured payload");
+    }
+
+    [Fact]
+    public async Task A_failed_event_insert_leaves_its_isolated_declaration_reapable()
+    {
+        var teamId = await SeedTeamAsync();
+        Guid runId;
+        using (var setup = _fixture.BeginScope())
+            runId = (await setup.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+
+        var payload = JsonSerializer.SerializeToElement(new { marker = Guid.NewGuid(), blob = new string('x', ArtifactStoreConfig.DefaultInlineThresholdBytes + 500) });
+        using (var failed = _fixture.BeginScope())
+        {
+            var db = failed.Resolve<CodeSpaceDbContext>();
+            await using var transaction = await db.Database.BeginTransactionAsync();
+            await Should.ThrowAsync<DbUpdateException>(() => failed.Resolve<IAgentRunService>().AppendEventAsync(runId,
+                new AgentEvent { Kind = AgentEventKind.ToolCall, Text = null!, Data = payload }, CancellationToken.None));
+            await transaction.RollbackAsync();
+        }
+
+        using var verify = _fixture.BeginScope();
+        var declaration = (await verify.Resolve<CodeSpaceDbContext>().WorkflowArtifactRetention.AsNoTracking()
+            .Where(row => row.TeamId == teamId && row.RetentionClass == "AgentRunEventData").ToListAsync()).ShouldHaveSingleItem(
+            "provider bytes and their declaration commit outside the holder transaction, so a failed holder remains reclaimable");
+        declaration.State.ShouldBe(ArtifactRetentionState.Declared);
+        (await verify.Resolve<CodeSpaceDbContext>().AgentRunEvent.AsNoTracking().CountAsync(row => row.AgentRunId == runId)).ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task A_custom_plain_offloader_keeps_the_pre_retention_large_event_contract()
+    {
+        var teamId = await SeedTeamAsync();
+        Guid runId;
+        using (var setup = _fixture.BeginScope())
+            runId = (await setup.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+
+        var artifactId = Guid.NewGuid();
+        var offloader = new SuccessfulPlainOffloader(artifactId);
+        var payload = JsonSerializer.SerializeToElement(new { marker = Guid.NewGuid(), blob = new string('p', ArtifactStoreConfig.DefaultInlineThresholdBytes + 500) });
+        AgentRunEvent appended;
+        using (var append = _fixture.BeginScope(builder => builder.RegisterInstance<IArtifactOffloader>(offloader)))
+            appended = await append.Resolve<IAgentRunService>().AppendEventAsync(runId,
+                new AgentEvent { Kind = AgentEventKind.ToolCall, Text = "custom", Data = payload }, CancellationToken.None);
+
+        appended.DataArtifactId.ShouldBe(artifactId);
+        offloader.OffloadCalls.ShouldBe(1,
+            "the holder-aware capability is optional; a custom implementation of the original interface must retain its established large-event behavior");
+        using var verify = _fixture.BeginScope();
+        var persisted = await verify.Resolve<CodeSpaceDbContext>().AgentRunEvent.AsNoTracking().SingleAsync(row => row.Id == appended.Id);
+        persisted.DataArtifactId.ShouldBe(artifactId);
+        (await verify.Resolve<CodeSpaceDbContext>().WorkflowArtifactRetention.AsNoTracking().AnyAsync(row => row.ArtifactId == artifactId)).ShouldBeFalse(
+            "the compatibility fallback is fail-closed on permanent retention rather than inventing an unsafe declaration");
+    }
+
+    [Fact]
+    public async Task A_second_event_reusing_the_same_payload_revokes_the_first_declaration()
+    {
+        var teamId = await SeedTeamAsync();
+        Guid runId;
+        using (var setup = _fixture.BeginScope())
+            runId = (await setup.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+
+        var payload = JsonSerializer.SerializeToElement(new { marker = Guid.NewGuid(), blob = new string('x', ArtifactStoreConfig.DefaultInlineThresholdBytes + 500) });
+        AgentRunEvent first;
+        AgentRunEvent second;
+        using (var append = _fixture.BeginScope())
+            first = await append.Resolve<IAgentRunService>().AppendEventAsync(runId, new AgentEvent { Kind = AgentEventKind.ToolCall, Text = "first", Data = payload }, CancellationToken.None);
+        using (var append = _fixture.BeginScope())
+            second = await append.Resolve<IAgentRunService>().AppendEventAsync(runId, new AgentEvent { Kind = AgentEventKind.ToolCall, Text = "second", Data = payload }, CancellationToken.None);
+
+        second.DataArtifactId.ShouldBe(first.DataArtifactId, "content identity dedups independently of the holder row");
+        using var verify = _fixture.BeginScope();
+        var declaration = await verify.Resolve<CodeSpaceDbContext>().WorkflowArtifactRetention.AsNoTracking()
+            .SingleAsync(row => row.ArtifactId == first.DataArtifactId);
+        declaration.State.ShouldBe(ArtifactRetentionState.Revoked,
+            "once the same id escapes to another holder, the first declaration no longer enumerates every reference and must keep forever");
+        declaration.HolderId.ShouldBe(first.Id, "revocation preserves the original diagnostic holder instead of rewriting history");
+    }
+
+    [Fact]
+    public async Task A_batch_with_interleaved_large_unique_and_duplicate_payloads_preserves_order_holders_and_revocation()
+    {
+        var teamId = await SeedTeamAsync();
+        Guid runId;
+        using (var setup = _fixture.BeginScope())
+            runId = (await setup.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+
+        var payloadA = JsonSerializer.SerializeToElement(new { marker = $"A-{Guid.NewGuid():N}", blob = new string('a', ArtifactStoreConfig.DefaultInlineThresholdBytes + 500) });
+        var payloadB = JsonSerializer.SerializeToElement(new { marker = $"B-{Guid.NewGuid():N}", blob = new string('b', ArtifactStoreConfig.DefaultInlineThresholdBytes + 500) });
+        var inputs = new[]
+        {
+            new AgentEvent { Kind = AgentEventKind.Warning, Text = "small", Data = JsonSerializer.SerializeToElement(new { marker = "small" }) },
+            new AgentEvent { Kind = AgentEventKind.ToolCall, Text = "A-first", Data = payloadA },
+            new AgentEvent { Kind = AgentEventKind.TestOutput, Text = "B", Data = payloadB },
+            new AgentEvent { Kind = AgentEventKind.ToolCall, Text = "A-second", Data = payloadA },
+        };
+
+        using (var append = _fixture.BeginScope())
+            await append.Resolve<IAgentRunService>().AppendEventsAsync(runId, inputs, CancellationToken.None);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        var stored = await db.AgentRunEvent.AsNoTracking().Where(row => row.AgentRunId == runId).OrderBy(row => row.Sequence).ToListAsync();
+        stored.Select(row => row.Text).ShouldBe(["small", "A-first", "B", "A-second"]);
+        stored[0].DataJson.ShouldNotBeNull();
+        stored.Skip(1).ShouldAllBe(row => row.DataJson == null && row.DataArtifactId != null);
+        stored[1].DataArtifactId.ShouldBe(stored[3].DataArtifactId, "the duplicate payload dedups without crossing its ordinal lane");
+        stored[2].DataArtifactId.ShouldNotBe(stored[1].DataArtifactId);
+
+        var declarations = await db.WorkflowArtifactRetention.AsNoTracking()
+            .Where(row => row.ArtifactId == stored[1].DataArtifactId || row.ArtifactId == stored[2].DataArtifactId)
+            .ToDictionaryAsync(row => row.ArtifactId);
+        declarations[stored[1].DataArtifactId!.Value].State.ShouldBe(ArtifactRetentionState.Revoked);
+        declarations[stored[1].DataArtifactId!.Value].HolderId.ShouldBe(stored[1].Id,
+            "dedup revocation preserves the first writer's diagnostic holder");
+        declarations[stored[2].DataArtifactId!.Value].State.ShouldBe(ArtifactRetentionState.Declared);
+        declarations[stored[2].DataArtifactId!.Value].HolderId.ShouldBe(stored[2].Id,
+            "the independent large payload keeps the id at its own SQL ordinal");
+
+        var store = verify.Resolve<IArtifactStore>();
+        Encoding.UTF8.GetString((await store.GetBytesAsync(teamId, stored[1].DataArtifactId!.Value, CancellationToken.None)).ShouldNotBeNull().Bytes).ShouldBe(payloadA.GetRawText());
+        Encoding.UTF8.GetString((await store.GetBytesAsync(teamId, stored[2].DataArtifactId!.Value, CancellationToken.None)).ShouldNotBeNull().Bytes).ShouldBe(payloadB.GetRawText());
+    }
+
+    [Fact]
+    public async Task Concurrent_large_event_writes_keep_each_declaration_aligned_with_its_own_holder()
+    {
+        var teamId = await SeedTeamAsync();
+        Guid runA;
+        Guid runB;
+        using (var setup = _fixture.BeginScope())
+        {
+            var runs = setup.Resolve<IAgentRunService>();
+            runA = (await runs.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+            runB = (await runs.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+        }
+
+        async Task<AgentRunEvent> AppendAsync(Guid runId, string marker)
+        {
+            using var append = _fixture.BeginScope();
+            var payload = JsonSerializer.SerializeToElement(new { marker, blob = new string(marker[0], ArtifactStoreConfig.DefaultInlineThresholdBytes + 500) });
+            return await append.Resolve<IAgentRunService>().AppendEventAsync(runId,
+                new AgentEvent { Kind = AgentEventKind.ToolCall, Text = marker, Data = payload }, CancellationToken.None);
+        }
+
+        var events = await Task.WhenAll(AppendAsync(runA, "alpha"), AppendAsync(runB, "bravo"));
+
+        using var verify = _fixture.BeginScope();
+        var artifactIds = events.Select(@event => @event.DataArtifactId!.Value).ToArray();
+        var declarations = await verify.Resolve<CodeSpaceDbContext>().WorkflowArtifactRetention.AsNoTracking()
+            .Where(row => artifactIds.Contains(row.ArtifactId)).ToDictionaryAsync(row => row.ArtifactId);
+        declarations.Count.ShouldBe(2);
+        events.ShouldAllBe(@event => declarations[@event.DataArtifactId!.Value].HolderId == @event.Id,
+            "parallel isolated scopes must not exchange the pre-minted event identities");
     }
 
     [Fact]
@@ -704,6 +866,13 @@ public class AgentRunServiceTests
             events[1].DataJson.ShouldBeNull("the large payload was moved out of the row");
             events[1].DataArtifactId.ShouldNotBeNull("the row keeps only the ref");
 
+            var declaration = await scope.Resolve<CodeSpaceDbContext>().WorkflowArtifactRetention.AsNoTracking()
+                .SingleAsync(row => row.ArtifactId == events[1].DataArtifactId);
+            declaration.RetentionClass.ShouldBe("AgentRunEventData");
+            declaration.HolderKind.ShouldBe("agent_run_event");
+            declaration.HolderId.ShouldBe(events[1].Id,
+                "the explicit id array and payload arrays must keep holder identity aligned through WITH ORDINALITY");
+
             events[2].DataJson.ShouldBeNull("no payload");
             events[2].DataArtifactId.ShouldBeNull();
 
@@ -769,6 +938,20 @@ public class AgentRunServiceTests
             Task.FromResult<string?>(inline);
     }
 
+    private sealed class SuccessfulPlainOffloader(Guid artifactId) : IArtifactOffloader
+    {
+        public int OffloadCalls { get; private set; }
+
+        public Task<OffloadedText> OffloadIfLargeAsync(Guid teamId, string? text, string contentType, CancellationToken cancellationToken)
+        {
+            OffloadCalls++;
+            return Task.FromResult(new OffloadedText("", artifactId));
+        }
+
+        public Task<string> ResolveAsync(Guid teamId, string? inline, Guid? requestedArtifactId, CancellationToken cancellationToken) =>
+            Task.FromResult(inline ?? "");
+    }
+
     [Fact]
     public async Task Completing_with_a_large_patch_offloads_it_to_an_artifact_and_keeps_only_the_ref()
     {
@@ -807,6 +990,9 @@ public class AgentRunServiceTests
             artifact.ShouldNotBeNull();
             System.Text.Encoding.UTF8.GetString(artifact!.Bytes).ShouldBe(bigPatch, "the offloaded diff is recoverable in full");
             artifact.ContentType.ShouldBe("text/x-diff");
+            (await scope.Resolve<CodeSpaceDbContext>().WorkflowArtifactRetention.AsNoTracking()
+                .AnyAsync(row => row.ArtifactId == stored.PatchArtifactId)).ShouldBeFalse(
+                "ordinary patch/transcript offloads stay fail-closed on permanent retention; only the holder-aware event seam declares");
         }
     }
 

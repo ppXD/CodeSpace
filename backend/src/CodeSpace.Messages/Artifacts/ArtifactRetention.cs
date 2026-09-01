@@ -24,6 +24,12 @@ public enum ArtifactRetentionClass
     /// the reference after the artifact write commits.
     /// </summary>
     ModelCallBodyCapture = 3,
+
+    /// <summary>
+    /// An offloaded structured agent-event payload referenced only by <c>agent_run_event.data_artifact_id</c>. The
+    /// event id is minted before the artifact write and is the declaration's diagnostic holder identity.
+    /// </summary>
+    AgentRunEventData = 4,
 }
 
 /// <summary>

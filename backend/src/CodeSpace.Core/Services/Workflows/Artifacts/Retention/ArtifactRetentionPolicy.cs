@@ -35,12 +35,16 @@ public static class ArtifactRetentionPolicy
     public static readonly ArtifactRetentionRule ModelCallBodyCapture =
         new(ArtifactRetentionClass.ModelCallBodyCapture, TimeSpan.FromDays(7), TimeSpan.FromHours(24));
 
+    public static readonly ArtifactRetentionRule AgentRunEventData =
+        new(ArtifactRetentionClass.AgentRunEventData, TimeSpan.FromDays(7), TimeSpan.FromHours(24));
+
     private static readonly IReadOnlyDictionary<ArtifactRetentionClass, ArtifactRetentionRule> Rules =
         new Dictionary<ArtifactRetentionClass, ArtifactRetentionRule>
         {
             [ArtifactManifestContent.Class] = ArtifactManifestContent,
             [SensitiveRecordPayload.Class] = SensitiveRecordPayload,
             [ModelCallBodyCapture.Class] = ModelCallBodyCapture,
+            [AgentRunEventData.Class] = AgentRunEventData,
         };
 
     /// <summary>The rule for <paramref name="value"/>, or null when the running policy does not register it — which the reaper reads as "cannot tell" and keeps.</summary>

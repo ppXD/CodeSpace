@@ -5,8 +5,10 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Artifacts.Backends;
 using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
+using CodeSpace.Core.Services.Workflows.Artifacts.Retention;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
+using CodeSpace.Messages.Artifacts;
 using CodeSpace.Messages.Constants;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
@@ -265,6 +267,46 @@ public class ArtifactStoreFlowTests
         var sha = ArtifactStore.ComputeSha256Hex(content);
         var rowCount = await db.WorkflowArtifact.AsNoTracking().CountAsync(a => a.TeamId == teamId && a.Sha256 == sha);
         rowCount.ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task Concurrent_declared_and_plain_writes_of_the_same_sha_revoke_the_winner_declaration()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var content = Encoding.UTF8.GetBytes(new string('r', ArtifactStoreConfig.DefaultInlineThresholdBytes + 500) + Guid.NewGuid());
+        var holderId = Guid.NewGuid();
+        using var root = _fixture.BeginScope();
+        var coordinator = new OrderedArtifactWriteRace();
+        var inner = root.Resolve<IArtifactBlobBackend>();
+        using var declaring = _fixture.BeginScope(builder => builder.RegisterInstance<IArtifactBlobBackend>(new OrderedRaceBlobBackend(inner, coordinator, declaredLane: true)));
+        using var plain = _fixture.BeginScope(builder => builder.RegisterInstance<IArtifactBlobBackend>(new OrderedRaceBlobBackend(inner, coordinator, declaredLane: false)));
+
+        async Task<ArtifactRetentionWrite> DeclareAsync()
+        {
+            try
+            {
+                return await declaring.Resolve<IArtifactRetentionWriter>().PutDeclaredAsync(new ArtifactRetentionWriteRequest(teamId, content, "application/json",
+                    ArtifactRetentionClass.AgentRunEventData, "agent_run_event", holderId), CancellationToken.None);
+            }
+            finally
+            {
+                coordinator.DeclaredCommitted.TrySetResult();
+            }
+        }
+
+        var declaredTask = DeclareAsync();
+        var plainTask = plain.Resolve<IArtifactStore>().PutAsync(teamId, content, "application/json", CancellationToken.None);
+        await Task.WhenAll(declaredTask, plainTask);
+
+        declaredTask.Result.Declared.ShouldBeTrue("the declaring lane is released to commit first after both initial dedup reads miss");
+        plainTask.Result.ShouldBe(declaredTask.Result.ArtifactId, "the forced unique-index loser returns the winner's content identity");
+        using var verify = _fixture.BeginScope();
+        var declaration = await verify.Resolve<CodeSpaceDbContext>().WorkflowArtifactRetention.AsNoTracking()
+            .SingleAsync(row => row.ArtifactId == declaredTask.Result.ArtifactId);
+        declaration.State.ShouldBe(ArtifactRetentionState.Revoked,
+            "the unique-violation recovery must run the same revoke fence as an ordinary dedup hit before the shared id escapes");
+        declaration.HolderId.ShouldBe(holderId);
+        (await verify.Resolve<IArtifactStore>().GetBytesAsync(teamId, plainTask.Result, CancellationToken.None)).ShouldNotBeNull().Bytes.ShouldBe(content);
     }
 
     [Fact]
@@ -606,6 +648,33 @@ public class ArtifactStoreFlowTests
         });
         await db.SaveChangesAsync();
         return workflowId;
+    }
+
+    private sealed class OrderedArtifactWriteRace
+    {
+        private int _arrivals;
+        public TaskCompletionSource BothInitialReadsMissed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource DeclaredCommitted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void Arrive()
+        {
+            if (Interlocked.Increment(ref _arrivals) == 2) BothInitialReadsMissed.TrySetResult();
+        }
+    }
+
+    private sealed class OrderedRaceBlobBackend(IArtifactBlobBackend inner, OrderedArtifactWriteRace race, bool declaredLane) : IArtifactBlobBackend
+    {
+        public async Task<string> WriteAsync(string sha256, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken)
+        {
+            race.Arrive();
+            await race.BothInitialReadsMissed.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
+            if (!declaredLane) await race.DeclaredCommitted.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
+            return await inner.WriteAsync(sha256, bytes, cancellationToken);
+        }
+
+        public Task<bool> ExistsAsync(string storageUrl, CancellationToken cancellationToken) => inner.ExistsAsync(storageUrl, cancellationToken);
+        public Task<byte[]> ReadAsync(string storageUrl, CancellationToken cancellationToken) => inner.ReadAsync(storageUrl, cancellationToken);
+        public Task<ArtifactBlobRange> ReadRangeAsync(string storageUrl, long offset, int length, CancellationToken cancellationToken) => inner.ReadRangeAsync(storageUrl, offset, length, cancellationToken);
     }
 }
 
