@@ -30,7 +30,7 @@ public sealed class ArtifactRetentionPolicyTests
     [Fact]
     public void Registered_classes_keep_orphan_candidates_for_a_week_then_quarantine_them_for_a_day()
     {
-        var rules = new[] { ArtifactRetentionClass.ArtifactManifestContent, ArtifactRetentionClass.SensitiveRecordPayload, ArtifactRetentionClass.ModelCallBodyCapture }
+        var rules = new[] { ArtifactRetentionClass.ArtifactManifestContent, ArtifactRetentionClass.SensitiveRecordPayload, ArtifactRetentionClass.ModelCallBodyCapture, ArtifactRetentionClass.AgentRunEventData }
             .Select(value => ArtifactRetentionPolicy.For(value.ToString()).ShouldNotBeNull()).ToArray();
 
         rules.ShouldAllBe(rule => rule.MinimumAge == TimeSpan.FromDays(7) && rule.QuarantineWindow == TimeSpan.FromHours(24));
@@ -106,13 +106,21 @@ public sealed class ArtifactRetentionPolicyTests
             .Select(path => Path.GetRelativePath(sourceRoot, path).Replace(Path.DirectorySeparatorChar, '/'))
             .OrderBy(path => path, StringComparer.Ordinal).ToArray();
 
-        callers.ShouldBe(["Services/Agents/Publish/ArtifactManifestStore.cs", "Services/Workflows/ModelCalls/WorkflowRunModelCallBodyArtifactWriter.cs", "Services/Workflows/Runtime/WorkflowSensitivePayloadStore.cs"],
+        callers.ShouldBe(["Services/Agents/Publish/ArtifactManifestStore.cs", "Services/Workflows/Artifacts/ArtifactOffloader.cs", "Services/Workflows/ModelCalls/WorkflowRunModelCallBodyArtifactWriter.cs", "Services/Workflows/Runtime/WorkflowSensitivePayloadStore.cs"],
             "every retention-candidate id must be freshly obtained through PutDeclaredAsync immediately before its one oracle-visible holder write");
         typeof(IArtifactManifestStore).GetMethod(nameof(IArtifactManifestStore.CaptureDeclaredAsync))!.ReturnType.ShouldBe(typeof(Task<int>),
             "manifest capture must not return the candidate artifact id for a later writer to reuse without passing the store's availability/dedup fence again");
         File.ReadAllText(Path.Combine(sourceRoot, callers[0])).ShouldContain("ContentArtifactId = artifactId");
-        File.ReadAllText(Path.Combine(sourceRoot, callers[1])).ShouldContain("request.CaptureId");
-        File.ReadAllText(Path.Combine(sourceRoot, callers[2])).ShouldContain("CiphertextArtifactId = artifactId");
+        File.ReadAllText(Path.Combine(sourceRoot, callers[1])).ShouldContain("request.HolderId");
+        File.ReadAllText(Path.Combine(sourceRoot, callers[2])).ShouldContain("request.CaptureId");
+        File.ReadAllText(Path.Combine(sourceRoot, callers[3])).ShouldContain("CiphertextArtifactId = artifactId");
+        typeof(IArtifactRetentionOffloader).IsAssignableFrom(typeof(ArtifactOffloader)).ShouldBeTrue(
+            "the service registered as IArtifactOffloader must carry the holder-aware sibling without widening the ordinary interface");
+        var agentRunService = File.ReadAllText(Path.Combine(sourceRoot, "Services/Agents/AgentRunService.cs"));
+        agentRunService.ShouldContain("_offloader is IArtifactRetentionOffloader",
+            customMessage: "event retention must feature-detect the production offloader's sibling face without expanding AgentRunService's constructor");
+        agentRunService.ShouldContain("_offloader.OffloadIfLargeAsync",
+            customMessage: "a custom implementation of the original interface remains valid and falls back to permanent retention");
     }
 
     [Fact]

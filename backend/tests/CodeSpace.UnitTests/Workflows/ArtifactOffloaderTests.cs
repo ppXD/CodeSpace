@@ -2,6 +2,7 @@ using System.Text;
 using CodeSpace.Core.Failures;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
+using CodeSpace.Messages.Artifacts;
 using CodeSpace.Messages.Failures;
 using Shouldly;
 
@@ -60,6 +61,26 @@ public sealed class ArtifactOffloaderTests
         store.Puts[0].TeamId.ShouldBe(teamId);
         store.Puts[0].ContentType.ShouldBe("text/x-diff");
         Encoding.UTF8.GetString(store.Puts[0].Bytes).ShouldBe(big, "the exact bytes are stored");
+    }
+
+    [Fact]
+    public async Task Holder_aware_offload_without_a_scope_factory_preserves_the_plain_store_contract()
+    {
+        var store = new FakeStore();
+        var offloader = (IArtifactRetentionOffloader)new ArtifactOffloader(store);
+        var teamId = Guid.NewGuid();
+        var holderId = Guid.NewGuid();
+        var big = Big();
+
+        var result = await offloader.OffloadDeclaredIfLargeAsync(new ArtifactRetentionOffloadRequest(teamId, big, "application/json",
+            ArtifactRetentionClass.AgentRunEventData, "agent_run_event", holderId), CancellationToken.None);
+
+        result.Inline.ShouldBeEmpty();
+        result.ArtifactId.ShouldNotBeNull();
+        store.Puts.ShouldHaveSingleItem();
+        store.Puts[0].TeamId.ShouldBe(teamId);
+        Encoding.UTF8.GetString(store.Puts[0].Bytes).ShouldBe(big,
+            "the pre-retention construction path must keep working; absence of the optional declaring scope means permanent retention, never a failed write");
     }
 
     [Fact]

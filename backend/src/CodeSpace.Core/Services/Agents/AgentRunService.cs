@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Artifacts;
 using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
@@ -141,6 +142,8 @@ public interface IAgentRunService
 
 public sealed class AgentRunService : IAgentRunService, IScopedDependency
 {
+    public const string EventDataHolderKind = "agent_run_event";
+
     private readonly CodeSpaceDbContext _db;
     private readonly IAdmissionController _admissionController;
     private readonly ISandboxRunnerRegistry _runners;
@@ -293,13 +296,14 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
 
     public async Task<AgentRunEvent> AppendEventAsync(Guid runId, AgentEvent @event, CancellationToken cancellationToken)
     {
+        var eventId = Guid.NewGuid();
         var data = new[] { @event.Data?.GetRawText() };
         var dataArtifactIds = new Guid?[1];
-        await OffloadLargeDataPayloadsAsync(runId, data, dataArtifactIds, cancellationToken).ConfigureAwait(false);
+        await OffloadLargeDataPayloadsAsync(runId, [eventId], data, dataArtifactIds, cancellationToken).ConfigureAwait(false);
 
         var record = new AgentRunEvent
         {
-            Id = Guid.NewGuid(),
+            Id = eventId,
             AgentRunId = runId,
             Kind = @event.Kind,
             Text = @event.Text,
@@ -326,10 +330,11 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         // thus serial-stamps) the rows in array order. This holds because Postgres never parallelizes the writing
         // side of a single INSERT … SELECT — the ModifyTable node consumes the sorted stream row-by-row and calls
         // nextval() in that order; the ordering tests (single batch, cross-batch monotonicity, 300-row) guard it.
-        // The parameter count is FIXED at five regardless of batch size (one array per column, fully bound — never
+        // The parameter count is FIXED at six regardless of batch size (one array per column, fully bound — never
         // string-concatenated), so a 256-event flush is one bind, not hundreds of placeholders. `id` + `occurred_at`
-        // use their column defaults (gen_random_uuid() / NOW()); append-only INSERT — the immutability trigger
-        // (UPDATE/DELETE-only) is unaffected.
+        // are respectively pre-minted before offload and DB-stamped with NOW(); append-only INSERT — the
+        // immutability trigger (UPDATE/DELETE-only) is unaffected.
+        var ids = new Guid[events.Count];
         var kinds = new string[events.Count];
         var texts = new string[events.Count];
         var data = new string?[events.Count];
@@ -337,20 +342,21 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
 
         for (var i = 0; i < events.Count; i++)
         {
+            ids[i] = Guid.NewGuid();
             kinds[i] = events[i].Kind.ToString();   // matches the entity's HasConversion<string>() (enum member name)
             texts[i] = events[i].Text;
             data[i] = events[i].Data?.GetRawText();
         }
 
-        await OffloadLargeDataPayloadsAsync(runId, data, dataArtifactIds, cancellationToken).ConfigureAwait(false);
+        await OffloadLargeDataPayloadsAsync(runId, ids, data, dataArtifactIds, cancellationToken).ConfigureAwait(false);
 
         const string sql =
-            "INSERT INTO agent_run_event (agent_run_id, kind, text, data_json, data_artifact_id) " +
-            "SELECT {0}, e.kind, e.text, CAST(e.data AS jsonb), e.data_artifact_id " +
-            "FROM unnest({1}::text[], {2}::text[], {3}::text[], {4}::uuid[]) WITH ORDINALITY AS e(kind, text, data, data_artifact_id, ord) " +
+            "INSERT INTO agent_run_event (id, agent_run_id, kind, text, data_json, data_artifact_id) " +
+            "SELECT e.id, {0}, e.kind, e.text, CAST(e.data AS jsonb), e.data_artifact_id " +
+            "FROM unnest({1}::uuid[], {2}::text[], {3}::text[], {4}::text[], {5}::uuid[]) WITH ORDINALITY AS e(id, kind, text, data, data_artifact_id, ord) " +
             "ORDER BY e.ord";
 
-        await _db.Database.ExecuteSqlRawAsync(sql, new object[] { runId, kinds, texts, data, dataArtifactIds }, cancellationToken).ConfigureAwait(false);
+        await _db.Database.ExecuteSqlRawAsync(sql, new object[] { runId, ids, kinds, texts, data, dataArtifactIds }, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -360,7 +366,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
     /// ZERO I/O (no team lookup, no store call), so both append paths' common case is unchanged; the team id is
     /// resolved once, lazily, only when something actually needs offloading.
     /// </summary>
-    private async Task OffloadLargeDataPayloadsAsync(Guid runId, string?[] data, Guid?[] dataArtifactIds, CancellationToken cancellationToken)
+    private async Task OffloadLargeDataPayloadsAsync(Guid runId, Guid[] holderIds, string?[] data, Guid?[] dataArtifactIds, CancellationToken cancellationToken)
     {
         Guid? teamId = null;
 
@@ -373,7 +379,10 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
                 .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false)
                 ?? throw new KeyNotFoundException($"AgentRun {runId} not found — cannot offload its event payload.");
 
-            var (_, artifactId) = await _offloader.OffloadIfLargeAsync(teamId.Value, payload, "application/json", cancellationToken).ConfigureAwait(false);
+            var request = new ArtifactRetentionOffloadRequest(teamId.Value, payload, "application/json", ArtifactRetentionClass.AgentRunEventData, EventDataHolderKind, holderIds[i]);
+            var (_, artifactId) = _offloader is IArtifactRetentionOffloader retentionOffloader
+                ? await retentionOffloader.OffloadDeclaredIfLargeAsync(request, cancellationToken).ConfigureAwait(false)
+                : await _offloader.OffloadIfLargeAsync(teamId.Value, payload, "application/json", cancellationToken).ConfigureAwait(false);
 
             if (artifactId is { })
             {

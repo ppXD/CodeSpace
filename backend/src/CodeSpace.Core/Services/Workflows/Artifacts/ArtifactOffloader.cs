@@ -1,6 +1,8 @@
 using System.Text;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
+using CodeSpace.Core.Services.Workflows.Artifacts.Retention;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace CodeSpace.Core.Services.Workflows.Artifacts;
 
@@ -11,11 +13,16 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts;
 /// (agent diff / stderr / transcript, event data_json, …) calls this instead of re-deriving the threshold +
 /// PutAsync + clear-inline dance.
 /// </summary>
-public sealed class ArtifactOffloader : IArtifactOffloader, IScopedDependency
+public sealed class ArtifactOffloader : IArtifactOffloader, IArtifactRetentionOffloader, IScopedDependency
 {
     private readonly IArtifactStore _store;
+    private readonly IServiceScopeFactory? _scopeFactory;
 
-    public ArtifactOffloader(IArtifactStore store) { _store = store; }
+    public ArtifactOffloader(IArtifactStore store, IServiceScopeFactory? scopeFactory = null)
+    {
+        _store = store;
+        _scopeFactory = scopeFactory;
+    }
 
     public async Task<OffloadedText> OffloadIfLargeAsync(Guid teamId, string? text, string contentType, CancellationToken cancellationToken)
     {
@@ -27,6 +34,29 @@ public sealed class ArtifactOffloader : IArtifactOffloader, IScopedDependency
         var artifactId = await _store.PutAsync(teamId, bytes, contentType, cancellationToken).ConfigureAwait(false);
 
         return new OffloadedText("", artifactId);
+    }
+
+    public async Task<OffloadedText> OffloadDeclaredIfLargeAsync(ArtifactRetentionOffloadRequest request, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (string.IsNullOrEmpty(request.Text)) return new OffloadedText("", null);
+
+        var bytes = Encoding.UTF8.GetBytes(request.Text);
+        if (bytes.Length <= ArtifactStoreConfig.InlineThresholdBytes) return new OffloadedText(request.Text, null);
+
+        if (_scopeFactory is null)
+        {
+            var permanentArtifactId = await _store.PutAsync(request.TeamId, bytes, request.ContentType, cancellationToken).ConfigureAwait(false);
+            return new OffloadedText("", permanentArtifactId);
+        }
+
+        var scopeFactory = _scopeFactory;
+        using var scope = scopeFactory.CreateScope();
+        var write = await scope.ServiceProvider.GetRequiredService<IArtifactRetentionWriter>().PutDeclaredAsync(
+            new ArtifactRetentionWriteRequest(request.TeamId, bytes, request.ContentType, request.RetentionClass, request.HolderKind, request.HolderId),
+            cancellationToken).ConfigureAwait(false);
+
+        return new OffloadedText("", write.ArtifactId);
     }
 
     public async Task<string> ResolveAsync(Guid teamId, string? inline, Guid? artifactId, CancellationToken cancellationToken)
