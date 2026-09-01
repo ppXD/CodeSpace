@@ -17,6 +17,13 @@ public enum ArtifactRetentionClass
 
     /// <summary>Encrypted recovery bytes referenced by one immutable sensitive-record sidecar row.</summary>
     SensitiveRecordPayload = 2,
+
+    /// <summary>
+    /// A materialized model-call body referenced only by the normalized model-call, attempt, and body-capture
+    /// columns enumerated by the reference oracle. The declaration names the durable capture intent that will receive
+    /// the reference after the artifact write commits.
+    /// </summary>
+    ModelCallBodyCapture = 3,
 }
 
 /// <summary>

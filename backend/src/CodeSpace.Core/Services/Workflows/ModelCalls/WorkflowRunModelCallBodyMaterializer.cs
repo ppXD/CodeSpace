@@ -156,7 +156,8 @@ public sealed class WorkflowRunModelCallBodyMaterializer : IWorkflowRunModelCall
         }
 
         var payload = Encode(value);
-        var metadata = await _artifacts.PutAsync(claim.TeamId, payload.Bytes, WorkflowRunModelCallBodyMaterializationFormats.EnvelopeContentType, cancellationToken).ConfigureAwait(false);
+        var metadata = await _artifacts.PutAsync(new WorkflowRunModelCallBodyArtifactWrite(
+            claim.TeamId, claim.Id, payload.Bytes, WorkflowRunModelCallBodyMaterializationFormats.EnvelopeContentType), cancellationToken).ConfigureAwait(false);
         return MaterializationOutcome.Available(metadata, payload.Format);
     }
 
