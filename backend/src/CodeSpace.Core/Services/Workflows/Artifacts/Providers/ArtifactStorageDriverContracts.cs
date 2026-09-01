@@ -138,6 +138,17 @@ public enum ArtifactStorageErrorCode
 
 public sealed record ArtifactStorageError(ArtifactStorageErrorCode Code, string Message, bool IsRetryable = false, string? ProviderCode = null);
 
+/// <summary>
+/// Optional thrown-failure contract for a provider operation that could not return its normal typed result. Drivers
+/// should prefer <see cref="ArtifactStorageError"/>; this marker lets plugin transports classify an exceptional path
+/// without exposing exception text. Unmarked programming exceptions remain programming faults and are rethrown.
+/// </summary>
+public interface IArtifactStorageOperationalException
+{
+    ArtifactStorageErrorCode Code { get; }
+    bool IsRetryable { get; }
+}
+
 public sealed record ArtifactStorageObjectMetadata
 {
     public required string ObjectKey { get; init; }

@@ -47,3 +47,17 @@ public sealed class LegacyPlacementAdoptionMemberConfiguration : IEntityTypeConf
         builder.HasIndex(value => new { value.ArcId, value.SourceWorkflowRowId }).IsUnique().HasDatabaseName("ux_legacy_placement_adoption_member_source");
     }
 }
+
+public sealed class LegacyPlacementAdoptionPassAuditConfiguration : IEntityTypeConfiguration<LegacyPlacementAdoptionPassAudit>
+{
+    public void Configure(EntityTypeBuilder<LegacyPlacementAdoptionPassAudit> builder)
+    {
+        builder.ToTable("legacy_placement_adoption_pass_audit");
+        builder.HasKey(value => new { value.ArcId, value.ClaimToken });
+        builder.Property(value => value.Phase).HasConversion<string>().HasMaxLength(16);
+        builder.Property(value => value.Outcome).HasConversion<string>().HasMaxLength(16);
+        builder.Property(value => value.YieldReason).HasConversion<string>().HasMaxLength(24);
+        builder.Property(value => value.FailureCode).HasConversion<string>().HasMaxLength(32);
+        builder.HasOne(value => value.Arc).WithMany(value => value.PassAudits).HasForeignKey(value => value.ArcId).OnDelete(DeleteBehavior.Restrict);
+    }
+}

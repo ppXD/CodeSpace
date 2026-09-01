@@ -31,7 +31,7 @@ namespace CodeSpace.IntegrationTests.Workflows.Artifacts;
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
-public sealed class LegacyPlacementAdoptionTests : IDisposable
+public sealed partial class LegacyPlacementAdoptionTests : IDisposable
 {
     private readonly PostgresFixture _fixture;
     private readonly List<string> _roots = [];
@@ -206,16 +206,21 @@ public sealed class LegacyPlacementAdoptionTests : IDisposable
 
         var results = await Task.WhenAll(AdoptAsync(world, evidence.NextCursor), AdoptAsync(world, evidence.NextCursor));
 
-        results.Sum(value => value.Available).ShouldBe(1);
-        results.Count(value => value.Refusal is LegacyPlacementAdoptionRefusalValue.ArcBusy
-            or LegacyPlacementAdoptionRefusalValue.CursorSuperseded).ShouldBe(1,
-            "one lease-fenced winner advances the arc; a loser must not replay stale provider observations");
+        var winner = results.FirstOrDefault(value => value.Available == 1)
+            .ShouldNotBeNull("at least one caller must receive the committed terminal summary");
+        foreach (var result in results)
+        {
+            if (result == winner) continue;
+            result.Available.ShouldBe(0);
+            result.Refusal.ShouldBeOneOf(LegacyPlacementAdoptionRefusalValue.ArcBusy,
+                LegacyPlacementAdoptionRefusalValue.CursorSuperseded);
+        }
         var afterRace = await CountsAsync(world);
         afterRace.Locations.ShouldBe(1);
         afterRace.Events.ShouldBe(1);
 
         var replay = await AdoptAsync(world, evidence.NextCursor);
-        replay.ShouldBe(results.Single(value => value.Available == 1),
+        replay.ShouldBe(winner,
             "the terminal tombstone must replay the lost final response instead of opening a new population");
         (await CountsAsync(world)).Events.ShouldBe(1, "terminal replay appends no duplicate event");
     }
@@ -495,7 +500,7 @@ public sealed class LegacyPlacementAdoptionTests : IDisposable
     }
 
     [Fact]
-    public async Task A_cancelled_provider_read_releases_its_claim_without_waiting_for_the_one_hour_crash_lease()
+    public async Task A_cancelled_provider_read_releases_its_claim_without_waiting_for_the_bounded_crash_lease()
     {
         var world = await SeedAsync(Candidate("cancelled HTTP pass resumes"));
         var evidence = await AdoptAsync(world);
@@ -1055,7 +1060,7 @@ public sealed class LegacyPlacementAdoptionTests : IDisposable
     private ILifetimeScope CapturingScope(CapturedLegacyPage captured) => _fixture.BeginScope(builder => builder
         .Register<ILegacyPlacementAdopter>(context => new LegacyPlacementAdopter(
             new DbContextOptionsBuilder<CodeSpaceDbContext>(context.Resolve<DbContextOptions<CodeSpaceDbContext>>()).AddInterceptors(captured).Options,
-            context.Resolve<IStorageProviderModuleCatalog>(), context.Resolve<IStorageRuntimeDriverBroker>(),
+            new LegacyPlacementAdoptionRuntime(context.Resolve<IStorageProviderModuleCatalog>(), context.Resolve<IStorageRuntimeDriverBroker>(), context.Resolve<TimeProvider>()),
             context.Resolve<IDataProtectionProvider>(), context.Resolve<ILogger<LegacyPlacementAdopter>>()))
         .InstancePerLifetimeScope());
 
@@ -1069,7 +1074,7 @@ public sealed class LegacyPlacementAdoptionTests : IDisposable
             context.Resolve<StorageRuntimeDriverBroker>(), lease => new BlockingDisposeDriver(lease, release))).InstancePerLifetimeScope();
         builder.Register<ILegacyPlacementAdopter>(context => new LegacyPlacementAdopter(
             new DbContextOptionsBuilder<CodeSpaceDbContext>(context.Resolve<DbContextOptions<CodeSpaceDbContext>>()).AddInterceptors(lockAttempt).Options,
-            context.Resolve<IStorageProviderModuleCatalog>(), context.Resolve<IStorageRuntimeDriverBroker>(),
+            new LegacyPlacementAdoptionRuntime(context.Resolve<IStorageProviderModuleCatalog>(), context.Resolve<IStorageRuntimeDriverBroker>(), context.Resolve<TimeProvider>()),
             context.Resolve<IDataProtectionProvider>(), context.Resolve<ILogger<LegacyPlacementAdopter>>())).InstancePerLifetimeScope();
     });
 

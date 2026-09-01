@@ -17,6 +17,19 @@ public static class LegacyPlacementAdoptionLimits
 {
     public const int DefaultRowsPerPass = 50;
     public const int MaxRowsPerPass = 200;
+    public const long DefaultBytesPerPass = 64L * 1024 * 1024;
+    public const long MaxBytesPerPass = 1024L * 1024 * 1024;
+    public static readonly TimeSpan DefaultTimePerPass = TimeSpan.FromSeconds(30);
+    public static readonly TimeSpan MaxTimePerPass = TimeSpan.FromMinutes(5);
+}
+
+public enum LegacyPlacementAdoptionYieldReasonValue
+{
+    None = 0,
+    RowLimit = 1,
+    ByteBudget = 2,
+    TimeBudget = 3,
+    ProviderRetryable = 4,
 }
 
 public enum LegacyPlacementAdoptionPhaseValue
@@ -41,6 +54,7 @@ public enum LegacyPlacementAdoptionRefusalValue
     ArcAlreadyActive = 10,
     CursorSuperseded = 11,
     ArcBusy = 12,
+    ProviderRejected = 13,
 }
 
 /// <summary>
@@ -69,6 +83,44 @@ public sealed record LegacyPlacementAdoptionSummary
     public required bool AdoptionAdmissible { get; init; }
     public string? NextCursor { get; init; }
     public required LegacyPlacementAdoptionRefusalValue Refusal { get; init; }
+
+    /// <summary>Provider payload bytes consumed by this pass. HEAD/probe metadata is not payload.</summary>
+    public long ReadBytes { get; init; }
+
+    /// <summary>Why this bounded pass yielded while the arc remains resumable.</summary>
+    public LegacyPlacementAdoptionYieldReasonValue YieldReason { get; init; }
+
+    /// <summary>
+    /// True when the first member alone exceeded the byte admission budget. One such member is still processed so an
+    /// arbitrarily large artifact cannot permanently pin the cursor; no second member may share that pass.
+    /// </summary>
+    public bool OversizedItem { get; init; }
+
+    /// <summary>
+    /// Durable whole-arc totals. Null for pre-audit tombstones and for arcs conservatively downgraded during a
+    /// mixed-version deployment; a downgraded ledger may retain a non-authoritative strict prefix internally.
+    /// </summary>
+    public LegacyPlacementAdoptionProgress? Progress { get; init; }
+}
+
+/// <summary>Monotonic totals over unique manifest progress plus explicitly named retry/budget attempts.</summary>
+public sealed record LegacyPlacementAdoptionProgress
+{
+    public required long MemberCount { get; init; }
+    public required long EvidenceExamined { get; init; }
+    public required long EvidenceResolved { get; init; }
+    public required long EvidenceConfirmed { get; init; }
+    public required long MintExamined { get; init; }
+    public required long Available { get; init; }
+    public required long Missing { get; init; }
+    public required long Corrupt { get; init; }
+    public required long AlreadyRecorded { get; init; }
+    public required long Conflicts { get; init; }
+    public required long Retryable { get; init; }
+    public required long ReadBytes { get; init; }
+    public required long CompletedPasses { get; init; }
+    public required long BudgetYields { get; init; }
+    public required long OversizedPasses { get; init; }
 }
 
 /// <summary>Why a survey could establish nothing, or <c>None</c> when it ran.</summary>
