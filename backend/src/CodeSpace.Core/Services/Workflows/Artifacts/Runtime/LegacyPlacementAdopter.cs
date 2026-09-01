@@ -569,7 +569,8 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
         {
             counts += group.Counts;
             if (group.Confirmed && !group.Conflicted) confirmed += group.Count;
-            if (!group.Conflicted && !group.Retryable && group.Observation != null) observations.Add(group.Observation);
+            if (!group.Conflicted && !group.Retryable && group.Observation != null)
+                observations.Add(group.Observation with { Candidates = group.Candidates });
         }
         var page = new LegacyPage(processed, processed.Count < request.Page.Rows.Count || request.Page.HasMore);
         request.Budget.Finish(page.HasMore);
@@ -663,7 +664,8 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
             }
         }
 
-        var retryInput = request.Summary with { Counts = AdoptionCounts.Retry(request.Observations.Count), YieldReason = LegacyPlacementAdoptionYieldReasonValue.ProviderRetryable };
+        var affectedSources = request.Observations.Sum(observation => observation.Candidates.Count);
+        var retryInput = request.Summary with { Counts = AdoptionCounts.Retry(affectedSources), YieldReason = LegacyPlacementAdoptionYieldReasonValue.ProviderRetryable };
         var released = await ReleaseClaimAsync(request.Claim, new PassSettlement
         {
             Phase = LegacyPlacementAdoptionArcPhase.Minting, Outcome = LegacyPlacementAdoptionPassOutcome.Retryable,
@@ -672,7 +674,7 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
             Summary = retryInput, EndPosition = request.Claim.Cursor.Position,
         }, cancellationToken).ConfigureAwait(false);
         if (released.Cursor != null)
-            return new CommitResult(AdoptionCounts.Retry(request.Observations.Count), released.Cursor,
+            return new CommitResult(AdoptionCounts.Retry(affectedSources), released.Cursor,
                 LegacyPlacementAdoptionRefusalValue.None, null, released.Progress);
 
         await using var db = CreateDb();
@@ -680,7 +682,7 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
             .SingleOrDefaultAsync(value => value.Id == request.Claim.Cursor.ArcId, cancellationToken).ConfigureAwait(false);
         return arc != null && IsTerminal(arc.State)
             ? new CommitResult(default, null, LegacyPlacementAdoptionRefusalValue.None, StoredSummary(arc))
-            : new CommitResult(AdoptionCounts.Retry(request.Observations.Count), request.Claim.Cursor,
+            : new CommitResult(AdoptionCounts.Retry(affectedSources), request.Claim.Cursor,
                 LegacyPlacementAdoptionRefusalValue.CursorSuperseded, null);
     }
 
@@ -771,8 +773,18 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
             return result;
         }
 
-        var observations = request.Observations.Where(value => SourceIsCurrent(value.Candidate.Row, sourceRows)).ToList();
-        counts += AdoptionCounts.Conflict(request.Observations.Count - observations.Count);
+        var observations = new List<LegacyObservation>(request.Observations.Count);
+        foreach (var observation in request.Observations)
+        {
+            var representative = observation.Candidates.FirstOrDefault(value => SourceIsCurrent(value.Row, sourceRows));
+            if (representative == null)
+            {
+                counts += AdoptionCounts.Conflict(observation.Candidates.Count);
+                continue;
+            }
+            observations.Add(observation with { Candidate = representative });
+            counts += AdoptionCounts.Recorded(observation.Candidates.Count - 1);
+        }
 
         var keys = observations.Select(value => value.Candidate.ObjectKey).Distinct(StringComparer.Ordinal).ToList();
         var existingLocations = keys.Count == 0
@@ -945,23 +957,56 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
         await TakeTeamArcLockAsync(db, request.TeamId, cancellationToken).ConfigureAwait(false);
         var terminalCutoff = await DatabaseClockAsync(db, cancellationToken).ConfigureAwait(false) - TerminalRetention;
         await db.Database.ExecuteSqlInterpolatedAsync($$"""
-            WITH claimed AS (
-                SELECT audit.ctid
-                FROM legacy_placement_adoption_pass_audit audit
-                JOIN legacy_placement_adoption_arc arc ON arc.id = audit.arc_id
-                WHERE arc.state IN ('Completed', 'Expired', 'Stale') AND arc.completed_at < {{terminalCutoff}}
-                ORDER BY audit.completed_at, audit.arc_id, audit.claim_token
-                FOR UPDATE OF audit SKIP LOCKED
-                LIMIT {{TerminalCleanupBatch}}
+            WITH completed AS (
+                SELECT arc.id, arc.completed_at FROM legacy_placement_adoption_arc arc
+                WHERE arc.state = 'Completed' AND arc.completed_at < {{terminalCutoff}}
+                ORDER BY arc.completed_at, arc.id FOR UPDATE OF arc SKIP LOCKED LIMIT 1
+            ), expired AS (
+                SELECT arc.id, arc.completed_at FROM legacy_placement_adoption_arc arc
+                WHERE arc.state = 'Expired' AND arc.completed_at < {{terminalCutoff}}
+                ORDER BY arc.completed_at, arc.id FOR UPDATE OF arc SKIP LOCKED LIMIT 1
+            ), stale AS (
+                SELECT arc.id, arc.completed_at FROM legacy_placement_adoption_arc arc
+                WHERE arc.state = 'Stale' AND arc.completed_at < {{terminalCutoff}}
+                ORDER BY arc.completed_at, arc.id FOR UPDATE OF arc SKIP LOCKED LIMIT 1
+            ), parents AS (
+                SELECT candidate.id, candidate.completed_at FROM (
+                    SELECT * FROM completed UNION ALL SELECT * FROM expired UNION ALL SELECT * FROM stale
+                ) candidate ORDER BY candidate.completed_at, candidate.id LIMIT 1
+            ), claimed AS (
+                SELECT audit.arc_id, audit.claim_token FROM parents
+                JOIN legacy_placement_adoption_pass_audit audit ON audit.arc_id = parents.id
+                ORDER BY audit.arc_id, audit.claim_token
+                FOR UPDATE OF audit SKIP LOCKED LIMIT {{TerminalCleanupBatch}}
             )
             DELETE FROM legacy_placement_adoption_pass_audit audit USING claimed
-            WHERE audit.ctid = claimed.ctid
+            WHERE audit.arc_id = claimed.arc_id AND audit.claim_token = claimed.claim_token
             """).ConfigureAwait(false);
-        await db.LegacyPlacementAdoptionArc.Where(value => (value.State == LegacyPlacementAdoptionArcState.Completed
-                || value.State == LegacyPlacementAdoptionArcState.Expired || value.State == LegacyPlacementAdoptionArcState.Stale)
-            && value.CompletedAt < terminalCutoff && !value.PassAudits.Any())
-            .OrderBy(value => value.CompletedAt).ThenBy(value => value.Id).Take(TerminalCleanupBatch)
-            .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
+        await db.Database.ExecuteSqlInterpolatedAsync($$"""
+            WITH completed AS (
+                SELECT arc.ctid, arc.completed_at, arc.id FROM legacy_placement_adoption_arc arc
+                WHERE arc.state = 'Completed' AND arc.completed_at < {{terminalCutoff}}
+                ORDER BY arc.completed_at, arc.id FOR UPDATE OF arc SKIP LOCKED LIMIT {{TerminalCleanupBatch}}
+            ), expired AS (
+                SELECT arc.ctid, arc.completed_at, arc.id FROM legacy_placement_adoption_arc arc
+                WHERE arc.state = 'Expired' AND arc.completed_at < {{terminalCutoff}}
+                ORDER BY arc.completed_at, arc.id FOR UPDATE OF arc SKIP LOCKED LIMIT {{TerminalCleanupBatch}}
+            ), stale AS (
+                SELECT arc.ctid, arc.completed_at, arc.id FROM legacy_placement_adoption_arc arc
+                WHERE arc.state = 'Stale' AND arc.completed_at < {{terminalCutoff}}
+                ORDER BY arc.completed_at, arc.id FOR UPDATE OF arc SKIP LOCKED LIMIT {{TerminalCleanupBatch}}
+            ), claimed AS (
+                SELECT candidate.ctid
+                FROM (
+                    SELECT * FROM completed UNION ALL SELECT * FROM expired UNION ALL SELECT * FROM stale
+                ) candidate
+                WHERE NOT EXISTS (SELECT 1 FROM legacy_placement_adoption_pass_audit audit WHERE audit.arc_id = candidate.id)
+                ORDER BY candidate.completed_at, candidate.id
+                LIMIT {{TerminalCleanupBatch}}
+            )
+            DELETE FROM legacy_placement_adoption_arc arc USING claimed
+            WHERE arc.ctid = claimed.ctid
+            """).ConfigureAwait(false);
 
         var live = await db.LegacyPlacementAdoptionArc.FromSqlInterpolated($$"""
             SELECT arc.*, arc.xmin FROM legacy_placement_adoption_arc arc
@@ -1414,7 +1459,7 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
         arc.ClaimExpiresAt = null;
         arc.CompletedAt = now;
         arc.LastModifiedAt = now;
-        arc.FinalSummaryJson = JsonSerializer.Serialize(final);
+        arc.FinalSummaryJson ??= JsonSerializer.Serialize(final);
         arc.Revision++;
     }
 
@@ -1482,9 +1527,9 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
     };
 
     private static LegacyPlacementAdoptionSummary StoredSummary(LegacyPlacementAdoptionArc arc) =>
-        JsonSerializer.Deserialize<LegacyPlacementAdoptionSummary>(arc.FinalSummaryJson
+        (JsonSerializer.Deserialize<LegacyPlacementAdoptionSummary>(arc.FinalSummaryJson
             ?? throw new InvalidOperationException($"Legacy adoption arc {arc.Id} has no terminal summary."))
-        ?? throw new InvalidOperationException($"Legacy adoption arc {arc.Id} has an unreadable terminal summary.");
+        ?? throw new InvalidOperationException($"Legacy adoption arc {arc.Id} has an unreadable terminal summary.")) with { Progress = Progress(arc) };
 
     private LegacyPlacementAdoptionSummary Current(AdoptionTarget target, LegacyPlacementAdoptionCursor cursor, LegacyPlacementAdoptionRefusalValue refusal) =>
         Summary(new SummaryInput
@@ -1942,7 +1987,13 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
         LegacyPlacementAdoptionYieldReason YieldReason, bool OversizedItem);
     private sealed class MintLogicalGroup
     {
-        public MintLogicalGroup(ResolvedRow first) => First = first;
+        private readonly List<ResolvedRow> _candidates;
+
+        public MintLogicalGroup(ResolvedRow first)
+        {
+            First = first;
+            _candidates = [first];
+        }
 
         public ResolvedRow First { get; }
         public int Count { get; private set; } = 1;
@@ -1951,6 +2002,7 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
         public bool Retryable { get; set; }
         public bool Confirmed { get; set; }
         public LegacyObservation? Observation { get; set; }
+        public IReadOnlyList<ResolvedRow> Candidates => _candidates;
 
         public AdoptionCounts Counts
         {
@@ -1960,13 +2012,14 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
                 if (Retryable) return AdoptionCounts.Retry(Count);
                 if (Recorded) return AdoptionCounts.Recorded(Count);
                 if (Observation == null) return AdoptionCounts.Conflict(Count);
-                return AdoptionCounts.Recorded(Count - 1);
+                return default;
             }
         }
 
         public void Add(ResolvedRow candidate)
         {
             Count++;
+            _candidates.Add(candidate);
             if (!SameIdentity(First, candidate)) Conflicted = true;
         }
     }
@@ -2036,6 +2089,7 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
     private sealed record LegacyObservation
     {
         public required ResolvedRow Candidate { get; init; }
+        public IReadOnlyList<ResolvedRow> Candidates { get; init; } = [];
         public required ArtifactLocationState State { get; init; }
         public byte[]? ObservedDigest { get; init; }
         public long? ObservedSize { get; init; }

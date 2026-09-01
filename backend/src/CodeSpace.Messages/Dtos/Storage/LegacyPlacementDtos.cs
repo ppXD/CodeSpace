@@ -96,7 +96,10 @@ public sealed record LegacyPlacementAdoptionSummary
     /// </summary>
     public bool OversizedItem { get; init; }
 
-    /// <summary>Durable whole-arc totals. Null only for a tombstone written before audit version one.</summary>
+    /// <summary>
+    /// Durable whole-arc totals. Null for pre-audit tombstones and for arcs conservatively downgraded during a
+    /// mixed-version deployment; a downgraded ledger may retain a non-authoritative strict prefix internally.
+    /// </summary>
     public LegacyPlacementAdoptionProgress? Progress { get; init; }
 }
 

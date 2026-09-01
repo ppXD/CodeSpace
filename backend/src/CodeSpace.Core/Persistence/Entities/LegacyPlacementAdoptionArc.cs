@@ -75,6 +75,11 @@ public sealed class LegacyPlacementAdoptionArc
 
     /// <summary>Object-shaped terminal replay payload, recorded before Cleaning starts and immutable thereafter.</summary>
     public string? FinalSummaryJson { get; set; }
+    /// <summary>
+    /// Version one makes the cumulative counters and pass ledger authoritative. Version zero is wholly incomplete:
+    /// it may retain a strict prefix of counters/audit rows after a rolling-deploy downgrade, and consumers must not
+    /// infer completeness from their presence or sums.
+    /// </summary>
     public short AuditVersion { get; set; }
     public long EvidenceExamined { get; set; }
     public long EvidenceResolved { get; set; }

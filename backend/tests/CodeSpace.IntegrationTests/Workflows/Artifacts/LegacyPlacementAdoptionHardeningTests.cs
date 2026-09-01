@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using System.Data.Common;
 using Autofac;
+using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows.Artifacts;
@@ -9,13 +11,186 @@ using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using CodeSpace.Messages.Dtos.Storage;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Logging;
+using Npgsql;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows.Artifacts;
 
 public sealed partial class LegacyPlacementAdoptionTests
 {
+    [Fact]
+    public async Task Rolling_checks_are_not_valid_and_cleanup_queries_are_bounded_index_ranges()
+    {
+        await using var connection = new NpgsqlConnection(_fixture.ConnectionString);
+        await connection.OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        var constraints = new Dictionary<string, (bool Validated, string Definition)>(StringComparer.Ordinal);
+        await using (var command = new NpgsqlCommand("""
+            SELECT conname, convalidated, pg_get_constraintdef(oid)
+            FROM pg_constraint
+            WHERE conrelid = 'legacy_placement_adoption_arc'::regclass
+              AND conname IN ('ck_legacy_adoption_arc_audit_version','ck_legacy_adoption_arc_claim_started','ck_legacy_adoption_arc_audit_bounds')
+            """, connection, transaction))
+        await using (var reader = await command.ExecuteReaderAsync())
+            while (await reader.ReadAsync()) constraints.Add(reader.GetString(0), (reader.GetBoolean(1), reader.GetString(2)));
+
+        constraints.Count.ShouldBe(3);
+        constraints.Values.ShouldAllBe(value => !value.Validated);
+        constraints["ck_legacy_adoption_arc_claim_started"].Definition.ShouldContain("audit_version = 0");
+        constraints["ck_legacy_adoption_arc_audit_bounds"].Definition.ShouldContain("audit_version = 0");
+
+        await transaction.RollbackAsync();
+    }
+
+    [Fact]
+    public async Task Duplicate_group_chooses_a_still_live_representative_when_the_hashed_first_source_vanishes()
+    {
+        var isolated = new PostgresFixture();
+        await isolated.InitializeAsync();
+        try
+        {
+            using var scenario = new LegacyPlacementAdoptionTests(isolated);
+            await scenario.DuplicateRepresentativeRaceCoreAsync();
+        }
+        finally { await isolated.DisposeAsync(); }
+    }
+
+    private async Task DuplicateRepresentativeRaceCoreAsync()
+    {
+        var duplicate = Candidate("duplicate group bytes");
+        var world = await SeedAsync(Candidate("w"), duplicate);
+        var first = world.Artifacts.Single(value => value.ExpectedBytes.SequenceEqual(System.Text.Encoding.UTF8.GetBytes(duplicate.Content)));
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            await db.Database.ExecuteSqlRawAsync("ALTER TABLE workflow_artifact DROP CONSTRAINT workflow_artifact_team_id_sha256_key");
+        }
+        await AddArtifactAsync(world, duplicate, DateTimeOffset.UtcNow);
+        var evidence = await AdoptAsync(world, batchSize: 3);
+        var gate = new AsyncGate();
+        LegacyPlacementAdoptionSummary result;
+        using (var scope = DecoratingScope(lease => new BlockingDisposeDriver(lease, gate)))
+        {
+            var adoption = scope.Resolve<ILegacyPlacementAdopter>().AdoptAsync(
+                new LegacyPlacementAdoptionRequest(world.TeamId, world.ActorId, world.ProfileId, 3, evidence.NextCursor), CancellationToken.None);
+            try
+            {
+                await gate.Started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                await DeleteSourceAsync(first.Id);
+            }
+            finally { gate.Continue.TrySetResult(); }
+            result = await adoption;
+        }
+
+        result.Conflicts.ShouldBe(0);
+        result.Available.ShouldBe(2, "the witness key and duplicate key each retain one physical observation");
+        result.AlreadyRecorded.ShouldBe(1, "the still-live duplicate source authorizes the logical duplicate outcome");
+        (await CountsAsync(world)).Locations.ShouldBe(2);
+    }
+
+    [Fact]
+    public async Task Commit_exhaustion_counts_every_source_in_one_duplicate_logical_group()
+    {
+        var isolated = new PostgresFixture();
+        await isolated.InitializeAsync();
+        try
+        {
+            using var scenario = new LegacyPlacementAdoptionTests(isolated);
+            await scenario.DuplicateCommitExhaustionCoreAsync();
+        }
+        finally { await isolated.DisposeAsync(); }
+    }
+
+    private async Task DuplicateCommitExhaustionCoreAsync()
+    {
+        var duplicate = Candidate("three duplicate sources");
+        var world = await SeedAsync(duplicate);
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlRawAsync("ALTER TABLE workflow_artifact DROP CONSTRAINT workflow_artifact_team_id_sha256_key");
+        await AddArtifactAsync(world, duplicate, DateTimeOffset.UtcNow.AddSeconds(1));
+        await AddArtifactAsync(world, duplicate, DateTimeOffset.UtcNow.AddSeconds(2));
+        var evidence = await AdoptAsync(world, batchSize: 4);
+        var failures = new CommitFailureInterceptor();
+        using var mint = _fixture.BeginScope(builder =>
+        {
+            var options = new DbContextOptionsBuilder<CodeSpaceDbContext>().UseNpgsql(_fixture.ConnectionString)
+                .UseSnakeCaseNamingConvention().AddInterceptors(failures).Options;
+            builder.RegisterInstance(options).As<DbContextOptions<CodeSpaceDbContext>>();
+            builder.Register<IStorageRuntimeDriverBroker>(context => new DecoratingBroker(
+                context.Resolve<StorageRuntimeDriverBroker>(), lease => new ArmAfterReadsDriver(lease, failures, 2))).InstancePerLifetimeScope();
+        });
+
+        var result = await mint.Resolve<ILegacyPlacementAdopter>().AdoptAsync(
+            new LegacyPlacementAdoptionRequest(world.TeamId, world.ActorId, world.ProfileId, 4, evidence.NextCursor), CancellationToken.None);
+
+        result.Retryable.ShouldBe(3);
+        result.NextCursor.ShouldNotBeNull();
+        using var read = _fixture.BeginScope();
+        var db = read.Resolve<CodeSpaceDbContext>();
+        var arc = await db.LegacyPlacementAdoptionArc.AsNoTracking().SingleAsync(value => value.TeamId == world.TeamId);
+        arc.MintExamined.ShouldBe(0);
+        var audit = await db.LegacyPlacementAdoptionPassAudit.AsNoTracking().SingleAsync(value => value.ArcId == arc.Id && value.Outcome == LegacyPlacementAdoptionPassOutcome.Retryable);
+        audit.RetryableDelta.ShouldBe(3);
+    }
+
+    [Fact]
+    public async Task Old_writer_claim_signatures_conservatively_downgrade_fresh_and_expired_v1_arcs()
+    {
+        var fresh = await SeedAsync(Candidate("old pod fresh claim"));
+        await AdoptAsync(fresh);
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var freshArcId = await db.LegacyPlacementAdoptionArc.Where(value => value.TeamId == fresh.TeamId).Select(value => value.Id).SingleAsync();
+        var claim = Guid.NewGuid();
+        await db.Database.ExecuteSqlInterpolatedAsync($$"""
+            UPDATE legacy_placement_adoption_arc
+            SET claim_token = {{claim}}, claim_expires_at = clock_timestamp() + INTERVAL '30 seconds', revision = revision + 1
+            WHERE id = {{freshArcId}}
+            """);
+        var heldV0 = await db.LegacyPlacementAdoptionArc.AsNoTracking().SingleAsync(value => value.Id == freshArcId);
+        heldV0.AuditVersion.ShouldBe((short)0);
+        heldV0.ClaimToken.ShouldBe(claim);
+        heldV0.ClaimStartedAt.ShouldBeNull("pre-0188 request-local v0 claims survive without a meaningless backfill");
+        await db.Database.ExecuteSqlInterpolatedAsync($$"""
+            UPDATE legacy_placement_adoption_arc
+            SET claim_token = NULL, claim_expires_at = NULL, revision = revision + 1
+            WHERE id = {{freshArcId}}
+            """);
+        var freshArc = await db.LegacyPlacementAdoptionArc.AsNoTracking().SingleAsync(value => value.Id == freshArcId);
+        freshArc.AuditVersion.ShouldBe((short)0);
+        freshArc.CompletedPasses.ShouldBe(heldV0.CompletedPasses, "downgrade preserves the honest strict-prefix counters without claiming completeness");
+
+        var expired = await SeedAsync(Candidate("old pod expired takeover"));
+        await AdoptAsync(expired);
+        var expiredArcId = await db.LegacyPlacementAdoptionArc.Where(value => value.TeamId == expired.TeamId).Select(value => value.Id).SingleAsync();
+        var expiredPrefix = await db.LegacyPlacementAdoptionArc.AsNoTracking().Where(value => value.Id == expiredArcId)
+            .Select(value => value.CompletedPasses).SingleAsync();
+        var priorClaim = Guid.NewGuid();
+        await db.Database.ExecuteSqlInterpolatedAsync($$"""
+            UPDATE legacy_placement_adoption_arc
+            SET claim_token = {{priorClaim}}, claim_started_at = clock_timestamp(), claim_expires_at = clock_timestamp() + INTERVAL '30 seconds',
+                revision = revision + 1
+            WHERE id = {{expiredArcId}}
+            """);
+        await db.Database.ExecuteSqlRawAsync("ALTER TABLE legacy_placement_adoption_arc DISABLE TRIGGER USER");
+        try { await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE legacy_placement_adoption_arc SET claim_expires_at = clock_timestamp() - INTERVAL '1 second' WHERE id = {expiredArcId}"); }
+        finally { await db.Database.ExecuteSqlRawAsync("ALTER TABLE legacy_placement_adoption_arc ENABLE TRIGGER USER"); }
+        var takeover = Guid.NewGuid();
+        await db.Database.ExecuteSqlInterpolatedAsync($$"""
+            UPDATE legacy_placement_adoption_arc
+            SET claim_token = {{takeover}}, claim_expires_at = clock_timestamp() + INTERVAL '30 seconds', revision = revision + 1
+            WHERE id = {{expiredArcId}}
+            """);
+
+        var stored = await db.LegacyPlacementAdoptionArc.AsNoTracking().SingleAsync(value => value.Id == expiredArcId);
+        stored.AuditVersion.ShouldBe((short)0);
+        stored.ClaimToken.ShouldBe(takeover);
+        stored.ClaimStartedAt.ShouldNotBeNull("the old writer signature deliberately leaves the additive start untouched");
+        stored.CompletedPasses.ShouldBe(expiredPrefix, "old takeover preserves the pre-downgrade strict prefix without asserting completeness");
+    }
+
     [Fact]
     public async Task Invalid_runtime_interval_order_is_rejected_before_arc_or_provider_work()
     {
@@ -455,6 +630,126 @@ public sealed partial class LegacyPlacementAdoptionTests
     }
 
     [Fact]
+    public async Task Terminal_audit_drain_is_independent_of_a_huge_older_active_audit_prefix()
+    {
+        var active = await SeedAsync(Candidate("active audit prefix"));
+        await AdoptAsync(active);
+        using var setup = _fixture.BeginScope();
+        var db = setup.Resolve<CodeSpaceDbContext>();
+        var activeArcId = await db.LegacyPlacementAdoptionArc.Where(value => value.TeamId == active.TeamId).Select(value => value.Id).SingleAsync();
+        await db.Database.ExecuteSqlRawAsync("ALTER TABLE legacy_placement_adoption_pass_audit DISABLE TRIGGER USER");
+        try
+        {
+            await db.Database.ExecuteSqlInterpolatedAsync($$"""
+                INSERT INTO legacy_placement_adoption_pass_audit
+                SELECT audit.arc_id, gen_random_uuid(), audit.phase, audit.outcome, audit.yield_reason, audit.failure_code,
+                    audit.start_position, audit.end_position, audit.examined, audit.resolved, audit.confirmed,
+                    audit.evidence_examined_delta, audit.evidence_resolved_delta, audit.evidence_confirmed_delta,
+                    audit.mint_examined_delta, audit.available_delta, audit.missing_delta, audit.corrupt_delta,
+                    audit.already_recorded_delta, audit.conflicts_delta, audit.retryable_delta, audit.read_bytes_delta,
+                    audit.oversized_item, clock_timestamp() - INTERVAL '60 days', clock_timestamp() - INTERVAL '60 days'
+                FROM legacy_placement_adoption_pass_audit audit CROSS JOIN generate_series(1, 10000)
+                WHERE audit.arc_id = {{activeArcId}} LIMIT 10000
+                """);
+        }
+        finally { await db.Database.ExecuteSqlRawAsync("ALTER TABLE legacy_placement_adoption_pass_audit ENABLE TRIGGER USER"); }
+
+        var terminal = await SeedAsync(Candidate("newer terminal audit"));
+        var result = await AdoptAsync(terminal);
+        while (result.NextCursor != null) result = await AdoptAsync(terminal, result.NextCursor);
+        var terminalArcId = await db.LegacyPlacementAdoptionArc.Where(value => value.TeamId == terminal.TeamId).Select(value => value.Id).SingleAsync();
+        await db.Database.ExecuteSqlRawAsync("ALTER TABLE legacy_placement_adoption_arc DISABLE TRIGGER USER");
+        try { await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE legacy_placement_adoption_arc SET created_at = clock_timestamp() - INTERVAL '32 days', completed_at = clock_timestamp() - INTERVAL '31 days' WHERE id = {terminalArcId}"); }
+        finally { await db.Database.ExecuteSqlRawAsync("ALTER TABLE legacy_placement_adoption_arc ENABLE TRIGGER USER"); }
+        var terminalAudits = await db.LegacyPlacementAdoptionPassAudit.CountAsync(value => value.ArcId == terminalArcId);
+
+        var capture = new CleanupCommandCaptureInterceptor();
+        var trigger = await SeedAsync();
+        using (var cleanup = _fixture.BeginScope(builder =>
+        {
+            var options = new DbContextOptionsBuilder<CodeSpaceDbContext>().UseNpgsql(_fixture.ConnectionString)
+                .UseSnakeCaseNamingConvention().AddInterceptors(capture).Options;
+            builder.RegisterInstance(options).As<DbContextOptions<CodeSpaceDbContext>>();
+        }))
+            await cleanup.Resolve<ILegacyPlacementAdopter>().AdoptAsync(
+                new LegacyPlacementAdoptionRequest(trigger.TeamId, trigger.ActorId, trigger.ProfileId, 1, null), CancellationToken.None);
+
+        (await db.LegacyPlacementAdoptionPassAudit.CountAsync(value => value.ArcId == activeArcId)).ShouldBe(10001);
+        (await db.LegacyPlacementAdoptionPassAudit.CountAsync(value => value.ArcId == terminalArcId)).ShouldBe(Math.Max(0, terminalAudits - 32));
+        var auditCleanup = capture.Commands.Single(command => command.Contains("DELETE FROM legacy_placement_adoption_pass_audit", StringComparison.Ordinal));
+        AssertOrdered(auditCleanup, "LIMIT 1", "JOIN legacy_placement_adoption_pass_audit");
+        auditCleanup.ShouldContain("ORDER BY audit.arc_id, audit.claim_token");
+    }
+
+    private static void AssertOrdered(string command, string first, string second)
+    {
+        var firstIndex = command.IndexOf(first, StringComparison.Ordinal);
+        var secondIndex = command.IndexOf(second, StringComparison.Ordinal);
+        firstIndex.ShouldBeGreaterThanOrEqualTo(0, $"production command must contain {first}");
+        secondIndex.ShouldBeGreaterThanOrEqualTo(0, $"production command must contain {second}");
+        firstIndex.ShouldBeLessThan(secondIndex);
+    }
+
+    [Fact]
+    public async Task Cross_team_parent_cleanup_skips_locked_oldest_tombstones_and_deletes_only_the_next_bounded_batch()
+    {
+        var retained = await SeedAsync();
+        await AdoptAsync(retained);
+        Guid[] retainedIds;
+        using (var setup = _fixture.BeginScope())
+        {
+            var db = setup.Resolve<CodeSpaceDbContext>();
+            var sourceId = await db.LegacyPlacementAdoptionArc.Where(value => value.TeamId == retained.TeamId).Select(value => value.Id).SingleAsync();
+            await db.Database.ExecuteSqlRawAsync("ALTER TABLE legacy_placement_adoption_arc DISABLE TRIGGER USER");
+            try
+            {
+                await db.Database.ExecuteSqlInterpolatedAsync($$"""
+                    UPDATE legacy_placement_adoption_arc
+                    SET created_at = clock_timestamp() - INTERVAL '62 days', completed_at = clock_timestamp() - INTERVAL '61 days'
+                    WHERE id = {{sourceId}};
+                    INSERT INTO legacy_placement_adoption_arc
+                    SELECT (jsonb_populate_record(NULL::legacy_placement_adoption_arc,
+                        to_jsonb(arc) || jsonb_build_object('id', gen_random_uuid()))).*
+                    FROM legacy_placement_adoption_arc arc CROSS JOIN generate_series(1, 63)
+                    WHERE arc.id = {{sourceId}};
+                    """);
+            }
+            finally { await db.Database.ExecuteSqlRawAsync("ALTER TABLE legacy_placement_adoption_arc ENABLE TRIGGER USER"); }
+            retainedIds = await db.LegacyPlacementAdoptionArc.Where(value => value.TeamId == retained.TeamId).Select(value => value.Id).ToArrayAsync();
+        }
+        retainedIds.Length.ShouldBe(64);
+
+        using var blocker = _fixture.BeginScope();
+        var blockerDb = blocker.Resolve<CodeSpaceDbContext>();
+        await using var blockerTransaction = await blockerDb.Database.BeginTransactionAsync();
+        await blockerDb.Database.ExecuteSqlInterpolatedAsync($$"""
+            SELECT 1 FROM legacy_placement_adoption_arc arc
+            WHERE arc.id = ANY ({{retainedIds}})
+            ORDER BY arc.completed_at, arc.id
+            FOR UPDATE OF arc LIMIT 32
+            """);
+
+        var otherTeam = await SeedAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        var capture = new CleanupCommandCaptureInterceptor();
+        using (var cleanup = _fixture.BeginScope(builder =>
+        {
+            var options = new DbContextOptionsBuilder<CodeSpaceDbContext>().UseNpgsql(_fixture.ConnectionString)
+                .UseSnakeCaseNamingConvention().AddInterceptors(capture).Options;
+            builder.RegisterInstance(options).As<DbContextOptions<CodeSpaceDbContext>>();
+        }))
+            await cleanup.Resolve<ILegacyPlacementAdopter>().AdoptAsync(
+                new LegacyPlacementAdoptionRequest(otherTeam.TeamId, otherTeam.ActorId, otherTeam.ProfileId, 1, null), timeout.Token);
+
+        using var verification = _fixture.BeginScope();
+        var remaining = await verification.Resolve<CodeSpaceDbContext>().LegacyPlacementAdoptionArc.AsNoTracking()
+            .CountAsync(value => value.TeamId == retained.TeamId);
+        remaining.ShouldBe(32, "the second team must skip locked tombstones and delete exactly the next bounded batch");
+        var parentCleanup = capture.Commands.Single(command => command.Contains("DELETE FROM legacy_placement_adoption_arc", StringComparison.Ordinal));
+        AssertOrdered(parentCleanup, "LIMIT ", "WHERE NOT EXISTS");
+    }
+
+    [Fact]
     public async Task Deferred_audit_guards_reject_one_sided_totals_and_a_token_that_the_arc_never_held()
     {
         var auditOnly = await SeedAsync(Candidate("audit only guard"));
@@ -541,6 +836,53 @@ public sealed partial class LegacyPlacementAdoptionTests
     }
 
     [Fact]
+    public async Task Settlement_must_atomically_release_the_claim_it_audits()
+    {
+        var world = await SeedAsync(Candidate("one shot first"), Candidate("one shot second"));
+        await AdoptAsync(world, batchSize: 1);
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var arcId = await db.LegacyPlacementAdoptionArc.Where(value => value.TeamId == world.TeamId).Select(value => value.Id).SingleAsync();
+
+        var failure = await Should.ThrowAsync<Exception>(() => SettleWithoutReleaseAsync(db, arcId));
+
+        failure.ToString().ShouldContain("atomically");
+    }
+
+    [Fact]
+    public async Task An_already_settled_still_held_claim_cannot_reuse_its_audit()
+    {
+        var world = await SeedAsync(Candidate("one shot seeded"));
+        await AdoptAsync(world, batchSize: 1);
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var arcId = await db.LegacyPlacementAdoptionArc.Where(value => value.TeamId == world.TeamId).Select(value => value.Id).SingleAsync();
+        var claimToken = Guid.NewGuid();
+        await db.Database.ExecuteSqlRawAsync("ALTER TABLE legacy_placement_adoption_arc DISABLE TRIGGER USER");
+        await db.Database.ExecuteSqlRawAsync("ALTER TABLE legacy_placement_adoption_pass_audit DISABLE TRIGGER USER");
+        try
+        {
+            await db.Database.ExecuteSqlInterpolatedAsync($$"""
+                UPDATE legacy_placement_adoption_arc
+                SET claim_token = {{claimToken}}, claim_started_at = clock_timestamp(),
+                    claim_expires_at = clock_timestamp() + INTERVAL '30 seconds', completed_passes = completed_passes + 1,
+                    last_settled_claim_token = {{claimToken}}, revision = revision + 1
+                WHERE id = {{arcId}}
+                """);
+            await InsertMatchingZeroAuditAsync(db, arcId, claimToken);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("ALTER TABLE legacy_placement_adoption_pass_audit ENABLE TRIGGER USER");
+            await db.Database.ExecuteSqlRawAsync("ALTER TABLE legacy_placement_adoption_arc ENABLE TRIGGER USER");
+        }
+
+        var failure = await Should.ThrowAsync<Exception>(() => SettleHeldClaimAsync(db, arcId, claimToken, release: true));
+
+        failure.ToString().ShouldContain("settle exactly once");
+    }
+
+    [Fact]
     public async Task Bounded_cleaning_is_unclaimed_and_does_not_rewrite_the_terminal_audit_summary()
     {
         var world = await SeedAsync();
@@ -563,6 +905,94 @@ public sealed partial class LegacyPlacementAdoptionTests
         var arc = await db.LegacyPlacementAdoptionArc.AsNoTracking().SingleAsync(value => value.TeamId == world.TeamId);
         arc.ClaimToken.ShouldBeNull();
         (await db.LegacyPlacementAdoptionPassAudit.AsNoTracking().CountAsync(value => value.ArcId == arc.Id)).ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task Old_cleaner_finishes_a_multi_page_v1_summary_by_downgrading_without_rewriting_forensic_json()
+    {
+        var world = await SeedAsync();
+        var malformed = await AddArtifactAsync(world, Candidate("old cleaner malformed"), DateTimeOffset.UnixEpoch.AddDays(1));
+        for (var index = 0; index < LegacyPlacementAdoptionLimits.MaxRowsPerPass * 2 + 1; index++)
+            await AddArtifactAsync(world, Candidate($"old cleaner {index}"), DateTimeOffset.UnixEpoch.AddDays(index + 2));
+        LegacyPlacementAdoptionSummary cleaning;
+        using (var scope = ThrowingLayoutScope(malformed.StorageUrl))
+            cleaning = await scope.Resolve<ILegacyPlacementAdopter>().AdoptAsync(
+                new LegacyPlacementAdoptionRequest(world.TeamId, world.ActorId, world.ProfileId, 1, null), CancellationToken.None);
+
+        using var dbScope = _fixture.BeginScope();
+        var db = dbScope.Resolve<CodeSpaceDbContext>();
+        var arc = await db.LegacyPlacementAdoptionArc.AsNoTracking().SingleAsync(value => value.TeamId == world.TeamId);
+        var forensicJson = arc.FinalSummaryJson;
+        await OldCleaningPageAsync(db, arc.Id, complete: false);
+        (await db.LegacyPlacementAdoptionArc.AsNoTracking().SingleAsync(value => value.Id == arc.Id)).AuditVersion.ShouldBe((short)1);
+        await OldCleaningPageAsync(db, arc.Id, complete: true);
+
+        var stored = await db.LegacyPlacementAdoptionArc.AsNoTracking().SingleAsync(value => value.Id == arc.Id);
+        stored.AuditVersion.ShouldBe((short)0);
+        stored.FinalSummaryJson.ShouldBe(forensicJson);
+        var replay = await AdoptAsync(world, cleaning.NextCursor);
+        replay.NextCursor.ShouldBeNull();
+        replay.Progress.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task New_cleaner_preserves_an_old_v0_summary_without_adding_default_fields()
+    {
+        var world = await SeedAsync();
+        var malformed = await AddArtifactAsync(world, Candidate("new cleaner malformed"), DateTimeOffset.UnixEpoch.AddDays(1));
+        for (var index = 0; index < LegacyPlacementAdoptionLimits.MaxRowsPerPass; index++)
+            await AddArtifactAsync(world, Candidate($"new cleaner {index}"), DateTimeOffset.UnixEpoch.AddDays(index + 2));
+        LegacyPlacementAdoptionSummary cleaning;
+        using (var scope = ThrowingLayoutScope(malformed.StorageUrl))
+            cleaning = await scope.Resolve<ILegacyPlacementAdopter>().AdoptAsync(
+                new LegacyPlacementAdoptionRequest(world.TeamId, world.ActorId, world.ProfileId, 1, null), CancellationToken.None);
+
+        using var dbScope = _fixture.BeginScope();
+        var db = dbScope.Resolve<CodeSpaceDbContext>();
+        var arcId = await db.LegacyPlacementAdoptionArc.Where(value => value.TeamId == world.TeamId).Select(value => value.Id).SingleAsync();
+        await db.Database.ExecuteSqlRawAsync("ALTER TABLE legacy_placement_adoption_arc DISABLE TRIGGER USER");
+        try
+        {
+            await db.Database.ExecuteSqlInterpolatedAsync($$"""
+                UPDATE legacy_placement_adoption_arc SET audit_version = 0,
+                    final_summary_jsonb = final_summary_jsonb - ARRAY['ReadBytes','YieldReason','OversizedItem','Progress']
+                WHERE id = {{arcId}}
+                """);
+        }
+        finally { await db.Database.ExecuteSqlRawAsync("ALTER TABLE legacy_placement_adoption_arc ENABLE TRIGGER USER"); }
+        var oldJson = await db.LegacyPlacementAdoptionArc.AsNoTracking().Where(value => value.Id == arcId).Select(value => value.FinalSummaryJson).SingleAsync();
+
+        var completed = await AdoptAsync(world, cleaning.NextCursor);
+
+        completed.NextCursor.ShouldBeNull();
+        completed.Progress.ShouldBeNull();
+        (await db.LegacyPlacementAdoptionArc.AsNoTracking().Where(value => value.Id == arcId)
+            .Select(value => value.FinalSummaryJson).SingleAsync()).ShouldBe(oldJson);
+    }
+
+    private static async Task OldCleaningPageAsync(CodeSpaceDbContext db, Guid arcId, bool complete)
+    {
+        await using var transaction = await db.Database.BeginTransactionAsync();
+        await db.Database.ExecuteSqlInterpolatedAsync($$"""
+            DELETE FROM legacy_placement_adoption_member member
+            WHERE (member.arc_id, member.position) IN (
+                SELECT candidate.arc_id, candidate.position FROM legacy_placement_adoption_member candidate
+                WHERE candidate.arc_id = {{arcId}} ORDER BY candidate.position LIMIT {{LegacyPlacementAdoptionLimits.MaxRowsPerPass}})
+            """);
+        if (complete)
+            await db.Database.ExecuteSqlInterpolatedAsync($$"""
+                UPDATE legacy_placement_adoption_arc
+                SET state = terminal_state, completed_at = clock_timestamp(), last_modified_at = clock_timestamp(),
+                    final_summary_jsonb = final_summary_jsonb - ARRAY['ReadBytes','YieldReason','OversizedItem','Progress'], revision = revision + 1
+                WHERE id = {{arcId}} AND NOT EXISTS (SELECT 1 FROM legacy_placement_adoption_member WHERE arc_id = {{arcId}})
+                """);
+        else
+            await db.Database.ExecuteSqlInterpolatedAsync($$"""
+                UPDATE legacy_placement_adoption_arc
+                SET last_modified_at = clock_timestamp(), expires_at = clock_timestamp() + INTERVAL '7 days', revision = revision + 1
+                WHERE id = {{arcId}}
+                """);
+        await transaction.CommitAsync();
     }
 
     private ILifetimeScope RuntimeScope(TimeProvider clock, TimeSpan renewalInterval, TimeSpan operationTimeout,
@@ -591,6 +1021,22 @@ public sealed partial class LegacyPlacementAdoptionTests
                 0, 0, 0, 0, 0,
                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                 FALSE, clock_timestamp(), clock_timestamp())
+            """);
+
+    private static Task<int> InsertMatchingZeroAuditAsync(CodeSpaceDbContext db, Guid arcId, Guid claimToken) =>
+        db.Database.ExecuteSqlInterpolatedAsync($$"""
+            INSERT INTO legacy_placement_adoption_pass_audit (
+                arc_id, claim_token, phase, outcome, yield_reason, failure_code,
+                start_position, end_position, examined, resolved, confirmed,
+                evidence_examined_delta, evidence_resolved_delta, evidence_confirmed_delta,
+                mint_examined_delta, available_delta, missing_delta, corrupt_delta,
+                already_recorded_delta, conflicts_delta, retryable_delta, read_bytes_delta,
+                oversized_item, started_at, completed_at)
+            SELECT id, {{claimToken}}, phase, 'Interrupted', 'None', 'ProgrammingFault',
+                current_position, current_position, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                FALSE, claim_started_at, clock_timestamp()
+            FROM legacy_placement_adoption_arc WHERE id = {{arcId}}
             """);
 
     private static async Task ForgeSettlementAsync(CodeSpaceDbContext db, Guid arcId, Forgery forgery)
@@ -630,6 +1076,37 @@ public sealed partial class LegacyPlacementAdoptionTests
 
     private sealed record Forgery(string Phase, long StartOffset, long AuditReadDelta, long ArcReadDelta);
 
+    private static async Task SettleWithoutReleaseAsync(CodeSpaceDbContext db, Guid arcId)
+    {
+        var claimToken = Guid.NewGuid();
+        await using var transaction = await db.Database.BeginTransactionAsync();
+        await AcquireClaimAsync(db, arcId, claimToken);
+        await InsertMatchingZeroAuditAsync(db, arcId, claimToken);
+        await SettleHeldClaimAsync(db, arcId, claimToken, release: false);
+        await transaction.CommitAsync();
+    }
+
+    private static Task<int> AcquireClaimAsync(CodeSpaceDbContext db, Guid arcId, Guid claimToken) =>
+        db.Database.ExecuteSqlInterpolatedAsync($$"""
+            UPDATE legacy_placement_adoption_arc
+            SET claim_token = {{claimToken}}, claim_started_at = clock_timestamp(),
+                claim_expires_at = clock_timestamp() + INTERVAL '30 seconds', revision = revision + 1
+            WHERE id = {{arcId}}
+            """);
+
+    private static async Task SettleHeldClaimAsync(CodeSpaceDbContext db, Guid arcId, Guid claimToken, bool release)
+    {
+        await db.Database.ExecuteSqlInterpolatedAsync($$"""
+            UPDATE legacy_placement_adoption_arc
+            SET completed_passes = completed_passes + 1, last_settled_claim_token = {{claimToken}},
+                claim_token = CASE WHEN {{release}} THEN NULL ELSE claim_token END,
+                claim_started_at = CASE WHEN {{release}} THEN NULL ELSE claim_started_at END,
+                claim_expires_at = CASE WHEN {{release}} THEN NULL ELSE claim_expires_at END,
+                revision = revision + 1
+            WHERE id = {{arcId}}
+            """);
+    }
+
     private sealed class ThrowingHeadDriver : DelegatingDriver
     {
         private readonly Exception _exception;
@@ -638,6 +1115,52 @@ public sealed partial class LegacyPlacementAdoptionTests
 
         public override ValueTask<ArtifactStorageHeadResult> HeadAsync(ArtifactStorageHeadRequest request, CancellationToken cancellationToken) =>
             ValueTask.FromException<ArtifactStorageHeadResult>(_exception);
+    }
+
+    private sealed class CommitFailureInterceptor : SaveChangesInterceptor
+    {
+        private int _remaining;
+
+        public void Arm(int count) => Interlocked.Exchange(ref _remaining, count);
+
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(DbContextEventData eventData,
+            InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            if (Volatile.Read(ref _remaining) > 0 && Interlocked.Decrement(ref _remaining) >= 0)
+                return ValueTask.FromException<InterceptionResult<int>>(new DbUpdateConcurrencyException("forced commit race"));
+            return ValueTask.FromResult(result);
+        }
+    }
+
+    private sealed class CleanupCommandCaptureInterceptor : DbCommandInterceptor
+    {
+        public List<string> Commands { get; } = [];
+
+        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(DbCommand command, CommandEventData eventData,
+            InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.Contains("legacy_placement_adoption", StringComparison.Ordinal)) Commands.Add(command.CommandText);
+            return ValueTask.FromResult(result);
+        }
+    }
+
+    private sealed class ArmAfterReadsDriver : DelegatingDriver
+    {
+        private readonly CommitFailureInterceptor _failures;
+        private int _remainingReads;
+
+        public ArmAfterReadsDriver(StorageRuntimeDriverLease lease, CommitFailureInterceptor failures, int reads) : base(lease)
+        {
+            _failures = failures;
+            _remainingReads = reads;
+        }
+
+        public override async ValueTask<ArtifactStorageReadResult> OpenReadAsync(ArtifactStorageReadRequest request, CancellationToken cancellationToken)
+        {
+            var result = await base.OpenReadAsync(request, cancellationToken);
+            if (Interlocked.Decrement(ref _remainingReads) == 0) _failures.Arm(3);
+            return result;
+        }
     }
 
     public enum ProviderFailureSurface { Head, Read, Probe, Thrown }

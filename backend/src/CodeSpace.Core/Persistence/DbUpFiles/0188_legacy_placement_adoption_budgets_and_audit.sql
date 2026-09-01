@@ -6,9 +6,11 @@
 -- and bounded unclaimed Cleaning deliberately write no audit row. No object key, locator, provider message, exception text, or credential appears
 -- here. After the existing 30-day retention, audit rows drain in bounded calls before the RESTRICTed tombstone.
 --
--- Deployment cost: ADD COLUMN takes a brief metadata lock and the new table/index are empty. PostgreSQL 11+ stores
--- constant defaults without rewriting the arc table. The UPDATE only touches a presently claimed arc, if one exists.
--- DbUp runs this file transactionally. Rollback requires dropping the audit table/guards and the added columns.
+-- Deployment cost: DbUp runs this file transactionally, so ALTER TABLE holds ACCESS EXCLUSIVE until commit. PostgreSQL
+-- 11+ stores these constant defaults without rewriting the arc table. Existing arcs stay audit version zero, so this
+-- migration deliberately does not scan or rewrite their request-local in-flight claims. Terminal and audit cleanup reuse 0186's per-state partial arc
+-- index plus the new audit table's primary key, avoiding another full index/table scan while ACCESS EXCLUSIVE is held.
+-- Rollback requires dropping the audit table/guards and the added columns.
 
 ALTER TABLE legacy_placement_adoption_arc
     ADD COLUMN audit_version              SMALLINT NOT NULL DEFAULT 0,
@@ -29,16 +31,12 @@ ALTER TABLE legacy_placement_adoption_arc
     ADD COLUMN oversized_passes           BIGINT NOT NULL DEFAULT 0,
     ADD COLUMN last_settled_claim_token   UUID NULL;
 
-UPDATE legacy_placement_adoption_arc
-SET claim_started_at = last_modified_at
-WHERE claim_token IS NOT NULL;
-
 ALTER TABLE legacy_placement_adoption_arc
-    ADD CONSTRAINT ck_legacy_adoption_arc_audit_version CHECK (audit_version IN (0, 1)),
+    ADD CONSTRAINT ck_legacy_adoption_arc_audit_version CHECK (audit_version IN (0, 1)) NOT VALID,
     ADD CONSTRAINT ck_legacy_adoption_arc_claim_started CHECK (
-        (claim_token IS NULL) = (claim_started_at IS NULL)),
+        audit_version = 0 OR (claim_token IS NULL) = (claim_started_at IS NULL)) NOT VALID,
     ADD CONSTRAINT ck_legacy_adoption_arc_audit_bounds CHECK (
-        evidence_examined >= 0 AND evidence_resolved >= 0 AND evidence_confirmed >= 0
+        audit_version = 0 OR (evidence_examined >= 0 AND evidence_resolved >= 0 AND evidence_confirmed >= 0
         AND evidence_confirmed <= evidence_resolved AND evidence_resolved <= evidence_examined
         AND evidence_examined <= member_count
         AND mint_examined >= 0 AND mint_examined <= member_count
@@ -47,7 +45,7 @@ ALTER TABLE legacy_placement_adoption_arc
         AND retryable >= 0 AND read_bytes >= 0 AND completed_passes >= 0
         AND budget_yields >= 0 AND budget_yields <= completed_passes
         AND oversized_passes >= 0 AND oversized_passes <= completed_passes
-        AND (completed_passes = 0) = (last_settled_claim_token IS NULL));
+        AND (completed_passes = 0) = (last_settled_claim_token IS NULL))) NOT VALID;
 
 CREATE TABLE legacy_placement_adoption_pass_audit (
     arc_id                    UUID        NOT NULL REFERENCES legacy_placement_adoption_arc(id) ON DELETE RESTRICT,
@@ -114,9 +112,34 @@ CREATE TRIGGER legacy_placement_adoption_pass_audit_enforce_append_only
     FOR EACH ROW EXECUTE FUNCTION legacy_placement_adoption_pass_audit_guard();
 
 CREATE OR REPLACE FUNCTION legacy_placement_adoption_arc_audit_guard() RETURNS TRIGGER AS $$
+DECLARE
+    old_writer_signature BOOLEAN := FALSE;
 BEGIN
-    IF NEW.audit_version IS DISTINCT FROM OLD.audit_version THEN
+    -- #1720 does not know the v1 claim-start or additive summary contracts. A mixed-version
+    -- deployment must conservatively abandon exact auditing when an old writer first
+    -- touches a v1 arc, rather than reject the run or fabricate a complete ledger.
+    old_writer_signature := OLD.audit_version = 1 AND NEW.audit_version = 1 AND (
+        (NEW.claim_token IS DISTINCT FROM OLD.claim_token
+            AND NEW.claim_started_at IS NOT DISTINCT FROM OLD.claim_started_at)
+        OR (OLD.final_summary_jsonb IS NULL AND NEW.final_summary_jsonb IS NOT NULL
+            AND NOT (NEW.final_summary_jsonb ? 'Progress'))
+        OR (OLD.final_summary_jsonb IS NOT NULL AND NEW.final_summary_jsonb IS NOT NULL
+            AND NEW.final_summary_jsonb = OLD.final_summary_jsonb - ARRAY['ReadBytes', 'YieldReason', 'OversizedItem', 'Progress']));
+    IF old_writer_signature THEN
+        NEW.audit_version := 0;
+    END IF;
+
+    IF NEW.audit_version IS DISTINCT FROM OLD.audit_version
+       AND NOT old_writer_signature THEN
         RAISE EXCEPTION 'legacy adoption audit version is immutable (arc=%).', OLD.id;
+    END IF;
+    -- An old pod completing a multi-page Cleaning arc projects the immutable v1
+    -- summary through its older DTO and drops only these additive members.  Preserve
+    -- the original forensic bytes; arbitrary v0 summary rewrites remain visible to
+    -- the lifecycle immutability guard and are still rejected.
+    IF NEW.audit_version = 0 AND OLD.final_summary_jsonb IS NOT NULL AND NEW.final_summary_jsonb IS NOT NULL
+       AND NEW.final_summary_jsonb = OLD.final_summary_jsonb - ARRAY['ReadBytes', 'YieldReason', 'OversizedItem', 'Progress'] THEN
+        NEW.final_summary_jsonb := OLD.final_summary_jsonb;
     END IF;
     IF NEW.audit_version = 0 THEN RETURN NEW; END IF;
 
@@ -136,6 +159,10 @@ BEGIN
         IF OLD.claim_token IS NULL OR NEW.last_settled_claim_token IS DISTINCT FROM OLD.claim_token THEN
             RAISE EXCEPTION 'legacy adoption settled audit must name the claim held by the arc (arc=%, held=%, settled=%).',
                 OLD.id, OLD.claim_token, NEW.last_settled_claim_token;
+        END IF;
+        IF OLD.last_settled_claim_token IS NOT DISTINCT FROM OLD.claim_token
+           OR NEW.claim_token IS NOT NULL OR NEW.claim_started_at IS NOT NULL OR NEW.claim_expires_at IS NOT NULL THEN
+            RAISE EXCEPTION 'legacy adoption claim may settle exactly once and must be released atomically (arc=%, claim=%).', OLD.id, OLD.claim_token;
         END IF;
     ELSIF NEW.last_settled_claim_token IS DISTINCT FROM OLD.last_settled_claim_token THEN
         RAISE EXCEPTION 'legacy adoption last settled claim changes only with one settled pass (arc=%).', OLD.id;
