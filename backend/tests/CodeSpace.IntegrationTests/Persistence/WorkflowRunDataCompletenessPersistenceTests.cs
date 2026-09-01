@@ -138,7 +138,10 @@ public sealed class WorkflowRunDataCompletenessPersistenceTests
             statement.PresentRecordCount = 0;
         });
         var folded = await SeedManifestAsync(world, WorkflowRunDataOwnerKinds.NativeRecord);
-        var unstated = await SeedManifestAsync(world, WorkflowRunDataOwnerKinds.ToolCall, statement =>
+        // This row models 0172's pre-latch value, not a post-0187 conditional declaration. A NULL expectation is
+        // therefore seeded on an unused always-applicable member; making a fresh conditional facet NULL is an
+        // impossible production shape that coverage correctly refuses.
+        var unstated = await SeedManifestAsync(world, WorkflowRunDataOwnerKinds.HarnessExecution, statement =>
         {
             statement.ExpectedRecordCount = null;
             statement.PresentRecordCount = 4;
@@ -146,7 +149,12 @@ public sealed class WorkflowRunDataCompletenessPersistenceTests
         });
 
         using var scope = _fixture.BeginScope();
-        await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlRawAsync(CorrectiveMigration());
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        // PostgreSQL DDL is transactional. 0172 redefines functions that later migrations have since evolved, so the
+        // replay and its observations must roll back together or this shared fixture silently downgrades the schema
+        // seen by every test class that happens to run afterwards.
+        await using var migrationReplay = await db.Database.BeginTransactionAsync();
+        await db.Database.ExecuteSqlRawAsync(CorrectiveMigration());
 
         var rewritten = await Manifests(scope).SingleAsync(candidate => candidate.Id == minted.Id);
         rewritten.ExpectedRecordCount.ShouldBeNull(customMessage: "a determinate zero nobody counted is exactly the claim this migration removes");
@@ -167,6 +175,8 @@ public sealed class WorkflowRunDataCompletenessPersistenceTests
         (await DeclaredFlagsAsync(scope, minted.Id, folded.Id, unstated.Id))
             .ShouldBe(new[] { false, true, true },
                 customMessage: "only the minted statement has no declared expectation; the un-stated one keeps its latch, which is what makes its NULL absorb");
+
+        await migrationReplay.RollbackAsync();
     }
 
     [Fact]
@@ -387,7 +397,9 @@ public sealed class WorkflowRunDataCompletenessPersistenceTests
     {
         var world = await SeedRunAsync();
         var claimed = await SeedManifestAsync(world, WorkflowRunDataOwnerKinds.NativeRecord);
-        var untouchedFacet = await SeedManifestAsync(world, WorkflowRunDataOwnerKinds.ToolCall, statement =>
+        // The neighbour is indeterminate, so it must be one of the run's initialized baseline members. A conditional
+        // facet becomes applicable only through a positive declaration and cannot honestly start at NULL.
+        var untouchedFacet = await SeedManifestAsync(world, WorkflowRunDataOwnerKinds.HarnessExecution, statement =>
         {
             statement.ExpectedRecordCount = null;
             statement.Verdict = WorkflowRunCaptureCompleteness.LegacyUnknown;

@@ -83,6 +83,75 @@ public sealed class NativeRecordCompletenessFlowTests
             customMessage: "nothing was missing, so nothing may be recorded as missing");
     }
 
+    [Fact]
+    public async Task A_batch_with_semantic_projections_declares_exact_run_owned_coverage_in_the_same_two_round_trips()
+    {
+        var run = await SeedWorkflowBoundRunAsync();
+        var plane = Plane(out var planeScope);
+        using var _ = planeScope;
+        var handle = await OpenAsync(plane, run);
+        var first = Frame(handle, 0);
+        var second = Frame(handle, 1);
+
+        await plane.WriteAsync(Batch(handle, first, second) with
+        {
+            Events = [Event(handle, first, SemanticProjectionQuality.Exact), Event(handle, second, SemanticProjectionQuality.RedactedExact)],
+        }, CancellationToken.None);
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var statement = await db.WorkflowRunDataManifest.AsNoTracking()
+            .SingleAsync(candidate => candidate.WorkflowRunId == run.WorkflowRunId && candidate.Facet == WorkflowRunDataOwnerKinds.SemanticEvent);
+        statement.ExpectedRecordCount.ShouldBe(2);
+        statement.PresentRecordCount.ShouldBe(2);
+        statement.Verdict.ShouldBe(WorkflowRunCaptureCompleteness.RedactedExact,
+            "one redacted-exact projection latches the facet's honest byte-fidelity arm");
+
+        var view = (await scope.Resolve<IRunDataCompletenessReader>().ReadAsync(run.WorkflowRunId, run.TeamId, CancellationToken.None)).ShouldNotBeNull();
+        view.RequiredFacets.ShouldContain(WorkflowRunDataOwnerKinds.SemanticEvent,
+            customMessage: "a run that actually invoked the conditional producer must owe its statement in the fold");
+    }
+
+    [Fact]
+    public async Task A_semantic_backfill_accounts_the_prior_declaration_without_declaring_it_twice()
+    {
+        var run = await SeedWorkflowBoundRunAsync();
+        var plane = Plane(out var planeScope);
+        using var _ = planeScope;
+        var handle = await OpenAsync(plane, run);
+        var zero = Frame(handle, 0);
+        var one = Frame(handle, 1);
+
+        await plane.WriteAsync(Batch(handle, zero, one) with
+        {
+            Events = [Event(handle, zero), Event(handle, one)],
+        }, CancellationToken.None);
+
+        var two = Frame(handle, 2);
+        await Should.ThrowAsync<DbUpdateException>(() => plane.WriteAsync(Batch(handle, Frame(handle, 1), two) with
+        {
+            Events = [Event(handle, one), Event(handle, two)],
+        }, CancellationToken.None));
+
+        var refused = await StatementAsync(run, WorkflowRunDataOwnerKinds.SemanticEvent);
+        refused.ExpectedRecordCount.ShouldBe(4, "the refused projection batch declared before its shared transaction failed");
+        refused.PresentRecordCount.ShouldBe(2);
+
+        var three = Frame(handle, 3);
+        await plane.WriteAsync(Backfill(handle, two, three) with
+        {
+            Events = [Event(handle, two), Event(handle, three)],
+        }, CancellationToken.None);
+
+        var recovered = await StatementAsync(run, WorkflowRunDataOwnerKinds.SemanticEvent);
+        recovered.ExpectedRecordCount.ShouldBe(4,
+            "a reattached batch represents the obligation already declared by the refused write; declaring it again permanently inflates the run's debt");
+        recovered.PresentRecordCount.ShouldBe(4,
+            "every semantic projection that became durable in the original and repair batches is accounted once");
+        recovered.Verdict.IsStrictlyReadable().ShouldBeFalse(
+            customMessage: "the refusal's open gap remains authoritative until a cited recovery closes it");
+    }
+
     /// <summary>
     /// The shortfall the plane can actually have: a durable write the database refuses. Today that is a log warning and
     /// a round that quietly stops capturing — the silence this plane exists to break. The refused frames must become a
@@ -304,7 +373,8 @@ public sealed class NativeRecordCompletenessFlowTests
 
         var handle = await OpenAsync(plane, run);
 
-        await plane.WriteAsync(Batch(handle, Frame(handle, 0)), CancellationToken.None);
+        var first = Frame(handle, 0);
+        await plane.WriteAsync(Batch(handle, first) with { Events = [Event(handle, first)] }, CancellationToken.None);
 
         // No CloseAsync: this is exactly a worker torn down mid-round, leaving its process attempt Running.
         await ((INativeRecordExecutionPlane)plane).TerminalizeAsync(run.TeamId, run.AgentRunId, run.FenceEpoch, CancellationToken.None);
@@ -315,14 +385,24 @@ public sealed class NativeRecordCompletenessFlowTests
         died.PresentRecordCount.ShouldBe(1, customMessage: "what did land is still a fact, and stays stated");
         died.Verdict.ShouldBe(WorkflowRunCaptureCompleteness.LegacyUnknown);
         died.Verdict.IsStrictlyReadable().ShouldBeFalse();
+        var semanticDied = await StatementAsync(run, WorkflowRunDataOwnerKinds.SemanticEvent);
+        semanticDied.ExpectedRecordCount.ShouldBeNull(
+            customMessage: "semantic projections share the dead observer's unknown source window; leaving this facet Exact would make the run contradict its native source");
+        semanticDied.PresentRecordCount.ShouldBe(1);
+        semanticDied.Verdict.ShouldBe(WorkflowRunCaptureCompleteness.LegacyUnknown);
 
-        await plane.WriteAsync(Batch(handle, Frame(handle, 1)), CancellationToken.None);
+        var second = Frame(handle, 1);
+        await plane.WriteAsync(Batch(handle, second) with { Events = [Event(handle, second)] }, CancellationToken.None);
 
         var after = await StatementAsync(run);
         after.ExpectedRecordCount.ShouldBeNull(
             customMessage: "a later batch cannot restore a total nobody ever knew — counting back up to complete here would convert the unknown into the assurance 0146 refuses");
         after.PresentRecordCount.ShouldBe(2);
         after.Verdict.IsStrictlyReadable().ShouldBeFalse();
+        var semanticAfter = await StatementAsync(run, WorkflowRunDataOwnerKinds.SemanticEvent);
+        semanticAfter.ExpectedRecordCount.ShouldBeNull();
+        semanticAfter.PresentRecordCount.ShouldBe(2);
+        semanticAfter.Verdict.IsStrictlyReadable().ShouldBeFalse();
     }
 
     /// <summary>
@@ -673,6 +753,14 @@ public sealed class NativeRecordCompletenessFlowTests
             .SingleAsync(candidate => candidate.WorkflowRunId == run.WorkflowRunId && candidate.Facet == WorkflowRunDataOwnerKinds.NativeRecord);
     }
 
+    private async Task<WorkflowRunDataManifest> StatementAsync(SeededRun run, string facet)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().WorkflowRunDataManifest.AsNoTracking()
+            .SingleAsync(candidate => candidate.WorkflowRunId == run.WorkflowRunId && candidate.Facet == facet);
+    }
+
     /// <summary>The facet's statement, or null where the facet has none — because "no row" is itself one of the two indeterminate answers this producer can leave behind.</summary>
     private async Task<WorkflowRunDataManifest?> StatementOrNullAsync(SeededRun run)
     {
@@ -772,6 +860,18 @@ public sealed class NativeRecordCompletenessFlowTests
             Redaction = redaction, IsFinal = true,
         };
     }
+
+    private static AgentSemanticEventV1 Event(NativeRecordCaptureHandle handle, NativeRecordV1 source, SemanticProjectionQuality quality = SemanticProjectionQuality.Exact) => new()
+    {
+        ContractVersion = WorkflowRunDataContract.CurrentVersion,
+        EventId = Guid.NewGuid(),
+        EventType = "urn:codespace:test:semantic-event",
+        EventSchemaVersion = 1,
+        SourceNativeRecordIds = [source.RecordId],
+        ExecutionId = handle.ExecutionId,
+        Necessity = SemanticEventNecessity.Ignorable,
+        ProjectionQuality = quality,
+    };
 
     private async Task<SeededRun> SeedWorkflowBoundRunAsync()
     {

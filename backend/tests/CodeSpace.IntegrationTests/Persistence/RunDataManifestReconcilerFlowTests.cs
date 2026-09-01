@@ -57,8 +57,9 @@ public sealed class RunDataManifestReconcilerFlowTests
     [Fact]
     public async Task A_terminal_runs_unattributed_shortfall_resolves_indeterminate()
     {
-        var world = await SeedTerminalRunAsync();
+        var world = await SeedRunAsync();
         var statement = await SeedShortfallAsync(world);
+        await TerminalizeAsync(world);
 
         var before = await StatementAsync(statement.Id);
         before.ExpectedRecordCount.ShouldBe(3, "precondition: the expectation must still be DETERMINATE, or this test would be watching a facet that was already indeterminate before the sweep ran");
@@ -83,9 +84,10 @@ public sealed class RunDataManifestReconcilerFlowTests
     [Fact]
     public async Task A_worker_killed_between_the_declaration_and_the_payload_write_is_indeterminate_one_tick_later()
     {
-        var world = await SeedTerminalRunAsync();
+        var world = await SeedRunAsync();
 
         await DeclareAsync(world, expected: 3);
+        await TerminalizeAsync(world);
 
         var declared = await StatementAsync(world, WorkflowRunDataOwnerKinds.NativeRecord);
         declared.ExpectedRecordCount.ShouldBe(3, "precondition: the declaration must have committed, or the payload write is not what went missing");
@@ -107,9 +109,10 @@ public sealed class RunDataManifestReconcilerFlowTests
     [Fact]
     public async Task A_shortfall_the_gap_plane_can_already_name_keeps_its_attribution()
     {
-        var world = await SeedTerminalRunAsync();
+        var world = await SeedRunAsync();
         var statement = await SeedShortfallAsync(world);
         await SeedOpenGapAsync(world);
+        await TerminalizeAsync(world);
 
         var attributed = await StatementAsync(statement.Id);
         attributed.KnownMissingCount.ShouldBe(1, "precondition: the gap must have reached the statement, or this test proves nothing about attributed shortfalls");
@@ -169,8 +172,9 @@ public sealed class RunDataManifestReconcilerFlowTests
     [InlineData(false)]
     public async Task An_answer_that_lands_between_the_probe_and_the_write_is_not_written_over(bool accounted)
     {
-        var world = await SeedTerminalRunAsync();
+        var world = await SeedRunAsync();
         var statement = await SeedShortfallAsync(world);
+        await TerminalizeAsync(world);
 
         var interleaved = await ReconcileUntilExaminedAsync(world, () => accounted ? AdvanceDeliverableAsync(world, present: 2) : SeedOpenGapAsync(world));
 
@@ -394,18 +398,14 @@ public sealed class RunDataManifestReconcilerFlowTests
         await db.SaveChangesAsync();
     }
 
-    private async Task<RunWorld> SeedTerminalRunAsync()
+    private async Task TerminalizeAsync(RunWorld world)
     {
-        var world = await SeedRunAsync();
-
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         var run = await db.WorkflowRun.SingleAsync(candidate => candidate.Id == world.RunId);
         run.Status = WorkflowRunStatus.Success;
         run.CompletedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync();
-
-        return world;
     }
 
     private async Task<RunWorld> SeedRunAsync()

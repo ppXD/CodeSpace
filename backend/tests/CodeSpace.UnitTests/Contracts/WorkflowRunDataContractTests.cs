@@ -25,6 +25,8 @@ public sealed class WorkflowRunDataContractTests
         WorkflowRunDataNames.NativeRecord.ShouldBe("workflow_run_native_record");
         WorkflowRunDataNames.LogSegment.ShouldBe("workflow_run_log_segment");
         WorkflowRunDataNames.DataManifest.ShouldBe("workflow_run_data_manifest");
+        WorkflowRunDataNames.DataCoverage.ShouldBe("workflow_run_data_coverage");
+        WorkflowRunDataNames.DataCoverageFacet.ShouldBe("workflow_run_data_coverage_facet");
     }
 
     [Theory]
@@ -35,6 +37,16 @@ public sealed class WorkflowRunDataContractTests
     public void Global_storage_aggregates_are_not_run_owned_names(string tableName)
     {
         WorkflowRunDataNames.IsRunOwned(tableName).ShouldBeFalse("a WorkflowRunId foreign key does not transfer aggregate ownership to the run plane");
+    }
+
+    [Theory]
+    [InlineData(WorkflowRunDataNames.DataCoverage)]
+    [InlineData(WorkflowRunDataNames.DataCoverageFacet)]
+    public void Completeness_control_metadata_is_not_registered_as_an_artifact_owner_table(string tableName)
+    {
+        WorkflowRunDataNames.IsRunOwned(tableName).ShouldBeTrue();
+        WorkflowRunDataNames.All.ShouldNotContain(tableName,
+            "coverage records persist the question and its membership; they never own artifact bytes and must not mint an unsupported owner noun");
     }
 
     [Fact]

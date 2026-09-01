@@ -15,8 +15,8 @@ public static class WorkflowRunDataContract
 }
 
 /// <summary>
-/// The REGISTERED table names whose aggregate root is a Workflow Run. Registration is the reservation of a name, not
-/// evidence of a table: several of these are still FORWARD DECLARATIONS with no EF entity behind them.
+/// The REGISTERED artifact-owner table names whose aggregate root is a Workflow Run. Registration is the reservation
+/// of an owner noun, not evidence of a table: several are still FORWARD DECLARATIONS with no EF entity behind them.
 /// <c>WorkflowRunDataNamesReachabilityTests</c> resolves every name in <see cref="All"/> against
 /// <c>CodeSpaceDbContext</c> and lists the unbacked ones explicitly, so which are real and which are promises is a
 /// checked fact rather than a claim in this comment — and shipping one moves its name off that list.
@@ -46,6 +46,10 @@ public static class WorkflowRunDataNames
     public const string SessionStateRevision = Prefix + "session_state_revision";
     public const string CaptureGap = Prefix + "capture_gap";
     public const string DataManifest = Prefix + "data_manifest";
+
+    /// <summary>Run-owned completeness control metadata. These names are deliberately outside <see cref="All"/> because neither table owns artifact bytes.</summary>
+    public const string DataCoverage = Prefix + "data_coverage";
+    public const string DataCoverageFacet = Prefix + "data_coverage_facet";
 
     private static readonly IReadOnlyList<string> Registered = Array.AsReadOnly(new[]
     {

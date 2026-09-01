@@ -83,9 +83,10 @@ public sealed class NativeRecordContractException : Exception, IFailure
 /// bearing, because the refusals are reachable BY DESIGN: 0137 rejects a superseded worker's fence on exactly the
 /// reclaim-for-reattach case, which is the outcome that case is supposed to have.
 ///
-/// <para>It also ACCOUNTS for what it wrote, for THREE facets of the run's record. Every batch advances the completeness
-/// statement for the <see cref="WorkflowRunDataOwnerKinds.NativeRecord"/> facet, and a batch the database refuses
-/// becomes a known-missing span; every LAUNCH does the same for
+/// <para>It also ACCOUNTS for what it wrote, for FOUR facets of the run's record. Every batch advances the completeness
+/// statements for <see cref="WorkflowRunDataOwnerKinds.NativeRecord"/> and, only when the batch projects any,
+/// <see cref="WorkflowRunDataOwnerKinds.SemanticEvent"/>; a batch the database refuses becomes a known-missing span.
+/// Every LAUNCH does the same for
 /// <see cref="WorkflowRunDataOwnerKinds.HarnessProcessAttempt"/>, whose expectation — one process record per launch — is
 /// declared rather than discovered; and only a launch that mints a new
 /// <see cref="WorkflowRunDataOwnerKinds.HarnessExecution"/> identity states that facet. Each concern lives in its own

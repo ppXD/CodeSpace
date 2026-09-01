@@ -1,5 +1,6 @@
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.RunData;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Contracts;
 using Microsoft.Extensions.Logging;
@@ -7,8 +8,8 @@ using Microsoft.Extensions.Logging;
 namespace CodeSpace.Core.Services.Agents.Capture;
 
 /// <summary>
-/// The plane as a PRODUCER of <c>workflow_run_data_manifest</c> and <c>workflow_run_capture_gap</c> for the ONE facet
-/// it owns, <see cref="WorkflowRunDataOwnerKinds.NativeRecord"/>. Both tables shipped with correct invariants and no
+/// The plane as a PRODUCER of <c>workflow_run_data_manifest</c> and <c>workflow_run_capture_gap</c> for the native rows
+/// and semantic projections its one batch makes durable. Both tables shipped with correct invariants and no
 /// writer at all; this is what stops them being tables whose only writers are their tests.
 ///
 /// <para><b>What a complete verdict here MEANS, stated so it can be checked against this file.</b> Exact —
@@ -90,7 +91,7 @@ public sealed partial class NativeRecordPlane
     /// </summary>
     private async Task CommitAsync(CodeSpaceDbContext db, NativeRecordBatch batch, CancellationToken cancellationToken)
     {
-        var declared = batch.BackfillsDeclaredFrames || await DeclareAsync(batch, cancellationToken).ConfigureAwait(false);
+        var declared = batch.BackfillsDeclaredFrames || await AdvanceAllAsync(Advances(batch, declaration: true), cancellationToken).ConfigureAwait(false);
 
         try
         {
@@ -107,15 +108,11 @@ public sealed partial class NativeRecordPlane
         else await MarkDeclarationLostAsync(batch, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>What this plane UNDERTAKES to make durable, stated before it tries, so a failure after this point is visible as a shortfall rather than as two counts that fell short together. Returns whether the claim was admitted, because a lost declaration may not be followed by a presence.</summary>
-    private async Task<bool> DeclareAsync(NativeRecordBatch batch, CancellationToken cancellationToken)
-    {
-        if (Advance(batch, expected: batch.Records.Count, present: 0, masked: false) is not { } declaration) return false;
-
-        return await _completeness.AdvanceAsync(declaration, cancellationToken).ConfigureAwait(false);
-    }
-
     /// <summary>
+    /// What this plane UNDERTAKES to make durable, stated before it tries, so a failure after this point is visible as
+    /// a shortfall rather than as two counts that fell short together. Returns whether the claim was admitted, because
+    /// a lost declaration may not be followed by a presence.
+    ///
     /// A lost declaration can never be followed by a present-only advance, which would manufacture Exact over
     /// expected=0. The batch's frames are durable and stay so; what stops being knowable is how many the run owes, and
     /// an unstated expectation is what 0146 refuses every complete verdict over.
@@ -125,19 +122,20 @@ public sealed partial class NativeRecordPlane
     /// </summary>
     private async Task MarkDeclarationLostAsync(NativeRecordBatch batch, CancellationToken cancellationToken)
     {
-        if (batch.Handle.WorkflowRunId is not { } workflowRunId || batch.Records.Count == 0) return;
+        if (batch.Handle.WorkflowRunId is not { } workflowRunId) return;
 
-        if (!await _completeness.UnstateExpectationAsync(batch.Handle.TeamId, workflowRunId, WorkflowRunDataOwnerKinds.NativeRecord, cancellationToken).ConfigureAwait(false)) return;
+        foreach (var facet in Advances(batch, declaration: true).Select(advance => advance.Facet))
+        {
+            if (!await _completeness.UnstateExpectationAsync(batch.Handle.TeamId, workflowRunId, facet, cancellationToken).ConfigureAwait(false)) continue;
 
-        _logger.LogWarning("The expectation declaration for a captured batch of workflow run {WorkflowRunId} was not admitted, so its {FrameCount} frame(s) remain durable but the facet is unstated rather than counted from a present-only delta", workflowRunId, batch.Records.Count);
+            _logger.LogWarning("The {Facet} expectation declaration for a captured batch of workflow run {WorkflowRunId} was not admitted, so its durable records remain uncounted and the facet is unstated rather than advanced from a present-only delta", facet, workflowRunId);
+        }
     }
 
     /// <summary>Every frame of this batch is durable, so the facet's presence advances by exactly the frames it carried — and by the redacted arm where any of them reached storage masked.</summary>
     private async Task AccountForAsync(NativeRecordBatch batch, CancellationToken cancellationToken)
     {
-        if (Advance(batch, expected: 0, present: batch.Records.Count, masked: batch.Records.Any(capture => capture.Frame.Redaction == NativeRecordRedaction.Masked)) is not { } landed) return;
-
-        await _completeness.AdvanceAsync(landed, cancellationToken).ConfigureAwait(false);
+        await AdvanceAllAsync(Advances(batch, declaration: false), cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -161,14 +159,45 @@ public sealed partial class NativeRecordPlane
     /// workflow run has no row to key the statement to, and a batch carrying no frames of this facet moves neither of
     /// its counts.
     /// </summary>
-    private static RunDataFacetAdvance? Advance(NativeRecordBatch batch, long expected, long present, bool masked) =>
-        batch.Handle.WorkflowRunId is { } workflowRunId && batch.Records.Count > 0
-            ? new RunDataFacetAdvance
+    private async Task<bool> AdvanceAllAsync(IReadOnlyList<RunDataFacetAdvance> advances, CancellationToken cancellationToken)
+    {
+        if (advances.Count == 0) return true;
+        if (_completeness is IRunDataCompletenessBatchWriter batchWriter)
+            return await batchWriter.AdvanceBatchAsync(advances, cancellationToken).ConfigureAwait(false);
+
+        var admitted = true;
+        foreach (var advance in advances)
+            admitted = await _completeness.AdvanceAsync(advance, cancellationToken).ConfigureAwait(false) && admitted;
+
+        return admitted;
+    }
+
+    /// <summary>
+    /// The facets this transaction itself makes durable. Semantic-event applicability is conditional per run: a batch
+    /// with no projection never acquires it. A backfill calls only the presence arm; the database skips that arm where
+    /// no historical declaration exists, so deploying this producer cannot invent an obligation for an older run.
+    /// </summary>
+    private static IReadOnlyList<RunDataFacetAdvance> Advances(NativeRecordBatch batch, bool declaration)
+    {
+        if (batch.Handle.WorkflowRunId is not { } workflowRunId) return [];
+
+        var advances = new List<RunDataFacetAdvance>(2);
+        Add(WorkflowRunDataOwnerKinds.NativeRecord, batch.Records.Count,
+            !declaration && batch.Records.Any(capture => capture.Frame.Redaction == NativeRecordRedaction.Masked));
+        Add(WorkflowRunDataOwnerKinds.SemanticEvent, batch.Events.Count,
+            !declaration && batch.Events.Any(projection => projection.ProjectionQuality == SemanticProjectionQuality.RedactedExact));
+        return advances;
+
+        void Add(string facet, int count, bool masked)
+        {
+            if (count == 0) return;
+            advances.Add(new RunDataFacetAdvance
             {
-                TeamId = batch.Handle.TeamId, WorkflowRunId = workflowRunId,
-                Facet = WorkflowRunDataOwnerKinds.NativeRecord, Expected = expected, Present = present, Masked = masked,
-            }
-            : null;
+                TeamId = batch.Handle.TeamId, WorkflowRunId = workflowRunId, Facet = facet,
+                Expected = declaration ? count : 0, Present = declaration ? 0 : count, Masked = masked,
+            });
+        }
+    }
 
     /// <summary>
     /// The run's expectation stops being knowable. Called when an execution reaches its terminal with a process attempt
@@ -178,9 +207,12 @@ public sealed partial class NativeRecordPlane
     /// </summary>
     private async Task MarkIndeterminateAsync(Guid teamId, Guid workflowRunId, CancellationToken cancellationToken)
     {
-        if (!await _completeness.UnstateExpectationAsync(teamId, workflowRunId, WorkflowRunDataOwnerKinds.NativeRecord, cancellationToken).ConfigureAwait(false)) return;
+        foreach (var facet in new[] { WorkflowRunDataOwnerKinds.NativeRecord, WorkflowRunDataOwnerKinds.SemanticEvent })
+        {
+            if (!await _completeness.UnstateExpectationAsync(teamId, workflowRunId, facet, cancellationToken).ConfigureAwait(false)) continue;
 
-        _logger.LogWarning("The native record capture of workflow run {WorkflowRunId} had an observer still open when its harness execution reached a terminal, so the run's frame expectation is unstated rather than assumed satisfied", workflowRunId);
+            _logger.LogWarning("The {Facet} capture of workflow run {WorkflowRunId} had an observer still open when its harness execution reached a terminal, so its expectation is unstated rather than assumed satisfied", facet, workflowRunId);
+        }
     }
 
     /// <summary>

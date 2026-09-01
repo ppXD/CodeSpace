@@ -61,6 +61,14 @@ public sealed partial class NativeRecordPlane
     /// no workflow run, so a batch that gets here carrying calls came from a writer that decided otherwise. Refusing it
     /// again here is what keeps that decision from reaching the tables, and the log says so once per batch rather than
     /// once per call.
+    ///
+    /// <para><b>Why this plane is not yet a completeness producer.</b> The anti-join below is an optimization and an
+    /// idempotent projection check, not a keyed obligation: two concurrent scopes can both observe one model-call id as
+    /// absent, both stage it and both declare one expected row before the unique constraint admits only one transaction.
+    /// A naked counter would then remain expected=2/present=1 forever although the one logical call is durable. Honest
+    /// coverage here needs an admission claim keyed by (team, workflow run, model-call id) whose winner alone increments
+    /// expected, and whose durable completion alone increments present. Until that exists, omitting this facet is the
+    /// fail-closed answer; folding the raw or distinct batch count would be a false obligation.</para>
     /// </summary>
     private async Task<ModelCallScope?> ModelCallScopeAsync(CodeSpaceDbContext db, NativeRecordCaptureHandle handle, CancellationToken cancellationToken)
     {
