@@ -394,6 +394,67 @@ public sealed partial class LegacyPlacementAdoptionTests
     }
 
     [Fact]
+    public async Task Cross_team_cleanup_skips_another_transaction_claim_and_still_deletes_only_one_bounded_batch()
+    {
+        var retained = await SeedAsync(Candidate("cross team cleanup"));
+        var result = await AdoptAsync(retained);
+        result = await AdoptAsync(retained, result.NextCursor);
+        using (var setup = _fixture.BeginScope())
+        {
+            var db = setup.Resolve<CodeSpaceDbContext>();
+            var arcId = await db.LegacyPlacementAdoptionArc.Where(value => value.TeamId == retained.TeamId).Select(value => value.Id).SingleAsync();
+            await db.Database.ExecuteSqlRawAsync("ALTER TABLE legacy_placement_adoption_pass_audit DISABLE TRIGGER USER");
+            try
+            {
+                await db.Database.ExecuteSqlInterpolatedAsync($$"""
+                    INSERT INTO legacy_placement_adoption_pass_audit
+                    SELECT audit.arc_id, gen_random_uuid(), audit.phase, audit.outcome, audit.yield_reason, audit.failure_code,
+                        audit.start_position, audit.end_position, audit.examined, audit.resolved, audit.confirmed,
+                        audit.evidence_examined_delta, audit.evidence_resolved_delta, audit.evidence_confirmed_delta,
+                        audit.mint_examined_delta, audit.available_delta, audit.missing_delta, audit.corrupt_delta,
+                        audit.already_recorded_delta, audit.conflicts_delta, audit.retryable_delta, audit.read_bytes_delta,
+                        audit.oversized_item, audit.started_at, audit.completed_at
+                    FROM legacy_placement_adoption_pass_audit audit CROSS JOIN generate_series(1, 31)
+                    WHERE audit.arc_id = {{arcId}}
+                    """);
+            }
+            finally { await db.Database.ExecuteSqlRawAsync("ALTER TABLE legacy_placement_adoption_pass_audit ENABLE TRIGGER USER"); }
+            await db.Database.ExecuteSqlRawAsync("ALTER TABLE legacy_placement_adoption_arc DISABLE TRIGGER USER");
+            try
+            {
+                await db.Database.ExecuteSqlInterpolatedAsync($$"""
+                    UPDATE legacy_placement_adoption_arc
+                    SET created_at = clock_timestamp() - INTERVAL '32 days', completed_at = clock_timestamp() - INTERVAL '31 days'
+                    WHERE id = {{arcId}}
+                    """);
+            }
+            finally { await db.Database.ExecuteSqlRawAsync("ALTER TABLE legacy_placement_adoption_arc ENABLE TRIGGER USER"); }
+        }
+
+        using var blocker = _fixture.BeginScope();
+        var blockerDb = blocker.Resolve<CodeSpaceDbContext>();
+        await using var blockerTransaction = await blockerDb.Database.BeginTransactionAsync();
+        await blockerDb.Database.ExecuteSqlInterpolatedAsync($$"""
+            SELECT 1 FROM legacy_placement_adoption_pass_audit audit
+            JOIN legacy_placement_adoption_arc arc ON arc.id = audit.arc_id
+            WHERE arc.team_id = {{retained.TeamId}}
+            ORDER BY audit.completed_at, audit.arc_id, audit.claim_token
+            FOR UPDATE OF audit LIMIT 32
+            """);
+
+        var otherTeam = await SeedAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        using (var cleanup = _fixture.BeginScope())
+            await cleanup.Resolve<ILegacyPlacementAdopter>().AdoptAsync(
+                new LegacyPlacementAdoptionRequest(otherTeam.TeamId, otherTeam.ActorId, otherTeam.ProfileId, 1, null), timeout.Token);
+
+        using var verification = _fixture.BeginScope();
+        var remaining = await verification.Resolve<CodeSpaceDbContext>().LegacyPlacementAdoptionPassAudit.AsNoTracking()
+            .CountAsync(value => value.Arc.TeamId == retained.TeamId);
+        remaining.ShouldBe(32, "the second team must skip 32 locked rows and delete exactly the next bounded batch without waiting");
+    }
+
+    [Fact]
     public async Task Deferred_audit_guards_reject_one_sided_totals_and_a_token_that_the_arc_never_held()
     {
         var auditOnly = await SeedAsync(Candidate("audit only guard"));
