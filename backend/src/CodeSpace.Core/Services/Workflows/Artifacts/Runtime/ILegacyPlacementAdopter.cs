@@ -8,4 +8,8 @@ public interface ILegacyPlacementAdopter : IScopedDependency
     Task<LegacyPlacementAdoptionSummary> AdoptAsync(LegacyPlacementAdoptionRequest request, CancellationToken cancellationToken);
 }
 
-public sealed record LegacyPlacementAdoptionRequest(Guid TeamId, Guid ActorId, Guid ProfileId, int BatchSize, string? Cursor);
+public sealed record LegacyPlacementAdoptionRequest(Guid TeamId, Guid ActorId, Guid ProfileId, int BatchSize, string? Cursor)
+{
+    public long ByteBudget { get; init; } = LegacyPlacementAdoptionLimits.DefaultBytesPerPass;
+    public TimeSpan TimeBudget { get; init; } = LegacyPlacementAdoptionLimits.DefaultTimePerPass;
+}

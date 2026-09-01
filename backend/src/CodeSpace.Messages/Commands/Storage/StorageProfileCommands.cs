@@ -67,4 +67,6 @@ public sealed record AdoptLegacyPlacementsCommand : ICommand<LegacyPlacementAdop
     public Guid ProfileId { get; init; }
     public int BatchSize { get; init; } = LegacyPlacementAdoptionLimits.DefaultRowsPerPass;
     public string? Cursor { get; init; }
+    public long ByteBudget { get; init; } = LegacyPlacementAdoptionLimits.DefaultBytesPerPass;
+    public int TimeBudgetSeconds { get; init; } = (int)LegacyPlacementAdoptionLimits.DefaultTimePerPass.TotalSeconds;
 }

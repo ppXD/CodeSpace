@@ -90,5 +90,9 @@ public sealed class AdoptLegacyPlacementsCommandHandler : IRequestHandler<AdoptL
 
     public async Task<LegacyPlacementAdoptionSummary> Handle(AdoptLegacyPlacementsCommand request, CancellationToken cancellationToken) =>
         await _adopter.AdoptAsync(new LegacyPlacementAdoptionRequest(_currentTeam.Id!.Value, _currentUser.Id!.Value, request.ProfileId,
-            request.BatchSize, request.Cursor), cancellationToken).ConfigureAwait(false);
+            request.BatchSize, request.Cursor)
+        {
+            ByteBudget = request.ByteBudget,
+            TimeBudget = TimeSpan.FromSeconds(request.TimeBudgetSeconds),
+        }, cancellationToken).ConfigureAwait(false);
 }
