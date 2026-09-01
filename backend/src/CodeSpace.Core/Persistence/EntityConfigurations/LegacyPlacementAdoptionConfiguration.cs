@@ -58,6 +58,6 @@ public sealed class LegacyPlacementAdoptionPassAuditConfiguration : IEntityTypeC
         builder.Property(value => value.Outcome).HasConversion<string>().HasMaxLength(16);
         builder.Property(value => value.YieldReason).HasConversion<string>().HasMaxLength(24);
         builder.Property(value => value.FailureCode).HasConversion<string>().HasMaxLength(32);
-        builder.HasOne(value => value.Arc).WithMany(value => value.PassAudits).HasForeignKey(value => value.ArcId).OnDelete(DeleteBehavior.Cascade);
+        builder.HasOne(value => value.Arc).WithMany(value => value.PassAudits).HasForeignKey(value => value.ArcId).OnDelete(DeleteBehavior.Restrict);
     }
 }

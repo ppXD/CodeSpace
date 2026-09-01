@@ -35,6 +35,8 @@ public sealed class LegacyPlacementAdoptionRuntime : ILegacyPlacementAdoptionRun
 
 internal enum LegacyProviderExceptionDisposition
 {
+    Missing,
+    Corrupt,
     Retryable,
     Rejected,
     ProgrammingFault,
@@ -42,11 +44,26 @@ internal enum LegacyProviderExceptionDisposition
 
 internal static class LegacyProviderExceptionClassifier
 {
+    public static LegacyProviderExceptionDisposition Classify(ArtifactStorageError error)
+    {
+        ArgumentNullException.ThrowIfNull(error);
+        if (error.Code is ArtifactStorageErrorCode.InvalidRequest or ArtifactStorageErrorCode.Unauthorized
+            or ArtifactStorageErrorCode.Forbidden or ArtifactStorageErrorCode.Unsupported)
+            return LegacyProviderExceptionDisposition.Rejected;
+        if (error.IsRetryable) return LegacyProviderExceptionDisposition.Retryable;
+        return error.Code switch
+        {
+            ArtifactStorageErrorCode.Missing => LegacyProviderExceptionDisposition.Missing,
+            ArtifactStorageErrorCode.IntegrityMismatch or ArtifactStorageErrorCode.Corrupt => LegacyProviderExceptionDisposition.Corrupt,
+            _ => LegacyProviderExceptionDisposition.Retryable,
+        };
+    }
+
     public static LegacyProviderExceptionDisposition Classify(Exception exception)
     {
         ArgumentNullException.ThrowIfNull(exception);
         if (exception is IArtifactStorageOperationalException classified)
-            return classified.IsRetryable ? LegacyProviderExceptionDisposition.Retryable : LegacyProviderExceptionDisposition.Rejected;
+            return Classify(new ArtifactStorageError(classified.Code, "Provider operational failure.", classified.IsRetryable));
         if (exception is UnauthorizedAccessException or NotSupportedException)
             return LegacyProviderExceptionDisposition.Rejected;
         if (exception is InvalidDataException)
@@ -75,16 +92,18 @@ internal sealed class LegacyPlacementPassBudget
     }
 
     public long ReadBytes { get; private set; }
+    public int ProcessedRows { get; private set; }
     public bool OversizedItem { get; private set; }
     public LegacyPlacementAdoptionYieldReason YieldReason { get; private set; }
 
-    public bool TryStart(long expectedBytes)
+    public bool TryStart(long expectedBytes, bool readsPayload = true)
     {
-        var cost = expectedBytes == long.MaxValue ? long.MaxValue : checked(expectedBytes + 1);
+        var cost = !readsPayload ? 0 : expectedBytes == long.MaxValue ? long.MaxValue : checked(expectedBytes + 1);
         if (!_started)
         {
             _started = true;
             OversizedItem = cost > _byteBudget - Math.Min(ReadBytes, _byteBudget);
+            ProcessedRows++;
             return true;
         }
         if (OversizedItem || cost > _byteBudget - Math.Min(ReadBytes, _byteBudget))
@@ -97,6 +116,7 @@ internal sealed class LegacyPlacementPassBudget
             YieldReason = LegacyPlacementAdoptionYieldReason.TimeBudget;
             return false;
         }
+        ProcessedRows++;
         return true;
     }
 

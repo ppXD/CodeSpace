@@ -45,6 +45,7 @@ public class FailureTaxonomyTests
         "AgentStalledException",
         "MaterializationHaltException",
         "LegacyProviderRejectedException",
+        "LegacyProviderLeasePoisonedException",
     };
 
     [Fact]

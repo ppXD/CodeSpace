@@ -4,7 +4,7 @@
 -- original compact summary; new arcs are version 1. Every completed/aborted claimed pass writes at most one
 -- secret-free row keyed by (arc, claim token), in the same transaction that applies its counter delta. Claim renewal
 -- and bounded unclaimed Cleaning deliberately write no audit row. No object key, locator, provider message, exception text, or credential appears
--- here. Terminal tombstone deletion after the existing 30-day retention cascades the bounded per-arc audit.
+-- here. After the existing 30-day retention, audit rows drain in bounded calls before the RESTRICTed tombstone.
 --
 -- Deployment cost: ADD COLUMN takes a brief metadata lock and the new table/index are empty. PostgreSQL 11+ stores
 -- constant defaults without rewriting the arc table. The UPDATE only touches a presently claimed arc, if one exists.
@@ -50,7 +50,7 @@ ALTER TABLE legacy_placement_adoption_arc
         AND (completed_passes = 0) = (last_settled_claim_token IS NULL));
 
 CREATE TABLE legacy_placement_adoption_pass_audit (
-    arc_id                    UUID        NOT NULL REFERENCES legacy_placement_adoption_arc(id) ON DELETE CASCADE,
+    arc_id                    UUID        NOT NULL REFERENCES legacy_placement_adoption_arc(id) ON DELETE RESTRICT,
     claim_token               UUID        NOT NULL,
     phase                     VARCHAR(16) NOT NULL,
     outcome                   VARCHAR(16) NOT NULL,
@@ -97,9 +97,12 @@ BEGIN
         RAISE EXCEPTION 'legacy adoption pass audit is append-only (arc=%, claim=%).', OLD.arc_id, OLD.claim_token;
     END IF;
     IF TG_OP = 'DELETE' THEN
-        IF pg_trigger_depth() <= 1 THEN
-            RAISE EXCEPTION 'legacy adoption pass audit may leave only through its parent tombstone cascade (arc=%, claim=%).',
-                OLD.arc_id, OLD.claim_token;
+        IF NOT EXISTS (
+            SELECT 1 FROM legacy_placement_adoption_arc arc
+            WHERE arc.id = OLD.arc_id AND arc.state IN ('Completed', 'Expired', 'Stale')
+              AND arc.claim_token IS NULL AND arc.completed_at < clock_timestamp() - INTERVAL '30 days'
+        ) THEN
+            RAISE EXCEPTION 'legacy adoption pass audit may be drained only after its parent tombstone retention (arc=%, claim=%).', OLD.arc_id, OLD.claim_token;
         END IF;
     END IF;
     RETURN COALESCE(NEW, OLD);
@@ -158,44 +161,71 @@ CREATE OR REPLACE FUNCTION legacy_placement_adoption_require_audit_shape() RETUR
 DECLARE
     target_arc_id UUID;
     arc legacy_placement_adoption_arc%ROWTYPE;
-    totals RECORD;
+    audit legacy_placement_adoption_pass_audit%ROWTYPE;
     progress JSONB;
 BEGIN
     target_arc_id := COALESCE((to_jsonb(NEW) ->> 'arc_id')::UUID, (to_jsonb(NEW) ->> 'id')::UUID);
     SELECT * INTO arc FROM legacy_placement_adoption_arc WHERE id = target_arc_id;
     IF NOT FOUND OR arc.audit_version = 0 THEN RETURN NULL; END IF;
 
-    SELECT COUNT(*) AS passes,
-           COALESCE(SUM(evidence_examined_delta), 0) AS evidence_examined,
-           COALESCE(SUM(evidence_resolved_delta), 0) AS evidence_resolved,
-           COALESCE(SUM(evidence_confirmed_delta), 0) AS evidence_confirmed,
-           COALESCE(SUM(mint_examined_delta), 0) AS mint_examined,
-           COALESCE(SUM(available_delta), 0) AS available,
-           COALESCE(SUM(missing_delta), 0) AS missing,
-           COALESCE(SUM(corrupt_delta), 0) AS corrupt,
-           COALESCE(SUM(already_recorded_delta), 0) AS already_recorded,
-           COALESCE(SUM(conflicts_delta), 0) AS conflicts,
-           COALESCE(SUM(retryable_delta), 0) AS retryable,
-           COALESCE(SUM(read_bytes_delta), 0) AS read_bytes,
-           COUNT(*) FILTER (WHERE yield_reason IN ('ByteBudget', 'TimeBudget')) AS budget_yields,
-           COUNT(*) FILTER (WHERE oversized_item) AS oversized_passes
-    INTO totals FROM legacy_placement_adoption_pass_audit audit WHERE audit.arc_id = arc.id;
-
-    IF (arc.completed_passes, arc.evidence_examined, arc.evidence_resolved, arc.evidence_confirmed,
-        arc.mint_examined, arc.available, arc.missing, arc.corrupt, arc.already_recorded, arc.conflicts,
-        arc.retryable, arc.read_bytes, arc.budget_yields, arc.oversized_passes)
-       IS DISTINCT FROM
-       (totals.passes, totals.evidence_examined, totals.evidence_resolved, totals.evidence_confirmed,
-        totals.mint_examined, totals.available, totals.missing, totals.corrupt, totals.already_recorded, totals.conflicts,
-        totals.retryable, totals.read_bytes, totals.budget_yields, totals.oversized_passes) THEN
-        RAISE EXCEPTION 'legacy adoption cumulative counters must equal append-only pass audit (arc=%).', arc.id;
+    IF TG_TABLE_NAME = 'legacy_placement_adoption_pass_audit' THEN
+        IF arc.last_settled_claim_token IS DISTINCT FROM NEW.claim_token OR arc.completed_passes = 0 THEN
+            RAISE EXCEPTION 'legacy adoption pass audit must be the pass atomically settled by its parent (arc=%, claim=%).', NEW.arc_id, NEW.claim_token;
+        END IF;
+        RETURN NULL;
     END IF;
-    IF arc.completed_passes > 0 AND NOT EXISTS (
-        SELECT 1 FROM legacy_placement_adoption_pass_audit audit
-        WHERE audit.arc_id = arc.id AND audit.claim_token = arc.last_settled_claim_token
-    ) THEN
-        RAISE EXCEPTION 'legacy adoption last settled claim must identify a durable pass audit (arc=%, claim=%).',
-            arc.id, arc.last_settled_claim_token;
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.completed_passes <> 0 OR NEW.last_settled_claim_token IS NOT NULL THEN
+            RAISE EXCEPTION 'legacy adoption arc cannot start with settled audit state (arc=%).', NEW.id;
+        END IF;
+        RETURN NULL;
+    END IF;
+
+    IF NEW.completed_passes = OLD.completed_passes THEN
+        IF (NEW.evidence_examined, NEW.evidence_resolved, NEW.evidence_confirmed, NEW.mint_examined,
+            NEW.available, NEW.missing, NEW.corrupt, NEW.already_recorded, NEW.conflicts, NEW.retryable,
+            NEW.read_bytes, NEW.budget_yields, NEW.oversized_passes, NEW.last_settled_claim_token)
+           IS DISTINCT FROM
+           (OLD.evidence_examined, OLD.evidence_resolved, OLD.evidence_confirmed, OLD.mint_examined,
+            OLD.available, OLD.missing, OLD.corrupt, OLD.already_recorded, OLD.conflicts, OLD.retryable,
+            OLD.read_bytes, OLD.budget_yields, OLD.oversized_passes, OLD.last_settled_claim_token) THEN
+            RAISE EXCEPTION 'legacy adoption counters cannot change without exactly one pass settlement (arc=%).', NEW.id;
+        END IF;
+    ELSIF NEW.completed_passes = OLD.completed_passes + 1 THEN
+        SELECT * INTO audit FROM legacy_placement_adoption_pass_audit
+        WHERE arc_id = OLD.id AND claim_token = OLD.claim_token;
+        IF NOT FOUND OR NEW.last_settled_claim_token IS DISTINCT FROM OLD.claim_token
+           OR audit.phase IS DISTINCT FROM OLD.phase OR audit.start_position IS DISTINCT FROM OLD.current_position
+           OR audit.started_at IS DISTINCT FROM OLD.claim_started_at THEN
+            RAISE EXCEPTION 'legacy adoption settlement must match the exact held claim, phase, position, and start time (arc=%).', OLD.id;
+        END IF;
+        IF (NEW.evidence_examined - OLD.evidence_examined, NEW.evidence_resolved - OLD.evidence_resolved,
+            NEW.evidence_confirmed - OLD.evidence_confirmed, NEW.mint_examined - OLD.mint_examined,
+            NEW.available - OLD.available, NEW.missing - OLD.missing, NEW.corrupt - OLD.corrupt,
+            NEW.already_recorded - OLD.already_recorded, NEW.conflicts - OLD.conflicts,
+            NEW.retryable - OLD.retryable, NEW.read_bytes - OLD.read_bytes,
+            NEW.budget_yields - OLD.budget_yields, NEW.oversized_passes - OLD.oversized_passes)
+           IS DISTINCT FROM
+           (audit.evidence_examined_delta, audit.evidence_resolved_delta, audit.evidence_confirmed_delta,
+            audit.mint_examined_delta, audit.available_delta, audit.missing_delta, audit.corrupt_delta,
+            audit.already_recorded_delta, audit.conflicts_delta, audit.retryable_delta, audit.read_bytes_delta,
+            CASE WHEN audit.yield_reason IN ('ByteBudget', 'TimeBudget') THEN 1 ELSE 0 END,
+            CASE WHEN audit.oversized_item THEN 1 ELSE 0 END) THEN
+            RAISE EXCEPTION 'legacy adoption cumulative delta must exactly equal its one pass audit (arc=%, claim=%).', OLD.id, OLD.claim_token;
+        END IF;
+        IF audit.end_position < OLD.current_position
+           OR audit.outcome = 'Advanced' AND audit.failure_code <> 'None'
+           OR audit.outcome = 'Retryable' AND audit.failure_code <> 'ProviderTransient'
+           OR audit.outcome IN ('Retryable', 'Interrupted') AND NEW.current_position IS DISTINCT FROM OLD.current_position
+           OR audit.outcome = 'Advanced' AND NOT (
+                NEW.state IN ('Cleaning', 'Completed', 'Expired', 'Stale')
+                OR NEW.phase = OLD.phase AND NEW.current_position = audit.end_position
+                OR OLD.phase = 'Evidence' AND NEW.phase = 'Minting' AND NEW.current_position = 0)
+           OR audit.outcome = 'Aborted' AND NEW.state NOT IN ('Cleaning', 'Completed', 'Expired', 'Stale') THEN
+            RAISE EXCEPTION 'legacy adoption pass outcome is inconsistent with its lifecycle transition (arc=%, claim=%).', OLD.id, OLD.claim_token;
+        END IF;
+    ELSE
+        RAISE EXCEPTION 'legacy adoption completed pass count must advance by exactly one settlement (arc=%).', NEW.id;
     END IF;
 
     IF arc.final_summary_jsonb IS NOT NULL AND arc.state IN ('Cleaning', 'Completed', 'Expired', 'Stale') THEN
@@ -234,4 +264,4 @@ CREATE CONSTRAINT TRIGGER legacy_placement_adoption_pass_require_audit_shape
     FOR EACH ROW EXECUTE FUNCTION legacy_placement_adoption_require_audit_shape();
 
 COMMENT ON TABLE legacy_placement_adoption_pass_audit IS
-    'Secret-free append-only result of one claimed provider pass. One PK row per claim; renewals are folded into that pass. Unclaimed Cleaning is not audited. Deleted only with its retained terminal arc.';
+    'Secret-free append-only result of one claimed provider pass. One PK row per claim; renewals are folded into that pass. Unclaimed Cleaning is not audited. After 30 days terminal retention, rows drain in bounded batches before the RESTRICTed parent tombstone is deleted.';

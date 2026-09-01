@@ -40,6 +40,7 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
     public async Task<LegacyPlacementAdoptionSummary> AdoptAsync(LegacyPlacementAdoptionRequest request, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
+        ValidateRuntimeIntervals();
         if (request.TeamId == Guid.Empty || request.ActorId == Guid.Empty || request.ProfileId == Guid.Empty)
             throw new ArgumentException("Legacy placement adoption requires persisted team, actor, and profile identities.", nameof(request));
 
@@ -72,11 +73,9 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
         if (claim.Summary != null) return claim.Summary;
         if (claim.Claim == null) return Current(target, claim.Cursor ?? arc.Cursor, claim.Refusal);
         var budget = new LegacyPlacementPassBudget(request.ByteBudget, request.TimeBudget, _runtime.Clock);
-        var examined = 0;
         try
         {
             var page = await PageAsync(claim.Claim.Cursor, Math.Clamp(request.BatchSize, 1, LegacyPlacementAdoptionLimits.MaxRowsPerPass), cancellationToken).ConfigureAwait(false);
-            examined = page.Rows.Count;
             if (page.Rows.Count == 0)
                 return await FinishEmptyPageAsync(request, target, claim.Claim, cancellationToken).ConfigureAwait(false);
 
@@ -122,14 +121,25 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
             return await AbortAsync(new AbortRequest
             {
                 Target = target, Claim = claim.Claim, Refusal = LegacyPlacementAdoptionRefusalValue.ProviderRejected,
-                Examined = examined,
+                Examined = budget.ProcessedRows,
             }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (LegacyProviderLeasePoisonedException)
+        {
+            return await RetryClaimAsync(target, claim.Claim, budget.ProcessedRows, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception exception)
         {
-            await ReleaseAfterFailureAsync(claim.Claim, target, FailureCode(exception, cancellationToken)).ConfigureAwait(false);
+            await ReleaseAfterFailureAsync(claim.Claim, target, budget, FailureCode(exception, cancellationToken)).ConfigureAwait(false);
             throw;
         }
+    }
+
+    private void ValidateRuntimeIntervals()
+    {
+        if (_runtime.ClaimRenewalInterval <= TimeSpan.Zero || _runtime.ProviderOperationTimeout <= TimeSpan.Zero || _runtime.ClaimTtl <= TimeSpan.Zero
+            || _runtime.ClaimRenewalInterval >= _runtime.ProviderOperationTimeout || _runtime.ProviderOperationTimeout >= _runtime.ClaimTtl)
+            throw new InvalidOperationException("Legacy adoption requires positive runtime intervals ordered as claim renewal < provider operation timeout < claim TTL.");
     }
 
     private async Task<LegacyPlacementAdoptionSummary?> ReplayTerminalCursorAsync(LegacyPlacementAdoptionRequest request, CancellationToken cancellationToken)
@@ -179,13 +189,16 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
             : Current(liveTarget, resolution.Cursor, resolution.Refusal);
     }
 
-    private async Task ReleaseAfterFailureAsync(ArcClaim claim, AdoptionTarget target, LegacyPlacementAdoptionPassFailureCode failureCode)
+    private async Task ReleaseAfterFailureAsync(ArcClaim claim, AdoptionTarget target, LegacyPlacementPassBudget? budget, LegacyPlacementAdoptionPassFailureCode failureCode)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         var settlement = new PassSettlement
         {
             Phase = Store(Phase(claim.Cursor.Mode)), Outcome = LegacyPlacementAdoptionPassOutcome.Interrupted,
-            FailureCode = failureCode, Summary = new SummaryInput { Target = target, Phase = Phase(claim.Cursor.Mode) },
+            FailureCode = failureCode, Summary = new SummaryInput
+            {
+                Target = target, Phase = Phase(claim.Cursor.Mode), Examined = budget?.ProcessedRows ?? 0, ReadBytes = budget?.ReadBytes ?? 0,
+            },
             EndPosition = claim.Cursor.Position,
         };
         try { await ReleaseClaimAsync(claim, settlement, timeout.Token).ConfigureAwait(false); }
@@ -211,7 +224,7 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
         }
         catch (Exception exception)
         {
-            await ReleaseAfterFailureAsync(claim.Claim, target, FailureCode(exception, cancellationToken)).ConfigureAwait(false);
+            await ReleaseAfterFailureAsync(claim.Claim, target, null, FailureCode(exception, cancellationToken)).ConfigureAwait(false);
             throw;
         }
     }
@@ -328,6 +341,13 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
             Counts = counts, DestinationConfirmed = true, Admissible = admissible, ReadBytes = pageObserved.ReadBytes,
             YieldReason = Wire(pageObserved.YieldReason), OversizedItem = pageObserved.OversizedItem,
         };
+        if (pageObserved.ResolutionMissing)
+            return await AbortAsync(new AbortRequest
+            {
+                Target = request.Target, Claim = request.Claim,
+                Refusal = LegacyPlacementAdoptionRefusalValue.AdmissionEvidenceMissing,
+                Examined = page.Rows.Count, Audit = input,
+            }, cancellationToken).ConfigureAwait(false);
         if (counts.Retryable > 0)
         {
             var retryInput = input with { YieldReason = LegacyPlacementAdoptionYieldReasonValue.ProviderRetryable };
@@ -385,9 +405,11 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
             }
             if (!head.IsSuccess)
             {
+                var disposition = LegacyProviderExceptionClassifier.Classify(head.Error!);
+                if (disposition == LegacyProviderExceptionDisposition.Corrupt) continue;
                 var destinationLive = await DestinationAnswersAsync(request.Lease, request.Claim, cancellationToken).ConfigureAwait(false);
                 if (!destinationLive) destinationUnavailable = true;
-                if (!destinationLive || head.Error?.Code != ArtifactStorageErrorCode.Missing) retryable++;
+                if (!destinationLive || disposition != LegacyProviderExceptionDisposition.Missing) retryable++;
                 continue;
             }
             if (!Served(head, key))
@@ -449,57 +471,55 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
                 : WitnessVerdict.Retryable;
         }
         if (head?.IsSuccess == true) return WitnessVerdict.Retryable;
+        if (head?.Error is { } witnessError
+            && LegacyProviderExceptionClassifier.Classify(witnessError) == LegacyProviderExceptionDisposition.Corrupt)
+            return WitnessVerdict.Missing;
         var destinationLive = await DestinationAnswersAsync(request.Lease, request.Claim, cancellationToken).ConfigureAwait(false);
         if (!destinationLive) return WitnessVerdict.DestinationUnavailable;
-        return head?.Error?.Code == ArtifactStorageErrorCode.Missing ? WitnessVerdict.Missing : WitnessVerdict.Retryable;
+        return head?.Error is { } error && LegacyProviderExceptionClassifier.Classify(error) == LegacyProviderExceptionDisposition.Missing
+            ? WitnessVerdict.Missing : WitnessVerdict.Retryable;
     }
 
     private async Task<MintObservationResult> ObserveAsync(MintRequest request, CancellationToken cancellationToken)
     {
         var processed = new List<LegacyRow>(request.Page.Rows.Count);
+        var groups = new Dictionary<string, MintLogicalGroup>(StringComparer.Ordinal);
+        var resolved = 0;
+        var resolutionMissing = false;
+        var destinationUnanswered = false;
         foreach (var row in request.Page.Rows)
         {
-            if (!request.Budget.TryStart(row.SizeBytes)) break;
-            processed.Add(row);
-        }
-        var page = new LegacyPage(processed, processed.Count < request.Page.Rows.Count || request.Page.HasMore);
-        var resolved = new List<ResolvedRow>(processed.Count);
-        foreach (var row in processed)
-        {
             var key = Resolve(request.Layout, request.Configuration, row);
-            if (key != null) resolved.Add(new ResolvedRow(row, key, Convert.FromHexString(row.Sha256)));
-        }
-
-        var counts = default(AdoptionCounts);
-        var candidates = new List<ResolvedRow>(resolved.Count);
-        foreach (var group in resolved.GroupBy(value => value.ObjectKey, StringComparer.Ordinal))
-        {
-            var first = group.First();
-            var duplicates = group.Skip(1).ToList();
-            if (duplicates.Any(value => !SameIdentity(first, value)))
+            var duplicate = key != null && groups.ContainsKey(key);
+            if (!request.Budget.TryStart(row.SizeBytes, readsPayload: !duplicate)) break;
+            processed.Add(row);
+            if (key == null)
             {
-                counts += AdoptionCounts.Conflict(group.Count());
+                resolutionMissing = true;
                 continue;
             }
 
-            candidates.Add(first);
-        }
+            resolved++;
+            var candidate = new ResolvedRow(row, key, Convert.FromHexString(row.Sha256));
+            if (groups.TryGetValue(key, out var prior))
+            {
+                prior.Add(candidate);
+                continue;
+            }
 
-        var existing = await ExistingAsync(request.Request.TeamId, request.Target.RevisionId, candidates.Select(value => value.ObjectKey).ToList(), cancellationToken).ConfigureAwait(false);
-        var observations = new List<LegacyObservation>();
-        var confirmed = 0;
-        var destinationUnanswered = false;
-        foreach (var candidate in candidates)
-        {
+            var group = new MintLogicalGroup(candidate);
+            groups.Add(key, group);
             await RenewClaimIfDueAsync(request.Claim, cancellationToken).ConfigureAwait(false);
+            var existing = await ExistingAsync(request.Request.TeamId, request.Target.RevisionId, [candidate.ObjectKey], cancellationToken).ConfigureAwait(false);
             if (existing.TryGetValue(candidate.ObjectKey, out var recorded))
             {
-                counts += Same(recorded, candidate) ? AdoptionCounts.Recorded() : AdoptionCounts.Conflict();
+                group.Recorded = Same(recorded, candidate);
+                group.Conflicted = !group.Recorded;
                 continue;
             }
             if (destinationUnanswered)
             {
-                counts += AdoptionCounts.Retry();
+                group.Retryable = true;
                 continue;
             }
 
@@ -507,38 +527,54 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
             if (head == null)
             {
                 destinationUnanswered = !await DestinationAnswersAsync(request.Lease, request.Claim, cancellationToken).ConfigureAwait(false);
-                counts += AdoptionCounts.Retry();
+                group.Retryable = true;
                 continue;
             }
             if (!head.IsSuccess)
             {
+                var disposition = LegacyProviderExceptionClassifier.Classify(head.Error!);
+                if (disposition == LegacyProviderExceptionDisposition.Corrupt)
+                {
+                    group.Observation = LegacyObservation.ProviderCorrupt(candidate);
+                    continue;
+                }
                 var destinationLive = await DestinationAnswersAsync(request.Lease, request.Claim, cancellationToken).ConfigureAwait(false);
                 if (!destinationLive) destinationUnanswered = true;
-                if (destinationLive && head.Error?.Code == ArtifactStorageErrorCode.Missing)
-                    observations.Add(LegacyObservation.Missing(candidate));
+                if (destinationLive && disposition == LegacyProviderExceptionDisposition.Missing)
+                    group.Observation = LegacyObservation.Missing(candidate);
                 else
-                    counts += AdoptionCounts.Retry();
+                    group.Retryable = true;
                 continue;
             }
             if (!Served(head, candidate.ObjectKey))
             {
-                counts += AdoptionCounts.Retry();
+                group.Retryable = true;
                 continue;
             }
 
-            confirmed++;
+            group.Confirmed = true;
             var content = await ReadAndHashAsync(new ReadHashRequest
             {
                 Lease = request.Lease, Candidate = candidate, Head = head.Metadata!,
                 Capabilities = request.Lease.Driver.Capabilities, Claim = request.Claim, Budget = request.Budget,
             }, cancellationToken).ConfigureAwait(false);
-            if (content == null) counts += AdoptionCounts.Retry();
-            else observations.Add(content);
+            if (content == null) group.Retryable = true;
+            else group.Observation = content;
         }
 
+        var counts = default(AdoptionCounts);
+        var observations = new List<LegacyObservation>();
+        var confirmed = 0;
+        foreach (var group in groups.Values)
+        {
+            counts += group.Counts;
+            if (group.Confirmed && !group.Conflicted) confirmed += group.Count;
+            if (!group.Conflicted && !group.Retryable && group.Observation != null) observations.Add(group.Observation);
+        }
+        var page = new LegacyPage(processed, processed.Count < request.Page.Rows.Count || request.Page.HasMore);
         request.Budget.Finish(page.HasMore);
-        return new MintObservationResult(page, resolved.Count, confirmed, observations, counts, request.Budget.ReadBytes,
-            request.Budget.YieldReason, request.Budget.OversizedItem);
+        return new MintObservationResult(page, resolved, confirmed, observations, counts, resolutionMissing,
+            request.Budget.ReadBytes, request.Budget.YieldReason, request.Budget.OversizedItem);
     }
 
     private async Task<LegacyObservation?> ReadAndHashAsync(ReadHashRequest request, CancellationToken cancellationToken)
@@ -554,7 +590,8 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
                 ExpectedETag = durableEtag,
                 ExpectedVersion = durableVersion,
             }, token), cancellationToken).ConfigureAwait(false);
-            if (!invocation.Succeeded) return null;
+            if (!invocation.Succeeded)
+                return await ReadFailureAsync(request, invocation.Failure, cancellationToken).ConfigureAwait(false);
             read = invocation.Value;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -566,7 +603,8 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
             return null;
         }
 
-        if (!read.IsSuccess) return null;
+        if (!read.IsSuccess)
+            return await ReadFailureAsync(request, LegacyProviderExceptionClassifier.Classify(read.Error!), cancellationToken).ConfigureAwait(false);
         var metadata = read.Metadata;
         HashObservation hash;
         try
@@ -599,6 +637,16 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
         return exact
             ? LegacyObservation.Available(request.Candidate, hash, durableEtag, durableVersion)
             : LegacyObservation.Corrupt(request.Candidate, hash, durableEtag, durableVersion);
+    }
+
+    private async Task<LegacyObservation?> ReadFailureAsync(ReadHashRequest request, LegacyProviderExceptionDisposition? disposition, CancellationToken cancellationToken)
+    {
+        if (disposition == LegacyProviderExceptionDisposition.Rejected) throw new LegacyProviderRejectedException();
+        if (disposition == LegacyProviderExceptionDisposition.Corrupt)
+            return LegacyObservation.ProviderCorrupt(request.Candidate);
+        if (disposition != LegacyProviderExceptionDisposition.Missing) return null;
+        return await DestinationAnswersAsync(request.Lease, request.Claim, cancellationToken).ConfigureAwait(false)
+            ? LegacyObservation.Missing(request.Candidate) : null;
     }
 
     private async Task<CommitResult> CommitAsync(CommitRequest request, CancellationToken cancellationToken)
@@ -896,9 +944,17 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await TakeTeamArcLockAsync(db, request.TeamId, cancellationToken).ConfigureAwait(false);
         var terminalCutoff = await DatabaseClockAsync(db, cancellationToken).ConfigureAwait(false) - TerminalRetention;
+        var retainedTerminalIds = db.LegacyPlacementAdoptionArc
+            .Where(value => (value.State == LegacyPlacementAdoptionArcState.Completed
+                    || value.State == LegacyPlacementAdoptionArcState.Expired || value.State == LegacyPlacementAdoptionArcState.Stale)
+                && value.CompletedAt < terminalCutoff)
+            .Select(value => value.Id);
+        await db.LegacyPlacementAdoptionPassAudit.Where(value => retainedTerminalIds.Contains(value.ArcId))
+            .OrderBy(value => value.CompletedAt).ThenBy(value => value.ArcId).ThenBy(value => value.ClaimToken)
+            .Take(TerminalCleanupBatch).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
         await db.LegacyPlacementAdoptionArc.Where(value => (value.State == LegacyPlacementAdoptionArcState.Completed
                 || value.State == LegacyPlacementAdoptionArcState.Expired || value.State == LegacyPlacementAdoptionArcState.Stale)
-            && value.CompletedAt < terminalCutoff)
+            && value.CompletedAt < terminalCutoff && !value.PassAudits.Any())
             .OrderBy(value => value.CompletedAt).ThenBy(value => value.Id).Take(TerminalCleanupBatch)
             .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
 
@@ -1480,14 +1536,33 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
     {
         var invocation = await InvokeProviderAsync(lease, claim,
             token => lease.Driver.HeadAsync(new ArtifactStorageHeadRequest(objectKey), token), cancellationToken).ConfigureAwait(false);
-        return invocation.Succeeded ? invocation.Value : null;
+        if (invocation.Succeeded)
+        {
+            var error = invocation.Value.Error;
+            if (error != null && LegacyProviderExceptionClassifier.Classify(error) == LegacyProviderExceptionDisposition.Rejected)
+                throw new LegacyProviderRejectedException();
+            return invocation.Value;
+        }
+        return invocation.Failure switch
+        {
+            LegacyProviderExceptionDisposition.Missing => ArtifactStorageHeadResult.Failed(new ArtifactStorageError(ArtifactStorageErrorCode.Missing, "Provider reported that the object is missing.")),
+            LegacyProviderExceptionDisposition.Corrupt => ArtifactStorageHeadResult.Failed(new ArtifactStorageError(ArtifactStorageErrorCode.Corrupt, "Provider reported corrupt object metadata.")),
+            _ => null,
+        };
     }
 
     private async Task<bool> DestinationAnswersAsync(StorageRuntimeDriverLease lease, ArcClaim claim, CancellationToken cancellationToken)
     {
         var invocation = await InvokeProviderAsync(lease, claim,
             token => lease.Driver.ProbeAsync(new ArtifactStorageProbeRequest(), token), cancellationToken).ConfigureAwait(false);
-        return invocation.Succeeded && invocation.Value.Status is ArtifactStorageProbeStatus.Available or ArtifactStorageProbeStatus.ReadOnly;
+        if (!invocation.Succeeded) return false;
+        if (invocation.Value.Error is { } error)
+        {
+            var disposition = LegacyProviderExceptionClassifier.Classify(error);
+            if (disposition == LegacyProviderExceptionDisposition.Rejected) throw new LegacyProviderRejectedException();
+            return false;
+        }
+        return invocation.Value.Status is ArtifactStorageProbeStatus.Available or ArtifactStorageProbeStatus.ReadOnly;
     }
 
     private async Task<HashObservation?> HashAsync(Stream content, long expectedSize, StorageRuntimeDriverLease lease,
@@ -1535,7 +1610,7 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             if (pending != null) { abandoned = true; lease.Abandon(pending); }
-            return ProviderInvocation<T>.Retry();
+            throw new LegacyProviderLeasePoisonedException();
         }
         catch (OperationCanceledException)
         {
@@ -1547,6 +1622,8 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
             var disposition = LegacyProviderExceptionClassifier.Classify(exception);
             if (disposition == LegacyProviderExceptionDisposition.Retryable) return ProviderInvocation<T>.Retry();
             if (disposition == LegacyProviderExceptionDisposition.Rejected) throw new LegacyProviderRejectedException();
+            if (disposition is LegacyProviderExceptionDisposition.Missing or LegacyProviderExceptionDisposition.Corrupt)
+                return ProviderInvocation<T>.Conclusive(disposition);
             throw;
         }
         finally
@@ -1856,8 +1933,38 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
     }
 
     private sealed record MintObservationResult(LegacyPage Page, int Resolved, int Confirmed,
-        IReadOnlyList<LegacyObservation> ToCommit, AdoptionCounts Counts, long ReadBytes,
+        IReadOnlyList<LegacyObservation> ToCommit, AdoptionCounts Counts, bool ResolutionMissing, long ReadBytes,
         LegacyPlacementAdoptionYieldReason YieldReason, bool OversizedItem);
+    private sealed class MintLogicalGroup
+    {
+        public MintLogicalGroup(ResolvedRow first) => First = first;
+
+        public ResolvedRow First { get; }
+        public int Count { get; private set; } = 1;
+        public bool Recorded { get; set; }
+        public bool Conflicted { get; set; }
+        public bool Retryable { get; set; }
+        public bool Confirmed { get; set; }
+        public LegacyObservation? Observation { get; set; }
+
+        public AdoptionCounts Counts
+        {
+            get
+            {
+                if (Conflicted) return AdoptionCounts.Conflict(Count);
+                if (Retryable) return AdoptionCounts.Retry(Count);
+                if (Recorded) return AdoptionCounts.Recorded(Count);
+                if (Observation == null) return AdoptionCounts.Conflict(Count);
+                return AdoptionCounts.Recorded(Count - 1);
+            }
+        }
+
+        public void Add(ResolvedRow candidate)
+        {
+            Count++;
+            if (!SameIdentity(First, candidate)) Conflicted = true;
+        }
+    }
     private sealed class CommitRequest
     {
         public required Guid TeamId { get; init; }
@@ -1906,10 +2013,11 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
         LegacyPlacementAdoptionRefusalValue Refusal, LegacyPlacementAdoptionSummary? TerminalSummary,
         LegacyPlacementAdoptionProgress? Progress = null);
     private sealed record ClaimRelease(LegacyPlacementAdoptionCursor? Cursor, LegacyPlacementAdoptionProgress? Progress);
-    private sealed record ProviderInvocation<T>(bool Succeeded, T Value)
+    private sealed record ProviderInvocation<T>(bool Succeeded, T Value, LegacyProviderExceptionDisposition? Failure)
     {
-        public static ProviderInvocation<T> Success(T value) => new(true, value);
-        public static ProviderInvocation<T> Retry() => new(false, default!);
+        public static ProviderInvocation<T> Success(T value) => new(true, value, null);
+        public static ProviderInvocation<T> Retry() => new(false, default!, LegacyProviderExceptionDisposition.Retryable);
+        public static ProviderInvocation<T> Conclusive(LegacyProviderExceptionDisposition failure) => new(false, default!, failure);
     }
 
     private enum WitnessVerdict
@@ -1953,6 +2061,12 @@ public sealed class LegacyPlacementAdopter : ILegacyPlacementAdopter
                 ErrorMessage = hash.ExceededExpected
                     ? "The legacy object exceeded the immutable artifact size; reading stopped after one extra byte."
                     : "The legacy object's streamed bytes do not match the immutable artifact identity.",
+            };
+        public static LegacyObservation ProviderCorrupt(ResolvedRow row) =>
+            new()
+            {
+                Candidate = row, State = ArtifactLocationState.Corrupt, ErrorCode = "LegacyProviderReportedCorrupt",
+                ErrorMessage = "The provider reported that the legacy object failed its integrity contract.",
             };
     }
 
