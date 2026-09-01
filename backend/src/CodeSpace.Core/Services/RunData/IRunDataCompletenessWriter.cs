@@ -98,8 +98,18 @@ public interface IRunDataAbandonedExpectationWriter
     Task<bool> UnstateAbandonedExpectationAsync(RunDataAbandonedExpectation abandoned, CancellationToken cancellationToken);
 }
 
+/// <summary>
+/// Vector form for a producer whose one durable batch owns several facets. It is deliberately a sibling rather than
+/// widening every test double of <see cref="IRunDataCompletenessWriter"/>: production folds the vector under one
+/// rendezvous and one database round trip, while a focused double can keep exercising one facet at a time.
+/// </summary>
+public interface IRunDataCompletenessBatchWriter
+{
+    Task<bool> AdvanceBatchAsync(IReadOnlyList<RunDataFacetAdvance> advances, CancellationToken cancellationToken);
+}
+
 /// <inheritdoc cref="IRunDataCompletenessWriter"/>
-public sealed class RunDataCompletenessWriter : IRunDataCompletenessWriter, IRunDataAbandonedExpectationWriter, IScopedDependency
+public sealed class RunDataCompletenessWriter : IRunDataCompletenessWriter, IRunDataCompletenessBatchWriter, IRunDataAbandonedExpectationWriter, IScopedDependency
 {
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<RunDataCompletenessWriter> _logger;
@@ -117,8 +127,21 @@ public sealed class RunDataCompletenessWriter : IRunDataCompletenessWriter, IRun
 
     public async Task<bool> AdvanceAsync(RunDataFacetAdvance advance, CancellationToken cancellationToken) =>
         await ContainedAsync(LostClaimSubject.Of(advance.WorkflowRunId), advance.Facet, async db => await db.Database.ExecuteSqlAsync(
-            $"SELECT workflow_run_data_manifest_advance({advance.TeamId}, {advance.WorkflowRunId}, {advance.Facet}, {advance.Expected}, {advance.Present}, {advance.Masked}, {WorkflowRunDataContract.CurrentVersion})",
+            $"SELECT workflow_run_data_manifest_advance_covered({advance.TeamId}, {advance.WorkflowRunId}, {advance.Facet}, {advance.Expected}, {advance.Present}, {advance.Masked}, {RunDataManifestCoverage.RequiredFacets.ToArray()}, {WorkflowRunDataContract.CurrentVersion})",
             cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+
+    public async Task<bool> AdvanceBatchAsync(IReadOnlyList<RunDataFacetAdvance> advances, CancellationToken cancellationToken)
+    {
+        if (advances.Count == 0) return true;
+
+        var first = advances[0];
+        if (advances.Any(advance => advance.TeamId != first.TeamId || advance.WorkflowRunId != first.WorkflowRunId))
+            throw new ArgumentException("A completeness batch belongs to exactly one tenant-bound workflow run.", nameof(advances));
+
+        return await ContainedAsync(LostClaimSubject.Of(first.WorkflowRunId), WorkflowRunDataOwnerKinds.DataManifest, async db => await db.Database.ExecuteSqlAsync(
+            $"SELECT workflow_run_data_manifest_advance_covered_batch({first.TeamId}, {first.WorkflowRunId}, {advances.Select(advance => advance.Facet).ToArray()}, {advances.Select(advance => advance.Expected).ToArray()}, {advances.Select(advance => advance.Present).ToArray()}, {advances.Select(advance => advance.Masked).ToArray()}, {RunDataManifestCoverage.RequiredFacets.ToArray()}, {WorkflowRunDataContract.CurrentVersion})",
+            cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+    }
 
     public async Task<bool> NoticeAsync(WorkflowRunCaptureGap gap, CancellationToken cancellationToken) =>
         await ContainedAsync(LostClaimSubject.Of(gap), gap.SubjectKind, async db =>

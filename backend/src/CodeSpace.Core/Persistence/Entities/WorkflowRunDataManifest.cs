@@ -49,11 +49,14 @@ namespace CodeSpace.Core.Persistence.Entities;
 /// <see cref="WorkflowRunDataOwnerKinds.NativeRecord"/> facet; harness process-attempt capture states
 /// <see cref="WorkflowRunDataOwnerKinds.HarnessProcessAttempt"/>; and a newly minted harness execution states
 /// <see cref="WorkflowRunDataOwnerKinds.HarnessExecution"/>; in-process inference states
-/// <see cref="WorkflowRunDataOwnerKinds.ModelCall"/>. The engine mints a row for each of those four when a run starts,
+/// <see cref="WorkflowRunDataOwnerKinds.ModelCall"/>. A native batch that actually projects events conditionally
+/// states <see cref="WorkflowRunDataOwnerKinds.SemanticEvent"/> for that run. The engine mints a row for each of the
+/// four always-applicable facets when a run starts,
 /// stating only that the facet EXISTS — <see cref="ExpectedRecordCount"/> null — so a producer that died before its
 /// first advance is distinguishable from a plane that never ran, without any of them claiming to be empty. Every other
-/// facet has no producer, so its absent row is the indeterminate answer above. <c>IRunDataCompletenessReader</c> reads these rows only as bounded operator
-/// metadata and explicitly refuses a run-wide verdict. No completion, terminal decision, planner, oracle, critic or
+/// facet without a producer has no member or statement, so its absent row is the indeterminate answer above.
+/// <c>IRunDataCompletenessReader</c> folds only the bounded, run-owned applicability snapshot as operator metadata.
+/// No completion, terminal decision, planner, oracle, critic or
 /// router consults it, because an authority reader wired before all producers exist would park every run whose facets
 /// nobody states.</para>
 ///

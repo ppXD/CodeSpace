@@ -364,8 +364,8 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
             "WorkflowRunDataManifestConfiguration.cs",
         }, customMessage: "a production file other than the shared completeness writer, the Workflow Run manifest " +
                           "reader, the Agent Run exact-gap reader, and the capture plane's three completeness partials " +
-                          "now touches the capture-gap / data-manifest plane. Exactly four producers exist — the " +
-                          "native-record, harness-process-attempt, harness-execution and model-call facets — and exactly two bounded, " +
+                          "now touches the capture-gap / data-manifest plane. Exactly six facets have producers — " +
+                          "native-record, semantic-event, harness-process-attempt, harness-execution, model-call and model-call-body-capture — and exactly two bounded, " +
                           "observation-only readers plus one maintenance reconciler exist. No reducer folds a gap and terminal authority does not " +
                           "consult the manifest. Any new producer or reader is a deliberate step that updates this " +
                           "list — not a silent one.");
@@ -928,17 +928,27 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
     /// <summary>
     /// Every word one migration has on a constraint, in the order it says them. A statement is the inline
     /// <c>CONSTRAINT x CHECK</c> of a CREATE TABLE or the <c>ADD CONSTRAINT x CHECK</c> of an ALTER alike; a DROP is
-    /// counted too, because revoking is the other way the database's answer changes. A COMMENT names it without either.
+    /// counted too, because revoking is the other way the database's answer changes. An online-safe temporary
+    /// constraint renamed into this name carries its already-validated body forward. A COMMENT names it without either.
     /// </summary>
     private static IEnumerable<ConstraintWord> WordsOn(MigrationScript script, string constraintName)
     {
         var stated = new Regex($@"\bCONSTRAINT\s+{Regex.Escape(constraintName)}\s+CHECK\s*\(", RegexOptions.IgnoreCase);
         var revoked = new Regex($@"\bDROP\s+CONSTRAINT\s+(IF\s+EXISTS\s+)?{Regex.Escape(constraintName)}\b", RegexOptions.IgnoreCase);
+        var renamed = new Regex($@"\bRENAME\s+CONSTRAINT\s+(?<source>[a-zA-Z0-9_]+)\s+TO\s+{Regex.Escape(constraintName)}\b", RegexOptions.IgnoreCase);
 
         var statements = stated.Matches(script.Text).Select(match => new ConstraintWord(script, match.Index, BodyAt(script, match)));
         var revocations = revoked.Matches(script.Text).Select(match => new ConstraintWord(script, match.Index, null));
+        var renames = renamed.Matches(script.Text).Select(rename =>
+        {
+            var source = rename.Groups["source"].Value;
+            var sourcePattern = new Regex($@"\bCONSTRAINT\s+{Regex.Escape(source)}\s+CHECK\s*\(", RegexOptions.IgnoreCase);
+            var sourceStatement = sourcePattern.Matches(script.Text).LastOrDefault(match => match.Index < rename.Index)
+                ?? throw new InvalidOperationException($"{script.Name} renames check constraint '{source}' to '{constraintName}' without stating the source body earlier in the same migration.");
+            return new ConstraintWord(script, rename.Index, BodyAt(script, sourceStatement));
+        });
 
-        return statements.Concat(revocations).OrderBy(word => word.Index).ToList();
+        return statements.Concat(revocations).Concat(renames).OrderBy(word => word.Index).ToList();
     }
 
     /// <summary>The CHECK body the matched statement opens, normalized the way the model's own spelling is.</summary>

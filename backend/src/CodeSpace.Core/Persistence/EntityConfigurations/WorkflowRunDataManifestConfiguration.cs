@@ -32,7 +32,6 @@ public sealed class WorkflowRunDataManifestConfiguration : IEntityTypeConfigurat
         builder.HasOne<Team>().WithMany().HasForeignKey(manifest => manifest.TeamId).OnDelete(DeleteBehavior.Restrict);
         builder.HasOne<WorkflowRun>().WithMany().HasForeignKey(manifest => new { manifest.TeamId, manifest.WorkflowRunId })
             .HasPrincipalKey(run => new { run.TeamId, run.Id }).OnDelete(DeleteBehavior.Restrict);
-
         // Two rows stating different completeness for the same facet of the same run is the one shape that would make
         // the table unreadable: whoever asked would have to pick, and picking is what this plane exists to stop.
         builder.HasIndex(manifest => new { manifest.TeamId, manifest.WorkflowRunId, manifest.Facet }).IsUnique()
