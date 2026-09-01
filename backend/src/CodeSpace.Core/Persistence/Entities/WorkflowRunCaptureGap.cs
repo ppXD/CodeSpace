@@ -43,12 +43,12 @@ namespace CodeSpace.Core.Persistence.Entities;
 /// harness-execution identity is refused durable storage while the worker still owns it. It is recorded through
 /// <c>IRunDataCompletenessWriter</c> on a commit of its OWN, never together with a claim about the record: the bad news
 /// has to survive whatever happens to the claim it contradicts,
-/// and a shared transaction would let a refused statement take the gap down with it. The declared-deliverable capture
-/// (<c>ArtifactManifestStore</c>) records a <see cref="CaptureGapReason.BoundExceeded"/> span for a file past its
-/// per-file capture cap — bytes that existed and were never taken, which no other plane would ever notice. The
-/// remaining two reasons are representable and unproduced — no plane yet notices its own torn re-attach or its own
-/// unreadable frame. All THREE of that plane's spans name the run that owns them, for either key shape the run can
-/// have. The Agent Run operator summary is the first production reader, over the gaps that NAME this Agent Run —
+/// and a shared transaction would let a refused statement take the gap down with it. <see cref="CaptureGapReason.BoundExceeded"/>
+/// remains a generic schema reason for bounded producers; declared deliverables no longer produce it because their
+/// files stream without a capture-size ceiling. The remaining two reasons are representable and unproduced — no plane
+/// yet notices its own torn re-attach or its own unreadable frame. All THREE of that plane's spans name the run that
+/// owns them, for either key shape the run can have. The Agent Run operator summary is the first production reader,
+/// over the gaps that NAME this Agent Run —
 /// including the ones whose subject IS the refused write itself, a process attempt or an execution identity, which
 /// therefore carry no attempt coordinate at all: a reader that demanded one would leave exactly those gaps recorded
 /// and unreachable. It is bounded, team-scoped and observation-only. No completion, terminal decision, planner,

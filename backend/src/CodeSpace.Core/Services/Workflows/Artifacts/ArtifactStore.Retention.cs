@@ -11,17 +11,32 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts;
 /// choke point every artifact write passes through, and that is what makes "no other producer holds this id" provable
 /// instead of assumed.
 /// </summary>
-public sealed partial class ArtifactStore : IArtifactRetentionWriter
+public sealed partial class ArtifactStore : IArtifactRetentionWriter, IArtifactStreamRetentionWriter
 {
     public async Task<ArtifactRetentionWrite> PutDeclaredAsync(ArtifactRetentionWriteRequest request, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
         if (string.IsNullOrWhiteSpace(request.ContentType))
             throw new ArgumentException("ContentType is required.", nameof(request));
-        if (string.IsNullOrWhiteSpace(request.HolderKind) || request.HolderId == Guid.Empty)
-            throw new ArgumentException("A declaration must name the holder it is about to write.", nameof(request));
+        ValidateDeclaration(request.HolderKind, request.HolderId, request);
 
-        return await WriteAsync(new ArtifactWrite(request.TeamId, request.Bytes, request.ContentType, request), cancellationToken).ConfigureAwait(false);
+        var declaration = new ArtifactRetentionDeclaration(request.RetentionClass, request.HolderKind, request.HolderId);
+        return await WriteAsync(new ArtifactWrite(request.TeamId, request.Bytes, request.ContentType, declaration), cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<ArtifactStreamRetentionWrite> PutDeclaredAsync(ArtifactStreamRetentionWriteRequest request, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(request.Artifact);
+        ValidateDeclaration(request.HolderKind, request.HolderId, request);
+
+        return await WriteStreamAsync(request.Artifact, new ArtifactRetentionDeclaration(request.RetentionClass, request.HolderKind, request.HolderId), cancellationToken).ConfigureAwait(false);
+    }
+
+    private static void ValidateDeclaration(string holderKind, Guid holderId, object request)
+    {
+        if (string.IsNullOrWhiteSpace(holderKind) || holderId == Guid.Empty)
+            throw new ArgumentException("A declaration must name the holder it is about to write.", nameof(request));
     }
 
     /// <summary>
@@ -29,17 +44,17 @@ public sealed partial class ArtifactStore : IArtifactRetentionWriter
     /// <c>NextSweepAt</c> at the class's age floor: the reaper cannot even claim the row before the floor elapses, so a
     /// producer whose holder write is still in flight is not merely re-queued, it is never looked at.
     /// </summary>
-    private static WorkflowArtifactRetention DeclarationFor(ArtifactRetentionWriteRequest request, WorkflowArtifact artifact)
+    private static WorkflowArtifactRetention DeclarationFor(ArtifactRetentionDeclaration declaration, WorkflowArtifact artifact)
     {
-        var floor = ArtifactRetentionPolicy.For(request.RetentionClass.ToString())?.MinimumAge ?? ArtifactRetentionPolicy.MinimumAgeFloor;
+        var floor = ArtifactRetentionPolicy.For(declaration.RetentionClass.ToString())?.MinimumAge ?? ArtifactRetentionPolicy.MinimumAgeFloor;
 
         return new WorkflowArtifactRetention
         {
             ArtifactId = artifact.Id,
             TeamId = artifact.TeamId,
-            RetentionClass = request.RetentionClass.ToString(),
-            HolderKind = request.HolderKind,
-            HolderId = request.HolderId,
+            RetentionClass = declaration.RetentionClass.ToString(),
+            HolderKind = declaration.HolderKind,
+            HolderId = declaration.HolderId,
             State = ArtifactRetentionState.Declared,
             DeclaredAt = artifact.CreatedAt,
             NextSweepAt = artifact.CreatedAt.Add(floor),
@@ -71,4 +86,6 @@ public sealed partial class ArtifactStore : IArtifactRetentionWriter
                 last_modified_at = clock_timestamp()
             WHERE team_id = {teamId} AND artifact_id = {artifactId} AND state IN ('Declared', 'Quarantined')
             """, cancellationToken).ConfigureAwait(false);
+
+    private sealed record ArtifactRetentionDeclaration(ArtifactRetentionClass RetentionClass, string HolderKind, Guid HolderId);
 }

@@ -159,7 +159,7 @@ public sealed partial class ArtifactStore : IArtifactStore, IArtifactStreamStore
     private sealed record ArtifactDedupTarget(Guid Id, string? StorageUrl);
 
     /// <summary>One write's inputs. <c>Declaration</c> is null for every plain <see cref="PutAsync"/> caller, which is what keeps their bytes permanently unreapable.</summary>
-    private sealed record ArtifactWrite(Guid TeamId, ReadOnlyMemory<byte> Bytes, string ContentType, ArtifactRetentionWriteRequest? Declaration);
+    private sealed record ArtifactWrite(Guid TeamId, ReadOnlyMemory<byte> Bytes, string ContentType, ArtifactRetentionDeclaration? Declaration);
 
     /// <summary>
     /// Puts a local row's missing blob back — but only while local disk is still where this team's new offloaded bytes

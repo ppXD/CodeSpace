@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Agents.Publish;
@@ -55,6 +56,32 @@ public class ArtifactManifestStoreFlowTests
         System.Text.Encoding.UTF8.GetString(stored!.Bytes).ShouldBe("# findings\n", "the CAS row holds the exact captured bytes");
 
         rows.Single(r => r.LogicalPath == "data/rows.csv").Kind.ShouldBe(ArtifactManifestKind.Dataset);
+    }
+
+    [Fact]
+    public async Task A_large_declared_file_is_captured_exactly_without_materializing_it_at_the_manifest_seam()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var agentRunId = Guid.NewGuid();
+        var length = ArtifactManifestStore.MaxArtifactBytes + 1;
+
+        using var workspace = new TempWorkspace();
+        workspace.SetLength("data/large.csv", length);
+        using var expectedContent = File.OpenRead(System.IO.Path.Combine(workspace.Path, "data/large.csv"));
+        var expectedSha = Convert.ToHexStringLower(SHA256.HashData(expectedContent));
+
+        using var scope = _fixture.BeginScope();
+        var store = scope.Resolve<IArtifactManifestStore>();
+
+        var captured = await store.CaptureDeclaredAsync(Task("data/large.csv"), workspace.Path, agentRunId, null, teamId, fenceEpoch: 1, CancellationToken.None);
+
+        captured.ShouldBe(1, "the former byte-array cap is not a durable-deliverable limit; large content must stream to the artifact store");
+        var manifest = (await store.ListForAgentRunAsync(agentRunId, teamId, CancellationToken.None)).ShouldHaveSingleItem();
+        manifest.SizeBytes.ShouldBe(length);
+        var metadata = (await scope.Resolve<IArtifactStore>().GetMetadataAsync(teamId, manifest.ContentArtifactId, CancellationToken.None)).ShouldNotBeNull();
+        metadata.SizeBytes.ShouldBe(length);
+        manifest.Sha256.ShouldBe(expectedSha, "streaming must preserve the complete file identity, not only report a self-consistent store result");
+        metadata.Sha256.ShouldBe(manifest.Sha256, "the manifest must reuse the identity admitted by the streaming store, not re-read a mutable workspace path");
     }
 
     [Fact]
@@ -120,6 +147,14 @@ public class ArtifactManifestStoreFlowTests
             var full = System.IO.Path.Combine(Path, relative);
             Directory.CreateDirectory(System.IO.Path.GetDirectoryName(full)!);
             File.WriteAllText(full, content);
+        }
+
+        public void SetLength(string relative, long length)
+        {
+            var full = System.IO.Path.Combine(Path, relative);
+            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(full)!);
+            using var file = File.Create(full);
+            file.SetLength(length);
         }
 
         public void Dispose()
