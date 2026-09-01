@@ -1,6 +1,8 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
+import type { WorkflowVariable } from "@/api/workflows";
+
 import { AddInputFieldModal } from "./AddInputFieldModal";
 
 /**
@@ -49,14 +51,14 @@ describe("AddInputFieldModal — a Select requires an option", () => {
     // default controls can hold that, and resolveDefault answers `undefined` for it — so a save that
     // wrote its answer unconditionally deleted the operator's whole plan. Untouched means untouched.
     const onSave = vi.fn();
-    const stored = {
+    const stored: WorkflowVariable = {
       name: "subtasks",
       label: "Subtasks",
       description: "The planned subtasks the workflow fans out over.",
       schema: { type: "array", items: { type: "object" } },
       default: [{ title: "Add the migration" }, { title: "Wire the handler" }],
       required: false,
-    } as never;
+    };
 
     render(<AddInputFieldModal initial={stored} takenNames={[]} onSave={onSave} onClose={vi.fn()} />);
 
@@ -67,6 +69,27 @@ describe("AddInputFieldModal — a Select requires an option", () => {
     const saved = onSave.mock.calls.at(-1)![0];
     expect(saved.default).toEqual([{ title: "Add the migration" }, { title: "Wire the handler" }]);
     expect(saved.description).toBe("The planned subtasks the workflow fans out over.");
+    expect(saved.schema).toEqual(stored.schema);
+    expect(screen.getByRole("option", { name: "Custom (array) — preserved" })).toBeInTheDocument();
+  });
+
+  it("converts an unsupported schema only after an explicit type choice and clears its incompatible default", () => {
+    const onSave = vi.fn();
+    const stored: WorkflowVariable = {
+      name: "subtasks",
+      schema: { type: "array", items: { type: "object" }, "x-origin": "planner" },
+      default: [{ title: "Add the migration" }],
+      required: false,
+    };
+
+    render(<AddInputFieldModal initial={stored} takenNames={[]} onSave={onSave} onClose={vi.fn()} />);
+
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "text" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    const saved = onSave.mock.calls.at(-1)![0];
+    expect(saved.schema).toEqual({ type: "string", items: { type: "object" }, "x-origin": "planner" });
+    expect(saved.default).toBeUndefined();
   });
 
   it("writes a default the operator did change", () => {

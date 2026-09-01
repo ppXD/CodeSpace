@@ -47,7 +47,6 @@ export interface InputFieldDraft {
   hidden?: boolean;
 }
 
-/** Build the per-field JSON Schema for an input field from the editor draft. */
 /**
  * The keywords this editor OWNS — the ones its controls can turn on, and therefore the only ones it
  * may turn off. Everything else in a stored schema belongs to whoever wrote it and is carried
@@ -93,16 +92,33 @@ export function buildFieldSchema(draft: InputFieldDraft, base?: Record<string, u
   return schema;
 }
 
-/** Infer the editor field type from a stored schema (for editing an existing input). */
-export function schemaToFieldType(schema: unknown): InputFieldType {
+/**
+ * Infer an editor field type only when every discriminator that selects a bespoke control is
+ * representable. Null means "custom": callers must preserve the stored schema until the operator
+ * explicitly converts it instead of silently presenting and saving it as Text.
+ */
+export function schemaToFieldType(schema: unknown): InputFieldType | null {
+  if (schema !== null && schema !== undefined && (typeof schema !== "object" || Array.isArray(schema))) return null;
   const s = asObject(schema);
+  const rawSelector = s["x-selector"];
   const selector = SELECTOR_FIELD_TYPES.find((t) => t === s["x-selector"]);
   if (selector) return selector;
-  if (Array.isArray(s.enum)) return "select";
+  if (rawSelector !== undefined) return null;
+  if (Array.isArray(s.enum)) {
+    if ((s.type !== undefined && s.type !== "string") || !s.enum.every((value) => typeof value === "string")) return null;
+    return "select";
+  }
   if (s.type === "boolean") return "boolean";
-  if (s.type === "number" || s.type === "integer") return "number";
+  if (s.type === "number") return "number";
+  if (s.type !== undefined && s.type !== "string") return null;
   if (s["x-long"] === true) return "paragraph";
   return "text";
+}
+
+/** Stable, honest label for a schema the friendly editor cannot represent. */
+export function schemaTypeLabel(schema: unknown): string {
+  const type = asObject(schema).type;
+  return typeof type === "string" && type.trim() !== "" ? type : "custom";
 }
 
 export function schemaMaxLength(schema: unknown): number | null {

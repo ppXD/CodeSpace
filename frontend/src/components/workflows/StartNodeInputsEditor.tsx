@@ -2,7 +2,7 @@ import { useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { WorkflowVariable } from "@/api/workflows";
-import { schemaToFieldType } from "@/lib/inputFieldSchema";
+import { schemaToFieldType, schemaTypeLabel } from "@/lib/inputFieldSchema";
 
 import { AddInputFieldModal } from "./AddInputFieldModal";
 
@@ -51,7 +51,7 @@ export function StartNodeInputsEditor({ inputs, onChange }: StartNodeInputsEdito
               <Ic.Key size={12} />
               <span className="wf-inputs-row-name">{v.name}</span>
               {v.label && <span className="wf-inputs-row-label">· {v.label}</span>}
-              <span className="wf-inputs-row-type">{schemaToFieldType(v.schema)}</span>
+              <span className="wf-inputs-row-type">{schemaToFieldType(v.schema) ?? schemaTypeLabel(v.schema)}</span>
               {v.required && <span className="wf-inputs-row-req">required</span>}
               <button
                 type="button"

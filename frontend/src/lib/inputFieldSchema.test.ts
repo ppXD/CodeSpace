@@ -9,6 +9,7 @@ import {
   schemaMaxLength,
   schemaOptions,
   schemaToFieldType,
+  schemaTypeLabel,
 } from "./inputFieldSchema";
 
 describe("buildFieldSchema", () => {
@@ -89,10 +90,25 @@ describe("schemaToFieldType", () => {
     expect(schemaToFieldType(buildFieldSchema({ type: "conversation" }))).toBe("conversation");
   });
 
-  it("treats integer as number and unknown as text", () => {
-    expect(schemaToFieldType({ type: "integer" })).toBe("number");
+  it("fails closed for schema shapes the friendly controls cannot round-trip", () => {
+    expect(schemaToFieldType({ type: "integer" })).toBeNull();
+    expect(schemaToFieldType({ type: "array", items: { type: "object" } })).toBeNull();
+    expect(schemaToFieldType({ type: "object" })).toBeNull();
+    expect(schemaToFieldType({ type: "string", "x-selector": "plugin-picker" })).toBeNull();
+    expect(schemaToFieldType({ type: "string", enum: [1, 2] })).toBeNull();
+    expect(schemaToFieldType(["not", "a", "schema-object"])).toBeNull();
+    expect(schemaToFieldType("string")).toBeNull();
+  });
+
+  it("keeps an absent type compatible with the historical Text fallback", () => {
     expect(schemaToFieldType({})).toBe("text");
     expect(schemaToFieldType(null)).toBe("text");
+  });
+
+  it("labels custom schemas from their stored type without inventing one", () => {
+    expect(schemaTypeLabel({ type: "array" })).toBe("array");
+    expect(schemaTypeLabel({ type: "vendor-shape" })).toBe("vendor-shape");
+    expect(schemaTypeLabel({})).toBe("custom");
   });
 });
 

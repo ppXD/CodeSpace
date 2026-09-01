@@ -187,7 +187,7 @@ function WorkflowEditorPage() {
   );
 }
 
-function EditorShell() {
+export function EditorShell() {
   const { workflowSlug } = Route.useParams();
   const workflow = useWorkflow(workflowSlug);
   const manifests = useNodeManifests();
