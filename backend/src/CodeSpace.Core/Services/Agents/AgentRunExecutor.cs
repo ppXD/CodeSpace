@@ -155,9 +155,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     // once at construction. SandboxKinds.Local when no setting was supplied — a hand-built test double is not
     // required to know about a configuration class, and that is the value this line hard-coded before the key existed.
     private readonly string _defaultRunnerKind;
+    private readonly Services.RunData.IRunDataCompletenessWriter? _completeness;
     private readonly ILogger<AgentRunExecutor> _logger;
 
-    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, Workflows.Artifacts.IArtifactStore artifacts, IPublishManifestStore manifests, IArtifactManifestStore artifactManifests, Capture.ICaptureIntentService captureIntents, IEnumerable<IPublishGuard> publishGuards, ILogger<AgentRunExecutor> logger, IAgentRunLogCaptureBridge? logCapture = null, INativeRecordPlane? nativeRecords = null, AgentDefaultRunnerSetting? defaultRunner = null)
+    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, Workflows.Artifacts.IArtifactStore artifacts, IPublishManifestStore manifests, IArtifactManifestStore artifactManifests, Capture.ICaptureIntentService captureIntents, IEnumerable<IPublishGuard> publishGuards, ILogger<AgentRunExecutor> logger, IAgentRunLogCaptureBridge? logCapture = null, INativeRecordPlane? nativeRecords = null, AgentDefaultRunnerSetting? defaultRunner = null, Services.RunData.IRunDataCompletenessWriter? completeness = null)
     {
         _runs = runs;
         _harnesses = harnesses;
@@ -178,6 +179,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         _logCapture = logCapture;
         _nativeRecords = nativeRecords;
         _defaultRunnerKind = defaultRunner?.Value ?? SandboxKinds.Local;
+        _completeness = completeness;
         // Tolerate a null enumerable (a hand-built test double that never exercises the push path) — zero guards
         // registered is a legitimate state (every push clears), not a constructor-time crash.
         _publishGuards = (publishGuards ?? Enumerable.Empty<IPublishGuard>()).OrderBy(g => g.Order).ToList();
@@ -948,7 +950,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // best-effort step (its own try/catch below) so an artifact-store hiccup can NEVER discard the git
             // ground truth just assigned above. The existing 1MB inline cap stays byte-identical for every other
             // consumer; this only ADDS a durable reference a large diff wouldn't otherwise have.
-            result = result with { PatchArtifactId = await TryOffloadPatchAsync(runId, teamId, changes.Patch, cancellationToken).ConfigureAwait(false) };
+            var offload = await TryOffloadPatchAsync(runId, teamId, changes.Patch, "patch:primary", cancellationToken).ConfigureAwait(false);
+            result = result with { PatchArtifactId = offload.ArtifactId, PatchLossReason = offload.LossReason };
 
             // Multi-repo: ALSO surface every writable repo's outcome as a Change Set. A single-repo workspace skips
             // this branch entirely, so its result is unchanged (RepositoryResults empty, ChangeSetId null).
@@ -1024,18 +1027,46 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         return await _artifacts.PutAsync(teamId, System.Text.Encoding.UTF8.GetBytes(evidence), "application/json", cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<Guid?> TryOffloadPatchAsync(Guid runId, Guid teamId, string patch, CancellationToken cancellationToken)
+    private async Task<(Guid? ArtifactId, string? LossReason)> TryOffloadPatchAsync(Guid runId, Guid teamId, string patch, string subject, CancellationToken cancellationToken)
     {
         try
         {
-            return (await _offloader.OffloadIfLargeAsync(teamId, patch, "text/x-diff", cancellationToken).ConfigureAwait(false)).ArtifactId;
+            return ((await _offloader.OffloadIfLargeAsync(teamId, patch, "text/x-diff", cancellationToken).ConfigureAwait(false)).ArtifactId, null);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogWarning(ex, "Agent run {RunId}: failed to offload the full patch to the artifact store; the manifest will carry no PatchArtifactId", runId);
-            return null;
+            // Deliverable-loss honesty: the refusal is NAMED — on the result/manifest (so the preview can say why a
+            // listed file has no bytes) AND as a capture gap (so completeness never reports data it does not have).
+            var reason = $"the patch's bytes were not stored — {ex.GetType().Name}: {Truncate(ex.Message, 300)}";
+            _logger.LogWarning(ex, "Agent run {RunId}: failed to offload the full patch to the artifact store; the manifest will carry no PatchArtifactId and names the loss", runId);
+            await NoticeDeliverableLossAsync(runId, teamId, subject, reason).ConfigureAwait(false);
+            return (null, reason);
         }
     }
+
+    /// <summary>The blessed capture-gap producer shape (mirrors <c>WorkflowEngine.NoticeOutputsNotOffloadedAsync</c>): bad news lands on its own transaction and its own failure is loud — a loss that also loses its record is the one unacceptable silence.</summary>
+    private async Task NoticeDeliverableLossAsync(Guid runId, Guid teamId, string subjectId, string detail)
+    {
+        if (_completeness is null) return;   // optional capture plane (test construction) — production DI always supplies it
+
+        try
+        {
+            await _completeness.NoticeAsync(new Persistence.Entities.WorkflowRunCaptureGap
+            {
+                Id = Guid.NewGuid(), TeamId = teamId, AgentRunId = runId,
+                SubjectKind = Messages.Contracts.WorkflowRunDataOwnerKinds.Deliverable, SubjectId = subjectId,
+                RangeKind = Persistence.Entities.CaptureGapRangeKind.Unbounded, Reason = Persistence.Entities.CaptureGapReason.WriteRefused,
+                ReasonDetail = detail, CaptureSource = "in-process",
+                NoticedAt = DateTimeOffset.UtcNow, CreatedAt = DateTimeOffset.UtcNow,
+            }, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "Agent run {RunId}: a deliverable loss occurred AND its capture-gap record could not be written — this run may render files whose bytes were never stored ({Subject})", runId, subjectId);
+        }
+    }
+
+    private static string Truncate(string text, int max) => text.Length <= max ? text : text[..max] + "…";
 
     /// <summary>
     /// The RE-ATTACH counterpart of <see cref="EnrichWithWorkspaceChangesAsync"/>: no live <see cref="IWorkspaceHandle"/>
@@ -1059,7 +1090,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             // Separate best-effort step (see TryOffloadPatchAsync) — an artifact-store hiccup must never discard the
             // git capture just assigned above.
-            return result with { PatchArtifactId = await TryOffloadPatchAsync(runId, teamId, changes.Patch, cancellationToken).ConfigureAwait(false) };
+            var reattachOffload = await TryOffloadPatchAsync(runId, teamId, changes.Patch, "patch:primary", cancellationToken).ConfigureAwait(false);
+            return result with { PatchArtifactId = reattachOffload.ArtifactId, PatchLossReason = reattachOffload.LossReason };
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1106,7 +1138,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // Publish-manifest (I1): offload THIS repo's full, untruncated patch — TryOffloadPatchAsync is its OWN
             // best-effort step (never throws), so a per-repo artifact failure can only leave THAT repo's
             // PatchArtifactId null — it can never abort this loop or discard a sibling repo's already-captured diff.
-            var patchArtifactId = await TryOffloadPatchAsync(runId, teamId, changes.Patch, cancellationToken).ConfigureAwait(false);
+            var patchArtifactId = (await TryOffloadPatchAsync(runId, teamId, changes.Patch, $"patch:{repo.Alias}", cancellationToken).ConfigureAwait(false)).ArtifactId;
 
             perRepo.Add(new RepositoryRunResult
             {
@@ -1397,7 +1429,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 return;
             }
 
-            await _manifests.UpsertForAgentRunAsync(runId, BuildManifestUpsert(run, "primary", task.RepositoryId, result.BaseSha, result.PatchArtifactId, result.ChangedFiles, result.ProducedBranch, result.PublishError, result.PublishSkipReason, result.AcceptancePassed, result.PushedCommitSha), claimedEpoch, cancellationToken).ConfigureAwait(false);
+            await _manifests.UpsertForAgentRunAsync(runId, BuildManifestUpsert(run, "primary", task.RepositoryId, result.BaseSha, result.PatchArtifactId, result.ChangedFiles, result.ProducedBranch, result.PublishError, result.PublishSkipReason, result.AcceptancePassed, result.PushedCommitSha, result.PatchLossReason), claimedEpoch, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1426,6 +1458,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Agent run {RunId}: failed to capture declared deliverable artifacts; the acceptance oracle still grades them on the produced branch", runId);
+            await NoticeDeliverableLossAsync(runId, run.TeamId, "declared-deliverables", $"declared deliverables were not captured — {ex.GetType().Name}: {Truncate(ex.Message, 300)}").ConfigureAwait(false);
             return result;
         }
     }
@@ -1472,7 +1505,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     }
 
     /// <summary>Pure mapping from a run's produced-artifact facts to the manifest upsert shape — the PublishState/AcceptanceState derivation this pins: <see cref="PublishState.Pushed"/> is a CONFIRMED claim (review hole 2) — it requires BOTH the produced branch AND the readback-confirmed remote tip (P3b-2's <paramref name="pushedCommitSha"/>); a branch whose readback failed or mismatched maps PatchOnly with a named PublishError, because a push command that RAN proves intent, not arrival — and Pushed flows straight into Delivered/Delivery-Passed. Everything else unchanged: no branch means PatchOnly (PublishError distinguishes an intentional FAILED attempt from a BY-CHOICE guard skip, whose reason lands on Summary); acceptance mirrors the grader's tri-state verbatim. Internal so it's unit-pinned without a database.</summary>
-    internal static PublishManifestUpsert BuildManifestUpsert(AgentRun run, string alias, Guid? repositoryId, string? baseSha, Guid? patchArtifactId, IReadOnlyList<string> changedFiles, string? producedBranch, string? publishError, string? publishSkipReason, bool? acceptancePassed, string? pushedCommitSha = null) => new()
+    internal static PublishManifestUpsert BuildManifestUpsert(AgentRun run, string alias, Guid? repositoryId, string? baseSha, Guid? patchArtifactId, IReadOnlyList<string> changedFiles, string? producedBranch, string? publishError, string? publishSkipReason, bool? acceptancePassed, string? pushedCommitSha = null, string? patchLossReason = null) => new()
     {
         CommitSha = pushedCommitSha,
         TeamId = run.TeamId,
@@ -1481,6 +1514,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         RepositoryId = repositoryId,
         BaseSha = baseSha,
         PatchArtifactId = patchArtifactId,
+        PatchLossReason = patchLossReason,
         ChangedFileCount = changedFiles.Count,
         ChangedFilesJson = changedFiles.Count > 0 ? JsonSerializer.Serialize(changedFiles, AgentJson.Options) : null,
         AcceptanceState = acceptancePassed switch { true => PublishAcceptanceState.Passed, false => PublishAcceptanceState.Failed, null => PublishAcceptanceState.NotApplicable },

@@ -57,6 +57,9 @@ public class PublishManifest : IEntity<Guid>, IAuditable
     /// <summary>Soft link to <c>workflow_artifact.id</c> holding the FULL, untruncated unified diff — offloaded via <c>IArtifactOffloader</c> BEFORE any inline-string cap is applied, so a large diff never loses bytes.</summary>
     public Guid? PatchArtifactId { get; set; }
 
+    /// <summary>Named loss: why the patch's bytes are NOT in the store when they are not — the preview renders this instead of a bare missing-bytes error. Null = no loss.</summary>
+    public string? PatchLossReason { get; set; }
+
     public int ChangedFileCount { get; set; }
 
     /// <summary>The full changed-file path list as a JSON string array — never silently capped (unlike a UI's display cap).</summary>

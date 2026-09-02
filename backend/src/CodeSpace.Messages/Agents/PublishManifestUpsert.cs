@@ -15,6 +15,9 @@ public sealed record PublishManifestUpsert
     public string? Branch { get; init; }
     public string? CommitSha { get; init; }
     public Guid? PatchArtifactId { get; init; }
+
+    /// <summary>Why the patch's bytes are not durably stored when they are not (offload refused / shed) — null = no loss.</summary>
+    public string? PatchLossReason { get; init; }
     public int ChangedFileCount { get; init; }
     public string? ChangedFilesJson { get; init; }
     public PublishAcceptanceState AcceptanceState { get; init; } = PublishAcceptanceState.NotApplicable;

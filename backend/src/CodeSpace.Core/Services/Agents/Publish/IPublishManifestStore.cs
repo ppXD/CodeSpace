@@ -164,6 +164,7 @@ public sealed class PublishManifestStore : IPublishManifestStore, IScopedDepende
             Branch = input.Branch,
             CommitSha = input.CommitSha,
             PatchArtifactId = input.PatchArtifactId,
+            PatchLossReason = input.PatchLossReason,
             ChangedFileCount = input.ChangedFileCount,
             ChangedFilesJson = input.ChangedFilesJson,
             AcceptanceState = input.AcceptanceState,
@@ -247,6 +248,7 @@ public sealed class PublishManifestStore : IPublishManifestStore, IScopedDepende
                 .SetProperty(m => m.Branch, input.Branch)
                 .SetProperty(m => m.CommitSha, input.CommitSha)
                 .SetProperty(m => m.PatchArtifactId, input.PatchArtifactId)
+                .SetProperty(m => m.PatchLossReason, input.PatchLossReason)
                 .SetProperty(m => m.ChangedFileCount, input.ChangedFileCount)
                 .SetProperty(m => m.ChangedFilesJson, input.ChangedFilesJson)
                 .SetProperty(m => m.AcceptanceState, input.AcceptanceState)

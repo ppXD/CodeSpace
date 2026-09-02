@@ -40,6 +40,10 @@ public sealed record AgentRunResult
     /// <summary>When non-null, the artifact-store id holding the authoritative full unified diff. Any adjacent <see cref="Patch"/> is only a bounded executor-side compatibility copy and must not be used as fallback; normal terminal persistence clears it. Null when the diff is inline (small) or absent.</summary>
     public Guid? PatchArtifactId { get; init; }
 
+    /// <summary>Why the patch's bytes are NOT durably stored, when they are not — the offload was refused, or the oversize inline copy was shed after a refused offload. Null = no loss (stored, inline, or no patch existed). A reader renders this instead of a clickable file that 404s.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? PatchLossReason { get; init; }
+
     /// <summary>DC-4: how many DECLARED deliverable files this attempt's capture minted typed artifact-manifest rows for (a non-TestsPass acceptance's path list). 0-omitted — a git-only run serializes byte-identical; the capture promise's facts read this so a typed capture is never recorded as "empty".</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public int CapturedArtifactCount { get; init; }

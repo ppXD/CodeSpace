@@ -56,7 +56,10 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
 
         var patch = await ResolvePatchAsync(teamId, found.Candidate.Patch, cancellationToken).ConfigureAwait(false);
         if (patch is PatchResolution.Unavailable unavailable)
-            return Unavailable(found.Candidate.Identity, sourceUrl, Reason(unavailable.Kind), StorageNote(unavailable.Kind, sourceUrl != null));
+            return Unavailable(found.Candidate.Identity, sourceUrl, Reason(unavailable.Kind),
+                found.Candidate.Patch.LossReason is { Length: > 0 } loss
+                    ? WithSourceFallback($"This file's bytes were never stored: {loss}", sourceUrl != null)
+                    : StorageNote(unavailable.Kind, unavailable.Detail, sourceUrl != null));
 
         var view = UnifiedPatchReader.Read(((PatchResolution.Found)patch).Text, requested.Path);
         if (view is null)
@@ -133,7 +136,7 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
 
         var rows = await query
             .OrderByDescending(m => m.LastModifiedDate).ThenBy(m => m.Id)
-            .Select(m => new ManifestMatch(m.AgentRunId!.Value, m.RepositoryId, m.RepositoryAlias, m.PatchArtifactId))
+            .Select(m => new ManifestMatch(m.AgentRunId!.Value, m.RepositoryId, m.RepositoryAlias, m.PatchArtifactId, m.PatchLossReason))
             .Take(MaxManifestMatches + 1)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
@@ -156,7 +159,7 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
     private async Task<PatchResolution> ResolvePatchAsync(Guid teamId, PatchRef patchRef, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(patchRef.Inline) && patchRef.ArtifactId is null)
-            return new PatchResolution.Unavailable(ArtifactContentUnavailableKind.MetadataMissing);
+            return new PatchResolution.Unavailable(ArtifactContentUnavailableKind.MetadataMissing, Detail: null);
 
         try
         {
@@ -164,7 +167,7 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
         }
         catch (ArtifactContentUnavailableException exception)
         {
-            return new PatchResolution.Unavailable(exception.Kind);
+            return new PatchResolution.Unavailable(exception.Kind, exception.Detail);
         }
     }
 
@@ -187,7 +190,7 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
 
                 candidates.Add(new FileCandidate(
                     new RoomFileIdentity { Path = path, AgentRunId = row.AgentRunId, RepositoryId = repository.RepositoryId ?? manifest?.RepositoryId, RepositoryAlias = repository.Alias },
-                    PatchFrom(repository.Patch, repository.PatchArtifactId, manifest)));
+                    PatchFrom(repository.Patch, repository.PatchArtifactId, manifest, resultLossReason: null)));
             }
 
             foreach (var manifest in manifests.Where(manifest => !consumed.Contains(manifest)))
@@ -199,10 +202,10 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
         if (result?.ChangedFiles.Contains(path, StringComparer.Ordinal) == true)
         {
             if (manifests.Count == 0)
-                candidates.Add(new FileCandidate(new RoomFileIdentity { Path = path, AgentRunId = row.AgentRunId }, new PatchRef(result.Patch, result.PatchArtifactId)));
+                candidates.Add(new FileCandidate(new RoomFileIdentity { Path = path, AgentRunId = row.AgentRunId }, new PatchRef(result.Patch, result.PatchArtifactId, result.PatchLossReason)));
             else
                 candidates.AddRange(manifests.Select(manifest => new FileCandidate(
-                    Identity(row.AgentRunId, path, manifest), PatchFrom(result.Patch, result.PatchArtifactId, manifest))));
+                    Identity(row.AgentRunId, path, manifest), PatchFrom(result.Patch, result.PatchArtifactId, manifest, result.PatchLossReason))));
         }
         else
         {
@@ -213,13 +216,13 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
     }
 
     private static FileCandidate ManifestCandidate(Guid agentRunId, string path, ManifestMatch manifest) =>
-        new(Identity(agentRunId, path, manifest), new PatchRef("", manifest.PatchArtifactId));
+        new(Identity(agentRunId, path, manifest), new PatchRef("", manifest.PatchArtifactId, manifest.PatchLossReason));
 
     private static RoomFileIdentity Identity(Guid agentRunId, string path, ManifestMatch manifest) =>
         new() { Path = path, AgentRunId = agentRunId, RepositoryId = manifest.RepositoryId, RepositoryAlias = manifest.RepositoryAlias };
 
-    private static PatchRef PatchFrom(string? inline, Guid? artifactId, ManifestMatch? manifest) =>
-        manifest?.PatchArtifactId is { } manifestArtifactId ? new PatchRef("", manifestArtifactId) : new PatchRef(inline, artifactId);
+    private static PatchRef PatchFrom(string? inline, Guid? artifactId, ManifestMatch? manifest, string? resultLossReason) =>
+        manifest?.PatchArtifactId is { } manifestArtifactId ? new PatchRef("", manifestArtifactId, manifest.PatchLossReason) : new PatchRef(inline, artifactId, manifest?.PatchLossReason ?? resultLossReason);
 
     private static FileLocation Select(IReadOnlyList<FileCandidate> candidates, RoomFileIdentity requested)
     {
@@ -301,14 +304,14 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
         _ => RoomFileUnavailableReason.BackendUnavailable,
     };
 
-    private static string StorageNote(ArtifactContentUnavailableKind kind, bool hasSource) => WithSourceFallback(kind switch
+    private static string StorageNote(ArtifactContentUnavailableKind kind, string? detail, bool hasSource) => WithSourceFallback(kind switch
     {
         ArtifactContentUnavailableKind.MetadataMissing => "The saved patch metadata is unavailable.",
         ArtifactContentUnavailableKind.PhysicalObjectMissing => "The saved patch's stored bytes are missing from the configured artifact backend.",
         ArtifactContentUnavailableKind.IntegrityFailure => "The saved patch failed integrity verification and cannot be opened safely.",
         ArtifactContentUnavailableKind.AccessDenied => "The configured artifact backend denied access to the saved patch.",
         _ => "The configured artifact backend is temporarily unavailable.",
-    }, hasSource);
+    } + (detail is { Length: > 0 } ? $" Ledger: {detail}." : ""), hasSource);
 
     private static string WithSourceFallback(string note, bool hasSource) => hasSource ? note + " Open the delivered pull request to view the file." : note;
 
@@ -323,9 +326,9 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
         return nodes.Select(n => RoomDeliveryParser.Parse(n.OutputsJson, n.InputsJson)).FirstOrDefault(d => d != null)?.Url;
     }
 
-    private readonly record struct PatchRef(string? Inline, Guid? ArtifactId);
+    private readonly record struct PatchRef(string? Inline, Guid? ArtifactId, string? LossReason = null);
     private sealed record AgentResultRow(Guid AgentRunId, string ResultJson);
-    private sealed record ManifestMatch(Guid AgentRunId, Guid? RepositoryId, string RepositoryAlias, Guid? PatchArtifactId);
+    private sealed record ManifestMatch(Guid AgentRunId, Guid? RepositoryId, string RepositoryAlias, Guid? PatchArtifactId, string? PatchLossReason);
     private sealed record ManifestMatches(IReadOnlyList<ManifestMatch> Rows, bool Truncated);
     private sealed record FileCandidate(RoomFileIdentity Identity, PatchRef Patch);
     private sealed record CandidateIdentity(Guid? AgentRunId, Guid? RepositoryId, string? RepositoryAlias);
@@ -343,6 +346,6 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
     {
         private PatchResolution() { }
         public sealed record Found(string Text) : PatchResolution;
-        public sealed record Unavailable(ArtifactContentUnavailableKind Kind) : PatchResolution;
+        public sealed record Unavailable(ArtifactContentUnavailableKind Kind, string? Detail) : PatchResolution;
     }
 }

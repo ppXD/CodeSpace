@@ -331,7 +331,8 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
 
         mentions.ShouldBe(new[]
         {
-            "AgentRunService.cs",
+            "AgentRunExecutor.cs",
+        "AgentRunService.cs",
 
             "CodeSpaceDbContext.cs",
             "IRunDataCompletenessReader.cs",
