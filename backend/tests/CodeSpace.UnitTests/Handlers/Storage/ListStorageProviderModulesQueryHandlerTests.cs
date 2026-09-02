@@ -34,14 +34,15 @@ public sealed class ListStorageProviderModulesQueryHandlerTests
         result[0].DisplayName.ShouldBe("Alpha");
         result[0].Capabilities.ShouldBeEmpty();
         result[0].TeamNamespaceProperty.ShouldBeNull("a module that cannot subdivide its namespace must report that it cannot, rather than a property a form would then send");
+        result[0].AcceptsNoNewBytes.ShouldBeFalse("taking writes is the ordinary case and a module that takes them must not have to say so");
         result[0].ConfigSchema.GetProperty("title").GetString().ShouldBe("Alpha config");
         result[1].Capabilities.ShouldBe(["StreamingRead", "ConditionalCreate"], "flags are emitted once in stable enum-value order");
         result[1].SecretSchema.GetProperty("properties").GetProperty("token").GetProperty("writeOnly").GetBoolean().ShouldBeTrue();
 
         var wire = JsonSerializer.SerializeToElement(result, new JsonSerializerOptions(JsonSerializerDefaults.Web));
         wire[0].EnumerateObject().Select(property => property.Name).ShouldBe([
-            "typeKey", "displayName", "configSchema", "secretSchema", "capabilities", "teamNamespaceProperty"
-        ], "the discovery API must never grow an accidental FactoryType or secret-value field");
+            "typeKey", "displayName", "configSchema", "secretSchema", "capabilities", "teamNamespaceProperty", "acceptsNoNewBytes"
+        ], "the discovery API must never grow an accidental FactoryType or secret-value field; acceptsNoNewBytes is admissible because it is a declaration about the module, not about any team's configuration, and a screen that offers a write-refusing provider as a destination walks an operator to a refusal at the last step");
         wire.GetRawText().ShouldNotContain("factoryType", Case.Insensitive);
         wire.GetRawText().ShouldNotContain(nameof(MustNotBeInstantiatedFactory), Case.Insensitive);
     }

@@ -27,6 +27,7 @@ public sealed class ListStorageProviderModulesQueryHandler : IRequestHandler<Lis
                 SecretSchema = module.SecretSchema.Clone(),
                 Capabilities = ExpandCapabilities(module.Capabilities),
                 TeamNamespaceProperty = (module as IStorageProviderTeamNamespace)?.TeamNamespaceProperty,
+                AcceptsNoNewBytes = module is IStorageProviderAcceptsNoNewBytes,
             })
             .ToList();
 

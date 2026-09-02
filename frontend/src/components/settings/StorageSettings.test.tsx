@@ -22,6 +22,7 @@ const localProvider: StorageProviderModuleSummary = {
   secretSchema: { type: "object", properties: {}, additionalProperties: false },
   capabilities: ["ConditionalCreate", "StreamingRead"],
   teamNamespaceProperty: "rootPath",
+  acceptsNoNewBytes: false,
 };
 
 const secretProvider: StorageProviderModuleSummary = {
@@ -41,6 +42,7 @@ const secretProvider: StorageProviderModuleSummary = {
   },
   capabilities: ["MultipartUpload", "StreamingWrite"],
   teamNamespaceProperty: "keyPrefix",
+  acceptsNoNewBytes: false,
 };
 
 const profile: StorageProfileSummary = {
@@ -168,6 +170,14 @@ function activeStep(): string | null {
   return document.querySelector("[data-step-state='active']")?.getAttribute("data-step") ?? null;
 }
 
+/**
+ * On screen once the destination's own card is. The NAME is no longer a unique signal — the card names the place and
+ * the Advanced drawer's rows name it again — so the card's own menu, which only it has, is what is waited on.
+ */
+async function findDestination(name: string) {
+  return await screen.findByRole("button", { name: `Actions for ${name}` });
+}
+
 /** A finished step collapses to its summary line; its rows are behind the disclosure. */
 async function expandStep(title: string) {
   fireEvent.click(await screen.findByRole("button", { name: `Show ${title}` }));
@@ -218,16 +228,20 @@ describe("storage profiles settings", () => {
       return json({ message: "Unexpected request" }, 500);
     });
 
-    await screen.findByText("primary");
+    await findDestination("primary");
     await expandStep("Storage credentials");
     await screen.findByText("aliyun-primary");
     fireEvent.click(screen.getByRole("button", { name: "Load more profiles" }));
     fireEvent.click(screen.getByRole("button", { name: "Load more credentials" }));
 
-    expect(await screen.findByText("archive")).toBeInTheDocument();
-    expect(await screen.findByText("aliyun-archive")).toBeInTheDocument();
-    expect(screen.getByText("primary")).toBeInTheDocument();
-    expect(screen.getByText("aliyun-primary")).toBeInTheDocument();
+    // Scoped to the paginated lists this test is about: a destination card names the same place, so an unscoped
+    // query would pass on the card alone and prove nothing about the second page.
+    const profileList = within(await screen.findByRole("list", { name: "Storage profiles" }));
+    const credentialList = within(await screen.findByRole("list", { name: "Storage credentials" }));
+    expect(await profileList.findByText("archive")).toBeInTheDocument();
+    expect(await credentialList.findByText("aliyun-archive")).toBeInTheDocument();
+    expect(profileList.getByText("primary")).toBeInTheDocument();
+    expect(credentialList.getByText("aliyun-primary")).toBeInTheDocument();
     const requestUrls = vi.mocked(globalThis.fetch).mock.calls.map(([input]) => String(input));
     expect(requestUrls.some((url) => url.includes("/api/storage/profiles/page?limit=50&cursor=profile-cursor"))).toBe(true);
     expect(requestUrls.some((url) => url.includes("/api/storage/credentials/page?limit=50&cursor=credential-cursor"))).toBe(true);
@@ -392,7 +406,7 @@ describe("storage profiles settings", () => {
       return json({ message: "Unexpected request" }, 500);
     });
 
-    await screen.findByText("primary");
+    await findDestination("primary");
     fireEvent.click(screen.getByRole("button", { name: "Manage primary" }));
     await screen.findByRole("dialog", { name: "Manage storage profile primary" });
     setSchemaText("Revision non-secret configuration", "/artifacts/new");
@@ -422,7 +436,7 @@ describe("storage profiles settings", () => {
       return json({ message: "Unexpected request" }, 500);
     });
 
-    await screen.findByText("primary");
+    await findDestination("primary");
     fireEvent.click(screen.getByRole("button", { name: "Manage primary" }));
     await screen.findByText("Current revision 2");
     fireEvent.click(screen.getByRole("button", { name: "Set Active" }));
@@ -449,7 +463,7 @@ describe("storage profiles settings", () => {
     });
 
     await expandStep("Storage profiles");
-    await screen.findByText("primary");
+    await findDestination("primary");
     fireEvent.click(screen.getByRole("button", { name: "Manage primary" }));
     await screen.findByText("Current revision 2");
     fireEvent.click(screen.getByRole("button", { name: "Retire profile" }));
@@ -477,7 +491,7 @@ describe("storage profiles settings", () => {
       return json({ message: "Unexpected request" }, 500);
     });
 
-    await screen.findByText("primary");
+    await findDestination("primary");
     fireEvent.click(screen.getByRole("button", { name: "Manage primary" }));
     await screen.findByText("Current revision 2");
 
@@ -511,7 +525,7 @@ describe("storage profiles settings", () => {
     };
     renderSettings(defaultHandler({ providers: [secretProvider], profiles: [{ ...profile, providerTypeKey: secretProvider.typeKey }], detail: secretDetail }));
 
-    await screen.findByText("primary");
+    await findDestination("primary");
     fireEvent.click(screen.getByRole("button", { name: "Manage primary" }));
     const dialog = await screen.findByRole("dialog", { name: "Manage storage profile primary" });
 
@@ -542,7 +556,7 @@ describe("storage profiles settings", () => {
       return json({ message: "Unexpected request" }, 500);
     });
 
-    await screen.findByText("primary");
+    await findDestination("primary");
     fireEvent.click(screen.getByRole("button", { name: "Manage primary" }));
     const dialog = await screen.findByRole("dialog", { name: "Manage storage profile primary" });
     fireEvent.change(within(dialog).getByLabelText("Storage credential"), { target: { value: credential.id } });
@@ -574,7 +588,7 @@ describe("storage profiles settings", () => {
       return json({ message: "Unexpected request" }, 500);
     });
 
-    await screen.findByText("primary");
+    await findDestination("primary");
     fireEvent.click(screen.getByRole("button", { name: "Manage primary" }));
     const dialog = await screen.findByRole("dialog", { name: "Manage storage profile primary" });
     expect(within(dialog).getByLabelText("Probe revision")).toHaveValue("current");
@@ -620,7 +634,7 @@ describe("storage profiles settings", () => {
       return json({ message: "Unexpected request" }, 500);
     });
 
-    await screen.findByText("primary");
+    await findDestination("primary");
     fireEvent.click(screen.getByRole("button", { name: "Manage primary" }));
     const dialog = await screen.findByRole("dialog", { name: "Manage storage profile primary" });
     fireEvent.change(within(dialog).getByLabelText("Probe revision"), { target: { value: "2" } });
@@ -653,7 +667,7 @@ describe("storage profiles settings", () => {
       return json({ message: "Unexpected request" }, 500);
     });
 
-    await screen.findByText("primary");
+    await findDestination("primary");
     fireEvent.click(screen.getByRole("button", { name: "Manage primary" }));
     const dialog = await screen.findByRole("dialog", { name: "Manage storage profile primary" });
     fireEvent.click(within(dialog).getByRole("button", { name: "Run write probe" }));
@@ -681,7 +695,7 @@ describe("storage profiles settings", () => {
       return json({ message: "Unexpected request" }, 500);
     });
 
-    await screen.findByText("primary");
+    await findDestination("primary");
     fireEvent.click(screen.getByRole("button", { name: "Manage primary" }));
     const dialog = await screen.findByRole("dialog", { name: "Manage storage profile primary" });
     const run = within(dialog).getByRole("button", { name: "Run write probe" });
@@ -713,9 +727,14 @@ describe("storage profiles settings", () => {
       if (path === "/api/storage/profiles/page") return json({ code: "storage_unavailable", message: "Profile ledger unavailable" }, 503);
       return json({}, 404);
     });
+    // Both views say it, and both have to: the page's own view of the destinations, and the ledger inside Advanced.
+    // The message is what matters — saying nothing is configured about a list that could not be read is what invites
+    // an operator to set up a second of everything.
+    expect(await screen.findByText("Couldn't load where this team's data is kept")).toBeInTheDocument();
     expect(await screen.findByText("Couldn't load storage profiles")).toBeInTheDocument();
-    expect(screen.getByText("Profile ledger unavailable")).toBeInTheDocument();
+    expect(screen.getAllByText("Profile ledger unavailable")).toHaveLength(2);
     expect(screen.queryByText("No storage profiles configured")).not.toBeInTheDocument();
+    expect(screen.queryByText("Nothing is set up yet")).not.toBeInTheDocument();
   });
 });
 
@@ -800,7 +819,7 @@ describe("storage guided flow", () => {
     // Activate, Create, and a per-row Manage. None of them may appear here.
     renderSettings(defaultHandler({ credentials: [credential], profiles: [profile] }), { permissions: [] });
 
-    expect(await screen.findByText("primary")).toBeInTheDocument();
+    expect(await screen.findByText("Lands here")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Create /i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Manage /i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Activate /i })).not.toBeInTheDocument();
