@@ -117,7 +117,8 @@ public static class SupervisorDependencyGate
 
     /// <summary>A dependency counts as satisfied iff its latest attempt's work is VERIFIED and unwaived: a SUCCEEDED attempt not objectively acceptance-rejected, OR an UNDER-CLAIM (Failed shell + acceptance objectively PASSED — the same A1 classification the recitation and checklist render, threaded here so the three surfaces can never disagree about whether a unit is built-on-able). Never a human-waived one (B2: WAIVED ≠ PASSED, the FATAL-1 invariant). The single definition <see cref="SatisfiedSubtaskIds"/> and <see cref="LatestSucceededAgentRunIds"/> share so they can never drift.</summary>
     private static bool IsSatisfied(SupervisorAgentResult result) =>
-        string.Equals(result.Status, nameof(AgentRunStatus.Succeeded), StringComparison.Ordinal) && result.AcceptancePassed != false
+        (string.Equals(result.Status, nameof(AgentRunStatus.Succeeded), StringComparison.Ordinal) && result.AcceptancePassed != false
+            || string.Equals(result.Status, nameof(AgentRunStatus.Failed), StringComparison.Ordinal) && result.AcceptancePassed == true)
         && !SupervisorOutcome.IsWaived(result);
 
     /// <summary>
