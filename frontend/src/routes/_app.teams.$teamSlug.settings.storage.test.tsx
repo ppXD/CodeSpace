@@ -27,7 +27,7 @@ describe("storage settings route", () => {
 
     expect(currentPath()).toBe("/teams/platform-team/settings/storage");
     expect(screen.getByRole("tab", { name: "Storage" }).getAttribute("aria-selected")).toBe("true");
-    expect(screen.getByRole("heading", { name: "Artifact storage" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Where this team's data is kept" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Data routing" })).toBeTruthy();
   });
 });

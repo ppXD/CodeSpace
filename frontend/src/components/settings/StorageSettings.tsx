@@ -97,10 +97,13 @@ export function StorageSettings() {
       )}
 
       <div className="cn-banner" style={{ margin: 16 }}>
-        <h2 className="cn-banner-h" id="storage-settings-title">Artifact storage</h2>
+        <h2 className="cn-banner-h" id="storage-settings-title">{"Where this team's data is kept"}</h2>
+        {/* The first thing an operator reads, so it is said in the words the rest of the page uses. The nouns the
+            ledger is built from - route, profile, revision - are true underneath and none of them is a decision
+            anyone makes here, so none of them belongs in the sentence that explains the screen. */}
         <div className="cn-banner-p">
-          Once a data route is Active, the next write for that data class lands on the profile it names. Until then
-          each class keeps the home it already has, which differs by class.
+          Each place below says what lands in it and whether it is working. A kind of data not sent to one keeps the
+          home it already has, and that differs by kind &mdash; the choices say which.
         </div>
         {/* Deliberately silent about reads: every storage query declares the same permission server-side, so
             promising a read-only view would be a claim this screen cannot keep. */}
@@ -131,7 +134,12 @@ export function StorageSettings() {
           the lifecycle states, per-class routing history, and draining a destination before it is stopped. Collapsed
           because none of it is part of setting storage up, and all of it is part of unpicking something. */}
       <details style={{ margin: 16 }}>
-        <summary className="cn-sub" style={{ cursor: "pointer", userSelect: "none" }}>Advanced &mdash; history, lifecycle, and per-class routing</summary>
+        {/* The app's reset hides the native marker, so the disclosure needs its own affordance or it reads as a
+            sentence nobody can act on. */}
+        <summary className="cn-sub" style={{ cursor: "pointer", userSelect: "none", display: "flex", alignItems: "center", gap: 7, padding: "8px 0" }}>
+          <Ic.ChevronRight size={13} aria-hidden="true" />
+          Advanced &mdash; history, lifecycle, and per-class routing
+        </summary>
       <div className="stg-flow" style={{ marginTop: 12 }}>
         <StorageCredentialSettings providers={providerRows} state={stepState("credential")} />
 

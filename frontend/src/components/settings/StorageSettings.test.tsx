@@ -331,11 +331,13 @@ describe("storage profiles settings", () => {
   it("lists profile state, current revision, and installed provider while preserving the provider catalog", async () => {
     renderSettings(defaultHandler({ profiles: [{ ...profile, state: "Active" }] }));
 
-    expect(screen.getByRole("heading", { name: "Artifact storage" })).toBeInTheDocument();
-    // The header used to call the runtime "deployment-managed until qualification and cutover are complete",
-    // which described a permanent layer as an unfinished one. An Active route over an Active profile IS where
-    // the next write lands, so the header now says what this screen decides instead of disclaiming it.
-    expect(screen.getByText(/Once a data route is Active, the next write for that data class lands on the profile it names/i)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Where this team's data is kept" })).toBeInTheDocument();
+    // The header once called the runtime "deployment-managed until qualification and cutover are complete", which
+    // described a permanent layer as an unfinished one; then it said what routing does, in routing's own nouns. It
+    // now says what the screen shows, in the words the screen uses - the ledger's nouns are all true underneath and
+    // none of them is a decision anyone makes here.
+    expect(screen.getByText(/Each place below says what lands in it and whether it is working/i)).toBeInTheDocument();
+    expect(screen.getByText(/keeps the home it already has, and that differs by kind/i)).toBeInTheDocument();
     expect(document.body).not.toHaveTextContent(/qualification and cutover/i);
     expect(document.body).not.toHaveTextContent(/control-plane configuration only/i);
 
