@@ -51,6 +51,15 @@ public sealed class FakeAliyunOssHandler : HttpMessageHandler
 
     /// <summary>Forces every request to fail the way OSS fails a bad signature, body echo included.</summary>
     public bool RejectEverySignature { get; set; }
+
+    /// <summary>
+    /// Models an Aliyun RAM policy whose <c>oss:ListObjects</c> grant carries an <c>oss:Prefix</c> condition - the
+    /// least-privilege shape for a bucket shared between tenants. When set, a listing is authorized only when its
+    /// <c>prefix</c> parameter equals this value; anything wider, the bucket-wide listing included, answers
+    /// AccessDenied exactly as the real service does. Object reads and writes are unaffected, which is the whole
+    /// point: this is the credential shape whose objects all work and whose bucket enumeration does not.
+    /// </summary>
+    public string? ListGrantedOnlyForPrefix { get; set; }
     public bool BlockEveryRequest { get; set; }
 
     /// <summary>Empties the bucket without touching the recorded calls — the shape of an object deleted outside CodeSpace.</summary>
@@ -81,7 +90,7 @@ public sealed class FakeAliyunOssHandler : HttpMessageHandler
         var rejection = Authorize(request);
         if (rejection != null) return rejection;
         if (!string.Equals(uri.Host, $"{Bucket}.{Host}", StringComparison.Ordinal)) return Error(HttpStatusCode.NotFound, "NoSuchBucket");
-        if (key.Length == 0) return List();
+        if (key.Length == 0) return List(uri);
 
         if (request.Method == HttpMethod.Put && request.Headers.TryGetValues("x-oss-copy-source", out var source)) return Copy(source.Single(), key, request);
         if (request.Method == HttpMethod.Put) return await PutAsync(key, request, cancellationToken).ConfigureAwait(false);
@@ -208,8 +217,19 @@ public sealed class FakeAliyunOssHandler : HttpMessageHandler
         return new HttpResponseMessage(HttpStatusCode.NoContent) { Content = new ByteArrayContent([]) };
     }
 
-    private HttpResponseMessage List()
+    /// <summary>The listing's own <c>prefix</c> parameter, decoded - the value an <c>oss:Prefix</c> condition is matched against.</summary>
+    private static string ListedPrefix(Uri uri) =>
+        uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries)
+            .Where(pair => pair.StartsWith("prefix=", StringComparison.Ordinal))
+            .Select(pair => Uri.UnescapeDataString(pair["prefix=".Length..]))
+            .DefaultIfEmpty(string.Empty)
+            .First();
+
+    private HttpResponseMessage List(Uri uri)
     {
+        if (ListGrantedOnlyForPrefix != null && ListedPrefix(uri) != ListGrantedOnlyForPrefix)
+            return Error(HttpStatusCode.Forbidden, "AccessDenied");
+
         lock (_gate)
         {
             var body = $"<?xml version=\"1.0\" encoding=\"UTF-8\"?><ListBucketResult><Name>{Bucket}</Name><KeyCount>{_objects.Count}</KeyCount><MaxKeys>1</MaxKeys><IsTruncated>{(_objects.Count > 1).ToString().ToLowerInvariant()}</IsTruncated></ListBucketResult>";

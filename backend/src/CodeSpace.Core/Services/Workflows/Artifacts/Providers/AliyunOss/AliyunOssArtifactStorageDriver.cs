@@ -246,12 +246,12 @@ internal sealed partial class AliyunOssArtifactStorageDriver : IArtifactStorageD
     ///
     /// Left as a bare status, a 404 becomes Missing: a mistyped bucket name would report the OBJECT as absent, which
     /// the plane treats as an ordinary answer, rather than the PROFILE as unusable, which an operator must fix. So the
-    /// question is re-asked with a request that can answer it - the same bucket-scoped ListObjects the health probe
+    /// question is re-asked with a request that can answer it - the same prefix-scoped ListObjects the health probe
     /// issues, whose failures do carry a body - and its token re-runs the HEAD's own status through the classifier.
     ///
     /// COSTS one extra small request per FAILED head, the dedup miss on a fresh upload included. It can only sharpen
     /// the answer: a bucket request that succeeds, faults, or is itself unattributable leaves the HEAD's own verdict
-    /// exactly as it was. It therefore does NOT cover a credential without <c>oss:ListObjects</c> on the bucket, which
+    /// exactly as it was. It therefore does NOT cover a credential that cannot list its own prefix at all, which
     /// answers AccessDenied to the re-ask and so still cannot tell an absent bucket from an absent object.
     /// </summary>
     private async Task<ArtifactStorageError> AttributeHeadFailureAsync(Exception exception, string objectKey, CancellationToken cancellationToken)
@@ -264,11 +264,29 @@ internal sealed partial class AliyunOssArtifactStorageDriver : IArtifactStorageD
         return AliyunOssErrors.Reclassify(error, objectKey, bucket?.ProviderCode);
     }
 
+    /// <summary>
+    /// Asks whether the destination answers a read, scoped to the destination itself - the profile's own key prefix -
+    /// rather than to the whole bucket.
+    ///
+    /// <para>A bucket-wide listing looks equivalent and is not, because of how Aliyun RAM expresses a prefix-scoped
+    /// grant: <c>oss:ListObjects</c> is authorized against the BUCKET resource with the prefix carried as the
+    /// <c>oss:Prefix</c> condition key. A request that names no prefix therefore fails that condition, so the standard
+    /// least-privilege policy - the one Aliyun's own documentation recommends for a shared bucket - answered
+    /// AccessDenied to this probe and reported a destination whose every read, write and delete would have succeeded
+    /// as a dead one. Naming the prefix satisfies the condition, and asks the narrower question that was always the
+    /// one worth asking: not whether this credential can enumerate the bucket, but whether it can reach the place
+    /// this profile writes to.</para>
+    ///
+    /// <para>An empty prefix sends the bucket-wide listing it always did, so a profile that owns its whole bucket is
+    /// unaffected. A mistyped bucket still answers NoSuchBucket either way: bucket resolution precedes prefix
+    /// filtering, which is what keeps <see cref="AttributeHeadFailureAsync"/> able to tell an absent bucket from an
+    /// absent object.</para>
+    /// </summary>
     private async Task<ArtifactStorageError?> ProbeReadAsync(CancellationToken cancellationToken)
     {
         try
         {
-            await Client.ListObjectsV2Async(new ListObjectsV2Request { Bucket = _target.Bucket, MaxKeys = 1 }, cancellationToken: cancellationToken).ConfigureAwait(false);
+            await Client.ListObjectsV2Async(new ListObjectsV2Request { Bucket = _target.Bucket, Prefix = _target.KeyPrefix, MaxKeys = 1 }, cancellationToken: cancellationToken).ConfigureAwait(false);
             return null;
         }
         catch (Exception exception) when (AliyunOssErrors.IsCallerCancellation(exception, cancellationToken))

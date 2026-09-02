@@ -25,8 +25,8 @@ namespace CodeSpace.UnitTests.Workflows.Artifacts.Providers.AliyunOss;
 /// WHAT IT DOES NOT PROVE: any other region or endpoint form (a <c>-internal</c> VPC or accelerate host routes and
 /// signs differently); a bucket with versioning ENABLED (the driver requires it DISABLED and nothing here can tell
 /// the difference - a versioned bucket keeps every staged upload as a non-current version and bills for it); a
-/// narrower bucket policy than the one used (<c>ProbeAsync</c> issues a bucket-level ListObjects, so a credential
-/// scoped to objects only reds the probe case on permissions rather than on the driver); the 5 GiB simple-copy
+/// narrower bucket policy than the one used (<c>ProbeAsync</c> lists the profile's own key prefix, so a credential
+/// granted no listing at all still reds the probe case on permissions rather than on the driver); the 5 GiB simple-copy
 /// ceiling the staged publish inherits (the kit's largest payload is 5 MiB + 17 bytes and this driver has NO
 /// multipart path at all, so neither this lane nor the fake ever approaches an object OSS would refuse to copy); or
 /// that any of it still holds tomorrow.
