@@ -1,4 +1,5 @@
 import type { StorageProfileHealthSummary } from "@/api/storage";
+import { timeAgo as when } from "@/lib/relativeTime";
 
 /**
  * Whether a destination is taking bytes, as of the last time anything asked.
@@ -79,14 +80,4 @@ function label(health: StorageProfileHealthSummary): string {
 function failureTitle(health: StorageProfileHealthSummary): string {
   const reason = health.failureStage && health.failureCode ? ` — ${health.failureStage}/${health.failureCode}` : "";
   return `Last checked ${when(health.observedAt)}${reason}. New writes for any data class routed here will not land.`;
-}
-
-/** How long ago, in the shortest form that is still unambiguous. Exported so a card and a badge cannot disagree. */
-export function when(observedAt: string): string {
-  const minutes = Math.round((Date.now() - new Date(observedAt).getTime()) / 60000);
-  if (!Number.isFinite(minutes) || minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes} min ago`;
-
-  const hours = Math.round(minutes / 60);
-  return hours < 24 ? `${hours} h ago` : `${Math.round(hours / 24)} d ago`;
 }

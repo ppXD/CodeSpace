@@ -7,7 +7,9 @@ import { useProbeStorageProfile, useProfilePlacementTotals, useStorageProfile } 
 import { credentialForRef } from "@/lib/storageCredentialRef";
 import { RowMenu } from "@/components/settings/RowMenu";
 
-import { StorageHealthBadge, when } from "./StorageHealthBadge";
+import { timeAgo } from "@/lib/relativeTime";
+
+import { StorageHealthBadge } from "./StorageHealthBadge";
 import { probeFailureGuidance, probeFailureReference } from "./storageProbeGuidance";
 
 /**
@@ -42,7 +44,7 @@ export function StorageDestinationCard({ profile, providers, credentials, routes
   const current = currentRevision(detail.data, profile.currentRevision);
   const landing = useMemo(() => landsHere(profile.id, routes, dataClasses), [profile.id, routes, dataClasses]);
   const stored = useMemo(() => storedHere(totals.data), [totals.data]);
-  const credential = useMemo(() => credentialForRef(current?.credentialRef, credentials), [current?.credentialRef, credentials]);
+  const credential = useMemo(() => credentialForRef(current?.credentialRef, credentials), [current, credentials]);
   // A profile that admits no writes refused the probe before a driver was opened, so nothing observed the
   // destination. Rendering that as "the destination did not answer" blames the wrong end, and offering a connection
   // repair for it offers a fix for something that is not broken.
@@ -118,7 +120,7 @@ export function StorageDestinationCard({ profile, providers, credentials, routes
           <Fact label="Lands here">{landing.length > 0 ? landing.join(", ") : "Nothing yet"}</Fact>
           <Fact label="Stored here">{totals.isLoading ? "…" : stored}</Fact>
           <Fact label="Access key">{credential?.safeHint ?? credential?.stableName ?? (provider && !providerTakesSecret(provider) ? "None needed" : "—")}</Fact>
-          <Fact label="Last checked">{profile.health ? when(profile.health.observedAt) : "Never"}</Fact>
+          <Fact label="Last checked">{profile.health ? timeAgo(profile.health.observedAt) : "Never"}</Fact>
         </div>
       </div>
     </div>

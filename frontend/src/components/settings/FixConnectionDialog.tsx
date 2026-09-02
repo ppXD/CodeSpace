@@ -36,8 +36,8 @@ export function FixConnectionDialog({ profile, provider, credentials, onClose }:
   const current = detail.data?.revisions.find((candidate) => candidate.revision === profile.currentRevision);
   // Resolved from the pointer this destination actually names, never from whichever key of the right provider
   // happens to be active - replacing the wrong key is how a working destination gets broken.
-  const credential = useMemo(() => credentialForRef(current?.credentialRef, credentials), [current?.credentialRef, credentials]);
-  const storedConfig = useMemo(() => (isRecord(current?.nonSecretConfig) ? { ...(current!.nonSecretConfig as Record<string, unknown>) } : {}), [current?.nonSecretConfig]);
+  const credential = useMemo(() => credentialForRef(current?.credentialRef, credentials), [current, credentials]);
+  const storedConfig = useMemo(() => (isRecord(current?.nonSecretConfig) ? { ...(current.nonSecretConfig as Record<string, unknown>) } : {}), [current]);
 
   const [config, setConfig] = useState<Record<string, unknown> | null>(null);
   const [secret, setSecret] = useState<Record<string, unknown>>({});
