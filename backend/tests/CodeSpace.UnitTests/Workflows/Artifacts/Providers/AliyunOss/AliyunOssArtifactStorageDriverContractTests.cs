@@ -218,7 +218,7 @@ public sealed class AliyunOssArtifactStorageDriverContractTests : ArtifactStorag
         head.Error!.Code.ShouldBe(ArtifactStorageErrorCode.Unavailable, "a bucket that is not there is a profile an operator must fix, not an object the plane may treat as not yet written");
         head.Error.ProviderCode.ShouldBe("NoSuchBucket");
         head.Error.IsRetryable.ShouldBeFalse("retrying does not bring a deleted bucket back — and this bit is what separates it from a transient 5xx wearing the same code, which is the entire safety of corroborated abandonment");
-        _oss.Calls.ShouldBe(["HEAD /codespace/objects/absent/value", "GET /?list-type=2&encoding-type=url&max-keys=1"], "the HEAD carries no body to classify, so exactly one bucket-scoped re-ask must supply the token");
+        _oss.Calls.ShouldBe(["HEAD /codespace/objects/absent/value", "GET /?list-type=2&encoding-type=url&prefix=codespace%2F&max-keys=1"], "the HEAD carries no body to classify, so exactly one prefix-scoped re-ask must supply the token");
     }
 
     /// <summary>
@@ -235,6 +235,41 @@ public sealed class AliyunOssArtifactStorageDriverContractTests : ArtifactStorag
 
         head.Error!.Code.ShouldBe(ArtifactStorageErrorCode.Missing);
         head.Error.ProviderCode.ShouldBeNull("a HEAD carries no body, so the driver has no token of its own to report and must not borrow one that does not change the verdict");
+    }
+
+    /// <summary>
+    /// The listing names the profile's own prefix, because Aliyun RAM expresses a prefix-scoped grant as a BUCKET
+    /// resource plus an <c>oss:Prefix</c> condition. A listing that names no prefix fails that condition, so a
+    /// credential holding the least-privilege policy Aliyun's own documentation recommends answered AccessDenied to a
+    /// probe of a destination whose every read and write it could perform.
+    /// </summary>
+    [Fact]
+    public async Task The_read_probe_lists_only_the_prefix_this_profile_writes_to()
+    {
+        await using var driver = await CreateDriverAsync();
+        _oss.Calls.Clear();
+
+        var probe = await driver.ProbeAsync(new ArtifactStorageProbeRequest(), CancellationToken.None);
+
+        probe.Status.ShouldBe(ArtifactStorageProbeStatus.Available, probe.Error?.Message);
+        _oss.Calls.ShouldHaveSingleItem().ShouldBe("GET /?list-type=2&encoding-type=url&prefix=codespace%2F&max-keys=1");
+    }
+
+    /// <summary>
+    /// The theory's second row is the negative control: without it, a fixture that quietly authorized every listing
+    /// would let the first row pass whether or not the driver names its prefix at all.
+    /// </summary>
+    [Theory]
+    [InlineData("codespace/", ArtifactStorageProbeStatus.Available)]
+    [InlineData("someone-else/", ArtifactStorageProbeStatus.Unavailable)]
+    public async Task A_key_granted_listing_only_under_one_prefix_can_still_qualify_its_own_destination(string grantedPrefix, ArtifactStorageProbeStatus expected)
+    {
+        await using var driver = await CreateDriverAsync();
+        _oss.ListGrantedOnlyForPrefix = grantedPrefix;
+
+        var probe = await driver.ProbeAsync(new ArtifactStorageProbeRequest { VerifyWriteAccess = true }, CancellationToken.None);
+
+        probe.Status.ShouldBe(expected, probe.Error?.Message);
     }
 
     public void Dispose() => _oss.Dispose();
