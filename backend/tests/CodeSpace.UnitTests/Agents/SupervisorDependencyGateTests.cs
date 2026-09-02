@@ -41,8 +41,10 @@ public class SupervisorDependencyGateTests
     [InlineData("Succeeded", null, true)]   // ungraded success → a usable contract
     [InlineData("Succeeded", true, true)]   // accepted success → satisfied
     [InlineData("Succeeded", false, false)] // objectively REJECTED → not a usable contract
-    [InlineData("Failed", null, false)]     // failed → not satisfied
-    public void A_dependency_is_satisfied_only_by_a_non_rejected_success(string status, bool? accepted, bool expectReady)
+    [InlineData("Failed", null, false)]     // failed with UNGRADED acceptance → unknown verification, not satisfied
+    [InlineData("Failed", true, true)]      // UNDER-CLAIM: the shell died but acceptance objectively PASSED — the recitation says "do not retry, merge it" and the checklist says Completed; the gate must agree or dependents block forever (live no-progress stop, 2026-08-30)
+    [InlineData("Failed", false, false)]    // failed AND rejected → not a usable contract
+    public void A_dependency_is_satisfied_only_by_verified_work(string status, bool? accepted, bool expectReady)
     {
         var ctx = Context(Plan(("a", null), ("b", new[] { "a" })), Spawn((("a", status, accepted))));
 

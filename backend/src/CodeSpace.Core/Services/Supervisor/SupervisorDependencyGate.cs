@@ -10,10 +10,14 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// a spawn set; <see cref="Partition"/> admits the ready subset and defers the rest, so a unit can build on a versioned,
 /// accepted predecessor instead of racing it.
 ///
-/// <para>"Satisfied" = a dependency an agent ran to a non-rejected success: its latest attempt is <c>Succeeded</c> AND
-/// not objectively rejected by its per-unit acceptance (<see cref="SupervisorAgentResult.AcceptancePassed"/> != false).
-/// A dependency that FAILED its acceptance is NOT a usable contract, so its dependents stay blocked until a retry of it
-/// succeeds. A plan with NO <c>DependsOn</c> (the flat-plan default) admits every requested subtask verbatim —
+/// <para>"Satisfied" = a dependency whose latest attempt's WORK is verified and unwaived: a <c>Succeeded</c> attempt
+/// not objectively rejected by its per-unit acceptance (<see cref="SupervisorAgentResult.AcceptancePassed"/> != false),
+/// OR an UNDER-CLAIM — the shell died (<c>Failed</c>) but the acceptance objectively PASSED. The under-claim arm is the
+/// A1 classification the recitation ("objectively fine; do not retry, merge it") and the checklist (Completed) already
+/// render; without it here, those surfaces tell the brain a unit is done while this gate blocks its dependents forever
+/// — the run then spins "dispatched no agents" into the no-progress stop (seen live, 2026-08-30). A dependency that
+/// FAILED its acceptance (or was never graded after a failed shell) is NOT a usable contract, so its dependents stay
+/// blocked until a retry of it succeeds. A plan with NO <c>DependsOn</c> (the flat-plan default) admits every requested subtask verbatim —
 /// byte-identical to before. A cyclic / dangling DAG never satisfies, so its dependents never become ready and the run
 /// converges to the no-progress bound (a clean stop) rather than looping; a dedicated plan validator can fail it faster.</para>
 /// </summary>
@@ -111,9 +115,11 @@ public static class SupervisorDependencyGate
             .ToList();
     }
 
-    /// <summary>A dependency counts as satisfied iff its latest attempt SUCCEEDED and was not objectively acceptance-rejected NOR human-waived (B2: a dependent must never build on unverified work — WAIVED ≠ PASSED, the FATAL-1 invariant) — the single definition <see cref="SatisfiedSubtaskIds"/> and <see cref="LatestSucceededAgentRunIds"/> share so they can never drift.</summary>
+    /// <summary>A dependency counts as satisfied iff its latest attempt's work is VERIFIED and unwaived: a SUCCEEDED attempt not objectively acceptance-rejected, OR an UNDER-CLAIM (Failed shell + acceptance objectively PASSED — the same A1 classification the recitation and checklist render, threaded here so the three surfaces can never disagree about whether a unit is built-on-able). Never a human-waived one (B2: WAIVED ≠ PASSED, the FATAL-1 invariant). The single definition <see cref="SatisfiedSubtaskIds"/> and <see cref="LatestSucceededAgentRunIds"/> share so they can never drift.</summary>
     private static bool IsSatisfied(SupervisorAgentResult result) =>
-        string.Equals(result.Status, nameof(AgentRunStatus.Succeeded), StringComparison.Ordinal) && result.AcceptancePassed != false && !SupervisorOutcome.IsWaived(result);
+        (string.Equals(result.Status, nameof(AgentRunStatus.Succeeded), StringComparison.Ordinal) && result.AcceptancePassed != false
+            || string.Equals(result.Status, nameof(AgentRunStatus.Failed), StringComparison.Ordinal) && result.AcceptancePassed == true)
+        && !SupervisorOutcome.IsWaived(result);
 
     /// <summary>
     /// The AgentRunId of a subtask's LATEST attempt (retry-resume's world-state continuity), UNFILTERED on success —
