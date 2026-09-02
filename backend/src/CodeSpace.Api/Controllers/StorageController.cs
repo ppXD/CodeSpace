@@ -134,6 +134,21 @@ public class StorageController : ControllerBase
         return result == null ? NotFound() : Ok(result);
     }
 
+    /// <summary>
+    /// Qualifies provider configuration and its secret against the real destination, persisting nothing.
+    ///
+    /// <para>Not addressed under a profile because there is no profile: this is the answer an operator needs BEFORE
+    /// one exists. A storage profile cannot be deleted, so testing a key by saving one first is how a mistyped secret
+    /// becomes a row nobody can remove.</para>
+    /// </summary>
+    [HttpPost("probes")]
+    [RequestSizeLimit(MaxMutationBodyBytes)]
+    public async Task<IActionResult> ProbeConfiguration([FromBody] ProbeStorageConfigurationCommand command, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     [HttpPost("profiles/{profileId:guid}/probe")]
     [RequestSizeLimit(MaxMutationBodyBytes)]
     public async Task<IActionResult> ProbeProfile([FromRoute] Guid profileId, [FromBody] ProbeStorageProfileCommand command, CancellationToken cancellationToken)

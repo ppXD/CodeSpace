@@ -35,6 +35,26 @@ public sealed record SetStorageProfileStateCommand : ICommand<StorageProfileDeta
     public required StorageProfileStateValue State { get; init; }
 }
 
+/// <summary>
+/// Qualifies provider configuration and its secret against the real destination WITHOUT persisting anything.
+///
+/// <para>Sibling of <see cref="ProbeStorageProfileCommand"/> rather than a mode of it (Rule 7): that one names a
+/// saved profile revision and answers whether a destination CodeSpace already records still works. This one answers
+/// whether a destination is worth recording at all. The distinction is not cosmetic - a storage profile cannot be
+/// deleted, so without this command the only way to test a key is to save a profile first, and getting the key wrong
+/// leaves a row behind that can never be removed.</para>
+///
+/// <para>The secret is write-only request material, exactly as on <c>CreateStorageCredentialCommand</c>, and is never
+/// part of a response DTO.</para>
+/// </summary>
+public sealed record ProbeStorageConfigurationCommand : ICommand<StorageConfigurationProbeResult>, IRequireTeamPermission
+{
+    public string RequiredPermission => TeamPermissions.StorageManage;
+    public required string ProviderTypeKey { get; init; }
+    public required JsonElement NonSecretConfig { get; init; }
+    public JsonElement? Secret { get; init; }
+}
+
 public sealed record ProbeStorageProfileCommand : ICommand<StorageProfileProbeResult>, IRequireTeamPermission
 {
     public string RequiredPermission => TeamPermissions.StorageManage;
