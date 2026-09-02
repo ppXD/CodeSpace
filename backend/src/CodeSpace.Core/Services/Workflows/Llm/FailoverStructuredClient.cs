@@ -29,7 +29,7 @@ public sealed class FailoverStructuredClient : IStructuredLLMClient
     public IReadOnlyList<(IStructuredLLMClient Client, ModelPoolPick Pick)> Candidates => _candidates;
 
     /// <summary>The wire faults worth hopping providers on — the gateway was unhealthy or throttled, and no billable completion was produced. Everything else is a fault of the request or the credential.</summary>
-    public static bool IsFailoverWorthy(LlmErrorCategory category) => true;
+    public static bool IsFailoverWorthy(LlmErrorCategory category) => category is LlmErrorCategory.Transient or LlmErrorCategory.RateLimited;
 
     public async Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
     {
