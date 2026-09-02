@@ -66,6 +66,24 @@ public sealed class StorageRouteService : IStorageRouteService, IScopedDependenc
         };
     }
 
+    public async Task<StorageRouteSummary?> GetByDataClassAsync(Guid teamId, string dataClassTypeKey, CancellationToken cancellationToken)
+    {
+        var normalized = ExecuteRule(() => StorageRouteRules.NormalizeDataClassTypeKey(dataClassTypeKey));
+        var row = await (
+            from route in _db.StorageRoute.AsNoTracking()
+            join revision in _db.StorageRouteRevision.AsNoTracking()
+                on new { route.TeamId, StorageRouteId = route.Id, Revision = route.CurrentRevision }
+                equals new { revision.TeamId, revision.StorageRouteId, revision.Revision }
+            join profile in _db.StorageProfile.AsNoTracking()
+                on new { revision.TeamId, revision.StorageProfileId }
+                equals new { profile.TeamId, StorageProfileId = profile.Id }
+            where route.TeamId == teamId && route.DataClassTypeKey == normalized
+            select new { Route = route, Revision = revision, ProfileStableName = profile.StableName })
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        return row == null ? null : Summary(row.Route, row.Revision, row.ProfileStableName);
+    }
+
     public async Task<StorageRouteDetail?> GetAsync(Guid teamId, Guid routeId, string? revisionCursor, int revisionLimit, CancellationToken cancellationToken)
     {
         var head = await (

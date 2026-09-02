@@ -142,6 +142,21 @@ public class StorageController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>
+    /// Records a whole destination - its key, its address, and what lands in it - in ONE transaction.
+    ///
+    /// <para>Composed server-side because the pieces are individually irreversible: neither a credential nor a
+    /// profile can be deleted. A caller issuing the underlying requests in sequence and losing one in the middle
+    /// would leave a half-built destination nobody can remove.</para>
+    /// </summary>
+    [HttpPost("destinations")]
+    [RequestSizeLimit(MaxMutationBodyBytes)]
+    public async Task<IActionResult> CreateDestination([FromBody] CreateStorageDestinationCommand command, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     [HttpGet("routes/page")]
     public async Task<IActionResult> ListRoutePage([FromQuery] ListStorageRoutePageQuery query, CancellationToken cancellationToken)
     {
