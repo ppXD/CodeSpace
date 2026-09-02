@@ -23,4 +23,15 @@ public sealed record StorageProviderModuleDescriptor
     /// field that is, or it can only find out by being rejected.</para>
     /// </summary>
     public string? TeamNamespaceProperty { get; init; }
+
+    /// <summary>
+    /// Whether this provider never accepts new bytes, whatever state its destination is in.
+    ///
+    /// <para>Route binding refuses such a provider BY DECLARATION, before any probe is asked, because a routing
+    /// decision made against it can never come good. A screen that offers it as somewhere to send data therefore
+    /// walks an operator through filling in a destination and refuses them at the last step. Projected from the
+    /// module's own <c>IStorageProviderAcceptsNoNewBytes</c> marker so a screen never has to know the providers by
+    /// name.</para>
+    /// </summary>
+    public required bool AcceptsNoNewBytes { get; init; }
 }

@@ -43,10 +43,15 @@ export function StorageDestinationCard({ profile, providers, credentials, routes
   const landing = useMemo(() => landsHere(profile.id, routes, dataClasses), [profile.id, routes, dataClasses]);
   const stored = useMemo(() => storedHere(totals.data), [totals.data]);
   const credential = useMemo(() => credentialForRef(current?.credentialRef, credentials), [current?.credentialRef, credentials]);
-  const failing = profile.health != null && profile.health.status !== "Available";
+  // A profile that admits no writes refused the probe before a driver was opened, so nothing observed the
+  // destination. Rendering that as "the destination did not answer" blames the wrong end, and offering a connection
+  // repair for it offers a fix for something that is not broken.
+  const stopped = profile.state !== "Active";
+  const unobserved = profile.health?.failureCode === "ProfileNotActive";
+  const failing = !stopped && !unobserved && profile.health != null && profile.health.status !== "Available";
 
   return (
-    <div className="cn-list" style={{ marginBottom: 12 }}>
+    <div className="cn-list" style={{ marginBottom: 12 }} role="listitem" aria-label={profile.stableName}>
       <div className="cn-row">
         <div className="cn-row-head">
           <div className="cn-meta">
@@ -55,6 +60,7 @@ export function StorageDestinationCard({ profile, providers, credentials, routes
               <StorageHealthBadge health={profile.health} currentRevision={profile.currentRevision} />
             </div>
             <div className="cn-sub">{address(provider, current)}</div>
+            {stopped && <div className="cn-sub" style={{ color: "var(--warn)", marginTop: 4 }}>Stopped. Nothing lands here — writes for anything still pointed at it fail. Reads of what is stored here still work.</div>}
           </div>
           {mayManage && (
             <>
@@ -96,7 +102,17 @@ export function StorageDestinationCard({ profile, providers, credentials, routes
           </div>
         )}
 
-        {probeError && <div className="cn-sub" style={{ color: "var(--danger)", marginTop: 8 }}>{probeError}</div>}
+        <div role="status" aria-live="polite">
+          {probe.isPending && <div className="cn-sub" style={{ marginTop: 8 }}>Checking&hellip;</div>}
+          {probeError && <div className="cn-sub" style={{ color: "var(--danger)", marginTop: 8 }}>{probeError}</div>}
+          {!probe.isPending && !probeError && probe.data && (
+            <div className="cn-sub" style={{ marginTop: 8, color: probe.data.status === "Available" ? "var(--good)" : "var(--danger)" }}>
+              {probe.data.status === "Available"
+                ? `It answered and accepted a write. ${probe.data.latencyMilliseconds} ms.`
+                : `${probeFailureGuidance(probe.data.failure?.code ?? "ProbeProviderFailure") ?? "It did not answer."}${probe.data.failure ? ` Reported as ${probeFailureReference(probe.data.failure)}.` : ""}`}
+            </div>
+          )}
+        </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 14, marginTop: 12 }}>
           <Fact label="Lands here">{landing.length > 0 ? landing.join(", ") : "Nothing yet"}</Fact>
@@ -163,8 +179,13 @@ function size(bytes: number): string {
   return `${unit === 0 ? value : value.toFixed(value < 10 ? 1 : 0)} ${units[unit]}`;
 }
 
+/**
+ * The revision the profile is on, and only that one. The previous fallback to `revisions[0]` meant that whenever the
+ * cached detail and the polled summary disagreed - which they do for a moment after every change - the card showed
+ * some OTHER revision's address and key as current, and Fix opened a form pre-filled from it.
+ */
 function currentRevision(detail: StorageProfileDetail | undefined, revision: number) {
-  return detail?.revisions.find((candidate) => candidate.revision === revision) ?? detail?.revisions[0];
+  return detail?.revisions.find((candidate) => candidate.revision === revision);
 }
 
 

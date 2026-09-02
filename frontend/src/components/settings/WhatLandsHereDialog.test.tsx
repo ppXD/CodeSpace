@@ -1,8 +1,9 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { StorageProfileSummary } from "@/api/storage";
+import { DialogProvider } from "@/components/dialog";
 import type { RoutedDataClass, StorageRouteSummary } from "@/api/storageRoutes";
 
 import { WhatLandsHereDialog } from "./WhatLandsHereDialog";
@@ -61,7 +62,9 @@ function renderDialog(routes: StorageRouteSummary[]) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <WhatLandsHereDialog profile={profile} routes={routes} dataClasses={dataClasses} onClose={() => {}} />
+      <DialogProvider>
+        <WhatLandsHereDialog profile={profile} routes={routes} dataClasses={dataClasses} onClose={() => {}} />
+      </DialogProvider>
     </QueryClientProvider>,
   );
   return calls;
@@ -78,17 +81,51 @@ describe("WhatLandsHereDialog", () => {
     expect(boxes[1].checked).toBe(false);
   });
 
-  // Stopping a class must not spend anything irreversible. The pointer stays where it is and only the state moves,
-  // so turning it back on later needs no decision about where it pointed — and the row itself is the team's only
-  // one for that class, forever.
-  it("stops a class by disabling its pointer rather than repointing or replacing it", async () => {
+  /**
+   * Stopping a class is destructive and the dialog has to say so before it acts.
+   * `RoutedDestinationResolver.LocalApplies` admits a local home for exactly two dispositions - no route at all, and
+   * a route created and never activated - and a route an operator STOPPED is neither. So this does not send writes
+   * back to the server's own disk: it makes them fail.
+   */
+  it("asks before stopping a class, and says the writes will fail rather than fall back", async () => {
     const calls = renderDialog([route()]);
 
     fireEvent.click(screen.getAllByRole("checkbox")[0]);
     fireEvent.click(screen.getByRole("button", { name: "Apply" }));
 
+    const asked = await screen.findByRole("alertdialog");
+    expect(asked).toHaveTextContent(/will FAIL/);
+    expect(asked).toHaveTextContent(/no way back to the local home/i);
+    expect(calls).toHaveLength(0);
+
+    fireEvent.click(within(asked).getByRole("button", { name: "Stop storing them" }));
+
     await waitFor(() => expect(calls).toHaveLength(1));
     expect(calls[0]).toMatchObject({ path: "/api/storage/routes/rt-artifacts/state", method: "PUT", body: { expectedXmin: 3, expectedCurrentRevision: 1, state: "Disabled" } });
+  });
+
+  // Declining has to leave the pointer exactly as it was - the untick is a proposal until it is confirmed.
+  it("changes nothing when the operator declines", async () => {
+    const calls = renderDialog([route()]);
+
+    fireEvent.click(screen.getAllByRole("checkbox")[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    const asked = await screen.findByRole("alertdialog");
+    fireEvent.click(within(asked).getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(calls).toHaveLength(0);
+  });
+
+  // Ticking is not destructive and must not ask: it moves where the next write goes and nothing else.
+  it("does not ask before sending a new kind of data here", async () => {
+    const calls = renderDialog([]);
+
+    fireEvent.click(screen.getAllByRole("checkbox")[1]);
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    await waitFor(() => expect(calls.length).toBeGreaterThan(0));
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   });
 
   // A data class carries exactly one pointer for the life of the team, so claiming one another destination holds is
@@ -117,16 +154,19 @@ describe("WhatLandsHereDialog", () => {
     expect(calls[1]).toMatchObject({ path: "/api/storage/routes/rt-new/state", body: { state: "Active" } });
   });
 
-  // The two classes say different things when they stop landing here, and the difference is whether data is being
-  // dropped. Read off the class's own declaration, not its name.
-  it("says where an unticked class's writes go, differently for a class with no home of its own", () => {
+  /**
+   * The two classes differ about being UNROUTED - one has a local home, the other does not - but they do not differ
+   * about being STOPPED, and the dialog used to claim they did. Saying "back to this server's own disk" of a stopped
+   * class is the most expensive kind of wrong: it reads as safe.
+   */
+  it("says a stopped class's writes will fail, for both classes, and never that they fall back", () => {
     renderDialog([route(), route({ id: "rt-logs", dataClassTypeKey: "agent-run-log/v1" })]);
 
     fireEvent.click(screen.getAllByRole("checkbox")[0]);
     fireEvent.click(screen.getAllByRole("checkbox")[1]);
 
-    expect(screen.getByText(/goes back to this server's own disk/i)).toBeInTheDocument();
-    expect(screen.getByText(/stop being captured at all/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/Writes for these will FAIL/)).toHaveLength(2);
+    expect(screen.queryByText(/goes back to this server's own disk/i)).not.toBeInTheDocument();
   });
 
   it("has nothing to apply until something is ticked or unticked", () => {

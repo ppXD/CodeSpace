@@ -15,7 +15,7 @@ import { WhatLandsHereDialog } from "./WhatLandsHereDialog";
  * permanent debris this whole surface exists to stop accumulating. Its history is still reachable through the
  * step-by-step flow, which is where the lifecycle lives.
  */
-export function StorageDestinations({ profiles, providers, credentials, routes, dataClasses, mayManage, loading, onAdvanced }: {
+export function StorageDestinations({ profiles, providers, credentials, routes, dataClasses, mayManage, loading, error, onAdvanced }: {
   profiles: StorageProfileSummary[];
   providers: StorageProviderModuleSummary[];
   credentials: StorageCredentialMetadata[];
@@ -23,6 +23,8 @@ export function StorageDestinations({ profiles, providers, credentials, routes, 
   dataClasses: RoutedDataClass[];
   mayManage: boolean;
   loading: boolean;
+  /** A load failure, which is NOT an empty team: saying "nothing is set up yet" about an unread list invites setting up a second of everything. */
+  error: string | null;
   onAdvanced: (profileId: string) => void;
 }) {
   const [fixing, setFixing] = useState<string | null>(null);
@@ -33,6 +35,16 @@ export function StorageDestinations({ profiles, providers, credentials, routes, 
   const routingProfile = live.find((profile) => profile.id === routing);
 
   if (loading) return <div className="ct-empty" role="status"><div className="ct-empty-h">Loading&hellip;</div></div>;
+
+  if (error != null) {
+    return (
+      <div className="cn-banner cn-banner-err" role="alert">
+        <div className="cn-banner-h">{"Couldn't load where this team's data is kept"}</div>
+        <div className="cn-banner-p">{error}</div>
+        <div className="cn-banner-p">This is not the same as having none. Nothing has been changed, and adding a destination now could duplicate one that already exists.</div>
+      </div>
+    );
+  }
 
   if (live.length === 0) {
     return (
@@ -45,6 +57,7 @@ export function StorageDestinations({ profiles, providers, credentials, routes, 
 
   return (
     <>
+      <div role="list" aria-label="Where this team's data is kept">
       {live.map((profile) => (
         <StorageDestinationCard
           key={profile.id}
@@ -59,6 +72,7 @@ export function StorageDestinations({ profiles, providers, credentials, routes, 
           onAdvanced={() => onAdvanced(profile.id)}
         />
       ))}
+      </div>
 
       {fixingProfile && (
         <FixConnectionDialog

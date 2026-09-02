@@ -12,7 +12,8 @@ const provider: StorageProviderModuleSummary = {
   configSchema: { type: "object", properties: { endpoint: { type: "string", title: "Endpoint" }, bucket: { type: "string", title: "Bucket name" } }, required: ["endpoint", "bucket"] },
   secretSchema: { type: "object", properties: { accessKeyId: { type: "string", title: "AccessKey ID" }, accessKeySecret: { type: "string", title: "AccessKey secret", writeOnly: true } }, required: ["accessKeyId", "accessKeySecret"] },
   capabilities: [],
-  teamNamespaceProperty: "bucket",
+  teamNamespaceProperty: "keyPrefix",
+  acceptsNoNewBytes: false,  // as the shipped OSS module declares it
 };
 
 const profile: StorageProfileSummary = {
@@ -41,7 +42,15 @@ function json(body: unknown) {
   return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
 }
 
-function renderDialog(options: { probeStatus?: string } = {}) {
+function setConfigField(label: string, value: string) {
+  const row = Array.from(document.querySelectorAll<HTMLElement>(".wf-form-row"))
+    .find((candidate) => candidate.querySelector(".wf-form-label")?.textContent?.startsWith(label))!;
+  const editor = row.querySelector<HTMLElement>('[role="textbox"]')!;
+  editor.innerHTML = value;
+  fireEvent.input(editor);
+}
+
+function renderDialog(options: { probeStatus?: string; failProfileRevisions?: boolean; onClose?: () => void } = {}) {
   const calls: Call[] = [];
   localStorage.setItem("codespace.jwt", "test-jwt");
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
@@ -53,14 +62,18 @@ function renderDialog(options: { probeStatus?: string } = {}) {
       return json({ providerTypeKey: provider.typeKey, profileId: profile.id, profileRevision: 3, writeAccessRequested: true, status: options.probeStatus ?? "Available", latencyMilliseconds: 180, failure: options.probeStatus && options.probeStatus !== "Available" ? { stage: "Probe", code: "ProbeSignatureMismatch", retryable: false } : null });
     }
     if (path === "/api/storage/credentials/cred-b/revisions") return json({ ...credentials[1], currentRevision: 3, credentialRef: "db:cred-b:3", xmin: 99 });
-    if (path === `/api/storage/profiles/${profile.id}/revisions`) return json({ ...detail, currentRevision: 4 });
+    if (path === `/api/storage/profiles/${profile.id}/revisions`) {
+      return options.failProfileRevisions
+        ? new Response(JSON.stringify({ code: "storage_profile_conflict", message: "Someone changed this destination." }), { status: 409, headers: { "Content-Type": "application/json" } })
+        : json({ ...detail, currentRevision: 4 });
+    }
     return json([]);
   }));
 
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <FixConnectionDialog profile={profile} provider={provider} credentials={credentials} onClose={() => {}} />
+      <FixConnectionDialog profile={profile} provider={provider} credentials={credentials} onClose={options.onClose ?? (() => {})} />
     </QueryClientProvider>,
   );
   return calls;
@@ -144,6 +157,70 @@ describe("FixConnectionDialog", () => {
 
     expect(await screen.findByText(/Nothing needs changing/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+  });
+
+  /**
+   * The defect this closes was the worst kind: the dialog probed the SAVED address, then appended a permanent
+   * revision carrying the EDITED one, and told the operator it was "what you just tested". The stored key never
+   * leaves the server, so a changed address genuinely cannot be tested without a key - and the honest answer is to
+   * say so rather than to test something else.
+   */
+  it("will not test a changed address with the stored key, and says why", async () => {
+    const calls = renderDialog();
+    await screen.findByLabelText("AccessKey secret");
+
+    setConfigField("Bucket name", "codespace-artifact");
+
+    expect(screen.getByRole("button", { name: "Test connection" })).toBeDisabled();
+    expect(screen.getByText(/Re-enter the key to test a changed address/)).toBeInTheDocument();
+    expect(calls).toHaveLength(0);
+  });
+
+  // A pass covers exactly what was on the form when it passed. Editing after it must retract Save, or a passing test
+  // licences writing something nothing has tried.
+  it("retracts Save when the form changes after a passing test", async () => {
+    renderDialog();
+    await screen.findByLabelText("AccessKey secret");
+    fillSecret();
+    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
+    await screen.findByText("It answered.");
+    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+
+    setConfigField("Bucket name", "somewhere-else");
+
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(screen.queryByText("It answered.")).not.toBeInTheDocument();
+  });
+
+  // Save is two writes and only the second makes the first mean anything. A retry after the second one failed must
+  // point at the version already minted - minting another leaves a permanent key version nothing points at.
+  it("does not mint a second key version when the destination half is retried", async () => {
+    const calls = renderDialog({ failProfileRevisions: true });
+    await screen.findByLabelText("AccessKey secret");
+    fillSecret();
+    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
+    await screen.findByText("It answered.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls.filter((call) => call.path.includes("/credentials/"))).toHaveLength(1));
+    await screen.findByRole("alert");
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(calls.filter((call) => call.path === `/api/storage/profiles/${profile.id}/revisions`)).toHaveLength(2));
+    expect(calls.filter((call) => call.path.includes("/credentials/"))).toHaveLength(1);
+    expect(calls.filter((call) => call.path === `/api/storage/profiles/${profile.id}/revisions`)[1].body).toMatchObject({ credentialRef: "db:cred-b:3" });
+  });
+
+  // Escape is how a keyboard leaves a dialog in this app; these three portalled their own surface and had none.
+  it("closes on Escape", async () => {
+    let closed = false;
+    renderDialog({ onClose: () => { closed = true; } });
+    await screen.findByLabelText("AccessKey secret");
+
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    expect(closed).toBe(true);
   });
 
   it("says the old key is kept, because data stored here still opens through it", async () => {

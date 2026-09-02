@@ -23,6 +23,7 @@ const ossProvider: StorageProviderModuleSummary = {
   secretSchema: { type: "object", properties: {}, additionalProperties: false },
   capabilities: [],
   teamNamespaceProperty: "keyPrefix",
+  acceptsNoNewBytes: false,
 };
 
 /** A provider that cannot give each team a namespace of its own, so it can never be a deployment default. */
@@ -33,6 +34,7 @@ const undividable: StorageProviderModuleSummary = {
   secretSchema: { type: "object", properties: {}, additionalProperties: false },
   capabilities: [],
   teamNamespaceProperty: null,
+  acceptsNoNewBytes: false,
 };
 
 const authored: StorageDefaultSummary = {

@@ -9,6 +9,8 @@ export interface StorageProviderModuleSummary {
   capabilities: string[];
   /** The config property that carries this provider's namespace, or null when it cannot subdivide one — and so cannot be a deployment default. */
   teamNamespaceProperty: string | null;
+  /** True when this provider never accepts new bytes: route binding refuses it by declaration, so it is not somewhere data can be sent. */
+  acceptsNoNewBytes: boolean;
 }
 
 export type StorageProfileState = "Draft" | "Active" | "Disabled" | "Retired";

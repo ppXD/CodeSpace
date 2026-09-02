@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ProfilePlacementTotal, StorageCredentialMetadata, StorageProfileDetail, StorageProfileSummary, StorageProviderModuleSummary } from "@/api/storage";
@@ -14,7 +14,8 @@ const provider: StorageProviderModuleSummary = {
   configSchema: { type: "object", properties: { endpoint: { type: "string" }, bucket: { type: "string" }, keyPrefix: { type: "string" } } },
   secretSchema: { type: "object", properties: { accessKeyId: { type: "string" } }, required: ["accessKeyId"] },
   capabilities: [],
-  teamNamespaceProperty: "bucket",
+  teamNamespaceProperty: "keyPrefix",
+  acceptsNoNewBytes: false,  // as the shipped OSS module declares it
 };
 
 const profile: StorageProfileSummary = {
@@ -80,6 +81,7 @@ function renderCard(options: { profile?: StorageProfileSummary; routes?: Storage
     const path = new URL(typeof input === "string" ? input : input.toString(), "http://test.local").pathname;
     if (path === `/api/storage/profiles/${profile.id}`) return json(detail);
     if (path === `/api/storage/profiles/${profile.id}/placements/totals`) return json(options.totals ?? []);
+    if (path === `/api/storage/profiles/${profile.id}/probe`) return json({ profileId: profile.id, profileRevision: 3, writeAccessRequested: true, status: "Available", latencyMilliseconds: 118, failure: null });
     return json([]);
   }));
 
@@ -155,6 +157,43 @@ describe("StorageDestinationCard", () => {
     expect(await screen.findByRole("button", { name: "Fix the connection" })).toBeInTheDocument();
     expect(screen.getByText(/policy does not allow writing here/i)).toBeInTheDocument();
     expect(screen.getByText(/Probe \/ ProbePermissionDenied/)).toBeInTheDocument();
+  });
+
+  /**
+   * A stopped destination refused the probe before a driver was opened, so nothing observed the destination. Showing
+   * that in red as "the destination did not answer" blames the wrong end, and offering a connection repair offers a
+   * fix for something that is not broken.
+   */
+  it("says a stopped destination is stopped rather than unreachable, and offers no repair", async () => {
+    renderCard({ profile: { ...profile, state: "Disabled", health: { status: "Unavailable", writeVerified: false, profileRevision: 3, latencyMilliseconds: 1, observedAt: new Date().toISOString(), failureStage: "Profile", failureCode: "ProfileNotActive" } } });
+
+    expect(await screen.findByText(/Stopped\. Nothing lands here/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Fix the connection" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/did not answer/i)).not.toBeInTheDocument();
+  });
+
+  // The check writes and removes a real object at the destination. A control that does that and reports nothing
+  // teaches an operator to click it twice and trust neither answer.
+  it("reports what the check found", async () => {
+    renderCard();
+    await screen.findByText(/Aliyun OSS/);
+
+    fireEvent.click(screen.getByRole("button", { name: `Actions for ${profile.stableName}` }));
+    fireEvent.click(await screen.findByRole("button", { name: "Check it now" }));
+
+    expect(await screen.findByText(/It answered and accepted a write/)).toBeInTheDocument();
+  });
+
+  /**
+   * The cached detail and the polled summary disagree for a moment after every change. Falling back to whichever
+   * revision happened to be first showed some OTHER revision's address and key as current, and the repair dialog
+   * then opened pre-filled from it.
+   */
+  it("shows no address at all rather than one from a revision the destination has left", async () => {
+    renderCard({ profile: { ...profile, currentRevision: 9 } });
+
+    expect(await screen.findByText("Aliyun OSS")).toBeInTheDocument();
+    expect(screen.queryByText(/oss-cn-hongkong/)).not.toBeInTheDocument();
   });
 
   it("offers no repair while the destination is answering", async () => {

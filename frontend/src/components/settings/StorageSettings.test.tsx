@@ -22,6 +22,7 @@ const localProvider: StorageProviderModuleSummary = {
   secretSchema: { type: "object", properties: {}, additionalProperties: false },
   capabilities: ["ConditionalCreate", "StreamingRead"],
   teamNamespaceProperty: "rootPath",
+  acceptsNoNewBytes: false,
 };
 
 const secretProvider: StorageProviderModuleSummary = {
@@ -41,6 +42,7 @@ const secretProvider: StorageProviderModuleSummary = {
   },
   capabilities: ["MultipartUpload", "StreamingWrite"],
   teamNamespaceProperty: "keyPrefix",
+  acceptsNoNewBytes: false,
 };
 
 const profile: StorageProfileSummary = {
@@ -725,9 +727,14 @@ describe("storage profiles settings", () => {
       if (path === "/api/storage/profiles/page") return json({ code: "storage_unavailable", message: "Profile ledger unavailable" }, 503);
       return json({}, 404);
     });
+    // Both views say it, and both have to: the page's own view of the destinations, and the ledger inside Advanced.
+    // The message is what matters — saying nothing is configured about a list that could not be read is what invites
+    // an operator to set up a second of everything.
+    expect(await screen.findByText("Couldn't load where this team's data is kept")).toBeInTheDocument();
     expect(await screen.findByText("Couldn't load storage profiles")).toBeInTheDocument();
-    expect(screen.getByText("Profile ledger unavailable")).toBeInTheDocument();
+    expect(screen.getAllByText("Profile ledger unavailable")).toHaveLength(2);
     expect(screen.queryByText("No storage profiles configured")).not.toBeInTheDocument();
+    expect(screen.queryByText("Nothing is set up yet")).not.toBeInTheDocument();
   });
 });
 

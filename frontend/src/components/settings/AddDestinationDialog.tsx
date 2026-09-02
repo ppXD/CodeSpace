@@ -1,10 +1,13 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode, useRef } from "react";
 import { createPortal } from "react-dom";
+
+import { useDialogKeys } from "./useDialogKeys";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { ApiError } from "@/api/request";
 import { storageApi, type StorageConfigurationProbeResult, type StorageProviderModuleSummary } from "@/api/storage";
-import { storageRouteApi, type RoutedDataClass } from "@/api/storageRoutes";
+import { storageRouteApi, type RoutedDataClass, type StorageRouteSummary } from "@/api/storageRoutes";
+import { deriveSecretHint } from "@/lib/storageSecretHint";
 import { SchemaForm } from "@/components/workflows/SchemaForm";
 
 import { probeFailureGuidance, probeFailureReference } from "./storageProbeGuidance";
@@ -23,7 +26,10 @@ import { probeFailureGuidance, probeFailureReference } from "./storageProbeGuida
  */
 export function AddDestinationDialog({ providers, onClose, onCreated }: { providers: StorageProviderModuleSummary[]; onClose: () => void; onCreated: () => void }) {
   const queryClient = useQueryClient();
-  const [providerTypeKey, setProviderTypeKey] = useState(providers[0]?.typeKey ?? "");
+  // A provider that never accepts new bytes is not somewhere data can be sent: route binding refuses it by
+  // declaration, so offering it walks an operator through four fields and refuses them at the last step.
+  const offerable = useMemo(() => providers.filter((candidate) => !candidate.acceptsNoNewBytes), [providers]);
+  const [providerTypeKey, setProviderTypeKey] = useState(offerable[0]?.typeKey ?? "");
   const [config, setConfig] = useState<Record<string, unknown>>({});
   const [secret, setSecret] = useState<Record<string, unknown>>({});
   const [name, setName] = useState("");
@@ -31,8 +37,11 @@ export function AddDestinationDialog({ providers, onClose, onCreated }: { provid
   const [claimed, setClaimed] = useState<string[]>([]);
   const [qualified, setQualified] = useState<StorageConfigurationProbeResult | null>(null);
 
-  const provider = useMemo(() => providers.find((candidate) => candidate.typeKey === providerTypeKey), [providers, providerTypeKey]);
+  const provider = useMemo(() => offerable.find((candidate) => candidate.typeKey === providerTypeKey), [offerable, providerTypeKey]);
   const dataClasses = useQuery({ queryKey: ["storage", "data-classes"], queryFn: ({ signal }) => storageRouteApi.listDataClasses(signal) });
+  // Where each class lands TODAY. Without it a class already routed elsewhere reads as unrouted, and ticking it -
+  // which the server performs as a REPOINT - takes it from another destination with nothing on screen saying so.
+  const routes = useQuery({ queryKey: ["storage", "routes", "for-add"], queryFn: ({ signal }) => storageRouteApi.listPage(null, 50, signal) });
 
   // The name is derived from whatever the provider says identifies its namespace — the bucket, the root path — so the
   // operator types nothing extra, and can still overrule it.
@@ -50,7 +59,7 @@ export function AddDestinationDialog({ providers, onClose, onCreated }: { provid
       providerTypeKey,
       nonSecretConfig: config,
       secret: hasSecretInputs(provider) ? secret : null,
-      safeHint: safeHint(provider, secret),
+      safeHint: deriveSecretHint(provider?.secretSchema, secret),
       dataClassTypeKeys: claimed,
     }),
     onSuccess: async () => {
@@ -61,6 +70,7 @@ export function AddDestinationDialog({ providers, onClose, onCreated }: { provid
 
   const answered = probe.data;
   const step: Step = qualified ? "use" : answered && answered.status !== "Available" ? "refused" : "connect";
+  const nameValid = NAME_PATTERN.test(effectiveName);
   const canTest = Boolean(provider) && requiredValuesPresent(provider?.configSchema, config) && (!requiresSecret(provider) || requiredValuesPresent(provider?.secretSchema, secret));
 
   // The promise sits beside the button that acts on it. At the bottom of a scrolling form it was the first thing an
@@ -73,7 +83,7 @@ export function AddDestinationDialog({ providers, onClose, onCreated }: { provid
     <div className="mdl-foot">
       <span className="wf-form-help" style={{ maxWidth: "46ch" }}>
         {step === "connect" && "Nothing is saved until this test passes."}
-        {step === "use" && "Only what you tick starts landing here."}
+        {step === "use" && (nameValid ? "Only what you tick starts landing here." : "Give this place a name: lowercase letters, digits and hyphens.")}
       </span>
       <span style={{ display: "flex", gap: 10 }}>
       <button type="button" className="btn" onClick={step === "refused" ? () => probe.reset() : onClose}>
@@ -90,7 +100,7 @@ export function AddDestinationDialog({ providers, onClose, onCreated }: { provid
         </button>
       )}
       {step === "use" && (
-        <button type="button" className="btn btn-primary" disabled={create.isPending} onClick={() => create.mutate()}>
+        <button type="button" className="btn btn-primary" disabled={!nameValid || create.isPending} onClick={() => create.mutate()}>
           {create.isPending ? "Saving…" : "Start storing here"}
         </button>
       )}
@@ -103,7 +113,7 @@ export function AddDestinationDialog({ providers, onClose, onCreated }: { provid
       {step === "connect" && (
         <>
           <div className="wf-form">
-            {providers.length > 1 && (
+            {offerable.length > 1 && (
               <div className="wf-form-row">
                 <label className="wf-form-label" htmlFor="destination-provider">Where should this team&rsquo;s data be written?</label>
                 <select
@@ -112,7 +122,7 @@ export function AddDestinationDialog({ providers, onClose, onCreated }: { provid
                   value={providerTypeKey}
                   onChange={(event) => { setProviderTypeKey(event.target.value); setConfig({}); setSecret({}); probe.reset(); }}
                 >
-                  {providers.map((candidate) => <option key={candidate.typeKey} value={candidate.typeKey}>{candidate.displayName}</option>)}
+                  {offerable.map((candidate) => <option key={candidate.typeKey} value={candidate.typeKey}>{candidate.displayName}</option>)}
                 </select>
               </div>
             )}
@@ -120,17 +130,6 @@ export function AddDestinationDialog({ providers, onClose, onCreated }: { provid
             {provider && <SchemaForm schema={provider.configSchema} value={config} onChange={setConfig} />}
             {provider && hasSecretInputs(provider) && <SchemaForm schema={provider.secretSchema} value={secret} onChange={setSecret} sensitive />}
 
-            <div className="wf-form-row">
-              <label className="wf-form-label" htmlFor="destination-name">Name</label>
-              <input
-                id="destination-name"
-                className="wf-form-input"
-                value={effectiveName}
-                placeholder={derivedName}
-                onChange={(event) => { setNameEdited(true); setName(event.target.value); }}
-              />
-              <span className="wf-form-help">What this place is called on this screen. Lowercase letters, digits and hyphens. It cannot be renamed later.</span>
-            </div>
           </div>
 
           {probe.error instanceof ApiError && <Banner title="Couldn&rsquo;t run the test">{probe.error.message}</Banner>}
@@ -146,7 +145,7 @@ export function AddDestinationDialog({ providers, onClose, onCreated }: { provid
           </div>
           <p className="wf-form-help" style={{ marginTop: 12 }}>Reported as {probeFailureReference(answered.failure)}.</p>
           <p className="wf-form-help" style={{ marginTop: 10 }}>
-            <strong>Nothing was saved.</strong> There is no destination and no key &mdash; this test wrote nothing anywhere, including at the destination itself.
+            <strong>Nothing was saved.</strong> There is no destination and no key &mdash; and the only thing this test ever writes at the destination is an empty object it removes again.
           </p>
         </>
       )}
@@ -155,16 +154,33 @@ export function AddDestinationDialog({ providers, onClose, onCreated }: { provid
         <>
           <div className="cn-banner" role="status">
             <div className="cn-banner-h">{effectiveName} answered.</div>
-            <div className="cn-banner-p">It wrote a test object, read it back and removed it. {qualified.latencyMilliseconds}&thinsp;ms.</div>
+            <div className="cn-banner-p">It listed the folder and accepted a write. The empty object it wrote is removed again. {qualified.latencyMilliseconds}&thinsp;ms.</div>
           </div>
 
           <div className="wf-form" style={{ marginTop: 16 }}>
+            <div className="wf-form-row">
+              <label className="wf-form-label" htmlFor="destination-name">Name</label>
+              <input
+                id="destination-name"
+                className="wf-form-input"
+                value={effectiveName}
+                placeholder={derivedName || "artifacts"}
+                onChange={(event) => { setNameEdited(true); setName(event.target.value); }}
+              />
+              <span className="wf-form-help">What this place is called on this screen. Lowercase letters, digits and hyphens. It cannot be renamed later.</span>
+            </div>
+
             <div className="wf-form-row">
               <span className="wf-form-label">What lands here?</span>
               <span className="wf-form-help">Nothing is ticked for you. Each choice moves where NEW writes go &mdash; data already stored stays where it is.</span>
             </div>
 
-            {dataClasses.isLoading && <span className="wf-form-help">Loading&hellip;</span>}
+            {(dataClasses.isLoading || routes.isLoading) && <span className="wf-form-help">Loading&hellip;</span>}
+            {(dataClasses.error != null || routes.error != null) && (
+              <span className="wf-form-help" style={{ color: "var(--danger)" }}>
+                Couldn&rsquo;t read what this team stores today, so these choices cannot be described honestly. Save the destination without ticking anything and set that from its card.
+              </span>
+            )}
             {dataClasses.data?.map((dataClass: RoutedDataClass) => (
               <label key={dataClass.typeKey} className="wf-form-row" style={{ flexDirection: "row", alignItems: "flex-start", gap: 9 }}>
                 <input
@@ -174,7 +190,7 @@ export function AddDestinationDialog({ providers, onClose, onCreated }: { provid
                 />
                 <span>
                   <span className="cn-name" style={{ fontSize: 13 }}>{dataClass.displayName}</span>
-                  <span className="wf-form-help" style={{ display: "block" }}>{unroutedToday(dataClass)}</span>
+                  <span className="wf-form-help" style={{ display: "block" }}>{whatTickingDoes(dataClass, routedElsewhere(dataClass, routes.data?.items))}</span>
                 </span>
               </label>
             ))}
@@ -192,10 +208,13 @@ type Step = "connect" | "refused" | "use";
 
 /** The rail names the three questions, so an operator can see there are only three before answering the first. */
 function Frame({ step, onClose, footer, children }: { step: Step; onClose: () => void; footer: ReactNode; children: ReactNode }) {
+  const surface = useRef<HTMLDivElement>(null);
+  useDialogKeys(surface, onClose);
+
   return createPortal(
     <>
       <div className="mdl-mask" aria-hidden="true" onClick={onClose} />
-      <div className="mdl" role="dialog" aria-modal="true" aria-label="Add a destination">
+      <div ref={surface} className="mdl" role="dialog" aria-modal="true" aria-label="Add a destination">
         <div className="mdl-head">
           <div className="mdl-title-wrap">
             <div className="mdl-title">Add a destination</div>
@@ -227,34 +246,45 @@ function Banner({ title, children }: { title: string; children: ReactNode }) {
 }
 
 /**
- * What happens to a class the operator does NOT tick, said plainly. The difference between the two sentences is not
- * cosmetic: one says the data has a home already, the other says it is being dropped.
+ * What ticking this class actually does, for the state it is actually in.
+ *
+ * Three cases, not two, and the third is the one worth saying: a class already landing at another destination is
+ * REPOINTED by the server rather than newly routed, so ticking it takes it from somewhere. Describing that as
+ * "currently written to this server's own disk" is how an operator moves a live data class by accident.
  */
-function unroutedToday(dataClass: RoutedDataClass): string {
+function whatTickingDoes(dataClass: RoutedDataClass, elsewhere: StorageRouteSummary | undefined): string {
+  if (elsewhere) return `Currently landing in ${elsewhere.storageProfileStableName}. Ticking this MOVES the next write here — what is already stored there stays there and keeps opening.`;
+
   return dataClass.hasLocalFallback
     ? "Currently written to this server's own disk. Ones already there stay there and keep opening — but they can never move back once this is on."
     : "Not captured at all today. Ticking this is what starts capturing them; leaving it alone changes nothing.";
 }
 
-/** The provider's own namespace field is the name an operator would have typed anyway. */
-function deriveName(provider: StorageProviderModuleSummary | undefined, config: Record<string, unknown>): string {
-  const property = provider?.teamNamespaceProperty;
-  const value = property ? config[property] : undefined;
-  if (typeof value !== "string") return "";
-  const slug = value.trim().toLowerCase().replace(/^[a-z]+:\/\//, "").replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
-  return slug.slice(0, 128);
+/** The destination this class lands in today, if any. Only an Active route sends anything. */
+function routedElsewhere(dataClass: RoutedDataClass, routes: StorageRouteSummary[] | undefined): StorageRouteSummary | undefined {
+  return routes?.find((route) => route.dataClassTypeKey === dataClass.typeKey && route.state === "Active");
 }
 
-/** A non-secret reminder of WHICH key this is. Built from the first non-secret-looking string the operator gave. */
-function safeHint(provider: StorageProviderModuleSummary | undefined, secret: Record<string, unknown>): string | null {
-  const properties = schemaProperties(provider?.secretSchema);
-  for (const [key, declared] of Object.entries(properties)) {
-    if (isRecord(declared) && declared.writeOnly === true) continue;
-    const value = secret[key];
-    if (typeof value === "string" && value.length > 0) return value.length <= 12 ? value : `${value.slice(0, 7)}…${value.slice(-4)}`;
+/** The server's own rule for a name, mirrored so a prefill is never something it would refuse. */
+const NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,127}$/;
+
+/**
+ * A prefill, not a derivation: the first value the operator typed that is ALREADY a valid name, in the provider's own
+ * schema order. For OSS that is the bucket; for a filesystem root, nothing, and the operator names it.
+ *
+ * Deliberately not `teamNamespaceProperty` - that names the field carrying the provider's NAMESPACE, which for the
+ * shipped OSS provider is the optional `keyPrefix`. Reading it produced an empty name in the ordinary case, and an
+ * empty name is refused by the server at the very last step.
+ */
+function deriveName(provider: StorageProviderModuleSummary | undefined, config: Record<string, unknown>): string {
+  const properties = schemaProperties(provider?.configSchema);
+  for (const name of Object.keys(properties)) {
+    const value = config[name];
+    if (typeof value === "string" && NAME_PATTERN.test(value.trim())) return value.trim();
   }
-  return null;
+  return "";
 }
+
 
 function requiresSecret(provider: StorageProviderModuleSummary | undefined): boolean {
   const required = provider?.secretSchema?.required;
@@ -272,7 +302,12 @@ function schemaProperties(schema: unknown): Record<string, unknown> {
 function requiredValuesPresent(schema: unknown, value: Record<string, unknown>): boolean {
   if (!isRecord(schema)) return true;
   const required = Array.isArray(schema.required) ? schema.required : [];
-  return required.every((name) => typeof name === "string" && typeof value[name] === "string" && (value[name] as string).trim().length > 0);
+  return required.every((name) => typeof name === "string" && filled(value[name]));
+}
+
+/** Present and non-empty. Not string-only: a provider may require a number or a boolean, and one that did could never be tested. */
+function filled(value: unknown): boolean {
+  return value != null && (typeof value !== "string" || value.trim().length > 0);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

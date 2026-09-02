@@ -122,6 +122,7 @@ export function StorageSettings() {
           dataClasses={dataClasses.data ?? []}
           mayManage={mayManage}
           loading={profiles.isLoading}
+          error={profileError}
           onAdvanced={(profileId) => setManagedProfileId(profileId)}
         />
       </div>
