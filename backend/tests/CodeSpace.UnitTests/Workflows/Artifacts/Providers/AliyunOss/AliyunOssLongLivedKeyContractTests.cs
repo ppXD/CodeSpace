@@ -33,7 +33,7 @@ public sealed class AliyunOssLongLivedKeyContractTests : ArtifactStorageDriverCo
 
     protected override async ValueTask<IArtifactStorageDriver> CreateDriverAsync()
     {
-        var factory = new AliyunOssArtifactStorageDriverFactory(_oss, TimeProvider.System);
+        var factory = new AliyunOssArtifactStorageDriverFactory(_oss);
         using var credential = AliyunOssTestProfile.Credential(new { accessKeyId = FakeAliyunOssHandler.AccessKeyId, accessKeySecret = FakeAliyunOssHandler.AccessKeySecret });
         return await factory.CreateAsync(new ArtifactStorageDriverCreateRequest(AliyunOssTestProfile.Snapshot()) { CredentialHandle = credential }, CancellationToken.None);
     }

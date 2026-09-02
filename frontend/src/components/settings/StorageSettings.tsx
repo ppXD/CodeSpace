@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { ApiError } from "@/api/request";
-import type { StorageCredentialMetadata, StorageProfileDetail, StorageProfileProbeResult, StorageProfileState, StorageProfileSummary, StorageProviderModuleSummary } from "@/api/storage";
+import type { StorageCredentialMetadata, StorageProfileDetail, StorageProfileProbeFailureCode, StorageProfileProbeResult, StorageProfileState, StorageProfileSummary, StorageProviderModuleSummary } from "@/api/storage";
 import { useAppendStorageProfileRevision, useCreateStorageProfile, usePlacementIntegrity, useProbeStorageProfile, useSetStorageProfileState, useStorageCredentials, useStorageProfile, useStorageProfiles, useStorageProviderModules } from "@/hooks/use-storage";
 import { useStorageRoutes } from "@/hooks/use-storage-routes";
 import { TeamPermissions, useTeamPermissions } from "@/hooks/use-team-management";
@@ -551,9 +551,27 @@ function StorageProfileProbeResultView({ binding }: { binding: BoundStorageProfi
     <div className="cn-banner" role="status" aria-label="Storage probe result" style={{ marginTop: 10 }}>
       <div className="cn-banner-h"><span className={statusClass}>{result.status}</span></div>
       <div className="cn-banner-p">Revision {binding.profileRevision} · {result.writeAccessRequested ? "Read and write" : "Read only"} · {result.latencyMilliseconds} ms</div>
-      {result.failure && <div className="cn-banner-p">Stage {result.failure.stage} · Code {result.failure.code} · {result.failure.retryable ? "Retryable" : "Not retryable"}</div>}
+      {result.failure && <>
+        <div className="cn-banner-p">Stage {result.failure.stage} · Code {result.failure.code} · {result.failure.retryable ? "Retryable" : "Not retryable"}</div>
+        {probeFailureGuidance(result.failure.code) && <div className="cn-banner-p">{probeFailureGuidance(result.failure.code)}</div>}
+      </>}
     </div>
   );
+}
+
+function probeFailureGuidance(code: StorageProfileProbeFailureCode): string | null {
+  switch (code) {
+    case "ProbeCredentialInvalid": return "The provider does not recognize this AccessKey ID. Re-select or rotate the linked credential.";
+    case "ProbeSignatureMismatch": return "The provider rejected the request signature. Verify Endpoint and Region, then re-enter the AccessKey secret.";
+    case "ProbeSecurityTokenInvalid": return "The linked STS security token is invalid.";
+    case "ProbeSecurityTokenExpired": return "The linked STS security token has expired. Rotate the credential.";
+    case "ProbeSecurityTokenMissing": return "This temporary AccessKey requires an STS security token.";
+    case "ProbeClockSkew": return "The provider rejected the signing time. Check the server clock; the SDK already attempted clock-skew correction.";
+    case "ProbeDestinationMissing": return "The configured bucket does not exist or is not reachable at this endpoint.";
+    case "ProbePermissionDenied": return "The credential is valid but its OSS policy does not allow this operation.";
+    case "ProbeNetworkUnavailable": return "The endpoint could not be reached. Check DNS, TLS, proxy, and network routing.";
+    default: return null;
+  }
 }
 
 function RetireConfirmation({ stableName, onCancel, onConfirm }: { stableName: string; onCancel: () => void; onConfirm: () => void }) {

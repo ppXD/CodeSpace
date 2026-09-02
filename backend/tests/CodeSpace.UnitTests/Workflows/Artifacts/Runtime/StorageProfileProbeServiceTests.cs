@@ -100,6 +100,34 @@ public sealed class StorageProfileProbeServiceTests
         wire.ShouldNotContain("config", Case.Insensitive);
     }
 
+    [Theory]
+    [InlineData(ArtifactStorageFailureReason.CredentialInvalid, StorageProfileProbeFailureCodeValue.ProbeCredentialInvalid)]
+    [InlineData(ArtifactStorageFailureReason.SignatureMismatch, StorageProfileProbeFailureCodeValue.ProbeSignatureMismatch)]
+    [InlineData(ArtifactStorageFailureReason.SecurityTokenInvalid, StorageProfileProbeFailureCodeValue.ProbeSecurityTokenInvalid)]
+    [InlineData(ArtifactStorageFailureReason.SecurityTokenExpired, StorageProfileProbeFailureCodeValue.ProbeSecurityTokenExpired)]
+    [InlineData(ArtifactStorageFailureReason.SecurityTokenMissing, StorageProfileProbeFailureCodeValue.ProbeSecurityTokenMissing)]
+    [InlineData(ArtifactStorageFailureReason.ClockSkew, StorageProfileProbeFailureCodeValue.ProbeClockSkew)]
+    [InlineData(ArtifactStorageFailureReason.DestinationMissing, StorageProfileProbeFailureCodeValue.ProbeDestinationMissing)]
+    [InlineData(ArtifactStorageFailureReason.PermissionDenied, StorageProfileProbeFailureCodeValue.ProbePermissionDenied)]
+    [InlineData(ArtifactStorageFailureReason.NetworkUnavailable, StorageProfileProbeFailureCodeValue.ProbeNetworkUnavailable)]
+    public async Task Safe_provider_neutral_reasons_are_preserved_as_actionable_probe_codes(ArtifactStorageFailureReason reason, StorageProfileProbeFailureCodeValue expected)
+    {
+        var driver = new StubDriver
+        {
+            Probe = new ArtifactStorageProbeResult
+            {
+                Status = ArtifactStorageProbeStatus.Unavailable,
+                Latency = TimeSpan.Zero,
+                Error = new ArtifactStorageError(ArtifactStorageErrorCode.Unauthorized, "redacted") { Reason = reason }
+            }
+        };
+        var service = new StorageProfileProbeService(new StubTargetResolver(Target(1)), new StubBroker(new StorageRuntimeDriverResolution.Ready(new StorageRuntimeDriverLease(driver))));
+
+        var result = await service.ProbeAsync(new StorageProfileProbeRequest(_teamId, _profileId, 1, true), CancellationToken.None);
+
+        result.Failure!.Code.ShouldBe(expected);
+    }
+
     [Fact]
     public async Task Provider_exception_and_cleanup_failure_become_secret_free_typed_failures()
     {

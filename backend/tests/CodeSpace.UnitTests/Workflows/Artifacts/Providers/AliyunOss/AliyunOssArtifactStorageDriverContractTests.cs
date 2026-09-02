@@ -184,6 +184,21 @@ public sealed class AliyunOssArtifactStorageDriverContractTests : ArtifactStorag
         _oss.Authorizations.ShouldAllBe(header => header.StartsWith("OSS4-HMAC-SHA256 Credential=", StringComparison.Ordinal));
         _oss.Authorizations.ShouldAllBe(header => !header.Contains(FakeAliyunOssHandler.AccessKeySecret, StringComparison.Ordinal));
         _oss.SecurityTokens.ShouldAllBe(token => token == FakeAliyunOssHandler.SecurityToken, "the endpoint accepts a request without an STS token, so the token must be asserted here rather than assumed from a 403");
+        _oss.Rfc822Dates.ShouldAllBe(value => !string.IsNullOrWhiteSpace(value), "the official SDK emits the standard Date header alongside x-oss-date");
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_is_not_reclassified_as_a_retryable_network_failure_by_the_sdk_boundary()
+    {
+        await using var driver = await CreateDriverAsync();
+        using var cancellation = new CancellationTokenSource();
+        _oss.BlockEveryRequest = true;
+
+        var pending = driver.ProbeAsync(new ArtifactStorageProbeRequest(), cancellation.Token).AsTask();
+        await _oss.RequestStarted.Task;
+        cancellation.Cancel();
+
+        await Should.ThrowAsync<OperationCanceledException>(pending);
     }
 
     /// <summary>
@@ -203,7 +218,7 @@ public sealed class AliyunOssArtifactStorageDriverContractTests : ArtifactStorag
         head.Error!.Code.ShouldBe(ArtifactStorageErrorCode.Unavailable, "a bucket that is not there is a profile an operator must fix, not an object the plane may treat as not yet written");
         head.Error.ProviderCode.ShouldBe("NoSuchBucket");
         head.Error.IsRetryable.ShouldBeFalse("retrying does not bring a deleted bucket back — and this bit is what separates it from a transient 5xx wearing the same code, which is the entire safety of corroborated abandonment");
-        _oss.Calls.ShouldBe(["HEAD /codespace/objects/absent/value", "GET /?list-type=2&max-keys=0"], "the HEAD carries no body to classify, so exactly one bucket-scoped re-ask must supply the token");
+        _oss.Calls.ShouldBe(["HEAD /codespace/objects/absent/value", "GET /?list-type=2&encoding-type=url&max-keys=1"], "the HEAD carries no body to classify, so exactly one bucket-scoped re-ask must supply the token");
     }
 
     /// <summary>
@@ -226,7 +241,7 @@ public sealed class AliyunOssArtifactStorageDriverContractTests : ArtifactStorag
 
     protected override async ValueTask<IArtifactStorageDriver> CreateDriverAsync()
     {
-        var factory = new AliyunOssArtifactStorageDriverFactory(_oss, TimeProvider.System);
+        var factory = new AliyunOssArtifactStorageDriverFactory(_oss);
         using var credential = AliyunOssTestProfile.Credential();
         return await factory.CreateAsync(new ArtifactStorageDriverCreateRequest(AliyunOssTestProfile.Snapshot()) { CredentialHandle = credential }, CancellationToken.None);
     }
@@ -234,7 +249,7 @@ public sealed class AliyunOssArtifactStorageDriverContractTests : ArtifactStorag
     /// <summary>A profile naming a bucket the endpoint does not host - exactly what a mistyped <c>BucketName</c> produces.</summary>
     protected override async ValueTask<IArtifactStorageDriver?> CreateDriverOverAbsentDestinationAsync()
     {
-        var factory = new AliyunOssArtifactStorageDriverFactory(_oss, TimeProvider.System);
+        var factory = new AliyunOssArtifactStorageDriverFactory(_oss);
         using var credential = AliyunOssTestProfile.Credential();
         var snapshot = AliyunOssTestProfile.Snapshot(new
         {

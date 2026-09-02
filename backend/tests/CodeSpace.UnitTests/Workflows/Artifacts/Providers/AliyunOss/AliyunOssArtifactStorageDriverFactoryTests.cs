@@ -64,7 +64,7 @@ public sealed class AliyunOssArtifactStorageDriverFactoryTests : IDisposable
     [Fact]
     public async Task A_missing_credential_is_refused_because_oss_has_no_anonymous_write_path()
     {
-        var factory = new AliyunOssArtifactStorageDriverFactory(_oss, TimeProvider.System);
+        var factory = new AliyunOssArtifactStorageDriverFactory(_oss);
 
         var error = await Should.ThrowAsync<ArgumentException>(() => factory.CreateAsync(new ArtifactStorageDriverCreateRequest(AliyunOssTestProfile.Snapshot()), CancellationToken.None).AsTask());
 
@@ -85,6 +85,19 @@ public sealed class AliyunOssArtifactStorageDriverFactoryTests : IDisposable
         error.ToString().ShouldNotContain(Secret);
     }
 
+    [Theory]
+    [InlineData(" access-key", "secret", "token")]
+    [InlineData("access-key", "secret ", "token")]
+    [InlineData("access-key", "secret", " token")]
+    public async Task Credential_fields_with_boundary_whitespace_are_rejected_before_the_sdk_signs(string accessKeyId, string accessKeySecret, string securityToken)
+    {
+        using var credential = AliyunOssTestProfile.Credential(new { accessKeyId, accessKeySecret, securityToken });
+
+        await Should.ThrowAsync<ArgumentException>(() => CreateAsync(AliyunOssTestProfile.Snapshot(), credential).AsTask());
+
+        _oss.Calls.ShouldBeEmpty();
+    }
+
     [Fact]
     public async Task The_credential_handle_is_not_retained_beyond_driver_creation()
     {
@@ -101,7 +114,7 @@ public sealed class AliyunOssArtifactStorageDriverFactoryTests : IDisposable
 
     private ValueTask<IArtifactStorageDriver> CreateAsync(StorageProfileSnapshot profile, StorageCredentialHandle? credential = null)
     {
-        var factory = new AliyunOssArtifactStorageDriverFactory(_oss, TimeProvider.System);
+        var factory = new AliyunOssArtifactStorageDriverFactory(_oss);
         return factory.CreateAsync(new ArtifactStorageDriverCreateRequest(profile) { CredentialHandle = credential ?? AliyunOssTestProfile.Credential() }, CancellationToken.None);
     }
 }

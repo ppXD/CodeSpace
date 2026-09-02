@@ -1,4 +1,3 @@
-using System.Text;
 using System.Text.Json;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers.AliyunOss;
 using Shouldly;
@@ -56,24 +55,6 @@ public sealed class AliyunOssTargetRegionTests
         Parse("artifacts.example.com", region: "cn-hangzhou").Region.ShouldBe("cn-hangzhou", "the override is what makes a custom domain configurable at all");
     }
 
-    /// <summary>
-    /// The whole point of deriving is that the derived value IS the value: it has to hash into the same signing key.
-    /// Comparing two authorization headers alone could pass on two equally wrong regions, so this also pins the region
-    /// inside the credential scope and pins that a different region really does move the signature.
-    /// </summary>
-    [Fact]
-    public void A_derived_region_signs_exactly_like_the_same_region_supplied_explicitly()
-    {
-        var derived = Identity(Parse("oss-cn-hangzhou.aliyuncs.com").Region);
-        var explicitly = Identity(Parse("oss-cn-hangzhou.aliyuncs.com", region: "cn-hangzhou").Region);
-
-        var authorization = AliyunOssV4Signer.Authorization(Request(), derived);
-
-        authorization.ShouldBe(AliyunOssV4Signer.Authorization(Request(), explicitly));
-        authorization.ShouldContain("/20260818/cn-hangzhou/oss/aliyun_v4_request", Case.Sensitive, "the derived region has to reach the V4 credential scope, not just match another derived value");
-        authorization.ShouldNotBe(AliyunOssV4Signer.Authorization(Request(), Identity("cn-shanghai")), "the signing key is region-scoped, so an equality assertion over it is only meaningful if a different region moves it");
-    }
-
     private static AliyunOssTarget Parse(string endpoint, string? region = null)
     {
         var configuration = new Dictionary<string, string>(StringComparer.Ordinal) { ["endpoint"] = endpoint, ["bucket"] = "codespace-artifacts" };
@@ -81,20 +62,4 @@ public sealed class AliyunOssTargetRegionTests
 
         return AliyunOssTarget.Parse(JsonSerializer.SerializeToElement(configuration));
     }
-
-    private static AliyunOssSigningIdentity Identity(string region) => new()
-    {
-        Region = region,
-        AccessKeyId = "LTAI5tFakeAccessKeyId",
-        SigningKeySeed = Encoding.UTF8.GetBytes("aliyun_v4wJalrXUtnFEMIK7MDENGbPxRfiCYFAKESECRET")
-    };
-
-    private static AliyunOssSigningRequest Request() => new()
-    {
-        Method = "PUT",
-        ResourcePath = "/codespace-artifacts/codespace/object",
-        Query = new Dictionary<string, string>(StringComparer.Ordinal),
-        Headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["x-oss-content-sha256"] = "UNSIGNED-PAYLOAD", ["x-oss-date"] = "20260818T123456Z" },
-        Timestamp = new DateTimeOffset(2026, 8, 18, 12, 34, 56, TimeSpan.Zero)
-    };
 }

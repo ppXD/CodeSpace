@@ -1,9 +1,11 @@
 using System.Diagnostics;
+using AlibabaCloud.OSS.V2;
+using AlibabaCloud.OSS.V2.Models;
 
 namespace CodeSpace.Core.Services.Workflows.Artifacts.Providers.AliyunOss;
 
 /// <summary>
-/// Streaming Aliyun OSS driver spoken directly over the signed REST API.
+/// Streaming Aliyun OSS driver over Alibaba Cloud's official V2 SDK.
 ///
 /// A write is staged, verified, then published with a server-side copy guarded by <c>x-oss-forbid-overwrite</c>. That
 /// mirrors the local driver's temp-file-then-rename contract: unverified bytes never occupy the destination key, so a
@@ -32,17 +34,13 @@ internal sealed partial class AliyunOssArtifactStorageDriver : IArtifactStorageD
         | StorageProviderCapabilities.HealthProbe
         | StorageProviderCapabilities.StableETag;
 
-    private readonly HttpClient _http;
+    private Client? _client;
     private readonly AliyunOssTarget _target;
-    private readonly TimeProvider _clock;
-    private AliyunOssSigningIdentity? _identity;
 
-    public AliyunOssArtifactStorageDriver(HttpClient http, AliyunOssTarget target, AliyunOssSigningIdentity identity, TimeProvider clock)
+    public AliyunOssArtifactStorageDriver(Client client, AliyunOssTarget target)
     {
-        _http = http;
+        _client = client;
         _target = target;
-        _identity = identity;
-        _clock = clock;
     }
 
     public StorageProviderCapabilities Capabilities => SupportedCapabilities;
@@ -81,14 +79,19 @@ internal sealed partial class AliyunOssArtifactStorageDriver : IArtifactStorageD
         cancellationToken.ThrowIfCancellationRequested();
         if (!_target.TryResolveKey(request.ObjectKey, ObjectArea, out var key)) return ArtifactStorageHeadResult.Failed(InvalidKey(request.ObjectKey));
 
-        using var message = NewRequest(HttpMethod.Head, key);
-        var sent = await SendAsync(message, key, request.ObjectKey, cancellationToken).ConfigureAwait(false);
-        if (sent.Error != null) return ArtifactStorageHeadResult.Failed(sent.Error);
-
-        using var response = sent.Response!;
-        if (!response.IsSuccessStatusCode) return ArtifactStorageHeadResult.Failed(await AttributeHeadFailureAsync(response, request.ObjectKey, cancellationToken).ConfigureAwait(false));
-
-        return ArtifactStorageHeadResult.Found(Describe(response, request.ObjectKey, ContentLengthOf(response)));
+        try
+        {
+            var result = await Client.HeadObjectAsync(new HeadObjectRequest { Bucket = _target.Bucket, Key = key }, cancellationToken: cancellationToken).ConfigureAwait(false);
+            return ArtifactStorageHeadResult.Found(Describe(result, request.ObjectKey, result.ContentLength ?? 0));
+        }
+        catch (Exception exception) when (AliyunOssErrors.IsCallerCancellation(exception, cancellationToken))
+        {
+            throw new OperationCanceledException(cancellationToken);
+        }
+        catch (Exception exception) when (AliyunOssErrors.IsOperational(exception))
+        {
+            return ArtifactStorageHeadResult.Failed(await AttributeHeadFailureAsync(exception, request.ObjectKey, cancellationToken).ConfigureAwait(false));
+        }
     }
 
     public async ValueTask<ArtifactStorageReadResult> OpenReadAsync(ArtifactStorageReadRequest request, CancellationToken cancellationToken)
@@ -123,14 +126,19 @@ internal sealed partial class AliyunOssArtifactStorageDriver : IArtifactStorageD
         if (request.ExpectedETag != null && !string.Equals(request.ExpectedETag, head.Metadata!.ETag, StringComparison.Ordinal))
             return ArtifactStorageDeleteResult.Failed(Failure(ArtifactStorageErrorCode.ConditionNotMet, $"ETag condition was not met for object '{request.ObjectKey}'."));
 
-        using var message = NewRequest(HttpMethod.Delete, key);
-        var sent = await SendAsync(message, key, request.ObjectKey, cancellationToken).ConfigureAwait(false);
-        if (sent.Error != null) return ArtifactStorageDeleteResult.Failed(sent.Error);
-
-        using var response = sent.Response!;
-        return response.IsSuccessStatusCode
-            ? ArtifactStorageDeleteResult.Removed()
-            : ArtifactStorageDeleteResult.Failed(await AliyunOssErrors.FromResponseAsync(response, request.ObjectKey, cancellationToken).ConfigureAwait(false));
+        try
+        {
+            await Client.DeleteObjectAsync(new DeleteObjectRequest { Bucket = _target.Bucket, Key = key }, cancellationToken: cancellationToken).ConfigureAwait(false);
+            return ArtifactStorageDeleteResult.Removed();
+        }
+        catch (Exception exception) when (AliyunOssErrors.IsCallerCancellation(exception, cancellationToken))
+        {
+            throw new OperationCanceledException(cancellationToken);
+        }
+        catch (Exception exception) when (AliyunOssErrors.IsOperational(exception))
+        {
+            return ArtifactStorageDeleteResult.Failed(AliyunOssErrors.FromException(exception, request.ObjectKey));
+        }
     }
 
     public async ValueTask<ArtifactStorageProbeResult> ProbeAsync(ArtifactStorageProbeRequest request, CancellationToken cancellationToken)
@@ -157,9 +165,7 @@ internal sealed partial class AliyunOssArtifactStorageDriver : IArtifactStorageD
 
     public ValueTask DisposeAsync()
     {
-        var identity = Interlocked.Exchange(ref _identity, null);
-        if (identity != null) System.Security.Cryptography.CryptographicOperations.ZeroMemory(identity.SigningKeySeed);
-        _http.Dispose();
+        Interlocked.Exchange(ref _client, null)?.Dispose();
         return ValueTask.CompletedTask;
     }
 
@@ -248,24 +254,31 @@ internal sealed partial class AliyunOssArtifactStorageDriver : IArtifactStorageD
     /// exactly as it was. It therefore does NOT cover a credential without <c>oss:ListObjects</c> on the bucket, which
     /// answers AccessDenied to the re-ask and so still cannot tell an absent bucket from an absent object.
     /// </summary>
-    private async Task<ArtifactStorageError> AttributeHeadFailureAsync(HttpResponseMessage response, string objectKey, CancellationToken cancellationToken)
+    private async Task<ArtifactStorageError> AttributeHeadFailureAsync(Exception exception, string objectKey, CancellationToken cancellationToken)
     {
-        var error = await AliyunOssErrors.FromResponseAsync(response, objectKey, cancellationToken).ConfigureAwait(false);
+        var error = AliyunOssErrors.FromException(exception, objectKey);
         if (error.ProviderCode != null) return error;
 
         var bucket = await ProbeReadAsync(cancellationToken).ConfigureAwait(false);
 
-        return AliyunOssErrors.Reclassify(error, response.StatusCode, objectKey, bucket?.ProviderCode);
+        return AliyunOssErrors.Reclassify(error, objectKey, bucket?.ProviderCode);
     }
 
     private async Task<ArtifactStorageError?> ProbeReadAsync(CancellationToken cancellationToken)
     {
-        using var message = new HttpRequestMessage(HttpMethod.Get, _target.ObjectUri(string.Empty, "?list-type=2&max-keys=0"));
-        var sent = await SendAsync(message, string.Empty, _target.Bucket, cancellationToken).ConfigureAwait(false);
-        if (sent.Error != null) return sent.Error;
-
-        using var response = sent.Response!;
-        return response.IsSuccessStatusCode ? null : await AliyunOssErrors.FromResponseAsync(response, _target.Bucket, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await Client.ListObjectsV2Async(new ListObjectsV2Request { Bucket = _target.Bucket, MaxKeys = 1 }, cancellationToken: cancellationToken).ConfigureAwait(false);
+            return null;
+        }
+        catch (Exception exception) when (AliyunOssErrors.IsCallerCancellation(exception, cancellationToken))
+        {
+            throw new OperationCanceledException(cancellationToken);
+        }
+        catch (Exception exception) when (AliyunOssErrors.IsOperational(exception))
+        {
+            return AliyunOssErrors.FromException(exception, _target.Bucket);
+        }
     }
 
     private async Task<ArtifactStorageError?> ProbeWriteAsync(CancellationToken cancellationToken)
@@ -274,15 +287,17 @@ internal sealed partial class AliyunOssArtifactStorageDriver : IArtifactStorageD
 
         try
         {
-            using var message = NewRequest(HttpMethod.Put, key);
-            message.Content = new ByteArrayContent([]);
-            message.Content.Headers.ContentLength = 0;
-
-            var sent = await SendAsync(message, key, key, cancellationToken).ConfigureAwait(false);
-            if (sent.Error != null) return sent.Error;
-
-            using var response = sent.Response!;
-            return response.IsSuccessStatusCode ? null : await AliyunOssErrors.FromResponseAsync(response, key, cancellationToken).ConfigureAwait(false);
+            await using var body = new MemoryStream([], writable: false);
+            await Client.PutObjectAsync(new PutObjectRequest { Bucket = _target.Bucket, Key = key, Body = body, ContentLength = 0 }, cancellationToken: cancellationToken).ConfigureAwait(false);
+            return null;
+        }
+        catch (Exception exception) when (AliyunOssErrors.IsCallerCancellation(exception, cancellationToken))
+        {
+            throw new OperationCanceledException(cancellationToken);
+        }
+        catch (Exception exception) when (AliyunOssErrors.IsOperational(exception))
+        {
+            return AliyunOssErrors.FromException(exception, key);
         }
         finally
         {
@@ -297,9 +312,7 @@ internal sealed partial class AliyunOssArtifactStorageDriver : IArtifactStorageD
 
     private static bool IsSha256(string value) => value.Length == 64 && value.All(Uri.IsHexDigit);
 
-    private static long ContentLengthOf(HttpResponseMessage response) => response.Content.Headers.ContentLength ?? 0;
+    private Client Client => _client ?? throw new ObjectDisposedException(nameof(AliyunOssArtifactStorageDriver));
 
     private readonly record struct StagedObject(long Length, string Sha256, ArtifactStorageError? Error);
-
-    private readonly record struct SendOutcome(HttpResponseMessage? Response, ArtifactStorageError? Error);
 }

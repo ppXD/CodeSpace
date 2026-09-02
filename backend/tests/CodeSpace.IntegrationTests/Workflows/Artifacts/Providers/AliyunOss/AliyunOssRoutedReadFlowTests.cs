@@ -134,7 +134,7 @@ public sealed class AliyunOssRoutedReadFlowTests : IDisposable
         {
             var factories = context.Resolve<IEnumerable<IArtifactStorageDriverFactory>>()
                 .Where(factory => factory.ProviderTypeKey != AliyunOssArtifactStorageDriverFactory.TypeKey)
-                .Append(new AliyunOssArtifactStorageDriverFactory(_oss, TimeProvider.System));
+                .Append(new AliyunOssArtifactStorageDriverFactory(_oss));
 
             return new ArtifactStorageDriverFactoryCatalog(factories, context.Resolve<IStorageProviderModuleCatalog>());
         }).As<IArtifactStorageDriverFactoryCatalog>().InstancePerLifetimeScope());

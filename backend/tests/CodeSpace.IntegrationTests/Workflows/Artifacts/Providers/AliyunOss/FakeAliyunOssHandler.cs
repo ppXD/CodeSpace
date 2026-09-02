@@ -12,8 +12,8 @@ namespace CodeSpace.IntegrationTests.Workflows.Artifacts.Providers.AliyunOss;
 /// with no bucket, no network, and no credentials. It models only what the driver actually speaks: virtual-hosted
 /// addressing, streaming PUT, server-side copy with <c>x-oss-forbid-overwrite</c>, HEAD, ranged/conditional GET,
 /// DELETE, and the ListObjectsV2 probe - plus the OSS XML error envelope. It deliberately does NOT recompute the
-/// request signature (that would only prove the driver agrees with itself); it asserts the wire-visible shape of the
-/// V4 authorization material instead, and <c>AliyunOssV4SignerTests</c> pins the bytes independently.
+/// request signature (that would only prove the SDK agrees with itself); it asserts the wire-visible shape of the
+/// official SDK's V4 authorization material instead.
 ///
 /// Every write and every read carries <c>x-oss-version-id</c>, so the driver is exercised against a response shape
 /// that reports versions: a version the driver reported but would not accept back as an <c>ExpectedVersion</c> is a
@@ -43,12 +43,15 @@ public sealed class FakeAliyunOssHandler : HttpMessageHandler
 
     public List<string> Authorizations { get; } = [];
     public List<string> Calls { get; } = [];
+    public List<string?> Rfc822Dates { get; } = [];
+    public TaskCompletionSource RequestStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     /// <summary>One entry per authorized request: the <c>x-oss-security-token</c> it carried, or null when it carried none.</summary>
     public List<string?> SecurityTokens { get; } = [];
 
     /// <summary>Forces every request to fail the way OSS fails a bad signature, body echo included.</summary>
     public bool RejectEverySignature { get; set; }
+    public bool BlockEveryRequest { get; set; }
 
     /// <summary>Empties the bucket without touching the recorded calls — the shape of an object deleted outside CodeSpace.</summary>
     public void EmptyBucket() => _objects.Clear();
@@ -58,6 +61,11 @@ public sealed class FakeAliyunOssHandler : HttpMessageHandler
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (BlockEveryRequest)
+        {
+            RequestStarted.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
+        }
 
         var uri = request.RequestUri!;
         var key = Uri.UnescapeDataString(uri.AbsolutePath.TrimStart('/'));
@@ -113,6 +121,7 @@ public sealed class FakeAliyunOssHandler : HttpMessageHandler
         var timestamp = Single(request, "x-oss-date");
         if (timestamp == null || !TimestampPattern.IsMatch(timestamp) || timestamp[..8] != parsed.Groups["date"].Value) return SignatureRejection();
         if (Single(request, "x-oss-content-sha256") != "UNSIGNED-PAYLOAD") return SignatureRejection();
+        lock (_gate) Rfc822Dates.Add(Single(request, "Date"));
 
         // A long-lived AccessKey sends no STS token at all, so only a token that is present and wrong is a rejection.
         var securityToken = Single(request, "x-oss-security-token");
@@ -203,7 +212,7 @@ public sealed class FakeAliyunOssHandler : HttpMessageHandler
     {
         lock (_gate)
         {
-            var body = $"<?xml version=\"1.0\" encoding=\"UTF-8\"?><ListBucketResult><Name>{Bucket}</Name><KeyCount>{_objects.Count}</KeyCount><MaxKeys>0</MaxKeys><IsTruncated>true</IsTruncated></ListBucketResult>";
+            var body = $"<?xml version=\"1.0\" encoding=\"UTF-8\"?><ListBucketResult><Name>{Bucket}</Name><KeyCount>{_objects.Count}</KeyCount><MaxKeys>1</MaxKeys><IsTruncated>{(_objects.Count > 1).ToString().ToLowerInvariant()}</IsTruncated></ListBucketResult>";
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8, "application/xml") };
         }
     }

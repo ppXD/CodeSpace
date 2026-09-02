@@ -1,12 +1,14 @@
-using System.Text;
 using System.Text.Json;
+using AlibabaCloud.OSS.V2;
+using AlibabaCloud.OSS.V2.Credentials;
+using AlibabaCloud.OSS.V2.Transport;
 
 namespace CodeSpace.Core.Services.Workflows.Artifacts.Providers.AliyunOss;
 
 /// <summary>
-/// Activation entry point for <c>aliyun-oss/v1</c>. It is the only place a plaintext OSS secret is ever materialized:
-/// the credential handle is read once, projected into signing material, and never retained. Configuration is admitted
-/// against the module's own schema so a factory rejection and a Settings rejection can never disagree.
+/// Activation entry point for <c>aliyun-oss/v1</c>. It is the only place a plaintext OSS secret is materialized and
+/// handed to Alibaba Cloud's official SDK. Configuration is admitted against the module's own schema so a factory
+/// rejection and a Settings rejection can never disagree.
 /// </summary>
 public sealed class AliyunOssArtifactStorageDriverFactory : IArtifactStorageDriverFactory
 {
@@ -24,17 +26,11 @@ public sealed class AliyunOssArtifactStorageDriverFactory : IArtifactStorageDriv
     }, LazyThreadSafetyMode.ExecutionAndPublication);
 
     private readonly Func<HttpMessageHandler> _transport;
-    private readonly TimeProvider _clock;
+    public AliyunOssArtifactStorageDriverFactory() : this(() => SharedTransport.Value) { }
 
-    public AliyunOssArtifactStorageDriverFactory() : this(() => SharedTransport.Value, TimeProvider.System) { }
+    internal AliyunOssArtifactStorageDriverFactory(HttpMessageHandler transport) : this(() => transport) { }
 
-    internal AliyunOssArtifactStorageDriverFactory(HttpMessageHandler transport, TimeProvider clock) : this(() => transport, clock) { }
-
-    private AliyunOssArtifactStorageDriverFactory(Func<HttpMessageHandler> transport, TimeProvider clock)
-    {
-        _transport = transport;
-        _clock = clock;
-    }
+    private AliyunOssArtifactStorageDriverFactory(Func<HttpMessageHandler> transport) => _transport = transport;
 
     public string ProviderTypeKey => TypeKey;
 
@@ -47,9 +43,10 @@ public sealed class AliyunOssArtifactStorageDriverFactory : IArtifactStorageDriv
         EnsureProfileIdentity(profile);
 
         var target = AliyunOssTarget.Parse(profile.Configuration);
-        var identity = ReadIdentity(request.CredentialHandle, target.Region);
+        var credential = ReadCredential(request.CredentialHandle);
+        var client = CreateClient(target, credential);
 
-        return ValueTask.FromResult<IArtifactStorageDriver>(new AliyunOssArtifactStorageDriver(NewHttpClient(), target, identity, _clock));
+        return ValueTask.FromResult<IArtifactStorageDriver>(new AliyunOssArtifactStorageDriver(client, target));
     }
 
     private static void EnsureProfileIdentity(StorageProfileSnapshot profile)
@@ -63,27 +60,54 @@ public sealed class AliyunOssArtifactStorageDriverFactory : IArtifactStorageDriv
     }
 
     /// <summary>
-    /// Projects the handle's secret into signing material inside the handle's own lease. Nothing here echoes a value:
-    /// the schema validator reports property paths only, so an invalid secret cannot be reconstructed from a failure.
+    /// Copies the handle's secret inside the handle's own lease. Nothing here echoes a value: the schema validator
+    /// reports property paths only, so an invalid secret cannot be reconstructed from a failure.
     /// </summary>
-    private static AliyunOssSigningIdentity ReadIdentity(StorageCredentialHandle? handle, string region)
+    private static AliyunOssSdkCredential ReadCredential(StorageCredentialHandle? handle)
     {
         if (handle == null) throw new ArgumentException($"Storage provider '{TypeKey}' requires an AccessKey credential; OSS has no anonymous write path.", nameof(handle));
 
         return handle.UseSecret(secret =>
         {
             StorageProviderJson.Validate(secret, AliyunOssStorageProviderModule.SecretSchemaDocument, "Aliyun OSS credential secret", "SecretSchema");
+            var accessKeyId = secret.GetProperty("accessKeyId").GetString()!;
+            var accessKeySecret = secret.GetProperty("accessKeySecret").GetString()!;
+            var securityToken = secret.TryGetProperty("securityToken", out var token) && token.ValueKind == JsonValueKind.String ? token.GetString() : null;
+            EnsureNoBoundaryWhitespace(accessKeyId, "accessKeyId");
+            EnsureNoBoundaryWhitespace(accessKeySecret, "accessKeySecret");
+            if (securityToken != null) EnsureNoBoundaryWhitespace(securityToken, "securityToken");
 
-            return new AliyunOssSigningIdentity
-            {
-                Region = region,
-                AccessKeyId = secret.GetProperty("accessKeyId").GetString()!,
-                SigningKeySeed = Encoding.UTF8.GetBytes("aliyun_v4" + secret.GetProperty("accessKeySecret").GetString()),
-                SecurityToken = secret.TryGetProperty("securityToken", out var token) && token.ValueKind == JsonValueKind.String ? token.GetString() : null
-            };
+            return new AliyunOssSdkCredential(accessKeyId, accessKeySecret, securityToken);
         });
     }
 
-    /// <summary>Artifacts stream in both directions, so the per-request deadline belongs to the caller's token, not the client.</summary>
-    private HttpClient NewHttpClient() => new(_transport(), disposeHandler: false) { Timeout = Timeout.InfiniteTimeSpan };
+    private Client CreateClient(AliyunOssTarget target, AliyunOssSdkCredential credential)
+    {
+        var http = new HttpClient(_transport(), disposeHandler: false) { Timeout = Timeout.InfiniteTimeSpan };
+        var credentials = credential.SecurityToken == null
+            ? new StaticCredentialsProvider(credential.AccessKeyId, credential.AccessKeySecret)
+            : new StaticCredentialsProvider(credential.AccessKeyId, credential.AccessKeySecret, credential.SecurityToken);
+
+        return new Client(new Configuration
+        {
+            Region = target.Region,
+            Endpoint = target.Endpoint.AbsoluteUri.TrimEnd('/'),
+            CredentialsProvider = credentials,
+            HttpTransport = new HttpTransport(http),
+            SignatureVersion = "v4",
+            RetryMaxAttempts = 3,
+            UsePathStyle = false,
+            UseCName = false,
+            DisableClockSkewCorrection = false,
+            DisableAutoDetectMimeType = true
+        });
+    }
+
+    private static void EnsureNoBoundaryWhitespace(string value, string propertyName)
+    {
+        if (value.Length != value.Trim().Length)
+            throw new ArgumentException($"Aliyun OSS credential property '{propertyName}' cannot start or end with whitespace.", propertyName);
+    }
+
+    private sealed record AliyunOssSdkCredential(string AccessKeyId, string AccessKeySecret, string? SecurityToken);
 }
