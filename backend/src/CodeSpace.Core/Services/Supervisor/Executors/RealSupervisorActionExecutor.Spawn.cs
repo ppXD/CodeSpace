@@ -421,7 +421,10 @@ public sealed partial class RealSupervisorActionExecutor
 
         var (escalatedTask, escalation) = await ApplyRetryEscalationAsync(builtTask, priorResult, context, cancellationToken).ConfigureAwait(false);
 
-        var task = prior is null ? escalatedTask : ApplyResumeRecord(escalatedTask, prior, workspaceHasPriorWork: effectiveStaging.Ref is not null);
+        var task = ApplyRetryDisposition(escalatedTask, prior, priorResult, workspaceHasPriorWork: effectiveStaging.Ref is not null);
+
+        if (AgentRetryCauses.Classify(priorResult?.Error) == AgentRetryCauses.GatewayFormatFault)
+            _logger.LogWarning("Supervisor retry of subtask {SubtaskId}: the prior attempt died on a gateway FORMAT fault — retrying FRESH (a conversation replay re-triggers the fault) with extended thinking disabled ({EnvVar}=0)", retry.SubtaskId, AgentRetryCauses.MaxThinkingTokensEnvVar);
 
         return await StageAgentsAndParkAsync(new List<(AgentTask, SupervisorAgentDispatch?)> { (task, null) }, context, cancellationToken, escalation, retryContractHashes, retryDeliveryUnits).ConfigureAwait(false);
     }
@@ -470,6 +473,22 @@ public sealed partial class RealSupervisorActionExecutor
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         return SupervisorRetryEscalation.PickStrongerModel(rows, m => m.IsDefault, m => m.ProbedCapabilityTier, m => m.CapabilityTier, m => m.ModelId, priorModelName)?.ModelId;
+    }
+
+    /// <summary>
+    /// Cause-aware retry disposition (the pure fork, unit-pinned like <see cref="ApplyResumeRecord"/>): a prior
+    /// attempt that died on a gateway FORMAT fault retries FRESH with extended thinking disabled — resuming would
+    /// replay the exact history that re-triggers the fault, burning a full attempt to relearn it. Every other
+    /// shape keeps today's semantics byte-identically: resume when a resumable session exists, cold-start when not.
+    /// World-state continuity (the prior branch tip staging) is decided elsewhere and stays UNCHANGED either way —
+    /// the degrade drops the broken conversation, never the preserved work.
+    /// </summary>
+    internal static AgentTask ApplyRetryDisposition(AgentTask task, ResumableSession? prior, SupervisorAgentResult? priorResult, bool workspaceHasPriorWork)
+    {
+        if (AgentRetryCauses.Classify(priorResult?.Error) == AgentRetryCauses.GatewayFormatFault)
+            return task with { Environment = AgentRetryCauses.WithThinkingDisabled(task.Environment) };
+
+        return prior is null ? task : ApplyResumeRecord(task, prior, workspaceHasPriorWork);
     }
 
     /// <summary>The pure fold of a resumable prior attempt onto the task: always stamps the session/transcript, and — ONLY when <paramref name="workspaceHasPriorWork"/> is false — appends the honest-redo line so the hint's truth value always matches the actual git state. Internal + static so the honesty branch is unit-pinned directly.</summary>
