@@ -67,4 +67,7 @@ public sealed record StructuredLLMCompletion
 
     /// <summary>Provider-reported token counts + stop reason. Never null — <see cref="LlmUsage.None"/> when the provider returned no usage.</summary>
     public LlmUsage Usage { get; init; } = LlmUsage.None;
+
+    /// <summary>L4 pool failover provenance: the candidates the call skipped past on a transient / rate-limit fault before <see cref="Model"/> answered ("provider:model — category status"), in order. Empty when the first candidate answered. A caller that stamps provenance MUST read <see cref="Model"/>, never the resolved pick — after a failover they differ.</summary>
+    public IReadOnlyList<string> FailedOver { get; init; } = Array.Empty<string>();
 }
