@@ -57,9 +57,7 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
         var patch = await ResolvePatchAsync(teamId, found.Candidate.Patch, cancellationToken).ConfigureAwait(false);
         if (patch is PatchResolution.Unavailable unavailable)
             return Unavailable(found.Candidate.Identity, sourceUrl, Reason(unavailable.Kind),
-                found.Candidate.Patch.LossReason is { Length: > 0 } loss
-                    ? WithSourceFallback($"This file's bytes were never stored: {loss}", sourceUrl != null)
-                    : StorageNote(unavailable.Kind, unavailable.Detail, sourceUrl != null));
+                StorageNote(unavailable.Kind, unavailable.Detail, sourceUrl != null));
 
         var view = UnifiedPatchReader.Read(((PatchResolution.Found)patch).Text, requested.Path);
         if (view is null)
