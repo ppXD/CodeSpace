@@ -660,7 +660,7 @@ describe("storage profiles settings", () => {
 
     const result = await within(dialog).findByRole("status", { name: "Storage probe result" });
     expect(result).toHaveTextContent("ProbeSignatureMismatch");
-    expect(result).toHaveTextContent("Verify Endpoint and Region");
+    expect(result).toHaveTextContent("an endpoint and region that don't match each other");
     expect(result).not.toHaveTextContent("must never render");
   });
 
