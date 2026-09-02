@@ -7,7 +7,7 @@ name: Backend · Real bucket
 #
 # ON DEMAND ONLY. Unlike the other backend lanes this one is not on push:main either: every run WRITES to a real
 # bucket the owner pays for, and there is no benefit to re-proving one bucket on every merge. Run it after touching
-# the OSS driver, the V4 signer, or the storage-profile schema.
+# the OSS driver, its official-SDK adapter, or the storage-profile schema.
 #
 # The four variables come from repository secrets (bucket and endpoint are secrets too — they identify the owner's
 # deployment). With any of them unconfigured the cases self-skip GREEN and print a "NOT VERIFIED … skip is NOT a

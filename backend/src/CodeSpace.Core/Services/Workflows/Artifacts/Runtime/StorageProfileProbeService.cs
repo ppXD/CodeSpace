@@ -217,7 +217,23 @@ public sealed class StorageProfileProbeService : IStorageProfileProbeService
         _ => Failure(StorageProfileProbeFailureStageValue.Cancellation, StorageProfileProbeFailureCodeValue.CancelledDriverInitialization, true),
     };
 
-    private static StorageProfileProbeFailure ProbeFailure(ArtifactStorageError error) => Failure(StorageProfileProbeFailureStageValue.Probe, error.Code switch
+    private static StorageProfileProbeFailure ProbeFailure(ArtifactStorageError error) => Failure(StorageProfileProbeFailureStageValue.Probe, ProbeFailureCode(error), error.IsRetryable);
+
+    private static StorageProfileProbeFailureCodeValue ProbeFailureCode(ArtifactStorageError error) => error.Reason switch
+    {
+        ArtifactStorageFailureReason.CredentialInvalid => StorageProfileProbeFailureCodeValue.ProbeCredentialInvalid,
+        ArtifactStorageFailureReason.SignatureMismatch => StorageProfileProbeFailureCodeValue.ProbeSignatureMismatch,
+        ArtifactStorageFailureReason.SecurityTokenInvalid => StorageProfileProbeFailureCodeValue.ProbeSecurityTokenInvalid,
+        ArtifactStorageFailureReason.SecurityTokenExpired => StorageProfileProbeFailureCodeValue.ProbeSecurityTokenExpired,
+        ArtifactStorageFailureReason.SecurityTokenMissing => StorageProfileProbeFailureCodeValue.ProbeSecurityTokenMissing,
+        ArtifactStorageFailureReason.ClockSkew => StorageProfileProbeFailureCodeValue.ProbeClockSkew,
+        ArtifactStorageFailureReason.DestinationMissing => StorageProfileProbeFailureCodeValue.ProbeDestinationMissing,
+        ArtifactStorageFailureReason.PermissionDenied => StorageProfileProbeFailureCodeValue.ProbePermissionDenied,
+        ArtifactStorageFailureReason.NetworkUnavailable => StorageProfileProbeFailureCodeValue.ProbeNetworkUnavailable,
+        _ => ProbeFailureCode(error.Code),
+    };
+
+    private static StorageProfileProbeFailureCodeValue ProbeFailureCode(ArtifactStorageErrorCode code) => code switch
     {
         ArtifactStorageErrorCode.InvalidRequest => StorageProfileProbeFailureCodeValue.ProbeInvalidRequest,
         ArtifactStorageErrorCode.Missing => StorageProfileProbeFailureCodeValue.ProbeMissing,
@@ -231,7 +247,7 @@ public sealed class StorageProfileProbeService : IStorageProfileProbeService
         ArtifactStorageErrorCode.Unavailable => StorageProfileProbeFailureCodeValue.ProbeUnavailable,
         ArtifactStorageErrorCode.Unsupported => StorageProfileProbeFailureCodeValue.ProbeUnsupported,
         _ => StorageProfileProbeFailureCodeValue.ProbeProviderFailure,
-    }, error.IsRetryable);
+    };
 
     private static StorageProfileProbeFailure Failure(StorageProfileProbeFailureStageValue stage, StorageProfileProbeFailureCodeValue code, bool retryable) => new()
     {

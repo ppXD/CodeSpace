@@ -136,7 +136,24 @@ public enum ArtifactStorageErrorCode
     ProviderFailure = 11,
 }
 
-public sealed record ArtifactStorageError(ArtifactStorageErrorCode Code, string Message, bool IsRetryable = false, string? ProviderCode = null);
+/// <summary>Provider-neutral reason that can be safely persisted and shown without exposing a provider response body.</summary>
+public enum ArtifactStorageFailureReason
+{
+    CredentialInvalid,
+    SignatureMismatch,
+    SecurityTokenInvalid,
+    SecurityTokenExpired,
+    SecurityTokenMissing,
+    ClockSkew,
+    DestinationMissing,
+    PermissionDenied,
+    NetworkUnavailable,
+}
+
+public sealed record ArtifactStorageError(ArtifactStorageErrorCode Code, string Message, bool IsRetryable = false, string? ProviderCode = null)
+{
+    public ArtifactStorageFailureReason? Reason { get; init; }
+}
 
 /// <summary>
 /// Optional thrown-failure contract for a provider operation that could not return its normal typed result. Drivers

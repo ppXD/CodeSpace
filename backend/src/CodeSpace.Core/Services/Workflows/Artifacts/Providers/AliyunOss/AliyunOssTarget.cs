@@ -4,9 +4,9 @@ using System.Text.Json;
 namespace CodeSpace.Core.Services.Workflows.Artifacts.Providers.AliyunOss;
 
 /// <summary>
-/// The addressable half of a profile: which bucket, over which endpoint, signed for which region. OSS is addressed
-/// virtual-hosted (<c>https://{bucket}.{endpoint}/{key}</c>) while the V4 canonical resource stays <c>/{bucket}/{key}</c>,
-/// so the two forms are built here rather than at each call site.
+/// The addressable half of a profile: which bucket, over which service endpoint, signed for which region. The official
+/// SDK owns virtual-host resolution and canonical request construction; this type owns only validated configuration
+/// and CodeSpace's collision-free key namespace.
 /// </summary>
 internal sealed record AliyunOssTarget
 {
@@ -37,16 +37,12 @@ internal sealed record AliyunOssTarget
 
         return new AliyunOssTarget
         {
-            Endpoint = new Uri($"https://{bucket}.{endpoint.Host}", UriKind.Absolute),
+            Endpoint = new Uri($"https://{endpoint.Host}", UriKind.Absolute),
             Region = ResolveRegion(configuration, endpoint.Host),
             Bucket = bucket,
             KeyPrefix = keyPrefix
         };
     }
-
-    public string ResourcePath(string ossKey) => $"/{Bucket}/{ossKey}";
-
-    public Uri ObjectUri(string ossKey, string query = "") => new($"{Endpoint.GetLeftPart(UriPartial.Authority)}/{AliyunOssV4Signer.Encode(ossKey, escapeSlash: false)}{query}", UriKind.Absolute);
 
     /// <summary>
     /// Projects a caller's object key onto a bucket key, refusing anything that could escape the profile's prefix.
@@ -118,12 +114,7 @@ internal sealed record AliyunOssTarget
         return segments.Skip(1).All(segment => segment.Length != 0 && segment.All(char.IsAsciiLetterOrDigit));
     }
 
-    /// <summary>
-    /// The profile's own half of every key, held to the same segment rule as a caller's. A dot segment here would pass
-    /// the schema pattern and then desynchronize the two path forms: <see cref="ObjectUri"/> lets Uri compress it out
-    /// of the request path while the V4 signature covers the literal <see cref="ResourcePath"/>, so every request from
-    /// such a profile would 403. Refusing it at parse time turns a permanently dead profile into an activation error.
-    /// </summary>
+    /// <summary>The profile's own half of every key, held to the same segment rule as a caller's.</summary>
     private static bool IsAddressablePrefix(string keyPrefix) =>
         keyPrefix.Length == 0 || (keyPrefix.EndsWith('/') && SegmentsAreAddressable(keyPrefix[..^1].Split('/')));
 

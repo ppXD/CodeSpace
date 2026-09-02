@@ -66,12 +66,14 @@ public sealed class AliyunOssStorageProviderModule : IStorageProviderModule, ISt
               "type": "string",
               "minLength": 1,
               "maxLength": 128,
+              "pattern": "^(?!\\s)[\\s\\S]*\\S$",
               "title": "AccessKey ID"
             },
             "accessKeySecret": {
               "type": "string",
               "minLength": 1,
               "maxLength": 256,
+              "pattern": "^(?!\\s)[\\s\\S]*\\S$",
               "title": "AccessKey secret",
               "writeOnly": true
             },
@@ -79,6 +81,7 @@ public sealed class AliyunOssStorageProviderModule : IStorageProviderModule, ISt
               "type": "string",
               "minLength": 1,
               "maxLength": 4096,
+              "pattern": "^(?!\\s)[\\s\\S]*\\S$",
               "title": "STS security token",
               "description": "Only for temporary STS credentials. A profile using one stops working when the token expires.",
               "writeOnly": true

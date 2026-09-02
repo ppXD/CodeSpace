@@ -76,6 +76,17 @@ public sealed class AliyunOssStorageProviderModuleTests
     }
 
     [Theory]
+    [InlineData(" access-key", "secret", "token")]
+    [InlineData("access-key", "secret ", "token")]
+    [InlineData("access-key", "secret", " token")]
+    public void The_secret_schema_rejects_boundary_whitespace_before_a_credential_is_stored(string accessKeyId, string accessKeySecret, string securityToken)
+    {
+        var secret = JsonSerializer.SerializeToElement(new { accessKeyId, accessKeySecret, securityToken });
+
+        Should.Throw<ArgumentException>(() => StorageProviderJson.Validate(secret, new AliyunOssStorageProviderModule().SecretSchema, "Secret"));
+    }
+
+    [Theory]
     [InlineData("""{"region":"cn-hangzhou","bucket":"codespace-artifacts"}""")]
     [InlineData("""{"endpoint":"oss-cn-hangzhou.aliyuncs.com","region":"cn-hangzhou"}""")]
     [InlineData("""{"endpoint":"http://oss-cn-hangzhou.aliyuncs.com","region":"cn-hangzhou","bucket":"codespace-artifacts"}""")]

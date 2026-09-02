@@ -639,6 +639,31 @@ describe("storage profiles settings", () => {
     await waitFor(() => expect(requests).toHaveLength(2));
   });
 
+  it("turns a safe signature reason into actionable guidance without rendering provider text", async () => {
+    renderSettings(async (path, init) => {
+      const method = init.method ?? "GET";
+      if (path === "/api/storage/provider-modules") return json([localProvider]);
+      if (path === "/api/storage/credentials/page") return json(page([]));
+      if (path === "/api/storage/profiles/page") return json(page([profile]));
+      if (path === `/api/storage/profiles/${profile.id}` && method === "GET") return json(detail);
+      if (path === `/api/storage/profiles/${profile.id}/probe` && method === "POST") return json({
+        ...probeResult({ status: "Unavailable", failure: { stage: "Probe", code: "ProbeSignatureMismatch", retryable: false } }),
+        providerMessage: "must never render",
+      });
+      return json({ message: "Unexpected request" }, 500);
+    });
+
+    await screen.findByText("primary");
+    fireEvent.click(screen.getByRole("button", { name: "Manage primary" }));
+    const dialog = await screen.findByRole("dialog", { name: "Manage storage profile primary" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Run write probe" }));
+
+    const result = await within(dialog).findByRole("status", { name: "Storage probe result" });
+    expect(result).toHaveTextContent("ProbeSignatureMismatch");
+    expect(result).toHaveTextContent("Verify Endpoint and Region");
+    expect(result).not.toHaveTextContent("must never render");
+  });
+
   it("prevents duplicate probes and aborts the in-flight request when the profile editor unmounts", async () => {
     let probeCalls = 0;
     const captured: { signal: AbortSignal | null } = { signal: null };
