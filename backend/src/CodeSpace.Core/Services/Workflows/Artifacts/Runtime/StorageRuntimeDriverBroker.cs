@@ -3,7 +3,6 @@ using System.Text.Json;
 using CodeSpace.Core.Services.Workflows.Artifacts.Credentials;
 using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers;
-using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 
@@ -13,14 +12,14 @@ public sealed class StorageRuntimeDriverBroker : IStorageRuntimeDriverBroker
     private readonly IStorageProfileSnapshotResolver _profileResolver;
     private readonly IStorageCredentialSecretResolver _credentialResolver;
     private readonly IArtifactStorageDriverFactoryCatalog _factoryCatalog;
-    private readonly ILogger<StorageRuntimeDriverBroker> _logger;
+    private readonly IStorageDriverActivator _activator;
 
-    public StorageRuntimeDriverBroker(IStorageProfileSnapshotResolver profileResolver, IStorageCredentialSecretResolver credentialResolver, IArtifactStorageDriverFactoryCatalog factoryCatalog, ILogger<StorageRuntimeDriverBroker> logger)
+    public StorageRuntimeDriverBroker(IStorageProfileSnapshotResolver profileResolver, IStorageCredentialSecretResolver credentialResolver, IArtifactStorageDriverFactoryCatalog factoryCatalog, IStorageDriverActivator activator)
     {
         _profileResolver = profileResolver;
         _credentialResolver = credentialResolver;
         _factoryCatalog = factoryCatalog;
-        _logger = logger;
+        _activator = activator;
     }
 
     public async ValueTask<StorageRuntimeDriverResolution> OpenAsync(StorageRuntimeDriverRequest request, CancellationToken cancellationToken)
@@ -103,58 +102,8 @@ public sealed class StorageRuntimeDriverBroker : IStorageRuntimeDriverBroker
             }
         }
 
-        if (cancellationToken.IsCancellationRequested)
-        {
-            credentialHandle?.Dispose();
-            return new StorageRuntimeDriverResolution.Cancelled(StorageRuntimeCancellationStage.DriverInitialization);
-        }
-
-        IArtifactStorageDriver? driver;
-        try
-        {
-            driver = await factory.CreateAsync(new ArtifactStorageDriverCreateRequest(snapshot) { CredentialHandle = credentialHandle }, cancellationToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            return new StorageRuntimeDriverResolution.Cancelled(StorageRuntimeCancellationStage.DriverInitialization);
-        }
-        catch (OperationCanceledException)
-        {
-            return new StorageRuntimeDriverResolution.DriverInitializationFailed(StorageRuntimeDriverInitializationFailureReason.ProviderCanceled);
-        }
-        catch (Exception exception) when (exception is ArgumentException or NotSupportedException)
-        {
-            if (cancellationToken.IsCancellationRequested) return new StorageRuntimeDriverResolution.Cancelled(StorageRuntimeCancellationStage.DriverInitialization);
-
-            LogConfigurationRefusal(snapshot, exception);
-            return new StorageRuntimeDriverResolution.ConfigurationInvalid(StorageRuntimeConfigurationFailureReason.FactoryRejectedConfiguration);
-        }
-        catch (Exception exception) when (IsRecoverable(exception))
-        {
-            if (cancellationToken.IsCancellationRequested) return new StorageRuntimeDriverResolution.Cancelled(StorageRuntimeCancellationStage.DriverInitialization);
-            return new StorageRuntimeDriverResolution.DriverInitializationFailed(StorageRuntimeDriverInitializationFailureReason.ProviderFailure);
-        }
-        finally
-        {
-            credentialHandle?.Dispose();
-        }
-
-        if (cancellationToken.IsCancellationRequested)
-            return driver == null
-                ? new StorageRuntimeDriverResolution.Cancelled(StorageRuntimeCancellationStage.DriverInitialization)
-                : await DisposeCancelledDriverAsync(driver).ConfigureAwait(false);
-        if (driver == null) return new StorageRuntimeDriverResolution.DriverInitializationFailed(StorageRuntimeDriverInitializationFailureReason.NullDriver);
-        return new StorageRuntimeDriverResolution.Ready(new StorageRuntimeDriverLease(driver));
+        return await _activator.ActivateAsync(factory, snapshot, credentialHandle, cancellationToken).ConfigureAwait(false);
     }
-
-    /// <summary>
-    /// The provider's own refusal text is the only copy that says which field is wrong and what to put there, and the
-    /// resolution this method returns deliberately carries none of it - provider text may quote a secret, so the caller
-    /// gets a closed reason code instead. Writing it here is therefore what keeps the refusal readable at all; without
-    /// this line the operator sees a reason code with no way back to the field that produced it.
-    /// </summary>
-    private void LogConfigurationRefusal(StorageProfileSnapshot snapshot, Exception exception) =>
-        _logger.LogWarning(exception, "Storage provider {ProviderTypeKey} refused the configuration of storage profile {StorageProfileId} revision {StorageProfileRevision}.", snapshot.ProviderTypeKey, snapshot.ProfileId, snapshot.ProfileRevision);
 
     private static StorageRuntimeDriverResolution? ValidateSnapshot(StorageRuntimeDriverRequest request, StorageProfileSnapshot? snapshot)
     {
@@ -205,19 +154,6 @@ public sealed class StorageRuntimeDriverBroker : IStorageRuntimeDriverBroker
             && string.Equals(reference.SecretId, credentialId.ToString("D", CultureInfo.InvariantCulture), StringComparison.Ordinal)
             && int.TryParse(reference.SecretVersion, NumberStyles.None, CultureInfo.InvariantCulture, out revision) && revision > 0
             && string.Equals(reference.SecretVersion, revision.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal);
-    }
-
-    private static async ValueTask<StorageRuntimeDriverResolution> DisposeCancelledDriverAsync(IArtifactStorageDriver driver)
-    {
-        try
-        {
-            await StorageRuntimeDriverLease.DisposeDriverAsync(driver).ConfigureAwait(false);
-            return new StorageRuntimeDriverResolution.Cancelled(StorageRuntimeCancellationStage.DriverInitialization);
-        }
-        catch (Exception exception) when (IsRecoverable(exception))
-        {
-            return new StorageRuntimeDriverResolution.DriverInitializationFailed(StorageRuntimeDriverInitializationFailureReason.CleanupFailure);
-        }
     }
 
     private static bool IsRecoverable(Exception exception) => exception is not OutOfMemoryException and not AccessViolationException;

@@ -402,8 +402,8 @@ public sealed class StorageRuntimeDriverBrokerTests
     private StorageRuntimeDriverBroker Broker(IStorageProfileSnapshotResolver profile, IStorageCredentialSecretResolver credential, IArtifactStorageDriverFactory factory) =>
         Broker(profile, credential, new StubCatalog(factory));
 
-    private static StorageRuntimeDriverBroker Broker(IStorageProfileSnapshotResolver profile, IStorageCredentialSecretResolver credential, IArtifactStorageDriverFactoryCatalog catalog, ILogger<StorageRuntimeDriverBroker>? logger = null) =>
-        new(profile, credential, catalog, logger ?? NullLogger<StorageRuntimeDriverBroker>.Instance);
+    private static StorageRuntimeDriverBroker Broker(IStorageProfileSnapshotResolver profile, IStorageCredentialSecretResolver credential, IArtifactStorageDriverFactoryCatalog catalog, ILogger<StorageDriverActivator>? logger = null) =>
+        new(profile, credential, catalog, new StorageDriverActivator(logger ?? NullLogger<StorageDriverActivator>.Instance));
 
     private StorageRuntimeDriverRequest Request() => new(_teamId, _profileId, 7, StorageProfileEligibility.Write);
 
@@ -495,7 +495,7 @@ public sealed class StorageRuntimeDriverBrokerTests
         }
     }
 
-    private sealed class CapturingLogger : ILogger<StorageRuntimeDriverBroker>
+    private sealed class CapturingLogger : ILogger<StorageDriverActivator>
     {
         public List<(LogLevel Level, string Message, Exception? Exception)> Entries { get; } = [];
 
