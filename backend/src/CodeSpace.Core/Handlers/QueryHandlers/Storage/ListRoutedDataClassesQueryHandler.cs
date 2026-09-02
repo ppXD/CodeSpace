@@ -18,7 +18,7 @@ public sealed class ListRoutedDataClassesQueryHandler : IRequestHandler<ListRout
     public Task<IReadOnlyList<RoutedDataClassDescriptor>> Handle(ListRoutedDataClassesQuery request, CancellationToken cancellationToken)
     {
         IReadOnlyList<RoutedDataClassDescriptor> result = _catalog.DataClasses
-            .Select(dataClass => new RoutedDataClassDescriptor { TypeKey = dataClass.TypeKey, DisplayName = dataClass.DisplayName })
+            .Select(dataClass => new RoutedDataClassDescriptor { TypeKey = dataClass.TypeKey, DisplayName = dataClass.DisplayName, HasLocalFallback = dataClass is IRoutedDataClassLocalFallback })
             .ToList();
 
         return Task.FromResult(result);

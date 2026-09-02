@@ -64,9 +64,9 @@ export function StorageRouteSettings({ profiles, state = "active" }: { profiles:
           {/* The blocker is a route nobody cut over, so activating it — not creating another — is the
               accented act. Creating one for a second data class stays available beside it. */}
           {activeRoutes.length === 0 && activatable && (
-            <button type="button" className={state === "active" ? "btn btn-primary" : "btn"} onClick={() => manage(activatable)}>Activate {activatable.dataClassTypeKey}</button>
+            <button type="button" className="btn" onClick={() => manage(activatable)}>Activate {activatable.dataClassTypeKey}</button>
           )}
-          <button type="button" className={state === "active" && (activeRoutes.length > 0 || !activatable) ? "btn btn-primary" : "btn"} disabled={activeProfiles.length === 0 || routes.isLoading || routeError != null} onClick={() => setCreateOpen(true)}>Create data route</button>
+          <button type="button" className="btn" disabled={activeProfiles.length === 0 || routes.isLoading || routeError != null} onClick={() => setCreateOpen(true)}>Create data route</button>
         </>
       ) : undefined}
     >

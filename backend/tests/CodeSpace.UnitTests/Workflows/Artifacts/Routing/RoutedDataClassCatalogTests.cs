@@ -1,5 +1,7 @@
 using System.Reflection;
+using CodeSpace.Core.Handlers.QueryHandlers.Storage;
 using CodeSpace.Core.Services.Workflows.Artifacts.Routing;
+using CodeSpace.Messages.Queries.Storage;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Workflows.Artifacts.Routing;
@@ -18,6 +20,23 @@ public sealed class RoutedDataClassCatalogTests
 
         catalog.DataClasses.Select(dataClass => dataClass.TypeKey).ShouldBe(["agent-run-log/v1", "workflow-artifact/v1"]);
         catalog.DataClasses.Select(dataClass => dataClass.DisplayName).ShouldBe(["Agent run logs", "Workflow artifacts"]);
+    }
+
+    /// <summary>
+    /// Whether a class has a home outside the routing plane is the difference between the two sentences a screen owes
+    /// an operator about an unrouted class - "written to this server's own disk" and "not captured at all". The second
+    /// says data is being dropped, so a screen must not have to know the classes by name to say the right one, and
+    /// the descriptor must not flatten the distinction away.
+    /// </summary>
+    [Fact]
+    public async Task The_descriptor_carries_whether_a_class_has_a_home_outside_the_routing_plane()
+    {
+        var described = await new ListRoutedDataClassesQueryHandler(DiscoveredCatalog()).Handle(new ListRoutedDataClassesQuery(), CancellationToken.None);
+
+        described.Single(dataClass => dataClass.TypeKey == "workflow-artifact/v1").HasLocalFallback
+            .ShouldBeTrue("this plane keeps a local blob backend, so a team that has not routed it is still storing its artifacts");
+        described.Single(dataClass => dataClass.TypeKey == "agent-run-log/v1").HasLocalFallback
+            .ShouldBeFalse("this class has no home but the routing plane, so an unrouted team is not capturing run logs at all");
     }
 
     /// <summary>

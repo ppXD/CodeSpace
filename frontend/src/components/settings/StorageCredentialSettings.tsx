@@ -36,7 +36,7 @@ export function StorageCredentialSettings({ providers, state }: { providers: Sto
       state={state}
       line={credentialLine(rows, active, credentials.isLoading, error)}
       action={mayManage ? (
-        <button type="button" className={state === "active" ? "btn btn-primary" : "btn"} onClick={() => setCreateOpen(true)}>Create storage credential</button>
+        <button type="button" className="btn" onClick={() => setCreateOpen(true)}>Create storage credential</button>
       ) : undefined}
     >
       {credentials.isLoading && <LoadingMessage>Loading storage credentials…</LoadingMessage>}

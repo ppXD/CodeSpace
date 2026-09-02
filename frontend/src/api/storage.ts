@@ -193,17 +193,20 @@ export interface ProbeStorageProfileInput {
   verifyWriteAccess: boolean;
 }
 
+/** Why a destination did not answer, in closed vocabulary. Provider text never reaches a client. */
+export interface StorageProfileProbeFailure {
+  stage: StorageProfileProbeFailureStage;
+  code: StorageProfileProbeFailureCode;
+  retryable: boolean;
+}
+
 export interface StorageProfileProbeResult {
   profileId: string;
   profileRevision: number | null;
   writeAccessRequested: boolean;
   status: StorageProfileProbeStatus;
   latencyMilliseconds: number;
-  failure?: {
-    stage: StorageProfileProbeFailureStage;
-    code: StorageProfileProbeFailureCode;
-    retryable: boolean;
-  } | null;
+  failure?: StorageProfileProbeFailure | null;
 }
 
 /**
@@ -276,6 +279,42 @@ export interface AbandonProfilePlacementsInput {
   batchSize: number;
 }
 
+/** What an operator typed, on its way to a real destination. The secret is request material only and never comes back. */
+export interface ProbeStorageConfigurationInput {
+  providerTypeKey: string;
+  nonSecretConfig: Record<string, unknown>;
+  secret?: Record<string, unknown> | null;
+}
+
+/** The same status/failure vocabulary a saved profile's probe answers in, minus the profile identity there is none of. */
+export interface StorageConfigurationProbeResult {
+  providerTypeKey: string;
+  status: StorageProfileProbeStatus;
+  latencyMilliseconds: number;
+  failure: StorageProfileProbeFailure | null;
+}
+
+/** One place this team's data is kept: an address, the key that reaches it, and what lands in it. */
+export interface CreateStorageDestinationInput {
+  name: string;
+  providerTypeKey: string;
+  nonSecretConfig: Record<string, unknown>;
+  secret?: Record<string, unknown> | null;
+  safeHint?: string | null;
+  dataClassTypeKeys: string[];
+}
+
+export interface StorageDestinationDetail {
+  profileId: string;
+  name: string;
+  providerTypeKey: string;
+  profileRevision: number;
+  state: StorageProfileState;
+  credentialId: string | null;
+  credentialRevision: number | null;
+  dataClassTypeKeys: string[];
+}
+
 export const storageApi = {
   listProviderModules: () => fetchJson<StorageProviderModuleSummary[]>("/api/storage/provider-modules"),
   getPlacementIntegrity: (signal?: AbortSignal) => fetchJson<PlacementIntegritySummary>("/api/storage/placements/integrity", { signal }),
@@ -294,6 +333,17 @@ export const storageApi = {
     body: JSON.stringify(input),
   }),
   revokeCredential: (credentialId: string, input: RevokeStorageCredentialInput) => fetchJson<StorageCredentialMetadata>(`/api/storage/credentials/${encodeURIComponent(credentialId)}/revoke`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  }),
+  /** Qualifies configuration and a secret against the real destination. Persists nothing, so a wrong key costs an edit. */
+  probeConfiguration: (input: ProbeStorageConfigurationInput, signal?: AbortSignal) => fetchJson<StorageConfigurationProbeResult>("/api/storage/probes", {
+    method: "POST",
+    body: JSON.stringify(input),
+    signal,
+  }),
+  /** Records the key, the address and what lands there in one transaction: a destination, or nothing. */
+  createDestination: (input: CreateStorageDestinationInput) => fetchJson<StorageDestinationDetail>("/api/storage/destinations", {
     method: "POST",
     body: JSON.stringify(input),
   }),

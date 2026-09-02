@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { ApiError } from "@/api/request";
-import type { StorageCredentialMetadata, StorageProfileDetail, StorageProfileProbeFailureCode, StorageProfileProbeResult, StorageProfileState, StorageProfileSummary, StorageProviderModuleSummary } from "@/api/storage";
+import type { StorageCredentialMetadata, StorageProfileDetail, StorageProfileProbeResult, StorageProfileState, StorageProfileSummary, StorageProviderModuleSummary } from "@/api/storage";
 import { useAppendStorageProfileRevision, useCreateStorageProfile, usePlacementIntegrity, useProbeStorageProfile, useSetStorageProfileState, useStorageCredentials, useStorageProfile, useStorageProfiles, useStorageProviderModules } from "@/hooks/use-storage";
 import { useStorageRoutes } from "@/hooks/use-storage-routes";
 import { TeamPermissions, useTeamPermissions } from "@/hooks/use-team-management";
@@ -12,6 +12,8 @@ import { StorageCredentialSettings } from "./StorageCredentialSettings";
 import { StorageDefaultAdoption } from "./StorageDefaultAdoption";
 import { StorageRouteSettings } from "./StorageRouteSettings";
 import { PlacementIntegrityNotice } from "./PlacementIntegrityNotice";
+import { AddDestinationDialog } from "./AddDestinationDialog";
+import { probeFailureGuidance } from "./storageProbeGuidance";
 import { StoragePlacementDrain } from "./StoragePlacementDrain";
 import { StorageHealthBadge } from "./StorageHealthBadge";
 import { StorageStep, type StorageStepState } from "./StorageStep";
@@ -32,6 +34,7 @@ export function StorageSettings() {
   const integrity = usePlacementIntegrity();
   const mayManage = useTeamPermissions().can(TeamPermissions.StorageManage);
   const [createOpen, setCreateOpen] = useState(false);
+  const [addDestinationOpen, setAddDestinationOpen] = useState(false);
   const [managedProfileId, setManagedProfileId] = useState<string | null>(null);
   const providerRows = providers.data ?? [];
   const profileRows = profiles.data ?? [];
@@ -71,6 +74,26 @@ export function StorageSettings() {
 
   return (
     <div aria-labelledby="storage-settings-title">
+      {/* The one primary action on this page. It answers the whole question - key, address, and what lands there -
+          in one dialog that tests the destination BEFORE recording anything, so a mistyped secret costs a retry
+          rather than a credential and a profile neither of which can be deleted. The step-by-step flow below stays
+          for the things it is still the only way to reach: repairing a destination in place, stopping one, and
+          reading its history. */}
+      {mayManage && (
+        <div style={{ display: "flex", justifyContent: "flex-end", padding: "16px 16px 0" }}>
+          <button type="button" className="btn btn-primary" onClick={() => setAddDestinationOpen(true)}>
+            <Ic.Plus size={14} /> Add a destination
+          </button>
+        </div>
+      )}
+      {addDestinationOpen && (
+        <AddDestinationDialog
+          providers={providerRows}
+          onClose={() => setAddDestinationOpen(false)}
+          onCreated={() => setAddDestinationOpen(false)}
+        />
+      )}
+
       <div className="cn-banner" style={{ margin: 16 }}>
         <h2 className="cn-banner-h" id="storage-settings-title">Artifact storage</h2>
         <div className="cn-banner-p">
@@ -102,9 +125,9 @@ export function StorageSettings() {
               {/* With a profile already drafted, the accented act is activating it — a route may only
                   target an Active profile. Creating another stays available beside it. */}
               {activeProfiles.length === 0 && activatable && (
-                <button type="button" className={profileState === "active" ? "btn btn-primary" : "btn"} onClick={() => setManagedProfileId(activatable.id)}>Activate {activatable.stableName}</button>
+                <button type="button" className="btn" onClick={() => setManagedProfileId(activatable.id)}>Activate {activatable.stableName}</button>
               )}
-              <button type="button" className={profileState === "active" && (activeProfiles.length > 0 || !activatable) ? "btn btn-primary" : "btn"} disabled={providers.isLoading || providerError != null || providerRows.length === 0} onClick={() => setCreateOpen(true)}>Create storage profile</button>
+              <button type="button" className="btn" disabled={providers.isLoading || providerError != null || providerRows.length === 0} onClick={() => setCreateOpen(true)}>Create storage profile</button>
             </>
           ) : undefined}
         >
@@ -559,20 +582,6 @@ function StorageProfileProbeResultView({ binding }: { binding: BoundStorageProfi
   );
 }
 
-function probeFailureGuidance(code: StorageProfileProbeFailureCode): string | null {
-  switch (code) {
-    case "ProbeCredentialInvalid": return "The provider does not recognize this AccessKey ID. Re-select or rotate the linked credential.";
-    case "ProbeSignatureMismatch": return "The provider rejected the request signature. Verify Endpoint and Region, then re-enter the AccessKey secret.";
-    case "ProbeSecurityTokenInvalid": return "The linked STS security token is invalid.";
-    case "ProbeSecurityTokenExpired": return "The linked STS security token has expired. Rotate the credential.";
-    case "ProbeSecurityTokenMissing": return "This temporary AccessKey requires an STS security token.";
-    case "ProbeClockSkew": return "The provider rejected the signing time. Check the server clock; the SDK already attempted clock-skew correction.";
-    case "ProbeDestinationMissing": return "The configured bucket does not exist or is not reachable at this endpoint.";
-    case "ProbePermissionDenied": return "The credential is valid but its OSS policy does not allow this operation.";
-    case "ProbeNetworkUnavailable": return "The endpoint could not be reached. Check DNS, TLS, proxy, and network routing.";
-    default: return null;
-  }
-}
 
 function RetireConfirmation({ stableName, onCancel, onConfirm }: { stableName: string; onCancel: () => void; onConfirm: () => void }) {
   const confirmRef = useRef<HTMLButtonElement>(null);

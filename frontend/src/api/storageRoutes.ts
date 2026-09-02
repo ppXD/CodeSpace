@@ -11,6 +11,8 @@ export type StorageProfileRevisionMode = "CurrentAtWrite" | "Pinned";
 export interface RoutedDataClass {
   typeKey: string;
   displayName: string;
+  /** True when this class has a durable home outside the routing plane, so leaving it unrouted stores it somewhere rather than losing it. */
+  hasLocalFallback: boolean;
 }
 
 export interface StorageRouteSummary {
@@ -106,6 +108,7 @@ function parseDataClasses(value: unknown): RoutedDataClass[] {
     return {
       typeKey: dataClassTypeKey(dataClass.typeKey),
       displayName: string(dataClass.displayName, "routable data class name"),
+      hasLocalFallback: dataClass.hasLocalFallback === true,
     };
   });
 }
