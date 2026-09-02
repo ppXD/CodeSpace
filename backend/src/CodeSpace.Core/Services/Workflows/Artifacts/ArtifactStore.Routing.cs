@@ -221,7 +221,7 @@ public sealed partial class ArtifactStore
     {
         var stamps = await RecordedStampsAsync(read, cancellationToken).ConfigureAwait(false);
         if (stamps.Count == 0)
-            throw new ArtifactContentUnavailableException(read.ArtifactId, ArtifactContentUnavailableKind.PhysicalObjectMissing);
+            throw new ArtifactContentUnavailableException(read.ArtifactId, ArtifactContentUnavailableKind.PhysicalObjectMissing, detail: await MissingStampDetailAsync(read, cancellationToken).ConfigureAwait(false));
 
         var problem = ArtifactCasProblemCode.ArtifactMissing;
         foreach (var stamp in stamps)
@@ -238,6 +238,35 @@ public sealed partial class ArtifactStore
         }
 
         throw new ArtifactContentUnavailableException(read.ArtifactId, KindOf(problem));
+    }
+
+    /// <summary>
+    /// When an object has NO Available location, the ledger usually still knows WHY — a demoted location carries its
+    /// state, error code and observation time. Surfacing it is the difference between "missing, go dig with SQL" and
+    /// "missing: the destination reported ObjectMissing on 2026-08-30". Best-effort: a failure to read the ledger
+    /// never masks the original miss.
+    /// </summary>
+    private async Task<string?> MissingStampDetailAsync(RoutedRead read, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var location = await _db.ArtifactLocation.AsNoTracking()
+                .Where(l => l.TeamId == read.TeamId && l.ArtifactObjectId == read.ArtifactObjectId)
+                .OrderByDescending(l => l.VerifiedAt)
+                .Select(l => new { l.State, l.LastErrorCode, l.LastErrorMessage, l.VerifiedAt })
+                .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+            if (location is null) return "the object has no recorded location — the byte write never committed";
+
+            return $"the location ledger records state {location.State}"
+                 + (location.LastErrorCode is { Length: > 0 } code ? $", code {code}" : "")
+                 + (location.LastErrorMessage is { Length: > 0 } message ? $": {message}" : "")
+                 + (location.VerifiedAt is { } at ? $" (observed {at:u})" : "");
+        }
+        catch (Exception)
+        {
+            return null;   // the miss itself is already being thrown — never mask it with a diagnostics failure
+        }
     }
 
     /// <summary>

@@ -151,8 +151,9 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
     private readonly IToolCallLedgerService _ledger;
     private readonly Completion.ICompletionContractStore _contracts;
     private readonly ILogger<AgentRunService> _logger;
+    private readonly Services.RunData.IRunDataCompletenessWriter? _completeness;
 
-    public AgentRunService(CodeSpaceDbContext db, IAdmissionController admissionController, ISandboxRunnerRegistry runners, IArtifactOffloader offloader, IToolCallLedgerService ledger, Completion.ICompletionContractStore contracts, ILogger<AgentRunService> logger)
+    public AgentRunService(CodeSpaceDbContext db, IAdmissionController admissionController, ISandboxRunnerRegistry runners, IArtifactOffloader offloader, IToolCallLedgerService ledger, Completion.ICompletionContractStore contracts, ILogger<AgentRunService> logger, Services.RunData.IRunDataCompletenessWriter? completeness = null)
     {
         _db = db;
         _admissionController = admissionController;
@@ -161,6 +162,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         _ledger = ledger;
         _contracts = contracts;
         _logger = logger;
+        _completeness = completeness;
     }
 
     public async Task<AgentRun> CreateAsync(AgentTask task, Guid teamId, Guid? workflowRunId, string? nodeId, string iterationKey = "", CancellationToken cancellationToken = default)
@@ -446,7 +448,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         // D2/D3: large fields (the unified diff, the faithful raw transcript) are offloaded to the content-addressed
         // artifact store (team-scoped) and only the ref kept — so result_jsonb stays bounded instead of carrying an
         // unbounded blob. Small fields stay inline. Done BEFORE serialize so the persisted result carries the refs.
-        result = await OffloadOrShedAsync(result, snapshot.TeamId, cancellationToken).ConfigureAwait(false);
+        result = await OffloadOrShedAsync(runId, result, snapshot.TeamId, cancellationToken).ConfigureAwait(false);
 
         var resultJson = JsonSerializer.Serialize(result, AgentJson.Options);
 
@@ -495,7 +497,32 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
     /// exists to prevent. Partial success is preserved — fields whose offload committed before the failure keep their
     /// refs, because the <c>with</c>-chain reassigns <paramref name="result"/> after each step.</para>
     /// </summary>
-    private async Task<AgentRunResult> OffloadOrShedAsync(AgentRunResult result, Guid teamId, CancellationToken cancellationToken)
+
+    /// <summary>The blessed capture-gap producer shape (mirrors <c>WorkflowEngine.NoticeOutputsNotOffloadedAsync</c>): bad news lands on its own transaction; its own failure is loud.</summary>
+    private async Task NoticeDeliverableLossAsync(Guid runId, Guid teamId, string subjectId, string detail)
+    {
+        if (_completeness is null) return;   // optional capture plane (test construction) — production DI supplies it
+
+        try
+        {
+            await _completeness.NoticeAsync(new WorkflowRunCaptureGap
+            {
+                Id = Guid.NewGuid(), TeamId = teamId, AgentRunId = runId,
+                SubjectKind = CodeSpace.Messages.Contracts.WorkflowRunDataOwnerKinds.Deliverable, SubjectId = subjectId,
+                RangeKind = CaptureGapRangeKind.Unbounded, Reason = CaptureGapReason.WriteRefused,
+                ReasonDetail = detail, CaptureSource = "in-process",
+                NoticedAt = DateTimeOffset.UtcNow, CreatedAt = DateTimeOffset.UtcNow,
+            }, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "Agent run {RunId}: a deliverable loss occurred AND its capture-gap record could not be written ({Subject})", runId, subjectId);
+        }
+    }
+
+    private static string Truncate(string text, int max) => text.Length <= max ? text : text[..max] + "…";
+
+    private async Task<AgentRunResult> OffloadOrShedAsync(Guid runId, AgentRunResult result, Guid teamId, CancellationToken cancellationToken)
     {
         try
         {
@@ -517,7 +544,12 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
                 "Agent run completion could not offload large payloads and shed them to preserve the run's outcome: patch={PatchShed}, repositoryPatches={RepositoryPatchesShed}, transcript={TranscriptShed}, sessionTranscript={SessionTranscriptShed}. The run's status, branch, acceptance and changed files are intact; the shed bytes remain in the spool until the reaper's window closes.",
                 shed.PatchShed, shed.RepositoryPatchesShed, shed.TranscriptShed, shed.SessionTranscriptShed);
 
-            return shed.Result;
+            // Deliverable-loss honesty: a shed patch lost BOTH carriers (no artifact ref, inline dropped) — name the
+            // loss on the surviving result (the preview renders it instead of a clickable 404) and as a capture gap.
+            var reason = $"the patch's bytes were shed after the store refused the offload — {exception.GetType().Name}: {Truncate(exception.Message, 300)}";
+            if (shed.PatchShed) await NoticeDeliverableLossAsync(runId, teamId, "patch:primary", reason).ConfigureAwait(false);
+
+            return shed.PatchShed ? shed.Result with { PatchLossReason = reason } : shed.Result;
         }
     }
 

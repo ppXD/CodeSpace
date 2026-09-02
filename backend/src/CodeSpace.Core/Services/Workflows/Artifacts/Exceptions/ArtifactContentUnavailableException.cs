@@ -8,15 +8,19 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
 /// </summary>
 public sealed class ArtifactContentUnavailableException : Exception, IFailure
 {
-    public ArtifactContentUnavailableException(Guid artifactId, ArtifactContentUnavailableKind kind, Exception? innerException = null)
-        : base(MessageFor(artifactId, kind), innerException)
+    public ArtifactContentUnavailableException(Guid artifactId, ArtifactContentUnavailableKind kind, Exception? innerException = null, string? detail = null)
+        : base(detail is null ? MessageFor(artifactId, kind) : $"{MessageFor(artifactId, kind)} ({detail})", innerException)
     {
         ArtifactId = artifactId;
         Kind = kind;
+        Detail = detail;
     }
 
     public Guid ArtifactId { get; }
     public ArtifactContentUnavailableKind Kind { get; }
+
+    /// <summary>The NAMED reason when the location ledger recorded one (state / error code / when observed) — a reader renders this instead of leaving the operator to guess with SQL. Null when no record explains the miss.</summary>
+    public string? Detail { get; }
 
     FailureKind IFailure.Kind => FailureKind.Unavailable;
     string IFailure.Code => FailureCodes.ArtifactContentUnavailable;

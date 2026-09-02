@@ -304,6 +304,26 @@ public class RoomFilePreviewFlowTests
     }
 
     [Fact]
+    public async Task A_lost_patch_names_why_its_bytes_were_never_stored()
+    {
+        // Deliverable-loss honesty: the offload was refused (or the oversize inline copy was shed), so NO carrier
+        // exists — but the result row NAMES the loss. The preview must render that name, never a bare
+        // metadata-missing shrug the operator has to chase with SQL.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId);
+        await AddLossyAgentAsync(teamId, runId, new[] { "docs/analysis/pr-inventory.md" }, "the patch's bytes were shed after the store refused the offload — HttpRequestException: 403 from the destination");
+
+        var preview = await PreviewAsync(runId, "docs/analysis/pr-inventory.md", teamId);
+
+        preview.ShouldNotBeNull();
+        preview!.Kind.ShouldBe("unavailable");
+        preview.UnavailableReason.ShouldBe(RoomFileUnavailableReason.MetadataMissing);
+        preview.Note.ShouldNotBeNull();
+        preview.Note!.ShouldContain("never stored", customMessage: "the loss must be named AS a loss — not rendered as generic missing metadata");
+        preview.Note.ShouldContain("403", customMessage: "…and carry the recorded reason verbatim, so nobody digs with SQL");
+    }
+
+    [Fact]
     public async Task A_routed_patch_whose_object_is_gone_is_an_unavailable_preview_that_names_the_reason()
     {
         // The failure a user hits when a destination stops serving. It must arrive as a typed reason the drawer can
@@ -453,6 +473,15 @@ public class RoomFilePreviewFlowTests
 
         await db.SaveChangesAsync();
         return agentRunId;
+    }
+
+    private async Task AddLossyAgentAsync(Guid teamId, Guid runId, IReadOnlyList<string> changedFiles, string lossReason)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var result = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", ChangedFiles = changedFiles.ToList(), Patch = "", PatchLossReason = lossReason };
+        db.AgentRun.Add(new AgentRun { Id = Guid.NewGuid(), TeamId = teamId, WorkflowRunId = runId, Harness = "codex-cli", Status = AgentRunStatus.Succeeded, CreatedDate = DateTimeOffset.UtcNow, ResultJson = JsonSerializer.Serialize(result, AgentJson.Options) });
+        await db.SaveChangesAsync();
     }
 
     private async Task<Guid> AddMultiRepoAgentAsync(Guid teamId, Guid runId, params (Guid RepositoryId, string Alias, string Path, string Body)[] repositories)

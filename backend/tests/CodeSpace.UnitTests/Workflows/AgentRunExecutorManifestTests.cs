@@ -22,6 +22,7 @@ public class AgentRunExecutorManifestTests
     public void A_produced_branch_resolves_to_Pushed_with_the_branch_name_recorded()
     {
         var upsert = AgentRunExecutor.BuildManifestUpsert(Run(), "primary", Guid.NewGuid(), "abc123", null, new[] { "a.cs" }, "codespace/agent/deadbeef", publishError: null, publishSkipReason: null, acceptancePassed: null, pushedCommitSha: "fee1dead");
+        upsert.PatchLossReason.ShouldBeNull("no loss occurred — the column must stay NULL so it only ever means a real loss");
 
         upsert.PublishStateValue.ShouldBe(PublishState.Pushed);
         upsert.CommitSha.ShouldBe("fee1dead", "the remote-CONFIRMED tip rides onto the manifest — the delivery receipt's candidate: hash becomes an observed fact");
@@ -124,5 +125,13 @@ public class AgentRunExecutorManifestTests
         upsert.RepositoryId.ShouldBe(repositoryId);
         upsert.BaseSha.ShouldBe("base-sha");
         upsert.PatchArtifactId.ShouldBe(patchArtifactId);
+    }
+
+    [Fact]
+    public void A_named_patch_loss_threads_to_the_manifest_verbatim()
+    {
+        var upsert = AgentRunExecutor.BuildManifestUpsert(Run(), "primary", Guid.NewGuid(), "abc123", null, new[] { "a.cs" }, null, publishError: null, publishSkipReason: null, acceptancePassed: null, pushedCommitSha: null, patchLossReason: "the patch's bytes were not stored — IOException: disk full");
+
+        upsert.PatchLossReason.ShouldBe("the patch's bytes were not stored — IOException: disk full", "a lost patch must reach the manifest row NAMED — the preview renders this instead of a clickable 404");
     }
 }
