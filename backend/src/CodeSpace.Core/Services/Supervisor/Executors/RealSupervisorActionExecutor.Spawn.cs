@@ -485,6 +485,9 @@ public sealed partial class RealSupervisorActionExecutor
     /// </summary>
     internal static AgentTask ApplyRetryDisposition(AgentTask task, ResumableSession? prior, SupervisorAgentResult? priorResult, bool workspaceHasPriorWork)
     {
+        if (AgentRetryCauses.Classify(priorResult?.Error) == AgentRetryCauses.GatewayFormatFault)
+            return task with { Environment = AgentRetryCauses.WithThinkingDisabled(task.Environment) };
+
         return prior is null ? task : ApplyResumeRecord(task, prior, workspaceHasPriorWork);
     }
 
