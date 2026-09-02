@@ -5,7 +5,7 @@ import { Ic } from "@/_imported/ai-code-space/icons";
 import { ApiError } from "@/api/request";
 import type { StorageCredentialMetadata, StorageProfileDetail, StorageProfileProbeResult, StorageProfileState, StorageProfileSummary, StorageProviderModuleSummary } from "@/api/storage";
 import { useAppendStorageProfileRevision, useCreateStorageProfile, usePlacementIntegrity, useProbeStorageProfile, useSetStorageProfileState, useStorageCredentials, useStorageProfile, useStorageProfiles, useStorageProviderModules } from "@/hooks/use-storage";
-import { useStorageRoutes } from "@/hooks/use-storage-routes";
+import { useRoutedDataClasses, useStorageRoutes } from "@/hooks/use-storage-routes";
 import { TeamPermissions, useTeamPermissions } from "@/hooks/use-team-management";
 import { SchemaForm } from "@/components/workflows/SchemaForm";
 import { StorageCredentialSettings } from "./StorageCredentialSettings";
@@ -14,6 +14,7 @@ import { StorageRouteSettings } from "./StorageRouteSettings";
 import { PlacementIntegrityNotice } from "./PlacementIntegrityNotice";
 import { AddDestinationDialog } from "./AddDestinationDialog";
 import { probeFailureGuidance } from "./storageProbeGuidance";
+import { StorageDestinations } from "./StorageDestinations";
 import { StoragePlacementDrain } from "./StoragePlacementDrain";
 import { StorageHealthBadge } from "./StorageHealthBadge";
 import { StorageStep, type StorageStepState } from "./StorageStep";
@@ -31,6 +32,7 @@ export function StorageSettings() {
   const credentials = useStorageCredentials();
   const profiles = useStorageProfiles();
   const routes = useStorageRoutes();
+  const dataClasses = useRoutedDataClasses();
   const integrity = usePlacementIntegrity();
   const mayManage = useTeamPermissions().can(TeamPermissions.StorageManage);
   const [createOpen, setCreateOpen] = useState(false);
@@ -111,7 +113,25 @@ export function StorageSettings() {
       {/* Above the flow: adopting means the three steps below are already done for that class. */}
       <StorageDefaultAdoption mayManage={mayManage} />
 
-      <div className="stg-flow" style={{ margin: 16 }}>
+      <div style={{ margin: 16 }}>
+        <StorageDestinations
+          profiles={profileRows}
+          providers={providerRows}
+          credentials={credentialRows}
+          routes={routes.data ?? []}
+          dataClasses={dataClasses.data ?? []}
+          mayManage={mayManage}
+          loading={profiles.isLoading}
+          onAdvanced={(profileId) => setManagedProfileId(profileId)}
+        />
+      </div>
+
+      {/* Everything a destination card does not say, kept and reachable rather than removed: the append-only ledger,
+          the lifecycle states, per-class routing history, and draining a destination before it is stopped. Collapsed
+          because none of it is part of setting storage up, and all of it is part of unpicking something. */}
+      <details style={{ margin: 16 }}>
+        <summary className="cn-sub" style={{ cursor: "pointer", userSelect: "none" }}>Advanced &mdash; history, lifecycle, and per-class routing</summary>
+      <div className="stg-flow" style={{ marginTop: 12 }}>
         <StorageCredentialSettings providers={providerRows} state={stepState("credential")} />
 
         <StorageStep
@@ -157,6 +177,7 @@ export function StorageSettings() {
 
         <StorageRouteSettings profiles={profileRows} state={stepState("route")} />
       </div>
+      </details>
 
       <section className="stg-scope" aria-labelledby="storage-providers-title" data-scope="deployment">
         <div className="stg-scope-head">

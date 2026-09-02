@@ -38,7 +38,7 @@ export function StorageHealthBadge({ health, currentRevision }: { health?: Stora
     return (
       <span className="cn-status cn-status-warn" title={`The last successful probe was against revision ${health.profileRevision}; this profile is now on revision ${currentRevision}, which nothing has checked.`}>
         <span className="cn-status-dot" aria-hidden="true" />
-        unchecked since revision {currentRevision}
+        unchecked since it changed
       </span>
     );
   }
@@ -81,7 +81,8 @@ function failureTitle(health: StorageProfileHealthSummary): string {
   return `Last checked ${when(health.observedAt)}${reason}. New writes for any data class routed here will not land.`;
 }
 
-function when(observedAt: string): string {
+/** How long ago, in the shortest form that is still unambiguous. Exported so a card and a badge cannot disagree. */
+export function when(observedAt: string): string {
   const minutes = Math.round((Date.now() - new Date(observedAt).getTime()) / 60000);
   if (!Number.isFinite(minutes) || minutes < 1) return "just now";
   if (minutes < 60) return `${minutes} min ago`;

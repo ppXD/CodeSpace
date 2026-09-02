@@ -62,7 +62,7 @@ describe("StorageHealthBadge", () => {
     // Health for revision 3 says nothing about revision 4 — the profile has moved to a destination nothing checked.
     render(<StorageHealthBadge health={verified} currentRevision={4} />);
 
-    expect(screen.getByText("unchecked since revision 4")).toBeInTheDocument();
+    expect(screen.getByText("unchecked since it changed")).toBeInTheDocument();
     expect(screen.queryByText("writes verified")).not.toBeInTheDocument();
   });
 
