@@ -63,8 +63,43 @@ export function AddDestinationDialog({ providers, onClose, onCreated }: { provid
   const step: Step = qualified ? "use" : answered && answered.status !== "Available" ? "refused" : "connect";
   const canTest = Boolean(provider) && requiredValuesPresent(provider?.configSchema, config) && (!requiresSecret(provider) || requiredValuesPresent(provider?.secretSchema, secret));
 
+  // The promise sits beside the button that acts on it. At the bottom of a scrolling form it was the first thing an
+  // operator scrolled past, which is the one sentence that decides whether a typo is expensive. Short, because what
+  // the test actually DOES is worth saying where it has just been proven - the Use step's banner says it. The
+  // refused step says
+  // nothing here: its body already leads with "Nothing was saved", and saying it twice reads as reassurance rather
+  // than as fact.
+  const footer = (
+    <div className="mdl-foot">
+      <span className="wf-form-help" style={{ maxWidth: "46ch" }}>
+        {step === "connect" && "Nothing is saved until this test passes."}
+        {step === "use" && "Only what you tick starts landing here."}
+      </span>
+      <span style={{ display: "flex", gap: 10 }}>
+      <button type="button" className="btn" onClick={step === "refused" ? () => probe.reset() : onClose}>
+        {step === "refused" ? "Change the connection details" : "Cancel"}
+      </button>
+      {step === "connect" && (
+        <button type="button" className="btn btn-primary" disabled={!canTest || probe.isPending} onClick={() => probe.mutate()}>
+          {probe.isPending ? "Testing…" : "Test connection"}
+        </button>
+      )}
+      {step === "refused" && (
+        <button type="button" className="btn btn-primary" disabled={probe.isPending} onClick={() => probe.mutate()}>
+          {probe.isPending ? "Testing…" : "Test again"}
+        </button>
+      )}
+      {step === "use" && (
+        <button type="button" className="btn btn-primary" disabled={create.isPending} onClick={() => create.mutate()}>
+          {create.isPending ? "Saving…" : "Start storing here"}
+        </button>
+      )}
+      </span>
+    </div>
+  );
+
   return (
-    <Frame onClose={onClose} step={step}>
+    <Frame onClose={onClose} step={step} footer={footer}>
       {step === "connect" && (
         <>
           <div className="wf-form">
@@ -100,9 +135,6 @@ export function AddDestinationDialog({ providers, onClose, onCreated }: { provid
 
           {probe.error instanceof ApiError && <Banner title="Couldn&rsquo;t run the test">{probe.error.message}</Banner>}
 
-          <p className="wf-form-help" style={{ marginTop: 14 }}>
-            Nothing is saved until this test writes an object to the destination and reads it back.
-          </p>
         </>
       )}
 
@@ -152,26 +184,6 @@ export function AddDestinationDialog({ providers, onClose, onCreated }: { provid
         </>
       )}
 
-      <div className="mdl-foot">
-        <button type="button" className="btn" onClick={step === "refused" ? () => probe.reset() : onClose}>
-          {step === "refused" ? "Change the connection details" : "Cancel"}
-        </button>
-        {step === "connect" && (
-          <button type="button" className="btn btn-primary" disabled={!canTest || probe.isPending} onClick={() => probe.mutate()}>
-            {probe.isPending ? "Testing…" : "Test connection"}
-          </button>
-        )}
-        {step === "refused" && (
-          <button type="button" className="btn btn-primary" disabled={probe.isPending} onClick={() => probe.mutate()}>
-            {probe.isPending ? "Testing…" : "Test again"}
-          </button>
-        )}
-        {step === "use" && (
-          <button type="button" className="btn btn-primary" disabled={create.isPending} onClick={() => create.mutate()}>
-            {create.isPending ? "Saving…" : "Start storing here"}
-          </button>
-        )}
-      </div>
     </Frame>
   );
 }
@@ -179,7 +191,7 @@ export function AddDestinationDialog({ providers, onClose, onCreated }: { provid
 type Step = "connect" | "refused" | "use";
 
 /** The rail names the three questions, so an operator can see there are only three before answering the first. */
-function Frame({ step, onClose, children }: { step: Step; onClose: () => void; children: ReactNode }) {
+function Frame({ step, onClose, footer, children }: { step: Step; onClose: () => void; footer: ReactNode; children: ReactNode }) {
   return createPortal(
     <>
       <div className="mdl-mask" aria-hidden="true" onClick={onClose} />
@@ -198,6 +210,7 @@ function Frame({ step, onClose, children }: { step: Step; onClose: () => void; c
           <button type="button" className="mdl-x" aria-label="Close" onClick={onClose}>&times;</button>
         </div>
         <div className="mdl-body">{children}</div>
+        {footer}
       </div>
     </>,
     document.body,

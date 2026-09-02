@@ -97,8 +97,23 @@ export function FixConnectionDialog({ profile, provider, credentials, onClose }:
 
   const nothingToDo = !replacingKey && !configChanged;
 
+  const footer = (
+    <div className="mdl-foot">
+      <span className="wf-form-help" style={{ maxWidth: "46ch" }}>Nothing is written until the destination answers.</span>
+      <span style={{ display: "flex", gap: 10 }}>
+      <button type="button" className="btn" onClick={onClose}>Cancel</button>
+      <button type="button" className="btn" disabled={test.isPending || !current} onClick={() => test.mutate()}>
+        {test.isPending ? "Testing…" : "Test connection"}
+      </button>
+      <button type="button" className="btn btn-primary" disabled={!qualified || nothingToDo || save.isPending} onClick={() => save.mutate()}>
+        {save.isPending ? "Saving…" : "Save"}
+      </button>
+      </span>
+    </div>
+  );
+
   return (
-    <Frame title={`Fix ${profile.stableName}`} subtitle="Test first. Nothing is written until it answers." onClose={onClose}>
+    <Frame title={`Fix ${profile.stableName}`} subtitle="Test first. Nothing is written until it answers." onClose={onClose} footer={footer}>
       {detail.isLoading && <span className="wf-form-help">Loading&hellip;</span>}
 
       {current && (
@@ -132,20 +147,11 @@ export function FixConnectionDialog({ profile, provider, credentials, onClose }:
       {save.error instanceof ApiError && <Refusal>{save.error.message}</Refusal>}
       {save.error != null && !(save.error instanceof ApiError) && <Refusal>{String((save.error as { message?: unknown }).message ?? "The change could not be saved.")}</Refusal>}
 
-      <div className="mdl-foot">
-        <button type="button" className="btn" onClick={onClose}>Cancel</button>
-        <button type="button" className="btn" disabled={test.isPending || !current} onClick={() => test.mutate()}>
-          {test.isPending ? "Testing…" : "Test connection"}
-        </button>
-        <button type="button" className="btn btn-primary" disabled={!qualified || nothingToDo || save.isPending} onClick={() => save.mutate()}>
-          {save.isPending ? "Saving…" : "Save"}
-        </button>
-      </div>
     </Frame>
   );
 }
 
-function Frame({ title, subtitle, onClose, children }: { title: string; subtitle: string; onClose: () => void; children: ReactNode }) {
+function Frame({ title, subtitle, onClose, footer, children }: { title: string; subtitle: string; onClose: () => void; footer: ReactNode; children: ReactNode }) {
   return createPortal(
     <>
       <div className="mdl-mask" aria-hidden="true" onClick={onClose} />
@@ -158,6 +164,7 @@ function Frame({ title, subtitle, onClose, children }: { title: string; subtitle
           <button type="button" className="mdl-x" aria-label="Close" onClick={onClose}>&times;</button>
         </div>
         <div className="mdl-body">{children}</div>
+        {footer}
       </div>
     </>,
     document.body,

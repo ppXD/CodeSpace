@@ -66,8 +66,20 @@ export function WhatLandsHereDialog({ profile, routes, dataClasses, onClose }: {
 
   const changed = dataClasses.some((dataClass) => ticked.has(dataClass.typeKey) !== landing.has(dataClass.typeKey));
 
+  const footer = (
+    <div className="mdl-foot">
+      <span className="wf-form-help" style={{ maxWidth: "46ch" }}>Nothing already stored moves.</span>
+      <span style={{ display: "flex", gap: 10 }}>
+      <button type="button" className="btn" onClick={onClose}>Cancel</button>
+      <button type="button" className="btn btn-primary" disabled={!changed || apply.isPending} onClick={() => apply.mutate()}>
+        {apply.isPending ? "Applying…" : "Apply"}
+      </button>
+      </span>
+    </div>
+  );
+
   return (
-    <Frame title={`What lands in ${profile.stableName}`} onClose={onClose}>
+    <Frame title={`What lands in ${profile.stableName}`} onClose={onClose} footer={footer}>
       <p className="wf-form-help">Each choice moves where NEW writes go. Data already stored stays exactly where it is, and keeps opening.</p>
 
       <div className="wf-form" style={{ marginTop: 14 }}>
@@ -100,12 +112,6 @@ export function WhatLandsHereDialog({ profile, routes, dataClasses, onClose }: {
         </div>
       )}
 
-      <div className="mdl-foot">
-        <button type="button" className="btn" onClick={onClose}>Cancel</button>
-        <button type="button" className="btn btn-primary" disabled={!changed || apply.isPending} onClick={() => apply.mutate()}>
-          {apply.isPending ? "Applying…" : "Apply"}
-        </button>
-      </div>
     </Frame>
   );
 }
@@ -127,7 +133,7 @@ function consequence(dataClass: RoutedDataClass, ticked: boolean, landsHereNow: 
   return ticked ? "Lands here now." : dataClass.hasLocalFallback ? "Written to this server's own disk." : "Not captured at all.";
 }
 
-function Frame({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+function Frame({ title, onClose, footer, children }: { title: string; onClose: () => void; footer: ReactNode; children: ReactNode }) {
   return createPortal(
     <>
       <div className="mdl-mask" aria-hidden="true" onClick={onClose} />
@@ -140,6 +146,7 @@ function Frame({ title, onClose, children }: { title: string; onClose: () => voi
           <button type="button" className="mdl-x" aria-label="Close" onClick={onClose}>&times;</button>
         </div>
         <div className="mdl-body">{children}</div>
+        {footer}
       </div>
     </>,
     document.body,
