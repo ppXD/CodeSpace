@@ -1,25 +1,33 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.Messages.Tasks;
+using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.Tasks.Projection;
 
 /// <summary>
 /// Default <see cref="ITaskRunSnapshotFactory"/> — the flat pipeline: resolve the builder by the route's
-/// projection kind → build the definition → start it as a snapshot run → return the handle. Holds no state and
-/// no per-kind logic: the ONLY dispatch is <c>_registry.Resolve(context.Route.ProjectionKind)</c>, so a new
-/// projection strategy plugs in by registering its builder, with zero edit here (the generic spine).
+/// projection kind → build the definition → start it as a snapshot run → stamp the route provenance → return the
+/// handle. Holds no state and no per-kind logic: the ONLY dispatch is
+/// <c>_registry.Resolve(context.Route.ProjectionKind)</c>, so a new projection strategy plugs in by registering
+/// its builder, with zero edit here (the generic spine).
 /// </summary>
 public sealed class TaskRunSnapshotFactory : ITaskRunSnapshotFactory, IScopedDependency
 {
+    /// <summary>Web defaults (camelCase, case-insensitive read) for the persisted route provenance, so the column reads like the API's own JSON. <c>RoutePlan</c> is all open strings / numbers — no enum converter needed.</summary>
+    private static readonly JsonSerializerOptions RouteJson = new(JsonSerializerDefaults.Web);
+
     private readonly ITaskProjectionRegistry _registry;
     private readonly IRunFromSnapshotStarter _starter;
+    private readonly CodeSpaceDbContext _db;
 
-    public TaskRunSnapshotFactory(ITaskProjectionRegistry registry, IRunFromSnapshotStarter starter)
+    public TaskRunSnapshotFactory(ITaskProjectionRegistry registry, IRunFromSnapshotStarter starter, CodeSpaceDbContext db)
     {
         _registry = registry;
         _starter = starter;
+        _db = db;
     }
 
     public async Task<TaskRunHandle> CreateAndRunAsync(TaskBuildContext context, Guid teamId, Guid actorUserId, SessionAssignment? session, CancellationToken cancellationToken)
@@ -34,7 +42,30 @@ public sealed class TaskRunSnapshotFactory : ITaskRunSnapshotFactory, IScopedDep
         // the run session-less, byte-identical to pre-session behaviour.
         var runId = await _starter.StartFromSnapshotAsync(definition, teamId, actorUserId, launchPayloadJson, ScopeRepositoryIds(context.AgentProfile), context.Route.ProjectionKind, session, cancellationToken).ConfigureAwait(false);
 
+        await StampRouteProvenanceAsync(runId, context.Route, cancellationToken).ConfigureAwait(false);
+
         return new TaskRunHandle { RunId = runId, ProjectionKind = context.Route.ProjectionKind };
+    }
+
+    /// <summary>
+    /// Records the FULL routing decision on the staged run beside its denormalised <c>projection_kind</c> — the
+    /// tier, recipe, bounds preset + caps, whether the classifier (not the operator) chose the tier, its confidence
+    /// and rationale, and any capability degrade. Without it the run keeps only "which builder ran" and a reader
+    /// could never say WHY it got the depth it got.
+    ///
+    /// <para>A targeted single-column UPDATE, NOT a tracked mutation. The starter already committed the row, and by
+    /// the time it returns the post-commit dispatcher may already have CAS-ed the run Pending→Enqueued from another
+    /// context — a tracked save then loses the optimistic-concurrency race and throws
+    /// (<c>DbUpdateConcurrencyException</c>: 0 rows affected), failing an otherwise perfectly good launch over
+    /// provenance. This column is write-once and no other writer ever touches it, so it can never be in genuine
+    /// contention; skipping the concurrency token is correct rather than merely convenient.</para>
+    /// </summary>
+    private async Task StampRouteProvenanceAsync(Guid runId, RoutePlan route, CancellationToken cancellationToken)
+    {
+        var json = JsonSerializer.Serialize(route, RouteJson);
+
+        await _db.WorkflowRun.Where(r => r.Id == runId)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.RoutePlanJson, json), cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

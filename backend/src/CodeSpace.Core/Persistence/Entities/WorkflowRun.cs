@@ -97,6 +97,15 @@ public class WorkflowRun : IEntity<Guid>, IAuditable
     public string? ProjectionKind { get; set; }
 
     /// <summary>
+    /// The FULL routing decision (a serialized <c>RoutePlan</c>) this task run was projected from — the effort tier,
+    /// recipe, bounds preset + caps, whether the classifier rather than the operator chose the tier, its confidence
+    /// and rationale, and any capability degrade. <see cref="ProjectionKind"/> answers only "which builder ran"; this
+    /// answers WHY the run got the depth it got. Opaque provenance — nothing reads it to make a decision. NULL for an
+    /// authored / non-task run (there is no route) and for task runs staged before the column existed.
+    /// </summary>
+    public string? RoutePlanJson { get; set; }
+
+    /// <summary>
     /// Launch-time SCOPE: the repositories this run was launched against (multi-repo) — a point-in-time snapshot set at
     /// the snapshot/task creation site. NOT the repos the run actually touched (that is the future
     /// <c>touched_repository_ids</c> from the Changes projector). Empty for an authored workflow run (its repos live in

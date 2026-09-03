@@ -29,6 +29,7 @@ namespace CodeSpace.Core.Services.Tasks;
 public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
 {
     private readonly ITaskLaunchSeedProviderRegistry _seedProviders;
+    private readonly ILaunchRepositoryScopeGuard _repositoryScope;
     private readonly IEffortRouter _router;
     private readonly ITaskRunSnapshotFactory _factory;
     private readonly IWorkSessionService _sessions;
@@ -41,9 +42,10 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     private readonly CodeSpaceDbContext _db;
     private readonly ILogger<TaskLaunchService> _logger;
 
-    public TaskLaunchService(ITaskLaunchSeedProviderRegistry seedProviders, IEffortRouter router, ITaskRunSnapshotFactory factory, IWorkSessionService sessions, ISessionContextBuilder sessionContext, ISessionSummarizer sessionSummarizer, ISessionBranchResolver sessionBranches, ILaunchBasePinResolver basePins, IModelPoolSelector modelSelector, ILLMClientRegistry llm, CodeSpaceDbContext db, ILogger<TaskLaunchService> logger)
+    public TaskLaunchService(ITaskLaunchSeedProviderRegistry seedProviders, ILaunchRepositoryScopeGuard repositoryScope, IEffortRouter router, ITaskRunSnapshotFactory factory, IWorkSessionService sessions, ISessionContextBuilder sessionContext, ISessionSummarizer sessionSummarizer, ISessionBranchResolver sessionBranches, ILaunchBasePinResolver basePins, IModelPoolSelector modelSelector, ILLMClientRegistry llm, CodeSpaceDbContext db, ILogger<TaskLaunchService> logger)
     {
         _seedProviders = seedProviders;
+        _repositoryScope = repositoryScope;
         _router = router;
         _factory = factory;
         _sessions = sessions;
@@ -61,7 +63,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     {
         var seed = await _seedProviders.Resolve(request.SurfaceKind).SeedAsync(request, cancellationToken).ConfigureAwait(false);
 
-        await EnsureRepositoriesInTeamAsync(seed, request, cancellationToken).ConfigureAwait(false);
+        await _repositoryScope.EnsureInTeamAsync(seed, request, cancellationToken).ConfigureAwait(false);
 
         await EnsureModelsInTeamAsync(request, cancellationToken).ConfigureAwait(false);
 
@@ -226,32 +228,8 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     private static readonly IReadOnlyDictionary<Guid, SessionStartRef> EmptyBaseRefs = new Dictionary<Guid, SessionStartRef>();
 
     /// <summary>
-    /// Validates EVERY repo the run touches — the primary (seed's, else request's) PLUS each related (multi-repo) repo —
-    /// belongs to <c>request.TeamId</c>. A foreign / missing repo is a clear not-found (indistinguishable, so a foreign
-    /// repo never leaks) and rejecting ANY one fails the whole launch fail-closed, BEFORE the session opens (no orphan).
-    /// No repo named ⇒ skip (analysis-only is valid). Single-repo path is byte-identical (one id in, the same message out).
-    /// </summary>
-    private async Task EnsureRepositoriesInTeamAsync(TaskLaunchSeed seed, TaskLaunchRequest request, CancellationToken cancellationToken)
-    {
-        var ids = new HashSet<Guid>();
-
-        if ((seed.RepositoryId ?? request.RepositoryId) is { } primary) ids.Add(primary);
-        if (request.RelatedRepositories is { } related) foreach (var r in related) ids.Add(r.RepositoryId);
-
-        if (ids.Count == 0) return;
-
-        var inTeam = await _db.Repository.AsNoTracking()
-            .Where(r => ids.Contains(r.Id) && r.TeamId == request.TeamId && r.DeletedDate == null)
-            .Select(r => r.Id)
-            .ToListAsync(cancellationToken).ConfigureAwait(false);
-
-        if (inTeam.Count != ids.Count)
-            throw new KeyNotFoundException($"Repository {string.Join(", ", ids.Except(inTeam))} not found or not accessible.");
-    }
-
-    /// <summary>
     /// Validates EVERY operator-supplied allowed-model-pool row (<c>ModelCredentialModel</c> id) is a team-owned,
-    /// enabled row under an active, non-deleted credential — the model analogue of <see cref="EnsureRepositoriesInTeamAsync"/>.
+    /// enabled row under an active, non-deleted credential — the model analogue of <c>ILaunchRepositoryScopeGuard</c>.
     /// A foreign / disabled / dead-credential row is an indistinguishable not-found (so a foreign row never leaks its
     /// existence), and ANY bad row fails the whole launch fail-closed BEFORE the session opens (no orphan). An empty
     /// pool ⇒ skip (all the team's models — byte-identical to no override). The dispatch-time pool guard still fails
@@ -297,8 +275,8 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
             throw new KeyNotFoundException($"Agent {string.Join(", ", ids.Except(inTeam))} not found or not accessible.");
     }
 
-    /// <summary>Maps the seed + the operator's effort/recipe/autonomy + safety-budget caps onto the router input. The router TIGHTENS the effort preset's caps with <c>CapsOverride</c> (null ⇒ preset-only, byte-identical).</summary>
-    private static EffortRouteRequest BuildRouteRequest(TaskLaunchSeed seed, TaskLaunchRequest request) => new()
+    /// <summary>Maps the seed + the operator's effort/recipe/autonomy + safety-budget caps onto the router input. The router TIGHTENS the effort preset's caps with <c>CapsOverride</c> (null ⇒ preset-only, byte-identical). Internal (not private) so the read-only route PREVIEW routes through the SAME mapping — a preview that built its own request would be free to drift from the launch it claims to predict.</summary>
+    internal static EffortRouteRequest BuildRouteRequest(TaskLaunchSeed seed, TaskLaunchRequest request) => new()
     {
         Seed = seed,
         RequestedEffort = request.RequestedEffort,
@@ -378,7 +356,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     /// effect there today either); such a launch still gets its output-review floor (<see cref="EffectiveOutputReviewMode"/>)
     /// even though this specific mandate is inert for it. There is no sensible SERVER-SYNTHESIZED check to default to
     /// (the argv is domain-specific) — an omission fails LOUD here rather than silently shipping ungated, mirroring
-    /// <see cref="EnsureRepositoriesInTeamAsync"/>'s fail-closed launch-time rejection shape (before the session opens).
+    /// <c>ILaunchRepositoryScopeGuard</c>'s fail-closed launch-time rejection shape (before the session opens).
     /// </summary>
     internal static void EnsureAcceptanceMandate(TaskLaunchRequest request, RoutePlan route)
     {

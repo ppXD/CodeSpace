@@ -124,6 +124,67 @@ export interface CompileTaskSpecResult {
   grounded: boolean;
 }
 
+/** One selectable effort tier on a route confirm card — mirrors the backend `ConfirmCardOption`. `mode` is the
+ *  open effort string sent back as the launch's EXPLICIT `effort`, which short-circuits the classifier. */
+export interface RouteConfirmOption {
+  mode: string;
+  label: string;
+  hint?: string | null;
+}
+
+/** Mirror of the backend `ConfirmCard`. The router builds one whenever an auto route landed below its confidence
+ *  floor OR the classifier flagged risky side effects — the options are derived from the live bounds presets, so
+ *  the composer must render whatever comes back rather than a hardcoded tier list. */
+export interface RouteConfirmCard {
+  suggestedMode: string;
+  rationale: string;
+  options: RouteConfirmOption[];
+}
+
+/** The generic signals the classifier extracted — mirrors the backend `EffortSignals`. Only `riskySideEffects` is
+ *  read by the composer (it earns the risk badge); the rest ride along for future surfacing. */
+export interface RouteSignals {
+  needsCodeChange?: boolean;
+  crossFile?: boolean;
+  needsTestsOrCi?: boolean;
+  riskySideEffects?: boolean;
+  ambiguous?: boolean;
+  estimatedCostTier?: string;
+}
+
+/** Mirror of the backend `EffortDecision` — the classifier's own output, kept distinct from the router's verdict. */
+export interface RouteDecision {
+  signals: RouteSignals;
+  suggestedEffort: string;
+  suggestedRecipe: string;
+  confidence: number;
+  rationale: string;
+  classifierKind: string;
+}
+
+/** Mirror of the backend `RoutePlan` — the routing decision a launch would (or did) run under. `needsConfirmCard`
+ *  + `confirm` are the load-bearing pair: before B1 the backend built this card and nothing ever showed it, so a
+ *  risky auto-classified task started with no human gate at all. */
+export interface RoutePlan {
+  effortMode: string;
+  recipeKind: string;
+  projectionKind: string;
+  boundsPreset: string;
+  recommendedAutonomy: string;
+  needsConfirmCard: boolean;
+  needsPlanReview: boolean;
+  wasAutoClassified: boolean;
+  classifierConfidence: number;
+  degradedReason?: string | null;
+  decision?: RouteDecision | null;
+  confirm?: RouteConfirmCard | null;
+}
+
+/** Mirror of the backend `TaskRoutePreviewResult`. */
+export interface TaskRoutePreviewResult {
+  route: RoutePlan;
+}
+
 export const tasksApi = {
   // Launch a run from a task spec — the run resource is rooted at api/workflows/runs (the substrate is the
   // workflow engine), so launching a task is creating a run.
@@ -132,4 +193,8 @@ export const tasksApi = {
   // Compile a free-text goal into launch-contract suggestions (read-only; nothing persisted, nothing staked).
   specPreview: (input: { goal: string; repositoryId?: string }) =>
     fetchJson<CompileTaskSpecResult>("/api/workflows/runs/spec-preview", { method: "POST", body: JSON.stringify(input) }),
+  // Preview the ROUTE a launch would take — same seed provider, same router, same request mapping as the launch
+  // itself. Read-only: no session is opened, no run is staged, nothing is persisted.
+  routePreview: (input: { taskText: string; repositoryId?: string; effort?: string }) =>
+    fetchJson<TaskRoutePreviewResult>("/api/workflows/runs/route-preview", { method: "POST", body: JSON.stringify(input) }),
 };

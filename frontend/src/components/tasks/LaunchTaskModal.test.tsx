@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const launchSpy = vi.fn();
@@ -22,6 +22,18 @@ type SpecState = {
 };
 let specState: SpecState = { suggestion: null, grounded: false, loading: false };
 vi.mock("@/hooks/use-spec-preview", () => ({ useSpecPreview: () => specState }));
+
+// B1 route preview. The hook is mocked so the card's inputs are exactly the backend contract; `enabledSeen`
+// records the hook's own `enabled` argument so a test can prove the preview is not even ASKED for an explicit tier.
+type RouteState = { route: import("@/api/tasks").RoutePlan | null; failed: boolean; loading: boolean };
+let routeState: RouteState = { route: null, failed: false, loading: false };
+let enabledSeen: boolean[] = [];
+vi.mock("@/hooks/use-route-preview", () => ({
+  useRoutePreview: (_g: string, _r: string | null | undefined, _e: string, enabled: boolean) => {
+    enabledSeen.push(enabled);
+    return enabled ? routeState : { route: null, failed: false, loading: false };
+  },
+}));
 
 vi.mock("@/hooks/use-tasks", () => ({
   useLaunchTask: () => ({
@@ -50,7 +62,13 @@ function renderBox(over: Partial<Parameters<typeof LaunchTaskModal>[0]> = {}) {
 
 const typeTask = (v: string) => fireEvent.change(screen.getByPlaceholderText(/Describe a task/), { target: { value: v } });
 
-beforeEach(() => { launchSpy.mockClear(); lastInput = null; specState = { suggestion: null, grounded: false, loading: false }; });
+beforeEach(() => {
+  launchSpy.mockClear();
+  lastInput = null;
+  specState = { suggestion: null, grounded: false, loading: false };
+  routeState = { route: null, failed: false, loading: false };
+  enabledSeen = [];
+});
 
 describe("LaunchTaskModal (minimal box)", () => {
   it("shows the prefilled repo in the Repositories control and gates Send on a task", () => {
@@ -371,5 +389,124 @@ describe("LaunchTaskModal (spec-preview suggestion card, P5-7)", () => {
     expect(screen.getByTestId("spec-suggestion-card")).toBeInTheDocument();
     expect(screen.queryByText("Checks")).toBeNull();
     expect(screen.getByText("Criteria")).toBeInTheDocument();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+// B1 — route preview + confirm gate. The defect this closes: the router already built a
+// confirm card for a low-confidence or risky auto route, nothing ever rendered it, and
+// the run started regardless — so a "delete / drop / migrate / deploy to production"
+// task was routed to deep and STARTED with no human gate at all.
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+const ROUTE: import("@/api/tasks").RoutePlan = {
+  effortMode: "deep",
+  recipeKind: "supervisor",
+  projectionKind: "agent.supervisor",
+  boundsPreset: "deep",
+  recommendedAutonomy: "Standard",
+  needsConfirmCard: true,
+  needsPlanReview: false,
+  wasAutoClassified: true,
+  classifierConfidence: 0.42,
+  decision: {
+    signals: { riskySideEffects: false, needsCodeChange: true },
+    suggestedEffort: "deep",
+    suggestedRecipe: "supervisor",
+    confidence: 0.42,
+    rationale: "Heuristic guess (cost tier high) from: code change, cross-file.",
+    classifierKind: "heuristic",
+  },
+  confirm: {
+    suggestedMode: "deep",
+    rationale: "Heuristic guess (cost tier high) from: code change, cross-file.",
+    options: [
+      { mode: "quick", label: "Quick", hint: "parallelism 1, spawns default" },
+      { mode: "standard", label: "Standard", hint: "parallelism 3, spawns default" },
+      { mode: "deep", label: "Deep", hint: "parallelism 5, spawns default" },
+    ],
+  },
+};
+
+describe("LaunchTaskModal — route preview (B1)", () => {
+  it("renders the confirm card and BLOCKS Launch until a depth is picked", () => {
+    routeState = { route: ROUTE, failed: false, loading: false };
+    renderBox({ surface: "chat", autofill: {} });
+    typeTask("Refactor the auth module across several files");
+
+    expect(screen.getByTestId("route-confirm-card")).toBeInTheDocument();
+    expect(screen.getByText(/Heuristic guess \(cost tier high\)/)).toBeInTheDocument();
+
+    // THE gate — without it the card is decoration and the run starts anyway.
+    const send = screen.getByLabelText("Launch task");
+    expect(send).toBeDisabled();
+    expect(send).toHaveAttribute("title", "Confirm the effort above to launch");
+    fireEvent.click(send);
+    expect(launchSpy).not.toHaveBeenCalled();
+  });
+
+  it("picking an option sets the effort EXPLICITLY, clears the card, and enables Launch", () => {
+    routeState = { route: ROUTE, failed: false, loading: false };
+    renderBox({ surface: "chat", autofill: {} });
+    typeTask("Refactor the auth module across several files");
+
+    // Tier labels come from the composer's own Effort vocabulary — "Standard", not "standard". Scoped to the card:
+    // "Standard" is also the Permission pill's autonomy tier, and picking THAT would not answer the confirm.
+    fireEvent.click(within(screen.getByTestId("route-confirm-card")).getByText("Standard"));
+
+    // Effort is no longer "auto", so the preview is not even asked (enabled=false) and no card can render.
+    expect(screen.queryByTestId("route-confirm-card")).toBeNull();
+    expect(enabledSeen.at(-1)).toBe(false);
+
+    const send = screen.getByLabelText("Launch task");
+    expect(send).not.toBeDisabled();
+    fireEvent.click(send);
+    expect(lastInput).toMatchObject({ effort: "standard" });
+  });
+
+  it("flags a risky route with a badge and its own header copy (colour is never the only signal)", () => {
+    routeState = {
+      route: { ...ROUTE, decision: { ...ROUTE.decision!, signals: { riskySideEffects: true } } },
+      failed: false, loading: false,
+    };
+    renderBox({ surface: "chat", autofill: {} });
+    typeTask("Drop the legacy tables and deploy the migration to production");
+
+    expect(screen.getByTestId("route-risk-badge")).toBeInTheDocument();
+    expect(screen.getByText(/This looks irreversible/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Launch task")).toBeDisabled();
+  });
+
+  it("a confident route shows a one-line hint instead of a card and never blocks Launch", () => {
+    routeState = { route: { ...ROUTE, needsConfirmCard: false, confirm: null }, failed: false, loading: false };
+    renderBox({ surface: "chat", autofill: {} });
+    typeTask("Fix the parser crash on blank lines");
+
+    expect(screen.queryByTestId("route-confirm-card")).toBeNull();
+    expect(screen.getByTestId("route-hint")).toHaveTextContent("Auto → Deep");
+    expect(screen.getByLabelText("Launch task")).not.toBeDisabled();
+  });
+
+  it("a FAILED preview says so quietly and still allows the launch (best-effort, never a hard gate)", () => {
+    routeState = { route: null, failed: true, loading: false };
+    renderBox({ surface: "chat", autofill: {} });
+    typeTask("Fix the parser crash on blank lines");
+
+    expect(screen.queryByTestId("route-confirm-card")).toBeNull();
+    expect(screen.getByText(/Route preview unavailable/)).toBeInTheDocument();
+
+    const send = screen.getByLabelText("Launch task");
+    expect(send).not.toBeDisabled();
+    fireEvent.click(send);
+    expect(launchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("an explicitly chosen tier never asks for a preview at all", () => {
+    renderBox({ surface: "chat", autofill: { effort: "quick" } });
+    typeTask("Fix the parser crash on blank lines");
+
+    expect(enabledSeen.every(e => e === false)).toBe(true);
+    expect(screen.queryByTestId("route-confirm-card")).toBeNull();
+    expect(screen.queryByTestId("route-hint")).toBeNull();
   });
 });

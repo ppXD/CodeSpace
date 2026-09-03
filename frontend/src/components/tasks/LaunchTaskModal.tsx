@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
-import type { TaskSpecSuggestion, TaskSurfaceKind } from "@/api/tasks";
+import type { RoutePlan, TaskSpecSuggestion, TaskSurfaceKind } from "@/api/tasks";
 import { buildLaunchInput, DEFAULT_ACCEPTANCE, type LaunchBooleanOverride } from "@/lib/launchInput";
 import { presetOf, QUALITY_PRESETS, type QualityTier } from "@/lib/qualityPresets";
 import { Combo, type Option } from "@/components/common/Combo";
@@ -11,6 +11,7 @@ import { Ic } from "@/_imported/ai-code-space/icons";
 import { useAgentDefinitions, useHarnesses } from "@/hooks/use-agents";
 import { useCredentialedModels } from "@/hooks/use-model-credentials";
 import { useRepositories, useRepositoryBranches } from "@/hooks/use-repositories";
+import { useRoutePreview } from "@/hooks/use-route-preview";
 import { useSpecPreview } from "@/hooks/use-spec-preview";
 import { useLaunchTask } from "@/hooks/use-tasks";
 
@@ -214,6 +215,18 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   const primary = workspace.find(r => r.isPrimary) ?? workspace[0];
   const reposLabel = workspace.length === 0 ? "Repositories" : workspace.length === 1 ? repoName(workspace[0].repositoryId) : `${workspace.length} repositories`;
 
+  // B1 route preview: on the AUTO tier the backend tells us where this launch WOULD go before it goes anywhere.
+  // The router has always built a confirm card for a low-confidence or risky-side-effect auto route — nothing ever
+  // showed it, so a task flagged for delete/drop/migrate/deploy/production/secrets was routed and STARTED with no
+  // human gate. Asking is free: the endpoint opens no session and stages no run. An explicit tier is already the
+  // operator's decision, so the preview is not asked for one at all.
+  const routePreview = useRoutePreview(taskText, primary?.repositoryId, effort, effort === "auto");
+  const routeCard = routePreview.route?.needsConfirmCard ? routePreview.route : null;
+  // The gate: an auto launch WAITS on the operator's answer. Answering means picking a tier, which then rides the
+  // wire as an EXPLICIT effort — the confirmation is the tier itself, never a separate flag the backend must trust.
+  const routeConfirmPending = !!routeCard;
+  const confirmEffort = (mode: string) => { setEffort(mode); closeMenu(); };
+
   const effLabel = EFFORT_OPTS.find(e => e.v === effort)?.l ?? "Auto";
   const modelLabel = model || "Auto";
   const comboLabel = (modelLabel === "Auto" && effLabel === "Auto") ? "Auto" : `${modelLabel} · ${effLabel}`;
@@ -246,7 +259,9 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   // submit. Standard is excluded: it verifies per item via the plan's own contracts and never sends this field for
   // ANY tier (the same `effort !== "standard"` gate the Acceptance-checks row itself is already shown/sent under).
   if (tier !== "Prototype" && effort !== "standard" && cfg.acceptanceChecks.length === 0) missing.push("an acceptance check");
-  const canLaunch = missing.length === 0 && !launch.isPending;
+  // B1: an auto route the router wants confirmed BLOCKS the launch until the operator picks a tier. This is the one
+  // place the confirm card stops being decoration — a risky auto-classified task can no longer start unattended.
+  const canLaunch = missing.length === 0 && !routeConfirmPending && !launch.isPending;
 
   const toggleRepo = (id: string) => {
     const short = repoName(id).split("/").pop() || "repo";
@@ -337,6 +352,12 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
 
   const content = (
     <>
+      {routeCard && <RouteConfirmCard route={routeCard} onPick={confirmEffort} />}
+      {!routeCard && effort === "auto" && routePreview.route && <RouteHint route={routePreview.route} />}
+      {!routeCard && effort === "auto" && routePreview.failed && (
+        <div className="lt3-route-quiet">Route preview unavailable — launching will still pick a depth automatically.</div>
+      )}
+
       <div className="lt3-box">
           <textarea ref={taRef} className="lt3-input" rows={inline ? 1 : 3} placeholder={placeholder} value={taskText} onChange={e => setTaskText(e.target.value)} autoFocus={!inline} />
 
@@ -438,7 +459,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
               )}
             </div>
 
-            <button className="lt3-send" aria-label="Launch task" disabled={!canLaunch} onClick={submit} title={canLaunch ? "Launch" : `Add ${missing.join(" and ")}`}>
+            <button className="lt3-send" aria-label="Launch task" disabled={!canLaunch} onClick={submit} title={canLaunch ? "Launch" : routeConfirmPending ? "Confirm the effort above to launch" : `Add ${missing.join(" and ")}`}>
               <SendGlyph />
             </button>
           </div>
@@ -731,6 +752,72 @@ function SToggleRow({ label, on, onToggle, locked }: { label: string; on: boolea
       <span className="lt3-srow-l">{label}</span>
       <span className="lt3-tog" data-on={on}><span /></span>
     </button>
+  );
+}
+
+/** The tier labels the composer already uses, keyed by the backend's open effort string, so a confirm option
+ *  reads the same as the Effort flyout ("Fast", not "quick"). An unknown mode falls back to its own string —
+ *  the options come from the live bounds registry, so a new preset must render rather than vanish. */
+const TIER_LABEL: Record<string, string> = Object.fromEntries(EFFORT_OPTS.map(e => [e.v, e.l]));
+
+/**
+ * B1 — the ROUTE CONFIRM card, above the composer box. The router builds this whenever an auto route landed
+ * below its confidence floor OR the classifier flagged risky side effects; until now nothing rendered it and the
+ * run started anyway. It blocks the Launch button, and the only way to answer it is to pick a tier — which
+ * leaves as an EXPLICIT effort, short-circuiting the classifier so the second route is deterministic.
+ *
+ * <p>The options come from `confirm.options` (derived server-side from the live bounds presets), never a
+ * hardcoded list — a new tier appears here with no frontend edit.</p>
+ */
+function RouteConfirmCard({ route, onPick }: { route: RoutePlan; onPick: (mode: string) => void }) {
+  const confirm = route.confirm;
+  if (!confirm) return null;
+
+  const risky = route.decision?.signals?.riskySideEffects === true;
+
+  return (
+    <div className="lt3-route" data-risk={risky} data-testid="route-confirm-card">
+      <div className="lt3-route-h">
+        {risky ? <Ic.Triangle size={14} /> : <Ic.Compass size={14} />}
+        <span>{risky ? "This looks irreversible — confirm the depth" : "Confirm the depth before launching"}</span>
+        {risky && <span className="lt3-route-badge" data-testid="route-risk-badge">Risky side effects</span>}
+      </div>
+
+      <div className="lt3-route-why">
+        <b>{TIER_LABEL[confirm.suggestedMode] ?? confirm.suggestedMode}</b> suggested · {confirm.rationale}
+      </div>
+
+      {route.degradedReason && <div className="lt3-route-degraded">{route.degradedReason}</div>}
+
+      <div className="lt3-route-opts" role="group" aria-label="Confirm the effort">
+        {confirm.options.map(o => (
+          <button
+            key={o.mode}
+            type="button"
+            className="lt3-route-opt"
+            data-suggested={o.mode === confirm.suggestedMode}
+            onClick={() => onPick(o.mode)}
+          >
+            <span className="lt3-route-opt-t">{TIER_LABEL[o.mode] ?? o.mode}</span>
+            {o.hint && <span className="lt3-route-opt-d">{o.hint}</span>}
+          </button>
+        ))}
+      </div>
+
+      <div className="lt3-route-f">Picking a depth launches at that tier explicitly — the classifier is not consulted again.</div>
+    </div>
+  );
+}
+
+/** B1 — the quiet route hint for an auto launch the router was confident about: one line naming where it goes and
+ *  why, so "Auto" is never an unexplained black box even when there is nothing to confirm. */
+function RouteHint({ route }: { route: RoutePlan }) {
+  const why = route.degradedReason || route.decision?.rationale || "";
+
+  return (
+    <div className="lt3-route-quiet" data-testid="route-hint">
+      Auto → <b>{TIER_LABEL[route.effortMode] ?? route.effortMode}</b>{why && <> · {why}</>}
+    </div>
   );
 }
 
