@@ -648,6 +648,60 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
     /// The category error stays fail-closed: a <c>TestsPass</c> argv has no code world to run in without a repo, so
     /// the captured-deliverable lane is never even consulted and the detail is byte-identical to before C2.
     /// </summary>
+    /// <summary>
+    /// An EMPTY rebuilt world has two causes that must never share a verdict. When the attempt's own capture health
+    /// says the CAPTURE failed — a storage fault, or a walk that refused files it saw — the empty world is
+    /// infrastructure: a retry re-bills an agent and fails identically forever. Only a clean capture that found
+    /// nothing is GENUINE, because only then can another agent pass change the outcome.
+    /// </summary>
+    [Theory]
+    [InlineData("fault", true, "the deliverable capture faulted")]
+    [InlineData("refused", true, "the capture refused")]
+    [InlineData("clean", false, null)]
+    public async Task An_empty_rebuilt_world_is_infra_when_the_capture_itself_fell_short(string shape, bool infra, string? detailFragment)
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var agentRunId = Guid.NewGuid();
+
+        var unitJson = shape switch
+        {
+            "fault" => UnitWithCaptureHealth(agentRunId, captureFault: "IOException: the object store refused the write", refused: 0),
+            "refused" => UnitWithCaptureHealth(agentRunId, captureFault: null, refused: 7),
+            _ => UnitWithCaptureHealth(agentRunId, captureFault: null, refused: 0),
+        };
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, ArtifactPlanPayload("s1", new[] { "report.md" }));
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(unitJson));
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = false, Detail = "unused" })
+        {
+            CapturedGrade = new BenchmarkGrade { Passed = false, Detail = ISupervisorAcceptanceGrader.NoDeliverablesCaptured, Class = GradeFailureClass.Genuine },
+        };
+
+        var ctx = await RehydrateAsync(runId, teamId, RepoLessGoalConfig(), grader);
+
+        var spawn = ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn);
+        var unit = SupervisorOutcome.ReadAgentResults(spawn.OutcomeJson).Single();
+
+        unit.AcceptancePassed.ShouldBe(false, "an empty world is never a pass either way");
+        CodeSpace.Core.Services.Agents.AgentAcceptanceContract.IsInfraFailure(unit.AcceptanceDetail, workPresent: false).ShouldBe(infra);
+
+        var prompt = CodeSpace.Core.Services.Supervisor.Deciders.LlmSupervisorDecider.BuildUserPromptForTest(ctx);
+
+        if (infra)
+        {
+            unit.AcceptanceDetail.ShouldContain(detailFragment!, Case.Insensitive, "the refusal is NAMED — one unfalsifiable verdict must not replace another");
+            prompt.ShouldNotContain("RETRY this exact subtask", Case.Sensitive, "a storage fault read as 'the model produced nothing' burns retries no retry can fix");
+            prompt.ShouldContain("Do NOT retry the agent", Case.Sensitive);
+        }
+        else
+        {
+            unit.AcceptanceDetail.ShouldBe(ISupervisorAcceptanceGrader.NoDeliverablesCaptured, "a clean capture that found nothing is the honest GENUINE verdict");
+            prompt.ShouldContain("RETRY this exact subtask", Case.Sensitive, "producing nothing IS what another agent pass can fix");
+        }
+    }
+
     [Fact]
     public async Task A_repo_less_tests_pass_unit_still_fails_closed_and_never_reaches_the_captured_lane()
     {
@@ -1042,6 +1096,10 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
 
     private static SupervisorAgentResult Unit(Guid agentRunId, string? producedBranch) =>
         new() { AgentRunId = agentRunId, Status = "Succeeded", Summary = "did it", ProducedBranch = producedBranch };
+
+    /// <summary>C2 — a repo-less unit carrying its attempt's CAPTURE health, the only thing that can tell a storage fault apart from an agent that produced nothing.</summary>
+    private static SupervisorAgentResult UnitWithCaptureHealth(Guid agentRunId, string? captureFault, int refused) =>
+        new() { AgentRunId = agentRunId, Status = "Succeeded", Summary = "wrote the findings report", DeliverableCaptureFault = captureFault, UncapturedDeliverables = refused };
 
     private static string SpawnOutcome(params SupervisorAgentResult[] units) =>
         JsonSerializer.Serialize(new { agentRunIds = units.Select(u => u.AgentRunId).ToArray(), agentCount = units.Length, agentResults = units }, AgentJson.Options);

@@ -131,6 +131,23 @@ public sealed record SupervisorAgentResult
     public string? Contradiction { get; init; }
 
     /// <summary>
+    /// C2: why this unit's deliverable capture FAULTED, when it did — carried into the compact because the repo-less
+    /// grade lane rebuilds its world from the captured rows, and a fault that captured nothing must never be graded
+    /// as "the agent produced nothing" (GENUINE, retryable) when it is infrastructure (a retry cannot fix it).
+    /// Null-omitted, mirroring <see cref="Contradiction"/>'s back-compat contract.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? DeliverableCaptureFault { get; init; }
+
+    /// <summary>
+    /// C2: how many files the unit's scratch walk SAW and did not take. Nonzero means the world held MORE than the
+    /// capture kept, so an empty rebuild is a shortfall to be named rather than proof the agent produced nothing.
+    /// 0-omitted.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public int UncapturedDeliverables { get; init; }
+
+    /// <summary>
     /// The unit's EXPLICIT verdict state (B2, amend-acceptance arc), carried ALONGSIDE <see cref="AcceptancePassed"/>
     /// — the Contradiction-field precedent: null-omitted, so every pre-B2 row serializes byte-identical and an
     /// ungraded unit stays absent-absent. Its one near-term producer is the co-sign overlay's WAIVE (B3):

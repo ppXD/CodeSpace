@@ -530,6 +530,11 @@ public static class SupervisorOutcome
             AcceptancePassed = result?.AcceptancePassed,
             AcceptanceDetail = ClipCompactText(result?.AcceptanceDetail),
             AcceptanceEvidenceId = result?.AcceptanceEvidenceId,
+            // C2: the capture's own health rides the compact, because the repo-less re-grade rebuilds its world from
+            // the captured rows and cannot otherwise tell a storage fault (infra — a retry is wasted) from an agent
+            // that genuinely produced nothing (which a retry CAN fix).
+            DeliverableCaptureFault = ClipCompactText(result?.DeliverableCaptureFault),
+            UncapturedDeliverables = result?.UncapturedScratchFileCount ?? 0,
             // The contradiction stamps the same instant the verdict is folded (the P4-1 doctrine — never re-derived
             // ad-hoc by a renderer), with the same status mapping the rehydrate fold uses.
             Contradiction = statusName switch

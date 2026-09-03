@@ -151,7 +151,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
 
         var written = 0;
 
-        foreach (var row in rows.Where(r => r.SupersededByManifestId is null))
+        foreach (var row in LatestAttemptRows(rows))
         {
             var target = Path.GetFullPath(Path.Combine(directory, row.LogicalPath));
 
@@ -169,13 +169,54 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
                 continue;
             }
 
-            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-            await File.WriteAllBytesAsync(target, bytes.Bytes, cancellationToken).ConfigureAwait(false);
+            // A logical path can collide with one already materialized as a directory (or vice versa) — 'docs' and
+            // 'docs/report.md' both being captured names. That is a rebuild-shaped problem, never a verdict on the
+            // work, so it costs ONE row rather than failing the whole grade into a GraderFault.
+            try { Directory.CreateDirectory(Path.GetDirectoryName(target)!); }
+            catch (IOException ex)
+            {
+                _logger.LogWarning(ex, "Agent run {AgentRunId}: captured deliverable '{Path}' collides with another captured path — not materialized", agentRunId, row.LogicalPath);
+                continue;
+            }
+
+            try { await File.WriteAllBytesAsync(target, bytes.Bytes, cancellationToken).ConfigureAwait(false); }
+            catch (UnauthorizedAccessException ex)
+            {
+                _logger.LogWarning(ex, "Agent run {AgentRunId}: captured deliverable '{Path}' could not be written into the grading directory — not materialized", agentRunId, row.LogicalPath);
+                continue;
+            }
+            catch (IOException ex)
+            {
+                _logger.LogWarning(ex, "Agent run {AgentRunId}: captured deliverable '{Path}' could not be written into the grading directory — not materialized", agentRunId, row.LogicalPath);
+                continue;
+            }
 
             written++;
         }
 
         return written;
+    }
+
+    /// <summary>
+    /// The LATEST attempt's rows only — current (unsuperseded) rows at the run's highest <c>FenceEpoch</c>.
+    ///
+    /// <para>Supersession is keyed per <c>(AgentRunId, FenceEpoch, LogicalPath)</c>, so a retry-resume that bumps the
+    /// epoch leaves the PRIOR attempt's rows current too. Materializing those rebuilds a world that never existed:
+    /// a deliverable the latest attempt deliberately deleted still satisfies <c>ArtifactPresent</c>, and two epochs'
+    /// copies of the same path race to overwrite each other in whatever order the store returned them — so the graded
+    /// bytes are decided by row order, not by the attempt. Filtering per-path would fix only the second; a deleted
+    /// deliverable would still be resurrected by its older row. The attempt is the unit of truth, so the whole world
+    /// comes from one epoch.</para>
+    /// </summary>
+    private static IEnumerable<Persistence.Entities.ArtifactManifest> LatestAttemptRows(IReadOnlyList<Persistence.Entities.ArtifactManifest> rows)
+    {
+        var current = rows.Where(r => r.SupersededByManifestId is null).ToList();
+
+        if (current.Count == 0) return current;
+
+        var latest = current.Max(r => r.FenceEpoch);
+
+        return current.Where(r => r.FenceEpoch == latest);
     }
 
     public async Task<BenchmarkGrade> GradePatchAsync(Guid repositoryId, Guid teamId, string baseSha, string inlinePatch, Guid? patchArtifactId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)

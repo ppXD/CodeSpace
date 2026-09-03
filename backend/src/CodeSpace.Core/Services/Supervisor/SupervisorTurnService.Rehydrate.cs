@@ -870,7 +870,28 @@ public sealed partial class SupervisorTurnService
         if (!Agents.AgentAcceptanceContract.GradesFromDeliverables(spec))
             return new BenchmarkGrade { Passed = false, Detail = "no-branch-or-repo" };
 
-        return await _acceptanceGrader.GradeCapturedAsync(result.AgentRunId, teamId, spec, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+        var grade = await _acceptanceGrader.GradeCapturedAsync(result.AgentRunId, teamId, spec, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+
+        return grade.Detail == ISupervisorAcceptanceGrader.NoDeliverablesCaptured ? DisambiguateEmptyWorld(result, grade) : grade;
+    }
+
+    /// <summary>
+    /// An EMPTY rebuilt world has two completely different causes, and only the attempt's own capture health can
+    /// tell them apart: the agent produced nothing (GENUINE — another pass CAN fix that, so a retry is the right
+    /// steer), or the CAPTURE never delivered what the agent produced (a storage fault, or a walk that refused files
+    /// it saw). The second is infrastructure: a retry re-bills an agent and fails identically forever, which is the
+    /// exact loop <c>IsInfraFailure</c> exists to break. Naming the refusal in the detail keeps the verdict legible
+    /// instead of trading one unfalsifiable verdict for another.
+    /// </summary>
+    private static BenchmarkGrade DisambiguateEmptyWorld(SupervisorAgentResult result, BenchmarkGrade grade)
+    {
+        if (result.DeliverableCaptureFault is { Length: > 0 } fault)
+            return grade with { Detail = $"grade-error: the deliverable capture faulted ({fault}) — nothing was stored to grade", Class = Messages.Agents.Benchmark.GradeFailureClass.Environment };
+
+        if (result.UncapturedDeliverables > 0)
+            return grade with { Detail = $"grade-error: the capture refused {result.UncapturedDeliverables} file(s) the run produced and stored none", Class = Messages.Agents.Benchmark.GradeFailureClass.Environment };
+
+        return grade;
     }
 
     /// <summary>

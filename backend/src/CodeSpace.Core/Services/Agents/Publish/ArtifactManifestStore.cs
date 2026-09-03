@@ -35,7 +35,8 @@ public interface IArtifactManifestStore
     /// worth keeping was routinely the one nobody declared — before this it died with the scratch directory.
     ///
     /// <para>Bounded on purpose (<see cref="ArtifactManifestStore.MaxUndeclaredCaptureFiles"/>,
-    /// <see cref="ArtifactManifestStore.MaxUndeclaredCaptureBytes"/>, <see cref="ArtifactManifestStore.MaxUndeclaredScanFiles"/>): an
+    /// <see cref="ArtifactManifestStore.MaxUndeclaredCaptureBytes"/>, <see cref="ArtifactManifestStore.MaxUndeclaredScanEntries"/>,
+    /// <see cref="ArtifactManifestStore.MaxUndeclaredScanSeconds"/>): an
     /// unbounded walk of a directory an agent had shell access to is a way to fill the artifact store, not a
     /// capability. The limits are VISIBLE rather than silent — the returned outcome reports what the walk refused,
     /// which the caller commits into the capture promise's facts. DECLARED paths are skipped here entirely: they
@@ -73,18 +74,31 @@ public sealed class ArtifactManifestStore : IArtifactManifestStore, IScopedDepen
     /// <summary>C2 — the total byte budget one walk's UNDECLARED captures share. A single file bigger than what is left is refused whole (never clipped — a truncated deliverable is a lie). Rule 8: pinned by test.</summary>
     public const long MaxUndeclaredCaptureBytes = 8L * 1024 * 1024;
 
-    /// <summary>C2 — how many filesystem entries one walk will even LOOK at before it stops scanning. Separate from the capture cap so a pathological tree cannot turn the walk itself into the cost. Rule 8: pinned by test.</summary>
-    public const int MaxUndeclaredScanFiles = 2000;
+    /// <summary>C2 — how many filesystem ENTRIES (directories included) one walk will even LOOK at before it stops scanning. Separate from the capture cap so a pathological tree cannot turn the walk itself into the cost. Rule 8: pinned by test.</summary>
+    public const int MaxUndeclaredScanEntries = 20000;
+
+    /// <summary>C2 — the wall-clock ceiling on one walk. A tree can be deep and slow without being large, and a capture step must never become the reason a run's completion hangs. Rule 8: pinned by test.</summary>
+    public const int MaxUndeclaredScanSeconds = 10;
 
     /// <summary>
-    /// C2 — the ONLY extensions an undeclared walk will take: text and text-shaped document formats an oracle can
-    /// actually read. Binaries, archives and images are refused — not because they are dangerous, but because a walk
-    /// nobody asked for should not spend a run's byte budget on bytes no grader will open. A DECLARED path is never
-    /// filtered by this list (an agent asked for that one by name). Rule 8: pinned by test.
+    /// C2 — the ONLY extensions an undeclared walk will take: text and the document formats <see cref="KindFor"/>
+    /// already knows how to type. A report an agent wrote as <c>report.pdf</c> or <c>summary.docx</c> is exactly the
+    /// deliverable this walk exists to keep — leaving those out meant the walk captured NOTHING for a real report,
+    /// and an empty world grades as "the agent produced nothing". Archives, executables and unknown binaries stay
+    /// refused: a walk nobody asked for should not spend a run's byte budget on bytes no grader will open. A DECLARED
+    /// path is never filtered by this list (an agent asked for that one by name). Rule 8: pinned by test.
     /// </summary>
-    public static readonly IReadOnlyList<string> CapturableUndeclaredExtensions = new[] { ".csv", ".html", ".json", ".jsonl", ".md", ".mmd", ".puml", ".rst", ".svg", ".tsv", ".txt", ".xml", ".yaml", ".yml" };
+    public static readonly IReadOnlyList<string> CapturableUndeclaredExtensions = new[] { ".csv", ".docx", ".html", ".json", ".jsonl", ".md", ".mmd", ".pdf", ".png", ".puml", ".rst", ".svg", ".tsv", ".txt", ".xlsx", ".xml", ".yaml", ".yml" };
+
+    /// <summary>
+    /// C2 — directory names the walk never descends. Every one is a build output or a dependency tree: thousands of
+    /// files an agent did not author, which would exhaust the scan and byte budgets and crowd out the one report the
+    /// walk exists to keep. Rule 8: pinned by test.
+    /// </summary>
+    public static readonly IReadOnlyList<string> SkippedWalkDirectories = new[] { ".git", "bin", "dist", "node_modules", "obj", "target", "vendor" };
 
     private static readonly HashSet<string> Capturable = new(CapturableUndeclaredExtensions, StringComparer.Ordinal);
+    private static readonly HashSet<string> SkippedDirectories = new(SkippedWalkDirectories, StringComparer.OrdinalIgnoreCase);
 
     private readonly CodeSpaceDbContext _db;
     private readonly IArtifactStreamRetentionWriter _retention;
@@ -121,7 +135,7 @@ public sealed class ArtifactManifestStore : IArtifactManifestStore, IScopedDepen
         var refused = 0;
         var spent = 0L;
 
-        foreach (var candidate in Walk(workspaceDirectory))
+        foreach (var candidate in Walk(workspaceDirectory, cancellationToken))
         {
             if (declared.Contains(candidate.Path)) continue;
 
@@ -193,27 +207,55 @@ public sealed class ArtifactManifestStore : IArtifactManifestStore, IScopedDepen
     /// deterministic — a cap that took a different subset per run would make "what did this attempt keep?"
     /// unanswerable. Symlinked files and directories are skipped at enumeration (the recursion never descends a
     /// reparse point) and <see cref="CaptureOneAsync"/>'s guard independently re-clamps every component, so an
-    /// escape has to beat both. Stops scanning at <see cref="MaxUndeclaredScanFiles"/>.
+    /// escape has to beat both. Stops scanning at <see cref="MaxUndeclaredScanEntries"/> entries or <see cref="MaxUndeclaredScanSeconds"/> seconds, whichever comes first.
     /// </summary>
-    internal static IReadOnlyList<ScratchFile> Walk(string root)
+    internal static IReadOnlyList<ScratchFile> Walk(string root, CancellationToken cancellationToken = default)
     {
-        var options = new EnumerationOptions
-        {
-            RecurseSubdirectories = true,
-            IgnoreInaccessible = true,
-            AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.System,
-        };
+        // An OWN traversal, not Directory.EnumerateFiles(RecurseSubdirectories): that API can only bound what it
+        // RETURNS, so a directory-only tree (or one node_modules) is descended in full before it yields a single
+        // file — the walk pays for a tree the agent did not author, and the budget is spent on files no grader will
+        // open. Here every entry, directory included, costs one against the scan cap, and a skipped directory costs
+        // exactly one instead of everything beneath it.
+        var options = new EnumerationOptions { IgnoreInaccessible = true, AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.System };
 
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(MaxUndeclaredScanSeconds);
         var files = new List<ScratchFile>();
+        var pending = new Queue<string>();
+        var entries = 0;
 
-        foreach (var full in Directory.EnumerateFiles(root, "*", options))
+        pending.Enqueue(root);
+
+        while (pending.Count > 0)
         {
-            if (files.Count >= MaxUndeclaredScanFiles) break;
+            if (cancellationToken.IsCancellationRequested || entries >= MaxUndeclaredScanEntries || DateTimeOffset.UtcNow >= deadline) break;
 
-            files.Add(new ScratchFile(Path.GetRelativePath(root, full).Replace(Path.DirectorySeparatorChar, '/'), LengthOf(full)));
+            var directory = pending.Dequeue();
+
+            foreach (var entry in EnumerateEntries(directory, options))
+            {
+                if (++entries >= MaxUndeclaredScanEntries) break;
+
+                var name = Path.GetFileName(entry);
+
+                if (Directory.Exists(entry))
+                {
+                    if (!SkippedDirectories.Contains(name)) pending.Enqueue(entry);
+                    continue;
+                }
+
+                files.Add(new ScratchFile(Path.GetRelativePath(root, entry).Replace(Path.DirectorySeparatorChar, '/'), LengthOf(entry)));
+            }
         }
 
         return files.OrderBy(f => f.Path, StringComparer.Ordinal).ToList();
+    }
+
+    /// <summary>A directory that vanished or turned unreadable mid-walk contributes nothing — the walk is best-effort by contract, and the capture guard is the authority on what still exists.</summary>
+    private static IEnumerable<string> EnumerateEntries(string directory, EnumerationOptions options)
+    {
+        try { return Directory.EnumerateFileSystemEntries(directory, "*", options).ToList(); }
+        catch (IOException) { return Array.Empty<string>(); }
+        catch (UnauthorizedAccessException) { return Array.Empty<string>(); }
     }
 
     /// <summary>A file that vanished between enumeration and measurement reads as zero-length — the capture's own guard is the authority on whether it still exists, and it fails closed there.</summary>
