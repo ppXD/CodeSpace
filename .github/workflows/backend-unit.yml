@@ -91,3 +91,8 @@ jobs:
       # protects has already been reporting green over nothing.
       - name: Real-model lane guard self-test
         run: bash .github/scripts/assert-every-filter-clause-ran.test.sh
+
+      # Same reasoning for the artifact redaction: a redaction that fails OPEN still ships the secret while the step
+      # name claims it was handled, and only a PR-visible self-test catches that before the lane uploads again.
+      - name: Real-model artifact redaction self-test
+        run: bash .github/scripts/collect-real-model-verdicts.test.sh

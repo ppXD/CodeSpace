@@ -125,13 +125,13 @@ jobs:
       # with it, so a red streak could not be diagnosed against the previous run's numbers. Keep them.
       #
       # A step summary is a per-STEP file, so this later step cannot read the test step's `$GITHUB_STEP_SUMMARY`
-      # directly — it concatenates every step_summary_* file in that directory instead. Best-effort: if the runner
-      # layout ever changes the collected file is simply empty, and nothing about the job's result changes.
+      # directly — the script concatenates every step_summary_* file in that directory instead, and REDACTS the
+      # configured model id (a repository secret: masked in the log, NOT in an uploaded file) out of both the
+      # collected summary and the trx. Best-effort: if the runner layout ever changes the collected file is simply
+      # empty, and nothing about the job's result changes.
       - name: Collect the real-model verdicts from the step summaries
         if: always()
-        run: |
-          mkdir -p backend/TestResults
-          cat "$(dirname "$GITHUB_STEP_SUMMARY")"/step_summary_* > backend/TestResults/step-summary.md 2>/dev/null || true
+        run: bash .github/scripts/collect-real-model-verdicts.sh backend/TestResults
 
       - name: Upload the real-model results (trx + verdicts)
         if: always()
@@ -283,13 +283,13 @@ jobs:
       # with it, so a red streak could not be diagnosed against the previous run's numbers. Keep them.
       #
       # A step summary is a per-STEP file, so this later step cannot read the test step's `$GITHUB_STEP_SUMMARY`
-      # directly — it concatenates every step_summary_* file in that directory instead. Best-effort: if the runner
-      # layout ever changes the collected file is simply empty, and nothing about the job's result changes.
+      # directly — the script concatenates every step_summary_* file in that directory instead, and REDACTS the
+      # configured model id (a repository secret: masked in the log, NOT in an uploaded file) out of both the
+      # collected summary and the trx. Best-effort: if the runner layout ever changes the collected file is simply
+      # empty, and nothing about the job's result changes.
       - name: Collect the real-model verdicts from the step summaries
         if: always()
-        run: |
-          mkdir -p backend/TestResults
-          cat "$(dirname "$GITHUB_STEP_SUMMARY")"/step_summary_* > backend/TestResults/step-summary.md 2>/dev/null || true
+        run: bash .github/scripts/collect-real-model-verdicts.sh backend/TestResults
 
       - name: Upload the real-model results (trx + verdicts)
         if: always()
@@ -455,13 +455,13 @@ jobs:
       # with it, so a red streak could not be diagnosed against the previous run's numbers. Keep them.
       #
       # A step summary is a per-STEP file, so this later step cannot read the test step's `$GITHUB_STEP_SUMMARY`
-      # directly — it concatenates every step_summary_* file in that directory instead. Best-effort: if the runner
-      # layout ever changes the collected file is simply empty, and nothing about the job's result changes.
+      # directly — the script concatenates every step_summary_* file in that directory instead, and REDACTS the
+      # configured model id (a repository secret: masked in the log, NOT in an uploaded file) out of both the
+      # collected summary and the trx. Best-effort: if the runner layout ever changes the collected file is simply
+      # empty, and nothing about the job's result changes.
       - name: Collect the real-model verdicts from the step summaries
         if: always()
-        run: |
-          mkdir -p backend/TestResults
-          cat "$(dirname "$GITHUB_STEP_SUMMARY")"/step_summary_* > backend/TestResults/step-summary.md 2>/dev/null || true
+        run: bash .github/scripts/collect-real-model-verdicts.sh backend/TestResults
 
       - name: Upload the real-model results (trx + verdicts)
         if: always()
@@ -587,13 +587,13 @@ jobs:
       # with it, so a red streak could not be diagnosed against the previous run's numbers. Keep them.
       #
       # A step summary is a per-STEP file, so this later step cannot read the test step's `$GITHUB_STEP_SUMMARY`
-      # directly — it concatenates every step_summary_* file in that directory instead. Best-effort: if the runner
-      # layout ever changes the collected file is simply empty, and nothing about the job's result changes.
+      # directly — the script concatenates every step_summary_* file in that directory instead, and REDACTS the
+      # configured model id (a repository secret: masked in the log, NOT in an uploaded file) out of both the
+      # collected summary and the trx. Best-effort: if the runner layout ever changes the collected file is simply
+      # empty, and nothing about the job's result changes.
       - name: Collect the real-model verdicts from the step summaries
         if: always()
-        run: |
-          mkdir -p backend/TestResults
-          cat "$(dirname "$GITHUB_STEP_SUMMARY")"/step_summary_* > backend/TestResults/step-summary.md 2>/dev/null || true
+        run: bash .github/scripts/collect-real-model-verdicts.sh backend/TestResults
 
       - name: Upload the real-model results (trx + verdicts)
         if: always()
@@ -700,13 +700,13 @@ jobs:
       # with it, so a red streak could not be diagnosed against the previous run's numbers. Keep them.
       #
       # A step summary is a per-STEP file, so this later step cannot read the test step's `$GITHUB_STEP_SUMMARY`
-      # directly — it concatenates every step_summary_* file in that directory instead. Best-effort: if the runner
-      # layout ever changes the collected file is simply empty, and nothing about the job's result changes.
+      # directly — the script concatenates every step_summary_* file in that directory instead, and REDACTS the
+      # configured model id (a repository secret: masked in the log, NOT in an uploaded file) out of both the
+      # collected summary and the trx. Best-effort: if the runner layout ever changes the collected file is simply
+      # empty, and nothing about the job's result changes.
       - name: Collect the real-model verdicts from the step summaries
         if: always()
-        run: |
-          mkdir -p backend/TestResults
-          cat "$(dirname "$GITHUB_STEP_SUMMARY")"/step_summary_* > backend/TestResults/step-summary.md 2>/dev/null || true
+        run: bash .github/scripts/collect-real-model-verdicts.sh backend/TestResults
 
       - name: Upload the real-model results (trx + verdicts)
         if: always()
@@ -814,13 +814,13 @@ jobs:
       # with it, so a red streak could not be diagnosed against the previous run's numbers. Keep them.
       #
       # A step summary is a per-STEP file, so this later step cannot read the test step's `$GITHUB_STEP_SUMMARY`
-      # directly — it concatenates every step_summary_* file in that directory instead. Best-effort: if the runner
-      # layout ever changes the collected file is simply empty, and nothing about the job's result changes.
+      # directly — the script concatenates every step_summary_* file in that directory instead, and REDACTS the
+      # configured model id (a repository secret: masked in the log, NOT in an uploaded file) out of both the
+      # collected summary and the trx. Best-effort: if the runner layout ever changes the collected file is simply
+      # empty, and nothing about the job's result changes.
       - name: Collect the real-model verdicts from the step summaries
         if: always()
-        run: |
-          mkdir -p backend/TestResults
-          cat "$(dirname "$GITHUB_STEP_SUMMARY")"/step_summary_* > backend/TestResults/step-summary.md 2>/dev/null || true
+        run: bash .github/scripts/collect-real-model-verdicts.sh backend/TestResults
 
       - name: Upload the real-model results (trx + verdicts)
         if: always()
@@ -966,13 +966,13 @@ jobs:
       # with it, so a red streak could not be diagnosed against the previous run's numbers. Keep them.
       #
       # A step summary is a per-STEP file, so this later step cannot read the test step's `$GITHUB_STEP_SUMMARY`
-      # directly — it concatenates every step_summary_* file in that directory instead. Best-effort: if the runner
-      # layout ever changes the collected file is simply empty, and nothing about the job's result changes.
+      # directly — the script concatenates every step_summary_* file in that directory instead, and REDACTS the
+      # configured model id (a repository secret: masked in the log, NOT in an uploaded file) out of both the
+      # collected summary and the trx. Best-effort: if the runner layout ever changes the collected file is simply
+      # empty, and nothing about the job's result changes.
       - name: Collect the real-model verdicts from the step summaries
         if: always()
-        run: |
-          mkdir -p backend/TestResults
-          cat "$(dirname "$GITHUB_STEP_SUMMARY")"/step_summary_* > backend/TestResults/step-summary.md 2>/dev/null || true
+        run: bash .github/scripts/collect-real-model-verdicts.sh backend/TestResults
 
       - name: Upload the real-model results (trx + verdicts)
         if: always()
@@ -1075,13 +1075,13 @@ jobs:
       # with it, so a red streak could not be diagnosed against the previous run's numbers. Keep them.
       #
       # A step summary is a per-STEP file, so this later step cannot read the test step's `$GITHUB_STEP_SUMMARY`
-      # directly — it concatenates every step_summary_* file in that directory instead. Best-effort: if the runner
-      # layout ever changes the collected file is simply empty, and nothing about the job's result changes.
+      # directly — the script concatenates every step_summary_* file in that directory instead, and REDACTS the
+      # configured model id (a repository secret: masked in the log, NOT in an uploaded file) out of both the
+      # collected summary and the trx. Best-effort: if the runner layout ever changes the collected file is simply
+      # empty, and nothing about the job's result changes.
       - name: Collect the real-model verdicts from the step summaries
         if: always()
-        run: |
-          mkdir -p backend/TestResults
-          cat "$(dirname "$GITHUB_STEP_SUMMARY")"/step_summary_* > backend/TestResults/step-summary.md 2>/dev/null || true
+        run: bash .github/scripts/collect-real-model-verdicts.sh backend/TestResults
 
       - name: Upload the real-model results (trx + verdicts)
         if: always()
@@ -1188,13 +1188,13 @@ jobs:
       # with it, so a red streak could not be diagnosed against the previous run's numbers. Keep them.
       #
       # A step summary is a per-STEP file, so this later step cannot read the test step's `$GITHUB_STEP_SUMMARY`
-      # directly — it concatenates every step_summary_* file in that directory instead. Best-effort: if the runner
-      # layout ever changes the collected file is simply empty, and nothing about the job's result changes.
+      # directly — the script concatenates every step_summary_* file in that directory instead, and REDACTS the
+      # configured model id (a repository secret: masked in the log, NOT in an uploaded file) out of both the
+      # collected summary and the trx. Best-effort: if the runner layout ever changes the collected file is simply
+      # empty, and nothing about the job's result changes.
       - name: Collect the real-model verdicts from the step summaries
         if: always()
-        run: |
-          mkdir -p backend/TestResults
-          cat "$(dirname "$GITHUB_STEP_SUMMARY")"/step_summary_* > backend/TestResults/step-summary.md 2>/dev/null || true
+        run: bash .github/scripts/collect-real-model-verdicts.sh backend/TestResults
 
       - name: Upload the real-model results (trx + verdicts)
         if: always()
@@ -1301,13 +1301,13 @@ jobs:
       # with it, so a red streak could not be diagnosed against the previous run's numbers. Keep them.
       #
       # A step summary is a per-STEP file, so this later step cannot read the test step's `$GITHUB_STEP_SUMMARY`
-      # directly — it concatenates every step_summary_* file in that directory instead. Best-effort: if the runner
-      # layout ever changes the collected file is simply empty, and nothing about the job's result changes.
+      # directly — the script concatenates every step_summary_* file in that directory instead, and REDACTS the
+      # configured model id (a repository secret: masked in the log, NOT in an uploaded file) out of both the
+      # collected summary and the trx. Best-effort: if the runner layout ever changes the collected file is simply
+      # empty, and nothing about the job's result changes.
       - name: Collect the real-model verdicts from the step summaries
         if: always()
-        run: |
-          mkdir -p backend/TestResults
-          cat "$(dirname "$GITHUB_STEP_SUMMARY")"/step_summary_* > backend/TestResults/step-summary.md 2>/dev/null || true
+        run: bash .github/scripts/collect-real-model-verdicts.sh backend/TestResults
 
       - name: Upload the real-model results (trx + verdicts)
         if: always()
