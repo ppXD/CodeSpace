@@ -353,19 +353,110 @@ public sealed class AgentCodeNode : INodeRuntime
     /// sessionId/transcript triple <c>RealSupervisorActionExecutor.ApplyRetryResumeHintAsync</c> reads from a DB
     /// query for a supervisor-orchestrated subtask retry) — or return the task unchanged when this isn't a
     /// respawn, or the retiring attempt captured no resumable session (cold-start, byte-identical to before).
+    ///
+    /// <para>World-state conservation: the CONVERSATION is only half of what carries forward. The retry's workspace
+    /// is repinned to the branch the prior attempt pushed FIRST (below), independently of whether a session was
+    /// captured — restoring a conversation over a fresh default-branch clone hands the agent a "warm transcript,
+    /// cold tree" it believes contains edits its sandbox does not have. When nothing was preserved, the goal is told
+    /// so in the same words the supervisor lane uses (<see cref="AgentRetryContinuity.HonestNoContinuityHint"/>), and
+    /// ONLY then — the line asserts a restored conversation, so it must never fire on a session-less respawn.</para>
     /// </summary>
     private static AgentTask ApplyRespawnResumeHint(AgentTask task, JsonElement? priorAttemptPayload)
     {
         if (priorAttemptPayload is not { } payload) return task;
 
-        if (ReadOptionalString(payload, "sessionId") is not { } sessionId) return task;
+        var (repinned, worldStateConserved) = RepinWorkspaceToPriorAttempt(task, payload);
 
-        return task with
+        if (ReadOptionalString(payload, "sessionId") is not { } sessionId) return repinned;
+
+        var resumed = repinned with
         {
             ResumeFromSessionId = sessionId,
             RestoredTranscript = ReadOptionalString(payload, "sessionTranscript"),
             RestoredTranscriptArtifactId = ReadOptionalGuid(payload, "sessionTranscriptArtifactId"),
         };
+
+        return worldStateConserved ? resumed : resumed with { Goal = AgentRetryContinuity.WithHonestNoContinuityHint(resumed.Goal) };
+    }
+
+    /// <summary>
+    /// Point this respawn's clone at the branch(es) the RETIRING attempt pushed — the quick lane's counterpart to the
+    /// supervisor's <c>ResolvePriorAttemptStagingAsync</c>, which pins its retry to the prior attempt's
+    /// <c>PublishManifest.Branch</c>. The node has no database, so the pushed fact comes from the payload the
+    /// notifier projected: <c>branch</c> / <c>repositoryResults[].producedBranch</c> is <c>AgentRunResult.ProducedBranch</c>,
+    /// which the executor assigns ONLY from a successful push (a push that failed after retries records
+    /// <c>PublishError</c> and a policy skip records <c>PublishSkipReason</c>, both leaving the branch null) — so a
+    /// present branch IS the "it was pushed" evidence, exactly the standard the manifest branch gives the other lane.
+    /// <para>Refs are HARD (never soft-fallback), matching that lane: a produced branch that has vanished must fail
+    /// the provision loud rather than silently re-clone the default branch under a conversation that says otherwise.
+    /// A repinned repo drops its base PIN — hard-checking-out the commit the branch was BUILT ON would discard the
+    /// very work being conserved. Nothing pushed (or no primary repo at all) ⇒ the task passes through untouched,
+    /// keeping the launch's authored base ref/pin byte-identical, and the caller says so honestly.</para>
+    /// </summary>
+    private static (AgentTask Task, bool Conserved) RepinWorkspaceToPriorAttempt(AgentTask task, JsonElement payload)
+    {
+        if (task.RepositoryId is not { } primaryId) return (task, false);
+
+        var produced = ReadProducedBranches(payload);
+        var primaryBranch = ReadOptionalString(payload, "branch") ?? produced.GetValueOrDefault(primaryId);
+        var authored = task.Workspace?.Primary;
+        var (related, relatedRepinned) = RepinRelatedRepositories(RelatedRepositories(task.Workspace), produced);
+
+        if (primaryBranch is null && !relatedRepinned) return (task, false);
+
+        var workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(primaryId, related,
+            primaryRef: primaryBranch ?? authored?.Ref,
+            primaryRefSoftFallback: primaryBranch is null && authored?.RefSoftFallback == true,
+            cwdMode: task.Workspace?.CwdMode ?? WorkspaceCwdMode.Auto,
+            primaryPinnedSha: primaryBranch is null ? authored?.PinnedSha : null,
+            primaryRefRecoverySha: primaryBranch is null ? authored?.RefRecoverySha : null);
+
+        return (task with { Workspace = workspace }, true);
+    }
+
+    /// <summary>Each repository the prior attempt PUSHED a branch for, keyed by repository id — the multi-repo half of the pin (the top-level <c>branch</c> mirrors the primary's). An entry with no id or no produced branch contributes nothing: it pushed nothing to continue from.</summary>
+    private static IReadOnlyDictionary<Guid, string> ReadProducedBranches(JsonElement payload)
+    {
+        var branches = new Dictionary<Guid, string>();
+
+        if (payload.ValueKind != JsonValueKind.Object || !payload.TryGetProperty("repositoryResults", out var repos) || repos.ValueKind != JsonValueKind.Array) return branches;
+
+        foreach (var repo in repos.EnumerateArray())
+            if (ReadOptionalGuid(repo, "repositoryId") is { } id && ReadOptionalString(repo, "producedBranch") is { } branch)
+                branches[id] = branch;
+
+        return branches;
+    }
+
+    /// <summary>The task's authored RELATED repos (every non-primary entry of its workspace) — the list the authoring seam re-projects. Empty for a single-repo or repo-less task, so the seam resolves the one-repo spec exactly as the first pass did.</summary>
+    private static IReadOnlyList<WorkspaceRepositorySpec> RelatedRepositories(WorkspaceSpec? workspace)
+    {
+        if (workspace is null) return Array.Empty<WorkspaceRepositorySpec>();
+
+        var primary = workspace.Primary;
+
+        return workspace.Repositories.Where(r => !ReferenceEquals(r, primary)).ToList();
+    }
+
+    /// <summary>Repin each related repo that pushed its own branch (a read-only sibling, or one that changed nothing, keeps its authored ref) — same rules as the primary: hard ref, base pin dropped.</summary>
+    private static (IReadOnlyList<WorkspaceRepositorySpec> Specs, bool Repinned) RepinRelatedRepositories(IReadOnlyList<WorkspaceRepositorySpec> specs, IReadOnlyDictionary<Guid, string> produced)
+    {
+        var repinned = false;
+        var updated = new List<WorkspaceRepositorySpec>(specs.Count);
+
+        foreach (var spec in specs)
+        {
+            if (!produced.TryGetValue(spec.RepositoryId, out var branch))
+            {
+                updated.Add(spec);
+                continue;
+            }
+
+            repinned = true;
+            updated.Add(spec with { Ref = branch, RefSoftFallback = false, RefRecoverySha = null, PinnedSha = null });
+        }
+
+        return (updated, repinned);
     }
 
     /// <summary>

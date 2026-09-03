@@ -133,6 +133,55 @@ public class MapAgentResumeFlowTests
     }
 
     [Fact]
+    public async Task A_map_branch_respawn_clones_the_branch_its_own_prior_attempt_pushed()
+    {
+        // The plan-map lane runs the SAME agent.run node through the SAME engine retry loop, so world-state
+        // conservation must hold per BRANCH: branch 0's respawn clones branch 0's own pushed branch, and the
+        // iteration key keeps that pin from leaking into any sibling.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var repositoryId = await SeedRepositoryAsync(teamId);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, RetryingMapOverAgentCodeDefinition(repositoryId));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: """{ "things": ["a"] }""");
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            var firstAgent = await BranchAgentRunIdAsync(runId, "map#0");
+
+            using var scope = _fixture.BeginScope();
+            var runs = scope.Resolve<IAgentRunService>();
+            var notifier = scope.Resolve<IAgentRunCompletionNotifier>();
+
+            await runs.MarkRunningAsync(firstAgent, CancellationToken.None);
+            await runs.CompleteAsync(firstAgent, new AgentRunResult
+            {
+                Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = "rate limited",
+                SessionId = "sess-branch-0", ProducedBranch = "codespace/agent/branch-0", ChangedFiles = new[] { "src/a.ts" },
+            }, CancellationToken.None);
+            await notifier.NotifyCompletedAsync(firstAgent, CancellationToken.None);
+
+            await RunEngineAsync(runId);   // the branch's failure respawns a FRESH agent INSIDE the map body
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            var secondAgent = (await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId && r.IterationKey == "map#0").ToListAsync()).Single(a => a.Id != firstAgent);
+            var task = JsonSerializer.Deserialize<AgentTask>(secondAgent.TaskJson, AgentJson.Options)!;
+
+            task.Workspace!.Primary!.Ref.ShouldBe("codespace/agent/branch-0", "the map branch's retry continues on the tree ITS OWN prior attempt produced");
+            task.ResumeFromSessionId.ShouldBe("sess-branch-0");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
     public async Task A_queued_branch_agent_run_under_a_cancelled_parent_run_is_cancelled_by_the_reconciler_not_relaunched()
     {
         // THE RECONCILER PARENT-RUN-TERMINAL GUARD (the real PR-D1 bug): two map branches stage Queued AgentRuns,
@@ -491,6 +540,57 @@ public class MapAgentResumeFlowTests
             new() { Id = "agent", TypeKey = "agent.run", ParentId = "map",
                     Config = WorkflowsTestSeed.Json("""{"goal":"Work on {{item}}","harness":"codex-cli","model":"gpt-5.3-codex","runnerKind":"local","readOnly":true}"""),
                     Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "count": "{{nodes.map.outputs.count}}" }""") },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "map" },
+            new() { From = "map", To = "end" },
+            new() { From = "ms", To = "agent" },
+        },
+    };
+
+    private async Task<Guid> SeedRepositoryAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+
+        var instance = new CodeSpace.Core.Persistence.Entities.ProviderInstance
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, Provider = ProviderKind.GitLab, DisplayName = "instance",
+            BaseUrl = $"https://git-{suffix}.local", OauthClientId = "client", OauthClientSecretEnc = "enc",
+        };
+        var repo = new CodeSpace.Core.Persistence.Entities.Repository
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, ProviderInstanceId = instance.Id,
+            ExternalId = $"ext-{suffix}", NamespacePath = "acme", Name = $"repo-{suffix}", FullPath = $"acme/repo-{suffix}",
+            DefaultBranch = "main", Visibility = RepositoryVisibility.Private, WebUrl = $"https://git.local/acme/repo-{suffix}", Status = RepositoryStatus.Active,
+        };
+
+        db.ProviderInstance.Add(instance);
+        db.Repository.Add(repo);
+        await db.SaveChangesAsync();
+
+        return repo.Id;
+    }
+
+    // Like MapOverAgentCodeDefinition but the body agent names a primary repository + a 2-attempt retry, so a
+    // branch whose first attempt pushes a branch and then fails respawns INSIDE the map body.
+    private static WorkflowDefinition RetryingMapOverAgentCodeDefinition(Guid repositoryId) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "map", TypeKey = "flow.map", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "items": "{{trigger.things}}" }""") },
+            new() { Id = "ms", TypeKey = "flow.map_start", ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "agent", TypeKey = "agent.run", ParentId = "map",
+                    Config = WorkflowsTestSeed.Json("""{"goal":"Work on {{item}}","harness":"codex-cli","model":"gpt-5.3-codex","runnerKind":"local"}"""),
+                    Inputs = WorkflowsTestSeed.Json($$"""{ "repositoryId": "{{repositoryId}}" }"""),
+                    Retry = new RetryPolicy { MaxAttempts = 2, BackoffSeconds = 0 } },
             new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(),
                     Inputs = WorkflowsTestSeed.Json("""{ "count": "{{nodes.map.outputs.count}}" }""") },
         },

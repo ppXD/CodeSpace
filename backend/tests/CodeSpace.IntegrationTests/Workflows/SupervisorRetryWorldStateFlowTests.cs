@@ -132,7 +132,7 @@ public sealed class SupervisorRetryWorldStateFlowTests
 
         task.Workspace.ShouldBeNull("no pushed branch to pin — the retry keeps the byte-identical default-branch clone");
         task.ResumeFromSessionId.ShouldBe("sess-sb-patch-only", "the conversation is still resumed");
-        task.Goal.ShouldContain(RealSupervisorActionExecutor.HonestNoContinuityHint, customMessage: "the goal must HONESTLY say the git changes were NOT preserved, since the conversation restore alone could otherwise imply the work is already on disk");
+        task.Goal.ShouldContain(AgentRetryContinuity.HonestNoContinuityHint, customMessage: "the goal must HONESTLY say the git changes were NOT preserved, since the conversation restore alone could otherwise imply the work is already on disk");
     }
 
     [Fact]
@@ -191,7 +191,7 @@ public sealed class SupervisorRetryWorldStateFlowTests
         task.ResumeFromSessionId.ShouldBe("sess-older", "the only resumable attempt is the older one — the newer crashed with no session");
         task.Workspace.ShouldNotBeNull("the older (resumable) attempt's own branch must be pinned");
         task.Workspace!.Repositories.Single().Ref.ShouldBe(olderManifest.Branch, "the git ref belongs to the SAME attempt whose conversation is being resumed, never the literal-latest attempt's (which has no branch at all)");
-        task.Goal.ShouldNotContain(RealSupervisorActionExecutor.HonestNoContinuityHint, customMessage: "the resumed attempt's own branch IS preserved — asserting otherwise would be a lie");
+        task.Goal.ShouldNotContain(AgentRetryContinuity.HonestNoContinuityHint, customMessage: "the resumed attempt's own branch IS preserved — asserting otherwise would be a lie");
     }
 
     // ─── Drive the real executor ──────────────────────────────────────────────────

@@ -500,11 +500,8 @@ public sealed partial class RealSupervisorActionExecutor
     {
         var resumed = task with { ResumeFromSessionId = prior.SessionId, RestoredTranscript = prior.InlineTranscript, RestoredTranscriptArtifactId = prior.TranscriptArtifactId };
 
-        return workspaceHasPriorWork ? resumed : resumed with { Goal = $"{resumed.Goal}\n\n{HonestNoContinuityHint}" };
+        return workspaceHasPriorWork ? resumed : resumed with { Goal = AgentRetryContinuity.WithHonestNoContinuityHint(resumed.Goal) };
     }
-
-    /// <summary>The honest-redo line (P0-1): fires ONLY when a resumed conversation exists but the workspace was NOT pinned to a prior pushed branch — never on a genuine cold-start retry (no prior attempt at all), which stays byte-identical.</summary>
-    internal const string HonestNoContinuityHint = "Note: your prior attempt's conversation is restored, but its git changes were NOT preserved in this workspace (no pushed branch was found to continue from) — you must redo any relevant file changes from scratch.";
 
     /// <summary>
     /// P5-2 (diagnosis-driven repair): fold the prior attempt's FAILED acceptance diagnosis — the check's detail +

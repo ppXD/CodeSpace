@@ -720,6 +720,193 @@ public class AgentCodeNodeTests
         task.RestoredTranscriptArtifactId.ShouldBeNull();
     }
 
+    // ── Retry world-state conservation: attempt N's pushed tree is attempt N+1's starting tree ──
+
+    [Fact]
+    public async Task A_respawn_clones_the_branch_the_prior_attempt_pushed_instead_of_the_default_branch()
+    {
+        // The conservation law the warm-resume half alone breaks: restoring the conversation while the workspace
+        // re-clones the DEFAULT branch hands the agent a "warm transcript, cold tree" — it believes edits exist that
+        // its sandbox does not contain. The prior attempt's PUSHED branch (the payload's `branch`, which the executor
+        // only ever sets from a successful push) becomes the retry's clone ref, exactly as the supervisor lane pins
+        // its retry to the prior attempt's manifest branch.
+        var repoId = Guid.NewGuid();
+        var inputs = new Dictionary<string, JsonElement> { ["repositoryId"] = Str(repoId.ToString()) };
+        var priorAttempt = JsonDocument.Parse("""
+            {"status":"Failed","error":"timed out","exitReason":"timed-out","sessionId":"sess-1","branch":"codespace/agent/attempt-1","changedFiles":["src/a.ts"]}
+            """).RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, inputs, priorAttempt), CancellationToken.None);
+
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+        var primary = task.Workspace.ShouldNotBeNull("a pinned retry ref needs an EXPLICIT one-repo workspace — a null Workspace clones the default branch").Primary!;
+
+        primary.RepositoryId.ShouldBe(repoId);
+        primary.Ref.ShouldBe("codespace/agent/attempt-1", "the retry starts from the tree its own prior attempt produced");
+        primary.RefSoftFallback.ShouldBeFalse("HARD like the supervisor lane's manifest pin — a vanished produced branch must fail loud, never silently re-clone the default branch");
+        task.Goal.ShouldBe("Fix the tests", "the work IS present in this tree — no honest-redo hint");
+    }
+
+    [Fact]
+    public async Task A_respawn_repins_each_multi_repo_sibling_to_its_own_pushed_branch()
+    {
+        // Multi-repo: the payload carries a per-repo produced branch, so EVERY writable repo that pushed is repinned
+        // (the primary from the top-level mirror, each sibling from its own entry) — one seam, single- and multi-repo
+        // identical. A read-only sibling that pushed nothing keeps its authored ref.
+        var primaryId = Guid.NewGuid();
+        var webId = Guid.NewGuid();
+        var docsId = Guid.NewGuid();
+
+        var inputs = new Dictionary<string, JsonElement>
+        {
+            ["repositoryId"] = Str(primaryId.ToString()),
+            ["relatedRepositories"] = JsonDocument.Parse($$"""
+                [{"repositoryId":"{{webId}}","alias":"web","access":"write"},{"repositoryId":"{{docsId}}","alias":"docs","access":"read"}]
+                """).RootElement,
+        };
+
+        var priorAttempt = JsonDocument.Parse($$"""
+            {"status":"Failed","error":"timed out","sessionId":"sess-2","branch":"codespace/agent/api",
+             "repositoryResults":[{"alias":"repo","repositoryId":"{{primaryId}}","producedBranch":"codespace/agent/api"},
+                                  {"alias":"web","repositoryId":"{{webId}}","producedBranch":"codespace/agent/web"},
+                                  {"alias":"docs","repositoryId":"{{docsId}}","producedBranch":null}]}
+            """).RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, inputs, priorAttempt), CancellationToken.None);
+
+        var repos = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!.Workspace!.Repositories;
+
+        repos.Single(r => r.RepositoryId == primaryId).Ref.ShouldBe("codespace/agent/api", "the primary clones its own prior branch");
+        repos.Single(r => r.RepositoryId == webId).Ref.ShouldBe("codespace/agent/web", "each sibling clones ITS OWN prior branch — never the primary's");
+        repos.Single(r => r.RepositoryId == docsId).Ref.ShouldBeNull("a repo that pushed nothing keeps its authored ref (the default branch)");
+    }
+
+    [Theory]
+    // Work existed but NOTHING was pushed: a failed push / a publish-policy skip leaves `branch` null, which is
+    // exactly how the payload says "not pushed" — so there is no ref to point at.
+    [InlineData("""{"status":"Failed","error":"push failed","sessionId":"s","changedFiles":["src/a.ts"]}""")]
+    // No branch and no work at all.
+    [InlineData("""{"status":"Failed","error":"crashed early","sessionId":"s"}""")]
+    // A blank branch is not a ref either.
+    [InlineData("""{"status":"Failed","error":"x","sessionId":"s","branch":"","repositoryResults":[]}""")]
+    public async Task A_respawn_with_no_pushed_branch_keeps_the_default_clone_and_says_so_honestly(string priorAttemptJson)
+    {
+        // The other half of the conservation law: when the prior attempt's work was NOT preserved, the resumed
+        // conversation implies edits the tree does not have — so the goal must SAY so, in the same words the
+        // supervisor lane uses. Pointing at a branch that was never pushed would fail the clone outright.
+        var inputs = new Dictionary<string, JsonElement> { ["repositoryId"] = Str(Guid.NewGuid().ToString()) };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, inputs, JsonDocument.Parse(priorAttemptJson).RootElement), CancellationToken.None);
+
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+
+        task.Workspace.ShouldBeNull("nothing to pin — the single-repo run keeps its null Workspace (the default-branch clone)");
+        task.Goal.ShouldBe($"Fix the tests\n\n{AgentRetryContinuity.HonestNoContinuityHint}", "the agent is TOLD its restored conversation's changes are not in this tree");
+    }
+
+    [Fact]
+    public async Task A_respawn_with_a_pushed_branch_but_no_restored_session_pins_the_tree_without_the_hint()
+    {
+        // World-state continuity is independent of conversation continuity (the supervisor resolves its manifest pin
+        // whether or not a resumable session exists). With no restored conversation there is no false belief to
+        // correct, so the honest-redo line — whose text asserts a restored conversation — must NOT fire.
+        var repoId = Guid.NewGuid();
+        var inputs = new Dictionary<string, JsonElement> { ["repositoryId"] = Str(repoId.ToString()) };
+        var priorAttempt = JsonDocument.Parse("""{"status":"Failed","error":"killed","branch":"codespace/agent/attempt-1"}""").RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, inputs, priorAttempt), CancellationToken.None);
+
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+
+        task.Workspace!.Primary!.Ref.ShouldBe("codespace/agent/attempt-1", "the produced tree is conserved even on a cold-start respawn");
+        task.ResumeFromSessionId.ShouldBeNull();
+        task.Goal.ShouldBe("Fix the tests", "no conversation was restored, so the restored-conversation hint would be a lie");
+    }
+
+    [Fact]
+    public async Task A_respawn_prefers_the_prior_attempts_branch_over_the_launch_base_ref_and_drops_the_base_pin()
+    {
+        // The prior attempt's own produced branch is MORE specific than the launch's authored base — and the base
+        // PIN must go with it: hard-checking-out the original base commit would throw away the very work this pin
+        // exists to conserve. The supervisor lane's ref-wins-over-pin precedent, applied to the quick lane.
+        var inputs = new Dictionary<string, JsonElement>
+        {
+            ["repositoryId"] = Str(Guid.NewGuid().ToString()),
+            ["baseRef"] = Str("release/2.0"),
+            ["pinnedSha"] = Str("aaaa1111bbbb2222"),
+        };
+        var priorAttempt = JsonDocument.Parse("""{"status":"Failed","error":"x","sessionId":"s","branch":"codespace/agent/attempt-1"}""").RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, inputs, priorAttempt), CancellationToken.None);
+
+        var primary = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!.Workspace!.Primary!;
+
+        primary.Ref.ShouldBe("codespace/agent/attempt-1");
+        primary.PinnedSha.ShouldBeNull("the immutable base pin cannot survive a repin onto the branch built ON that base — it would discard the work");
+    }
+
+    [Fact]
+    public async Task A_respawn_with_no_pushed_branch_leaves_the_launch_base_ref_and_pin_untouched()
+    {
+        // The negative path must not quietly widen: a retry with nothing to conserve keeps the launch's authored
+        // base ref, its soft-fallback flag, its recovery anchor and its base pin exactly as the first pass had them.
+        var inputs = new Dictionary<string, JsonElement>
+        {
+            ["repositoryId"] = Str(Guid.NewGuid().ToString()),
+            ["baseRef"] = Str("codespace/session/prior-turn"),
+            ["baseRefFromSession"] = Bool(true),
+            ["baseRefRecoverySha"] = Str("cccc3333"),
+            ["pinnedSha"] = Str("aaaa1111bbbb2222"),
+        };
+        var priorAttempt = JsonDocument.Parse("""{"status":"Failed","error":"x","sessionId":"s"}""").RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, inputs, priorAttempt), CancellationToken.None);
+
+        var primary = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!.Workspace!.Primary!;
+
+        primary.Ref.ShouldBe("codespace/session/prior-turn");
+        primary.RefSoftFallback.ShouldBeTrue();
+        primary.RefRecoverySha.ShouldBe("cccc3333");
+        primary.PinnedSha.ShouldBe("aaaa1111bbbb2222");
+    }
+
+    [Fact]
+    public async Task A_first_pass_with_no_prior_attempt_keeps_its_authored_workspace_byte_identical()
+    {
+        var inputs = new Dictionary<string, JsonElement> { ["repositoryId"] = Str(Guid.NewGuid().ToString()) };
+
+        var task = JsonSerializer.Deserialize<AgentTask>(
+            (await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, inputs, priorAttemptPayload: null), CancellationToken.None)).SuspendUntil!.Payload,
+            AgentJson.Options)!;
+
+        task.Workspace.ShouldBeNull("a single-repo first pass keeps Workspace null — the resolver derives it from RepositoryId");
+        task.Goal.ShouldBe("Fix the tests");
+    }
+
+    [Fact]
+    public async Task A_respawn_of_a_repo_less_run_has_no_tree_to_conserve()
+    {
+        // An analysis-only run (no primary repo) has no workspace to pin; a branch on the payload cannot invent one.
+        var priorAttempt = JsonDocument.Parse("""{"status":"Failed","error":"x","sessionId":"s","branch":"codespace/agent/attempt-1"}""").RootElement;
+
+        var task = JsonSerializer.Deserialize<AgentTask>(
+            (await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, inputs: null, priorAttempt), CancellationToken.None)).SuspendUntil!.Payload,
+            AgentJson.Options)!;
+
+        task.Workspace.ShouldBeNull("no repo, no tree — nothing to repin");
+        task.ResumeFromSessionId.ShouldBe("s", "the conversation still resumes; only the world-state pin is inapplicable");
+    }
+
+    [Fact]
+    public void The_honest_no_continuity_hint_is_pinned_verbatim()
+    {
+        // Rule 8-style pin: the quick lane (this node) and the supervisor lane read this ONE const, so both tell the
+        // agent the same thing about a tree that does not carry its prior work. The literal is pinned because the
+        // supervisor's own behaviour test asserts this exact wording — a reword must be a visible decision.
+        AgentRetryContinuity.HonestNoContinuityHint.ShouldBe(
+            "Note: your prior attempt's conversation is restored, but its git changes were NOT preserved in this workspace (no pushed branch was found to continue from) — you must redo any relevant file changes from scratch.");
+    }
+
     [Fact]
     public void The_fail_closed_acceptance_exit_reason_is_pinned()
     {

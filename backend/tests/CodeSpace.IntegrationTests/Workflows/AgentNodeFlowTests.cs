@@ -720,6 +720,101 @@ public class AgentNodeFlowTests
     }
 
     [Fact]
+    public async Task A_respawn_clones_the_branch_attempt_one_pushed_not_the_repository_default()
+    {
+        // World-state conservation, end to end on the production path: attempt 1 PUSHES a branch and then fails
+        // transiently. The respawn's own persisted TaskJson — the envelope the executor provisions the sandbox from —
+        // must name that branch as its primary clone ref. Asserted on the durable row, never a log line: a workspace
+        // spec that still says "default branch" is the exact refutation evidence this test exists to forbid.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var repositoryId = await SeedRepositoryAsync(teamId);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, RetryingAgentNodeDefinitionForRepository(maxAttempts: 2, repositoryId));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            var firstAgent = await GetAgentRunIdAsync(runId);
+
+            using (var first = _fixture.BeginScope())
+                JsonSerializer.Deserialize<AgentTask>((await first.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(r => r.Id == firstAgent)).TaskJson, AgentJson.Options)!
+                    .Workspace.ShouldBeNull("attempt 1 has nothing to continue from — it clones the repository default branch, unchanged");
+
+            // Attempt 1 pushed real work, then died transiently (the retryable shape).
+            await SimulateAgentExecutorAsync(firstAgent, new AgentRunResult
+            {
+                Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = "rate limited",
+                SessionId = "sess-attempt-1", ProducedBranch = "codespace/agent/attempt-1", ChangedFiles = new[] { "src/a.ts" },
+            });
+
+            await RunEngineAsync(runId);   // resume → attempt 1 fails → the respawn stages a FRESH agent + parks again
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            var secondAgent = (await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).ToListAsync()).Single(a => a.Id != firstAgent);
+            var task = JsonSerializer.Deserialize<AgentTask>(secondAgent.TaskJson, AgentJson.Options)!;
+
+            var primary = task.Workspace.ShouldNotBeNull("the retry needs an EXPLICIT workspace spec to clone at a ref — a null spec is the default-branch clone").Primary!;
+            primary.RepositoryId.ShouldBe(repositoryId);
+            primary.Ref.ShouldBe("codespace/agent/attempt-1", "the retry's sandbox is provisioned AT the work attempt 1 committed, not a fresh default-branch clone");
+            task.ResumeFromSessionId.ShouldBe("sess-attempt-1", "the warm conversation and the warm tree arrive together — that is the whole point");
+            task.Goal.ShouldNotContain("NOT preserved", customMessage: "the work IS preserved here, so the honest-redo line must not fire");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task A_respawn_whose_attempt_one_pushed_nothing_keeps_the_default_clone_and_is_told_so()
+    {
+        // The companion honesty case on the same production path: attempt 1 captured a session but pushed no branch
+        // (a failed push / a publish skip / no diff). There is no ref to point at, so the retry keeps the
+        // default-branch clone AND its goal says the restored conversation's changes are not in this tree.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var repositoryId = await SeedRepositoryAsync(teamId);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, RetryingAgentNodeDefinitionForRepository(maxAttempts: 2, repositoryId));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            var firstAgent = await GetAgentRunIdAsync(runId);
+
+            await SimulateAgentExecutorAsync(firstAgent, new AgentRunResult
+            {
+                Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = "rate limited",
+                SessionId = "sess-attempt-1", ChangedFiles = new[] { "src/a.ts" }, PublishError = "403 forbidden",
+            });
+
+            await RunEngineAsync(runId);
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            var secondAgent = (await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).ToListAsync()).Single(a => a.Id != firstAgent);
+            var task = JsonSerializer.Deserialize<AgentTask>(secondAgent.TaskJson, AgentJson.Options)!;
+
+            task.Workspace.ShouldBeNull("nothing was pushed — pinning a ref that does not exist on the remote would fail the provision outright");
+            task.Goal.ShouldEndWith(AgentRetryContinuity.HonestNoContinuityHint, customMessage: "the resumed agent is TOLD its changes are gone rather than trusting a transcript the tree contradicts");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
     public async Task P3_1_a_grader_infra_timeout_respawns_instead_of_failing_terminally()
     {
         // P3.1: a fail-closed "acceptance-failed" re-grade caused by the GRADER'S OWN timeout ("tests-timed-out",
@@ -930,6 +1025,41 @@ public class AgentNodeFlowTests
         {
             jobClient.AutoExecute = true;
         }
+    }
+
+    // manual → agent.run(repositoryId bound, Retry{maxAttempts, 0s}) → terminal — the world-state-conservation
+    // definition: a retry only has a workspace to repin when the node names a primary repository.
+    private static WorkflowDefinition RetryingAgentNodeDefinitionForRepository(int maxAttempts, Guid repositoryId)
+    {
+        var definition = RetryingAgentNodeDefinition(maxAttempts);
+        var nodes = definition.Nodes.Select(n => n.Id == "agent" ? n with { Inputs = WorkflowsTestSeed.Json($$"""{ "repositoryId": "{{repositoryId}}" }""") } : n).ToList();
+
+        return definition with { Nodes = nodes };
+    }
+
+    private async Task<Guid> SeedRepositoryAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+
+        var instance = new ProviderInstance
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, Provider = ProviderKind.GitLab, DisplayName = "instance",
+            BaseUrl = $"https://git-{suffix}.local", OauthClientId = "client", OauthClientSecretEnc = "enc",
+        };
+        var repo = new Repository
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, ProviderInstanceId = instance.Id,
+            ExternalId = $"ext-{suffix}", NamespacePath = "acme", Name = $"repo-{suffix}", FullPath = $"acme/repo-{suffix}",
+            DefaultBranch = "main", Visibility = RepositoryVisibility.Private, WebUrl = $"https://git.local/acme/repo-{suffix}", Status = RepositoryStatus.Active,
+        };
+
+        db.ProviderInstance.Add(instance);
+        db.Repository.Add(repo);
+        await db.SaveChangesAsync();
+
+        return repo.Id;
     }
 
     // manual → agent.run(Retry{maxAttempts, 0s}) → terminal — the respawn tests' definition (0s backoff so tests never sleep).

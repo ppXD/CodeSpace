@@ -433,7 +433,7 @@ public class SupervisorDependencyStagingTests
         var resumed = RealSupervisorActionExecutor.ApplyResumeRecord(task, prior, workspaceHasPriorWork: false);
 
         resumed.ResumeFromSessionId.ShouldBe("sess-1", "the conversation is still restored");
-        resumed.Goal.ShouldBe($"do the thing\n\n{RealSupervisorActionExecutor.HonestNoContinuityHint}", "the goal now HONESTLY says the git changes are NOT present, so the agent never trusts a restored conversation implying work it can't see");
+        resumed.Goal.ShouldBe($"do the thing\n\n{AgentRetryContinuity.HonestNoContinuityHint}", "the goal now HONESTLY says the git changes are NOT present, so the agent never trusts a restored conversation implying work it can't see");
     }
 
     // ── BuildBlockedSpawnOutcome: the wire shape resolve's conflict reader consumes ─────

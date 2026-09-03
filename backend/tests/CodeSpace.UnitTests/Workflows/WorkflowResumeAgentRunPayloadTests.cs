@@ -55,6 +55,27 @@ public class WorkflowResumeAgentRunPayloadTests
     }
 
     [Fact]
+    public void BuildResumePayload_reports_no_branch_when_the_push_FAILED_so_a_retry_never_clones_an_absent_ref()
+    {
+        // The retry's world-state pin reads `branch` as "the prior attempt PUSHED this" — that read is only sound
+        // because the executor sets ProducedBranch from a successful push and NOTHING else: a push that failed
+        // after retries records PublishError with the branch still null, and a publish-policy skip records
+        // PublishSkipReason the same way. If either ever projected a branch, the retry would pin its clone to a ref
+        // that does not exist on the remote and die at provision instead of redoing the work.
+        var failed = new AgentRunResult
+        {
+            Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", ChangedFiles = new[] { "src/a.ts" },
+            PublishError = "403 forbidden", PublishSkipReason = null,
+        };
+        var run = new AgentRun { Status = AgentRunStatus.Failed, ResultJson = JsonSerializer.Serialize(failed, AgentJson.Options) };
+
+        var payload = JsonDocument.Parse(WorkflowResumeAgentRunCompletionNotifier.BuildResumePayload(run)).RootElement;
+
+        payload.GetProperty("branch").ValueKind.ShouldBe(JsonValueKind.Null, "a failed push is honestly branch-less — the retry then keeps its default-branch clone and is TOLD the work is gone");
+        payload.GetProperty("changedFiles").GetArrayLength().ShouldBe(1, "the work is still reported (it exists as a patch) — only the pushable ref is absent");
+    }
+
+    [Fact]
     public void BuildResumePayload_carries_the_acceptance_detail_for_the_infra_vs_genuine_classification()
     {
         // P3.1: the node's retry verdict needs the RICHER detail (not just exitReason) to tell a grader infra
