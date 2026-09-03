@@ -148,7 +148,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             // Play the operator on every card the brain parked on, so the arc can reach its acceptance floor. This is
             // what turns the headline gate back into a measurement of COMPLETION: before it, the criterion
             // (a real patch + a PASSED acceptance grade) could only be met by a model that never asked anything.
-            var answeredAsks = await AnswerParkedAsksAsync(runId, teamId, userId);
+            var (answeredAsks, skippedAmendAsks) = await AnswerParkedAsksAsync(runId, teamId, userId);
 
             var (outcome, note) = await EvaluateAsync(runId, teamId, FileWritingFakeCli.StubbedHarnessKinds);   // headline arc = FileWritingFakeCli (always patches on success — but ONLY on the harness it arms)
 
@@ -156,7 +156,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             // M-1 number the operator's scorecard renders, through the real reducer chain.
             if (outcome == RealModelOutcome.Drove) await AssertNorthStarClearsFloorAsync(teamId, runId);
 
-            return (outcome, $"{Provider} model '{model}' whole-loop — {note}, answeredAsks={answeredAsks}");
+            return (outcome, $"{Provider} model '{model}' whole-loop — {note}, answeredAsks={answeredAsks}, skippedAmendAsks={skippedAmendAsks}");
         });
     }
 
@@ -434,23 +434,32 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
     /// arc <c>plan→spawn→spawn→merge→ask_human×9</c>, three attempts running, real-model run 33723910434). This answers
     /// each parked card the way an operator would, through the SAME production service the Room's answer endpoint calls,
     /// and lets the resume re-dispatch — an answered ask resets the streak, so a converging run is no longer starved.
+    /// It stops short of the ONE card family a script must never rule on: an amend co-sign, where the brain proposes to
+    /// rewrite or waive the very oracle its acceptance grade is measured against.
     ///
-    /// <para>Bounded by <see cref="UnattendedAskResponder.MaxAnsweredAsks"/>: a brain that keeps asking past it is a genuine capability miss
-    /// (the evaluator scores whatever terminal the run actually reached), never a hang. Returns the count so the verdict
-    /// line records how many asks this attempt cost — a run that needed nine answers is legible as such even when it
-    /// passes.</para>
+    /// <para>Bounded by <see cref="UnattendedAskResponder.MaxAnsweredAsks"/>: a brain that keeps asking past it is a
+    /// genuine capability miss (the evaluator scores whatever terminal the run actually reached), never a hang. An
+    /// <c>amend_acceptance</c> co-sign card is never answered — it stays parked for a real human — so the counts come
+    /// back as a pair and BOTH ride the verdict line: an attempt that needed nine answers, or that stopped at an oracle
+    /// amendment, stays legible even when it passes.</para>
     /// </summary>
-    private Task<int> AnswerParkedAsksAsync(Guid runId, Guid teamId, Guid userId) =>
+    private Task<(int Answered, int LeftForAHuman)> AnswerParkedAsksAsync(Guid runId, Guid teamId, Guid userId) =>
         UnattendedAskResponder.AnswerAllAsync(answer => AnswerParkedAskAsync(runId, teamId, userId, answer), () => DrainUntilSettledAsync(runId));
 
-    /// <summary>Answer the run's newest parked ask through the SAME production service the Room's answer endpoint calls, playing the human. False = nothing is parked awaiting an answer (no token-bearing unanswered ask), which is how the responder's loop terminates.</summary>
-    private async Task<bool> AnswerParkedAskAsync(Guid runId, Guid teamId, Guid userId, string answer)
+    /// <summary>Dispose of the run's newest parked ask through the SAME production service the Room's answer endpoint calls, playing the human — EXCEPT an amend co-sign card, which is left parked (this arm must never co-sign the brain's own rewrite of the oracle it is about to be graded against). <see cref="ParkedAskDisposition.NothingParked"/> = no token-bearing unanswered ask, which is how the responder's loop terminates.</summary>
+    private async Task<ParkedAskDisposition> AnswerParkedAskAsync(Guid runId, Guid teamId, Guid userId, string answer)
     {
         using var scope = _fixture.BeginScope();
 
+        var newestAsk = await scope.Resolve<CodeSpaceDbContext>().SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.AskHuman)
+            .OrderByDescending(d => d.Sequence).Select(d => d.PayloadJson).FirstOrDefaultAsync();
+
+        if (UnattendedAskResponder.MustLeaveForAHuman(newestAsk)) return ParkedAskDisposition.LeftForAHuman;
+
         var outcome = await scope.Resolve<ISupervisorAskAnswerService>().AnswerAsync(runId, teamId, userId, answer, CancellationToken.None);
 
-        return outcome is { Resumed: true };
+        return outcome is { Resumed: true } ? ParkedAskDisposition.Answered : ParkedAskDisposition.NothingParked;
     }
 
     private async Task<bool> ApproveParkedAmendCardAsync(Guid runId, Guid teamId, Guid userId)
@@ -1101,10 +1110,10 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             // merge-conflicted=False, i.e. the conflict the arm exists to present was never reached. Answering lets the
             // arc get there; the criterion below is UNCHANGED (any prompt-sanctioned handling still passes, silently
             // merging over a real conflict still reds).
-            var answeredAsks = await AnswerParkedAsksAsync(runId, teamId, userId);
+            var (answeredAsks, skippedAmendAsks) = await AnswerParkedAsksAsync(runId, teamId, userId);
 
             var (outcome, note) = await EvaluateConflictResolveAsync(runId, teamId);
-            return (outcome, $"{Provider} model '{model}' conflict→resolve — {note}, answeredAsks={answeredAsks}");
+            return (outcome, $"{Provider} model '{model}' conflict→resolve — {note}, answeredAsks={answeredAsks}, skippedAmendAsks={skippedAmendAsks}");
         });
     }
 
