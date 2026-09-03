@@ -455,6 +455,48 @@ public sealed class SupervisorTrajectoryEvalTests
         note.ShouldContain("WITHOUT shipping");
     }
 
+    // ── Environment fidelity: a re-dispatch must be able to SUCCEED, or the fixture fabricates a fail-loop ───
+
+    /// <summary>
+    /// The failure environment must fail the FIRST spawn ONLY. Folding EVERY spawn through the one-failed shape
+    /// manufactures a fresh failure for each re-dispatch, so the brain is punished for a production-legitimate
+    /// recovery and the arc cannot terminate — the same disease the multi-failure sibling was fixed for, observed
+    /// again live on run 33723910434 as plan→spawn→retry→spawn→retry→spawn→retry→spawn into the turn cap.
+    /// </summary>
+    [Fact]
+    public void The_failure_environment_fails_only_the_first_spawn_and_lets_a_re_dispatch_succeed()
+    {
+        var environment = SupervisorTrajectoryEnvironments.FailureThenRetry;
+        var spawn = new SupervisorDecision { Kind = SupervisorDecisionKinds.Spawn, PayloadJson = ScriptedPayload(SupervisorDecisionKinds.Spawn) };
+
+        var first = environment.Fold(spawn, 1, Array.Empty<SupervisorPriorDecision>());
+        var second = environment.Fold(spawn, 2, new[] { first });
+
+        StatusesOf(first).ShouldBe(new[] { "Succeeded", "Failed" }, "the FIRST spawn leaves exactly one unit for the brain to recover");
+        StatusesOf(second).ShouldBe(new[] { "Succeeded", "Succeeded" }, "a re-dispatch is a legitimate fresh attempt and must be able to succeed — otherwise every re-spawn folds a NEW failure and no arc can ever end");
+    }
+
+    /// <summary>
+    /// The same property end-to-end: a brain that recovers by RE-SPAWNING the failed unit rather than calling the
+    /// retry verb reaches a terminal stop and ships. Before the guard every re-spawn folded a fresh failure, so this
+    /// arc could only ever exhaust the turn cap.
+    /// </summary>
+    [Fact]
+    public async Task A_brain_that_recovers_by_re_spawning_ships_instead_of_looping()
+    {
+        var result = await SupervisorTrajectory.RunAsync(new RespawnRecoveringDecider(), SupervisorTrajectoryEnvironments.FailureThenRetry, maxTurns: 8, CancellationToken.None);
+
+        result.HitTurnCap.ShouldBeFalse("a re-dispatch that can succeed lets the arc terminate");
+        result.Kinds.ShouldBe(new[] { SupervisorDecisionKinds.Plan, SupervisorDecisionKinds.Spawn, SupervisorDecisionKinds.Spawn, SupervisorDecisionKinds.Merge, SupervisorDecisionKinds.Stop });
+
+        var (ok, note) = SupervisorTrajectoryScore.Score(result);
+        ok.ShouldBeTrue($"re-spawning the failed unit then merging clean is a sound recovery ({note})");
+    }
+
+    /// <summary>The agent statuses a folded outcome carries, read by the SAME production reader the decider's context is rendered from.</summary>
+    private static IReadOnlyList<string> StatusesOf(SupervisorPriorDecision folded) =>
+        SupervisorOutcome.ReadAgentResults(folded.OutcomeJson).Select(r => r.Status).ToList();
+
     // ── Scripted deciders (decide purely from the prior-decision kinds — no model) ──────────────────────────
 
     /// <summary>
@@ -723,6 +765,22 @@ public sealed class SupervisorTrajectoryEvalTests
                 !kinds.Contains(SupervisorDecisionKinds.Plan) ? SupervisorDecisionKinds.Plan
                 : !kinds.Contains(SupervisorDecisionKinds.Spawn) ? SupervisorDecisionKinds.Spawn
                 : kinds.Count(k => k == SupervisorDecisionKinds.Retry) < 2 ? SupervisorDecisionKinds.Retry
+                : !kinds.Contains(SupervisorDecisionKinds.Merge) ? SupervisorDecisionKinds.Merge
+                : SupervisorDecisionKinds.Stop;
+
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = ScriptedPayload(kind) });
+        }
+    }
+
+    /// <summary>A brain that recovers by RE-DISPATCHING rather than calling the retry verb: plan→spawn→spawn→merge→stop. Production-legitimate — a fresh attempt at the failed unit can succeed.</summary>
+    private sealed class RespawnRecoveringDecider : ISupervisorDecider
+    {
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+        {
+            var kinds = context.PriorDecisions.Select(d => d.DecisionKind).ToList();
+            var kind =
+                !kinds.Contains(SupervisorDecisionKinds.Plan) ? SupervisorDecisionKinds.Plan
+                : kinds.Count(k => k == SupervisorDecisionKinds.Spawn) < 2 ? SupervisorDecisionKinds.Spawn
                 : !kinds.Contains(SupervisorDecisionKinds.Merge) ? SupervisorDecisionKinds.Merge
                 : SupervisorDecisionKinds.Stop;
 

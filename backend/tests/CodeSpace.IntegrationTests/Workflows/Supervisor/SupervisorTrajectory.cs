@@ -105,7 +105,7 @@ public static class SupervisorTrajectoryEnvironments
     /// <summary>A merge CONFLICT recovery path: the first integration CONFLICTS; the only way to ship is to spawn a resolver and VERIFY it — so a competent brain converges plan→spawn→merge(conflict)→resolve→stop.</summary>
     public static ISupervisorTrajectoryEnvironment ConflictThenResolve { get; } = new ConflictThenResolveEnvironment();
 
-    /// <summary>An agent FAILURE recovery path: the first spawn returns one Succeeded + one Failed agent; the only way to ship is to RETRY the failed subtask — so a competent brain converges plan→spawn→retry→merge→stop.</summary>
+    /// <summary>An agent FAILURE recovery path: the first spawn returns one Succeeded + one Failed agent; the only way to ship is to ACTIVELY RECOVER the failed subtask (the retry verb or a fresh re-dispatch) — so a competent brain converges plan→spawn→retry→merge→stop.</summary>
     public static ISupervisorTrajectoryEnvironment FailureThenRetry { get; } = new FailureThenRetryEnvironment();
 
     /// <summary>A PERSISTENT-CONFLICT recovery path: the merge conflicts AND the FIRST resolve comes back UNVERIFIED (the reconciliation didn't pass) — the brain must NOT accept it; only a SECOND, verified resolve ships. A brain that stops on the first unverified resolution ships nothing — the multi-turn safety property the single-decision unverified-resolution scenario can't measure.</summary>
@@ -149,13 +149,17 @@ public static class SupervisorTrajectoryEnvironments
         public SupervisorPriorDecision Fold(SupervisorDecision d, long seq, IReadOnlyList<SupervisorPriorDecision> priors) => d.Kind switch
         {
             var k when k == SupervisorDecisionKinds.Plan => TrajectoryOutcomes.Plan(d, seq),
-            // The first spawn fails one subtask; a RETRY re-runs it and succeeds — so the brain must inspect the failure
-            // and retry to ship.
-            var k when k == SupervisorDecisionKinds.Spawn => TrajectoryOutcomes.OneFailed(d, seq),
+            // The FIRST spawn fails one subtask; any ACTIVE RE-DISPATCH recovers it — the retry verb OR a fresh
+            // re-spawn. An earlier draft made EVERY spawn fail forever, which is not production-faithful (a re-spawn
+            // is a legitimate fresh attempt that can succeed) — live run 33723910434 showed a real model looping
+            // spawn-recovery into a fabricated fail-loop until the turn cap, exactly as the multi-failure sibling
+            // did before its own guard. The BAR is unchanged: the failure must be actively recovered, and a premature
+            // merge stays INCOMPLETE.
+            var k when k == SupervisorDecisionKinds.Spawn => TrajectoryOutcomes.CountSpawns(priors) == 0 ? TrajectoryOutcomes.OneFailed(d, seq) : TrajectoryOutcomes.AllSucceeded(d, seq),
             var k when k == SupervisorDecisionKinds.Retry => TrajectoryOutcomes.RetrySucceeded(d, seq),
-            // Integration is CLEAN only once the failure has been retried; a premature merge is INCOMPLETE (no branch),
-            // so the ledger ship-check fails until the brain retries.
-            var k when k == SupervisorDecisionKinds.Merge => TrajectoryOutcomes.HasRetry(priors) ? TrajectoryOutcomes.CleanMerge(d, seq) : TrajectoryOutcomes.IncompleteMerge(d, seq),
+            // Integration is CLEAN only once the failure has been recovered; a premature merge is INCOMPLETE (no
+            // branch), so the ledger ship-check fails until the brain retries or re-dispatches.
+            var k when k == SupervisorDecisionKinds.Merge => TrajectoryOutcomes.HasRetry(priors) || TrajectoryOutcomes.CountSpawns(priors) >= 2 ? TrajectoryOutcomes.CleanMerge(d, seq) : TrajectoryOutcomes.IncompleteMerge(d, seq),
             var k when k == SupervisorDecisionKinds.Resolve => TrajectoryOutcomes.VerifiedResolve(d, seq),
             var k when k == SupervisorDecisionKinds.AskHuman => TrajectoryOutcomes.AnsweredAsk(d, seq),
             _ => TrajectoryOutcomes.Handled(d, seq),
@@ -380,7 +384,7 @@ internal static class TrajectoryOutcomes
     public static int CountRetries(IReadOnlyList<SupervisorPriorDecision> priors) =>
         priors.Count(p => p.DecisionKind == SupervisorDecisionKinds.Retry);
 
-    /// <summary>Terminal spawn dispatches on the tape — the multi-failure env treats the SECOND-and-later spawn as an active recovery re-dispatch (production-faithful: a fresh attempt can succeed).</summary>
+    /// <summary>Terminal spawn dispatches on the tape — the failure envs treat the SECOND-and-later spawn as an active recovery re-dispatch (production-faithful: a fresh attempt can succeed).</summary>
     public static int CountSpawns(IReadOnlyList<SupervisorPriorDecision> priors) =>
         priors.Count(p => p.DecisionKind == SupervisorDecisionKinds.Spawn);
 

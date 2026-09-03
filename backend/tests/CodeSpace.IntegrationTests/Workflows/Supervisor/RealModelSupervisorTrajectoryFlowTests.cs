@@ -22,7 +22,7 @@ public sealed class RealModelSupervisorTrajectoryFlowTests
     [SkippableTheory]
     [InlineData("Anthropic", "happy")]                  // plan → spawn → merge(clean) → stop
     [InlineData("Anthropic", "conflict")]               // plan → spawn → merge(CONFLICT) → resolve(verified) → stop
-    [InlineData("Anthropic", "failure")]                // plan → spawn(1 FAILED) → retry → merge(clean) → stop
+    [InlineData("Anthropic", "failure")]                // plan → spawn(1 FAILED) → ACTIVELY RECOVER it (retry or re-dispatch) → merge(clean) → stop
     [InlineData("Anthropic", "persistent-conflict")]    // the FIRST resolve is UNVERIFIED → must resolve AGAIN before shipping
     [InlineData("Anthropic", "multi-failure")]          // BOTH subtasks fail → must ACTIVELY RECOVER each (retry or re-dispatch) before a clean merge
     [InlineData("OpenAI", "happy")]

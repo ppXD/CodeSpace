@@ -195,7 +195,7 @@ public sealed class RealModelGateTests
     }
 
     [Fact]
-    public void A_verdict_carries_the_model_name_and_a_masking_proof_fingerprint()
+    public void A_verdict_carries_a_masking_proof_fingerprint()
     {
         // The configured model id is a repository SECRET (masked in the CI log), so the fingerprint is what actually
         // travels: a 25-run red streak can be told apart as "the gateway started answering with another model" only if
@@ -209,9 +209,7 @@ public sealed class RealModelGateTests
         {
             RealModelGate.ReportThreeWay(RealModelOutcome.Drove, "drove the arc", path);
 
-            var written = File.ReadAllText(path);
-            written.ShouldContain("model=");
-            written.ShouldContain("fp=");
+            File.ReadAllText(path).ShouldContain("fp=");
         }
         finally
         {
@@ -219,8 +217,39 @@ public sealed class RealModelGateTests
         }
     }
 
+    /// <summary>
+    /// GitHub masks a secret in the LOG, never in a FILE — and both the step summary and the trx are uploaded as
+    /// artifacts. Run 33723910434's `real-model-results` artifact carried the raw configured model id
+    /// (CODESPACE_LLM_MODEL_ID, a repository secret) in its step-summary copy, readable by anyone who could download
+    /// it. So the stamp the gate WRITES may carry the fingerprint and the source, never a name — for the observed
+    /// name either, which on a pinned lane is the very same id the secret holds.
+    /// </summary>
+    [Theory]
+    [InlineData("gateway-answered-model-xyz", "pinned-secret-model-id", "observed")]   // a live response named a model → its fp, tagged observed
+    [InlineData(null, "pinned-secret-model-id", "configured")]                         // nothing answered → fall back to the configured id's fp
+    [InlineData("", "pinned-secret-model-id", "configured")]                           // a blank observation is not an observation
+    public void The_stamp_the_gate_writes_carries_the_fingerprint_and_its_source_but_never_a_model_name(string? observed, string configured, string expectedSource)
+    {
+        var stamp = RealModelGate.ModelStamp(observed, configured);
+        var fingerprinted = string.IsNullOrWhiteSpace(observed) ? configured : observed;
+
+        stamp.ShouldContain($"({expectedSource})", Case.Sensitive, "an observed name must win over the configured id, and the reader must be told which one answered");
+        stamp.ShouldContain($"fp={RealModelGate.Fingerprint(fingerprinted)}", Case.Sensitive, "the fingerprint is taken over the name that actually identified the model this run");
+        stamp.ShouldNotContain(configured, Case.Sensitive, "the configured id is a repository SECRET and the artifact is a FILE — masking does not apply");
+
+        if (!string.IsNullOrWhiteSpace(observed))
+            stamp.ShouldNotContain(observed, Case.Sensitive, "on a pinned lane the observed name IS the secret; only its fingerprint may be written");
+    }
+
     [Fact]
-    public async Task The_verdict_names_the_model_the_PROVIDER_reported_not_the_one_that_was_asked_for()
+    public void The_stamp_says_unknown_when_nothing_named_a_model_at_all()
+    {
+        RealModelGate.ModelStamp(observed: null, configured: null).ShouldBe("[model=unknown fp=none]");
+        RealModelGate.ModelStamp(observed: "  ", configured: "  ").ShouldBe("[model=unknown fp=none]");
+    }
+
+    [Fact]
+    public async Task A_written_verdict_fingerprints_the_model_the_PROVIDER_reported_not_the_one_that_was_asked_for()
     {
         var path = Path.Combine(Path.GetTempPath(), $"realmodel-observed-{Guid.NewGuid():N}.md");
         try
@@ -235,14 +264,27 @@ public sealed class RealModelGateTests
             }, gating: false, stepSummaryPath: path);
 
             var written = File.ReadAllText(path);
-            written.ShouldContain("model=gateway-answered-model-xyz");
             written.ShouldContain($"fp={RealModelGate.Fingerprint("gateway-answered-model-xyz")}");
-            written.ShouldNotContain("(configured)", Case.Sensitive, "an observed name must win over the configured id");
+            written.ShouldContain("(observed)", Case.Sensitive, "an observed name must win over the configured id");
+            written.ShouldNotContain("gateway-answered-model-xyz", Case.Sensitive, "no model NAME may reach a file the gate writes — the file is uploaded, and upload masks nothing");
         }
         finally
         {
             File.Delete(path);
         }
+    }
+
+    /// <summary>
+    /// The name is not thrown away: the console-only line MAY spell out an OBSERVED name that differs from the
+    /// configured id, because that difference is the whole diagnostic ("the gateway started answering with another
+    /// model") and by construction is not the secret. The configured id is never spelled out anywhere.
+    /// </summary>
+    [Fact]
+    public void The_console_only_line_may_name_an_observed_model_that_differs_from_the_configured_id()
+    {
+        RealModelGate.UnexpectedModelSuffix("gateway-answered-model-xyz", "pinned-secret-model-id").ShouldContain("gateway-answered-model-xyz");
+        RealModelGate.UnexpectedModelSuffix("pinned-secret-model-id", "pinned-secret-model-id").ShouldBeEmpty("the gateway answered with exactly what was asked for — naming it would print the secret");
+        RealModelGate.UnexpectedModelSuffix(null, "pinned-secret-model-id").ShouldBeEmpty("nothing was observed, so there is no unexpected model to name");
     }
 
     [Fact]
