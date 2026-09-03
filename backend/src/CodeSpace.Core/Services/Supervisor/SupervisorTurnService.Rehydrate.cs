@@ -1025,6 +1025,29 @@ public sealed partial class SupervisorTurnService
         return manifest?.BaseSha;
     }
 
+    /// <summary>
+    /// C3: the base sha the STOP gates restore each target repository's oracle from — the newest recorded
+    /// <c>PublishManifest.BaseSha</c> for that repo (the S1 immutable base its participants materialized from,
+    /// the same anchor the per-unit fold restores against, read newest-first off the store). Resolved once per
+    /// stop, not once per repo×gate.
+    ///
+    /// <para>Without it the OPERATOR's floor — the one gate a run cannot ship past, and the only oracle the model
+    /// never authors — graded whatever bytes the candidate left behind under its own check script's name. A repo
+    /// with no recorded base is simply absent, and grades unprotected exactly as before.</para>
+    /// </summary>
+    private async Task<IReadOnlyDictionary<Guid, string>> OracleBaseShasAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var manifests = await _manifests.ListForWorkflowRunAsync(supervisorRunId, teamId, cancellationToken).ConfigureAwait(false);
+
+        var bases = new Dictionary<Guid, string>();
+
+        foreach (var manifest in manifests)
+            if (manifest.RepositoryId is { } repositoryId && !string.IsNullOrWhiteSpace(manifest.BaseSha) && !bases.ContainsKey(repositoryId))
+                bases[repositoryId] = manifest.BaseSha!;
+
+        return bases;
+    }
+
     private async Task<Core.Persistence.Entities.PublishManifest?> ResolveUnitManifestAsync(Guid agentRunId, Guid repositoryId, Guid teamId, CancellationToken cancellationToken)
     {
         var manifests = await _manifests.ListForAgentRunAsync(agentRunId, teamId, cancellationToken).ConfigureAwait(false);
@@ -1100,10 +1123,12 @@ public sealed partial class SupervisorTurnService
         if (gates.All(g => g.Spec is null)) return execution;   // no operator floor + no model criterion → byte-identical no-op (the dominant case)
 
         IReadOnlyList<(Guid RepositoryId, string Alias, string Branch)> targets;
+        IReadOnlyDictionary<Guid, string> oracleBaseShas;
 
         try
         {
             targets = await ResolveAcceptanceTargetsAsync(context, teamId, cancellationToken).ConfigureAwait(false);
+            oracleBaseShas = await OracleBaseShasAsync(context.SupervisorRunId, teamId, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1122,7 +1147,7 @@ public sealed partial class SupervisorTurnService
         // "grader.acceptance" so its spend is recorded + counts toward the cost cap.
         BenchmarkGrade grade;
         using (Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(context.SupervisorRunId, teamId, context.NodeId, "", GraderAcceptanceCallKind, _recordLogger, _offloader, _budget, context.MaxCostUsd)))
-            grade = await GradeStopTargetsWithHeartbeatAsync(context.SupervisorRunId, context.NodeId, teamId, targets, gates, cancellationToken).ConfigureAwait(false);
+            grade = await GradeStopTargetsWithHeartbeatAsync(context.SupervisorRunId, context.NodeId, teamId, targets, gates, oracleBaseShas, cancellationToken).ConfigureAwait(false);
 
         return execution with { OutcomeJson = SupervisorOutcome.AppendAcceptanceGrade(execution.OutcomeJson, grade.Passed, grade.Detail) };
     }
@@ -1136,14 +1161,14 @@ public sealed partial class SupervisorTurnService
     /// migration) at <see cref="SupervisorLane.AcceptanceGradeHeartbeatInterval"/>; it stops the instant grading
     /// finishes (success, failure, or exception) via the linked token — never outlives the grade it protects.
     /// </summary>
-    private async Task<BenchmarkGrade> GradeStopTargetsWithHeartbeatAsync(Guid supervisorRunId, string nodeId, Guid teamId, IReadOnlyList<(Guid RepositoryId, string Alias, string Branch)> targets, IReadOnlyList<(string Label, SupervisorAcceptanceSpec? Spec)> gates, CancellationToken cancellationToken)
+    private async Task<BenchmarkGrade> GradeStopTargetsWithHeartbeatAsync(Guid supervisorRunId, string nodeId, Guid teamId, IReadOnlyList<(Guid RepositoryId, string Alias, string Branch)> targets, IReadOnlyList<(string Label, SupervisorAcceptanceSpec? Spec)> gates, IReadOnlyDictionary<Guid, string> oracleBaseShas, CancellationToken cancellationToken)
     {
         using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var heartbeat = RunGradingHeartbeatLoopAsync(supervisorRunId, nodeId, SupervisorLane.AcceptanceGradeHeartbeatInterval, heartbeatCts.Token);
 
         try
         {
-            return await GradeStopTargetsAsync(teamId, targets, gates, cancellationToken).ConfigureAwait(false);
+            return await GradeStopTargetsAsync(teamId, targets, gates, oracleBaseShas, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -1202,7 +1227,7 @@ public sealed partial class SupervisorTurnService
     /// operator's own workspace, not the model). The first-failure short-circuit keeps the common rejected case cheap;
     /// a future perf slice could grade with a bounded degree-of-parallelism if a large workspace makes wall-clock bite.</para>
     /// </summary>
-    private async Task<BenchmarkGrade> GradeStopTargetsAsync(Guid teamId, IReadOnlyList<(Guid RepositoryId, string Alias, string Branch)> targets, IReadOnlyList<(string Label, SupervisorAcceptanceSpec? Spec)> gates, CancellationToken cancellationToken)
+    private async Task<BenchmarkGrade> GradeStopTargetsAsync(Guid teamId, IReadOnlyList<(Guid RepositoryId, string Alias, string Branch)> targets, IReadOnlyList<(string Label, SupervisorAcceptanceSpec? Spec)> gates, IReadOnlyDictionary<Guid, string> oracleBaseShas, CancellationToken cancellationToken)
     {
         foreach (var target in targets)
         {
@@ -1217,7 +1242,10 @@ public sealed partial class SupervisorTurnService
                 BenchmarkGrade grade;
                 try
                 {
-                    grade = await _acceptanceGrader.GradeAsync(target.RepositoryId, teamId, target.Branch, spec, spec?.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+                    // C3: every stop gate grades against a PROTECTED oracle — the grader restores the gate command's
+                    // own program file from the run's recorded base, so a candidate cannot buy the run's terminal
+                    // pass by rewriting the check script the operator's floor runs.
+                    grade = await _acceptanceGrader.GradeAsync(target.RepositoryId, teamId, target.Branch, spec, spec?.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, oracleBaseShas.GetValueOrDefault(target.RepositoryId), cancellationToken).ConfigureAwait(false);
                 }
                 catch (Workflows.Llm.LlmBudgetExceededException refused)
         {

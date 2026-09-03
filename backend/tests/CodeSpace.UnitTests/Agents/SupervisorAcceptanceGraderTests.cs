@@ -509,12 +509,230 @@ public class SupervisorAcceptanceGraderTests
     }
 
     [Fact]
+    public async Task An_unprotected_command_oracle_derives_its_own_program_from_the_base_and_voids_a_tamper()
+    {
+        // C3: the OPERATOR floor never authors ProtectedPaths — nothing in Core or the UI writes one — so before
+        // this the most trusted oracle in the system ran whatever bytes the candidate left under check.sh's name.
+        // With a base sha in hand the grader now probes the base for the command's own program and protects it.
+        var runners = new RecordingRunnerRegistry();
+        runners.Script(new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "check.sh\n", Stderr = "" });   // ls-tree: the base ships check.sh
+        runners.Script(new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "check.sh\n", Stderr = "" });   // diff: the candidate changed it
+        var artifacts = new FakeArtifactStore();
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: runners, artifacts: artifacts);
+
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = Command }, 30, "abc123def4567890", CancellationToken.None);
+
+        grade.Passed.ShouldBeTrue("the restore VOIDS the tamper — the verdict is the base judge's");
+
+        runners.Invocations[0].Args.ShouldBe(new[] { "ls-tree", "-r", "--name-only", "abc123def4567890", "--", "check.sh" }, "existence is answered off the base tree of the clone the grade already has — never a second fetch");
+        runners.Invocations[1].Args.ShouldBe(new[] { "diff", "--name-only", "abc123def4567890", "--", "check.sh" });
+        runners.Invocations[2].Args.ShouldBe(new[] { "checkout", "abc123def4567890", "--", "check.sh" }, "the derived program is restored exactly like an authored path");
+
+        artifacts.Puts.ShouldHaveSingleItem().Text.ShouldContain("ORACLE TAMPER VOIDED", Case.Sensitive, "the same wording the decider prompt + journal already read");
+    }
+
+    [Fact]
+    public async Task An_authored_protection_wins_outright_and_is_never_widened_by_derivation()
+    {
+        // A contract that scoped its own oracle is not second-guessed: no probe runs, and the restore covers
+        // exactly the authored set — the model-authored per-unit path stays byte-identical.
+        var runners = new RecordingRunnerRegistry();
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: runners);
+
+        var spec = new SupervisorAcceptanceSpec { Command = Command, ProtectedPaths = new[] { "tests/" } };
+        await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, "abc123def4567890", CancellationToken.None);
+
+        runners.Invocations.ShouldAllBe(i => !i.Args.Contains("ls-tree"), "an authored set needs no existence probe");
+        runners.Invocations.Count.ShouldBe(4, "tamper diff, restore, addition scan, untracked clean — the same four as before C3");
+        runners.Invocations[1].Args.ShouldBe(new[] { "checkout", "abc123def4567890", "--", "tests/" }, "check.sh is NOT added to the authored scope");
+    }
+
+    [Fact]
+    public async Task A_program_the_base_does_not_ship_is_not_the_operators_judge()
+    {
+        // The candidate may have authored the script itself (a task that says "add a check"). Restoring a path that
+        // does not exist at base would fail the git checkout outright and turn a gradeable candidate into an
+        // Environment failure — so an absent program simply grades unprotected.
+        var runners = new RecordingRunnerRegistry();
+        runners.Script(new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "", Stderr = "" });   // ls-tree finds nothing
+        var oracle = new FakeGrader(Pass);
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), oracle, runners: runners);
+
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = Command }, 30, "abc123def4567890", CancellationToken.None);
+
+        grade.Passed.ShouldBeTrue();
+        runners.Invocations.Count.ShouldBe(1, "the probe alone — no restore, no sweep");
+        oracle.Context.ShouldNotBeNull("the oracle still runs; an underivable protection is never a fail-closed arm");
+    }
+
+    [Fact]
+    public async Task A_failed_base_probe_grades_unprotected_rather_than_failing_a_gradeable_candidate()
+    {
+        var runners = new RecordingRunnerRegistry();
+        runners.Script(new SandboxResult { Status = SandboxStatus.Failed, ExitCode = 128, Stdout = "", Stderr = "fatal: not a tree object" });
+        var oracle = new FakeGrader(Pass);
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), oracle, runners: runners);
+
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = Command }, 30, "abc123def4567890", CancellationToken.None);
+
+        grade.Passed.ShouldBeTrue("a base we cannot read protects nothing — it does not invent a verdict");
+        grade.Detail.ShouldBe("tests-passed");
+        oracle.Context.ShouldNotBeNull();
+    }
+
+    [Fact]
+    public async Task A_non_argv_oracle_never_derives_protection()
+    {
+        // ArtifactPresent's Command is the list of deliverables the candidate must PRODUCE. Restoring one of those
+        // from base would void the very work being verified — the opposite of protecting a judge.
+        var runners = new RecordingRunnerRegistry();
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: runners);
+
+        var spec = new SupervisorAcceptanceSpec { Command = new[] { "docs/report.md" }, Kind = BenchmarkGradingKind.ArtifactPresent };
+        await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, "abc123def4567890", CancellationToken.None);
+
+        runners.Invocations.ShouldBeEmpty("no probe, no restore — the deliverable is not the oracle");
+    }
+
+    // ── C3, real git + the real oracle: the mechanism, not just the argv the grader asks for ─────────────
+
+    [Theory]
+    [InlineData(true, false, "tests-failed-exit-1")]     // the candidate rewrote check.sh → the restored judge fails it
+    [InlineData(false, true, "tests-passed")]            // the candidate did the work → the same judge passes it
+    public async Task A_candidates_rewrite_of_the_check_script_is_restored_from_the_base_over_a_real_repository(bool rewritesTheCheck, bool expectedPass, string expectedDetail)
+    {
+        // 🟢 High fidelity for the RESTORE: a real git repository, the real LocalProcessRunner, and the real
+        // TestsPassGrader — only the clone seam is faked (a real git working tree is exactly what a clone yields).
+        // The scripted-runner tests above prove the grader asks git for the right thing and nothing about what git
+        // then does; this proves the derivation + restore + verdict actually work end to end, and it needs no
+        // database, so it stands even where the integration fixture cannot run.
+        if (OperatingSystem.IsWindows() || !GitAvailable()) return;
+
+        using var repo = new RealRepo();
+        var baseSha = repo.SeedBase("#!/bin/sh\nif [ -f marker.txt ]; then exit 0; else exit 1; fi\n");
+
+        if (rewritesTheCheck)
+            repo.CommitOnCandidate("check.sh", "#!/bin/sh\nexit 0\n");          // the judge replaced; marker.txt never produced
+        else
+            repo.CommitOnCandidate("marker.txt", "delivered\n");                // the work really done; the judge untouched
+
+        var artifacts = new FakeArtifactStore();
+        var grader = BuildReal(repo.Directory, artifacts);
+
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "candidate", new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } }, 60, baseSha, CancellationToken.None);
+
+        grade.Passed.ShouldBe(expectedPass, $"the acceptance command's own program is restored from the base before it runs (detail='{grade.Detail}')");
+        grade.Detail.ShouldBe(expectedDetail, "the tampered candidate fails as a REAL verdict — never an oracle-restore collapse, never a self-awarded pass");
+        grade.Class.ShouldNotBe(GradeFailureClass.Environment, "an infra collapse would read as a verdict here — exactly how an unprotected floor hid before C3");
+
+        var evidence = artifacts.Puts.ShouldHaveSingleItem().Text;
+
+        if (rewritesTheCheck)
+            evidence.ShouldContain("ORACLE TAMPER VOIDED", Case.Sensitive, "a worker that rewrote its own judge must be SEEN, not merely neutralized");
+        else
+            evidence.ShouldNotContain("TAMPER", Case.Sensitive, "calling honest work tamper would teach the operator to ignore the warning");
+    }
+
+    [Fact]
+    public async Task A_check_script_the_base_never_had_is_the_candidates_own_work_over_a_real_repository()
+    {
+        // The scope fence: a task whose point is "add the check" must stay gradeable. The script is absent at base,
+        // so it is not the operator's judge — and handing `git checkout <base> -- check.sh` a path that does not
+        // exist there would fail the restore and turn honest work into an Environment failure.
+        if (OperatingSystem.IsWindows() || !GitAvailable()) return;
+
+        using var repo = new RealRepo();
+        var baseSha = repo.SeedBase(checkScript: null);
+
+        repo.CommitOnCandidate("check.sh", "#!/bin/sh\nexit 0\n");
+
+        var grader = BuildReal(repo.Directory, new FakeArtifactStore());
+
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "candidate", new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } }, 60, baseSha, CancellationToken.None);
+
+        grade.Passed.ShouldBeTrue($"the candidate AUTHORED check.sh — it is the work, not the judge (detail='{grade.Detail}')");
+        grade.Detail.ShouldBe("tests-passed");
+    }
+
+    /// <summary>The grader with ONLY the clone seam faked: <paramref name="directory"/> is a real git working tree, and the runner + oracle are the production ones.</summary>
+    private static SupervisorAcceptanceGrader BuildReal(string directory, FakeArtifactStore artifacts) =>
+        new(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }),
+            new FakeProviderRegistry(new FakeProvider(new FakeHandle(directory), null)),
+            new RealRunnerRegistry(),
+            new BenchmarkGraderRegistry(new CodeSpace.Core.Services.Agents.Eval.Benchmark.IBenchmarkGrader[] { new CodeSpace.Core.Services.Agents.Eval.Benchmark.Graders.TestsPassGrader() }),
+            new FakeOffloader(), artifacts, NullLogger<SupervisorAcceptanceGrader>.Instance);
+
+    private static bool GitAvailable() => Git(Path.GetTempPath(), out _, "--version");
+
+    private sealed class RealRunnerRegistry : ISandboxRunnerRegistry
+    {
+        private readonly CodeSpace.Core.Services.Agents.Sandbox.Runners.LocalProcessRunner _runner = new();
+        public ISandboxRunner Resolve(string kind) => _runner;
+        public IReadOnlyList<ISandboxRunner> All => new ISandboxRunner[] { _runner };
+    }
+
+    /// <summary>A throwaway git repository whose working tree is what the faked clone hands the grader: a <c>main</c> base commit, then a <c>candidate</c> branch checked out.</summary>
+    private sealed class RealRepo : IDisposable
+    {
+        public string Directory { get; } = Path.Combine(Path.GetTempPath(), "cs-oracle-derive-" + Guid.NewGuid().ToString("N"));
+
+        public RealRepo()
+        {
+            System.IO.Directory.CreateDirectory(Directory);
+            Run("init", "-b", "main");
+            Run("config", "user.email", "test@codespace.dev");
+            Run("config", "user.name", "Test");
+            Run("config", "commit.gpgsign", "false");
+        }
+
+        /// <summary>The base commit — the operator's judge (when <paramref name="checkScript"/> is given) plus a file so the tree is never empty. Returns its SHA.</summary>
+        public string SeedBase(string? checkScript)
+        {
+            File.WriteAllText(Path.Combine(Directory, "README.md"), "base\n");
+
+            if (checkScript is not null) File.WriteAllText(Path.Combine(Directory, "check.sh"), checkScript);
+
+            Run("add", "-A");
+            Run("commit", "-m", "seed");
+
+            Git(Directory, out var sha, "rev-parse", "HEAD").ShouldBeTrue();
+            Run("checkout", "-b", "candidate");
+
+            return sha.Trim();
+        }
+
+        public void CommitOnCandidate(string name, string content)
+        {
+            File.WriteAllText(Path.Combine(Directory, name), content);
+            Run("add", "-A");
+            Run("commit", "-m", "candidate work");
+        }
+
+        private void Run(params string[] args) => Git(Directory, out var output, args).ShouldBeTrue($"git {string.Join(' ', args)} failed: {output}");
+
+        public void Dispose()
+        {
+            try { System.IO.Directory.Delete(Directory, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
+    private static bool Git(string workdir, out string output, params string[] args)
+    {
+        var result = new CodeSpace.Core.Services.Agents.Sandbox.Runners.LocalProcessRunner()
+            .RunAsync(new SandboxSpec { Command = "git", Args = args, WorkingDirectory = workdir, TimeoutSeconds = 60 }, CancellationToken.None)
+            .GetAwaiter().GetResult();
+
+        output = string.IsNullOrEmpty(result.Stdout) ? result.Stderr : result.Stdout;
+        return result.Status == SandboxStatus.Success && result.ExitCode == 0;
+    }
+
+    [Fact]
     public void Evaluator_version_constant_pinned()
     {
         // The literal is the wire value on durable receipts — a rename/bump is a re-qualification decision, not
         // an invisible refactor. Bump in the SAME PR as any grading-semantics change.
-        // v3: a pre-completion full patch artifact is authoritative over its bounded inline compatibility copy.
-        SupervisorAcceptanceGrader.EvaluatorVersion.ShouldBe("supervisor-acceptance/v3");
+        // v4: an argv oracle's own program file is protected from candidate tampering even when no ProtectedPaths were authored.
+        SupervisorAcceptanceGrader.EvaluatorVersion.ShouldBe("supervisor-acceptance/v4");
     }
 
     [Fact]

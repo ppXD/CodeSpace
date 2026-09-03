@@ -59,7 +59,53 @@ public class AgentRunExecutorAcceptanceTests
         result.Contradiction.ShouldBeNull("this early return is EXACTLY why an under-claim (Failed self-report, passing grade) can never occur in this lane — a self-reported failure is never graded at all");
     }
 
+    [Fact]
+    public async Task A_branch_grade_hands_the_runs_own_base_to_the_grader_as_the_oracle_anchor()
+    {
+        // C3: the branch lane used to DISCARD the base it had recorded, so the grader had nothing to restore the
+        // check script from and graded whatever bytes the agent left behind under that name. The patch lane always
+        // passed its base; this is the branch lane's twin.
+        var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "ok" });
+
+        var produced = Succeeded() with { BaseSha = "base1234base1234" };
+        await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), produced, workspace: null, CancellationToken.None);
+
+        grader.OracleBaseShaByBranch["agent/s5-test"].ShouldBe("base1234base1234", "without the anchor the agent's own edit of check.sh IS the judge");
+    }
+
+    [Fact]
+    public async Task A_run_with_no_recorded_base_still_grades_exactly_as_before()
+    {
+        var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "ok" });
+
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), Succeeded(), workspace: null, CancellationToken.None);
+
+        grader.OracleBaseShaByBranch["agent/s5-test"].ShouldBeNull("a re-attached run with no surviving clone records no base — it grades unprotected, never fails closed for it");
+        result.AcceptancePassed.ShouldBe(true);
+    }
+
     // ── Multi-repo: graded PER REPO, mirroring the supervisor lane's per-unit multi-repo fold ─────────────
+
+    [Fact]
+    public async Task Each_repo_of_a_multi_repo_grade_is_anchored_on_its_own_base()
+    {
+        var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "exit 0" });
+
+        var multi = Succeeded() with
+        {
+            RepositoryResults = new[]
+            {
+                new RepositoryRunResult { RepositoryId = Guid.NewGuid(), Alias = "web", ProducedBranch = "agent/web", BaseSha = "webbase1" },
+                new RepositoryRunResult { RepositoryId = Guid.NewGuid(), Alias = "api", ProducedBranch = "agent/api", BaseSha = "apibase1" },
+            },
+        };
+
+        await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), multi, workspace: null, CancellationToken.None);
+
+        grader.OracleBaseShaByBranch["agent/web"].ShouldBe("webbase1");
+        grader.OracleBaseShaByBranch["agent/api"].ShouldBe("apibase1", "one repo's base can never anchor another's oracle");
+    }
+
 
     [Fact]
     public async Task A_multi_repo_result_grades_every_repo_that_produced_a_branch()
@@ -421,6 +467,15 @@ public class AgentRunExecutorAcceptanceTests
         public string? LastPatchBaseSha { get; private set; }
         public string? LastInlinePatch { get; private set; }
         public Guid? LastPatchArtifactId { get; private set; }
+
+        /// <summary>C3 — the oracle anchor each branch grade was handed, keyed by branch. Null (or an absent key) means that grade ran with no protection at all.</summary>
+        public Dictionary<string, string?> OracleBaseShaByBranch { get; } = new();
+
+        public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, string? oracleBaseSha, CancellationToken cancellationToken)
+        {
+            OracleBaseShaByBranch[branch] = oracleBaseSha;
+            return GradeAsync(repositoryId, teamId, branch, spec, timeoutSeconds, cancellationToken);
+        }
 
         public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
         {
