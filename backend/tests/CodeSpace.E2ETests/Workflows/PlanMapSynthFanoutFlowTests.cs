@@ -9,6 +9,7 @@ using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
@@ -118,13 +119,19 @@ public class PlanMapSynthFanoutFlowTests
     }
 
     [Fact]
-    public async Task An_item_whose_acceptance_contract_cannot_be_graded_fails_closed_through_to_the_checklist()
+    public async Task An_item_whose_acceptance_contract_cannot_be_graded_fails_closed_without_discarding_its_siblings_work()
     {
         if (OperatingSystem.IsWindows()) return;
 
-        // The rich-contract plan: s1 plain, s2 carries an OBJECTIVE acceptance. This fan-out runs REPO-LESS, so
-        // s2's contract has no produced branch to grade — the S5 gate must fail it CLOSED (never a phantom pass),
-        // the terminate-mode map must fail the run, and the checklist must tell the whole truth per item.
+        // The rich-contract plan: s1 research-kinded, s2 carries an OBJECTIVE acceptance. This fan-out runs
+        // REPO-LESS, so s2's contract has no produced branch to grade — the S5 gate must fail it CLOSED (never a
+        // phantom pass) and the checklist must tell the whole truth per item.
+        //
+        // What CHANGED with continue-on-error: the flunked item no longer takes the run down with it. Under the
+        // map's old terminate default, s2's failure skipped the reduce entirely — s1's real work existed only as
+        // an agent row, and the run's own outputs were empty. Now the map completes, the reduce runs, and the run
+        // reports Success WITH the failure counted and named. Fail-closed is a per-ITEM verdict; it was never
+        // supposed to mean "throw away every sibling".
         using (var knob = _fixture.BeginScope()) knob.Resolve<WorkPlanPlanScript>().AuthorContract = true;
 
         try
@@ -147,13 +154,39 @@ public class PlanMapSynthFanoutFlowTests
             using var verify = _fixture.BeginScope();
             var db = verify.Resolve<CodeSpaceDbContext>();
 
-            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
-                .ShouldBe(WorkflowRunStatus.Failure, "terminate-mode map: an item that flunks its contract fails the run — the same withhold philosophy as Deep's stop floor");
+            var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+
+            run.Status.ShouldBe(WorkflowRunStatus.Success,
+                customMessage: $"continue-on-error: the flunked item marks itself failed and the map still finishes, so the surviving sibling's work reaches the reduce — error: {run.Error}");
 
             var agentRuns = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).OrderBy(r => r.IterationKey).ToListAsync();
             var flunked = agentRuns.Single(r => r.Status == AgentRunStatus.Failed);
             flunked.ResultJson!.ShouldContain("acceptance-failed");
             flunked.ResultJson!.ShouldContain("no-branch-or-repo");
+
+            agentRuns.Count(r => r.Status == AgentRunStatus.Succeeded).ShouldBe(1,
+                customMessage: "the sibling item really ran and succeeded — it is exactly the work terminate-mode used to discard");
+
+            // The failure is COUNTED, on the map's own bag and on the run row beside the answer it qualifies.
+            var mapNode = await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "map" && n.IterationKey == "");
+            JsonDocument.Parse(mapNode.OutputsJson!).RootElement.GetProperty(WorkflowOutputKeys.MapFailed).GetInt32().ShouldBe(1);
+
+            var runOutputs = JsonDocument.Parse(run.OutputsJson!).RootElement;
+            runOutputs.GetProperty(WorkflowOutputKeys.MapFailed).GetInt32().ShouldBe(1,
+                customMessage: "a partial answer must be legible from the run's own outcome, not only from the map node's bag");
+
+            // …and NAMED: the reduce ran and read the failed branch's error marker. The deterministic synth echoes
+            // its prompt, so the marker's presence proves the reduce was handed the failure rather than a gap.
+            var combined = runOutputs.GetProperty("combined").GetString()!;
+            combined.ShouldStartWith(DeterministicSynthLlmClient.Prefix, customMessage: "the reduce ran at all — under terminate it never did");
+            combined.ShouldContain("error", Case.Insensitive, customMessage: "the reduce read the failed branch's {\"error\": ...} marker, so it can say what is missing");
+
+            // The plan item's own KIND reached the body on the DEFAULT lane: s1 is research-kinded, so the node
+            // resolved a read-only agent that produces no branch (privilege only ever lowers).
+            var research = agentRuns.Select(r => JsonSerializer.Deserialize<Messages.Agents.AgentTask>(r.TaskJson, AgentJson.Options)!)
+                .Single(t => t.Goal == "do the first thing");
+            research.PushProducedBranch.ShouldBe(false, customMessage: "kind=research ⇒ the node maps mode=research ⇒ no produced branch — the planner's per-item posture now reaches the standard lane");
+            research.Permissions.WriteScope.ShouldBe(AgentWriteScope.ReadOnly, customMessage: "kind=research ⇒ a read-only agent");
 
             var checklist = await verify.Resolve<CodeSpace.Core.Services.Plans.IWorkPlanChecklistService>().GetCurrentAsync(runId, teamId, CancellationToken.None);
             var states = checklist!.Items.Select(i => i.State).ToList();

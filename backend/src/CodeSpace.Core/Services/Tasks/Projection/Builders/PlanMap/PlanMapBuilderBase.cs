@@ -33,8 +33,28 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
     /// <summary>The body agent's goal binding over the planner's subtask objects — e.g. <c>"{{item.instruction}}"</c>.</summary>
     protected abstract string BranchGoal { get; }
 
-    /// <summary>The body agent's per-branch mode binding (e.g. <c>"{{item.kind}}"</c> — the plan item's open kind), or null when the variant authors no mode — then <see cref="AgentNodeMapping.BuildAgentConfig"/> omits it (byte-identical to a no-mode node).</summary>
-    protected virtual string? BranchMode => null;
+    /// <summary>
+    /// The body agent's per-branch mode binding — the plan item's OPEN <c>kind</c> (research / code / …), which
+    /// <c>AgentCodeNode</c> maps to a permission + push posture UNDER the autonomy-tier ceiling: a recognised
+    /// <c>research</c> kind LOWERS the branch to read-only + no produced branch, anything else (including an
+    /// unrecognised kind and an item that typed none) resolves to the tier baseline exactly as before. It rides on
+    /// EVERY plan-map variant, because the planner is invited to type each item on every one of them and a kind the
+    /// body never reads is a decision the platform threw away. Privilege only ever LOWERS here — a kind can never
+    /// raise the tier or turn network on — so honouring it is safe on the default lane, not only the opt-in one.
+    /// <para>A variant that must not read the item's kind overrides this to null; <see cref="AgentNodeMapping.BuildAgentConfig"/>
+    /// then omits the key (byte-identical to a no-mode node).</para>
+    /// </summary>
+    protected virtual string? BranchMode => "{{item.kind}}";
+
+    /// <summary>
+    /// The body agent's per-branch MODEL binding — the plan item's authored model name (the planner picks each
+    /// item's best fit from the team's capability catalog). It is passed as a FALLBACK, never an override: an
+    /// operator-pinned profile model still wins (<see cref="AgentNodeMapping.BuildAgentConfig"/>'s precedence), and
+    /// an item that authored none resolves to null at run time — the same absent-model task the body built before.
+    /// The harness follows: <c>HarnessModelReconciler</c> repairs a harness that cannot drive the named model's
+    /// provider at dispatch, which is how the plan's allocation lands without the body binding the harness itself.
+    /// </summary>
+    private const string BranchModel = "{{item.model}}";
 
     public WorkflowDefinition Build(TaskBuildContext context) => new()
     {
@@ -68,7 +88,7 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
             new() { Id = "ms", TypeKey = "flow.map_start", Label = "Subtask", ParentId = "map", Config = Empty(), Inputs = Empty() },
 
             new() { Id = "agent", TypeKey = "agent.run", Label = "Work the subtask", ParentId = "map", Retry = AgentNodeMapping.DefaultRetry,
-                    Config = AgentNodeMapping.BuildAgentConfig(BranchGoal, context.AgentProfile, BranchMode, grounding: context.GroundingContext, acceptance: "{{item.acceptance}}"), Inputs = AgentNodeMapping.BuildAgentInputs(context) },
+                    Config = AgentNodeMapping.BuildAgentConfig(BranchGoal, context.AgentProfile, BranchMode, grounding: context.GroundingContext, acceptance: "{{item.acceptance}}", fallbackModel: BranchModel), Inputs = AgentNodeMapping.BuildAgentInputs(context) },
         });
 
         // P4 (the plan-map integrated candidate): a repo-bound fan-out integrates its produced work into ONE
@@ -158,10 +178,21 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
         items = context.RequirePlanConfirmation ? "{{nodes.confirm.outputs.json.subtasks}}" : "{{nodes.planner.outputs.json.subtasks}}",
     });
 
-    /// <summary>The map Config — the route's <see cref="RouteCaps.MaxParallelism"/> cap so the fan-out is bounded (the engine reads the <c>maxParallelism</c> key into the branch SemaphoreSlim via <c>MapConfig</c>), the route's spend ceiling, both written only when the route sets them, and always the reduce's input budget (<see cref="SynthPromptBudgetChars"/>) that <see cref="SynthInputs"/>'s bounded binding depends on.</summary>
+    /// <summary>The <c>flow.map</c> error policy every plan-map graph declares — the wire value <c>MapPlan.ParseErrorHandling</c> reads (anything else, including the schema's own default, means terminate).</summary>
+    internal const string MapErrorHandlingContinue = "continue";
+
+    /// <summary>The map Config — always the continue-on-error policy (<see cref="MapErrorHandlingContinue"/>, so one dead branch never discards its siblings' work), the route's <see cref="RouteCaps.MaxParallelism"/> cap so the fan-out is bounded (the engine reads the <c>maxParallelism</c> key into the branch SemaphoreSlim via <c>MapConfig</c>), the route's spend ceiling, both written only when the route sets them, and always the reduce's input budget (<see cref="SynthPromptBudgetChars"/>) that <see cref="SynthInputs"/>'s bounded binding depends on.</summary>
     private static JsonElement MapConfigJson(TaskBuildContext context)
     {
         var config = new JsonObject();
+
+        // A SIBLING'S failure must not destroy this run's work. The flow.map schema defaults to "terminate", so one
+        // subtask that exhausted its attempts failed the whole map — which skips git.integrate_run AND the synth
+        // reduce, leaving every SUCCEEDED sibling's work reachable only as a per-agent branch nobody is told about,
+        // and the run's own outputs empty. Under "continue" the failed branch records its error marker in the results
+        // array (the reduce reads it and names it — see SynthInputs), the survivors still integrate into one
+        // reviewable candidate, and the run reports honestly instead of losing N-1 subtasks over one.
+        config["errorHandling"] = MapErrorHandlingContinue;
 
         if (context.Route.Caps.MaxParallelism is { } parallelism) config["maxParallelism"] = parallelism;
 
@@ -224,8 +255,10 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
     /// </summary>
     private static JsonElement SynthInputs(TaskBuildContext context) => JsonSerializer.SerializeToElement(new
     {
-        systemPrompt = "Combine the per-subtask results into one coherent answer that addresses the goal.",
-        userPrompt = $"Goal: {context.Seed.Goal}\n\nPer-subtask results:\n" + SynthResultsRef,
+        systemPrompt = "Combine the per-subtask results into one coherent answer that addresses the goal. "
+                     + "A subtask that FAILED appears in the results as an {\"error\": ...} entry instead of a result: never present its work as done — "
+                     + "say which subtasks failed, what they were meant to deliver, and what is therefore missing from the answer.",
+        userPrompt = $"Goal: {context.Seed.Goal}\n\nSubtasks that failed: " + SynthFailedRef + "\n\nPer-subtask results:\n" + SynthResultsRef,
     });
 
     /// <summary>The reduce's results binding, composed from <see cref="WorkflowOutputKeys.MapResultsPrompt"/> so the prompt and the key the reducer writes cannot drift apart.</summary>
@@ -233,6 +266,9 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
 
     /// <summary>The coverage of the results the reduce actually read, composed from <see cref="WorkflowOutputKeys.MapResultsCoverage"/> the same way. A sole-placeholder binding resolves to the WHOLE object, so the run output carries the fact intact rather than a stringified copy.</summary>
     private const string SynthResultsCoverageRef = "{{nodes.map.outputs." + WorkflowOutputKeys.MapResultsCoverage + "}}";
+
+    /// <summary>How many branches FAILED, composed from <see cref="WorkflowOutputKeys.MapFailed"/> the same way. Under continue-on-error this is the map's own count of the error markers sitting in the results — the reduce is told the number so a partial answer cannot read as a whole one.</summary>
+    private const string SynthFailedRef = "{{nodes.map.outputs." + WorkflowOutputKeys.MapFailed + "}}";
 
     /// <summary>
     /// The done terminal Inputs — bind the synth's reduced <c>text</c> output into the run's <c>combined</c> output
@@ -252,6 +288,11 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
         {
             ["combined"] = "{{nodes.synth.outputs.text}}",
             [WorkflowOutputKeys.MapResultsCoverage] = SynthResultsCoverageRef,
+            // The same reasoning as the coverage above, for the OTHER way a combined answer can be less than whole:
+            // under continue-on-error the run reaches Success with a failed subtask inside it, so the count of failed
+            // branches rides onto the run row beside the answer it qualifies — a partial result is legible from the
+            // run's outcome, not only from the map node's bag.
+            [WorkflowOutputKeys.MapFailed] = SynthFailedRef,
         };
 
         if (context.AgentProfile?.RepositoryId is not null)
