@@ -876,6 +876,59 @@ public class AgentCodeNodeTests
 
         task.Workspace.ShouldBeNull("no repo, no tree — nothing to repin");
         task.ResumeFromSessionId.ShouldBe("s", "the conversation still resumes; only the world-state pin is inapplicable");
+        task.Goal.ShouldBe("Fix the tests", "an analysis-only run never had a tree to lose — the git-flavoured honest-redo line would assert a fact about work this run was never able to produce");
+    }
+
+    [Theory]
+    [InlineData(null)]                                     // no repo input at all
+    [InlineData("")]                                       // picked then cleared
+    public async Task A_repo_less_respawn_is_never_told_its_git_changes_were_lost(string? rawRepositoryId)
+    {
+        // The same rule with NOTHING on the payload to conserve: an absent repository is not a lost tree. The hint's
+        // wording ("its git changes were NOT preserved in this workspace") would be nonsense for a run whose
+        // workspace never held a repo, and it would land on every retry of every analysis-only agent.
+        var inputs = rawRepositoryId is null ? null : new Dictionary<string, JsonElement> { ["repositoryId"] = Str(rawRepositoryId) };
+        var priorAttempt = JsonDocument.Parse("""{"status":"Failed","error":"crashed","sessionId":"s"}""").RootElement;
+
+        var task = JsonSerializer.Deserialize<AgentTask>(
+            (await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, inputs, priorAttempt), CancellationToken.None)).SuspendUntil!.Payload,
+            AgentJson.Options)!;
+
+        task.Goal.ShouldBe("Fix the tests", "no repository ⇒ no world-state claim either way");
+        task.Workspace.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task A_respawn_whose_primary_push_failed_repins_the_sibling_but_is_still_told_the_truth()
+    {
+        // The honesty decision follows the PRIMARY, exactly like the supervisor's workspaceHasPriorWork: a sibling's
+        // successful push is still conserved (its own branch is repinned), but the agent's primary repo re-clones the
+        // default branch, so the restored conversation MUST be told its changes are not there. An "any repo pushed"
+        // read would suppress the line precisely where the primary lost its work — the worst place to go quiet.
+        var primaryId = Guid.NewGuid();
+        var webId = Guid.NewGuid();
+
+        var inputs = new Dictionary<string, JsonElement>
+        {
+            ["repositoryId"] = Str(primaryId.ToString()),
+            ["relatedRepositories"] = JsonDocument.Parse($$"""[{"repositoryId":"{{webId}}","alias":"web","access":"write"}]""").RootElement,
+        };
+
+        // The primary's push FAILED (its entry carries publishError and no branch); the sibling's succeeded.
+        var priorAttempt = JsonDocument.Parse($$"""
+            {"status":"Failed","error":"x","sessionId":"s",
+             "repositoryResults":[{"alias":"repo","repositoryId":"{{primaryId}}","producedBranch":null,"publishError":"403 forbidden"},
+                                  {"alias":"web","repositoryId":"{{webId}}","producedBranch":"codespace/agent/web"}]}
+            """).RootElement;
+
+        var task = JsonSerializer.Deserialize<AgentTask>(
+            (await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, inputs, priorAttempt), CancellationToken.None)).SuspendUntil!.Payload,
+            AgentJson.Options)!;
+
+        var repos = task.Workspace!.Repositories;
+        repos.Single(r => r.RepositoryId == webId).Ref.ShouldBe("codespace/agent/web", "the sibling's pushed work is still conserved — a failed primary push must not throw it away");
+        repos.Single(r => r.RepositoryId == primaryId).Ref.ShouldBeNull("the primary never pushed, so it clones its default branch");
+        task.Goal.ShouldBe($"Fix the tests\n\n{AgentRetryContinuity.HonestNoContinuityHint}", "the primary's tree does NOT carry the restored conversation's edits, and the agent is told so");
     }
 
     [Fact]
