@@ -25,7 +25,7 @@ public class ModelCredentialModelConfiguration : IEntityTypeConfiguration<ModelC
         // The objectively-probed tier for an opaque id (a SEPARATE column from the brain verdict above).
         builder.Property(m => m.ProbedCapabilityTier).HasConversion<string>();
 
-        // Per-row prices (0190_model_credential_model_price.sql) are unconstrained `numeric` — no precision/scale
+        // Per-row prices (0192_model_credential_model_price.sql) are unconstrained `numeric` — no precision/scale
         // pinned, so a fractional-cent price (e.g. $0.075/M) survives the round-trip exactly. Nullable = unpriced.
         builder.Property(m => m.InputUsdPerMillion).HasColumnType("numeric");
         builder.Property(m => m.OutputUsdPerMillion).HasColumnType("numeric");
