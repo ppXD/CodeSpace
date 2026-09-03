@@ -21,7 +21,7 @@ namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 [Trait("Category", "RealModel")]
 public sealed class RealModelSessionContinueFlowTests
 {
-    [Theory]
+    [SkippableTheory]
     [InlineData("Anthropic")]
     [InlineData("OpenAI")]
     public async Task The_real_model_uses_the_session_handoff_at_every_continue_point(string provider)
@@ -30,7 +30,7 @@ public sealed class RealModelSessionContinueFlowTests
         var apiKey = Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
         var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
-        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → skip (honest CI/fork behaviour)
+        if (baseUrl is null || apiKey is null || model is null) throw RealModelGate.ReportSkipped(provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass: NotExecuted in the trx, never a green that measured nothing
 
         // Non-gating on gateway latency (timeout/transport drop → informational), gating on a genuine wrong decision —
         // the blessed wire fails only when the brain ignores the handed-off context (redoes shipped work / misses the ask).

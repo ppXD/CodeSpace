@@ -33,7 +33,7 @@ public sealed class RealGitHubPackImportE2ETests
 
     public RealGitHubPackImportE2ETests(PostgresFixture fixture) { _fixture = fixture; }
 
-    [Fact]
+    [SkippableFact]
     public async Task An_agents_library_clones_from_real_github_and_its_agents_are_discovered()
     {
         if (OperatingSystem.IsWindows()) return;
@@ -47,7 +47,7 @@ public sealed class RealGitHubPackImportE2ETests
         });
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task A_skills_library_clones_from_real_github_at_a_pinned_tag_and_its_skills_are_discovered()
     {
         if (OperatingSystem.IsWindows()) return;

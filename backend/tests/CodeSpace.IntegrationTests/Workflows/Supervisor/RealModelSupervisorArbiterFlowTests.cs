@@ -27,7 +27,7 @@ public sealed class RealModelSupervisorArbiterFlowTests
 {
     private static readonly Guid TeamId = Guid.NewGuid();
 
-    [Theory]
+    [SkippableTheory]
     [InlineData("Anthropic")]
     [InlineData("OpenAI")]
     public async Task The_real_arbiter_answers_an_obvious_low_risk_decision_rather_than_escalating(string provider)
@@ -36,7 +36,7 @@ public sealed class RealModelSupervisorArbiterFlowTests
         var apiKey = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
         var model = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
-        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → skip (honest CI/fork behaviour)
+        if (baseUrl is null || apiKey is null || model is null) throw RealModelGate.ReportSkipped(provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass: NotExecuted in the trx, never a green that measured nothing
 
         // best-of-N capability-floor (blessed wire gets N independent attempts, passes if ANY answers validly) so a single
         // non-deterministic escalate-instead-of-answer can't flaky-red main; a persistent escalate still REDs. The closure

@@ -44,7 +44,7 @@ public sealed class RealModelSpecPreviewE2ETests
 
     public RealModelSpecPreviewE2ETests(PostgresFixture fixture) { _fixture = fixture; }
 
-    [Fact]
+    [SkippableFact]
     public async Task With_no_repository_to_ground_on_the_live_compiler_refuses_to_invent_an_acceptance_check()
     {
         if (ReadLiveSecretsOrSkip() is not { } live) return;   // skip ≠ pass (surfaced loudly)
@@ -79,7 +79,7 @@ public sealed class RealModelSpecPreviewE2ETests
         });
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task A_live_compile_produces_a_suggestion_an_operator_could_actually_use()
     {
         if (ReadLiveSecretsOrSkip() is not { } live) return;
@@ -178,7 +178,7 @@ public sealed class RealModelSpecPreviewE2ETests
         var model = Environment.GetEnvironmentVariable(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
         var present = new[] { baseUrl, apiKey, model }.Count(v => !string.IsNullOrWhiteSpace(v));
-        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return null; }   // skip ≠ pass
+        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass
 
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three (base url / api key / model id) or none; a partial config would otherwise self-skip green proving nothing.");
 

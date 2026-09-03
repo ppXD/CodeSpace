@@ -30,14 +30,14 @@ public sealed class RealModelCapabilityProbeE2ETests
 
     public RealModelCapabilityProbeE2ETests(PostgresFixture fixture) { _fixture = fixture; }
 
-    [Fact]
+    [SkippableFact]
     public async Task A_live_model_under_an_opaque_alias_is_probed_to_a_coarse_tier()
     {
         var baseUrl = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
         var apiKey = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
         var model = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
-        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → skip (honest CI/fork behaviour)
+        if (baseUrl is null || apiKey is null || model is null) throw RealModelGate.ReportSkipped(Custom, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass: NotExecuted in the trx, never a green that measured nothing
 
         var teamId = await SeedTeamAsync();
         // Seed the live model under an OPAQUE id (capability_tier='Unknown') so the probe selects it.

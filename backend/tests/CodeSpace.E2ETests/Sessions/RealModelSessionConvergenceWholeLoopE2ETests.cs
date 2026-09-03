@@ -73,7 +73,7 @@ public sealed class RealModelSessionConvergenceWholeLoopE2ETests
     // push flag forced on here.
     public RealModelSessionConvergenceWholeLoopE2ETests(PostgresFixture fixture) { _fixture = fixture; }
 
-    [Fact]
+    [SkippableFact]
     public async Task A_live_model_continues_a_thread_and_builds_feature_B_on_turn1s_real_code()
     {
         var baseUrl = Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
@@ -81,12 +81,12 @@ public sealed class RealModelSessionConvergenceWholeLoopE2ETests
         var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
         var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
-        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }   // skip ≠ pass
+        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none; a partial config would self-skip this lane green proving nothing.");
 
         if (OperatingSystem.IsWindows()) return;
         if (!await GitReadyAsync()) return;
-        if (!await ClaudeReadyAsync()) { RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed — the real-coding arm needs a harness binary (skip ≠ pass)"); return; }
+        if (!await ClaudeReadyAsync()) throw RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed — the real-coding arm needs a harness binary (skip ≠ pass)");
 
         var jobClient = ResolveJobClient();
         jobClient.Clear();

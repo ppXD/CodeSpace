@@ -19,7 +19,7 @@ namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 [Trait("Category", "RealModel")]
 public sealed class RealModelSupervisorTrajectoryFlowTests
 {
-    [Theory]
+    [SkippableTheory]
     [InlineData("Anthropic", "happy")]                  // plan → spawn → merge(clean) → stop
     [InlineData("Anthropic", "conflict")]               // plan → spawn → merge(CONFLICT) → resolve(verified) → stop
     [InlineData("Anthropic", "failure")]                // plan → spawn(1 FAILED) → retry → merge(clean) → stop
@@ -36,7 +36,7 @@ public sealed class RealModelSupervisorTrajectoryFlowTests
         var apiKey = Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
         var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
-        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → skip (honest CI/fork behaviour)
+        if (baseUrl is null || apiKey is null || model is null) throw RealModelGate.ReportSkipped(provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass: NotExecuted in the trx, never a green that measured nothing
 
         var credential = new ResolvedModelCredential { Provider = provider, BaseUrl = BaseUrlFor(provider, baseUrl), ApiKey = apiKey };
         var registry = new LLMClientRegistry(new ILLMClient[] { new AnthropicClient(SharedHttp), new OpenAiClient(SharedHttp) });

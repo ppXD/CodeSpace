@@ -49,7 +49,7 @@ public sealed class RealModelGateTests
 
         // Reporting an informational wire's bad verdict NEVER throws — it cannot gate CI (tested via the pure seam so
         // it neither reads nor writes the real GITHUB_STEP_SUMMARY).
-        Should.NotThrow(() => RealModelGate.ReportInformational(ok: false, verdict: "bad", stepSummaryPath: null));
+        Should.NotThrow(() => RealModelGate.ReportInformational("OpenAI", ok: false, verdict: "bad", stepSummaryPath: null));
     }
 
     [Theory]
@@ -60,7 +60,7 @@ public sealed class RealModelGateTests
         var path = Path.Combine(Path.GetTempPath(), $"realmodel-summary-{Guid.NewGuid():N}.md");
         try
         {
-            RealModelGate.ReportInformational(ok, $"OpenAI trajectory — {(ok ? "drove to completion" : "never stopped")}", path);
+            RealModelGate.ReportInformational("OpenAI", ok, $"OpenAI trajectory — {(ok ? "drove to completion" : "never stopped")}", path);
 
             var written = File.ReadAllText(path);
             written.ShouldContain("INFORMATIONAL");
@@ -103,13 +103,141 @@ public sealed class RealModelGateTests
         var path = Path.Combine(Path.GetTempPath(), $"realmodel-infra-{Guid.NewGuid():N}.md");
         try
         {
-            // Anthropic is the blessed wire; a gateway timeout must NOT fail the job, AND must be surfaced loudly.
-            await Should.NotThrowAsync(() => RealModelGate.AssessLiveAsync("Anthropic",
-                () => throw new TaskCanceledException("timeout", new TimeoutException()), gating: true, path));
+            // Anthropic is the blessed wire; a gateway timeout must NOT fail the job (no ShouldAssertException), and it
+            // must be surfaced loudly — but it must ALSO not read as a PASS. It raises a SkipException, so the runner
+            // records the test as NotExecuted: the job stays green, and the trx says the lane measured nothing.
+            var skip = await Should.ThrowAsync<SkipException>(() => RealModelGate.AssessLiveAsync("Anthropic",
+                () => throw new TaskCanceledException("timeout", new TimeoutException()), gating: true, stepSummaryPath: path));
+
+            skip.Message.ShouldContain("NON-GATING infra skip");
 
             var written = File.ReadAllText(path);
             written.ShouldContain("NON-GATING infra skip");
             written.ShouldContain("Anthropic");
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task A_gateway_infra_fault_is_a_SkipException_on_every_gate_entry_point()
+    {
+        // One shape, four doors: whichever gate a lane calls, an unmeasurable run lands as NotExecuted, never Passed.
+        // (This is the defect the arc exists for: a 23-live-call decision gate reported `Passed [1 s]` beside a real
+        // `Passed [5 m 28 s]` run of the same test, because the infra skip was written to the step summary alone.)
+        Exception Infra() => new TaskCanceledException("timeout", new TimeoutException());
+
+        await Should.ThrowAsync<SkipException>(() => RealModelGate.AssessLiveAsync("Anthropic",
+            () => throw Infra(), gating: true, stepSummaryPath: null));
+
+        await Should.ThrowAsync<SkipException>(() => RealModelGate.AssessLiveAsync("Anthropic",
+            () => throw Infra(), stepSummaryPath: null));   // the three-way (whole-loop outcome) overload
+
+        await Should.ThrowAsync<SkipException>(() => RealModelGate.AssessLiveBestOfNAsync("Anthropic",
+            () => throw Infra(), attempts: 2, stepSummaryPath: null));
+
+        await Should.ThrowAsync<SkipException>(() => RealModelGate.AssessLiveWholeLoopAsync("Anthropic",
+            () => throw Infra(), attempts: 2, stepSummaryPath: null, attemptDeadline: TimeSpan.FromSeconds(5)));
+
+        // The INFORMATIONAL wire skips too — it never gated, but it never measured anything either.
+        await Should.ThrowAsync<SkipException>(() => RealModelGate.AssessLiveBestOfNAsync("OpenAI",
+            () => throw Infra(), attempts: 2, stepSummaryPath: null));
+    }
+
+    [Fact]
+    public void An_honest_no_credentials_skip_is_a_SkipException_the_caller_throws()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"realmodel-skipped-{Guid.NewGuid():N}.md");
+        try
+        {
+            // ReportSkipped RETURNS the exception (the call site throws it) so the honest fork/local skip stops being a
+            // silent `return;` that the trx recorded as a green pass over zero live calls.
+            var skip = RealModelGate.ReportSkipped("Anthropic", "CODESPACE_LLM_* absent (fork/local)", path);
+
+            skip.ShouldBeOfType<SkipException>();
+            skip.Message.ShouldContain("NOT EVALUATED");
+            File.ReadAllText(path).ShouldContain("NOT EVALUATED");
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task An_informational_wire_fault_writes_a_greppable_console_line_and_never_throws()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"realmodel-infofail-{Guid.NewGuid():N}.md");
+        var console = Console.Out;
+        var captured = new StringWriter();
+        try
+        {
+            Console.SetOut(captured);
+
+            // Under CI the step-summary branch is taken, which used to mean the job LOG said nothing at all about an
+            // informational wire's fault — a one-second "pass" with no trace. It must now also print to stdout.
+            await Should.NotThrowAsync(() => RealModelGate.AssessLiveAsync("OpenAI",
+                () => Task.FromResult((false, "OpenAI scored 3/14 golden decisions")), gating: true, stepSummaryPath: path));
+        }
+        finally
+        {
+            Console.SetOut(console);
+            File.Delete(path);
+        }
+
+        var stdout = captured.ToString();
+        stdout.ShouldContain("[realmodel] INFORMATIONAL-FAIL");
+        stdout.ShouldContain("wire=OpenAI");
+        stdout.ShouldContain("scored 3/14");
+        stdout.ShouldContain("An_informational_wire_fault_writes_a_greppable_console_line_and_never_throws", Case.Sensitive, "the line names WHICH test measured nothing");
+    }
+
+    [Fact]
+    public void A_verdict_carries_the_model_name_and_a_masking_proof_fingerprint()
+    {
+        // The configured model id is a repository SECRET (masked in the CI log), so the fingerprint is what actually
+        // travels: a 25-run red streak can be told apart as "the gateway started answering with another model" only if
+        // two runs' stamps can be compared. Same name → same fp; a different name → a different fp.
+        RealModelGate.Fingerprint("claude-sonnet-4-5").ShouldBe(RealModelGate.Fingerprint("claude-sonnet-4-5"));
+        RealModelGate.Fingerprint("claude-sonnet-4-5").ShouldNotBe(RealModelGate.Fingerprint("claude-opus-4-1"));
+        RealModelGate.Fingerprint("claude-sonnet-4-5").Length.ShouldBe(8);
+
+        var path = Path.Combine(Path.GetTempPath(), $"realmodel-stamp-{Guid.NewGuid():N}.md");
+        try
+        {
+            RealModelGate.ReportThreeWay(RealModelOutcome.Drove, "drove the arc", path);
+
+            var written = File.ReadAllText(path);
+            written.ShouldContain("model=");
+            written.ShouldContain("fp=");
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task The_verdict_names_the_model_the_PROVIDER_reported_not_the_one_that_was_asked_for()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"realmodel-observed-{Guid.NewGuid():N}.md");
+        try
+        {
+            // ObserveModel is what the live-wire's ModelObservingClient calls with StructuredLLMCompletion.Model. It is
+            // written INSIDE the drive closure — deeper in the async flow than the gate that reads it — which is why
+            // the sink is a mutable holder rather than a plain AsyncLocal<string>.
+            await RealModelGate.AssessLiveAsync("OpenAI", () =>
+            {
+                RealModelGate.ObserveModel("gateway-answered-model-xyz");
+                return Task.FromResult((true, "scored 14/14"));
+            }, gating: false, stepSummaryPath: path);
+
+            var written = File.ReadAllText(path);
+            written.ShouldContain("model=gateway-answered-model-xyz");
+            written.ShouldContain($"fp={RealModelGate.Fingerprint("gateway-answered-model-xyz")}");
+            written.ShouldNotContain("(configured)", Case.Sensitive, "an observed name must win over the configured id");
         }
         finally
         {
@@ -141,7 +269,7 @@ public sealed class RealModelGateTests
             // A demoted (informational) lane on the BLESSED wire must NOT fail the job even on a bad verdict — its result
             // is observed (a precondition the blessed decision-eval already measures), not a kill-gate. It is still REPORTED.
             await Should.NotThrowAsync(() => RealModelGate.AssessLiveAsync("Anthropic",
-                () => Task.FromResult((false, "whole-loop: no conformant decision")), gating: false, path));
+                () => Task.FromResult((false, "whole-loop: no conformant decision")), gating: false, stepSummaryPath: path));
 
             var written = File.ReadAllText(path);
             written.ShouldContain("INFORMATIONAL");
@@ -190,8 +318,10 @@ public sealed class RealModelGateTests
         var path = Path.Combine(Path.GetTempPath(), $"realmodel-3way-infra-{Guid.NewGuid():N}.md");
         try
         {
-            await Should.NotThrowAsync(() => RealModelGate.AssessLiveAsync("Anthropic",
-                () => throw new TaskCanceledException("timeout", new TimeoutException()), path));
+            // Non-gating (no ShouldAssertException) but NOT a pass either: it raises a SkipException so the trx records
+            // the lane as NotExecuted rather than green.
+            await Should.ThrowAsync<SkipException>(() => RealModelGate.AssessLiveAsync("Anthropic",
+                () => throw new TaskCanceledException("timeout", new TimeoutException()), stepSummaryPath: path));
 
             var written = File.ReadAllText(path);
             written.ShouldContain("NON-GATING infra skip");
@@ -347,7 +477,7 @@ public sealed class RealModelGateTests
 
         try
         {
-            await RealModelGate.AssessLiveAsync("Anthropic", () => throw new System.Text.Json.JsonException("missing required properties including: 'outcome'"), gating: false, summary);
+            await RealModelGate.AssessLiveAsync("Anthropic", () => throw new System.Text.Json.JsonException("missing required properties including: 'outcome'"), gating: false, stepSummaryPath: summary);
 
             var written = await File.ReadAllTextAsync(summary);
             written.ShouldContain("FAULTED before reaching a verdict", Case.Insensitive, "the fault is surfaced, not silently swallowed");
@@ -373,7 +503,7 @@ public sealed class RealModelGateTests
 
         try
         {
-            await RealModelGate.AssessLiveAsync("Anthropic", () => throw new ShouldAssertException("handoffWorked should be True but was False"), gating: false, summary);
+            await RealModelGate.AssessLiveAsync("Anthropic", () => throw new ShouldAssertException("handoffWorked should be True but was False"), gating: false, stepSummaryPath: summary);
         }
         catch (ShouldAssertException)
         {
@@ -393,7 +523,7 @@ public sealed class RealModelGateTests
         try
         {
             await Should.ThrowAsync<System.Text.Json.JsonException>(() =>
-                RealModelGate.AssessLiveAsync("Anthropic", () => throw new System.Text.Json.JsonException("boom"), gating: true, summary));
+                RealModelGate.AssessLiveAsync("Anthropic", () => throw new System.Text.Json.JsonException("boom"), gating: true, stepSummaryPath: summary));
         }
         finally { File.Delete(summary); }
     }
@@ -475,7 +605,7 @@ public sealed class RealModelGateTests
             Func<Task<(RealModelOutcome Outcome, string Note)>> drive =
                 () => throw new AgentExecutionInfraException("the spawned agents could not execute — agents=2 (0 succeeded, 2 failed)");
 
-            await Should.NotThrowAsync(() => RealModelGate.AssessLiveAsync("Anthropic", drive, path));
+            await Should.ThrowAsync<SkipException>(() => RealModelGate.AssessLiveAsync("Anthropic", drive, stepSummaryPath: path));
 
             var written = File.ReadAllText(path);
             written.ShouldContain("NON-GATING infra skip");
@@ -556,10 +686,13 @@ public sealed class RealModelGateTests
     [Fact]
     public async Task An_all_infra_run_is_a_non_gating_skip_never_a_gate()
     {
-        // Every attempt times out → misses never reaches N → non-gating infra skip, never a gate. A slow gateway can't red.
+        // Every attempt times out → misses never reaches N → non-gating infra skip, never a gate. A slow gateway can't
+        // red — and can no longer report a green PASS either: the run is recorded as NotExecuted.
         var (drive, _) = Sequence(new TimeoutException("a"), new TimeoutException("b"), new TimeoutException("c"), new TimeoutException("d"), new TimeoutException("e"));
 
-        await Should.NotThrowAsync(() => RealModelGate.AssessLiveWholeLoopAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
+        var skip = await Should.ThrowAsync<SkipException>(() => RealModelGate.AssessLiveWholeLoopAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
+
+        skip.ShouldNotBeOfType<ShouldAssertException>("an infra skip must never gate the blessed wire");
     }
 
     [Fact]
@@ -614,7 +747,7 @@ public sealed class RealModelGateTests
         // red main as a phantom CapabilityMiss.
         var (drive, _) = Sequence(new AgentExecutionInfraException("a"), new AgentExecutionInfraException("b"), new AgentExecutionInfraException("c"), new AgentExecutionInfraException("d"), new AgentExecutionInfraException("e"));
 
-        await Should.NotThrowAsync(() => RealModelGate.AssessLiveWholeLoopAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
+        await Should.ThrowAsync<SkipException>(() => RealModelGate.AssessLiveWholeLoopAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
     }
 
     [Fact]

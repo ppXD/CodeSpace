@@ -56,7 +56,7 @@ public sealed class RealModelPhaseAuthorshipFlowTests
     public RealModelPhaseAuthorshipFlowTests(PostgresFixture fixture) { _fixture = fixture; }
 
     /// <summary>LIVE: calls the REAL Anthropic model + records the cassette. Skips (early return) with no API key — i.e. always in CI + the sandbox. Tagged RealModel so a keyed human can target it.</summary>
-    [Fact]
+    [SkippableFact]
     [Trait("Category", "RealModel")]
     public async Task Live_real_model_authors_the_plan_and_records_the_cassette()
     {
@@ -65,8 +65,7 @@ public sealed class RealModelPhaseAuthorshipFlowTests
             // Reported, never a silent return. This half needs a DIRECT Anthropic key, which no workflow sets — the
             // live lanes carry a CODESPACE_LLM_* gateway instead — so it has skipped on every run since it was
             // written, reporting green while calling nothing.
-            RealModelGate.ReportSkipped("Anthropic", $"{AnthropicClient.ApiKeyEnvVar} absent — a human records the cassette with a direct key; no workflow sets one");
-            return;
+            throw RealModelGate.ReportSkipped("Anthropic", $"{AnthropicClient.ApiKeyEnvVar} absent — a human records the cassette with a direct key; no workflow sets one");
         }
 
         if (OperatingSystem.IsWindows()) return;   // the fake CLI is a /bin/sh script the runner spawns
@@ -75,7 +74,7 @@ public sealed class RealModelPhaseAuthorshipFlowTests
     }
 
     /// <summary>REPLAY: runs from the committed cassette, no key. Skips (early return) until a human records one — green now, ACTIVE on cassette commit.</summary>
-    [Fact]
+    [SkippableFact]
     [Trait("Category", "Integration")]
     public async Task Replay_runs_the_recorded_real_model_plan_deterministically()
     {
@@ -83,8 +82,7 @@ public sealed class RealModelPhaseAuthorshipFlowTests
         {
             // The half that was MEANT to carry this coverage in CI: record once, replay forever, no key and no model
             // cost. No cassette was ever committed, so it has always returned green having exercised nothing.
-            RealModelGate.ReportSkipped("Replay", $"no cassette at {RealModelCassettePaths.PlannerCassettePath} — record it via the live half with a direct Anthropic key, then commit it");
-            return;
+            throw RealModelGate.ReportSkipped("Replay", $"no cassette at {RealModelCassettePaths.PlannerCassettePath} — record it via the live half with a direct Anthropic key, then commit it");
         }
 
         if (OperatingSystem.IsWindows()) return;

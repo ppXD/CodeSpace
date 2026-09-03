@@ -25,7 +25,7 @@ public sealed class RealModelSamplingOmissionE2ETests
     private static readonly JsonElement AnswerSchema = JsonDocument.Parse(
         """{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}""").RootElement;
 
-    [Theory]
+    [SkippableTheory]
     [InlineData("Anthropic")]
     [InlineData("Custom")]
     public async Task A_temperature_omitted_structured_call_drives_the_live_model(string provider)
@@ -34,7 +34,7 @@ public sealed class RealModelSamplingOmissionE2ETests
         var apiKey = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
         var model = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
-        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → honest skip (green CI/fork)
+        if (baseUrl is null || apiKey is null || model is null) throw RealModelGate.ReportSkipped(provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass: NotExecuted in the trx, never a green that measured nothing
 
         await RealModelGate.AssessLiveAsync(provider, async () =>
         {
@@ -69,7 +69,7 @@ public sealed class RealModelSamplingOmissionE2ETests
     /// arbitrary gateway model's true ceiling is unknown, so a rare max_tokens-too-large 400 must never red the lane; the
     /// SSE-accumulation correctness is GATED by the deterministic <c>LlmSamplingWireTests</c>, and this is the live smoke.
     /// </summary>
-    [Theory]
+    [SkippableTheory]
     [InlineData("Anthropic")]
     [InlineData("Custom")]
     public async Task A_large_cap_streams_a_live_text_completion(string provider)
@@ -78,7 +78,7 @@ public sealed class RealModelSamplingOmissionE2ETests
         var apiKey = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
         var model = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
-        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → honest skip (green CI/fork)
+        if (baseUrl is null || apiKey is null || model is null) throw RealModelGate.ReportSkipped(provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass: NotExecuted in the trx, never a green that measured nothing
 
         await RealModelGate.AssessLiveAsync(provider, async () =>
         {
@@ -111,14 +111,14 @@ public sealed class RealModelSamplingOmissionE2ETests
     /// pinned deterministically by <c>LlmSamplingWireTests</c>. Custom wire only — <c>reasoning_effort</c> is an
     /// OpenAI-wire concept the Anthropic client never maps.
     /// </summary>
-    [Fact]
+    [SkippableFact]
     public async Task Reasoning_effort_rides_the_generic_path_on_the_live_custom_wire()
     {
         var baseUrl = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
         var apiKey = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
         var model = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
-        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → honest skip (green CI/fork)
+        if (baseUrl is null || apiKey is null || model is null) throw RealModelGate.ReportSkipped("Custom", "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass: NotExecuted in the trx, never a green that measured nothing
 
         await RealModelGate.AssessLiveAsync("Custom", async () =>
         {

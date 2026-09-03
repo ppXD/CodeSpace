@@ -37,7 +37,7 @@ public sealed class RealModelQualificationRehearsalE2ETests
 
     public RealModelQualificationRehearsalE2ETests(PostgresFixture fixture) { _fixture = fixture; }
 
-    [Fact]
+    [SkippableFact]
     public async Task The_hidden_suite_rehearsal_reports_the_would_be_qualification()
     {
         var baseUrl = Environment.GetEnvironmentVariable(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
@@ -45,13 +45,12 @@ public sealed class RealModelQualificationRehearsalE2ETests
         var model = Environment.GetEnvironmentVariable(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
         var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
-        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }   // skip ≠ pass
+        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none; a partial config would self-skip green proving nothing.");
 
         if (HiddenSuiteLoader.LoadFromDefaultLocation() is not { } suite)
         {
-            RealModelGate.ReportSkipped(Provider, $"no hidden suite at '{HiddenSuiteLoader.DefaultSuiteDirectory}' — stage it (CODESPACE_HIDDEN_SUITE_URL secret) to rehearse; skip ≠ pass");
-            return;
+            throw RealModelGate.ReportSkipped(Provider, $"no hidden suite at '{HiddenSuiteLoader.DefaultSuiteDirectory}' — stage it (CODESPACE_HIDDEN_SUITE_URL secret) to rehearse; skip ≠ pass");
         }
 
         if (OperatingSystem.IsWindows()) return;

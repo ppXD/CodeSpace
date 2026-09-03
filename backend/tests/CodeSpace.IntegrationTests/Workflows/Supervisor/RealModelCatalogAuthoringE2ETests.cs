@@ -21,7 +21,7 @@ namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 [Trait("Category", "RealModel")]
 public sealed class RealModelCatalogAuthoringE2ETests
 {
-    [Theory]
+    [SkippableTheory]
     [InlineData("Anthropic")]
     [InlineData("OpenAI")]
     public async Task The_real_model_decides_correctly_when_the_catalog_default_harness_mismatches_the_pool(string provider)
@@ -30,7 +30,7 @@ public sealed class RealModelCatalogAuthoringE2ETests
         var apiKey = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
         var model = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
-        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → skip (honest CI/fork behaviour)
+        if (baseUrl is null || apiKey is null || model is null) throw RealModelGate.ReportSkipped(provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass: NotExecuted in the trx, never a green that measured nothing
 
         await RealModelGate.AssessLiveAsync(provider, async () =>
         {

@@ -28,7 +28,7 @@ public sealed class RealModelSessionSummaryFlowTests
         ("Nimbus", "Fix the Nimbus notification webhook", "Nimbus webhook now verifies HMAC signatures before dispatch"),
     };
 
-    [Theory]
+    [SkippableTheory]
     [InlineData("Anthropic")]
     [InlineData("OpenAI")]
     public async Task The_real_model_distillation_preserves_every_older_turn(string provider)
@@ -37,7 +37,7 @@ public sealed class RealModelSessionSummaryFlowTests
         var apiKey = Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
         var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
-        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → skip (honest CI/fork behaviour)
+        if (baseUrl is null || apiKey is null || model is null) throw RealModelGate.ReportSkipped(provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass: NotExecuted in the trx, never a green that measured nothing
 
         // Non-gating on gateway latency (timeout/transport drop → informational), gating on a genuine quality miss —
         // the blessed wire fails only when the distillation DROPS an older turn's work from the rolling summary.

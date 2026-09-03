@@ -54,7 +54,7 @@ public sealed class RealModelStopHookE2ETests : IDisposable
 
     public RealModelStopHookE2ETests(PostgresFixture fixture) { _fixture = fixture; }
 
-    [Fact]
+    [SkippableFact]
     public async Task A_real_claude_agent_reacts_to_the_stop_hooks_feedback_and_creates_the_missing_file()
     {
         if (await EnsureLiveOrSkipAsync() is not { } live) return;   // skip ≠ pass (surfaced loudly)
@@ -132,11 +132,11 @@ public sealed class RealModelStopHookE2ETests : IDisposable
         var model = Environment.GetEnvironmentVariable(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
         var present = new[] { baseUrl, apiKey, model }.Count(v => !string.IsNullOrWhiteSpace(v));
-        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return null; }
+        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three (base url / api key / model id) or none; a partial config would otherwise self-skip green proving nothing.");
 
         if (OperatingSystem.IsWindows()) return null;
-        if (!await ClaudeReadyAsync()) { RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed — the in-loop verify E2E needs the harness binary (skip ≠ pass)"); return null; }
+        if (!await ClaudeReadyAsync()) throw RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed — the in-loop verify E2E needs the harness binary (skip ≠ pass)");
 
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         return new LiveContext(teamId, baseUrl!.TrimEnd('/'), apiKey!, model!);

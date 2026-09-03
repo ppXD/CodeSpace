@@ -119,6 +119,29 @@ jobs:
             RealModelSession \
             RealModelSupervisor
 
+
+      # The trx + the step-summary verdicts are the only record of WHAT the live model actually did — how many golden
+      # points it scored, which wire skipped, which model answered. They were written to the runner and thrown away
+      # with it, so a red streak could not be diagnosed against the previous run's numbers. Keep them.
+      #
+      # A step summary is a per-STEP file, so this later step cannot read the test step's `$GITHUB_STEP_SUMMARY`
+      # directly — it concatenates every step_summary_* file in that directory instead. Best-effort: if the runner
+      # layout ever changes the collected file is simply empty, and nothing about the job's result changes.
+      - name: Collect the real-model verdicts from the step summaries
+        if: always()
+        run: |
+          mkdir -p backend/TestResults
+          cat "$(dirname "$GITHUB_STEP_SUMMARY")"/step_summary_* > backend/TestResults/step-summary.md 2>/dev/null || true
+
+      - name: Upload the real-model results (trx + verdicts)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-model-results
+          path: backend/TestResults/
+          if-no-files-found: warn
+          retention-days: 30
+
   real-model-wholeloop:
     name: real model (live-brain whole-loop — supervisor arcs)
     runs-on: ubuntu-latest
@@ -253,6 +276,29 @@ jobs:
           bash .github/scripts/assert-every-filter-clause-ran.sh \
             backend/TestResults/real-model-wholeloop.trx \
             RealModelSupervisorWholeLoop
+
+
+      # The trx + the step-summary verdicts are the only record of WHAT the live model actually did — how many golden
+      # points it scored, which wire skipped, which model answered. They were written to the runner and thrown away
+      # with it, so a red streak could not be diagnosed against the previous run's numbers. Keep them.
+      #
+      # A step summary is a per-STEP file, so this later step cannot read the test step's `$GITHUB_STEP_SUMMARY`
+      # directly — it concatenates every step_summary_* file in that directory instead. Best-effort: if the runner
+      # layout ever changes the collected file is simply empty, and nothing about the job's result changes.
+      - name: Collect the real-model verdicts from the step summaries
+        if: always()
+        run: |
+          mkdir -p backend/TestResults
+          cat "$(dirname "$GITHUB_STEP_SUMMARY")"/step_summary_* > backend/TestResults/step-summary.md 2>/dev/null || true
+
+      - name: Upload the real-model results (trx + verdicts)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-model-wholeloop-results
+          path: backend/TestResults/
+          if-no-files-found: warn
+          retention-days: 30
 
   real-model-wholeloop-aux:
     name: real model (live-brain whole-loop — session · planner · delivery arcs)
@@ -403,6 +449,29 @@ jobs:
             RealModelSession \
             RealModelSpecPreview
 
+
+      # The trx + the step-summary verdicts are the only record of WHAT the live model actually did — how many golden
+      # points it scored, which wire skipped, which model answered. They were written to the runner and thrown away
+      # with it, so a red streak could not be diagnosed against the previous run's numbers. Keep them.
+      #
+      # A step summary is a per-STEP file, so this later step cannot read the test step's `$GITHUB_STEP_SUMMARY`
+      # directly — it concatenates every step_summary_* file in that directory instead. Best-effort: if the runner
+      # layout ever changes the collected file is simply empty, and nothing about the job's result changes.
+      - name: Collect the real-model verdicts from the step summaries
+        if: always()
+        run: |
+          mkdir -p backend/TestResults
+          cat "$(dirname "$GITHUB_STEP_SUMMARY")"/step_summary_* > backend/TestResults/step-summary.md 2>/dev/null || true
+
+      - name: Upload the real-model results (trx + verdicts)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-model-wholeloop-aux-results
+          path: backend/TestResults/
+          if-no-files-found: warn
+          retention-days: 30
+
   real-model-benchmark:
     name: real model (benchmark corpus solve-rate)
     runs-on: ubuntu-latest
@@ -512,6 +581,29 @@ jobs:
             backend/TestResults/real-model-benchmark.trx \
             RealModelBenchmark
 
+
+      # The trx + the step-summary verdicts are the only record of WHAT the live model actually did — how many golden
+      # points it scored, which wire skipped, which model answered. They were written to the runner and thrown away
+      # with it, so a red streak could not be diagnosed against the previous run's numbers. Keep them.
+      #
+      # A step summary is a per-STEP file, so this later step cannot read the test step's `$GITHUB_STEP_SUMMARY`
+      # directly — it concatenates every step_summary_* file in that directory instead. Best-effort: if the runner
+      # layout ever changes the collected file is simply empty, and nothing about the job's result changes.
+      - name: Collect the real-model verdicts from the step summaries
+        if: always()
+        run: |
+          mkdir -p backend/TestResults
+          cat "$(dirname "$GITHUB_STEP_SUMMARY")"/step_summary_* > backend/TestResults/step-summary.md 2>/dev/null || true
+
+      - name: Upload the real-model results (trx + verdicts)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-model-benchmark-results
+          path: backend/TestResults/
+          if-no-files-found: warn
+          retention-days: 30
+
   real-model-qualification-rehearsal:
     name: real model (hidden-suite qualification rehearsal — report only)
     runs-on: ubuntu-latest
@@ -601,6 +693,29 @@ jobs:
 
       - name: Assert the rehearsal actually ran (no silent skip)
         run: bash .github/scripts/assert-every-filter-clause-ran.sh backend/TestResults/real-model-qualification-rehearsal.trx RealModelQualificationRehearsal
+
+
+      # The trx + the step-summary verdicts are the only record of WHAT the live model actually did — how many golden
+      # points it scored, which wire skipped, which model answered. They were written to the runner and thrown away
+      # with it, so a red streak could not be diagnosed against the previous run's numbers. Keep them.
+      #
+      # A step summary is a per-STEP file, so this later step cannot read the test step's `$GITHUB_STEP_SUMMARY`
+      # directly — it concatenates every step_summary_* file in that directory instead. Best-effort: if the runner
+      # layout ever changes the collected file is simply empty, and nothing about the job's result changes.
+      - name: Collect the real-model verdicts from the step summaries
+        if: always()
+        run: |
+          mkdir -p backend/TestResults
+          cat "$(dirname "$GITHUB_STEP_SUMMARY")"/step_summary_* > backend/TestResults/step-summary.md 2>/dev/null || true
+
+      - name: Upload the real-model results (trx + verdicts)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-model-qualification-rehearsal-results
+          path: backend/TestResults/
+          if-no-files-found: warn
+          retention-days: 30
 
   real-model-benchmark-extended:
     name: real model (extended benchmark corpus — report only)
@@ -692,6 +807,29 @@ jobs:
           bash .github/scripts/assert-every-filter-clause-ran.sh \
             backend/TestResults/real-model-benchmark-extended.trx \
             RealModelExtendedBenchmark
+
+
+      # The trx + the step-summary verdicts are the only record of WHAT the live model actually did — how many golden
+      # points it scored, which wire skipped, which model answered. They were written to the runner and thrown away
+      # with it, so a red streak could not be diagnosed against the previous run's numbers. Keep them.
+      #
+      # A step summary is a per-STEP file, so this later step cannot read the test step's `$GITHUB_STEP_SUMMARY`
+      # directly — it concatenates every step_summary_* file in that directory instead. Best-effort: if the runner
+      # layout ever changes the collected file is simply empty, and nothing about the job's result changes.
+      - name: Collect the real-model verdicts from the step summaries
+        if: always()
+        run: |
+          mkdir -p backend/TestResults
+          cat "$(dirname "$GITHUB_STEP_SUMMARY")"/step_summary_* > backend/TestResults/step-summary.md 2>/dev/null || true
+
+      - name: Upload the real-model results (trx + verdicts)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-model-benchmark-extended-results
+          path: backend/TestResults/
+          if-no-files-found: warn
+          retention-days: 30
 
   real-model-injection:
     name: real model (agent/skill injection — claude gates, codex reports)
@@ -822,6 +960,29 @@ jobs:
           # match would satisfy every class-level clause and pass green with the gate running on nothing. The script
           # greps the fully-qualified name, which carries the method too, so the finer grain needs no separate check.
 
+
+      # The trx + the step-summary verdicts are the only record of WHAT the live model actually did — how many golden
+      # points it scored, which wire skipped, which model answered. They were written to the runner and thrown away
+      # with it, so a red streak could not be diagnosed against the previous run's numbers. Keep them.
+      #
+      # A step summary is a per-STEP file, so this later step cannot read the test step's `$GITHUB_STEP_SUMMARY`
+      # directly — it concatenates every step_summary_* file in that directory instead. Best-effort: if the runner
+      # layout ever changes the collected file is simply empty, and nothing about the job's result changes.
+      - name: Collect the real-model verdicts from the step summaries
+        if: always()
+        run: |
+          mkdir -p backend/TestResults
+          cat "$(dirname "$GITHUB_STEP_SUMMARY")"/step_summary_* > backend/TestResults/step-summary.md 2>/dev/null || true
+
+      - name: Upload the real-model results (trx + verdicts)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-model-injection-results
+          path: backend/TestResults/
+          if-no-files-found: warn
+          retention-days: 30
+
   real-model-publish-manifest:
     name: real model (publish-manifest capture + push)
     runs-on: ubuntu-latest
@@ -907,6 +1068,29 @@ jobs:
           bash .github/scripts/assert-every-filter-clause-ran.sh \
             backend/TestResults/real-model-publish-manifest.trx \
             RealModelPublishManifest
+
+
+      # The trx + the step-summary verdicts are the only record of WHAT the live model actually did — how many golden
+      # points it scored, which wire skipped, which model answered. They were written to the runner and thrown away
+      # with it, so a red streak could not be diagnosed against the previous run's numbers. Keep them.
+      #
+      # A step summary is a per-STEP file, so this later step cannot read the test step's `$GITHUB_STEP_SUMMARY`
+      # directly — it concatenates every step_summary_* file in that directory instead. Best-effort: if the runner
+      # layout ever changes the collected file is simply empty, and nothing about the job's result changes.
+      - name: Collect the real-model verdicts from the step summaries
+        if: always()
+        run: |
+          mkdir -p backend/TestResults
+          cat "$(dirname "$GITHUB_STEP_SUMMARY")"/step_summary_* > backend/TestResults/step-summary.md 2>/dev/null || true
+
+      - name: Upload the real-model results (trx + verdicts)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-model-publish-manifest-results
+          path: backend/TestResults/
+          if-no-files-found: warn
+          retention-days: 30
 
   real-model-footer-signals:
     name: real model (run-canvas footer live-signals)
@@ -998,6 +1182,29 @@ jobs:
             backend/TestResults/real-model-footer-signals.trx \
             RealModelFooterSignals
 
+
+      # The trx + the step-summary verdicts are the only record of WHAT the live model actually did — how many golden
+      # points it scored, which wire skipped, which model answered. They were written to the runner and thrown away
+      # with it, so a red streak could not be diagnosed against the previous run's numbers. Keep them.
+      #
+      # A step summary is a per-STEP file, so this later step cannot read the test step's `$GITHUB_STEP_SUMMARY`
+      # directly — it concatenates every step_summary_* file in that directory instead. Best-effort: if the runner
+      # layout ever changes the collected file is simply empty, and nothing about the job's result changes.
+      - name: Collect the real-model verdicts from the step summaries
+        if: always()
+        run: |
+          mkdir -p backend/TestResults
+          cat "$(dirname "$GITHUB_STEP_SUMMARY")"/step_summary_* > backend/TestResults/step-summary.md 2>/dev/null || true
+
+      - name: Upload the real-model results (trx + verdicts)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-model-footer-signals-results
+          path: backend/TestResults/
+          if-no-files-found: warn
+          retention-days: 30
+
   real-model-stop-hook:
     name: real model (in-loop acceptance stop-hook)
     runs-on: ubuntu-latest
@@ -1088,3 +1295,25 @@ jobs:
           bash .github/scripts/assert-every-filter-clause-ran.sh \
             backend/TestResults/real-model-stop-hook.trx \
             StopHookE2ETests
+
+      # The trx + the step-summary verdicts are the only record of WHAT the live model actually did — how many golden
+      # points it scored, which wire skipped, which model answered. They were written to the runner and thrown away
+      # with it, so a red streak could not be diagnosed against the previous run's numbers. Keep them.
+      #
+      # A step summary is a per-STEP file, so this later step cannot read the test step's `$GITHUB_STEP_SUMMARY`
+      # directly — it concatenates every step_summary_* file in that directory instead. Best-effort: if the runner
+      # layout ever changes the collected file is simply empty, and nothing about the job's result changes.
+      - name: Collect the real-model verdicts from the step summaries
+        if: always()
+        run: |
+          mkdir -p backend/TestResults
+          cat "$(dirname "$GITHUB_STEP_SUMMARY")"/step_summary_* > backend/TestResults/step-summary.md 2>/dev/null || true
+
+      - name: Upload the real-model results (trx + verdicts)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-model-stop-hook-results
+          path: backend/TestResults/
+          if-no-files-found: warn
+          retention-days: 30

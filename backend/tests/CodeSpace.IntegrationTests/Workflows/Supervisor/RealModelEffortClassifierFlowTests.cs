@@ -22,7 +22,7 @@ namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 [Trait("Category", "RealModel")]
 public sealed class RealModelEffortClassifierFlowTests
 {
-    [Theory]
+    [SkippableTheory]
     [InlineData("Anthropic")]
     [InlineData("OpenAI")]
     public async Task The_real_model_classifies_an_obviously_risky_task_as_deep_above_the_confirm_floor(string provider)
@@ -31,7 +31,7 @@ public sealed class RealModelEffortClassifierFlowTests
         var apiKey = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
         var model = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
-        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → skip (honest CI/fork behaviour)
+        if (baseUrl is null || apiKey is null || model is null) throw RealModelGate.ReportSkipped(provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass: NotExecuted in the trx, never a green that measured nothing
 
         await RealModelGate.AssessLiveAsync(provider, async () =>
         {

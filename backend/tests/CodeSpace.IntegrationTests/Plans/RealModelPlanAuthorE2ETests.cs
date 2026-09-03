@@ -39,14 +39,14 @@ public sealed class RealModelPlanAuthorE2ETests
 
     public RealModelPlanAuthorE2ETests(PostgresFixture fixture) { _fixture = fixture; }
 
-    [Fact]
+    [SkippableFact]
     public async Task A_live_model_authors_a_plan_that_persists_as_a_work_plan_version()
     {
         var baseUrl = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
         var apiKey = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
         var model = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
-        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → skip green
+        if (baseUrl is null || apiKey is null || model is null) throw RealModelGate.ReportSkipped(Custom, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass: NotExecuted in the trx, never a green that measured nothing
 
         var teamId = await SeedTeamAsync();
         var runId = Guid.NewGuid();   // the run link is a soft reference — no engine run needed at this tier

@@ -62,7 +62,7 @@ public sealed class RealModelAgentInjectionE2ETests
 
     public RealModelAgentInjectionE2ETests(PostgresFixture fixture) { _fixture = fixture; }
 
-    [Fact]
+    [SkippableFact]
     public async Task A_real_claude_agent_applies_its_injected_persona()
     {
         if (await EnsureLiveOrSkipAsync() is not { } live) return;   // skip ≠ pass (surfaced loudly)
@@ -94,7 +94,7 @@ public sealed class RealModelAgentInjectionE2ETests
         });
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task A_real_claude_agent_loads_and_uses_a_bound_skill()
     {
         if (await EnsureLiveOrSkipAsync() is not { } live) return;   // skip ≠ pass (surfaced loudly)
@@ -250,11 +250,11 @@ public sealed class RealModelAgentInjectionE2ETests
 
         // A set-but-BLANK secret counts as ABSENT (an undefined GitHub ${{ secrets.X }} expands to ""). IsNullOrWhiteSpace.
         var present = new[] { baseUrl, apiKey, model }.Count(v => !string.IsNullOrWhiteSpace(v));
-        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return null; }   // skip ≠ pass
+        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three (base url / api key / model id) or none; a partial config would otherwise self-skip green proving nothing.");
 
         if (OperatingSystem.IsWindows()) return null;                       // the harness + sandbox are /bin/sh based
-        if (!await ClaudeReadyAsync()) { RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed — the injection gate needs the harness binary (skip ≠ pass)"); return null; }
+        if (!await ClaudeReadyAsync()) throw RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed — the injection gate needs the harness binary (skip ≠ pass)");
 
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         return new LiveContext(teamId, baseUrl!.TrimEnd('/'), apiKey!, model!);

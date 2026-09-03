@@ -71,6 +71,62 @@ expect 1 "fails when the trx is missing entirely" \
 expect 1 "fails when given no clauses to check" \
   bash "$guard" "$trx"
 
+# ── Outcome counting: "the clause selected a test" is not "the clause measured anything" ──────────────────────────
+#
+# The real-model gates now SKIP (NotExecuted) when there are no live credentials or the gateway faulted, so a lane
+# can select every test it claims to and still measure nothing. That case must WARN — and must NOT error, because a
+# non-gating infra skip is by design.
+
+skipped_trx="${tmp}/skipped.trx"
+cat > "$skipped_trx" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<TestRun>
+  <Results>
+    <UnitTestResult testName="CodeSpace.IntegrationTests.Workflows.Supervisor.RealModelSupervisorDecisionFlowTests.The_real_model_decides(provider: &quot;Anthropic&quot;)" outcome="NotExecuted" />
+    <UnitTestResult testName="CodeSpace.IntegrationTests.Sessions.RealModelSessionFlowTests.A_session_continues" outcome="Passed" />
+  </Results>
+</TestRun>
+XML
+
+expect_output() {
+  local mode="$1" needle="$2" name="$3"; shift 3
+  local out
+  out="$("$@" 2>&1)"
+
+  if [ "$mode" = "has" ] && printf '%s' "$out" | grep -qF -- "$needle"; then
+    echo "  ok      ${name}"
+  elif [ "$mode" = "lacks" ] && ! printf '%s' "$out" | grep -qF -- "$needle"; then
+    echo "  ok      ${name}"
+  else
+    echo "  FAILED  ${name} — output ${mode} '${needle}' was not satisfied"
+    printf '%s\n' "$out" | sed 's/^/          | /'
+    failures=$((failures + 1))
+  fi
+}
+
+# THE new case: every test the clause selected skipped, so the clause measured nothing.
+expect_output has "::warning::" "warns when a clause's tests ALL skipped" \
+  bash "$guard" "$skipped_trx" RealModelSupervisor RealModelSession
+
+expect_output has "RealModelSupervisor(1 skipped)" "names WHICH clause measured nothing" \
+  bash "$guard" "$skipped_trx" RealModelSupervisor RealModelSession
+
+# A skip is non-gating by design — the warning must never become an error.
+expect 0 "an all-skipped clause does NOT fail the job" \
+  bash "$guard" "$skipped_trx" RealModelSupervisor RealModelSession
+
+# A clause with a passing test alongside is measured; it must not be dragged into the warning.
+expect_output lacks "RealModelSession(" "does not warn about a clause that passed" \
+  bash "$guard" "$skipped_trx" RealModelSupervisor RealModelSession
+
+# A fully healthy lane warns about nothing at all.
+expect_output lacks "::warning::" "never warns when every clause measured something" \
+  bash "$guard" "$trx" RealModelSupervisor RealModelSession
+
+# The per-clause outcome table is the artefact a human reads to tell a 5-minute run from a 1-second one.
+expect_output has "skipped" "prints a per-clause outcome table" \
+  bash "$guard" "$trx" RealModelSupervisor
+
 if [ "$failures" -ne 0 ]; then
   echo "${failures} guard self-test(s) failed"
   exit 1

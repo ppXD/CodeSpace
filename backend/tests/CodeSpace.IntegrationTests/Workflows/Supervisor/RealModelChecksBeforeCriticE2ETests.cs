@@ -45,14 +45,14 @@ public sealed class RealModelChecksBeforeCriticE2ETests
 
     public RealModelChecksBeforeCriticE2ETests(PostgresFixture fixture) { _fixture = fixture; }
 
-    [Fact]
+    [SkippableFact]
     public async Task A_doomed_plan_never_reaches_a_live_reviewer_while_a_valid_one_does()
     {
         var baseUrl = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
         var apiKey = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
         var model = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
-        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → skip
+        if (baseUrl is null || apiKey is null || model is null) throw RealModelGate.ReportSkipped(Custom, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass: NotExecuted in the trx, never a green that measured nothing
 
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var reviewerRowId = await SeedCredentialedModelAsync(teamId, model, baseUrl, apiKey);

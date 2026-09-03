@@ -82,7 +82,7 @@ public sealed class RealModelDeliveryGateE2ETests : IDisposable
         scope.Resolve<InMemoryBackgroundJobClient>().AutoExecute = true;
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task A_live_brain_under_a_patch_only_policy_parks_on_the_delivery_conflict_and_completes_only_after_adjudication()
     {
         var baseUrl = Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
@@ -90,7 +90,7 @@ public sealed class RealModelDeliveryGateE2ETests : IDisposable
         var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
         var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
-        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }   // skip ≠ pass: surfaced loudly as NOT EVALUATED
+        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass: surfaced loudly as NOT EVALUATED
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three (base url / api key / model id) or none; a partial config would otherwise self-skip green proving nothing.");
 
         if (OperatingSystem.IsWindows()) return;   // the fake CLI is a /bin/sh script
