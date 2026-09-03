@@ -1,7 +1,9 @@
 using Autofac;
 using Shouldly;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Llm;
+using CodeSpace.Messages.Agents;
 
 namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 
@@ -25,7 +27,11 @@ namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 public sealed class ModelObservingLLMClientDecoratorTests
 {
     private const string AskedFor = "the-configured-secret-id";
-    private const string Answered = "gateway-actually-answered-this";
+
+    /// <summary>A DISTINCT answering model per face. The sink keeps the LAST write, so driving all three faces with one name would let a face whose observation was gutted still pass on a sibling's write — each face is therefore asserted on its own name's fingerprint, in its own assessment.</summary>
+    private const string AnsweredText = "gateway-answered-the-text-call";
+    private const string AnsweredStructured = "gateway-answered-the-structured-call";
+    private const string AnsweredStreamed = "gateway-answered-the-streamed-call";
 
     private static readonly System.Text.Json.JsonElement EmptySchema = System.Text.Json.JsonDocument.Parse("{}").RootElement.Clone();
 
@@ -36,11 +42,7 @@ public sealed class ModelObservingLLMClientDecoratorTests
         // be applied at construction or the gate observes nothing.
         var registry = new LLMClientRegistry(new[] { ModelObserving.Wrap(new FakeWireClient()) });
 
-        var stamp = await StampAfterAsync(() => CallEveryFaceAsync(registry.Resolve(FakeWireClient.ProviderTag)));
-
-        stamp.ShouldContain($"model={Answered}");
-        stamp.ShouldNotContain(AskedFor, Case.Sensitive, "the PROVIDER-reported model must win over the one that was asked for");
-        stamp.ShouldNotContain("(configured)", Case.Sensitive, "a stamp reading (configured) means nothing fed the sink — the gate cannot name the model behind its own verdict");
+        await EveryFaceIsObservedAsync(registry.Resolve(FakeWireClient.ProviderTag));
     }
 
     [Fact]
@@ -54,10 +56,7 @@ public sealed class ModelObservingLLMClientDecoratorTests
 
         using var container = builder.Build();
 
-        var stamp = await StampAfterAsync(() => CallEveryFaceAsync(container.Resolve<ILLMClient>()));
-
-        stamp.ShouldContain($"model={Answered}");
-        stamp.ShouldNotContain("(configured)", Case.Sensitive);
+        await EveryFaceIsObservedAsync(container.Resolve<ILLMClient>());
     }
 
     [Fact]
@@ -91,11 +90,12 @@ public sealed class ModelObservingLLMClientDecoratorTests
         var answers = new List<string>();
         var drains = 0;
 
-        var answered = await UnattendedAskResponder.AnswerAllAsync(
-            answer => { answers.Add(answer); return Task.FromResult(parked-- > 0); },
+        var (answered, leftForAHuman) = await UnattendedAskResponder.AnswerAllAsync(
+            answer => { answers.Add(answer); return Task.FromResult(parked-- > 0 ? ParkedAskDisposition.Answered : ParkedAskDisposition.NothingParked); },
             () => { drains++; return Task.CompletedTask; });
 
         answered.ShouldBe(3);
+        leftForAHuman.ShouldBe(0);
         drains.ShouldBe(3, "each answered card's resume must be ridden to settlement before the next card is looked for");
         answers.Count.ShouldBe(4, "the loop stops on the first call that reports nothing parked");
         answers.ShouldAllBe(a => a.StartsWith(SupervisorApprovalRequest.ApproveReply, StringComparison.OrdinalIgnoreCase));
@@ -106,14 +106,56 @@ public sealed class ModelObservingLLMClientDecoratorTests
     {
         // A brain that answers every answer with another question must not hang the lane — it must fall out and be
         // scored on whatever terminal the run actually reached.
-        var answered = await UnattendedAskResponder.AnswerAllAsync(_ => Task.FromResult(true), () => Task.CompletedTask);
+        var (answered, _) = await UnattendedAskResponder.AnswerAllAsync(_ => Task.FromResult(ParkedAskDisposition.Answered), () => Task.CompletedTask);
 
         answered.ShouldBe(UnattendedAskResponder.MaxAnsweredAsks);
         UnattendedAskResponder.MaxAnsweredAsks.ShouldBeGreaterThan(SupervisorLane.DefaultMaxNoProgressDecisions,
             "a bound at or below the no-progress bound would starve a run that legitimately needs that many answers — the exact stall this responder exists to prevent");
     }
 
-    /// <summary>Run <paramref name="drive"/> inside a gate assessment and return the verdict stamp it produced — the same seam the gate's own reporting reads, so the assertion is on what a CI log would actually show.</summary>
+    [Fact]
+    public void An_amend_cosign_card_is_left_parked_because_a_run_may_never_mark_its_own_homework()
+    {
+        // A REAL amend card, built by the production projector. It is an ask_human like any other, and
+        // IsApprovedAmendCard approves on exactly the "approve" prefix the scripted answer carries — so a blanket
+        // responder would co-sign the brain's own proposal to WAIVE the oracle its acceptance grade is measured
+        // against, and the arm would then read a PASSED grade off the check the model talked its way out of.
+        var amendCard = SupervisorAmendAcceptance.IntoAskHuman(new SupervisorAmendAcceptancePayload
+        {
+            SubtaskId = "s1",
+            Waive = true,
+            Reason = "the gate binary is missing",
+        });
+
+        UnattendedAskResponder.MustLeaveForAHuman(amendCard.PayloadJson)
+            .ShouldBeTrue("an oracle amendment is the one card a script must never rule on — it stays parked for a real human");
+
+        // Every OTHER card family stays answerable: refusing them all would put the headline arm straight back into the
+        // unanswered-ask stall this responder exists to clear.
+        UnattendedAskResponder.MustLeaveForAHuman(QuestionCard(SupervisorPlanConfirmation.ConfirmationMarker)).ShouldBeFalse("a plan confirmation is the operator's routine go-ahead");
+        UnattendedAskResponder.MustLeaveForAHuman(QuestionCard(SupervisorGateEscalation.EscalationMarker)).ShouldBeFalse("a gate escalation is a ruling an operator makes");
+        UnattendedAskResponder.MustLeaveForAHuman(QuestionCard("Which log format should I use?")).ShouldBeFalse("a plain content ask is answerable by anyone");
+        UnattendedAskResponder.MustLeaveForAHuman(null).ShouldBeFalse("no card at all is not a refusal");
+
+        static string QuestionCard(string question) =>
+            System.Text.Json.JsonSerializer.Serialize(new SupervisorAskHumanPayload { Question = question }, AgentJson.Options);
+    }
+
+    [Fact]
+    public async Task The_responder_stops_at_an_amend_card_and_reports_it_rather_than_answering_it()
+    {
+        // Two ordinary cards, then an amend card. The answer surface only ever targets the NEWEST ask, so nothing
+        // behind the refused card is reachable — the loop must stop there and SAY so, not spin on it.
+        var script = new Queue<ParkedAskDisposition>(new[] { ParkedAskDisposition.Answered, ParkedAskDisposition.Answered, ParkedAskDisposition.LeftForAHuman, ParkedAskDisposition.Answered });
+
+        var (answered, leftForAHuman) = await UnattendedAskResponder.AnswerAllAsync(_ => Task.FromResult(script.Dequeue()), () => Task.CompletedTask);
+
+        answered.ShouldBe(2);
+        leftForAHuman.ShouldBe(1, "the refused card is COUNTED, so the verdict line says the attempt stopped at an oracle amendment rather than silently reading as a plain miss");
+        script.Count.ShouldBe(1, "the loop stopped at the refused card — it never looked past it");
+    }
+
+    /// <summary>Run <paramref name="drive"/> inside a gate assessment and return the verdict stamp it produced — the same seam the gate's own reporting reads, so the assertion is on what a CI log would actually show. A FRESH assessment per call, because the sink keeps only the last write.</summary>
     private static async Task<string> StampAfterAsync(Func<Task> drive)
     {
         var path = Path.Combine(Path.GetTempPath(), $"realmodel-observing-{Guid.NewGuid():N}.md");
@@ -133,13 +175,22 @@ public sealed class ModelObservingLLMClientDecoratorTests
         }
     }
 
-    /// <summary>Exercise every face the wrapper carries — the decider reaches the structured one, the streaming callers the tee'd one, an llm.complete node the plain one. Each must feed the sink; a face that passes through blind is a stamp the gate cannot trust.</summary>
-    private static async Task CallEveryFaceAsync(ILLMClient client)
+    /// <summary>Assert EACH face the wrapper carries feeds the sink — the decider reaches the structured one, the streaming callers the tee'd one, an llm.complete node the plain one. One assessment per face, each asserting its OWN answering model, so gutting any single face's observation reds this.</summary>
+    private static async Task EveryFaceIsObservedAsync(ILLMClient client)
     {
-        await client.CompleteAsync(TextRequest(), CancellationToken.None);
-        await ((IStructuredLLMClient)client).CompleteStructuredAsync(new StructuredLLMCompletionRequest { Model = AskedFor, SystemPrompt = "s", UserPrompt = "p", JsonSchema = EmptySchema }, CancellationToken.None);
+        await ObservesAsync(AnsweredText, () => client.CompleteAsync(TextRequest(), CancellationToken.None));
+        await ObservesAsync(AnsweredStructured, () => ((IStructuredLLMClient)client).CompleteStructuredAsync(new StructuredLLMCompletionRequest { Model = AskedFor, SystemPrompt = "s", UserPrompt = "p", JsonSchema = EmptySchema }, CancellationToken.None));
+        await ObservesAsync(AnsweredStreamed, async () => { await foreach (var _ in ((IStreamingLLMClient)client).StreamAsync(TextRequest(), CancellationToken.None)) { } });
+    }
 
-        await foreach (var _ in ((IStreamingLLMClient)client).StreamAsync(TextRequest(), CancellationToken.None)) { }
+    /// <summary>Drive one call inside a gate assessment and assert the verdict stamp names the model the PROVIDER answered with. Asserted through the masking-proof FINGERPRINT and the source tag rather than the raw name, so the assertion survives a stamp that prints the fingerprint alone (the model id is a repository secret; a stamp is free to stop printing it).</summary>
+    private static async Task ObservesAsync(string answeringModel, Func<Task> call)
+    {
+        var stamp = await StampAfterAsync(call);
+
+        stamp.ShouldContain($"fp={RealModelGate.Fingerprint(answeringModel)}", Case.Sensitive, $"the stamp must fingerprint the model the provider ANSWERED with ({answeringModel})");
+        stamp.ShouldNotContain($"fp={RealModelGate.Fingerprint(AskedFor)}", Case.Sensitive, "the asked-for model id must never be what the verdict reports");
+        stamp.ShouldNotContain("(configured)", Case.Sensitive, "a stamp tagged (configured) means nothing fed the sink — the gate cannot name the model behind its own verdict");
     }
 
     private static LLMCompletionRequest TextRequest() => new() { Model = AskedFor, SystemPrompt = "s", UserPrompt = "p" };
@@ -152,14 +203,14 @@ public sealed class ModelObservingLLMClientDecoratorTests
         public string Provider => ProviderTag;
 
         public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken) =>
-            Task.FromResult(new LLMCompletion { Text = "t", Model = Answered, Usage = LlmUsage.None });
+            Task.FromResult(new LLMCompletion { Text = "t", Model = AnsweredText, Usage = LlmUsage.None });
 
         public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken) =>
-            Task.FromResult(new StructuredLLMCompletion { Json = EmptySchema, Model = Answered, Usage = LlmUsage.None });
+            Task.FromResult(new StructuredLLMCompletion { Json = EmptySchema, Model = AnsweredStructured, Usage = LlmUsage.None });
 
         public async IAsyncEnumerable<LlmStreamEvent> StreamAsync(LLMCompletionRequest request, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
         {
-            yield return new LlmStreamEvent.Meta(Model: Answered);
+            yield return new LlmStreamEvent.Meta(Model: AnsweredStreamed);
             yield return new LlmStreamEvent.TextDelta("t");
             await Task.CompletedTask;
         }
@@ -170,10 +221,10 @@ public sealed class ModelObservingLLMClientDecoratorTests
         public string Provider => "FakeStructuredOnly";
 
         public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken) =>
-            Task.FromResult(new LLMCompletion { Text = "t", Model = Answered, Usage = LlmUsage.None });
+            Task.FromResult(new LLMCompletion { Text = "t", Model = AnsweredText, Usage = LlmUsage.None });
 
         public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken) =>
-            Task.FromResult(new StructuredLLMCompletion { Json = EmptySchema, Model = Answered, Usage = LlmUsage.None });
+            Task.FromResult(new StructuredLLMCompletion { Json = EmptySchema, Model = AnsweredStructured, Usage = LlmUsage.None });
     }
 
     private sealed class FakeTextOnlyClient : ILLMClient
@@ -181,6 +232,6 @@ public sealed class ModelObservingLLMClientDecoratorTests
         public string Provider => "FakeTextOnly";
 
         public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken) =>
-            Task.FromResult(new LLMCompletion { Text = "t", Model = Answered, Usage = LlmUsage.None });
+            Task.FromResult(new LLMCompletion { Text = "t", Model = AnsweredText, Usage = LlmUsage.None });
     }
 }
