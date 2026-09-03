@@ -825,6 +825,63 @@ public sealed class SupervisorAcceptanceFoldFlowTests
         result.RepositoryBranches.Count.ShouldBe(secondRepoExit == 0 ? 2 : 0, "all-or-nothing — one failing repo withholds EVERY per-repo head");
     }
 
+    [Theory]
+    [InlineData(true, "AcceptanceFailed")]      // the head rewrote check.sh to `exit 0` → the floor restores its own judge and fails it
+    [InlineData(false, "Completed")]            // the head did the actual work and never touched check.sh → the same floor passes it
+    public async Task The_real_operator_floor_voids_a_heads_rewrite_of_the_check_script_it_grades_with(bool rewritesTheCheck, string expectedStatus)
+    {
+        // C3, the refutation this PR had to remove: the operator's floor is the one gate a run cannot ship past,
+        // and it is built as a bare argv spec — nothing in Core or the UI has ever authored ProtectedPaths. So the
+        // floor cloned the run's final head and ran whatever bytes lived there under check.sh's name, including
+        // bytes the run itself wrote. Both arms below ship the SAME floor command against the SAME branch name;
+        // only the head's content differs.
+        if (!await GitReadyAsync()) return;
+
+        using var remote = new AcceptanceRemote();
+        await remote.InitAsync();
+
+        // main's check.sh is the operator's judge: it passes ONLY if marker.txt exists.
+        var baseSha = await remote.SeedMarkerCheckAsync("marker.txt");
+
+        if (rewritesTheCheck)
+            await remote.AddBranchWithCheckAsync("integration/head", 0);                             // the judge is replaced by `exit 0`; marker.txt was never produced
+        else
+            await remote.AddBranchWithFileAsync("integration/head", "marker.txt", "delivered\n");    // the work is really done; the judge is untouched
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+
+        await SeedCleanMergeDecisionAsync(runId, teamId, "integration/head");
+
+        // The run's recorded base — the S1 pin its participants materialized from, and the anchor the floor
+        // restores its oracle from. A patch-only row (no branch) so it is not itself a publication candidate.
+        await SeedManifestAsync(teamId, Guid.NewGuid(), repoId, branch: null, baseSha: baseSha, patchArtifactId: null, workflowRunId: runId);
+
+        SupervisorTurnResult result;
+        using (var scope = _fixture.BeginScope())
+        {
+            var service = new SupervisorTurnService(
+                scope.Resolve<ISupervisorDecisionLog>(),
+                new StopWithAcceptanceDecider(Array.Empty<string>()),
+                scope.Resolve<ISupervisorActionExecutor>(),
+                scope.Resolve<CodeSpaceDbContext>(),
+                scope.Resolve<ISupervisorAcceptanceGrader>(),
+                scope.Resolve<IDecisionQueueService>(),
+                scope.Resolve<IDecisionArbiter>(),
+                scope.Resolve<IDecisionAnswerService>(),
+                scope.Resolve<CodeSpace.Core.Services.Plans.IWorkPlanService>(),
+                scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Supervisor.ISupervisorPublishedBranchResolver>(), scope.Resolve<CodeSpace.Core.Services.Completion.ICompletionAssessmentComposer>(), new AdmitAllBudgetLedger(),
+        scope.Resolve<CodeSpace.Core.Services.Learning.ILessonReader>(), scope.Resolve<ILogger<SupervisorTurnService>>());
+
+            result = await service.RunTurnAsync(runId, teamId, NodeId, Goal, conversationId: null, GoalConfig(repoId, acceptanceChecks: new[] { "sh", "check.sh" }), CancellationToken.None);
+        }
+
+        AgentSupervisorNode.Finish(Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, result).Outputs["status"].GetString()
+            .ShouldBe(expectedStatus, "the operator's floor grades ITS OWN check script, restored from the run's recorded base — a head that rewrote it cannot ship, a head that did the work can");
+        result.IntegratedBranch.ShouldBe(rewritesTheCheck ? null : "integration/head", "a floor the head tampered with withholds the reviewable head");
+    }
+
     // ─── Helpers ───
 
     private async Task<Guid> SeedBoundRepositoryAsync(Guid teamId, string cloneUrlHttps)
@@ -891,6 +948,17 @@ public sealed class SupervisorAcceptanceFoldFlowTests
             await Git(_seed, "add", "-A");
             await Git(_seed, "commit", "-m", "seed");
             await Git(_seed, "push", "origin", "main");
+        }
+
+        /// <summary>A branch that adds ONE file and touches nothing else — the honest candidate in the C3 A/B below (its twin rewrites check.sh instead).</summary>
+        public async Task AddBranchWithFileAsync(string branch, string name, string content)
+        {
+            await Git(_seed, "checkout", "-B", branch, "main");
+            await File.WriteAllTextAsync(Path.Combine(_seed, name), content);
+            await Git(_seed, "add", "-A");
+            await Git(_seed, "commit", "-m", $"add {name}");
+            await Git(_seed, "push", "origin", branch);
+            await Git(_seed, "checkout", "main");
         }
 
         public async Task AddBranchWithCheckAsync(string branch, int checkExitCode)
@@ -1091,14 +1159,14 @@ public sealed class SupervisorAcceptanceFoldFlowTests
     }
 
     /// <summary>Seed a manifest row directly (bypassing IPublishManifestStore) — the durable source S2's patch fallback reads for a branch-less resolver, mirroring SupervisorUnitAcceptanceFoldFlowTests' own helper.</summary>
-    private async Task SeedManifestAsync(Guid teamId, Guid agentRunId, Guid repositoryId, string? branch, string? baseSha, Guid? patchArtifactId)
+    private async Task SeedManifestAsync(Guid teamId, Guid agentRunId, Guid repositoryId, string? branch, string? baseSha, Guid? patchArtifactId, Guid? workflowRunId = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
 
         db.PublishManifest.Add(new PublishManifest
         {
-            Id = Guid.NewGuid(), TeamId = teamId, Kind = PublishManifestKind.Agent, AgentRunId = agentRunId, RepositoryId = repositoryId,
+            Id = Guid.NewGuid(), TeamId = teamId, Kind = PublishManifestKind.Agent, AgentRunId = agentRunId, RepositoryId = repositoryId, WorkflowRunId = workflowRunId,
             RepositoryAlias = "primary", Branch = branch, BaseSha = baseSha, PatchArtifactId = patchArtifactId,
             PublishStateValue = branch is not null ? PublishState.Pushed : PublishState.PatchOnly,
         });

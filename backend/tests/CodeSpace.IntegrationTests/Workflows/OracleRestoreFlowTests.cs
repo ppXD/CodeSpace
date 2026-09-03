@@ -60,7 +60,7 @@ public sealed class OracleRestoreFlowTests
 
         var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
 
-        var grade = await GradeAsync(repoId, teamId, "candidate", baseSha);
+        var grade = await GradeAsync(repoId, teamId, "candidate", baseSha, Protected);
 
         grade.Passed.ShouldBeFalse("the candidate rewrote the failing case to exit 0 — the restore must put the oracle's own bytes back, or a worker grades itself");
         grade.EvidenceTail.ShouldContain("TAMPER VOIDED", Case.Insensitive, "the operator must be told the candidate touched its judge, not merely that the check failed");
@@ -83,7 +83,7 @@ public sealed class OracleRestoreFlowTests
 
         var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
 
-        var grade = await GradeAsync(repoId, teamId, "candidate", baseSha);
+        var grade = await GradeAsync(repoId, teamId, "candidate", baseSha, Protected);
 
         grade.Passed.ShouldBeFalse(
             "the candidate added tests/env.sh — a file the oracle sources — and every byte the oracle already owned was left untouched. "
@@ -116,18 +116,93 @@ public sealed class OracleRestoreFlowTests
 
         var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
 
-        var grade = await GradeAsync(repoId, teamId, "candidate", baseSha);
+        var grade = await GradeAsync(repoId, teamId, "candidate", baseSha, Protected);
 
         grade.Passed.ShouldBeTrue("the candidate touched nothing the oracle owns and the check passes — restoring protected paths must be a no-op here");
         (grade.EvidenceTail ?? "").ShouldNotContain("TAMPER", Case.Insensitive, "calling honest work tamper would teach the operator to ignore the warning");
     }
 
+    // ── C3: the same floor, with NO authored protection — the shape every real operator check actually has ──
+
+    [Fact]
+    public async Task Rewriting_the_check_script_the_command_names_does_not_buy_a_pass_without_any_authored_protection()
+    {
+        // Every test above hands the grader an AUTHORED ProtectedPaths. Nothing in Core or the UI ever writes one:
+        // the operator's own floor is built as a bare argv spec, so in production this file was proving a path no
+        // real grade took. Here the spec is the real one — command only — and the candidate rewrites the very
+        // script that command names.
+        if (OperatingSystem.IsWindows() || !await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(new() { ["check.sh"] = CheckScript, ["tests/case.sh"] = "exit 1\n" });
+        var baseSha = await remote.HeadShaAsync();
+
+        await remote.CommitOnBranchAsync("candidate", new() { ["check.sh"] = "exit 0\n" });
+
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+
+        var grade = await GradeAsync(repoId, teamId, "candidate", baseSha, protectedPaths: null);
+
+        grade.Passed.ShouldBeFalse("the candidate replaced check.sh — the script the acceptance command RUNS — with `exit 0`. Deriving the command's own program from the base is the only thing standing between that edit and a self-awarded pass");
+        grade.Class.ShouldNotBe(GradeFailureClass.Environment, $"it must fail as a real verdict, not collapse (detail='{grade.Detail}')");
+        grade.EvidenceTail.ShouldContain("TAMPER VOIDED", Case.Insensitive, "a worker that rewrote its own judge must be SEEN, not just neutralized");
+    }
+
+    [Fact]
+    public async Task An_untouched_check_script_grades_on_the_merits_without_any_authored_protection()
+    {
+        // The scope fence for the derived path: protection must not become a way to fail honest work.
+        if (OperatingSystem.IsWindows() || !await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(new() { ["check.sh"] = CheckScript, ["tests/case.sh"] = "exit 0\n" });
+        var baseSha = await remote.HeadShaAsync();
+
+        await remote.CommitOnBranchAsync("candidate", new() { ["src/feature.txt"] = "the actual work\n" });
+
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+
+        var grade = await GradeAsync(repoId, teamId, "candidate", baseSha, protectedPaths: null);
+
+        grade.Passed.ShouldBeTrue("the candidate never touched the judge — the derived restore is a no-op and the check's own exit code decides");
+        grade.Detail.ShouldBe("tests-passed", "the verdict text is exactly what an unprotected grade produced before C3");
+        (grade.EvidenceTail ?? "").ShouldNotContain("TAMPER", Case.Insensitive, "calling honest work tamper would teach the operator to ignore the warning");
+    }
+
+    [Fact]
+    public async Task A_check_script_the_base_never_had_is_the_candidates_own_and_is_not_restored_away()
+    {
+        // The other half of the fence: a task whose whole point is "add the check" must still be gradeable. The
+        // script is absent at base, so it is not the operator's judge and nothing is restored — grading a path that
+        // does not exist at base would fail the git checkout and turn honest work into an Environment failure.
+        if (OperatingSystem.IsWindows() || !await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(new() { ["README.md"] = "base\n" });
+        var baseSha = await remote.HeadShaAsync();
+
+        await remote.CommitOnBranchAsync("candidate", new() { ["check.sh"] = "exit 0\n" });
+
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+
+        var grade = await GradeAsync(repoId, teamId, "candidate", baseSha, protectedPaths: null);
+
+        grade.Passed.ShouldBeTrue($"the candidate AUTHORED check.sh — it is the work, not the judge (detail='{grade.Detail}')");
+        grade.Detail.ShouldNotContain("oracle-restore-failed", Case.Insensitive, "a derived path that does not exist at base must never be handed to `git checkout`");
+    }
+
     // ── Chassis ──────────────────────────────────────────────────────────────────────
 
-    private async Task<BenchmarkGrade> GradeAsync(Guid repoId, Guid teamId, string branch, string baseSha)
+    private async Task<BenchmarkGrade> GradeAsync(Guid repoId, Guid teamId, string branch, string baseSha, IReadOnlyList<string>? protectedPaths)
     {
         using var scope = _fixture.BeginScope();
-        var spec = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" }, ProtectedPaths = Protected };
+        var spec = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" }, ProtectedPaths = protectedPaths };
 
         return await scope.Resolve<ISupervisorAcceptanceGrader>().GradeAsync(repoId, teamId, branch, spec, 60, baseSha, CancellationToken.None);
     }

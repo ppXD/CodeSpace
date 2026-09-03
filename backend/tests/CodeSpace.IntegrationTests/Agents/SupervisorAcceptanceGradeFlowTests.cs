@@ -233,6 +233,46 @@ public sealed class SupervisorAcceptanceGradeFlowTests
         graded.AcceptanceDetail.ShouldBe("repo 'api': tests-failed-exit-1");
     }
 
+    [Theory]
+    [InlineData(true, false, "tests-failed-exit-1")]     // the branch rewrote check.sh → the restored judge fails it
+    [InlineData(false, true, "tests-passed")]            // the branch did the work → the same judge passes it
+    public async Task C3_a_branch_that_rewrites_the_check_script_cannot_grade_itself_through_the_real_executor(bool rewritesTheCheck, bool expectedPass, string expectedDetail)
+    {
+        // The single-agent twin of the supervisor floor. This lane recorded the run's base sha and then DISCARDED it
+        // at the branch grade, so the grader had nothing to restore check.sh from and ran the agent's own copy.
+        // Both arms ship the same contract against the same repo; only the branch's content differs.
+        if (!await GitReadyAsync()) return;
+
+        using var remote = new AcceptanceRemote();
+        await remote.InitAsync();
+        await remote.AddBranchWithScriptAsync("main", "#!/bin/sh\nif [ -f marker.txt ]; then exit 0; else exit 1; fi\n");   // the operator's judge, on main
+        var baseSha = await remote.HeadShaAsync("main");
+
+        if (rewritesTheCheck)
+            await remote.AddBranchWithScriptAsync("acc/candidate", "#!/bin/sh\nexit 0\n");            // the judge replaced; marker.txt never produced
+        else
+            await remote.AddBranchWithFileAsync("acc/candidate", "marker.txt", "delivered\n");        // the work really done; the judge untouched
+
+        var teamId = await SeedTeamAsync();
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+
+        using var scope = _fixture.BeginScope();
+        var executor = NewExecutor(scope);
+
+        var task = new AgentTask
+        {
+            Goal = "g", Harness = "no-op", Model = "test-model", RepositoryId = repoId,
+            Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } },
+        };
+        var run = new AgentRun { Id = Guid.NewGuid(), TeamId = teamId, Status = AgentRunStatus.Succeeded, TaskJson = System.Text.Json.JsonSerializer.Serialize(task, CodeSpace.Core.Services.Agents.AgentJson.Options) };
+        var succeeded = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", ProducedBranch = "acc/candidate", BaseSha = baseSha };
+
+        var graded = await executor.GradeAcceptanceIfPresentAsync(run, task, succeeded, workspace: null, CancellationToken.None);
+
+        graded.AcceptancePassed.ShouldBe(expectedPass, $"the run's own recorded base is the oracle anchor (detail='{graded.AcceptanceDetail}')");
+        graded.AcceptanceDetail.ShouldBe(expectedDetail, "the tampered branch fails as a real verdict — never an oracle-restore collapse, and never a self-awarded pass");
+    }
+
     [Fact]
     public async Task P3_2_a_setup_command_runs_before_the_check_in_the_same_real_workspace()
     {
@@ -404,6 +444,31 @@ public sealed class SupervisorAcceptanceGradeFlowTests
     }
 
     /// <summary>A bare file:// remote seeded with a main commit, to which acceptance branches each carrying a <c>check.sh</c> (whose exit code is the start-state) are pushed. The grader clones a branch and re-runs that check.</summary>
+    /// <summary>The real <c>AgentRunExecutor</c> wired from the DI scope — only the harness is a no-op stub (the acceptance gate never touches it).</summary>
+    private static CodeSpace.Core.Services.Agents.AgentRunExecutor NewExecutor(Autofac.ILifetimeScope scope)
+    {
+        var harness = new NoOpHarness();
+        var registry = new CodeSpace.Core.Services.Agents.AgentHarnessRegistry(new CodeSpace.Core.Services.Agents.IAgentHarness[] { harness });
+
+        return new CodeSpace.Core.Services.Agents.AgentRunExecutor(
+            scope.Resolve<CodeSpace.Core.Services.Agents.IAgentRunService>(),
+            registry,
+            new CodeSpace.Core.Services.Agents.HarnessModelReconciler(registry, scope.Resolve<CodeSpace.Core.Services.Agents.ModelCredentials.IModelPoolSelector>(), scope.Resolve<CodeSpaceDbContext>()),
+            scope.Resolve<CodeSpace.Core.Services.Agents.Sandbox.ISandboxRunnerRegistry>(),
+            scope.Resolve<CodeSpace.Core.Services.Agents.Workspace.IAgentWorkspaceResolver>(),
+            scope.Resolve<CodeSpace.Core.Services.Agents.IModelCredentialResolver>(),
+            scope.Resolve<CodeSpace.Core.Services.Agents.Workspace.IWorkspaceProviderRegistry>(),
+            scope.Resolve<CodeSpace.Core.Services.Agents.IAgentRunCompletionNotifier>(),
+            scope.Resolve<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(),
+            scope.Resolve<CodeSpaceDbContext>(),
+            scope.Resolve<CodeSpace.Core.Services.Review.IStructuredCritic>(),
+            scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(),
+            scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactStore>(),
+            scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IArtifactManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Agents.Capture.ICaptureIntentService>(),
+            Array.Empty<CodeSpace.Core.Services.Agents.Publish.IPublishGuard>(),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<CodeSpace.Core.Services.Agents.AgentRunExecutor>.Instance);
+    }
+
     private sealed class AcceptanceRemote : IDisposable
     {
         private readonly string _root = Path.Combine(Path.GetTempPath(), "cs-sup-accept-" + Guid.NewGuid().ToString("N"));
@@ -440,6 +505,17 @@ public sealed class SupervisorAcceptanceGradeFlowTests
             await File.WriteAllTextAsync(Path.Combine(_seed, "check.sh"), scriptBody);
             await Git(_seed, "add", "-A");
             await Git(_seed, "commit", "-m", $"check on {branch}");
+            await Git(_seed, "push", "origin", branch);
+            await Git(_seed, "checkout", "main");
+        }
+
+        /// <summary>A branch that adds ONE file and leaves <c>check.sh</c> alone — the honest half of the C3 A/B (its twin rewrites the check instead).</summary>
+        public async Task AddBranchWithFileAsync(string branch, string name, string content)
+        {
+            await Git(_seed, "checkout", "-B", branch, "main");
+            await File.WriteAllTextAsync(Path.Combine(_seed, name), content);
+            await Git(_seed, "add", "-A");
+            await Git(_seed, "commit", "-m", $"add {name} on {branch}");
             await Git(_seed, "push", "origin", branch);
             await Git(_seed, "checkout", "main");
         }

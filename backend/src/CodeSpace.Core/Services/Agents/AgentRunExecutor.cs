@@ -1895,8 +1895,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             var fullSpec = spec with { Command = command };
             var timeoutSeconds = spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds;
 
+            // C3: the run's own recorded base is the oracle anchor — the grader restores the acceptance command's
+            // program file from it, so an agent cannot buy its own pass by rewriting the check script it is graded
+            // with. The patch lane always had this anchor; the BRANCH lane discarded it and graded the candidate's
+            // bytes as the judge.
             grade = hasBranch
-                ? await grader.GradeAsync(repositoryId, run.TeamId, result.ProducedBranch!, fullSpec, timeoutSeconds, cancellationToken).ConfigureAwait(false)
+                ? await grader.GradeAsync(repositoryId, run.TeamId, result.ProducedBranch!, fullSpec, timeoutSeconds, result.BaseSha, cancellationToken).ConfigureAwait(false)
                 : await grader.GradePatchAsync(repositoryId, run.TeamId, result.BaseSha!, result.Patch, result.PatchArtifactId, fullSpec, timeoutSeconds, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1990,7 +1994,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             BenchmarkGrade grade;
             try
             {
-                grade = await grader.GradeAsync(target.RepositoryId!.Value, run.TeamId, target.ProducedBranch!, fullSpec, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+                // C3: each repo's own recorded base anchors ITS oracle restore — same protection as the single-repo lane.
+                grade = await grader.GradeAsync(target.RepositoryId!.Value, run.TeamId, target.ProducedBranch!, fullSpec, timeoutSeconds, target.BaseSha, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
