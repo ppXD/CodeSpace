@@ -1,4 +1,6 @@
+using System.Text.Json;
 using CodeSpace.Core.Services.Sessions.Room;
+using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Agents;
 using Shouldly;
 
@@ -66,6 +68,57 @@ public class RoomResultVerdictTests
 
         verdict.Degraded.ShouldBeTrue();
         verdict.Reason.ShouldBe("Checks failed");
+    }
+
+    /// <summary>
+    /// The COUPLING pin: drive the whole stop-kind × grade cross-product from the RAW payload / outcome bytes a stop
+    /// decision actually persists, and hold the card's verdict against <see cref="SupervisorOutcome.HonestOutcome"/> —
+    /// the very function the engine folds into <c>WorkflowRun.Outcome</c>. If the two ever disagree, the room is lying
+    /// about a run the ledger already judged.
+    ///
+    /// <para>Honest about its reach: today a naive <c>acceptancePassed is false</c> body ALSO satisfies this, because
+    /// <c>HonestOutcomeOf</c> is extensionally equal to it right now — so this theory cannot, at present, tell the two
+    /// apart (verified by mutation). What it does buy is the RELATIONSHIP: it goes red the moment the card's rule and
+    /// the engine's rule diverge — a new degraded word, a widened success set, a waived-grade change on either side,
+    /// or a card that starts reading absence as a verdict (that last one turns 4 of these cases red today).</para>
+    /// </summary>
+    [Theory]
+    [InlineData("completed", null, null)]
+    [InlineData("completed", null, true)]
+    [InlineData("completed", null, false)]
+    [InlineData("no-decision", null, null)]
+    [InlineData("no-decision", null, true)]
+    [InlineData("no-decision", null, false)]
+    [InlineData("needs_clarification", null, null)]
+    [InlineData("needs_clarification", null, true)]
+    [InlineData("needs_clarification", null, false)]
+    [InlineData(null, "no progress", null)]
+    [InlineData(null, "no progress", true)]
+    [InlineData(null, "no progress", false)]
+    public void The_cards_verdict_never_disagrees_with_the_engines_own_honest_outcome(string? outcome, string? forcedReason, bool? grade)
+    {
+        var payloadJson = forcedReason is null ? "{}" : JsonSerializer.Serialize(new { reason = forcedReason });
+        var outcomeJson = JsonSerializer.Serialize(new { stopped = true, outcome, summary = "The supervisor's closing line." });
+
+        if (grade is { } passed)
+            outcomeJson = SupervisorOutcome.AppendAcceptanceGrade(outcomeJson, passed, detail: "2 of 7 tests failed");
+
+        // Read the two facts back off the bytes exactly as the projector does.
+        var acceptancePassed = SupervisorOutcome.ReadAcceptanceGradePassed(outcomeJson);
+        var stopClass = SupervisorOutcome.ClassifyStop(payloadJson, outcomeJson);
+
+        acceptancePassed.ShouldBe(grade, "the fixture must round-trip through the real fold/read pair, or this theory proves nothing");
+
+        var honestOutcome = SupervisorOutcome.HonestOutcome(payloadJson, outcomeJson);
+        var acceptanceFailed = honestOutcome == SupervisorOutcome.AcceptanceFailedOutcome;
+
+        var verdict = RoomProjector.ResultVerdict(acceptancePassed, stopClass);
+
+        verdict.Degraded.ShouldBe(acceptanceFailed || stopClass.Degraded,
+            customMessage: $"the card and the run row must agree: outcome={outcome ?? "<null>"} reason={forcedReason ?? "<null>"} grade={grade?.ToString() ?? "<null>"} → honest word '{honestOutcome}'");
+
+        (verdict.Reason is not null).ShouldBe(acceptanceFailed,
+            customMessage: $"a reason line is owed EXACTLY when the honest word is {SupervisorOutcome.AcceptanceFailedOutcome} (got '{honestOutcome}', reason '{verdict.Reason ?? "<null>"}')");
     }
 
     private static SupervisorStopClassification Stop(SupervisorStopKind kind, string? summary = null, string? reason = null) =>

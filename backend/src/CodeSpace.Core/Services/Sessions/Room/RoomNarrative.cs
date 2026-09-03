@@ -26,6 +26,15 @@ public static class RoomNarrative
     /// </summary>
     public const string NotVerifiedWord = "not verified";
 
+    /// <summary>
+    /// The Deliver step's word for a run whose objective acceptance grade FAILED: its work is withheld from the
+    /// reviewable head (<c>SupervisorOutcome.IsWithheldFromHead</c>), so nothing was delivered — and saying so beats
+    /// both a silent Done (which claims a delivery that never happened) and the "stopped" a give-up stop earns
+    /// (nothing stopped this run; it reached a clean terminal and its work was refused). Pinned (Rule 8): it is a
+    /// user-facing claim about where the work went.
+    /// </summary>
+    public const string WithheldWord = "withheld — checks failed";
+
     /// <summary>The map + summary + inner blocks for one turn — everything <see cref="AssistantTurnBlock"/> needs below its header.</summary>
     public sealed record TurnNarrative(string? Summary, ExecutionMapBlock? Map, IReadOnlyList<RoomBlock> Blocks);
 
@@ -80,7 +89,7 @@ public static class RoomNarrative
         var (reviewStatus, reviewDetail) = ReviewStage(succeeded, failed, workStatus, acceptancePassed, degraded);
         steps.Add(Step($"{idPrefix}:review", "Review", reviewStatus, reviewDetail));
 
-        var (deliverStatus, deliverDetail) = DeliverStage(succeeded, failed, degraded);
+        var (deliverStatus, deliverDetail) = DeliverStage(succeeded, failed, degraded, acceptancePassed);
         steps.Add(Step($"{idPrefix}:deliver", "Deliver", deliverStatus, deliverDetail));
 
         return new ExecutionMapBlock { Id = $"{idPrefix}:map", Seq = seq, Steps = steps };
@@ -154,9 +163,19 @@ public static class RoomNarrative
         return work == ExecutionStepStatus.Done ? (ExecutionStepStatus.Running, null) : (ExecutionStepStatus.Queued, "queued");
     }
 
-    /// <summary>Deliver folds from the run outcome: a DEGRADED stop delivered nothing → skipped; success → Done (the PR reference rides the delivery card); failed → skipped; else queued.</summary>
-    private static (ExecutionStepStatus, string?) DeliverStage(bool succeeded, bool failed, bool degraded)
+    /// <summary>
+    /// Deliver folds from the objective acceptance verdict when graded, else the run outcome — the SAME precedence
+    /// <see cref="ReviewStage"/> uses, so the two adjacent steps can never tell different stories about one run: a
+    /// graded FAILURE delivered nothing BECAUSE its work is withheld from the reviewable head
+    /// (<c>SupervisorOutcome.IsWithheldFromHead</c>) → <see cref="WithheldWord"/>, never the vaguer "stopped" (nothing
+    /// stopped it — it ran to a clean terminal and was refused) and never a silent Done; a DEGRADED stop (a
+    /// fail-closed give-up / forced bound) delivered nothing → stopped; success → Done (the PR reference rides the
+    /// delivery card); failed → skipped; else queued.
+    /// </summary>
+    private static (ExecutionStepStatus, string?) DeliverStage(bool succeeded, bool failed, bool degraded, bool? acceptancePassed)
     {
+        if (acceptancePassed is false) return (ExecutionStepStatus.Skipped, WithheldWord);
+
         if (degraded) return (ExecutionStepStatus.Skipped, "stopped");
         if (succeeded) return (ExecutionStepStatus.Done, null);
         if (failed) return (ExecutionStepStatus.Skipped, "skipped");

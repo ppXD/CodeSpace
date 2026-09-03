@@ -273,6 +273,46 @@ public class RoomNarrativeTests
     }
 
     [Fact]
+    public void A1_a_FAILED_acceptance_grade_says_the_work_was_WITHHELD_rather_than_stopped_or_delivered()
+    {
+        // Deliver reads the same degraded flag the card now sets, so without the grade it would inherit "stopped" —
+        // wrong twice over (nothing stopped this run) and worse than the pre-A1 silent Done only in wording. The
+        // honest fact is WHERE the work went: withheld from the reviewable head because its checks failed.
+        var facts = new RoomTurnFacts { AcceptancePassed = false, FinalAnswer = new RoomFinalAnswer { Text = "Fixed it.", Degraded = true, DegradedReason = "Checks failed" } };
+
+        var deliver = Build(new[] { Tape("plan", 1), Tape("stop", 2, summary: "Fixed it.") }, WorkflowRunStatus.Success, facts: facts).Map!.Steps.Single(s => s.Label == "Deliver");
+
+        deliver.Status.ShouldBe(ExecutionStepStatus.Skipped, "nothing reached the head, so Deliver is not Done");
+        deliver.Detail.ShouldBe(RoomNarrative.WithheldWord);
+        deliver.Detail.ShouldBe("withheld — checks failed", "the literal is a user-facing claim — pinned so a rename is a visible decision (Rule 8)");
+    }
+
+    [Fact]
+    public void A1_an_UNGRADED_degraded_stop_keeps_todays_Review_and_Deliver_words()
+    {
+        // Regression guard for the shapes that were ALREADY degraded before A1 (a model give-up, a server-forced
+        // bound trip — indistinguishable at this tier, which sees only the degraded flag + the grade): with no grade
+        // to outrank them they must read exactly as they did. The withheld word is reserved for a refusing oracle.
+        var facts = new RoomTurnFacts { AcceptancePassed = null, FinalAnswer = new RoomFinalAnswer { Text = "Stopped short.", Degraded = true } };
+
+        var map = Build(new[] { Tape("plan", 1), Tape("stop", 2, summary: "Stopped short.") }, WorkflowRunStatus.Success, facts: facts).Map!;
+
+        map.Steps.Single(s => s.Label == "Review").Detail.ShouldBe("stopped", "an ungraded degrade keeps its own account");
+        map.Steps.Single(s => s.Label == "Deliver").Detail.ShouldBe("stopped", "no grade means nothing was withheld by a check — the give-up/forced word stands");
+    }
+
+    [Fact]
+    public void A1_a_PASSED_grade_leaves_Deliver_exactly_as_it_was()
+    {
+        var facts = new RoomTurnFacts { AcceptancePassed = true, FinalAnswer = new RoomFinalAnswer { Text = "Shipped." } };
+
+        var deliver = Build(new[] { Tape("plan", 1), Tape("stop", 2, summary: "Shipped.") }, WorkflowRunStatus.Success, facts: facts).Map!.Steps.Single(s => s.Label == "Deliver");
+
+        deliver.Status.ShouldBe(ExecutionStepStatus.Done);
+        deliver.Detail.ShouldBeNull("the PR reference rides the delivery card, not the map step (regression guard)");
+    }
+
+    [Fact]
     public void Map_status_maps_each_phase_status_to_the_step_vocabulary()
     {
         var n = Build(new[]

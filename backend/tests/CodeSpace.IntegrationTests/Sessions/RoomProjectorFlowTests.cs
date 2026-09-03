@@ -358,12 +358,22 @@ public class RoomProjectorFlowTests
 
         var turn = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
 
+        // The two derivations are INDEPENDENT: the engine folded the stop bytes into WorkflowRun.Outcome at terminal
+        // time (stamped above), while the projector re-derives its own verdict from those same bytes on every read —
+        // it does NOT read this column. Reading the row back is what makes the fixture load-bearing rather than
+        // decorative: it proves the run this test seeded really is the AcceptanceFailed-with-Status-Success shape, and
+        // it pins the two derivations against each other so they cannot silently drift into two different verdicts.
+        var row = await ReadRunOutcomeAsync(run);
+        row.Status.ShouldBe(WorkflowRunStatus.Success, "the graph completed — this is precisely why the status alone cannot be trusted");
+        row.Outcome.ShouldBe(SupervisorOutcome.AcceptanceFailedOutcome, "the engine's own honest word for these stop bytes");
+
         var result = turn.Blocks.OfType<FinalAnswerBlock>().Single();
-        result.Degraded.ShouldBeTrue("the work missed its own definition of done — the run row already says AcceptanceFailed, so the card cannot say Result");
+        result.Degraded.ShouldBeTrue($"the run row says '{row.Outcome}', so the card cannot say Result");
         result.DegradedReason.ShouldBe("Checks failed", "the card states the ledger's verdict, because the TEXT is the model's own success claim");
         result.Text.ShouldBe("Fixed the flaky tests across the suite.", "the model's claim is preserved verbatim — the card contradicts it, it does not rewrite it");
 
         turn.Map!.Steps.Single(s => s.Label == "Review").Detail.ShouldBe("failed", "the objective grade outranks the stop's classification — never softened to 'stopped'");
+        turn.Map!.Steps.Single(s => s.Label == "Deliver").Detail.ShouldBe(RoomNarrative.WithheldWord, "the work is withheld from the head — Deliver says where it went, not the vaguer 'stopped'");
     }
 
     [Fact]
@@ -1074,6 +1084,16 @@ public class RoomProjectorFlowTests
             CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
         });
         await db.SaveChangesAsync();
+    }
+
+    /// <summary>Read the run row's durable <c>Status</c> + honest <c>Outcome</c> back — the independent witness the projector does NOT consult, so a test can assert the card and the ledger agree.</summary>
+    private async Task<(WorkflowRunStatus Status, string? Outcome)> ReadRunOutcomeAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var row = await db.WorkflowRun.AsNoTracking().Where(r => r.Id == runId).Select(r => new { r.Status, r.Outcome }).SingleAsync();
+        return (row.Status, row.Outcome);
     }
 
     /// <summary>Stamp the run row's durable honest <c>Outcome</c> — what the engine derives from the stop decision's own bytes at terminal time. Seeded alongside the graded stop so the fixture is the SHAPE production writes, not just the half the projector happens to read.</summary>
