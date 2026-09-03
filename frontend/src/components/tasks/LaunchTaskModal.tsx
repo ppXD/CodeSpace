@@ -66,8 +66,9 @@ const PERMS = [
 ];
 // Every bounds preset's autonomy ceiling is "Standard" today (TaskLaunchService.ClampAutonomy clamps down to it),
 // so a Trusted/Unleashed REQUEST is silently reduced to Standard on every launch — offering them as reachable
-// choices would be a lie. The picker shows only the tiers the backend can actually grant; PERMS (all four) still
-// backs the Coordination "Autonomy ceiling" tighten-only control, a distinct backend policy this PR doesn't touch.
+// choices would be a lie. Same reasoning covers the Coordination "Autonomy ceiling" control: it can only TIGHTEN
+// the preset's ceiling (EffortRouter.TightenCeiling), never raise it, so picking Trusted/Unleashed there over an
+// already-Standard preset ceiling is inert too. PERMS (all four) survives only as the shared option-shape source.
 const REACHABLE_PERMS = PERMS.filter(p => p.v === "Confined" || p.v === "Standard");
 
 /**
@@ -550,7 +551,8 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
                   </div>
                   <div className="lt3-poolhint">The run keeps working the plan until it's done — bounded by this concurrency and the Budget, not a fixed round or agent count.</div>
                 </RowPop>
-                <Combo label="Autonomy ceiling" value={cfg.autonomyCeiling} options={[{ value: "", label: "Inherit" }, ...PERMS.map(p => ({ value: p.v, label: p.v }))]} onChange={v => setC({ autonomyCeiling: v })} />
+                <Combo label="Autonomy ceiling" value={cfg.autonomyCeiling} options={[{ value: "", label: "Inherit" }, ...REACHABLE_PERMS.map(p => ({ value: p.v, label: p.v }))]} onChange={v => setC({ autonomyCeiling: v })} />
+                <div className="lt3-poolhint">Trusted and Unleashed aren't offered here either — this ceiling can only TIGHTEN the preset's own Standard ceiling, never raise it, so they would be inert picks (backend policy).</div>
                 <Combo label="Integrate branches" value={cfg.integrateBranches} options={BOOLEAN_OVERRIDE_OPTIONS} onChange={v => setC({ integrateBranches: v as LaunchBooleanOverride })} />
                 <div className="lt3-hrow">
                   <Combo label="Decision critic" value={cfg.decisionReview} options={[

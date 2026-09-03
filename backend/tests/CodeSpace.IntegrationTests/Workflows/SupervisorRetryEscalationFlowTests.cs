@@ -218,11 +218,17 @@ public sealed class SupervisorRetryEscalationFlowTests
 
         var (task, outcomeJson) = await ExecuteRetryAsync(context, "s1");
 
-        task.Model.ShouldBeNull("the only candidate in the allowed pool is the prior model itself (Basic) — nothing in-pool beats its tier, so the ordinary (no profile model authored) resolution stands untouched");
+        // The only candidate in the allowed pool is the prior model itself (Basic) — nothing in-pool beats its tier,
+        // so the ESCALATION finds nothing to move to. That is a separate question from what the retry actually
+        // DISPATCHES on: ApplyPoolBoundDefaultAsync resolves a null effective model against the bound pool
+        // explicitly, so the allowed pool's one candidate fills the dispatch — the guarantee this test's own name
+        // makes is now airtight at the spawn stage, not just an incidental side effect of ResolveTeamDefaultAsync's
+        // Frontier soft-exclusion (which would not have guaranteed staying out of "claude-opus-4-8" for every pool shape).
+        task.Model.ShouldBe("claude-haiku-4-5", "the allowed pool's only candidate fills the dispatch — bounded explicitly, not left null for an unbounded downstream default to (usually) agree with");
 
-        // D3: the DISPATCH is untouched, but the ATTEMPT is recorded. Before, this returned nothing at all and the
-        // next turn's brain read a still-failing retry with no way to tell "reaching higher was impossible" from
-        // "nobody reached" — and re-asked for the same retry.
+        // D3: the ESCALATION is separately recorded even though it found nothing to move to. Before, this returned
+        // nothing at all and the next turn's brain read a still-failing retry with no way to tell "reaching higher
+        // was impossible" from "nobody reached" — and re-asked for the same retry.
         var escalation = SupervisorOutcome.ReadEscalation(outcomeJson);
         escalation.ShouldNotBeNull();
         escalation!.To.ShouldBeNull("nothing in the bounded pool beat the prior tier");
