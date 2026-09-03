@@ -72,6 +72,22 @@ public sealed class UnpricedModelUnderCapTests
     public void A_row_price_is_matched_case_insensitively_and_trimmed_like_every_other_layer() =>
         AgentCostPricing.CostUsd($"  {PoolModel.ToUpperInvariant()} ", 1_000_000, 0, RowPriced).ShouldBe(2m);
 
+    [Fact]
+    public void A_fat_fingered_row_price_is_SKIPPED_rather_than_overflowing_the_pricing_math()
+    {
+        // The column is an unconstrained `numeric`, so a typo'd 1e20 is storable. Multiplying it by int.MaxValue
+        // tokens overflows decimal into a throw — and "pricing never throws" is a contract the enforcement fold
+        // depends on. The absurd row falls through instead, so the model reads as unpriced (and a capped run then
+        // fails closed on it, which is the honest outcome for a price nobody can compute with).
+        var absurd = new Dictionary<string, ModelPrice>(StringComparer.OrdinalIgnoreCase)
+        {
+            [PoolModel] = new() { InputPerMillionUsd = 1e20m, OutputPerMillionUsd = 1m },
+        };
+
+        AgentCostPricing.CostUsd(PoolModel, int.MaxValue, int.MaxValue, absurd).ShouldBeNull();
+        UnpricedModelUnderCap.Blocks(PoolModel, 5m, absurd).ShouldBeTrue("an uncomputable price is not a price");
+    }
+
     // ── (2) The policy: blocks under a cap, silent without one ───────────────────────
 
     [Theory]

@@ -13,16 +13,24 @@ const mocks = vi.hoisted(() => ({
   confirmFn: vi.fn(),
 }));
 
-vi.mock("@/hooks/use-model-credentials", () => ({
-  useModelCredentials: () => ({ data: mocks.rows, isLoading: false, error: null }),
-  useAddModelCredential: () => ({ mutate: mocks.addMutate, isPending: false }),
-  useUpdateModelCredential: () => ({ mutate: vi.fn(), isPending: false }),
-  useRevokeModelCredential: () => ({ mutate: mocks.revokeMutate, isPending: false }),
-  useCredentialedModelList: () => ({ data: mocks.models, isLoading: false, error: null }),
-  useRefreshCredentialedModels: () => ({ mutate: vi.fn(), isPending: false }),
-  useSaveCredentialedModels: () => ({ mutate: vi.fn(), isPending: false }),
-  useSetDefaultCredentialedModel: () => ({ mutate: vi.fn(), isPending: false }),
-}));
+vi.mock("@/hooks/use-model-credentials", async () => {
+  // parsePrice is a pure helper the models modal calls directly — keep the real one so this page-level test never
+  // has to know about pricing at all.
+  const actual = await vi.importActual<typeof import("@/hooks/use-model-credentials")>("@/hooks/use-model-credentials");
+
+  return {
+    parsePrice: actual.parsePrice,
+    useModelCredentials: () => ({ data: mocks.rows, isLoading: false, error: null }),
+    useAddModelCredential: () => ({ mutate: mocks.addMutate, isPending: false }),
+    useUpdateModelCredential: () => ({ mutate: vi.fn(), isPending: false }),
+    useRevokeModelCredential: () => ({ mutate: mocks.revokeMutate, isPending: false }),
+    useCredentialedModelList: () => ({ data: mocks.models, isLoading: false, error: null }),
+    useRefreshCredentialedModels: () => ({ mutate: vi.fn(), isPending: false }),
+    useSaveCredentialedModels: () => ({ mutate: vi.fn(), isPending: false }),
+    useSetDefaultCredentialedModel: () => ({ mutate: vi.fn(), isPending: false }),
+    useSetCredentialedModelPrice: () => ({ mutate: vi.fn(), isPending: false }),
+  };
+});
 vi.mock("@/components/dialog", () => ({ useConfirm: () => mocks.confirmFn }));
 
 const cred: ModelCredentialSummary = {
