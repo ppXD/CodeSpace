@@ -64,6 +64,11 @@ const PERMS = [
   { v: "Trusted", d: "workspace edits · network" },
   { v: "Unleashed", d: "controlled runner · high trust" },
 ];
+// Every bounds preset's autonomy ceiling is "Standard" today (TaskLaunchService.ClampAutonomy clamps down to it),
+// so a Trusted/Unleashed REQUEST is silently reduced to Standard on every launch — offering them as reachable
+// choices would be a lie. The picker shows only the tiers the backend can actually grant; PERMS (all four) still
+// backs the Coordination "Autonomy ceiling" tighten-only control, a distinct backend policy this PR doesn't touch.
+const REACHABLE_PERMS = PERMS.filter(p => p.v === "Confined" || p.v === "Standard");
 
 /**
  * The one generic "Launch a task" composer — a minimal Copilot/Gemini-style box: a task input with the
@@ -115,11 +120,24 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
     maxParallel: "5", budget: "none",
     integrateBranches: "inherit" as LaunchBooleanOverride, autonomyCeiling: "",
     acceptance: [...DEFAULT_ACCEPTANCE], acceptanceChecks: [] as string[],
-    decisionSurface: "run-activity", timeout: "safe-default", timeLimit: "3600", notifyChat: "off",
+    timeLimit: "3600",
     requirePlanConfirmation: false, plannerReview: "None",
     decisionReview: "None", outputReview: "None", reviewerModel: "", reviseRounds: "", reviewerAgent: false,
   });
   const setC = (p: Partial<typeof cfg>) => setCfg(c => ({ ...c, ...p }));
+  // "Time limit" defaults to 1h everywhere EXCEPT Deep, which defaults to 2h (matching
+  // TaskLaunchService.DeepAgentTimeoutSeconds) — untouched, the row shows/sends that tier's OWN default (never
+  // touched ⇒ omitted from the wire, byte-identical); once the operator picks a value explicitly, it sticks
+  // across an effort change instead of silently snapping back to a tier default.
+  const [timeLimitTouched, setTimeLimitTouched] = useState(false);
+  const timeLimitDefault = effort === "deep" ? "7200" : "3600";
+  const effectiveTimeLimit = timeLimitTouched ? cfg.timeLimit : timeLimitDefault;
+  const timeLimitOpts: Option[] = [
+    { value: "1800", label: "30 minutes" },
+    { value: "3600", label: effort === "deep" ? "1 hour" : "1 hour (default)" },
+    { value: "7200", label: effort === "deep" ? "2 hours (default)" : "2 hours" },
+    { value: "0", label: "No limit" },
+  ];
   // P3.2: the picked Quality tier — tracked independently of `cfg`'s knob values, NOT re-derived via `presetOf`.
   // Hand-editing a knob after picking Delivery must not quietly drop the mandate back to Prototype.
   const [tier, setTier] = useState<QualityTier>("Prototype");
@@ -128,7 +146,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
     else if (customizeTab === "planning") setC({ requirePlanConfirmation: false, plannerReview: "None", reviewerModel: "" });
     else if (customizeTab === "supervisor") setC({ agentModels: [], agentPool: [], maxParallel: "5", budget: "none", integrateBranches: "inherit", autonomyCeiling: "", decisionReview: "None" });
     else if (customizeTab === "evaluation") setC({ acceptance: [...DEFAULT_ACCEPTANCE], acceptanceChecks: [], outputReview: "None", reviseRounds: "", reviewerAgent: false });
-    else setC({ decisionSurface: "run-activity", timeout: "safe-default", timeLimit: "3600", notifyChat: "off" });
+    else { setTimeLimitTouched(false); setC({ timeLimit: "3600" }); }
   };
 
   const repos = useRepositories();
@@ -250,7 +268,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
     const input = buildLaunchInput({
       taskText, surface, sessionId, workspace, effort, autonomy, model, modelCredentialId, modelCredentialModelId, harness, agentDefinitionId, runnerKind, cwdMode: cfg.cwdMode, enableMcp: cfg.enableMcp, tools: cfg.tools, pushBranch: cfg.pushBranch,
       maxParallel: cfg.maxParallel, budget: cfg.budget,
-      agentModels: cfg.agentModels, agentPool: cfg.agentPool, autonomyCeiling: cfg.autonomyCeiling, timeLimit: cfg.timeLimit,
+      agentModels: cfg.agentModels, agentPool: cfg.agentPool, autonomyCeiling: cfg.autonomyCeiling, timeLimit: effectiveTimeLimit,
       integrateBranches: cfg.integrateBranches, acceptanceCriteria: cfg.acceptance, acceptanceChecks: cfg.acceptanceChecks,
       requirePlanConfirmation: cfg.requirePlanConfirmation, plannerReview: cfg.plannerReview,
       decisionReview: cfg.decisionReview, outputReview: cfg.outputReview, reviewerModel: cfg.reviewerModel, reviseRounds: cfg.reviseRounds, reviewerAgent: cfg.reviewerAgent,
@@ -333,7 +351,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
               {menu === "perm" && (
                 <Pop align="left">
                   <div className="lt3-pop-t">Permission</div>
-                  {PERMS.map(p => (
+                  {REACHABLE_PERMS.map(p => (
                     <button key={p.v} className="lt3-opt" data-on={autonomy === p.v} onClick={() => { setAutonomy(p.v); closeMenu(); }}>
                       <span className="lt3-opt-m"><span className="lt3-opt-t">{p.v}</span><span className="lt3-opt-d">{p.d}</span></span>
                       {autonomy === p.v && <Ic.Check size={14} />}
@@ -551,14 +569,12 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
 
               {customizeTab === "safety" && <>
                 <div className="lt3-cnote">What agents can do alone, and when they must ask.</div>
-                <Combo label="Permissions" value={autonomy} options={PERMS.map(p => ({ value: p.v, label: p.v, desc: p.d }))} onChange={setAutonomy} />
+                <Combo label="Permissions" value={autonomy} options={REACHABLE_PERMS.map(p => ({ value: p.v, label: p.v, desc: p.d }))} onChange={setAutonomy} />
+                <div className="lt3-poolhint">Trusted and Unleashed aren't reachable from Launch yet — every preset's autonomy ceiling clamps a request down to Standard (backend policy).</div>
                 <SToggleRow label="Ask when uncertain" on locked />
                 <SToggleRow label="Approve irreversible actions" on locked />
                 <SToggleRow label="Stop before merge / push" on locked />
-                <Combo label="Decision surface" value={cfg.decisionSurface} options={[{ value: "run-activity", label: "Run activity" }]} onChange={v => setC({ decisionSurface: v })} />
-                <Combo label="Notify in chat" value={cfg.notifyChat} options={[{ value: "off", label: "Off" }, { value: "channel", label: "Current channel" }]} onChange={v => setC({ notifyChat: v })} />
-                <Combo label="Timeout" value={cfg.timeout} options={[{ value: "safe-default", label: "Safe default" }, { value: "pause", label: "Pause and wait" }, { value: "reject", label: "Safe reject" }]} onChange={v => setC({ timeout: v })} />
-                <Combo label="Time limit" value={cfg.timeLimit} options={[{ value: "1800", label: "30 minutes" }, { value: "3600", label: "1 hour" }, { value: "7200", label: "2 hours" }, { value: "0", label: "No limit" }]} onChange={v => setC({ timeLimit: v })} />
+                <Combo label="Time limit" value={effectiveTimeLimit} options={timeLimitOpts} onChange={v => { setTimeLimitTouched(true); setC({ timeLimit: v }); }} />
               </>}
 
               {customizeTab === "planning" && <>
@@ -619,7 +635,9 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
                 </div>
                 <Combo label="Reviewer" value={cfg.reviewerAgent ? "agent" : "model"} options={[
                   { value: "model", label: "Model — in-process critic reads the diff", desc: "Fast and cheap — judges the change as text" },
-                  { value: "agent", label: "Independent agent — clones the branch, other harness", desc: "Strongest — a real run inspects the actual repo (plans too); its approval is co-signed by a model" },
+                  effort === "deep"
+                    ? { value: "agent", label: "Independent agent — reviews the plan, other harness", desc: "Strongest for the plan: an independent run inspects the repo before it executes. Spawned agents still get the in-process model critic only — Deep has no per-unit independent-agent reviewer" }
+                    : { value: "agent", label: "Independent agent — clones the branch, other harness", desc: "Strongest — a real run inspects the actual repo (plans too); its approval is co-signed by a model" },
                 ]} onChange={v => setC({ reviewerAgent: v === "agent" })} />
                 {effort === "deep"
                   ? <TierRow label="Self-revise" tier="Deep units revise via the supervisor's retry loop" />

@@ -218,6 +218,40 @@ public class SupervisorDefinitionBuilderTests
     }
 
     [Fact]
+    public void Agent_profile_omits_model_and_credential_when_a_supervisor_brain_model_was_resolved()
+    {
+        // The "Brain model" chip pins the SUPERVISOR's own brain (SupervisorBrainModelId) — agents draw from the
+        // model pool instead (locked design, PR #771). Model/ModelCredentialId are the SAME chip's picks, so once
+        // a brain is baked they must NOT also leak in as every spawned agent's default.
+        var repoId = Guid.NewGuid();
+        var credId = Guid.NewGuid();
+        var profile = new ResolvedAgentProfile { RepositoryId = repoId, Harness = "claude-code", Model = "claude-opus", ModelCredentialId = credId, RunnerKind = "local" };
+
+        var agentProfile = Builder.Build(Context(profile, brainModelId: Guid.NewGuid())).Nodes.Single(n => n.Id == "sup").Config.GetProperty("agentProfile");
+
+        agentProfile.TryGetProperty("model", out _).ShouldBeFalse("the brain model must not become the spawned agents' default");
+        agentProfile.TryGetProperty("modelCredentialId", out _).ShouldBeFalse("the brain's credential must not become the spawned agents' default");
+        // Untouched fields still bake — only the brain-only pair is withheld.
+        agentProfile.GetProperty("repositoryId").GetString().ShouldBe(repoId.ToString());
+        agentProfile.GetProperty("harness").GetString().ShouldBe("claude-code");
+        agentProfile.GetProperty("runnerKind").GetString().ShouldBe("local");
+    }
+
+    [Fact]
+    public void Agent_profile_stays_byte_identical_on_an_unpinned_deep_launch_with_no_brain_resolved()
+    {
+        // No brain resolved at all (e.g. the pool can't supply a structured-capable model) ⇒ the byte-identical
+        // pre-existing shape: an absent Model/ModelCredentialId on the profile means there was nothing to withhold.
+        var profile = new ResolvedAgentProfile { Harness = "claude-code" };
+
+        var agentProfile = Builder.Build(Context(profile, brainModelId: null)).Nodes.Single(n => n.Id == "sup").Config.GetProperty("agentProfile");
+
+        agentProfile.TryGetProperty("model", out _).ShouldBeFalse();
+        agentProfile.TryGetProperty("modelCredentialId", out _).ShouldBeFalse();
+        agentProfile.GetProperty("harness").GetString().ShouldBe("claude-code");
+    }
+
+    [Fact]
     public void The_launch_base_pin_bakes_onto_the_agent_profile_and_each_related_entry()
     {
         // S1: every agent this supervisor spawns must materialize the SAME immutable base — the vector bakes into

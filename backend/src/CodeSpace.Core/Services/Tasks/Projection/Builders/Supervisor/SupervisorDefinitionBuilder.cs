@@ -23,7 +23,8 @@ namespace CodeSpace.Core.Services.Tasks.Projection.Builders.Supervisor;
 ///     <item><c>goal</c> = <c>Seed.Goal</c> — the objective the supervisor pursues.</item>
 ///     <item><c>agentProfile</c> = the resolved profile field-for-field (repositoryId / harness / model /
 ///       agentDefinitionId / modelCredentialId / runnerKind / enableMcp / autonomyLevel) — the default envelope
-///       every spawned agent inherits.</item>
+///       every spawned agent inherits. <c>model</c>/<c>modelCredentialId</c> are omitted whenever a supervisor
+///       brain model was resolved — that chip pins the BRAIN only; spawned agents draw from the model pool.</item>
 ///     <item><c>maxParallelism</c> / <c>maxTotalSpawns</c> = the route's
 ///       <see cref="RouteCaps"/> (the RouteCaps→SupervisorGoalConfig fold) — the operator's safety bounds. The
 ///       node clamps each to its bounds ceiling at EXECUTION (this build never clamps).</item>
@@ -147,7 +148,7 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         // off the resolved profile (the same source the single-agent path's "tools" key uses). Omitted when empty ⇒ the
         // harness default ⇒ byte-identical. Closes the gap where a launched pool was dropped on the supervisor lane.
         AddIfPresent(config, "allowedTools", context.AgentProfile?.AllowedTools is { Count: > 0 } tools ? tools.ToList() : null);
-        AddIfPresent(config, "agentProfile", BuildAgentProfile(context.AgentProfile, context.PinnedShas, context.Seed.BaseBranch));
+        AddIfPresent(config, "agentProfile", BuildAgentProfile(context.AgentProfile, context.PinnedShas, context.Seed.BaseBranch, context.SupervisorBrainModelId is not null));
         // DC-2a: the operator's OWN pre-declared delivery preference — PER FIELD authoritative over the model's
         // plan-time proposal (SupervisorDeliveryClamp enforces this at plan-persist time). Omitted when the
         // operator named none (byte-identical to before DC-2a — the model's own proposal stands untouched).
@@ -156,8 +157,8 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         return JsonSerializer.SerializeToElement(config);
     }
 
-    /// <summary>The nested agentProfile object — the resolved profile field-for-field onto the ConfigSchema keys. Null (omitted) when the profile is absent or all-null, so a bare supervisor spawns the codex-cli / Standard / no-repo default.</summary>
-    private static Dictionary<string, object?>? BuildAgentProfile(ResolvedAgentProfile? profile, IReadOnlyDictionary<Guid, string>? pinnedShas, string? baseRef)
+    /// <summary>The nested agentProfile object — the resolved profile field-for-field onto the ConfigSchema keys. Null (omitted) when the profile is absent or all-null, so a bare supervisor spawns the codex-cli / Standard / no-repo default. <paramref name="brainModelBaked"/> is true when a supervisor brain model was resolved (<c>context.SupervisorBrainModelId is not null</c>) — the operator's "Brain model" chip pins the SUPERVISOR's own brain only (locked design, PR #771: agents draw from the model pool), so <c>model</c>/<c>modelCredentialId</c> — the SAME chip's picks, per <see cref="ResolvedAgentProfile.Model"/> — are omitted here in that case; baking them would also make the brain model every spawned agent's default, contradicting the modal's own "Agent model: Auto · from model pool" copy and able to kill a run whose brain sits outside the allowed pool. Unpinned deep launches leave <c>Model</c>/<c>ModelCredentialId</c> null already, so this is a no-op there (byte-identical), as it is for every non-supervisor projection (this builder is Deep-only).</summary>
+    private static Dictionary<string, object?>? BuildAgentProfile(ResolvedAgentProfile? profile, IReadOnlyDictionary<Guid, string>? pinnedShas, string? baseRef, bool brainModelBaked)
     {
         if (profile == null) return null;
 
@@ -177,9 +178,12 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         // own launch pin too (omitted per entry when unpinned).
         AddIfPresent(map, "relatedRepositories", AgentWorkspaceAuthoring.SerializeRelatedRepositories(profile.RelatedRepositories, pinnedShas: pinnedShas));
         AddIfPresent(map, "harness", NullIfBlank(profile.Harness));
-        AddIfPresent(map, "model", NullIfBlank(profile.Model));
+        if (!brainModelBaked)
+        {
+            AddIfPresent(map, "model", NullIfBlank(profile.Model));
+            AddIfPresent(map, "modelCredentialId", profile.ModelCredentialId?.ToString());
+        }
         AddIfPresent(map, "agentDefinitionId", profile.AgentDefinitionId?.ToString());
-        AddIfPresent(map, "modelCredentialId", profile.ModelCredentialId?.ToString());
         AddIfPresent(map, "runnerKind", NullIfBlank(profile.RunnerKind));
         AddIfPresent(map, "timeoutSeconds", profile.TimeoutSeconds);
         AddIfPresent(map, "enableMcp", profile.EnableMcp);
