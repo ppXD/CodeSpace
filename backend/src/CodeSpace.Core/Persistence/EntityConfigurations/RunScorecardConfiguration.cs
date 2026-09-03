@@ -16,6 +16,10 @@ public class RunScorecardConfiguration : IEntityTypeConfiguration<RunScorecard>
         builder.Property(r => r.LessonArm).HasMaxLength(16);
         builder.Property(r => r.BrainModel).HasMaxLength(200);
         builder.Property(r => r.ScorerVersion).HasMaxLength(60);
+        // Match the migration's NUMERIC(18,6) exactly — an unspecified precision lets the provider pick its own
+        // default, so the model and the schema would disagree about what a cent is.
+        builder.Property(r => r.CostUsd).HasPrecision(18, 6);
+        builder.Property(r => r.BrainPlaneUsd).HasPrecision(18, 6);
         builder.HasIndex(r => r.WorkflowRunId).IsUnique();
         builder.HasIndex(r => new { r.TeamId, r.CompletedAt });
     }

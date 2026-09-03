@@ -3,6 +3,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Cost;
 using CodeSpace.Messages.Agents.Benchmark;
+using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.Agents.Eval.Benchmark;
 
@@ -29,7 +30,7 @@ public sealed class BenchmarkResultStore : IBenchmarkResultStore, IScopedDepende
 
     public async Task RecordAsync(Guid teamId, string suiteVersion, BenchmarkResult result, BenchmarkAgentSelection? selection, CancellationToken cancellationToken)
     {
-        _db.BenchmarkResultRecord.Add(new BenchmarkResultRecord
+        var row = new BenchmarkResultRecord
         {
             Id = Guid.NewGuid(),
             TeamId = teamId,
@@ -48,9 +49,23 @@ public sealed class BenchmarkResultStore : IBenchmarkResultStore, IScopedDepende
             DurationSeconds = result.DurationSeconds,
             GitSha = Env(GitShaEnvVar),
             CiRunId = Env(CiRunIdEnvVar),
-        });
+        };
 
-        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        _db.BenchmarkResultRecord.Add(row);
+
+        try
+        {
+            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            // The caller (CorpusBenchmarkRunner) SWALLOWS this so a write fault cannot move the corpus verdict —
+            // which means a failed row left Added in this SCOPED context would be re-attempted on the next cell's
+            // SaveChanges and fail it too, turning one lost cell into every later cell in the run. Detach so the
+            // failure stays contained to the cell that caused it.
+            _db.Entry(row).State = EntityState.Detached;
+            throw;
+        }
     }
 
     /// <summary>The cell's priced spend — null when the run reported no usage (the deterministic fake CLI emits none) or the model is unknown to the pricer. Fail-open, never a silent $0.</summary>

@@ -321,6 +321,78 @@ public class RunScorecardFlowTests
         card.Rollup.ByLessonArm[0].UnattendedSolvedWithDeliveryRuns.ShouldBe(1);
     }
 
+    [Fact]
+    public async Task A_stale_persisted_row_cannot_make_the_slice_disagree_with_the_rollup()
+    {
+        // The review finding: the slice used to prefer the PERSISTED bits, so a row written before its run's
+        // manifest settled made SolvedRuns and sum(ByLessonArm.SolvedRuns) disagree on the same page — two numbers
+        // over the same runs, measured by two different clocks. Only the ARM comes from the row now.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
+        await SeedDecisionAsync(teamId, runId, sequence: 1, LessonArms.Injected);
+
+        // Project while the run looks unsolved and undelivered — the row is now stale by construction.
+        await WriteAsync(runId, teamId);
+        (await RowForAsync(runId))!.Solved.ShouldBeFalse();
+
+        // The evidence lands afterwards, and nothing revisits the row.
+        await SeedMetricAssessmentAsync(teamId, runId, "Solved");
+        await SeedDeliveredManifestAsync(teamId, runId);
+
+        UnattendedDeliveryScorecard card;
+        using (var scope = _fixture.BeginScope())
+            card = await scope.Resolve<IUnattendedDeliveryScorecardService>().ComputeAsync(teamId, null, CancellationToken.None);
+
+        (await RowForAsync(runId))!.Solved.ShouldBeFalse("the row is deliberately left stale — this test is about what the SLICE does with it");
+
+        var injected = card.Rollup.ByLessonArm.Single(s => s.Arm == LessonArms.Injected);
+        injected.SolvedRuns.ShouldBe(card.Rollup.SolvedRuns, "the slice is a PARTITION of the rollup — same runs, same bits, same totals, only grouped");
+        injected.DeliveredRuns.ShouldBe(card.Rollup.DeliveredRuns);
+        injected.UnattendedSolvedWithDeliveryRuns.ShouldBe(card.Rollup.UnattendedSolvedWithDeliveryRuns);
+        injected.SolvedRuns.ShouldBe(1, "the live bits say solved even though the stale row says otherwise");
+    }
+
+    [Fact]
+    public async Task A_planner_lane_run_is_measured_under_the_arm_its_plan_was_authored_with()
+    {
+        // Before this, RunLessonArms read supervisor_decision only, so a TREATED planner run — arm assigned,
+        // lessons folded into the plan prompt — reported `unmeasured` and sat outside the experiment it was in.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
+        await SeedMetricAssessmentAsync(teamId, runId, "Solved");
+        await SeedPlanAuthorNodeCompletedAsync(runId, LessonArms.Injected);
+
+        await WriteAsync(runId, teamId);
+
+        (await RowForAsync(runId))!.LessonArm.ShouldBe(LessonArms.Injected, "the planner lane assigns an arm too — reading only the supervisor ledger reported a treated run as unmeasured");
+    }
+
+    [Fact]
+    public async Task A_plan_author_run_with_no_arm_stays_unmeasured()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
+        await SeedPlanAuthorNodeCompletedAsync(runId, lessonArm: null);
+
+        await WriteAsync(runId, teamId);
+
+        (await RowForAsync(runId))!.LessonArm.ShouldBeNull("an unstamped plan was never in the experiment — that is not the 'none' control");
+    }
+
+    [Fact]
+    public async Task A_planner_arm_is_not_readable_through_a_borrowed_team_id()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamB, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedTerminalRunAsync(teamA, WorkflowRunStatus.Success);
+        await SeedPlanAuthorNodeCompletedAsync(runId, LessonArms.Injected);
+
+        using var scope = _fixture.BeginScope();
+        var arms = await RunLessonArms.ReadAsync(scope.Resolve<CodeSpaceDbContext>(), [runId], teamB, CancellationToken.None);
+
+        arms.ShouldBeEmpty("WorkflowRunRecord carries no team of its own — tenancy is a JOIN on the run, not a trusted argument");
+    }
+
     // ─── Benchmark cells ────────────────────────────────────────────────────────────
 
     [Fact]
@@ -568,6 +640,32 @@ public class RunScorecardFlowTests
             CreatedBy = Guid.Empty,
             LastModifiedDate = now,
             LastModifiedBy = Guid.Empty,
+        });
+
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>
+    /// A <c>plan.author</c> <c>node.completed</c> record carrying the promoted <c>lessonArm</c> output — the
+    /// planner lane's durable arm carrier. Serialized through the REAL <c>RunRecordLogger.NodeCompletedPayload</c>
+    /// shape (outputs + duration_ms) so the reader can only pass against the payload production actually writes.
+    /// </summary>
+    private async Task SeedPlanAuthorNodeCompletedAsync(Guid runId, string? lessonArm)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var outputs = new Dictionary<string, object> { ["planId"] = Guid.NewGuid(), ["version"] = 1, ["goal"] = "do the thing" };
+
+        if (lessonArm is not null) outputs[RunLessonArms.PlanAuthorArmOutputKey] = lessonArm;
+
+        db.WorkflowRunRecord.Add(new WorkflowRunRecord
+        {
+            Id = Guid.NewGuid(),
+            RunId = runId,
+            NodeId = "plan",
+            RecordType = WorkflowRunRecordTypes.NodeCompleted,
+            PayloadJson = System.Text.Json.JsonSerializer.Serialize(new { outputs, duration_ms = 1200L }),
         });
 
         await db.SaveChangesAsync();

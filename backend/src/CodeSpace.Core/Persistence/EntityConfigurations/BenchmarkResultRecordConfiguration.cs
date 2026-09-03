@@ -20,6 +20,7 @@ public class BenchmarkResultRecordConfiguration : IEntityTypeConfiguration<Bench
         builder.Property(r => r.ExitReason).HasMaxLength(60);
         builder.Property(r => r.GitSha).HasMaxLength(60);
         builder.Property(r => r.CiRunId).HasMaxLength(40);
+        builder.Property(r => r.CostUsd).HasPrecision(18, 6);   // matches the migration's NUMERIC(18,6)
         builder.HasIndex(r => new { r.TeamId, r.SuiteVersion, r.CreatedDate });
         builder.HasIndex(r => new { r.TeamId, r.TaskId, r.Mode });
     }

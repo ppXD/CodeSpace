@@ -127,7 +127,13 @@ public sealed record UnattendedDeliveryRollup
 /// </summary>
 public sealed record ArmedRunScore
 {
-    /// <summary>The <c>LessonArms</c> value the run ran under (<c>injected</c> / <c>withheld</c> / <c>none</c>), or null when the run has no decision ledger at all (a single-agent or plan-map run) — null and <c>none</c> are DISTINCT: one is "not measurable", the other is "measured as the empty-lesson control".</summary>
+    /// <summary>
+    /// The <c>LessonArms</c> value the run ran under (<c>injected</c> / <c>withheld</c> / <c>none</c>), read from
+    /// EITHER lane that assigns one: the supervisor's frozen decision-row arm, or the <c>plan.author</c> node's
+    /// own <c>lessonArm</c> output. Null when the run was in neither lane (a single-agent run) — and null is
+    /// DISTINCT from <c>none</c>: one is "never in the experiment", the other is "measured as the empty-lesson
+    /// control". Merging them would dilute the group the injected arm is compared against.
+    /// </summary>
     public string? LessonArm { get; init; }
 
     public required bool Solved { get; init; }
