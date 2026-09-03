@@ -201,6 +201,9 @@ public sealed record SupervisorTurnContext
     /// <summary>The credentialed-model ROW id the supervisor's own decider runs on (carried from <c>SupervisorGoalConfig.SupervisorModelId</c>). REQUIRED — the decider resolves this row to its model + credential and fails closed when null/unresolvable. Distinct from the agent pool (<see cref="AllowedModelIds"/>): the brain is the operator's explicit pick, never bounded by the agent allow-list.</summary>
     public Guid? SupervisorModelId { get; init; }
 
+    /// <summary>Whether <see cref="SupervisorModelId"/> is the operator's honored pin (carried from <c>SupervisorGoalConfig.BrainModelPinned</c>). A pinned brain resolves verbatim; an auto-selected one may fail over across the pool on a transient gateway fault.</summary>
+    public bool SupervisorModelPinned { get; init; }
+
     /// <summary>How (if at all) an INDEPENDENT critic reviews each turn's decision before its side effect (carried from <c>SupervisorGoalConfig.DecisionReviewMode</c>). <see cref="ReviewMode.None"/> (the default) ⇒ the critic decorator is a pure passthrough ⇒ byte-identical. <see cref="ReviewMode.Improve"/> ⇒ one bounded re-decide against the critique. Baked durably so every turn + replay reads the same mode.</summary>
     public ReviewMode DecisionReviewMode { get; init; } = ReviewMode.None;
 

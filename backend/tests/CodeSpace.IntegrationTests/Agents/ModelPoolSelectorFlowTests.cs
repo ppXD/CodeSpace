@@ -193,6 +193,25 @@ public class ModelPoolSelectorFlowTests
         opusRow.ShouldNotBe(sonnetRow);
     }
 
+    [Fact]
+    public async Task ListBrainRowIds_is_the_selectors_own_order_with_the_pick_as_its_head()
+    {
+        // L4 (decision-lane failover): the auto-brain's alternates are the SAME total order the single pick derives from —
+        // the pick is its head, the rest are the candidates in precedence order — so the two can never disagree.
+        var teamId = await SeedTeamAsync();
+        var anthropicCred = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-a");
+        var sonnetRow = await AddModelReturningIdAsync(anthropicCred, "claude-sonnet-4-6");
+        var opusRow = await AddModelReturningIdAsync(anthropicCred, "claude-opus-4-8");
+
+        using var scope = _fixture.BeginScope();
+        var selector = scope.Resolve<IModelPoolSelector>();
+
+        var ordered = await selector.ListBrainRowIdsAsync(teamId, new[] { "Anthropic", "OpenAI" }, CancellationToken.None);
+
+        ordered.ShouldBe(new[] { opusRow, sonnetRow }, "model-id order: 'claude-opus-4-8' sorts before 'claude-sonnet-4-6' — the whole eligible set, in precedence");
+        (await selector.SelectBrainRowIdAsync(teamId, new[] { "Anthropic", "OpenAI" }, CancellationToken.None)).ShouldBe(ordered[0], "the single pick IS the head of this list — one order, two readers");
+    }
+
     // ─── SelectReviewerRowIdAsync (S4d): the critic's distinct-first ladder ───
 
     [Fact]

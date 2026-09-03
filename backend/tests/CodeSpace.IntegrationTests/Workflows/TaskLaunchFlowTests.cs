@@ -278,6 +278,9 @@ public class TaskLaunchFlowTests
 
             ReadSupervisorBrainModelPinIneligible(run.DefinitionSnapshotJson!).ShouldBeFalse(
                 "no pin was authored at all — this is an ordinary auto-select, not a fallback from a bad pin");
+
+            ReadSupervisorBrainModelPinned(run.DefinitionSnapshotJson!).ShouldBeFalse(
+                "auto-selected ⇒ never marked pinned — the decider may fail over across the pool on a transient gateway fault");
         }
         finally
         {
@@ -321,6 +324,9 @@ public class TaskLaunchFlowTests
 
             ReadSupervisorBrainModelPinIneligible(run.DefinitionSnapshotJson!).ShouldBeFalse(
                 "the pin resolved cleanly — never mark an honored pin as an ineligible fallback");
+
+            ReadSupervisorBrainModelPinned(run.DefinitionSnapshotJson!).ShouldBeTrue(
+                "an honored operator pin is baked as PINNED — the decider resolves that exact row verbatim and never hops providers");
         }
         finally
         {
@@ -361,6 +367,9 @@ public class TaskLaunchFlowTests
 
             ReadSupervisorBrainModelPinIneligible(run.DefinitionSnapshotJson!).ShouldBeTrue(
                 "the operator's pin silently steered the run onto a DIFFERENT brain than requested — that must be discoverable on the run's own definition, not just a swapped id with no trace");
+
+            ReadSupervisorBrainModelPinned(run.DefinitionSnapshotJson!).ShouldBeFalse(
+                "a fallback brain is auto-selected — never marked pinned, so it stays eligible for pool failover");
         }
         finally
         {
@@ -1673,6 +1682,15 @@ public class TaskLaunchFlowTests
         var sup = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "sup");
 
         return sup.GetProperty("config").TryGetProperty("brainModelPinIneligible", out var flag) && flag.GetBoolean();
+    }
+
+    /// <summary>Reads the projected <c>agent.supervisor</c> node's <c>brainModelPinned</c> flag — true only when the operator's pin was HONORED (the decider resolves it verbatim, never failing over). False when the key is absent (auto-selected, or a pin-ineligible fallback).</summary>
+    private static bool ReadSupervisorBrainModelPinned(string definitionSnapshotJson)
+    {
+        var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
+        var sup = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "sup");
+
+        return sup.GetProperty("config").TryGetProperty("brainModelPinned", out var flag) && flag.GetBoolean();
     }
 
     /// <summary>Whether the row id is an enabled credentialed-model row under an active credential the team owns — proves the baked brain is a real, team-scoped, decider-resolvable row.</summary>
