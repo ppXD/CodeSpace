@@ -137,10 +137,14 @@ public static class RoomNarrative
     /// </summary>
     private static (ExecutionStepStatus, string?) ReviewStage(bool succeeded, bool failed, ExecutionStepStatus work, bool? acceptancePassed, bool degraded)
     {
+        // The objective GRADE outranks the stop's own classification (this method's contract: "the objective acceptance
+        // verdict when graded, else the run outcome") — a run whose checks failed reads "failed", not the vaguer
+        // "stopped" its now-degraded card would otherwise impose.
+        if (acceptancePassed is false) return (ExecutionStepStatus.Failed, "failed");
+
         if (degraded) return (ExecutionStepStatus.Skipped, "stopped");
 
         if (acceptancePassed is true) return (ExecutionStepStatus.Done, "passed");
-        if (acceptancePassed is false) return (ExecutionStepStatus.Failed, "failed");
 
         // An ungraded run has NO verdict — the review step is Done (nothing is pending) but the claim must not be
         // "passed": nothing checked this work. A null AcceptancePassed means the run staked no oracle at all (a
@@ -297,6 +301,7 @@ public static class RoomNarrative
         Text = fa.Text,
         Attachments = fa.Attachments.Select(a => Attach(a, producers, agentById)).ToList(),
         Degraded = fa.Degraded,
+        DegradedReason = fa.DegradedReason,
     };
 
     /// <summary>Map a fact attachment to the DTO, attributing a FILE to its producing agent (so the RESULT never presents an intermediate agent's file as the final deliverable without saying whose it is).</summary>

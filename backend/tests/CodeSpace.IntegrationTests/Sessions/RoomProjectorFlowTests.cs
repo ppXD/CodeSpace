@@ -343,6 +343,44 @@ public class RoomProjectorFlowTests
     }
 
     [Fact]
+    public async Task A_stop_whose_acceptance_check_FAILED_renders_a_degraded_result_naming_the_reason()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Claimed done, checks disagreed");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Fix the flaky tests", resultSummary: null);
+
+        // The over-claim shape the room used to launder into a green Result: the supervisor stopped ORDERLY with a
+        // conformant "completed" outcome and a confident closing line, but the objective acceptance grade FAILED. The
+        // engine already stamps the honest word on the run row (Outcome = AcceptanceFailed) while the graph-level
+        // Status stays a clean terminal Success — so the card, reading only the stop's classification, painted green.
+        await SeedStopDecisionAsync(teamId, run, outcome: "completed", summary: "Fixed the flaky tests across the suite.", acceptancePassed: false);
+        await StampRunOutcomeAsync(run, SupervisorOutcome.AcceptanceFailedOutcome);
+
+        var turn = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
+
+        var result = turn.Blocks.OfType<FinalAnswerBlock>().Single();
+        result.Degraded.ShouldBeTrue("the work missed its own definition of done — the run row already says AcceptanceFailed, so the card cannot say Result");
+        result.DegradedReason.ShouldBe("Checks failed", "the card states the ledger's verdict, because the TEXT is the model's own success claim");
+        result.Text.ShouldBe("Fixed the flaky tests across the suite.", "the model's claim is preserved verbatim — the card contradicts it, it does not rewrite it");
+
+        turn.Map!.Steps.Single(s => s.Label == "Review").Detail.ShouldBe("failed", "the objective grade outranks the stop's classification — never softened to 'stopped'");
+    }
+
+    [Fact]
+    public async Task A_stop_whose_acceptance_check_PASSED_keeps_the_green_result()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Checked and done");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Fix the flaky tests", resultSummary: null);
+
+        await SeedStopDecisionAsync(teamId, run, outcome: "completed", summary: "Fixed the flaky tests across the suite.", acceptancePassed: true);
+
+        var result = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<FinalAnswerBlock>().Single();
+        result.Degraded.ShouldBeFalse("a graded PASS is the one case that earns the green Result (regression guard)");
+        result.DegradedReason.ShouldBeNull();
+    }
+
+    [Fact]
     public async Task A_server_forced_bound_stop_renders_a_degraded_result_and_surfaces_the_reason()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -1016,20 +1054,36 @@ public class RoomProjectorFlowTests
         await db.SaveChangesAsync();
     }
 
-    /// <summary>Stamp a supervisor STOP decision with its { stopped, outcome, summary } outcome — the terminal verb that drives the RESULT card. A non-success outcome (no-decision / no-model) marks a degraded give-up stop.</summary>
-    private async Task SeedStopDecisionAsync(Guid teamId, Guid runId, string outcome, string summary)
+    /// <summary>Stamp a supervisor STOP decision with its { stopped, outcome, summary } outcome — the terminal verb that drives the RESULT card. A non-success outcome (no-decision / no-model) marks a degraded give-up stop. <paramref name="acceptancePassed"/> folds the objective acceptance grade onto the SAME outcome bytes the terminal writer does (<c>SupervisorOutcome.AppendAcceptanceGrade</c>); null leaves the stop ungraded.</summary>
+    private async Task SeedStopDecisionAsync(Guid teamId, Guid runId, string outcome, string summary, bool? acceptancePassed = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var outcomeJson = JsonSerializer.Serialize(new { stopped = true, outcome, summary });
+
+        if (acceptancePassed is { } passed)
+            outcomeJson = SupervisorOutcome.AppendAcceptanceGrade(outcomeJson, passed, detail: "2 of 7 tests failed");
 
         db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
         {
             Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId,
             DecisionKind = SupervisorDecisionKinds.Stop, IdempotencyKey = $"stop:{Guid.NewGuid():N}", InputHash = new string('0', 64),
             Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}",
-            OutcomeJson = JsonSerializer.Serialize(new { stopped = true, outcome, summary }),
+            OutcomeJson = outcomeJson,
             CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
         });
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>Stamp the run row's durable honest <c>Outcome</c> — what the engine derives from the stop decision's own bytes at terminal time. Seeded alongside the graded stop so the fixture is the SHAPE production writes, not just the half the projector happens to read.</summary>
+    private async Task StampRunOutcomeAsync(Guid runId, string outcome)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var run = await db.WorkflowRun.SingleAsync(r => r.Id == runId);
+        run.Outcome = outcome;
         await db.SaveChangesAsync();
     }
 

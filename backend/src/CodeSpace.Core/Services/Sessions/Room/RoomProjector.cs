@@ -310,9 +310,10 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         // model GIVE-UP (no-decision / no-model / unknown-decision), OR a SERVER-FORCED stop (a budget / governance /
         // bound trip stamping a {reason} with no outcome). Classify BOTH shapes through the ONE shared classifier the
         // Journal ③ stop step also reads, so the RESULT card renders DEGRADED (not a green success) for either — and the
-        // step + the terminal can never drift. Generic: never a per-kind string.
+        // step + the terminal can never drift. Generic: never a per-kind string. A THIRD shape — an orderly stop whose
+        // objective acceptance grade FAILED — degrades the card too; see <see cref="ResultVerdict"/>.
         var stopClass = SupervisorOutcome.ClassifyStop(stop?.PayloadJson, stop?.OutcomeJson);
-        var degraded = stopClass.Degraded;
+        var verdict = ResultVerdict(acceptance, stopClass);
 
         // The delivered answer text: the supervisor's closing line (or, for a forced stop, WHY it stopped — "budget
         // exhausted" — so the RESULT never renders blank), else — for a single-agent run with no supervisor — that one
@@ -405,7 +406,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         {
             Rounds = rounds,
             Checklist = checklist,
-            FinalAnswer = BuildFinalAnswer(finalAnswerText, changedFileIdentities, delivery, degraded),
+            FinalAnswer = BuildFinalAnswer(finalAnswerText, changedFileIdentities, delivery, verdict),
             LatestLines = latestLines,
             AgentFiles = agentFiles,
             AgentFileIdentities = agentFileIdentities,
@@ -488,8 +489,31 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         catch (JsonException) { return null; }
     }
 
-    /// <summary>The rich final answer — the stop summary text + typed attachments (the changed files + the PR). Images are a true gap (no run output exposes them). Null when there's nothing to deliver. <paramref name="degraded"/> marks a fail-closed give-up stop so the card renders neutral, not a green success.</summary>
-    private static RoomFinalAnswer? BuildFinalAnswer(string? text, IReadOnlyList<RoomFileIdentity> files, RoomDelivery? pr, bool degraded)
+    /// <summary>
+    /// A1 (result honesty) — the RESULT card's verdict, composed from the SAME two durable stop-decision facts the
+    /// engine folds into the run row's <c>Outcome</c> through <see cref="SupervisorOutcome.HonestOutcomeOf"/>: the
+    /// objective acceptance grade and the stop's classification. Reusing that one authority is what makes the card and
+    /// the run row's word un-driftable — a run whose checks FAILED can never render the green Result behind the
+    /// model's own success-sounding closing line.
+    ///
+    /// <para>The reason is stated only when the card's TEXT does not already carry it: a give-up / forced stop's text
+    /// IS the classifier's account of why it stopped, whereas a failed grade leaves the model's closing line intact,
+    /// so the verdict needs its own line. Copy is authored here (Rule: the backend owns the room's words).</para>
+    ///
+    /// <para>Pure; internal so it is unit-pinned directly (InternalsVisibleTo) rather than only through the DB tier.</para>
+    /// </summary>
+    internal static (bool Degraded, string? Reason) ResultVerdict(bool? acceptancePassed, SupervisorStopClassification stopClass)
+    {
+        var acceptanceFailed = SupervisorOutcome.HonestOutcomeOf(acceptancePassed, stopClass) == SupervisorOutcome.AcceptanceFailedOutcome;
+
+        return (acceptanceFailed || stopClass.Degraded, acceptanceFailed ? AcceptanceFailedReason : null);
+    }
+
+    /// <summary>The card's account of a FAILED objective acceptance grade — the same word the Runs list already uses for the <c>AcceptanceFailed</c> outcome, so the two surfaces read alike.</summary>
+    private const string AcceptanceFailedReason = "Checks failed";
+
+    /// <summary>The rich final answer — the stop summary text + typed attachments (the changed files + the PR). Images are a true gap (no run output exposes them). Null when there's nothing to deliver. <paramref name="verdict"/> marks a stop that did NOT finish well (a give-up / forced stop, or a failed acceptance grade) so the card renders neutral, not a green success.</summary>
+    private static RoomFinalAnswer? BuildFinalAnswer(string? text, IReadOnlyList<RoomFileIdentity> files, RoomDelivery? pr, (bool Degraded, string? Reason) verdict)
     {
         var attachments = new List<RoomAttachment>();
 
@@ -501,7 +525,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
 
         var body = string.IsNullOrWhiteSpace(text) ? null : text.Trim();
 
-        return body == null && attachments.Count == 0 ? null : new RoomFinalAnswer { Text = body, Attachments = attachments, Degraded = degraded };
+        return body == null && attachments.Count == 0 ? null : new RoomFinalAnswer { Text = body, Attachments = attachments, Degraded = verdict.Degraded, DegradedReason = verdict.Reason };
     }
 
     /// <summary>
