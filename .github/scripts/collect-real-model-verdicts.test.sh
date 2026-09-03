@@ -13,8 +13,10 @@ collect="${here}/collect-real-model-verdicts.sh"
 
 failures=0
 
-# Stage a fresh runner-shaped layout: a step-summary directory with per-step files, and a results directory with a
-# trx. Echoes the two paths so a case can read what would have been uploaded.
+pass() { echo "  ok      $1"; }
+fail() { echo "  FAILED  $1"; failures=$((failures + 1)); }
+
+# Stage a fresh runner-shaped layout: a step-summary directory with per-step files, and a results directory.
 stage() {
   local root; root="$(mktemp -d)"
   mkdir -p "${root}/summaries" "${root}/results"
@@ -25,42 +27,117 @@ check() {
   local mode="$1" needle="$2" file="$3" name="$4"
 
   if [ ! -f "$file" ]; then
-    echo "  FAILED  ${name} — ${file} was never written"
-    failures=$((failures + 1))
+    fail "${name} — ${file} was never written"
     return
   fi
 
   if [ "$mode" = "has" ] && grep -qF -- "$needle" "$file"; then
-    echo "  ok      ${name}"
+    pass "$name"
   elif [ "$mode" = "lacks" ] && ! grep -qF -- "$needle" "$file"; then
-    echo "  ok      ${name}"
+    pass "$name"
   else
-    echo "  FAILED  ${name} — ${file} ${mode} '${needle}' was not satisfied"
+    fail "${name} — ${file} ${mode} '${needle}' was not satisfied"
     sed 's/^/          | /' "$file"
-    failures=$((failures + 1))
   fi
 }
 
-# ── THE case this exists for: the configured id must not survive into the uploaded summary ───────────────────────
+check_output() {
+  local mode="$1" needle="$2" out="$3" name="$4"
+
+  if [ "$mode" = "has" ] && printf '%s' "$out" | grep -qF -- "$needle"; then
+    pass "$name"
+  elif [ "$mode" = "lacks" ] && ! printf '%s' "$out" | grep -qF -- "$needle"; then
+    pass "$name"
+  else
+    fail "${name} — the step output ${mode} '${needle}' was not satisfied"
+    printf '%s\n' "$out" | sed 's/^/          | /'
+  fi
+}
+
+# The values the fixtures pretend are secrets. The base URL is the shape that broke a sed-based redaction: it
+# carries `:` and `/`.
+MODEL_ID="pinned-model-4-5"
+BASE_URL="https://gateway.internal.example.com:8443/v1/openai"
+API_KEY="sk-codespace-0123456789abcdef"
+SUITE_URL="https://hidden-suite.example.com/qualification.json"
+OBSERVED="ZhipuAI/GLM-5.3-Flash"
+
+# Run the collect step with every secret present.
+run_collect() {
+  CODESPACE_LLM_MODEL_ID="$MODEL_ID" \
+  CODESPACE_LLM_BASE_URL="$BASE_URL" \
+  CODESPACE_LLM_API_KEY="$API_KEY" \
+  CODESPACE_HIDDEN_SUITE_URL="$SUITE_URL" \
+    bash "$collect" "$@" 2>&1
+}
+
+# ── The list of secret names is the contract with the workflow ───────────────────────────────────────────────────
+#
+# A secret renamed in real-model.yml but not here stops being redacted, silently. Pin each name literally so the
+# rename is a visible decision, and cross-check that the workflow passes exactly these.
+
+for var in CODESPACE_LLM_MODEL_ID CODESPACE_LLM_BASE_URL CODESPACE_LLM_API_KEY CODESPACE_HIDDEN_SUITE_URL; do
+  if grep -qF -- "$var" "$collect"; then
+    pass "the redaction list names ${var}"
+  else
+    fail "the redaction list names ${var}"
+  fi
+done
+
+workflow="${here}/../workflows/real-model.yml"
+if [ -f "$workflow" ]; then
+  missing=""
+  for var in $(grep -o 'secrets\.[A-Z_0-9]*' "$workflow" | sed 's/secrets\.//' | sort -u); do
+    grep -qF -- "$var" "$collect" || missing="${missing} ${var}"
+  done
+
+  if [ -z "$missing" ]; then
+    pass "every secret real-model.yml passes is on the redaction list"
+  else
+    fail "every secret real-model.yml passes is on the redaction list — unredacted:${missing}"
+  fi
+fi
+
+# ── THE case this exists for: no gateway secret survives into an uploaded file ───────────────────────────────────
 
 root="$(stage)"
-printf "✅ real-model INFORMATIONAL wire — OpenAI model 'pinned-model-4-5' scored 12/14 [model fp=deadbeef (configured)]\n" > "${root}/summaries/step_summary_1"
-printf "⚠️ real-model gate NON-GATING infra skip — Anthropic (pinned-model-4-5 unreachable)\n" > "${root}/summaries/step_summary_2"
-CODESPACE_LLM_MODEL_ID=pinned-model-4-5 bash "$collect" "${root}/results" "${root}/summaries" >/dev/null 2>&1
+printf "✅ real-model INFORMATIONAL wire — OpenAI model '%s' scored 12/14 [model fp=deadbeef (configured)]\n" "$MODEL_ID" > "${root}/summaries/step_summary_1"
+printf "⚠️ real-model gate NON-GATING infra skip — Anthropic: HttpRequestException reaching %s\n" "$BASE_URL" > "${root}/summaries/step_summary_2"
+printf "[realmodel] key=%s suite=%s\n" "$API_KEY" "$SUITE_URL" > "${root}/summaries/step_summary_3"
+# The trx shape that actually leaked on run 33754366815: HttpClient's own Serilog lines, captured as test stdout,
+# naming the gateway 302 times — plus the provider model name from LlmCompleteNode's completion line.
+{
+  printf '<StdOut>Start processing HTTP request POST %s/messages</StdOut>\n' "$BASE_URL"
+  printf '<StdOut>LLM completion %s in=120 out=45 finish=stop</StdOut>\n' "$OBSERVED"
+  printf '<Message>REQUIRED wire - Anthropic model %s missed [key %s]</Message>\n' "$MODEL_ID" "$API_KEY"
+} > "${root}/results/real-model.trx"
+printf '%s\n' "$OBSERVED" > "${root}/summaries/codespace_observed_models"
+run_collect "${root}/results" "${root}/summaries" >/dev/null
 
-check lacks "pinned-model-4-5" "${root}/results/step-summary.md" "redacts the configured model id from the collected summary"
-check has "***" "${root}/results/step-summary.md" "leaves a visible *** where the id was"
-check has "scored 12/14" "${root}/results/step-summary.md" "keeps the verdict itself — the artifact is still the record of what the model did"
-check has "fp=deadbeef" "${root}/results/step-summary.md" "keeps the fingerprint, which is what actually travels"
-check has "NON-GATING infra skip" "${root}/results/step-summary.md" "concatenates EVERY step_summary_* file, not just the first"
+check lacks "$MODEL_ID"  "${root}/results/step-summary.md" "redacts the configured model id"
+check lacks "$BASE_URL"  "${root}/results/step-summary.md" "redacts the gateway base URL, ':' and '/' and all"
+check lacks "gateway.internal.example.com" "${root}/results/step-summary.md" "redacts the gateway HOST, not just the scheme"
+check lacks "$API_KEY"   "${root}/results/step-summary.md" "redacts the gateway API key"
+check lacks "$SUITE_URL" "${root}/results/step-summary.md" "redacts the hidden-suite URL"
+check lacks "$OBSERVED"  "${root}/results/real-model.trx" "redacts an OBSERVED model name out of the trx, from the gate's side file"
+check has   "LLM completion ***" "${root}/results/real-model.trx" "leaves the surrounding log line intact around the struck name"
+check lacks "$BASE_URL"  "${root}/results/real-model.trx" "redacts the gateway URL - ':' and '/' and all - out of the TRX, not just the summary"
+check lacks "gateway.internal.example.com" "${root}/results/real-model.trx" "redacts the gateway HOST out of the trx"
+check has   "Start processing HTTP request POST ***" "${root}/results/real-model.trx" "leaves the HttpClient log line readable around the struck URL"
+check lacks "$MODEL_ID" "${root}/results/real-model.trx" "redacts the configured model id out of the trx assertion message"
+check lacks "$API_KEY"  "${root}/results/real-model.trx" "redacts the API key out of the trx"
+check has   "REQUIRED wire" "${root}/results/real-model.trx" "leaves the verdict itself in the trx"
+check has   "scored 12/14" "${root}/results/step-summary.md" "keeps the verdict itself — the artifact is still the record of what the model did"
+check has   "fp=deadbeef"  "${root}/results/step-summary.md" "keeps the fingerprint, which is what actually travels"
+check has   "infra skip"   "${root}/results/step-summary.md" "concatenates EVERY step_summary_* file, not just the first"
 rm -rf "$root"
 
 # Two occurrences on ONE line: a single-shot replacement would leave the second one behind.
 root="$(stage)"
-printf "model 'pinned-model-4-5' answered as pinned-model-4-5\n" > "${root}/summaries/step_summary_1"
-CODESPACE_LLM_MODEL_ID=pinned-model-4-5 bash "$collect" "${root}/results" "${root}/summaries" >/dev/null 2>&1
+printf "model '%s' answered as %s\n" "$MODEL_ID" "$MODEL_ID" > "${root}/summaries/step_summary_1"
+run_collect "${root}/results" "${root}/summaries" >/dev/null
 
-check lacks "pinned-model-4-5" "${root}/results/step-summary.md" "redacts EVERY occurrence on a line, not just the first"
+check lacks "$MODEL_ID" "${root}/results/step-summary.md" "redacts EVERY occurrence on a line, not just the first"
 rm -rf "$root"
 
 # A model id routinely carries regex metacharacters. A sed-based redaction would treat these as a pattern and miss
@@ -75,46 +152,55 @@ check lacks "openai/gpt-4.1[2026-08-30]" "${root}/results/step-summary.md" "reda
 check has "scored 14/14" "${root}/results/step-summary.md" "redacts a metacharacter-bearing id WITHOUT discarding the verdict"
 rm -rf "$root"
 
-# ── The trx is uploaded too, and a failing blessed wire writes its verdict into the assertion message ────────────
+# ── A missing needle must be LOUD: an unredacted secret under a step named "redact" is the worst outcome ─────────
 
 root="$(stage)"
-printf '<UnitTestResult outcome="Failed"><Message>REQUIRED wire — Anthropic model %s missed</Message></UnitTestResult>\n' "pinned-model-4-5" > "${root}/results/real-model.trx"
-printf 'nothing here\n' > "${root}/summaries/step_summary_1"
-CODESPACE_LLM_MODEL_ID=pinned-model-4-5 bash "$collect" "${root}/results" "${root}/summaries" >/dev/null 2>&1
+printf "OpenAI scored 12/14\n" > "${root}/summaries/step_summary_1"
+out="$(CODESPACE_LLM_MODEL_ID="$MODEL_ID" CODESPACE_LLM_BASE_URL= CODESPACE_LLM_API_KEY= CODESPACE_HIDDEN_SUITE_URL= bash "$collect" "${root}/results" "${root}/summaries" 2>&1)"
 
-check lacks "pinned-model-4-5" "${root}/results/real-model.trx" "redacts the configured model id from the trx, in place"
-check has "REQUIRED wire" "${root}/results/real-model.trx" "leaves the rest of the trx intact"
+check_output has "::warning::" "$out" "warns when a listed secret env var is EMPTY"
+check_output has "CODESPACE_LLM_BASE_URL is EMPTY" "$out" "names WHICH secret could not be redacted"
+check_output lacks "CODESPACE_LLM_MODEL_ID is EMPTY" "$out" "does not warn about a secret that WAS present"
+rm -rf "$root"
+
+# A short value is a fragment, not an identifier: striking "1" would shred every line. Refuse it, loudly, and leave
+# the content alone rather than mangling the artifact.
+root="$(stage)"
+printf "attempt 1 of 3 scored 12/14\n" > "${root}/summaries/step_summary_1"
+out="$(CODESPACE_LLM_MODEL_ID=1 CODESPACE_LLM_BASE_URL= CODESPACE_LLM_API_KEY= CODESPACE_HIDDEN_SUITE_URL= bash "$collect" "${root}/results" "${root}/summaries" 2>&1)"
+
+check_output has "shorter than 8 characters" "$out" "refuses a too-short needle LOUDLY"
+check has "attempt 1 of 3 scored 12/14" "${root}/results/step-summary.md" "leaves the artifact unmangled when a needle is refused"
+rm -rf "$root"
+
+# Every secret absent (a fork, a local run) → content passes through untouched rather than being blanked.
+root="$(stage)"
+printf "OpenAI scored 12/14\n" > "${root}/summaries/step_summary_1"
+CODESPACE_LLM_MODEL_ID= CODESPACE_LLM_BASE_URL= CODESPACE_LLM_API_KEY= CODESPACE_HIDDEN_SUITE_URL= bash "$collect" "${root}/results" "${root}/summaries" >/dev/null 2>&1
+
+check has "OpenAI scored 12/14" "${root}/results/step-summary.md" "passes content through unchanged when no secret is configured"
 rm -rf "$root"
 
 # ── Best-effort: never a crash, never a mangled artifact, whatever the runner hands it ──────────────────────────
 
-# No secret configured (a fork, a local run) → the content passes through untouched rather than being blanked.
-root="$(stage)"
-printf "OpenAI scored 12/14\n" > "${root}/summaries/step_summary_1"
-CODESPACE_LLM_MODEL_ID= bash "$collect" "${root}/results" "${root}/summaries" >/dev/null 2>&1
-
-check has "OpenAI scored 12/14" "${root}/results/step-summary.md" "passes content through unchanged when no id is configured"
-rm -rf "$root"
-
 # No step_summary_* files at all (the runner layout changed) → an empty collected file, and still exit 0.
 root="$(stage)"
-CODESPACE_LLM_MODEL_ID=pinned-model-4-5 bash "$collect" "${root}/results" "${root}/summaries" >/dev/null 2>&1
+run_collect "${root}/results" "${root}/summaries" >/dev/null
 got=$?
 
 if [ "$got" -eq 0 ] && [ -f "${root}/results/step-summary.md" ] && [ ! -s "${root}/results/step-summary.md" ]; then
-  echo "  ok      writes an EMPTY summary and exits 0 when the runner has no step_summary_* files"
+  pass "writes an EMPTY summary and exits 0 when the runner has no step_summary_* files"
 else
-  echo "  FAILED  writes an EMPTY summary and exits 0 when the runner has no step_summary_* files — exit ${got}"
-  failures=$((failures + 1))
+  fail "writes an EMPTY summary and exits 0 when the runner has no step_summary_* files — exit ${got}"
 fi
 rm -rf "$root"
 
 # A results directory that does not exist yet is created, not fatal.
 root="$(stage)"
-printf "OpenAI model 'pinned-model-4-5' scored 12/14\n" > "${root}/summaries/step_summary_1"
-CODESPACE_LLM_MODEL_ID=pinned-model-4-5 bash "$collect" "${root}/absent/results" "${root}/summaries" >/dev/null 2>&1
+printf "OpenAI model '%s' scored 12/14\n" "$MODEL_ID" > "${root}/summaries/step_summary_1"
+run_collect "${root}/absent/results" "${root}/summaries" >/dev/null
 
-check lacks "pinned-model-4-5" "${root}/absent/results/step-summary.md" "creates a missing results directory and still redacts"
+check lacks "$MODEL_ID" "${root}/absent/results/step-summary.md" "creates a missing results directory and still redacts"
 rm -rf "$root"
 
 if [ "$failures" -ne 0 ]; then

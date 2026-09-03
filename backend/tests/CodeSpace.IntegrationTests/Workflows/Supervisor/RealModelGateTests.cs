@@ -233,7 +233,7 @@ public sealed class RealModelGateTests
         var stamp = RealModelGate.ModelStamp(observed, configured);
         var fingerprinted = string.IsNullOrWhiteSpace(observed) ? configured : observed;
 
-        stamp.ShouldContain($"({expectedSource})", Case.Sensitive, "an observed name must win over the configured id, and the reader must be told which one answered");
+        stamp.ShouldContain($"({expectedSource}", Case.Sensitive, "an observed name must win over the configured id, and the reader must be told which one answered");
         stamp.ShouldContain($"fp={RealModelGate.Fingerprint(fingerprinted)}", Case.Sensitive, "the fingerprint is taken over the name that actually identified the model this run");
         stamp.ShouldNotContain(configured, Case.Sensitive, "the configured id is a repository SECRET and the artifact is a FILE — masking does not apply");
 
@@ -275,16 +275,50 @@ public sealed class RealModelGateTests
     }
 
     /// <summary>
-    /// The name is not thrown away: the console-only line MAY spell out an OBSERVED name that differs from the
-    /// configured id, because that difference is the whole diagnostic ("the gateway started answering with another
-    /// model") and by construction is not the secret. The configured id is never spelled out anywhere.
+    /// "The gateway started answering with another model" is the one thing a name was carried for, and it survives as
+    /// a fingerprint COMPARISON — no name, so it is safe in the artifact AND on stdout, which is not a private
+    /// channel either (xUnit captures the console into the trx's StdOut, and the trx is uploaded).
     /// </summary>
     [Fact]
-    public void The_console_only_line_may_name_an_observed_model_that_differs_from_the_configured_id()
+    public void The_stamp_reports_a_gateway_answering_with_another_model_as_a_fingerprint_comparison()
     {
-        RealModelGate.UnexpectedModelSuffix("gateway-answered-model-xyz", "pinned-secret-model-id").ShouldContain("gateway-answered-model-xyz");
-        RealModelGate.UnexpectedModelSuffix("pinned-secret-model-id", "pinned-secret-model-id").ShouldBeEmpty("the gateway answered with exactly what was asked for — naming it would print the secret");
-        RealModelGate.UnexpectedModelSuffix(null, "pinned-secret-model-id").ShouldBeEmpty("nothing was observed, so there is no unexpected model to name");
+        var drifted = RealModelGate.ModelStamp("gateway-answered-model-xyz", "pinned-secret-model-id");
+
+        drifted.ShouldContain($"fp={RealModelGate.Fingerprint("gateway-answered-model-xyz")}", Case.Sensitive, "the model that ANSWERED is the primary fingerprint");
+        drifted.ShouldContain($"differs from configured fp={RealModelGate.Fingerprint("pinned-secret-model-id")}", Case.Sensitive, "the drift is actionable only if the reader can see WHICH pin it drifted from");
+        drifted.ShouldNotContain("gateway-answered-model-xyz", Case.Sensitive, "not even the observed name — the console lands in the trx too");
+        drifted.ShouldNotContain("pinned-secret-model-id", Case.Sensitive);
+
+        RealModelGate.ModelStamp("pinned-secret-model-id", "pinned-secret-model-id").ShouldNotContain("differs", Case.Sensitive, "the gateway answered with exactly what was asked for — there is no drift to report");
+        RealModelGate.ModelStamp(null, "pinned-secret-model-id").ShouldNotContain("differs", Case.Sensitive, "nothing was observed, so nothing can be said to differ");
+    }
+
+    /// <summary>
+    /// The gate writes no model name, but other components still log one — <c>LlmCompleteNode</c> logs
+    /// "LLM completion {Model} …" with the very value handed to <see cref="RealModelGate.ObserveModel"/>, and xUnit
+    /// captures that into the trx's StdOut (which is how run 33754366815's footer-signals trx shipped a provider
+    /// model name). So the gate hands the collect step the exact VALUES to strike, in a file beside the step
+    /// summaries — redacting by log-message SHAPE would break the moment a template changed.
+    /// </summary>
+    [Fact]
+    public void The_observed_model_names_are_recorded_for_the_collect_step_to_redact()
+    {
+        RealModelGate.ObservedModelsFileName.ShouldBe("codespace_observed_models", "the collect script reads this exact filename — renaming it here alone stops redacting observed model names");
+
+        var script = Path.Combine(RepositoryRoot(), ".github", "scripts", "collect-real-model-verdicts.sh");
+        File.Exists(script).ShouldBeTrue($"the collect script must exist at {script}");
+        File.ReadAllText(script).ShouldContain(RealModelGate.ObservedModelsFileName, Case.Sensitive, "the two halves of the side-file contract must name the same file");
+    }
+
+    /// <summary>Walk up from the test binary to the repository root (the directory holding .github).</summary>
+    private static string RepositoryRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+
+        while (dir is not null && !Directory.Exists(Path.Combine(dir.FullName, ".github")))
+            dir = dir.Parent;
+
+        return dir?.FullName ?? throw new DirectoryNotFoundException("no .github directory above the test binary");
     }
 
     [Fact]
