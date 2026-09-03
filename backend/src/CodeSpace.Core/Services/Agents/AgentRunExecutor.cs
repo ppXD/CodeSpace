@@ -259,12 +259,18 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             var workspaceProvision = await _workspaceResolver.ResolveAsync(task, run.TeamId, cancellationToken).ConfigureAwait(false);
             workspace = workspaceProvision is null ? null : await _workspaces.Resolve(runnerKind).PrepareAsync(workspaceProvision, cancellationToken).ConfigureAwait(false);
 
-            // DC-4 slice 2 / C2: EVERY repo-less run needs a WORLD — a scratch working directory the harness runs
-            // in, the capture reads from, and the oracle grades against. Without it the harness ran with a null
-            // working directory and anything it wrote (a report.md it was never asked to declare) died with the
-            // process, unreachable and unaccountable. The declared-deliverable condition that used to gate this is
-            // gone: a run only knows what it declared, and the interesting loss was always the file nobody declared.
-            workspace ??= Workspace.ScratchWorkspaceHandle.Create(agentRunId);
+            // DC-4 slice 2 / C2: a repo-less run with NO world of its own needs one — a scratch working directory
+            // the harness runs in, the capture reads from, and the oracle grades against. Without it the harness ran
+            // with a NULL working directory and anything it wrote (a report.md it was never asked to declare) died
+            // with the process, unreachable and unaccountable. The declared-deliverable condition that used to gate
+            // this is gone: a run only knows what it declared, and the interesting loss was always the file nobody
+            // declared.
+            //
+            // A task that NAMES its own WorkspaceDirectory already HAS a world and never had the defect — minting a
+            // scratch for it would REPLACE the caller's directory on the effective task below, moving the harness
+            // out of the tree the operator pointed it at and re-keying the session-transcript capture (which reads
+            // Task.WorkspaceDirectory) onto an empty temp dir. That is a silent hijack, not a repair.
+            workspace ??= string.IsNullOrWhiteSpace(task.WorkspaceDirectory) ? Workspace.ScratchWorkspaceHandle.Create(agentRunId) : null;
 
             // The primary repo's directory + cloned base SHA, stamped onto the durable handle at launch so a
             // re-attach can capture the diff even after the live workspace handle object dies with this worker.
@@ -1548,9 +1554,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     {
         if (workspace is null) return result;
 
+        var captured = 0;
+
         try
         {
-            var captured = await _artifactManifests.CaptureDeclaredAsync(task, workspace.Directory, runId, run.WorkflowRunId, run.TeamId, claimedEpoch, cancellationToken).ConfigureAwait(false);
+            captured = await _artifactManifests.CaptureDeclaredAsync(task, workspace.Directory, runId, run.WorkflowRunId, run.TeamId, claimedEpoch, cancellationToken).ConfigureAwait(false);
 
             // C2: only a SCRATCH world (a repo-less run) gets the undeclared walk. A git-backed workspace's
             // undeclared files are already captured — as the diff, with their history — so walking one would mint a
@@ -1563,9 +1571,15 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogWarning(ex, "Agent run {RunId}: failed to capture declared deliverable artifacts; the acceptance oracle still grades them on the produced branch", runId);
+            _logger.LogWarning(ex, "Agent run {RunId}: failed to capture deliverable artifacts; the acceptance oracle still grades them on the produced branch", runId);
             await NoticeDeliverableLossAsync(runId, run.TeamId, "declared-deliverables", $"declared deliverables were not captured — {ex.GetType().Name}: {Truncate(ex.Message, 300)}").ConfigureAwait(false);
-            return result;
+
+            // The DECLARED pass may have completed before the walk threw — discarding its count here would report a
+            // capture that really happened as zero. And the fault itself must be NAMED on the result: the repo-less
+            // grade lane rebuilds its world from these rows, so a storage fault that captured nothing is otherwise
+            // indistinguishable from an agent that produced nothing — which classifies GENUINE and buys retries no
+            // retry can fix. The marker is what turns that verdict infra-classed downstream.
+            return result with { CapturedArtifactCount = captured, DeliverableCaptureFault = $"{ex.GetType().Name}: {Truncate(ex.Message, 200)}" };
         }
     }
 

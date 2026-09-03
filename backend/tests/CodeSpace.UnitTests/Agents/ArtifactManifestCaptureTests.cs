@@ -298,17 +298,39 @@ public class ArtifactManifestCaptureTests
     {
         ArtifactManifestStore.MaxUndeclaredCaptureFiles.ShouldBe(32);
         ArtifactManifestStore.MaxUndeclaredCaptureBytes.ShouldBe(8L * 1024 * 1024);
-        ArtifactManifestStore.MaxUndeclaredScanFiles.ShouldBe(2000);
+        ArtifactManifestStore.MaxUndeclaredScanEntries.ShouldBe(20000);
+        ArtifactManifestStore.MaxUndeclaredScanSeconds.ShouldBe(10);
 
         ArtifactManifestStore.CapturableUndeclaredExtensions.ShouldBe(
-            new[] { ".csv", ".html", ".json", ".jsonl", ".md", ".mmd", ".puml", ".rst", ".svg", ".tsv", ".txt", ".xml", ".yaml", ".yml" },
-            customMessage: "text and text-shaped documents only — a walk nobody asked for must not spend the byte budget on bytes no grader opens");
+            new[] { ".csv", ".docx", ".html", ".json", ".jsonl", ".md", ".mmd", ".pdf", ".png", ".puml", ".rst", ".svg", ".tsv", ".txt", ".xlsx", ".xml", ".yaml", ".yml" },
+            customMessage: "text plus the document formats KindFor already types — an agent's report.pdf is exactly what this walk exists to keep");
+
+        ArtifactManifestStore.SkippedWalkDirectories.ShouldBe(
+            new[] { ".git", "bin", "dist", "node_modules", "obj", "target", "vendor" },
+            customMessage: "build outputs and dependency trees the agent did not author — descending them exhausts the budget and crowds out the real deliverable");
+    }
+
+    /// <summary>
+    /// Every extension the store can already TYPE must be one the walk can take. A gap here is not cosmetic: an
+    /// undeclared <c>report.pdf</c> would be refused, the walk would capture nothing, and an empty world grades as
+    /// "the agent produced nothing" — a GENUINE verdict that buys retries for a file that was sitting right there.
+    /// </summary>
+    [Theory]
+    [InlineData("report.pdf")]
+    [InlineData("summary.docx")]
+    [InlineData("data/book.xlsx")]
+    [InlineData("chart.png")]
+    public void Every_known_document_kind_is_capturable_by_the_walk(string path)
+    {
+        ArtifactManifestStore.KindFor(path).ShouldNotBe(ArtifactManifestKind.Other, "this extension is one the store types");
+        ArtifactManifestStore.IsCapturableUndeclared(path).ShouldBeTrue("a typed document the walk refuses is a deliverable lost to a retry loop");
     }
 
     [Theory]
     [InlineData("report.md", true)]
     [InlineData("notes/findings.txt", true)]
     [InlineData("data/rows.CSV", true)]                  // extension casing never changes the verdict
+    [InlineData("report.pdf", true)]                     // a report an agent wrote as a PDF is still the deliverable
     [InlineData("build/agent.bin", false)]               // not a text/document extension
     [InlineData("archive.tar.gz", false)]
     [InlineData("report", false)]                        // no extension at all
@@ -318,6 +340,35 @@ public class ArtifactManifestCaptureTests
     public void The_walk_takes_only_non_dotfile_text_documents(string relativePath, bool capturable)
     {
         ArtifactManifestStore.IsCapturableUndeclared(relativePath).ShouldBe(capturable);
+    }
+
+    /// <summary>
+    /// A dependency tree costs ONE entry, not everything beneath it. Without the skip the walk pays for thousands of
+    /// files the agent never authored, and the scan/byte budget is spent before it reaches the one report it exists
+    /// to keep — the deliverable is crowded out by node_modules.
+    /// </summary>
+    [Fact]
+    public void The_walk_never_descends_a_build_or_dependency_tree()
+    {
+        using var dir = new TempDir();
+        Directory.CreateDirectory(Path.Combine(dir.Path, "node_modules", "left-pad"));
+        Directory.CreateDirectory(Path.Combine(dir.Path, "obj", "Debug"));
+        Directory.CreateDirectory(Path.Combine(dir.Path, "docs"));
+        File.WriteAllText(Path.Combine(dir.Path, "node_modules", "left-pad", "index.json"), "{}");
+        File.WriteAllText(Path.Combine(dir.Path, "obj", "Debug", "build.json"), "{}");
+        File.WriteAllText(Path.Combine(dir.Path, "docs", "report.md"), "# the deliverable");
+
+        ArtifactManifestStore.Walk(dir.Path).Select(f => f.Path).ShouldBe(new[] { "docs/report.md" });
+    }
+
+    /// <summary>A walk is a capture step, never a reason a run's completion hangs — an already-cancelled token stops it before it reads a tree.</summary>
+    [Fact]
+    public void The_walk_honours_cancellation()
+    {
+        using var dir = new TempDir();
+        File.WriteAllText(Path.Combine(dir.Path, "report.md"), "x");
+
+        ArtifactManifestStore.Walk(dir.Path, new CancellationToken(canceled: true)).ShouldBeEmpty();
     }
 
     /// <summary>

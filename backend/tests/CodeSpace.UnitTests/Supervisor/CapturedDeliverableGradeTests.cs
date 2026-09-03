@@ -22,6 +22,10 @@ namespace CodeSpace.UnitTests.Supervisor;
 /// resolves, that a unit which captured nothing gets the honest GENUINE <c>no-deliverables-captured</c> verdict (an
 /// agent pass CAN fix "produced nothing"), and that the rebuilt world never outlives the grade.
 /// </summary>
+// The rebuild directory is minted under the process-global WorkspacesRoot (the same root GradePatchAsync uses), and
+// LocalGitWorkspaceProviderTests' cleanup-leak test COUNTS that root's directories. Same collection = serialized, so
+// these transient dirs can never be miscounted as a leak by a test running in parallel.
+[Collection("WorkspaceProvisioning")]
 [Trait("Category", "Unit")]
 public class CapturedDeliverableGradeTests
 {
@@ -100,6 +104,51 @@ public class CapturedDeliverableGradeTests
         Directory.Exists(oracle.LastDirectory!).ShouldBeFalse("the rebuilt world outlives neither the verdict nor the throw");
     }
 
+    /// <summary>
+    /// Supersession is keyed per (AgentRunId, FenceEpoch, LogicalPath), so a retry-resume that bumps the epoch leaves
+    /// the PRIOR attempt's rows current too. Rebuilding from both invents a world that never existed: a deliverable
+    /// the latest attempt DELETED still satisfies ArtifactPresent, and two epochs' copies of one path race to
+    /// overwrite each other in whatever order the store returned them.
+    /// </summary>
+    [Fact]
+    public async Task Only_the_latest_attempts_epoch_is_rebuilt_so_a_deleted_deliverable_never_resurrects()
+    {
+        var runId = Guid.NewGuid();
+        var teamId = Guid.NewGuid();
+
+        var staleKept = Row(runId, teamId, "report.md", "the FIRST attempt's report", epoch: 1);
+        var staleDeleted = Row(runId, teamId, "obsolete.md", "the first attempt wrote this; the retry deleted it", epoch: 1);
+        var fresh = Row(runId, teamId, "report.md", "the RETRY's report", epoch: 2);
+
+        var (grader, oracle, _) = New(new BenchmarkGrade { Passed = true, Detail = "ok" }, staleKept, staleDeleted, fresh);
+
+        await grader.GradeCapturedAsync(runId, teamId, Spec("report.md"), 60, CancellationToken.None);
+
+        oracle.SeenFiles.Keys.ToArray().ShouldBe(new[] { "report.md" },
+            customMessage: "a deliverable the latest attempt deleted must not be resurrected by its older epoch's row — that would satisfy ArtifactPresent for a file that no longer exists");
+        oracle.SeenFiles["report.md"].ShouldBe("the RETRY's report",
+            customMessage: "the graded bytes are the latest attempt's, never whichever row the store happened to return last");
+    }
+
+    /// <summary>A rebuild-shaped collision costs one row, never the whole verdict — the grade must still be the oracle's.</summary>
+    [Fact]
+    public async Task A_logical_path_that_collides_with_a_captured_directory_costs_only_its_own_row()
+    {
+        var runId = Guid.NewGuid();
+        var teamId = Guid.NewGuid();
+
+        var (grader, oracle, _) = New(new BenchmarkGrade { Passed = true, Detail = "artifact-present" },
+            Row(runId, teamId, "docs", "captured as a FILE named docs"),
+            Row(runId, teamId, "docs/report.md", "captured under docs as a DIRECTORY"));
+
+        var grade = await grader.GradeCapturedAsync(runId, teamId, Spec("docs/report.md"), 60, CancellationToken.None);
+
+        grade.Class.ShouldNotBe(GradeFailureClass.GraderFault, "one unrepresentable path pair must not fail the whole grade");
+        grade.Detail.ShouldBe("artifact-present", "the verdict still comes from the oracle");
+        oracle.Calls.ShouldBe(1);
+        oracle.SeenFiles.ShouldNotBeEmpty("whichever of the pair landed first is still graded");
+    }
+
     // ─── Fixtures ───
 
     private static SupervisorAcceptanceSpec Spec(params string[] paths) =>
@@ -122,10 +171,10 @@ public class CapturedDeliverableGradeTests
     /// <summary>One captured deliverable as the store holds it: the manifest row, and the CAS bytes it points at.</summary>
     private sealed record Deliverable(ArtifactManifest Row, byte[] Bytes);
 
-    private static Deliverable Row(Guid runId, Guid teamId, string logicalPath, string content) => new(
+    private static Deliverable Row(Guid runId, Guid teamId, string logicalPath, string content, long epoch = 1) => new(
         new ArtifactManifest
         {
-            Id = Guid.NewGuid(), TeamId = teamId, AgentRunId = runId, FenceEpoch = 1,
+            Id = Guid.NewGuid(), TeamId = teamId, AgentRunId = runId, FenceEpoch = epoch,
             LogicalPath = logicalPath, ContentArtifactId = Guid.NewGuid(),
             Kind = ArtifactManifestStore.KindFor(logicalPath), ContentType = ArtifactManifestStore.ContentTypeFor(logicalPath),
         },

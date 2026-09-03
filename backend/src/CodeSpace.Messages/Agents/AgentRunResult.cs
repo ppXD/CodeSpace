@@ -56,6 +56,16 @@ public sealed record AgentRunResult
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public int UncapturedScratchFileCount { get; init; }
 
+    /// <summary>
+    /// C2: why the deliverable capture FAULTED, when it did — the exception that stopped it, never a verdict on the
+    /// work. The repo-less grade lane rebuilds its world from the captured rows, so without this a storage fault that
+    /// captured nothing is indistinguishable from an agent that produced nothing: the first is infrastructure a retry
+    /// cannot fix, the second is exactly what a retry CAN fix, and they must never share a verdict. Null = the
+    /// capture ran to completion (whatever it found). Omitted when null.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? DeliverableCaptureFault { get; init; }
+
     /// <summary>D3: the FAITHFUL raw harness stream (every redacted line, including ones ParseEvent dropped) — the durable "replay the exact session" record. Inline when small; a larger transcript is offloaded and this is cleared, with <see cref="TranscriptArtifactId"/> holding the ref. Empty when there was no stream.</summary>
     public string Transcript { get; init; } = "";
 
