@@ -156,9 +156,19 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
     public async Task<Guid?> SelectBrainRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken) =>
         await SelectBrainRowIdCoreAsync(teamId, eligibleProviders, excludeRowId: null, cancellationToken).ConfigureAwait(false);
 
+    public async Task<IReadOnlyList<Guid>> ListBrainRowIdsAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken) =>
+        await OrderedBrainRowIdsAsync(teamId, eligibleProviders, excludeRowId: null, cancellationToken).ConfigureAwait(false);
+
     private async Task<Guid?> SelectBrainRowIdCoreAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, Guid? excludeRowId, CancellationToken cancellationToken)
     {
-        if (eligibleProviders.Count == 0) return null;
+        var ordered = await OrderedBrainRowIdsAsync(teamId, eligibleProviders, excludeRowId, cancellationToken).ConfigureAwait(false);
+        return ordered.Count == 0 ? null : ordered[0];
+    }
+
+    /// <summary>The ONE total order every brain pick derives from — the single pick is its head, the failover candidate list is the whole of it, so they can never disagree.</summary>
+    private async Task<IReadOnlyList<Guid>> OrderedBrainRowIdsAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, Guid? excludeRowId, CancellationToken cancellationToken)
+    {
+        if (eligibleProviders.Count == 0) return Array.Empty<Guid>();
 
         // Lower-case the eligible providers for a case-insensitive provider match (parity with the rest of the selector),
         // matched in-memory: the small set isn't worth an EF Contains over a constructed list, and a structured-provider
@@ -189,8 +199,8 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
             .ThenByDescending(r => (int)EffectiveTier(r.ProbedCapabilityTier, r.CapabilityTier))
             .ThenBy(r => r.ModelId, StringComparer.Ordinal)
             .ThenBy(r => r.Id)
-            .Select(r => (Guid?)r.Id)
-            .FirstOrDefault();
+            .Select(r => r.Id)
+            .ToList();
     }
 
     public async Task<Guid?> SelectReviewerRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, Guid? producerRowId, CancellationToken cancellationToken)

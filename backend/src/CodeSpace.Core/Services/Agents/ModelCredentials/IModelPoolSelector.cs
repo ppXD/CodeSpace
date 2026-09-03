@@ -66,6 +66,14 @@ public interface IModelPoolSelector
     Task<Guid?> SelectBrainRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken);
 
     /// <summary>
+    /// EVERY eligible brain row in the SAME precedence order <see cref="SelectBrainRowIdAsync"/> picks the first of —
+    /// the pool-failover candidate list for an auto-selected brain (L4). Default implementation wraps the single
+    /// pick (0 or 1 rows), so fakes inherit today's behavior; the real selector returns the full ordered set.
+    /// </summary>
+    async Task<IReadOnlyList<Guid>> ListBrainRowIdsAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken) =>
+        await SelectBrainRowIdAsync(teamId, eligibleProviders, cancellationToken).ConfigureAwait(false) is { } one ? new[] { one } : Array.Empty<Guid>();
+
+    /// <summary>
     /// The REVIEWER pick (Rule 7 sibling; S4d) — prefers a model DISTINCT from the producer so the critique is a
     /// second opinion, and FALLS BACK to the producer's own model when the pool has no alternative (a one-model
     /// team still gets its critic — an independent call, never a silent no-review). Default implementation

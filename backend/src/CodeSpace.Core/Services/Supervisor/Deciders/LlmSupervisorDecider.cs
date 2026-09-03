@@ -60,9 +60,15 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 
         // The brain model's OWN provider determines the structured client that serves it (multi-provider-ready) — not a
         // first-registered guess. No structured client for that provider → fail closed.
-        var structured = _clientRegistry.All.OfType<IStructuredLLMClient>().FirstOrDefault(c => string.Equals(c.Provider, pick.Credential.Provider, StringComparison.OrdinalIgnoreCase));
+        var structured = ClientFor(pick);
 
         if (structured == null) return NoModelStop();
+
+        // L4 (pool failover, decision lane): an AUTO-selected brain may hop to the pool's next structured-capable brain
+        // rows on a transient / rate-limit gateway fault; an operator-PINNED brain never does (an explicit pin resolves
+        // verbatim — its existing law). The candidates are the selector's own brain order, this row first.
+        if (!context.SupervisorModelPinned)
+            structured = BuildBrainClient(structured, pick, await ResolveBrainAlternatesAsync(context, brainModelId, cancellationToken).ConfigureAwait(false));
 
         // P1 — render the capability catalog (available harnesses + their drivable providers, and this run's
         // credentialed model pool + each model's provider) so the brain authors a provider-compatible (harness, model)
@@ -170,7 +176,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         // what authored the decision (e.g. the "via <model> · N tokens" line on a plan beat).
         var decision = SupervisorDecisionProjector.Project(model) with
         {
-            Usage = new SupervisorModelUsage { Model = pick.ModelId, InputTokens = completion.Usage.InputTokens, OutputTokens = completion.Usage.OutputTokens },
+            Usage = new SupervisorModelUsage { Model = completion.Model, InputTokens = completion.Usage.InputTokens, OutputTokens = completion.Usage.OutputTokens },
         };
 
         // A STRUCTURALLY invalid plan (SupervisorPlanValidator: a dangling DependsOn reference or a cycle) would
@@ -219,7 +225,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 
         var retried = SupervisorDecisionProjector.Project(model) with
         {
-            Usage = new SupervisorModelUsage { Model = pick.ModelId, InputTokens = completion.Usage.InputTokens, OutputTokens = completion.Usage.OutputTokens },
+            Usage = new SupervisorModelUsage { Model = completion.Model, InputTokens = completion.Usage.InputTokens, OutputTokens = completion.Usage.OutputTokens },
         };
 
         return SupervisorPlanValidator.Validate(retried) is null ? retried : null;
@@ -1160,4 +1166,39 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         "change what they asked), never spawn the rejected plan unchanged. " +
         "You never name node types, run ids, or graph wiring — only the action + its payload. " +
         "Return ONLY the schema-constrained JSON.";
+
+    /// <summary>Brain candidates per decision, the current row included — bounded so a decision turn never decrypts the whole pool's credentials.</summary>
+    internal const int MaxBrainCandidates = 3;
+
+    private IStructuredLLMClient? ClientFor(ModelPoolPick pick) =>
+        _clientRegistry.All.OfType<IStructuredLLMClient>().FirstOrDefault(c => string.Equals(c.Provider, pick.Credential.Provider, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>The pool's OTHER structured-capable brain rows in the selector's own precedence order, resolved to (client, pick) — the failover alternates for an auto-selected brain. Rows that do not resolve (revoked mid-run, no client for their provider) are skipped, never faked.</summary>
+    private async Task<IReadOnlyList<(IStructuredLLMClient Client, ModelPoolPick Pick)>> ResolveBrainAlternatesAsync(SupervisorTurnContext context, Guid currentRowId, CancellationToken cancellationToken)
+    {
+        var structuredProviders = _clientRegistry.All.OfType<IStructuredLLMClient>().Select(c => c.Provider).ToList();
+        var ordered = await _modelSelector.ListBrainRowIdsAsync(context.TeamId, structuredProviders, cancellationToken).ConfigureAwait(false);
+
+        var alternates = new List<(IStructuredLLMClient, ModelPoolPick)>();
+
+        foreach (var rowId in ordered.Where(id => id != currentRowId).Take(MaxBrainCandidates - 1))
+        {
+            if (await _modelSelector.ResolveByRowIdAsync(context.TeamId, rowId, cancellationToken).ConfigureAwait(false) is not { } alternate) continue;
+            if (ClientFor(alternate) is not { } client) continue;
+
+            alternates.Add((client, alternate));
+        }
+
+        return alternates;
+    }
+
+    /// <summary>The pure fold (unit-pinned): no alternates ⇒ the raw client, byte-identical; otherwise a <see cref="FailoverStructuredClient"/> over [current, alternates…] — the current brain always tries first.</summary>
+    internal static IStructuredLLMClient BuildBrainClient(IStructuredLLMClient current, ModelPoolPick currentPick, IReadOnlyList<(IStructuredLLMClient Client, ModelPoolPick Pick)> alternates)
+    {
+        if (alternates.Count == 0) return current;
+
+        var candidates = new List<(IStructuredLLMClient, ModelPoolPick)> { (current, currentPick) };
+        candidates.AddRange(alternates);
+        return new FailoverStructuredClient(candidates);
+    }
 }

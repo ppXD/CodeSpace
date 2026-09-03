@@ -46,6 +46,9 @@ public sealed record TaskBuildContext
     /// <summary>True when the operator pinned a brain model but it was ineligible (missing / disabled / cross-team / non-structured) and <see cref="SupervisorBrainModelId"/> is the auto-selected FALLBACK, not the requested pin — the <c>SupervisorDefinitionBuilder</c> bakes it into the node's <c>brainModelPinIneligible</c> so the run's own definition records that the pin did not apply, instead of silently baking the fallback with no trace. False/null (no pin, or the pin was honored) ⇒ the builder omits the key (byte-identical).</summary>
     public bool SupervisorBrainModelPinIneligible { get; init; }
 
+    /// <summary>True when the brain row is the operator's own HONORED pin — baked so the decider knows it must resolve verbatim (never fail over).</summary>
+    public bool SupervisorBrainModelPinned { get; init; }
+
     /// <summary>The operator's allowed model pool (credentialed-model ROW ids) for the agents a Deep run dispatches, validated TEAM-SCOPED at launch — the <c>SupervisorDefinitionBuilder</c> bakes it into the node's <c>allowedModelIds</c>, where a dispatched model out of the pool fails closed. Null / empty ⇒ the pool is all the team's models (the builder omits the key — byte-identical). Inert on a non-supervisor projection (its builder never reads this).</summary>
     public IReadOnlyList<Guid>? AllowedModelIds { get; init; }
 

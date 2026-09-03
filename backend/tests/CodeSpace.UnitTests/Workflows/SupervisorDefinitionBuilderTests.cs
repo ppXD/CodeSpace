@@ -31,13 +31,14 @@ public class SupervisorDefinitionBuilderTests
         new TerminalNode(),
     }));
 
-    private static TaskBuildContext Context(ResolvedAgentProfile? profile = null, RouteCaps? caps = null, Guid? brainModelId = null, bool brainModelPinIneligible = false, IReadOnlyList<Guid>? allowedModelIds = null, IReadOnlyList<Guid>? allowedAgentDefinitionIds = null, IReadOnlyList<string>? acceptanceChecks = null) => new()
+    private static TaskBuildContext Context(ResolvedAgentProfile? profile = null, RouteCaps? caps = null, Guid? brainModelId = null, bool brainModelPinIneligible = false, IReadOnlyList<Guid>? allowedModelIds = null, IReadOnlyList<Guid>? allowedAgentDefinitionIds = null, IReadOnlyList<string>? acceptanceChecks = null, bool brainModelPinned = false) => new()
     {
         Seed = new TaskLaunchSeed { Goal = "Ship the whole feature", SurfaceKind = "chat", TeamId = Guid.NewGuid() },
         Route = new RoutePlan { ProjectionKind = TaskProjectionKinds.Supervisor, Caps = caps ?? new RouteCaps() },
         AgentProfile = profile,
         SupervisorBrainModelId = brainModelId,
         SupervisorBrainModelPinIneligible = brainModelPinIneligible,
+        SupervisorBrainModelPinned = brainModelPinned,
         AllowedModelIds = allowedModelIds,
         AllowedAgentDefinitionIds = allowedAgentDefinitionIds,
         AcceptanceChecks = acceptanceChecks,
@@ -341,5 +342,17 @@ public class SupervisorDefinitionBuilderTests
         end.Inputs.GetProperty("integratedBranch").GetString().ShouldBe("{{nodes.sup.outputs.integratedBranch}}", "PR-5: the terminal must also carry the run's final reviewable branch, not just status/decision/reason/turns");
         end.Inputs.GetProperty("repositoryId").GetString().ShouldBe("{{nodes.sup.outputs.repositoryId}}", "PR-6: a single-repo run's Open-PR action needs the branch's owning repository, which integratedBranch alone doesn't carry");
         end.Inputs.GetProperty("repositoryBranches").GetString().ShouldBe("{{nodes.sup.outputs.repositoryBranches}}", "PR-5: and the per-repo final heads for a multi-repo run");
+    }
+
+    [Fact]
+    public void An_honored_brain_pin_is_baked_so_the_decider_never_fails_over_and_an_auto_brain_omits_the_key()
+    {
+        var pinnedBrain = Guid.NewGuid();
+
+        var pinned = Builder.Build(Context(brainModelId: pinnedBrain, brainModelPinned: true)).Nodes.Single(n => n.Id == "sup");
+        pinned.Config.GetProperty("brainModelPinned").GetBoolean().ShouldBeTrue("an honored operator pin must reach every turn + replay — the decider resolves it verbatim, never hopping providers");
+
+        var auto = Builder.Build(Context(brainModelId: Guid.NewGuid())).Nodes.Single(n => n.Id == "sup");
+        auto.Config.TryGetProperty("brainModelPinned", out _).ShouldBeFalse("auto-selected ⇒ no key ⇒ byte-identical (and eligible for pool failover)");
     }
 }

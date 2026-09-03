@@ -185,6 +185,7 @@ public sealed partial class SupervisorTurnService
             RequirePlanConfirmation = goalConfig?.RequirePlanConfirmation == true,
             DeliverySpec = goalConfig?.DeliverySpec,
             SupervisorModelId = goalConfig?.SupervisorModelId,
+            SupervisorModelPinned = goalConfig?.BrainModelPinned ?? false,
             DecisionReviewMode = goalConfig?.DecisionReviewMode ?? ReviewMode.None,
             PlanReviewMode = goalConfig?.PlanReviewMode ?? ReviewMode.None,
             ReviewerAgent = goalConfig?.ReviewerAgent ?? false,
