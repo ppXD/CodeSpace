@@ -255,11 +255,27 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
     /// </summary>
     private static JsonElement SynthInputs(TaskBuildContext context) => JsonSerializer.SerializeToElement(new
     {
-        systemPrompt = "Combine the per-subtask results into one coherent answer that addresses the goal. "
-                     + "A subtask that FAILED appears in the results as an {\"error\": ...} entry instead of a result: never present its work as done — "
-                     + "say which subtasks failed, what they were meant to deliver, and what is therefore missing from the answer.",
-        userPrompt = $"Goal: {context.Seed.Goal}\n\nSubtasks that failed: " + SynthFailedRef + "\n\nPer-subtask results:\n" + SynthResultsRef,
+        systemPrompt = SynthSystemPrompt,
+        // BYTE-IDENTICAL to the pre-continue prompt: the data half of the reduce carries the goal and the results,
+        // and nothing else. The failure half rides the SYSTEM prompt instead, so a run in which nothing failed is
+        // never handed a "Subtasks that failed: 0" line — the reduce learns about a failure from the marker actually
+        // sitting in its results, which is the only place the fact exists per-run. (A build-time conditional cannot
+        // express this: the failure count is a RUN-time fact and the prompt is frozen into the definition.)
+        userPrompt = $"Goal: {context.Seed.Goal}\n\nPer-subtask results:\n" + SynthResultsRef,
     });
+
+    /// <summary>
+    /// The reduce's instruction. The failure clause is what continue-on-error requires of it: the run now reaches
+    /// Success WITH a failed subtask inside it, so a reduce that read an <c>{"error": …}</c> entry as just another
+    /// result would narrate a partial run as a whole one. It is stated once, generically, in the system prompt —
+    /// true of every run whether or not this one failed anything — so the per-run user prompt stays exactly what it
+    /// was and the happy path gains no "0 failed" noise. The count itself is a persisted fact on the map's bag and
+    /// the run row (<see cref="DoneInputs"/>), where a reader can see it without asking the model.
+    /// </summary>
+    internal const string SynthSystemPrompt =
+        "Combine the per-subtask results into one coherent answer that addresses the goal. "
+        + "A subtask that FAILED appears in the results as an {\"error\": ...} entry instead of a result: never present its work as done — "
+        + "say which subtasks failed, what they were meant to deliver, and what is therefore missing from the answer.";
 
     /// <summary>The reduce's results binding, composed from <see cref="WorkflowOutputKeys.MapResultsPrompt"/> so the prompt and the key the reducer writes cannot drift apart.</summary>
     private const string SynthResultsRef = "{{nodes.map.outputs." + WorkflowOutputKeys.MapResultsPrompt + "}}";

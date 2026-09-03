@@ -156,9 +156,17 @@ public sealed class PlanMapIntegrateWholeLoopE2ETests
             run.Status.ShouldBe(WorkflowRunStatus.Success,
                 customMessage: $"one flunked item must not sink the whole fan-out — error: {run.Error}");
 
-            (await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).ToListAsync())
-                .Count(r => r.Status == AgentRunStatus.Failed)
-                .ShouldBe(1, customMessage: "the contract item really flunked — this arm is worthless if both items simply passed");
+            var agentRuns = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).ToListAsync();
+
+            // ONE flunked UNIT, not one flunked run: the map body carries the transient-failure retry policy, so the
+            // contract item respawns a fresh agent per attempt and leaves a Failed row per attempt (all on the same
+            // map#i cell). The sibling is the single Succeeded row.
+            agentRuns.Count(r => r.Status == AgentRunStatus.Failed).ShouldBeGreaterThan(0,
+                customMessage: "the contract item really flunked — this arm is worthless if both items simply passed");
+            agentRuns.Where(r => r.Status == AgentRunStatus.Failed).Select(r => r.IterationKey).Distinct().Count().ShouldBe(1,
+                customMessage: "every failed row must be an ATTEMPT of the SAME map branch — a second failed branch would mean the sibling flunked too and the test proves nothing about surviving work");
+            agentRuns.Count(r => r.Status == AgentRunStatus.Succeeded).ShouldBe(1,
+                customMessage: "the sibling item really ran and succeeded — that is the work terminate-mode used to discard");
 
             var outputs = JsonDocument.Parse(run.OutputsJson!).RootElement;
 
@@ -170,6 +178,14 @@ public sealed class PlanMapIntegrateWholeLoopE2ETests
 
             (await remote.BranchFileContentAsync(integrationBranch, FileWritingFakeCli.FileFor("do the first thing")))
                 .ShouldContain("do the first thing", customMessage: "the surviving item's real work is on the candidate — exactly what one sibling's failure used to discard");
+
+            // …and the head invariant, from the other side: the FLUNKED item wrote a real file and pushed it, but its
+            // own definition-of-done rejected it, so its work must NOT be on the branch a human reviews as the run's
+            // candidate (RunIntegrationContributions withholds a Failed/Waived manifest row — the same rule the deep
+            // lane's merge/resolver/publish doors enforce). Under terminate this could never be asserted, because
+            // integrate never ran after a failure.
+            (await remote.BranchHasFileAsync(integrationBranch, FileWritingFakeCli.FileFor("do the second thing")))
+                .ShouldBeFalse(customMessage: "the flunked item's work must be withheld from the candidate — continue-on-error must not turn 'keep the siblings' into 'ship the rejected work'");
 
             outputs.GetProperty("combined").GetString().ShouldNotBeNullOrWhiteSpace("the reduce ran too — the run narrates instead of dying at the map");
         }
@@ -373,6 +389,10 @@ public sealed class PlanMapIntegrateWholeLoopE2ETests
 
         public async Task<string> BranchFileContentAsync(string branch, string file) =>
             await Git(_root, "--git-dir", _bare, "show", $"{branch}:{file}");
+
+        /// <summary>Whether a branch's tree carries a path — <c>ls-tree</c> rather than <c>show</c>, because the absence of a file is a legitimate ASSERTION here and <c>git show branch:missing</c> exits non-zero (which the Git helper turns into a test error instead of a clean false).</summary>
+        public async Task<bool> BranchHasFileAsync(string branch, string file) =>
+            (await Git(_root, "--git-dir", _bare, "ls-tree", "--name-only", branch, "--", file)).Contains(file);
 
         private static async Task<string> Git(string cwd, params string[] args)
         {

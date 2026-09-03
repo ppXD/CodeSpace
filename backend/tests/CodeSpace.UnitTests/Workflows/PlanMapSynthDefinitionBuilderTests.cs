@@ -304,21 +304,36 @@ public class PlanMapSynthDefinitionBuilderTests
     /// <summary>
     /// Continue-on-error only pays off if the reduce TELLS THE TRUTH about it: the run now reaches Success with a
     /// failed subtask inside it, so a reduce that read an <c>{"error": ...}</c> entry as just another result would
-    /// narrate a partial run as a whole one. The prompt names the marker, instructs the model to say what failed,
-    /// and carries the map's own failed-branch count.
+    /// narrate a partial run as a whole one. The instruction names the marker and demands the failures be named.
     /// </summary>
     [Fact]
-    public void The_reduce_is_told_which_subtasks_failed_so_a_partial_answer_cannot_read_as_a_whole_one()
+    public void The_reduce_is_told_what_a_failed_subtask_looks_like_so_a_partial_answer_cannot_read_as_a_whole_one()
     {
-        var synth = Builder.Build(Context()).Nodes.Single(n => n.Id == "synth");
+        var systemPrompt = Builder.Build(Context()).Nodes.Single(n => n.Id == "synth").Inputs.GetProperty("systemPrompt").GetString()!;
 
-        var systemPrompt = synth.Inputs.GetProperty("systemPrompt").GetString()!;
+        systemPrompt.ShouldBe(PlanMapBuilderBase.SynthSystemPrompt);
         systemPrompt.ShouldContain("error", Case.Insensitive, customMessage: "the reduce must know a failed branch appears as an {\"error\": ...} entry, not as a result");
         systemPrompt.ShouldContain("failed", Case.Insensitive, customMessage: "the reduce is instructed to name the failed subtasks and what is missing because of them");
+    }
 
-        synth.Inputs.GetProperty("userPrompt").GetString()!
-            .ShouldContain($"{{{{nodes.map.outputs.{WorkflowOutputKeys.MapFailed}}}}}",
-                customMessage: "the reduce binds the map's own failed-branch count — the number is the map's fact, never the model's guess");
+    /// <summary>
+    /// The other arm: the per-run DATA half of the reduce is byte-identical to the pre-continue prompt — the goal
+    /// and the bounded results projection, nothing else. A run in which nothing failed must not be handed a
+    /// "Subtasks that failed: 0" line or any other failure furniture; the failure instruction is generic and lives
+    /// in the system prompt, and the per-run FACT lives where a reader can check it (the map bag + the run row).
+    /// A build-time conditional cannot do this job: the failure count is a run-time fact and the prompt is frozen
+    /// into the definition at build time.
+    /// </summary>
+    [Fact]
+    public void The_reduces_user_prompt_carries_no_failure_furniture_so_a_clean_run_is_byte_identical()
+    {
+        var userPrompt = Builder.Build(Context()).Nodes.Single(n => n.Id == "synth").Inputs.GetProperty("userPrompt").GetString()!;
+
+        userPrompt.ShouldBe($"Goal: Improve the onboarding module\n\nPer-subtask results:\n{{{{nodes.map.outputs.{WorkflowOutputKeys.MapResultsPrompt}}}}}",
+            customMessage: "the data half of the reduce prompt must not drift for a run that failed nothing");
+
+        userPrompt.ShouldNotContain(WorkflowOutputKeys.MapFailed,
+            customMessage: "the failed count is a persisted fact on the map bag + the run row — it is not furniture on every happy run's prompt");
     }
 
     /// <summary>The other half of the same fact: the failed-branch count reaches the RUN ROW beside the combined answer, so a partial result is legible from the run's outcome and not only from the map node's bag (the coverage binding's reasoning, applied to the second way an answer can be less than whole).</summary>

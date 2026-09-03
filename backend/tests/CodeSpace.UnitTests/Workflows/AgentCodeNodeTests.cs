@@ -867,8 +867,11 @@ public class AgentCodeNodeTests
     // ── mode (the model-authored intent) → base permissions + push, composing under the existing precedence ─────
 
     [Theory]
-    // research → analysis-only base: ReadOnly write scope, network off, and no produced branch (push false).
-    [InlineData("research", AgentNetworkAccess.Off, AgentWriteScope.ReadOnly, false)]
+    // research → analysis base: network OFF and no produced branch (push false), but the TIER's write scope, so the
+    // agent can write the deliverable files its own oracle grades (PlannerSchema pairs research/analysis kinds with
+    // ArtifactPresent / LlmJudge / CitationsResolve / ArtifactSchema over deliverable PATHS — a forced ReadOnly made
+    // every one of those contracts unsatisfiable). Nothing it writes is published; that is the actual boundary.
+    [InlineData("research", AgentNetworkAccess.Off, AgentWriteScope.Workspace, false)]
     // code → the tier-derived base (Standard = workspace write, no network) AND publishes its own branch (push true).
     [InlineData("code", AgentNetworkAccess.Off, AgentWriteScope.Workspace, true)]
     public async Task Mode_authors_the_base_permissions_and_push(string mode, AgentNetworkAccess network, AgentWriteScope writeScope, bool push)
@@ -881,6 +884,27 @@ public class AgentCodeNodeTests
         task.Permissions.Network.ShouldBe(network);
         task.Permissions.WriteScope.ShouldBe(writeScope);
         task.PushProducedBranch.ShouldBe(push);
+    }
+
+    [Fact]
+    public async Task Mode_research_lowers_the_network_but_never_raises_the_tiers_write_scope()
+    {
+        // The two halves of research's new base, on the tier that makes each falsifiable:
+        //  • Trusted GRANTS network — research must still turn it OFF (a mode may always LOWER privilege), while the
+        //    tier's Workspace write scope stands so the agent can write the deliverables it is graded on;
+        //  • Confined grants NO write — research must not manufacture one (a mode never raises the ceiling), which is
+        //    the same clamp-safety invariant Mode_code_does_not_override_a_low_autonomy_tier pins from the other side.
+        var trusted = new Dictionary<string, JsonElement> { ["goal"] = Str("g"), ["harness"] = Str("codex-cli"), ["mode"] = Str("research"), ["autonomyLevel"] = Str("Trusted") };
+
+        var trustedTask = JsonSerializer.Deserialize<AgentTask>((await new AgentCodeNode().RunAsync(BuildContext(trusted, resume: null), CancellationToken.None)).SuspendUntil!.Payload, AgentJson.Options)!;
+        trustedTask.Permissions.Network.ShouldBe(AgentNetworkAccess.Off, "research reads the tree it was given, never the internet — it lowers the Trusted tier's network");
+        trustedTask.Permissions.WriteScope.ShouldBe(AgentWriteScope.Workspace, "research writes its report into its own workspace, or its deliverable contract can never be satisfied");
+        trustedTask.PushProducedBranch.ShouldBe(false, "nothing research writes is published — that, not read-only, is the boundary");
+
+        var confined = new Dictionary<string, JsonElement> { ["goal"] = Str("g"), ["harness"] = Str("codex-cli"), ["mode"] = Str("research"), ["autonomyLevel"] = Str("Confined") };
+
+        JsonSerializer.Deserialize<AgentTask>((await new AgentCodeNode().RunAsync(BuildContext(confined, resume: null), CancellationToken.None)).SuspendUntil!.Payload, AgentJson.Options)!
+            .Permissions.WriteScope.ShouldBe(AgentWriteScope.ReadOnly, "the operator's Confined ceiling still caps the write scope — a mode never lifts the tier");
     }
 
     [Fact]
