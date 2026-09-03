@@ -1,4 +1,5 @@
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Persistence;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Agents;
@@ -126,6 +127,17 @@ public sealed class PublishManifestStore : IPublishManifestStore, IScopedDepende
 
     private async Task UpsertAsync(PublishManifestKind kind, Guid? agentRunId, PublishManifestUpsert input, long? expectedFenceEpoch, CancellationToken cancellationToken)
     {
+        // Made storable ONCE here, at the single point both the insert and the fenced update read from, so neither
+        // path can carry a U+0000 that Postgres refuses. These four are the free-text fields: the agent's own
+        // summary, and three reasons built from exception messages. The rest are shas, refs and ids.
+        input = input with
+        {
+            Summary = PersistedText.Sanitize(input.Summary),
+            PublishError = PersistedText.Sanitize(input.PublishError),
+            PatchLossReason = PersistedText.Sanitize(input.PatchLossReason),
+            ChangedFilesJson = PersistedText.SanitizeJson(input.ChangedFilesJson),
+        };
+
         var now = DateTimeOffset.UtcNow;
 
         // The delivery ledger is the IRREVERSIBLE claim of this pass — "this work was pushed, this acceptance

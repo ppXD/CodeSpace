@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Persistence;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Mcp;
@@ -299,7 +300,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
     public async Task<AgentRunEvent> AppendEventAsync(Guid runId, AgentEvent @event, CancellationToken cancellationToken)
     {
         var eventId = Guid.NewGuid();
-        var data = new[] { @event.Data?.GetRawText() };
+        var data = new[] { PersistedText.SanitizeJson(@event.Data?.GetRawText()) };
         var dataArtifactIds = new Guid?[1];
         await OffloadLargeDataPayloadsAsync(runId, [eventId], data, dataArtifactIds, cancellationToken).ConfigureAwait(false);
 
@@ -308,7 +309,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
             Id = eventId,
             AgentRunId = runId,
             Kind = @event.Kind,
-            Text = @event.Text,
+            Text = PersistedText.Sanitize(@event.Text)!,
             DataJson = data[0],
             DataArtifactId = dataArtifactIds[0],
         };
@@ -346,8 +347,13 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         {
             ids[i] = Guid.NewGuid();
             kinds[i] = events[i].Kind.ToString();   // matches the entity's HasConversion<string>() (enum member name)
-            texts[i] = events[i].Text;
-            data[i] = events[i].Data?.GetRawText();
+
+            // A harness line can carry a stray U+0000 (a subprocess pipe, a model completion), and Postgres holds
+            // it in NEITHER column type: `text` refuses the raw byte, `jsonb` refuses the escape a JSON writer
+            // makes of it. Unsanitized, one such byte fails this INSERT with 22021, and because the flush carries
+            // the whole batch it takes the run down over a character that renders as nothing. See PersistedText.
+            texts[i] = PersistedText.Sanitize(events[i].Text)!;
+            data[i] = PersistedText.SanitizeJson(events[i].Data?.GetRawText());
         }
 
         await OffloadLargeDataPayloadsAsync(runId, ids, data, dataArtifactIds, cancellationToken).ConfigureAwait(false);
@@ -450,15 +456,19 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         // unbounded blob. Small fields stay inline. Done BEFORE serialize so the persisted result carries the refs.
         result = await OffloadOrShedAsync(runId, result, snapshot.TeamId, cancellationToken).ConfigureAwait(false);
 
-        var resultJson = JsonSerializer.Serialize(result, AgentJson.Options);
+        // Summary, ExitReason, Error and the inline transcript are all harness words — any of them can carry a NUL
+        // that neither jsonb nor text will take. A run that DID its work must not fail at the last statement.
+        var resultJson = PersistedText.SanitizeJson(JsonSerializer.Serialize(result, AgentJson.Options))!;
+        var sessionId = PersistedText.Sanitize(result.SessionId);
+        var error = PersistedText.Sanitize(result.Error);
 
         var flipped = await _db.AgentRun
             .Where(r => r.Id == runId && r.Status == current && (expectedEpoch == null || r.FenceEpoch == expectedEpoch))
             .ExecuteUpdateAsync(s => s
                 .SetProperty(r => r.Status, result.Status)
                 .SetProperty(r => r.ResultJson, resultJson)
-                .SetProperty(r => r.SessionId, result.SessionId)
-                .SetProperty(r => r.Error, result.Error)
+                .SetProperty(r => r.SessionId, sessionId)
+                .SetProperty(r => r.Error, error)
                 .SetProperty(r => r.CompletedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
             .ConfigureAwait(false);
 

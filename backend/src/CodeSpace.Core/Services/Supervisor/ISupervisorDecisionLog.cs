@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Persistence;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Agents;
@@ -121,7 +122,11 @@ public sealed class SupervisorDecisionLog : ISupervisorDecisionLog, IScopedDepen
             DecisionKind = request.DecisionKind,
             IdempotencyKey = request.IdempotencyKey,
             InputHash = request.InputHash,
-            PayloadJson = request.PayloadJson,
+
+            // The decider model's own words (summary, rationale, an ask_human question) — storable only once a NUL
+            // is out of them. InputHash is deliberately left over the ORIGINAL bytes: it is the idempotency identity
+            // the caller minted, and sanitizing is deterministic, so the same decision still folds onto this row.
+            PayloadJson = PersistedText.SanitizeJson(request.PayloadJson)!,
             Status = SupervisorDecisionStatus.Pending,
             FenceEpoch = request.FenceEpoch,
             LessonArm = string.IsNullOrWhiteSpace(request.LessonArm) ? null : request.LessonArm,
@@ -188,12 +193,16 @@ public sealed class SupervisorDecisionLog : ISupervisorDecisionLog, IScopedDepen
 
         var now = DateTimeOffset.UtcNow;
 
+        // Both carry model/harness words; hoisted out of the expression tree so they are plain parameters.
+        var outcome = PersistedText.SanitizeJson(outcomeJson);
+        var storableError = PersistedText.Sanitize(error);
+
         var flipped = await _db.SupervisorDecisionRecord
             .Where(d => d.Id == decisionId && d.TeamId == teamId && d.Status == current)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(d => d.Status, status)
-                .SetProperty(d => d.OutcomeJson, outcomeJson)
-                .SetProperty(d => d.Error, error)
+                .SetProperty(d => d.OutcomeJson, outcome)
+                .SetProperty(d => d.Error, storableError)
                 .SetProperty(d => d.LastModifiedDate, now), cancellationToken)
             .ConfigureAwait(false);
 
@@ -232,6 +241,10 @@ public sealed class SupervisorDecisionLog : ISupervisorDecisionLog, IScopedDepen
 
     public async Task UpdateOutcomeAsync(Guid decisionId, Guid teamId, string foldedOutcomeJson, CancellationToken cancellationToken)
     {
+        // Sanitized ONCE, up front, so the same value drives the difference test and the write — the stored bytes
+        // are sanitized too, so a re-fold of the same outcome still compares equal and stays a no-op.
+        foldedOutcomeJson = PersistedText.SanitizeJson(foldedOutcomeJson)!;
+
         // A targeted outcome enrichment (NOT a status CAS — the row stays terminal). Only rewrite when the bytes
         // actually differ, so a re-fold on every rehydrate is a no-op (idempotent, allocation-light). Team-scoped.
         var affected = await _db.SupervisorDecisionRecord

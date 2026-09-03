@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using CodeSpace.Core.Persistence;
 using CodeSpace.Core.Services.Agents.Reduction;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Contracts;
@@ -513,7 +514,16 @@ internal sealed class AgentNativeRecordPump
     private NativeRecordV1? BuildFrame(string rawLine, string redactedLine, bool isFinal, long? sourceStart = null, long? sourceEnd = null)
     {
         var handle = _handle!;
-        var captured = Encoding.UTF8.GetBytes(redactedLine);
+
+        // `inline_payload` is TEXT and this is a VERBATIM harness stdout line, so it is the likeliest column in the
+        // system to meet a NUL — and Postgres holds none. Strip it for the STORED copy only: `redaction` is decided
+        // against the untouched line (removing a NUL is not masking a secret), the native type is classified against
+        // the untouched line, and the SOURCE geometry below counts rawLine's real bytes, because byte_offset /
+        // byte_length describe the reader's range in the stream and must keep addressing it. Digest and size_bytes
+        // are computed from the SAME bytes that get stored, so the payload stays self-describing.
+        var redaction = string.Equals(rawLine, redactedLine, StringComparison.Ordinal) ? NativeRecordRedaction.None : NativeRecordRedaction.Masked;
+        var payload = PersistedText.Sanitize(redactedLine)!;
+        var captured = Encoding.UTF8.GetBytes(payload);
         var sourceLength = Encoding.UTF8.GetByteCount(rawLine);
         var offset = sourceStart ?? _sourceOffset;
         var end = sourceEnd ?? offset + sourceLength + (isFinal ? 1 : 0);
@@ -534,12 +544,12 @@ internal sealed class AgentNativeRecordPump
             ByteOffset = offset,
             ByteLength = sourceLength,
             ByteEndOffset = sourceEnd,
-            InlinePayload = redactedLine,
+            InlinePayload = payload,
             DigestAlgorithm = WorkflowRunDataContract.Sha256Algorithm,
             Digest = Convert.ToHexString(SHA256.HashData(captured)).ToLowerInvariant(),
             SizeBytes = captured.Length,
             Encoding = NativeRecordPayloadEncoding.Utf8,
-            Redaction = string.Equals(rawLine, redactedLine, StringComparison.Ordinal) ? NativeRecordRedaction.None : NativeRecordRedaction.Masked,
+            Redaction = redaction,
             IsFinal = isFinal,
         };
     }
