@@ -100,8 +100,17 @@ public class WorkflowRun : IEntity<Guid>, IAuditable
     /// The FULL routing decision (a serialized <c>RoutePlan</c>) this task run was projected from — the effort tier,
     /// recipe, bounds preset + caps, whether the classifier rather than the operator chose the tier, its confidence
     /// and rationale, and any capability degrade. <see cref="ProjectionKind"/> answers only "which builder ran"; this
-    /// answers WHY the run got the depth it got. Opaque provenance — nothing reads it to make a decision. NULL for an
-    /// authored / non-task run (there is no route) and for task runs staged before the column existed.
+    /// answers WHY the run got the depth it got.
+    ///
+    /// <para><b>Write-once provenance with NO reader yet.</b> Only <c>TaskRunSnapshotFactory</c> writes it, and no
+    /// query, projection or decision consumes it today — it exists so a later Room surface can explain a run's depth
+    /// instead of guessing. Nothing may branch on it: treat it as an audit column, not a control input.</para>
+    ///
+    /// <para>NULL for: an authored / non-task run (there is no route); a task run staged before the column existed;
+    /// and — deliberately, for now — every RERUN / REPLAY fork, because <c>StageReplayFromSnapshotAsync</c> clones the
+    /// frozen definition and projection kind but not this column. A replay's route is the original's, so backfilling
+    /// it from the parent is the obvious follow-up; until then a null on a replay row means "not recorded", never
+    /// "not routed".</para>
     /// </summary>
     public string? RoutePlanJson { get; set; }
 

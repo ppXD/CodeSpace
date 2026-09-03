@@ -185,6 +185,20 @@ export interface TaskRoutePreviewResult {
   route: RoutePlan;
 }
 
+/** The WIRED subset of `PreviewTaskRouteCommand` — every field that actually changes the router's answer, and
+ *  nothing else. Built ONLY by `buildRoutePreviewInput`, which derives it from the launch input so the previewed
+ *  route is the route the launch would take. */
+export interface RoutePreviewInput {
+  taskText: string;
+  surfaceKind: TaskSurfaceKind;
+  repositoryId?: string;
+  relatedRepositories?: LaunchRelatedRepository[];
+  baseBranch?: string;
+  effort?: string;
+  caps?: LaunchCaps;
+  autonomyCeiling?: string;
+}
+
 export const tasksApi = {
   // Launch a run from a task spec — the run resource is rooted at api/workflows/runs (the substrate is the
   // workflow engine), so launching a task is creating a run.
@@ -195,6 +209,6 @@ export const tasksApi = {
     fetchJson<CompileTaskSpecResult>("/api/workflows/runs/spec-preview", { method: "POST", body: JSON.stringify(input) }),
   // Preview the ROUTE a launch would take — same seed provider, same router, same request mapping as the launch
   // itself. Read-only: no session is opened, no run is staged, nothing is persisted.
-  routePreview: (input: { taskText: string; repositoryId?: string; effort?: string }) =>
+  routePreview: (input: RoutePreviewInput) =>
     fetchJson<TaskRoutePreviewResult>("/api/workflows/runs/route-preview", { method: "POST", body: JSON.stringify(input) }),
 };

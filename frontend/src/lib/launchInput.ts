@@ -1,4 +1,4 @@
-import type { LaunchTaskInput, TaskSurfaceKind } from "@/api/tasks";
+import type { LaunchTaskInput, RoutePreviewInput, TaskSurfaceKind } from "@/api/tasks";
 import type { QualityTier } from "./qualityPresets";
 
 /** One repo in the launch workspace. `isPrimary` marks the repo whose id+branch become the run's
@@ -219,6 +219,35 @@ export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
 
   // P3.2: the quality-tier mandate. Prototype is the backend default ⇒ omitted, byte-identical.
   if (state.tier !== "Prototype") input.tier = state.tier;
+
+  return input;
+}
+
+/**
+ * B1: the ROUTE-PREVIEW payload — DERIVED from {@link buildLaunchInput}, never assembled separately. The preview
+ * only means anything if it routes the launch the operator is actually about to send, and every field below
+ * genuinely moves the answer: `effort` picks the tier (or asks the classifier), `caps` + `autonomyCeiling` merge
+ * onto the preset's bounds, `surfaceKind` selects the seed provider, and repo / branch / related repos shape the
+ * seed the classifier reads and the scope guard validates. Sending a bare goal previewed a DIFFERENT launch.
+ *
+ * <p>Execution overrides (model, harness, persona, runner, review modes, timeouts, quality tier) are absent
+ * because the router never reads them — including them would imply this predicts more than it does. `recipe` is
+ * absent because the composer has no control that pins one; the backend command still accepts it.</p>
+ */
+export function buildRoutePreviewInput(state: LaunchFormState): RoutePreviewInput {
+  const launch = buildLaunchInput(state);
+
+  const input: RoutePreviewInput = {
+    taskText: launch.taskText,
+    surfaceKind: launch.surfaceKind,
+  };
+
+  if (launch.repositoryId) input.repositoryId = launch.repositoryId;
+  if (launch.baseBranch) input.baseBranch = launch.baseBranch;
+  if (launch.effort) input.effort = launch.effort;
+  if (launch.relatedRepositories) input.relatedRepositories = launch.relatedRepositories;
+  if (launch.caps) input.caps = launch.caps;
+  if (launch.autonomyCeiling) input.autonomyCeiling = launch.autonomyCeiling;
 
   return input;
 }
