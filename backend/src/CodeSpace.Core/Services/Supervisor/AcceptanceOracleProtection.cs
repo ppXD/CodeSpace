@@ -57,6 +57,7 @@ public static class AcceptanceOracleProtection
             if (!atProgram) continue;
 
             if (token.StartsWith('-')) continue;                // a flag never ends the search for the program (`sh -c ./check.sh`)
+            if (IsEnvAssignment(token)) continue;               // `CI=1 ./check.sh` — the assignment PRECEDES the program
             if (IsInterpreter(token)) continue;                 // the script it is handed is the oracle, not the shell
 
             if (Normalize(token) is { } path && !candidates.Contains(path, StringComparer.Ordinal)) candidates.Add(path);
@@ -72,6 +73,23 @@ public static class AcceptanceOracleProtection
         argv.Where(a => !string.IsNullOrWhiteSpace(a)).SelectMany(a => a.Split(Whitespace, StringSplitOptions.RemoveEmptyEntries));
 
     private static bool IsInterpreter(string token) => Interpreters.Contains(token[(token.LastIndexOf('/') + 1)..]);
+
+    /// <summary>
+    /// A leading shell env assignment (<c>CI=1 ./check.sh</c>). It must be SKIPPED rather than treated as the
+    /// program: reading it as one leaves the real judge behind it unprotected, and silently — the assignment
+    /// carries an <c>=</c>, so it is never a pathspec and nothing downstream complains.
+    /// </summary>
+    private static bool IsEnvAssignment(string token)
+    {
+        var equals = token.IndexOf('=');
+
+        if (equals <= 0 || char.IsAsciiDigit(token[0])) return false;
+
+        for (var i = 0; i < equals; i++)
+            if (!char.IsAsciiLetterOrDigit(token[i]) && token[i] != '_') return false;
+
+        return true;
+    }
 
     /// <summary>
     /// A repo-relative pathspec, or null when the token cannot be one — absolute, escaping the repo root, carrying

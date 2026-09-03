@@ -594,6 +594,76 @@ public class SupervisorAcceptanceGraderTests
         runners.Invocations.ShouldBeEmpty("no probe, no restore — the deliverable is not the oracle");
     }
 
+    // ── C3: the oracle's integrity travels ON the grade, not only in the evidence ────────────────────────
+
+    [Fact]
+    public async Task A_voided_tamper_rides_the_grade_as_one_short_line()
+    {
+        // The stop fold persists pass + detail only, and the bounded EvidenceTail keeps the END of oracle output —
+        // a talkative check pushes a prepended note straight out of it. So the note has to ride the grade, or the
+        // floor's own tamper never reaches the journal, the decider prompt or the receipt.
+        var runners = new RecordingRunnerRegistry();
+        runners.Script(new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "check.sh\n", Stderr = "" });   // ls-tree: the base ships it
+        runners.Script(new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "check.sh\n", Stderr = "" });   // diff: the candidate changed it
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: runners);
+
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = Command }, 30, "abc123def4567890", CancellationToken.None);
+
+        grade.OracleNote.ShouldNotBeNull();
+        grade.OracleNote!.ShouldContain("ORACLE TAMPER VOIDED", Case.Sensitive);
+        grade.OracleNote.ShouldContain("check.sh");
+        grade.OracleNote.ShouldNotContain("\n", Case.Sensitive, "it rides a detail string — one line, never a paragraph");
+    }
+
+    [Fact]
+    public async Task A_protected_oracle_the_candidate_left_alone_stays_quiet_on_the_grade()
+    {
+        var runners = new RecordingRunnerRegistry();
+        runners.Script(new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "check.sh\n", Stderr = "" });   // ls-tree
+        runners.Script(new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "", Stderr = "" });             // diff: nothing changed
+        var artifacts = new FakeArtifactStore();
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: runners, artifacts: artifacts);
+
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = Command }, 30, "abc123def4567890", CancellationToken.None);
+
+        grade.OracleNote.ShouldBeNull("the dominant case must not annotate every verdict detail on the tape");
+        artifacts.Puts.ShouldHaveSingleItem().Text.ShouldContain("restored from abc123def456", Case.Sensitive, "the restore stays legible in the evidence");
+    }
+
+    [Theory]
+    [InlineData(null, "oracle: graded UNPROTECTED (no base recorded)")]
+    [InlineData("abc123def4567890", "oracle: graded UNPROTECTED (base probe failed)")]
+    public async Task A_judge_that_could_have_been_protected_but_was_not_says_so(string? oracleBaseSha, string expectedNote)
+    {
+        // Silence was readable as protection: a decider weighing a pass, or an operator reading a receipt, could
+        // not tell "the oracle was restored and untouched" from "nobody ever anchored it".
+        var runners = new RecordingRunnerRegistry();
+        runners.Script(new SandboxResult { Status = SandboxStatus.Failed, ExitCode = 128, Stdout = "", Stderr = "fatal: not a tree object" });
+        var artifacts = new FakeArtifactStore();
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: runners, artifacts: artifacts);
+
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = Command }, 30, oracleBaseSha, CancellationToken.None);
+
+        grade.Passed.ShouldBeTrue("an unanchored oracle never invents a verdict — it reports honestly and grades");
+        grade.Detail.ShouldBe("tests-passed");
+        grade.OracleNote.ShouldBe(expectedNote);
+        artifacts.Puts.ShouldBeEmpty("an ABSENCE must not mint the CAS evidence a receipt binds to — that would loosen admission on the strength of nothing");
+    }
+
+    [Fact]
+    public async Task A_command_with_no_judge_file_to_protect_stays_quiet()
+    {
+        // `dotnet test` names no repo file, so there was never an oracle to guard — absence of a note there cannot
+        // be misread, and annotating it would train readers to ignore the note that matters.
+        var runners = new RecordingRunnerRegistry();
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: runners);
+
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = new[] { "dotnet", "test" } }, 30, "abc123def4567890", CancellationToken.None);
+
+        grade.OracleNote.ShouldBeNull();
+        runners.Invocations.ShouldBeEmpty("not even a probe — a bare binary name is never worth full history");
+    }
+
     // ── C3, real git + the real oracle: the mechanism, not just the argv the grader asks for ─────────────
 
     [Theory]

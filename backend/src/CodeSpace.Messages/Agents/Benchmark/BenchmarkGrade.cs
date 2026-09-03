@@ -55,4 +55,18 @@ public sealed record BenchmarkGrade
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? EvidenceTail { get; init; }
+
+    /// <summary>
+    /// C3: a SHORT single-line statement about the ORACLE's OWN integrity for this grade — a voided candidate
+    /// tamper, or that the grade ran with the judge UNPROTECTED. Separate from <see cref="EvidenceTail"/> because
+    /// the tail is the trailing slice of oracle OUTPUT: a talkative check pushes an integrity note straight out of
+    /// it, and the run-level stop fold carries only pass + detail anyway, so a note left in the evidence never
+    /// reached the journal, the decider prompt, or the receipt on the very lane the protection guards.
+    ///
+    /// <para>Null is the QUIET case, and deliberately narrow: the oracle was protected and untouched, or there was
+    /// no judge file to protect at all. It never means "protection was checked and passed" — a caller that needs
+    /// that distinction reads the evidence.</para>
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? OracleNote { get; init; }
 }

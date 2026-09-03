@@ -1013,8 +1013,9 @@ public sealed partial class SupervisorTurnService
     /// P3a-3 (B+V0+): the base sha the grader restores the spec's ProtectedPaths from — the unit's recorded
     /// manifest BaseSha (the S1 immutable base its work was cut from). Resolved ONLY when the spec actually
     /// protects paths (no extra read on the common unprotected path); null = grader grades exactly as before.
-    /// A protected spec whose unit has no manifest grades with no restore — the tamper door stays closed at
-    /// admission (unevidenced/unrestorable protection surfaces in the evidence text, never a silent pass).
+    /// A protected spec whose unit has no manifest grades with NO restore, and the grade says so out loud
+    /// (<c>BenchmarkGrade.OracleNote</c> — "graded UNPROTECTED"): before C3 that case was silent, and silence
+    /// from an unanchored oracle is indistinguishable from a protected one that was left alone.
     /// </summary>
     private async Task<string?> OracleBaseShaAsync(Guid agentRunId, Guid repositoryId, SupervisorAcceptanceSpec spec, Guid teamId, CancellationToken cancellationToken)
     {
@@ -1026,26 +1027,54 @@ public sealed partial class SupervisorTurnService
     }
 
     /// <summary>
-    /// C3: the base sha the STOP gates restore each target repository's oracle from — the newest recorded
-    /// <c>PublishManifest.BaseSha</c> for that repo (the S1 immutable base its participants materialized from,
-    /// the same anchor the per-unit fold restores against, read newest-first off the store). Resolved once per
-    /// stop, not once per repo×gate.
+    /// C3: the base sha the STOP gates restore each target repository's oracle from. Resolved once per stop, not
+    /// once per repo×gate, and preferring the LEAST candidate-influenced anchor available:
+    /// <list type="number">
+    ///   <item>the S1 LAUNCH PIN (<c>SupervisorAgentProfile.PinnedSha</c> for the primary, each related repo's own
+    ///         <c>PinnedSha</c>) — server truth, minted before any candidate ran;</item>
+    ///   <item>failing that, the OLDEST recorded <c>PublishManifest.BaseSha</c> for the repo.</item>
+    /// </list>
     ///
-    /// <para>Without it the OPERATOR's floor — the one gate a run cannot ship past, and the only oracle the model
-    /// never authors — graded whatever bytes the candidate left behind under its own check script's name. A repo
-    /// with no recorded base is simply absent, and grades unprotected exactly as before.</para>
+    /// <para><b>Oldest, not newest.</b> Dependency staging hands a downstream unit a PRODUCER's branch as its base
+    /// (<c>RealSupervisorActionExecutor.DependencyStaging</c>), so a round-2 manifest's base can already contain a
+    /// round-1 candidate's edits — including its edits to the very check script the floor runs. Anchoring on the
+    /// newest base would restore the oracle from a tree a candidate had already written to, which is the least
+    /// protective choice on the tape. The store returns newest-first, so the LAST write per repo wins here.</para>
+    ///
+    /// <para>Without any anchor the OPERATOR's floor — the one gate a run cannot ship past, and the only oracle the
+    /// model never authors — graded whatever bytes the candidate left behind under its own check script's name. A
+    /// repo with no anchor at all is simply absent and grades unprotected, which the grade then SAYS
+    /// (<c>BenchmarkGrade.OracleNote</c>) rather than passing silently.</para>
     /// </summary>
-    private async Task<IReadOnlyDictionary<Guid, string>> OracleBaseShasAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken)
-    {
-        var manifests = await _manifests.ListForWorkflowRunAsync(supervisorRunId, teamId, cancellationToken).ConfigureAwait(false);
+    private async Task<IReadOnlyDictionary<Guid, string>> OracleBaseShasAsync(SupervisorTurnContext context, Guid teamId, CancellationToken cancellationToken) =>
+        ResolveOracleBaseShas(await _manifests.ListForWorkflowRunAsync(context.SupervisorRunId, teamId, cancellationToken).ConfigureAwait(false), context);
 
+    /// <summary>The pure half of <see cref="OracleBaseShasAsync"/> (internal so the anchor PRECEDENCE is unit-pinned directly): <paramref name="manifests"/> arrives newest-first, so the last write per repo leaves the OLDEST base, and the launch pins then overwrite it.</summary>
+    internal static IReadOnlyDictionary<Guid, string> ResolveOracleBaseShas(IReadOnlyList<Core.Persistence.Entities.PublishManifest> manifests, SupervisorTurnContext context)
+    {
         var bases = new Dictionary<Guid, string>();
 
         foreach (var manifest in manifests)
-            if (manifest.RepositoryId is { } repositoryId && !string.IsNullOrWhiteSpace(manifest.BaseSha) && !bases.ContainsKey(repositoryId))
+            if (manifest.RepositoryId is { } repositoryId && !string.IsNullOrWhiteSpace(manifest.BaseSha))
                 bases[repositoryId] = manifest.BaseSha!;
 
+        foreach (var (repositoryId, pin) in LaunchBasePins(context))
+            bases[repositoryId] = pin;
+
         return bases;
+    }
+
+    /// <summary>The run's S1 launch pins by repository — the primary's off the profile, each related repo's off the SHARED authored-repo parse (never a forked read of that JSON). Empty when the launch pinned nothing.</summary>
+    private static IEnumerable<(Guid RepositoryId, string PinnedSha)> LaunchBasePins(SupervisorTurnContext context)
+    {
+        if (context.AgentProfile is not { } profile) yield break;
+
+        if (profile.RepositoryId is { } primary && !string.IsNullOrWhiteSpace(profile.PinnedSha))
+            yield return (primary, profile.PinnedSha!);
+
+        foreach (var related in Agents.Workspace.AgentWorkspaceAuthoring.ParseRelatedRepositories(profile.RelatedRepositories ?? default))
+            if (!string.IsNullOrWhiteSpace(related.PinnedSha))
+                yield return (related.RepositoryId, related.PinnedSha!);
     }
 
     private async Task<Core.Persistence.Entities.PublishManifest?> ResolveUnitManifestAsync(Guid agentRunId, Guid repositoryId, Guid teamId, CancellationToken cancellationToken)
@@ -1128,7 +1157,7 @@ public sealed partial class SupervisorTurnService
         try
         {
             targets = await ResolveAcceptanceTargetsAsync(context, teamId, cancellationToken).ConfigureAwait(false);
-            oracleBaseShas = await OracleBaseShasAsync(context.SupervisorRunId, teamId, cancellationToken).ConfigureAwait(false);
+            oracleBaseShas = await OracleBaseShasAsync(context, teamId, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1229,6 +1258,8 @@ public sealed partial class SupervisorTurnService
     /// </summary>
     private async Task<BenchmarkGrade> GradeStopTargetsAsync(Guid teamId, IReadOnlyList<(Guid RepositoryId, string Alias, string Branch)> targets, IReadOnlyList<(string Label, SupervisorAcceptanceSpec? Spec)> gates, IReadOnlyDictionary<Guid, string> oracleBaseShas, CancellationToken cancellationToken)
     {
+        var oracleNotes = new List<string>();
+
         foreach (var target in targets)
         {
             var repoTag = string.IsNullOrEmpty(target.Alias) ? "" : $"repo '{target.Alias}': ";
@@ -1261,12 +1292,22 @@ public sealed partial class SupervisorTurnService
                     return new BenchmarkGrade { Passed = false, Detail = $"{repoTag}{label}: grade-error: {ex.Message}", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault };
                 }
 
-                if (!grade.Passed) return new BenchmarkGrade { Passed = false, Detail = $"{repoTag}{label}: {grade.Detail}" };
+                // C3: re-emit via `with` so the graded object's Class, EvidenceArtifactId, EvidenceTail and
+                // OracleNote survive the aggregate — rebuilt from scratch, this lane dropped the typed class AND
+                // left every stop-gate failure receipt evidence-less, exactly as the per-unit multi-repo fold once
+                // did (P5-2). The oracle's integrity note is folded into the DETAIL because the stop fold carries
+                // only pass + detail onto the tape.
+                if (!grade.Passed) return grade with { Detail = Annotated($"{repoTag}{label}: {grade.Detail}", grade.OracleNote) };
+
+                if (grade.OracleNote is { Length: > 0 } note) oracleNotes.Add($"{repoTag}{label}: {note}");
             }
         }
 
-        return new BenchmarkGrade { Passed = true, Detail = "accepted" };
+        return new BenchmarkGrade { Passed = true, Detail = Annotated("accepted", oracleNotes.Count == 0 ? null : string.Join("; ", oracleNotes)) };
     }
+
+    /// <summary>The verdict detail plus the oracle's integrity note, when there is one — the ONLY route a voided tamper or an unprotected judge has onto the durable stop outcome, which carries pass + detail and nothing else. No note ⇒ the detail verbatim (the dominant case stays byte-identical).</summary>
+    internal static string Annotated(string detail, string? oracleNote) => string.IsNullOrEmpty(oracleNote) ? detail : $"{detail} [{oracleNote}]";
 
     /// <summary>The model-authored acceptance spec off a stop decision's payload (<see cref="SupervisorStopPayload.Acceptance"/> — its command + oracle Kind), best-effort (null when absent / malformed).</summary>
     private static SupervisorAcceptanceSpec? ReadStopAcceptance(string payloadJson)

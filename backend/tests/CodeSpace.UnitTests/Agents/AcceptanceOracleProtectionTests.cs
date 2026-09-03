@@ -31,6 +31,12 @@ public class AcceptanceOracleProtectionTests
     [InlineData("sh|-c|./check.sh --fast", "check.sh")]                 // the program hides inside the -c string
     [InlineData("sh|-c|npm ci && ./check.sh", "check.sh")]              // …behind a chained setup command
     [InlineData("sh|-c|./check.sh && ./check.sh", "check.sh")]          // …twice: deduped
+    // …behind env assignments. Reading `CI=1` as the program would leave the real judge unprotected, and silently:
+    // the assignment carries an `=`, so it is never a pathspec and nothing downstream would complain.
+    [InlineData("sh|-c|CI=1 ./check.sh", "check.sh")]
+    [InlineData("sh|-c|CI=1 TERM=dumb ./check.sh", "check.sh")]
+    [InlineData("CI=1|sh|check.sh", "check.sh")]
+    [InlineData("sh|-c|1BAD=x ./check.sh", "")]                         // not a valid assignment ⇒ it IS the program ⇒ not a pathspec
     // A binary on PATH is nobody's repo file.
     [InlineData("dotnet|test", "")]
     [InlineData("npm|run|test", "")]
