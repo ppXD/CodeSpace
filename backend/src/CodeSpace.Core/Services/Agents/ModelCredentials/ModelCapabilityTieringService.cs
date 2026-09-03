@@ -49,7 +49,13 @@ public sealed class ModelCapabilityTieringService : IModelCapabilityTieringServi
 
             var ids = rows.Select(r => r.ModelId).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
-            if (await InProcessStructuredModel.ResolveAsync(_clients, _models, teamId, cancellationToken, InProcessStructuredModel.CheapBrainCeiling).ConfigureAwait(false) is not { } resolved)
+            // DELIBERATELY UNCEILINGED (D2). Tiering is a cheap call by size, but it PRODUCES the very tiers
+            // InProcessStructuredModel.CheapBrainCeiling reads — so a weak verdict here does not cost one call, it
+            // mis-ranks the pool for every later auto pick, INCLUDING the unceilinged supervisor brain's. That makes
+            // capability tiering a producer of selection ground truth, not a consumer of it, and it keeps the team's
+            // strongest model. The other cheap callers each consume a verdict a human reviews or that only degrades
+            // their own single answer; this one silently degrades everyone else's.
+            if (await InProcessStructuredModel.ResolveAsync(_clients, _models, teamId, cancellationToken).ConfigureAwait(false) is not { } resolved)
                 return;   // no structured provider with a team model → nothing to tier with; leave un-tiered (fail-closed)
 
             var (structured, pick) = resolved;

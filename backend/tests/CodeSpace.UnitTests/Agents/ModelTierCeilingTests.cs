@@ -11,7 +11,8 @@ namespace CodeSpace.UnitTests.Agents;
 /// before this ceiling the plane's cheapest calls all landed on the team's Frontier model. The ceiling narrows the
 /// candidate set under two invariants: an <c>IsDefault</c> row survives regardless of tier (operator authority is
 /// absolute), and a pool where NOTHING satisfies the ceiling is used whole (anti-strand — a pricier model beats a
-/// <c>NoModelStop</c>).
+/// <c>NoModelStop</c>). The bound is <c>&lt;=</c>, so a Strong ceiling admits Basic when that is the only sub-ceiling
+/// row — pinned below as the deliberate trade it is, not left implicit.
 ///
 /// <para><see cref="Pick"/> composes the ceiling with the SAME two steps <c>ModelPoolSelector.SelectAsync</c>'s
 /// unpinned path applies around it — the <c>Available</c> soft-filter first, then the IsDefault → effective-tier →
@@ -56,6 +57,39 @@ public sealed class ModelTierCeilingTests
 
         Pick(pool, ModelCapabilityTier.Strong)!.ModelId
             .ShouldBe("the-strong-one", "the whole point of D2 — a cheap call stops automatically spending the team's Frontier model");
+    }
+
+    [Fact]
+    public void A_Strong_ceiling_admits_Basic_when_that_is_the_only_row_under_it()
+    {
+        // The bound is <=, NOT "the tier the ceiling names". A team holding {Basic, Frontier} therefore runs every
+        // ceilinged caller on Basic. ACCEPTED DELIBERATELY: the three ceilinged callers each have a fail-open floor for a
+        // poor answer (the effort classifier falls to the deterministic heuristic, the distiller refuses an unusable
+        // proposal, the spec preview degrades to no suggestion), so the cost is one degraded SUGGESTION a human reviews,
+        // never a wrong action. A team that wants Frontier on these calls stars it — IsDefault beats any ceiling.
+        var pool = new List<Row>
+        {
+            new("the-frontier-one", IsDefault: false, Tier: ModelCapabilityTier.Frontier, ProbedTier: null, Id: 1),
+            new("the-basic-one", IsDefault: false, Tier: ModelCapabilityTier.Basic, ProbedTier: null, Id: 2),
+        };
+
+        Pick(pool, ModelCapabilityTier.Strong)!.ModelId
+            .ShouldBe("the-basic-one", "a Strong ceiling admits every tier AT OR UNDER Strong — Basic included; it is a ceiling, not a floor");
+    }
+
+    [Fact]
+    public void A_Strong_ceiling_still_prefers_Strong_over_Basic_when_both_are_present()
+    {
+        // The other half of the same contract: the ceiling NARROWS, the ladder still ranks strongest-first inside it,
+        // so Basic is reached only when nothing better is under the ceiling.
+        var pool = new List<Row>
+        {
+            new("aaa-basic", IsDefault: false, Tier: ModelCapabilityTier.Basic, ProbedTier: null, Id: 1),
+            new("zzz-strong", IsDefault: false, Tier: ModelCapabilityTier.Strong, ProbedTier: null, Id: 2),
+        };
+
+        Pick(pool, ModelCapabilityTier.Strong)!.ModelId
+            .ShouldBe("zzz-strong", "inside the ceiling the ordinary strongest-first ladder still decides — despite 'aaa' sorting first");
     }
 
     [Fact]
@@ -144,8 +178,10 @@ public sealed class ModelTierCeilingTests
     [Fact]
     public void The_cheap_brain_ceiling_constant_is_pinned_at_Strong()
     {
-        // The ONE value four production callers (effort classifier, capability tiering, lesson distiller, spec-preview
-        // compiler) pass. Lowering it to Basic would route the plane's judgment onto the team's weakest model; raising
+        // The ONE value three production callers (effort classifier, lesson distiller, spec-preview compiler) pass —
+        // capability tiering is deliberately NOT one of them: it PRODUCES the tiers this ceiling reads, so a weak verdict
+        // there would mis-rank the pool for every later auto pick including the unceilinged supervisor brain's.
+        // Lowering this to Basic would route the plane's judgment onto the team's weakest model; raising
         // it to Frontier would silently undo D2 and put every cheap call back on the priciest tier. Hard-pin the value
         // so either move is a deliberate, review-visible decision rather than an invisible edit.
         InProcessStructuredModel.CheapBrainCeiling.ShouldBe(ModelCapabilityTier.Strong);
@@ -155,6 +191,13 @@ public sealed class ModelTierCeilingTests
     /// The unpinned brain-plane pick, composed exactly as <c>ModelPoolSelector.SelectAsync</c> composes it: the
     /// <c>Available</c> soft-filter (anti-strand: kept whole when every row is known-dead), THEN the ceiling, THEN the
     /// IsDefault → effective-tier-descending → model-id → row-id ladder.
+    ///
+    /// <para>CAVEAT (Rule 12.5): only <see cref="ModelTierCeiling.Apply"/> here is production code — the soft-filter and
+    /// the ladder around it are a MIRROR of <c>ModelPoolSelector.SelectAsync</c>'s unpinned path, with no drift detector,
+    /// because that path needs a live <c>DbContext</c> and cannot be driven at this tier. So these cases pin the POLICY
+    /// (and the order the two steps compose in); the PRODUCTION order is pinned only at the integration tier, by
+    /// <c>ModelPoolSelectorFlowTests</c>'s ceiling cases against real Postgres. If the selector's ladder changes, this
+    /// helper must be updated with it — the integration tests, not this file, are what would catch the divergence.</para>
     /// </summary>
     private static Row? Pick(List<Row> candidates, ModelCapabilityTier? ceiling)
     {

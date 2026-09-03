@@ -19,17 +19,24 @@ public static class InProcessStructuredModel
 {
     /// <summary>
     /// D2 — the ONE cost ceiling every CHEAP in-process caller passes to <see cref="ResolveAsync"/>: the launch effort
-    /// classifier, model capability tiering, the nightly lesson distiller, the spec-preview compiler. Each asks ONE
-    /// short, schema-bounded question whose answer a human reviews or which is merely advisory, so none of them needs
-    /// the team's <see cref="ModelCapabilityTier.Frontier"/> model — before this ceiling every one of them got it, because
-    /// the pool's unpinned ladder ranks the EFFECTIVE tier DESCENDING ("auto = the strongest available brain").
-    /// <see cref="ModelCapabilityTier.Strong"/> is the ceiling rather than <see cref="ModelCapabilityTier.Basic"/> because
-    /// these calls still need reliable schema adherence — the goal is to stop reaching for the priciest tier, not to
-    /// route the plane's judgment onto its weakest model.
+    /// classifier, the nightly lesson distiller, the spec-preview compiler. Each asks ONE short, schema-bounded question
+    /// whose answer a human reviews, and each has its OWN fail-open floor when the answer is poor (the classifier falls
+    /// to the deterministic heuristic, the distiller refuses an unusable proposal, the preview degrades to no
+    /// suggestion) — so none needs the team's <see cref="ModelCapabilityTier.Frontier"/> model. Before this ceiling every
+    /// one of them got it, because the pool's unpinned ladder ranks the EFFECTIVE tier DESCENDING ("auto = the strongest
+    /// available brain").
     ///
-    /// <para>The DELIBERATE non-callers: the supervisor brain, the workflow planner, the critics, the rubric judges and
-    /// the agents themselves. Their output is the product, is not human-reviewed before it acts, or is the very thing
-    /// capability buys — so they keep the unceilinged "strongest available" ladder.</para>
+    /// <para><see cref="ModelCapabilityTier.Strong"/> names the CEILING, not a floor: the selector's ladder still prefers
+    /// the strongest row AT OR UNDER it, so a pool holding Strong yields Strong. A pool whose only sub-ceiling row is
+    /// <see cref="ModelCapabilityTier.Basic"/> (e.g. {Basic, Frontier}) DOES route these three onto Basic — accepted
+    /// deliberately, because each has the fail-open floor above and a poor answer costs one degraded suggestion, never a
+    /// wrong action. A team that wants its Frontier model on these calls stars it (<c>IsDefault</c> beats any ceiling).</para>
+    ///
+    /// <para>The DELIBERATE non-callers: the supervisor brain, the workflow planner, the critics, the rubric judges, the
+    /// agents themselves — their output is the product, is not human-reviewed before it acts, or is the very thing
+    /// capability buys — AND <c>ModelCapabilityTieringService</c>, which PRODUCES the tiers this ceiling reads, so a weak
+    /// verdict there would mis-rank the pool for every later auto pick including the unceilinged brain's. All keep the
+    /// unceilinged "strongest available" ladder.</para>
     /// </summary>
     public const ModelCapabilityTier CheapBrainCeiling = ModelCapabilityTier.Strong;
 
