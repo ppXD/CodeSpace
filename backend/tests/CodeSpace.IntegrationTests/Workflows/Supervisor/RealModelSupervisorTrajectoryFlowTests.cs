@@ -65,10 +65,13 @@ public sealed class RealModelSupervisorTrajectoryFlowTests
         {
             // A wall-clock deadline bounds the WHOLE trajectory independently of the per-call HTTP timeout, so a slow or
             // hanging endpoint surfaces the scorer's clean "did not converge" verdict instead of blowing the job's budget.
-            // A sound run is 4-5 turns, so maxTurns:8 is ample headroom for a replan or an ask.
+            // The turn cap comes from the ENVIRONMENT, because the arcs do not cost the same: most are sound in 4-6
+            // turns, but persistent-conflict needs SEVEN before it can even say stop. A flat cap measured the budget
+            // instead of the brain there — both blessed attempts of run 33754366815 earned a clean merge and then ran
+            // out of turns.
             using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(6));
 
-            var trajectory = await SupervisorTrajectory.RunAsync(decider, environment, maxTurns: 8, deadline.Token);
+            var trajectory = await SupervisorTrajectory.RunAsync(decider, environment, environment.MaxTurns, deadline.Token);
 
             // A FIRED wall-clock deadline is the gateway being too slow to finish the trajectory in the budget — not a
             // wrong decision — so surface it as a TimeoutException to skip (non-gating, does not consume a best-of-N slot).

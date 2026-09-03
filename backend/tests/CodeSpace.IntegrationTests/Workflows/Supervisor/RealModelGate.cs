@@ -68,51 +68,91 @@ public static class RealModelGate
 
     private static readonly AsyncLocal<ModelSink?> Sink = new();
 
-    /// <summary>Record the model name the PROVIDER reported for a live response (<c>StructuredLLMCompletion.Model</c> / <c>LLMCompletion.Model</c>). Called by the observing client the live-wire registry wraps; a no-op when no assessment is in flight.</summary>
+    /// <summary>The side file, written beside the step summaries, naming every model a live response reported this job — read by <c>collect-real-model-verdicts.sh</c> as extra redaction needles. See <see cref="RecordForRedaction"/>.</summary>
+    public const string ObservedModelsFileName = "codespace_observed_models";
+
+    private static readonly HashSet<string> RecordedForRedaction = new(StringComparer.Ordinal);
+
+    /// <summary>Record the model name the PROVIDER reported for a live response (<c>StructuredLLMCompletion.Model</c> / <c>LLMCompletion.Model</c>). Called by the observing client the live-wire registry wraps; the sink write is a no-op when no assessment is in flight, but the redaction record is NOT — an unassessed call logs the same name.</summary>
     public static void ObserveModel(string? model)
     {
-        if (Sink.Value is { } sink && !string.IsNullOrWhiteSpace(model)) sink.Name = model;
+        if (string.IsNullOrWhiteSpace(model)) return;
+
+        if (Sink.Value is { } sink) sink.Name = model;
+
+        RecordForRedaction(model.Trim());
+    }
+
+    /// <summary>
+    /// Append a provider-reported model name to the side file the collect step reads, once per distinct name.
+    /// </summary>
+    /// <remarks>
+    /// The gate itself no longer writes a model name anywhere, but OTHER components still log one:
+    /// <c>LlmCompleteNode</c> logs <c>"LLM completion {Model} …"</c> with this very value, and xUnit captures that
+    /// into the trx's <c>&lt;StdOut&gt;</c> — which is how run 33754366815's <c>real-model-footer-signals.trx</c>
+    /// shipped a provider model name. Redacting by log-message SHAPE would break the moment a template changed, so
+    /// the gate instead hands the collect step the exact VALUES to strike. Beside the step summaries because that
+    /// directory is the one place a later step can reach (a step summary is per-STEP), and it is not itself
+    /// uploaded. Best-effort and silent on failure: this is a diagnostic aid, and the named secret env vars are
+    /// redacted independently of it.
+    /// </remarks>
+    private static void RecordForRedaction(string model)
+    {
+        var summaryPath = Environment.GetEnvironmentVariable(StepSummaryEnvVar);
+
+        if (string.IsNullOrWhiteSpace(summaryPath)) return;
+
+        lock (RecordedForRedaction)
+        {
+            if (!RecordedForRedaction.Add(model)) return;
+
+            try
+            {
+                File.AppendAllText(Path.Combine(Path.GetDirectoryName(summaryPath)!, ObservedModelsFileName), model + Environment.NewLine);
+            }
+            catch (Exception)
+            {
+                // A collection detail must never fail a lane whose tests passed.
+            }
+        }
     }
 
     /// <summary>Install a fresh sink for one assessment so each gate call reports the model THAT call observed.</summary>
     private static void ArmModelSink() => Sink.Value = new ModelSink();
 
     /// <summary>
-    /// The model provenance appended to every verdict/report line: <c>[model fp=&lt;8-hex&gt; (observed|configured)]</c>.
+    /// The model provenance appended to every verdict/report line: <c>[model fp=&lt;8-hex&gt; (observed|configured)]</c>,
+    /// plus <c>, differs from configured fp=&lt;8-hex&gt;</c> when the gateway answered with something other than the pin.
     /// The fingerprint is taken over the PROVIDER-REPORTED name when a live response was observed, else over the
     /// configured <c>CODESPACE_LLM_MODEL_ID</c>, and the tag says which — so a red streak can be told apart as "the
     /// gateway started answering with another model" by comparing two runs' stamps. <c>model=unknown</c> means nothing
     /// named a model at all.
     ///
-    /// <para>It carries NO NAME, deliberately. Every line this stamp rides on is written to a FILE — the step summary
-    /// and the trx, both uploaded as artifacts — and GitHub masks a secret in the LOG only, never in a file: run
+    /// <para>It carries NO NAME ANYWHERE, deliberately — not even to stdout, which is not a private channel either:
+    /// xUnit captures console output into the trx's <c>&lt;StdOut&gt;</c>, and the trx is uploaded. Every line this
+    /// stamp rides on ends up in a FILE, and GitHub masks a secret in the LOG only, never in a file: run
     /// 33723910434's <c>real-model-results</c> artifact shipped the raw configured id, a repository secret, to anyone
-    /// who could download it. The observed name is no safer, because on the pinned lane it is that same id. The
-    /// fingerprint is what survives masking AND redaction, which is exactly why it exists;
-    /// <see cref="UnexpectedModelSuffix()"/> is the one place a name may still be spelled out, to stdout only.</para>
+    /// who could download it. The observed name is no safer — on the pinned lane it is that same id. Drift is
+    /// therefore reported as a fingerprint COMPARISON (<c>differs from configured fp=…</c>), which says the one thing
+    /// a name was there to say and survives both masking and redaction.</para>
     /// </summary>
     internal static string ModelStamp() => ModelStamp(Sink.Value?.Name, Environment.GetEnvironmentVariable(ModelIdEnvVar));
 
     /// <summary>Testable core of <see cref="ModelStamp()"/> — explicit observed/configured names, so the written stamp is pinnable without mutating process env.</summary>
     internal static string ModelStamp(string? observed, string? configured)
     {
-        var (name, source) = string.IsNullOrWhiteSpace(observed) ? (configured?.Trim(), "configured") : (observed.Trim(), "observed");
+        var live = string.IsNullOrWhiteSpace(observed) ? null : observed.Trim();
+        var pinned = string.IsNullOrWhiteSpace(configured) ? null : configured.Trim();
+        var name = live ?? pinned;
 
-        if (string.IsNullOrWhiteSpace(name)) return "[model=unknown fp=none]";
+        if (name is null) return "[model=unknown fp=none]";
 
-        return $"[model fp={Fingerprint(name)} ({source})]";
+        // "the gateway started answering with another model" is the whole diagnostic a name used to carry; as a
+        // fingerprint comparison it is just as actionable and gives away nothing.
+        var drift = live is not null && pinned is not null && live != pinned ? $", differs from configured fp={Fingerprint(pinned)}" : "";
+
+        return $"[model fp={Fingerprint(name)} ({(live is null ? "configured" : "observed")}{drift})]";
     }
-
-    /// <summary>
-    /// The CONSOLE-only suffix naming the observed model — and only when the gateway answered with something OTHER
-    /// than the configured id. That difference is the whole diagnostic the name adds, and by construction it is not
-    /// the secret, so it is safe to spell out where a human reads it. The configured id is never spelled out anywhere.
-    /// </summary>
-    internal static string UnexpectedModelSuffix() => UnexpectedModelSuffix(Sink.Value?.Name, Environment.GetEnvironmentVariable(ModelIdEnvVar));
-
-    /// <summary>Testable core of <see cref="UnexpectedModelSuffix()"/> — explicit observed/configured names.</summary>
-    internal static string UnexpectedModelSuffix(string? observed, string? configured) =>
-        !string.IsNullOrWhiteSpace(observed) && observed.Trim() != configured?.Trim() ? $" observed-model={observed.Trim()}" : "";
 
     /// <summary>First 8 hex of SHA-256 of <paramref name="value"/> — a stable, masking-proof identity for a secret model id, comparable across runs.</summary>
     internal static string Fingerprint(string value) =>
@@ -653,7 +693,7 @@ public static class RealModelGate
         // The two failures mean OPPOSITE things to a reader, so they must not share a tag: INFORMATIONAL-FAIL is
         // "ignore this, the wire never gates", ATTEMPT-FAIL is "attempt 1 of N on the wire that DOES gate". Job
         // 100548613534 printed the former for a blessed Anthropic attempt, which reads as a non-event.
-        if (!ok) Console.WriteLine($"[realmodel] {(informational ? "INFORMATIONAL-FAIL" : "ATTEMPT-FAIL")} {test ?? "(unnamed)"} wire={provider} reason={verdict} {ModelStamp()}{UnexpectedModelSuffix()}");
+        if (!ok) Console.WriteLine($"[realmodel] {(informational ? "INFORMATIONAL-FAIL" : "ATTEMPT-FAIL")} {test ?? "(unnamed)"} wire={provider} reason={verdict} {ModelStamp()}");
     }
 
     /// <summary>Whether <paramref name="provider"/>'s verdict gates CI (it is in the blessed set), reading the override from the process env.</summary>

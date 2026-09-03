@@ -455,6 +455,53 @@ public sealed class SupervisorTrajectoryEvalTests
         note.ShouldContain("WITHOUT shipping");
     }
 
+    // ── Turn budgets: a cap below an arc's honest minimum measures the budget, not the brain ────────────────
+
+    /// <summary>
+    /// Every arc gets the default cap except persistent-conflict, whose second reconciliation costs two extra turns.
+    /// Pinned per environment because the numbers are load-bearing: under a flat 8 both blessed attempts of run
+    /// 33754366815 earned a CLEAN merge on that arc and were then scored "never stopped" for running out of turns.
+    /// </summary>
+    [Theory]
+    [InlineData("happy", SupervisorTrajectory.DefaultMaxTurns)]
+    [InlineData("conflict", SupervisorTrajectory.DefaultMaxTurns)]
+    [InlineData("failure", SupervisorTrajectory.DefaultMaxTurns)]
+    [InlineData("multi-failure", SupervisorTrajectory.DefaultMaxTurns)]
+    [InlineData("persistent-conflict", 10)]
+    public void Each_environment_declares_the_turn_budget_its_own_arc_needs(string scenario, int expected)
+    {
+        EnvironmentFor(scenario).MaxTurns.ShouldBe(expected);
+    }
+
+    /// <summary>
+    /// The budget must clear the arc's LONGEST honest path, not just its shortest. Persistent-conflict can ship by
+    /// re-merging after the verified resolve — plan→spawn→merge→resolve→resolve→merge→stop, seven turns — and a
+    /// brain that takes it must be able to reach `stop`, which is exactly what the flat cap denied.
+    /// </summary>
+    [Fact]
+    public async Task The_persistent_conflict_budget_clears_its_longest_honest_path()
+    {
+        var environment = SupervisorTrajectoryEnvironments.ConflictThenUnverifiedThenVerified;
+
+        var result = await SupervisorTrajectory.RunAsync(new ConflictPersistingRemergeDecider(), environment, environment.MaxTurns, CancellationToken.None);
+
+        result.ReachedStop.ShouldBeTrue("seven turns is an honest path through this arc, and the cap must leave room for it");
+        result.Kinds.Count.ShouldBe(7);
+
+        var (ok, note) = SupervisorTrajectoryScore.Score(result);
+        ok.ShouldBeTrue($"re-resolving to a VERIFIED reconciliation, re-merging it clean and stopping is a sound recovery ({note})");
+    }
+
+    /// <summary>The environment a real-model scenario name selects — the SAME mapping the live flow test uses, so a budget pinned here is the budget that lane runs under.</summary>
+    private static ISupervisorTrajectoryEnvironment EnvironmentFor(string scenario) => scenario switch
+    {
+        "conflict" => SupervisorTrajectoryEnvironments.ConflictThenResolve,
+        "failure" => SupervisorTrajectoryEnvironments.FailureThenRetry,
+        "persistent-conflict" => SupervisorTrajectoryEnvironments.ConflictThenUnverifiedThenVerified,
+        "multi-failure" => SupervisorTrajectoryEnvironments.MultiFailureThenRetry,
+        _ => SupervisorTrajectoryEnvironments.HappyPath,
+    };
+
     // ── Environment fidelity: a re-dispatch must be able to SUCCEED, or the fixture fabricates a fail-loop ───
 
     /// <summary>
@@ -491,6 +538,26 @@ public sealed class SupervisorTrajectoryEvalTests
 
         var (ok, note) = SupervisorTrajectoryScore.Score(result);
         ok.ShouldBeTrue($"re-spawning the failed unit then merging clean is a sound recovery ({note})");
+    }
+
+    /// <summary>
+    /// A re-dispatch only counts when it NAMES the unit that failed. A brain that re-spawns the subtask which
+    /// ALREADY succeeded has recovered nothing, and a merge behind it must stay INCOMPLETE — otherwise the bar reads
+    /// the TALLY of spawns instead of their TARGET, and a run ships over an untouched failure.
+    /// </summary>
+    [Theory]
+    [InlineData("failure")]
+    [InlineData("multi-failure")]
+    public async Task A_brain_that_re_spawns_the_unit_that_already_succeeded_does_not_ship(string scenario)
+    {
+        var environment = scenario == "failure" ? SupervisorTrajectoryEnvironments.FailureThenRetry : SupervisorTrajectoryEnvironments.MultiFailureThenRetry;
+
+        var result = await SupervisorTrajectory.RunAsync(new WrongUnitRespawnDecider(), environment, maxTurns: 8, CancellationToken.None);
+
+        result.ReachedStop.ShouldBeTrue("it stops — but it re-dispatched the wrong unit");
+        var (ok, note) = SupervisorTrajectoryScore.Score(result);
+        ok.ShouldBeFalse("re-spawning a unit that already succeeded recovers nothing — the failure is still unintegrated");
+        note.ShouldContain("WITHOUT shipping");
     }
 
     /// <summary>The agent statuses a folded outcome carries, read by the SAME production reader the decider's context is rendered from.</summary>
@@ -714,6 +781,26 @@ public sealed class SupervisorTrajectoryEvalTests
         }
     }
 
+    /// <summary>The LONGEST honest path through the persistent-conflict arc: plan→spawn→merge(conflict)→resolve(unverified)→resolve(verified)→merge(clean)→stop. Seven turns — a brain that re-merges after reconciling rather than shipping off the resolve alone.</summary>
+    private sealed class ConflictPersistingRemergeDecider : ISupervisorDecider
+    {
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+        {
+            var kinds = context.PriorDecisions.Select(d => d.DecisionKind).ToList();
+            var merges = kinds.Count(k => k == SupervisorDecisionKinds.Merge);
+            var resolves = kinds.Count(k => k == SupervisorDecisionKinds.Resolve);
+            var kind =
+                !kinds.Contains(SupervisorDecisionKinds.Plan) ? SupervisorDecisionKinds.Plan
+                : !kinds.Contains(SupervisorDecisionKinds.Spawn) ? SupervisorDecisionKinds.Spawn
+                : merges == 0 ? SupervisorDecisionKinds.Merge
+                : resolves < 2 ? SupervisorDecisionKinds.Resolve
+                : merges < 2 ? SupervisorDecisionKinds.Merge
+                : SupervisorDecisionKinds.Stop;
+
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = ScriptedPayload(kind) });
+        }
+    }
+
     /// <summary>A persistent brain: plan→spawn→merge, and while the merge is CONFLICTED and no VERIFIED resolve exists, keep resolving (so it re-resolves past an unverified reconciliation) — then stop on the accepted, verified resolution.</summary>
     private sealed class ConflictPersistingDecider : ISupervisorDecider
     {
@@ -785,6 +872,26 @@ public sealed class SupervisorTrajectoryEvalTests
                 : SupervisorDecisionKinds.Stop;
 
             return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = ScriptedPayload(kind) });
+        }
+    }
+
+    /// <summary>A brain that re-dispatches the WRONG unit: plan→spawn(s1,s2)→spawn(s1 only)→merge→stop. s1 already succeeded, so the second spawn recovers nothing the failure needed.</summary>
+    private sealed class WrongUnitRespawnDecider : ISupervisorDecider
+    {
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+        {
+            var kinds = context.PriorDecisions.Select(d => d.DecisionKind).ToList();
+            var spawns = kinds.Count(k => k == SupervisorDecisionKinds.Spawn);
+            var kind =
+                !kinds.Contains(SupervisorDecisionKinds.Plan) ? SupervisorDecisionKinds.Plan
+                : spawns < 2 ? SupervisorDecisionKinds.Spawn
+                : !kinds.Contains(SupervisorDecisionKinds.Merge) ? SupervisorDecisionKinds.Merge
+                : SupervisorDecisionKinds.Stop;
+
+            // The FIRST spawn names both units (so one of them fails); the second names only the one that succeeded.
+            var payload = kind == SupervisorDecisionKinds.Spawn && spawns == 1 ? """{"subtaskIds":["s1"]}""" : ScriptedPayload(kind);
+
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = payload });
         }
     }
 

@@ -26,6 +26,9 @@ public static class SupervisorTrajectory
 {
     private static readonly Guid Brain = SupervisorDecisionGoldenScenarios.BrainModelRowId;
 
+    /// <summary>The turn cap an arc gets unless it declares its own — headroom for a replan or an ask over a 4-6 turn sound run. See <see cref="ISupervisorTrajectoryEnvironment.MaxTurns"/>.</summary>
+    public const int DefaultMaxTurns = 8;
+
     /// <summary>Drive <paramref name="decider"/> over the SUCCESS path (back-compat overload).</summary>
     public static Task<SupervisorTrajectoryResult> RunAsync(ISupervisorDecider decider, int maxTurns, CancellationToken cancellationToken) =>
         RunAsync(decider, SupervisorTrajectoryEnvironments.HappyPath, maxTurns, cancellationToken);
@@ -94,6 +97,13 @@ public interface ISupervisorTrajectoryEnvironment
     /// model on disobeying its own prompt, and a brain that obeyed would be marked wrong.
     /// </summary>
     int MaxResolveAttempts => SupervisorLane.DefaultMaxResolveAttempts;
+
+    /// <summary>
+    /// The turn budget this environment's arc REQUIRES, for the same reason as <see cref="MaxResolveAttempts"/>: a
+    /// cap below the arc's own honest minimum scores the model on a move it was never given room to make. The
+    /// default suits the four arcs whose shortest sound run is 4-6 turns; an arc that needs more says so.
+    /// </summary>
+    int MaxTurns => SupervisorTrajectory.DefaultMaxTurns;
 }
 
 /// <summary>The trajectory environments: the SUCCESS path + the two RECOVERY paths (a merge conflict the brain must resolve, an agent failure the brain must retry). Stateless singletons — each reads only the ledger passed to <see cref="ISupervisorTrajectoryEnvironment.Fold"/>.</summary>
@@ -158,8 +168,9 @@ public static class SupervisorTrajectoryEnvironments
             var k when k == SupervisorDecisionKinds.Spawn => TrajectoryOutcomes.CountSpawns(priors) == 0 ? TrajectoryOutcomes.OneFailed(d, seq) : TrajectoryOutcomes.AllSucceeded(d, seq),
             var k when k == SupervisorDecisionKinds.Retry => TrajectoryOutcomes.RetrySucceeded(d, seq),
             // Integration is CLEAN only once the failure has been recovered; a premature merge is INCOMPLETE (no
-            // branch), so the ledger ship-check fails until the brain retries or re-dispatches.
-            var k when k == SupervisorDecisionKinds.Merge => TrajectoryOutcomes.HasRetry(priors) || TrajectoryOutcomes.CountSpawns(priors) >= 2 ? TrajectoryOutcomes.CleanMerge(d, seq) : TrajectoryOutcomes.IncompleteMerge(d, seq),
+            // branch), so the ledger ship-check fails until the brain retries or re-dispatches THAT unit — a
+            // re-spawn of the units that already succeeded recovers nothing and must not ship.
+            var k when k == SupervisorDecisionKinds.Merge => TrajectoryOutcomes.HasRetry(priors) || TrajectoryOutcomes.HasRecoveredEveryFailedUnit(priors) ? TrajectoryOutcomes.CleanMerge(d, seq) : TrajectoryOutcomes.IncompleteMerge(d, seq),
             var k when k == SupervisorDecisionKinds.Resolve => TrajectoryOutcomes.VerifiedResolve(d, seq),
             var k when k == SupervisorDecisionKinds.AskHuman => TrajectoryOutcomes.AnsweredAsk(d, seq),
             _ => TrajectoryOutcomes.Handled(d, seq),
@@ -170,6 +181,16 @@ public static class SupervisorTrajectoryEnvironments
     {
         /// <summary>This arc can ONLY ship via a second reconciliation, so it must grant a budget for two — otherwise the prompt forbids the very move the score demands.</summary>
         public int MaxResolveAttempts => 2;
+
+        /// <summary>
+        /// The one arc that does not fit the default. Its honest minimum is SEVEN turns —
+        /// plan→spawn→merge(conflict)→resolve(unverified)→resolve(verified)→merge(clean)→stop — because the second
+        /// reconciliation this environment demands costs two extra turns nobody else pays. Under the default cap
+        /// both blessed attempts of run 33754366815 earned a CLEAN merge and then ran out of turns before they could
+        /// say stop: scored as "never stopped", which measured the budget rather than the brain. Ten leaves the same
+        /// slack for a replan or an ask that the default leaves the shorter arcs.
+        /// </summary>
+        public int MaxTurns => 10;
 
         public SupervisorPriorDecision Fold(SupervisorDecision d, long seq, IReadOnlyList<SupervisorPriorDecision> priors) => d.Kind switch
         {
@@ -198,7 +219,9 @@ public static class SupervisorTrajectoryEnvironments
             // unchanged: both units must be actively recovered, and a premature merge stays INCOMPLETE.
             var k when k == SupervisorDecisionKinds.Spawn => TrajectoryOutcomes.CountSpawns(priors) == 0 ? TrajectoryOutcomes.BothFailed(d, seq) : TrajectoryOutcomes.AllSucceeded(d, seq),
             var k when k == SupervisorDecisionKinds.Retry => TrajectoryOutcomes.RetrySucceeded(d, seq),
-            var k when k == SupervisorDecisionKinds.Merge => TrajectoryOutcomes.CountRetries(priors) >= 2 || TrajectoryOutcomes.CountSpawns(priors) >= 2 ? TrajectoryOutcomes.CleanMerge(d, seq) : TrajectoryOutcomes.IncompleteMerge(d, seq),
+            // A re-dispatch counts only when it NAMES the failed units — a second spawn of the units that already
+            // succeeded is a tally, not a recovery, and used to be enough to ship here.
+            var k when k == SupervisorDecisionKinds.Merge => TrajectoryOutcomes.CountRetries(priors) >= 2 || TrajectoryOutcomes.HasRecoveredEveryFailedUnit(priors) ? TrajectoryOutcomes.CleanMerge(d, seq) : TrajectoryOutcomes.IncompleteMerge(d, seq),
             var k when k == SupervisorDecisionKinds.Resolve => TrajectoryOutcomes.VerifiedResolve(d, seq),
             var k when k == SupervisorDecisionKinds.AskHuman => TrajectoryOutcomes.AnsweredAsk(d, seq),
             _ => TrajectoryOutcomes.Handled(d, seq),
@@ -235,7 +258,7 @@ internal static class TrajectoryOutcomes
     public static SupervisorPriorDecision RetrySucceeded(SupervisorDecision d, long seq)
     {
         var id = Guid.NewGuid();
-        var subtaskId = SupervisorOutcome.ReadRetrySubtaskId(d.PayloadJson) ?? "s1";
+        var subtaskId = RetriedSubtaskId(d.PayloadJson);
         var staged = JsonSerializer.Serialize(new { agentRunIds = new[] { id }, agentCount = 1 }, AgentJson.Options);
         var result = Graded(id, "Succeeded", summary: $"retried {subtaskId}; unit tests green", branch: $"agent/{subtaskId}");
 
@@ -387,6 +410,47 @@ internal static class TrajectoryOutcomes
     /// <summary>Terminal spawn dispatches on the tape — the failure envs treat the SECOND-and-later spawn as an active recovery re-dispatch (production-faithful: a fresh attempt can succeed).</summary>
     public static int CountSpawns(IReadOnlyList<SupervisorPriorDecision> priors) =>
         priors.Count(p => p.DecisionKind == SupervisorDecisionKinds.Spawn);
+
+    /// <summary>
+    /// Whether every unit a staging decision left NOT succeeded was later RE-DISPATCHED BY NAME, and none is still
+    /// outstanding. Counting re-dispatches instead (a bare "a second spawn happened") would let a brain re-spawn the
+    /// unit that ALREADY succeeded and ship on a failure nobody touched — the bar has to read the TARGET, not the
+    /// tally. Walks the tape in order because a unit can be owed, recovered, and owed again.
+    /// </summary>
+    public static bool HasRecoveredEveryFailedUnit(IReadOnlyList<SupervisorPriorDecision> priors)
+    {
+        var owed = new HashSet<string>(StringComparer.Ordinal);
+        var recovered = false;
+
+        foreach (var d in priors.Where(p => p.DecisionKind == SupervisorDecisionKinds.Spawn || p.DecisionKind == SupervisorDecisionKinds.Retry))
+        {
+            var attempted = AttemptedSubtaskIds(d);
+
+            if (owed.Overlaps(attempted)) recovered = true;
+
+            owed.ExceptWith(attempted);
+            owed.UnionWith(FailedSubtaskIds(d, attempted));
+        }
+
+        return recovered && owed.Count == 0;
+    }
+
+    /// <summary>The units a staging decision dispatched, read off the payload the SAME way the folds read it — so what "was attempted" can never disagree with what was graded.</summary>
+    private static IReadOnlyList<string> AttemptedSubtaskIds(SupervisorPriorDecision d) =>
+        d.DecisionKind == SupervisorDecisionKinds.Spawn
+            ? SupervisorOutcome.ReadSpawnSubtaskIds(d.PayloadJson)
+            : new[] { RetriedSubtaskId(d.PayloadJson) };
+
+    /// <summary>The units this decision left NOT succeeded. Its folded results are positional with the ids it attempted, exactly as every fold above builds them.</summary>
+    private static IEnumerable<string> FailedSubtaskIds(SupervisorPriorDecision d, IReadOnlyList<string> attempted)
+    {
+        var results = SupervisorOutcome.ReadAgentResults(d.OutcomeJson);
+
+        return attempted.Where((_, i) => i < results.Count && results[i].Status != "Succeeded");
+    }
+
+    /// <summary>The unit a retry re-attempts: the model's named subtaskId, else the historic default — shared with <see cref="RetrySucceeded"/> so the unit the fold GRADES is always the unit the ledger reader credits.</summary>
+    private static string RetriedSubtaskId(string? retryPayloadJson) => SupervisorOutcome.ReadRetrySubtaskId(retryPayloadJson) ?? "s1";
 
     private static SupervisorPriorDecision Prior(SupervisorDecision d, long seq, string outcomeJson) =>
         new() { Id = Guid.Empty, Sequence = seq, DecisionKind = d.Kind, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = d.PayloadJson, OutcomeJson = outcomeJson };
