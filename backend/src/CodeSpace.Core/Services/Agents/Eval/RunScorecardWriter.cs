@@ -156,8 +156,16 @@ public sealed class RunScorecardWriter : IRunScorecardWriter, IScopedDependency
         }
     }
 
-    /// <summary>The run facts the row copies verbatim — its terminal stamp (falling back to last-modified for a bypass terminal that recorded none) and its projection kind.</summary>
-    private readonly record struct CandidateRun(Guid Id, WorkflowRunStatus Status, string? ProjectionKind, DateTimeOffset? CompletedAt, DateTimeOffset LastModifiedDate);
+    /// <summary>
+    /// The run facts the row copies verbatim — its terminal stamp (falling back to last-modified for a bypass
+    /// terminal that recorded none) and its projection kind.
+    ///
+    /// <para>A REFERENCE type on purpose. As a <c>record struct</c> this was silently unusable as a candidacy
+    /// signal: <c>SingleOrDefaultAsync</c> over a value-type projection returns <c>default</c>, not null, so the
+    /// <c>is not { }</c> guard never fired and a non-terminal, pre-protocol, or other team's run projected an
+    /// all-zero row. The integration tier caught it; a reference type makes "no candidate" actually representable.</para>
+    /// </summary>
+    private sealed record CandidateRun(Guid Id, WorkflowRunStatus Status, string? ProjectionKind, DateTimeOffset? CompletedAt, DateTimeOffset LastModifiedDate);
 
     /// <summary>The two brain-plane columns: priced total (null = nothing priceable) and the decision model.</summary>
     private readonly record struct BrainPlaneFacts(decimal? TotalUsd, string? Model);
