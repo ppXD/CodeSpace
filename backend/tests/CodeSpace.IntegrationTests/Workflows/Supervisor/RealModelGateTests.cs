@@ -254,7 +254,8 @@ public sealed class RealModelGateTests
         var path = Path.Combine(Path.GetTempPath(), $"realmodel-observed-{Guid.NewGuid():N}.md");
         try
         {
-            // ObserveModel is what the live-wire's ModelObservingClient calls with StructuredLLMCompletion.Model. It is
+            // ObserveModel is what the observing wrapper (ModelObserving.Wrap / .RegisterDecorators) calls with
+            // StructuredLLMCompletion.Model. It is
             // written INSIDE the drive closure — deeper in the async flow than the gate that reads it — which is why
             // the sink is a mutable holder rather than a plain AsyncLocal<string>.
             await RealModelGate.AssessLiveAsync("OpenAI", () =>

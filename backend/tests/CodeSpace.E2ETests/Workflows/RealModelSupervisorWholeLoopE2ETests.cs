@@ -108,6 +108,10 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         jobClient.AutoExecute = true;
 
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        // The surface an ask PARKS on. Without it every ask degrades to a self-advancing NULL answer that nobody can
+        // ever answer, so nine of them walked the run into the no-progress forced stop with acceptance never run — the
+        // gate then measured the absence of a human rather than the model's completion (real-model run 33723910434).
+        var conversationId = await SeedConversationAsync(teamId, userId);
 
         using var remote = new BareRemote();
         // A NON-VACUOUS acceptance floor: the integrated head must actually CONTAIN an agent's work (an agent_*.txt that
@@ -122,7 +126,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
 
         // P2b canary (live-brain leg): the headline arc runs ENFORCED — a Drove verdict now implies the terminal
         // authority arbitrated the live model's own contract ledger to CleanSuccess.
-        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, completionMode: WorkflowDefinition.CompletionModeEnforced);
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, conversationId: conversationId, completionMode: WorkflowDefinition.CompletionModeEnforced);
 
         // STRICT real-model-DROVE-to-completion gate (the real-model whole-loop CONNECTIVITY criterion). The blessed wire
         // passes ONLY when the live model drove the whole arc to the real integrated+accepted head (Drove). A CAPABILITY
@@ -141,13 +145,18 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             await AssertRanEnforcedAsync(runId);
             await DriveUntilSettledAsync(runId);
 
+            // Play the operator on every card the brain parked on, so the arc can reach its acceptance floor. This is
+            // what turns the headline gate back into a measurement of COMPLETION: before it, the criterion
+            // (a real patch + a PASSED acceptance grade) could only be met by a model that never asked anything.
+            var answeredAsks = await AnswerParkedAsksAsync(runId, teamId, userId);
+
             var (outcome, note) = await EvaluateAsync(runId, teamId, FileWritingFakeCli.StubbedHarnessKinds);   // headline arc = FileWritingFakeCli (always patches on success — but ONLY on the harness it arms)
 
             // D3 (Arc D): a Drove round must ALSO clear the north-star floor — the release gate reads the same
             // M-1 number the operator's scorecard renders, through the real reducer chain.
             if (outcome == RealModelOutcome.Drove) await AssertNorthStarClearsFloorAsync(teamId, runId);
 
-            return (outcome, $"{Provider} model '{model}' whole-loop — {note}");
+            return (outcome, $"{Provider} model '{model}' whole-loop — {note}, answeredAsks={answeredAsks}");
         });
     }
 
@@ -415,6 +424,33 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         {
             return false;
         }
+    }
+
+    /// <summary>
+    /// The UNATTENDED operator surface, bounded. A live brain that asks a question parks the run on a durable card and
+    /// waits; in an environment with nobody to answer, every ask self-advances with a null answer, each one increments
+    /// the no-progress streak, and the ninth trips <c>SupervisorLane.DefaultMaxNoProgressDecisions</c> into a forced stop
+    /// — so acceptance never runs and the headline gate measured the ABSENCE OF A HUMAN, not the model's completion (the
+    /// arc <c>plan→spawn→spawn→merge→ask_human×9</c>, three attempts running, real-model run 33723910434). This answers
+    /// each parked card the way an operator would, through the SAME production service the Room's answer endpoint calls,
+    /// and lets the resume re-dispatch — an answered ask resets the streak, so a converging run is no longer starved.
+    ///
+    /// <para>Bounded by <see cref="UnattendedAskResponder.MaxAnsweredAsks"/>: a brain that keeps asking past it is a genuine capability miss
+    /// (the evaluator scores whatever terminal the run actually reached), never a hang. Returns the count so the verdict
+    /// line records how many asks this attempt cost — a run that needed nine answers is legible as such even when it
+    /// passes.</para>
+    /// </summary>
+    private Task<int> AnswerParkedAsksAsync(Guid runId, Guid teamId, Guid userId) =>
+        UnattendedAskResponder.AnswerAllAsync(answer => AnswerParkedAskAsync(runId, teamId, userId, answer), () => DrainUntilSettledAsync(runId));
+
+    /// <summary>Answer the run's newest parked ask through the SAME production service the Room's answer endpoint calls, playing the human. False = nothing is parked awaiting an answer (no token-bearing unanswered ask), which is how the responder's loop terminates.</summary>
+    private async Task<bool> AnswerParkedAskAsync(Guid runId, Guid teamId, Guid userId, string answer)
+    {
+        using var scope = _fixture.BeginScope();
+
+        var outcome = await scope.Resolve<ISupervisorAskAnswerService>().AnswerAsync(runId, teamId, userId, answer, CancellationToken.None);
+
+        return outcome is { Resumed: true };
     }
 
     private async Task<bool> ApproveParkedAmendCardAsync(Guid runId, Guid teamId, Guid userId)
@@ -1060,8 +1096,15 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
 
             await DriveUntilSettledAsync(runId);
 
+            // The SAME unattended operator surface as the headline arc. This arm already seeds a conversation, so its
+            // asks PARKED and the run sat Suspended before ever integrating — every attempt scored
+            // merge-conflicted=False, i.e. the conflict the arm exists to present was never reached. Answering lets the
+            // arc get there; the criterion below is UNCHANGED (any prompt-sanctioned handling still passes, silently
+            // merging over a real conflict still reds).
+            var answeredAsks = await AnswerParkedAsksAsync(runId, teamId, userId);
+
             var (outcome, note) = await EvaluateConflictResolveAsync(runId, teamId);
-            return (outcome, $"{Provider} model '{model}' conflict→resolve — {note}");
+            return (outcome, $"{Provider} model '{model}' conflict→resolve — {note}, answeredAsks={answeredAsks}");
         });
     }
 
