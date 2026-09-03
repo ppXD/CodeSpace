@@ -301,6 +301,13 @@ public sealed class PlanAuthorNode : INodeRuntime
         // Conditional, never a null value: an unstamped plan's outputs must stay byte-identical to before.
         if (plan.AuthoredByModel is { Length: > 0 } authoredBy) outputs["authoredByModel"] = JsonSerializer.SerializeToElement(authoredBy);
 
+        // The D2 A/B arm gets the SAME treatment as the authoring model above, and for the same reason: it lives
+        // inside `json` too, and `json` is offloaded to the artifact store once a plan is large — so a rollup that
+        // read the arm from there would silently report `unmeasured` for exactly the big plans whose arm matters
+        // most. As its own small key it is always inline and always readable. Conditional, so a plan whose producer
+        // stamped no arm keeps byte-identical outputs.
+        if (plan.LessonArm is { Length: > 0 } lessonArm) outputs["lessonArm"] = JsonSerializer.SerializeToElement(lessonArm);
+
         return outputs;
     }
 

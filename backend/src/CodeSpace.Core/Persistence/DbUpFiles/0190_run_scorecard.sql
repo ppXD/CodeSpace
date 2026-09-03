@@ -18,6 +18,13 @@
 -- fact carries it today. The column is here so the shape does not change when a launch seam starts recording it;
 -- until then every row reads NULL, which is honest rather than inferred.
 --
+-- lesson_arm is DELIBERATELY unconstrained. An IN-list of today's three LessonArms values would turn adding a
+-- fourth arm into silent data loss rather than a loud error: the writer runs behind a best-effort seam that
+-- swallows its exceptions, so every run under the new arm would fail its CHECK, be logged and dropped, and the
+-- trend would quietly thin out. The arm is copied from a frozen ledger value, never user input, so the constraint
+-- was guarding against nothing the application can actually produce. The vocabulary is pinned in a unit test
+-- instead, where a new arm surfaces as a visible edit rather than as missing rows.
+--
 -- Rollback: DROP TABLE run_scorecard;
 -- Idempotent (IF NOT EXISTS).
 
@@ -45,8 +52,7 @@ CREATE TABLE IF NOT EXISTS run_scorecard (
     CONSTRAINT ck_run_scorecard_touches CHECK (human_touches >= 0),
     -- The scorer's headline definition, pinned in the schema: solved AND delivered AND zero human touches. A future
     -- edit that quietly widens the numerator has to say so here (and bump scorer_version) instead of drifting.
-    CONSTRAINT ck_run_scorecard_headline CHECK (unattended_solved_with_delivery = (solved AND delivered AND human_touches = 0)),
-    CONSTRAINT ck_run_scorecard_lesson_arm CHECK (lesson_arm IS NULL OR lesson_arm IN ('injected', 'withheld', 'none'))
+    CONSTRAINT ck_run_scorecard_headline CHECK (unattended_solved_with_delivery = (solved AND delivered AND human_touches = 0))
 );
 
 -- The trend query's access path: one team's window, newest first.

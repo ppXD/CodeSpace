@@ -131,24 +131,34 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
     /// supervisor decision" into "the arm is MEASURED against the north-star". Nothing sliced a rate by it before,
     /// so injection's effect had never been measured at all.
     ///
-    /// <para>A run's arm + bits come from its DURABLE <c>run_scorecard</c> row when one exists; a run without one
-    /// falls back to the live score computed just above plus one batched read of its decision ledger's frozen arm.
-    /// So an empty table degrades to a purely live slice rather than an empty one, and a partly-filled table never
-    /// reports a partial population — the slice's denominator always equals the rollup's.</para>
+    /// <para>ONLY the ARM is read from a durable source; every scored BIT comes from the live score computed just
+    /// above. That split is load-bearing: a persisted row can be stale (its run's manifest settled after the row
+    /// was written, and the backfill has not revisited it), so preferring the row's own <c>solved</c>/<c>delivered</c>
+    /// bits made <c>SolvedRuns</c> and <c>sum(ByLessonArm.SolvedRuns)</c> disagree on the same page — two numbers
+    /// measured over the same runs by two different clocks. Taking the arm alone keeps the slice a partition OF the
+    /// rollup: same runs, same bits, same totals, just grouped.</para>
+    ///
+    /// <para>The arm prefers the row and falls back to a batched read of the decision ledger's frozen value, so an
+    /// empty table degrades to a purely live slice rather than an empty one. Supervisor-lane runs only — see
+    /// <see cref="ArmedRunScore.LessonArm"/>.</para>
     /// </summary>
     private async Task<IReadOnlyList<LessonArmSlice>> SliceByLessonArmAsync(Guid teamId, IReadOnlyList<Guid> runIds, IReadOnlyList<UnattendedDeliveryRunScore> liveScores, CancellationToken cancellationToken)
     {
-        var persisted = await _db.RunScorecard.AsNoTracking()
-            .Where(s => s.TeamId == teamId && runIds.Contains(s.WorkflowRunId))
-            .Select(s => new { s.WorkflowRunId, s.LessonArm, s.Solved, s.Delivered, s.UnattendedSolvedWithDelivery })
-            .ToDictionaryAsync(s => s.WorkflowRunId, cancellationToken).ConfigureAwait(false);
+        var persistedArms = await _db.RunScorecard.AsNoTracking()
+            .Where(s => s.TeamId == teamId && runIds.Contains(s.WorkflowRunId) && s.LessonArm != null)
+            .Select(s => new { s.WorkflowRunId, s.LessonArm })
+            .ToDictionaryAsync(s => s.WorkflowRunId, s => s.LessonArm!, cancellationToken).ConfigureAwait(false);
 
-        var liveArms = await RunLessonArms.ReadAsync(_db, runIds, teamId, cancellationToken).ConfigureAwait(false);
+        var ledgerArms = await RunLessonArms.ReadAsync(_db, runIds, teamId, cancellationToken).ConfigureAwait(false);
 
         var rows = liveScores
-            .Select(score => persisted.TryGetValue(score.WorkflowRunId, out var row)
-                ? new ArmedRunScore { LessonArm = row.LessonArm, Solved = row.Solved, Delivered = row.Delivered, UnattendedSolvedWithDelivery = row.UnattendedSolvedWithDelivery }
-                : new ArmedRunScore { LessonArm = liveArms.GetValueOrDefault(score.WorkflowRunId), Solved = score.Solved, Delivered = score.Delivered, UnattendedSolvedWithDelivery = score.UnattendedSolvedWithDelivery })
+            .Select(score => new ArmedRunScore
+            {
+                LessonArm = persistedArms.GetValueOrDefault(score.WorkflowRunId) ?? ledgerArms.GetValueOrDefault(score.WorkflowRunId),
+                Solved = score.Solved,
+                Delivered = score.Delivered,
+                UnattendedSolvedWithDelivery = score.UnattendedSolvedWithDelivery,
+            })
             .ToList();
 
         return LessonArmSlicer.Slice(rows);

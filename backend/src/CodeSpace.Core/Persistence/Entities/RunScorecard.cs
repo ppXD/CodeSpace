@@ -52,7 +52,7 @@ public class RunScorecard : IEntity<Guid>, IAuditable
     /// <summary>The run's priced BRAIN-plane spend (its own decision / critic / planner / grader model calls, folded from the <c>interaction.completed</c> ledger); null when the run recorded no such call.</summary>
     public decimal? BrainPlaneUsd { get; set; }
 
-    /// <summary>The lesson A/B arm the run ran under (<c>LessonArms</c>: injected / withheld / none), read off its supervisor decision rows. Null when the run has no decision ledger at all (a single-agent or plan-map run).</summary>
+    /// <summary>The lesson A/B arm the run ran under (<c>LessonArms</c>: injected / withheld / none), read off its supervisor decision rows OR its <c>plan.author</c> node output — both lanes assign one. Null when the run was in neither (a single-agent run), which is NOT the same claim as the <c>none</c> control.</summary>
     public string? LessonArm { get; set; }
 
     /// <summary>The supervisor brain model this run's decisions were actually authored by, when it had one. Null for a run with no decision ledger, and for one whose rows name no model.</summary>
