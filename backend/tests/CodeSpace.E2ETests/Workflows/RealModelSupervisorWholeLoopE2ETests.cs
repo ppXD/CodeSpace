@@ -83,7 +83,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         scope.Resolve<InMemoryBackgroundJobClient>().AutoExecute = true;
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task The_real_model_drives_the_whole_loop_to_an_integrated_accepted_patch()
     {
         var baseUrl = Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
@@ -94,7 +94,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         // is a broken/rotated/renamed secret that would otherwise self-skip the BLESSED gate GREEN having driven no live
         // brain at all — so throw to turn that masked-nothing into a RED main run instead of a false green.
         var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
-        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }   // skip ≠ pass: surfaced loudly as NOT EVALUATED
+        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass: surfaced loudly as NOT EVALUATED
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three (base url / api key / model id) or none; a partial config would otherwise self-skip the blessed whole-loop gate GREEN proving nothing.");
 
         if (OperatingSystem.IsWindows()) return;                          // the fake CLI is a /bin/sh script
@@ -150,7 +150,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         });
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task The_real_model_repairs_a_broken_oracle_through_the_cosign_loop()
     {
         // B6 — the run-96695645 re-enactment, the amend-acceptance arc's end-to-end proof: a live brain meets a
@@ -165,7 +165,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
         var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
-        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }   // skip ≠ pass
+        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none.");
 
         if (OperatingSystem.IsWindows()) return;
@@ -285,7 +285,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         return (approvedAmends > 0 && acceptancePassed ? RealModelOutcome.Drove : RealModelOutcome.CapabilityMiss, note);
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task The_real_model_authors_heterogeneous_per_agent_dispatch_when_the_goal_invites_distinct_roles()
     {
         // L4 ARC B — the model-authored DIVISION OF LABOUR proof: given a goal that invites two DISTINCT roles, does a live
@@ -300,7 +300,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
         var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
-        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }   // skip ≠ pass
+        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none; a partial config would self-skip the arm proving nothing.");
 
         if (OperatingSystem.IsWindows()) return;
@@ -361,7 +361,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         }, gating: false);
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task The_real_model_authors_semantic_phases_when_the_goal_has_distinct_stages()
     {
         // L4 ARC C — the model-authored SEMANTIC-PHASE proof, completing the L4 authorship trilogy (per-agent dispatch
@@ -377,7 +377,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
         var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
-        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }   // skip ≠ pass
+        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none; a partial config would self-skip the arm proving nothing.");
 
         if (OperatingSystem.IsWindows()) return;
@@ -437,7 +437,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         }, gating: false);
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task The_real_model_authors_a_dependent_subtask_whose_agent_actually_sees_its_producers_work()
     {
         // S1 HANDOFF — re-enacting run 28fec923 (a dependent subtask's fresh clone of the repository DEFAULT branch
@@ -457,7 +457,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
         var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
-        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }   // skip ≠ pass
+        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none; a partial config would self-skip the arm proving nothing.");
 
         if (OperatingSystem.IsWindows()) return;
@@ -545,7 +545,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         }, gating: false);
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task The_real_model_authors_a_read_only_subtask_acceptance_that_grades_not_applicable()
     {
         // S2 READ-ONLY ACCEPTANCE — the model-authored proof that a per-subtask acceptance contract on a subtask
@@ -568,7 +568,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
         var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
-        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }   // skip ≠ pass
+        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none; a partial config would self-skip the arm proving nothing.");
 
         if (OperatingSystem.IsWindows()) return;
@@ -653,7 +653,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             ? SupervisorOutcome.ReadSpawnSubtaskIds(decision.PayloadJson)
             : SupervisorOutcome.ReadRetrySubtaskId(decision.PayloadJson) is { } id ? new[] { id } : Array.Empty<string>();
 
-    [Fact]
+    [SkippableFact]
     public async Task The_real_model_never_reaches_a_terminal_stop_with_accepted_unpublished_work()
     {
         // I3 (publish-or-park) — the STRUCTURAL floor, proven against a REAL live-model run: unlike the dispatch /
@@ -671,7 +671,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
         var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
-        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }   // skip ≠ pass — a gating arm must surface NOT-EVALUATED, never self-skip green
+        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass — a gating arm must surface NOT-EVALUATED, never self-skip green
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none; a partial config would self-skip this lane green proving nothing.");
 
         if (OperatingSystem.IsWindows()) return;
@@ -817,7 +817,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         return (Classify(run.Status, drove: true), $"status={run.Status}, stops={stops.Count}, everProducedWork={everProducedWork}, all I3 checks held");
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task The_real_model_observes_a_real_conflict_and_chooses_to_resolve()
     {
         // Real-scenario coverage A1 — the headline gap the deterministic whole-loop can't reach: a LIVE brain reacting to
@@ -836,7 +836,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
         var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
-        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }   // skip ≠ pass — a gating arm must surface NOT-EVALUATED, never self-skip green
+        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass — a gating arm must surface NOT-EVALUATED, never self-skip green
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none; a partial config would self-skip this lane green proving nothing.");
 
         if (OperatingSystem.IsWindows()) return;
@@ -880,7 +880,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         });
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task The_real_model_reacts_to_a_failed_subtask_by_retrying()
     {
         // Real-scenario coverage A2 — a LIVE brain reacting to a real agent FAILURE through the real engine. Every
@@ -899,7 +899,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
         var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
-        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }   // skip ≠ pass — a gating arm must surface NOT-EVALUATED, never self-skip green
+        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass — a gating arm must surface NOT-EVALUATED, never self-skip green
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none; a partial config would self-skip this lane green proving nothing.");
 
         if (OperatingSystem.IsWindows()) return;
@@ -939,7 +939,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         });
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task The_real_coding_agent_solves_a_goal_relevance_task_authored_by_the_live_model()
     {
         // ITEM #2 LIVE ARM — the deepest 解對任務 proof: a REAL coding-CLI (claude-code) driven by a live model EDITS a
@@ -960,12 +960,12 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
         var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
-        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }
+        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none; a partial config would self-skip this lane green proving nothing.");
 
         if (OperatingSystem.IsWindows()) return;
         if (!await GitReadyAsync()) return;
-        if (!await ClaudeReadyAsync()) { RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed — the real-coding arm needs a harness binary (skip ≠ pass)"); return; }   // honest-skip, NOT a pass
+        if (!await ClaudeReadyAsync()) throw RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed — the real-coding arm needs a harness binary (skip ≠ pass)");   // honest-skip, NOT a pass
 
         var jobClient = ResolveJobClient();
         jobClient.Clear();
@@ -1357,7 +1357,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         return (rowId, credId);   // RowId = the brain's supervisorModelId; CredId = the credential the AGENT profile authenticates with
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task The_real_model_drives_a_multi_repo_task_to_a_per_repo_integrated_head_on_each_repo()
     {
         // MULTI-REPO ORCHESTRATION — the live brain drives a task spanning TWO bound repos to a per-repo integrated head
@@ -1372,7 +1372,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
         var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
-        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }   // skip ≠ pass
+        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none; a partial config would self-skip the arm proving nothing.");
 
         if (OperatingSystem.IsWindows()) return;
@@ -1438,7 +1438,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         }, gating: false);
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task The_real_model_authors_an_objective_stop_acceptance_definition_of_done_when_the_goal_names_a_check()
     {
         // L4 model-authored DEFINITION OF DONE — does a live model author its OWN objective stop 'acceptance' command (a
@@ -1452,7 +1452,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
         var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
-        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }   // skip ≠ pass
+        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none; a partial config would self-skip the arm proving nothing.");
 
         if (OperatingSystem.IsWindows()) return;

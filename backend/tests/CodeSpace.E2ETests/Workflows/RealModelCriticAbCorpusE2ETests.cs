@@ -60,7 +60,7 @@ public sealed class RealModelCriticAbCorpusE2ETests
 
     public RealModelCriticAbCorpusE2ETests(PostgresFixture fixture) { _fixture = fixture; }
 
-    [Fact]
+    [SkippableFact]
     public async Task Critic_on_vs_off_over_the_seed_corpus_reports_the_solve_cost_and_intervention_deltas()
     {
         var baseUrl = Environment.GetEnvironmentVariable(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
@@ -68,18 +68,17 @@ public sealed class RealModelCriticAbCorpusE2ETests
         var model = Environment.GetEnvironmentVariable(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
         var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
-        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }   // skip ≠ pass
+        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none; a partial config would self-skip green proving nothing.");
 
         if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(OptInEnvVar)))
         {
-            RealModelGate.ReportSkipped(Provider, $"critic A/B opt-in absent — set {OptInEnvVar}=1 to run the two-pass corpus A/B (≈2–3× a single-arm job; kept off the default lane budget)");
-            return;   // skip ≠ pass
+            throw RealModelGate.ReportSkipped(Provider, $"critic A/B opt-in absent — set {OptInEnvVar}=1 to run the two-pass corpus A/B (≈2–3× a single-arm job; kept off the default lane budget)");
         }
 
         if (OperatingSystem.IsWindows()) return;                          // the seed fixtures + checks are /bin/sh scripts
         if (!await GitReadyAsync()) return;
-        if (!await ClaudeReadyAsync()) { RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed — the benchmark needs a harness binary (skip ≠ pass)"); return; }
+        if (!await ClaudeReadyAsync()) throw RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed — the benchmark needs a harness binary (skip ≠ pass)");
 
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var credId = await SeedAgentCredentialAsync(teamId, baseUrl!.TrimEnd('/'), apiKey!);

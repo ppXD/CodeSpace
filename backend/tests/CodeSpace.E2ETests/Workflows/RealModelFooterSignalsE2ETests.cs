@@ -79,7 +79,7 @@ public sealed class RealModelFooterSignalsE2ETests : IDisposable
 
     // ─── Test 1 — footers B1 externalCall + B2 tokenStream (engine-driven llm.complete) ─────────
 
-    [Fact]
+    [SkippableFact]
     public async Task A_real_llm_complete_run_emits_external_call_and_streaming_interaction_delta()
     {
         if (ReadLiveSecretsOrSkip() is not { } live) return;   // skip ≠ pass (surfaced loudly)
@@ -205,11 +205,11 @@ public sealed class RealModelFooterSignalsE2ETests : IDisposable
 
     // ─── Test 2 — footer B3 agentFeed (executor-direct real claude agent.run) ────────────────────
 
-    [Fact]
+    [SkippableFact]
     public async Task A_real_claude_agent_run_emits_a_tool_or_file_event_feed()
     {
         if (ReadLiveSecretsOrSkip() is not { } live) return;   // skip ≠ pass (surfaced loudly)
-        if (!await ClaudeReadyAsync()) { RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed (skip ≠ pass)"); return; }
+        if (!await ClaudeReadyAsync()) throw RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed (skip ≠ pass)");
 
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
 
@@ -287,7 +287,7 @@ public sealed class RealModelFooterSignalsE2ETests : IDisposable
         var model = Environment.GetEnvironmentVariable(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
         var present = new[] { baseUrl, apiKey, model }.Count(v => !string.IsNullOrWhiteSpace(v));
-        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return null; }   // skip ≠ pass
+        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three (base url / api key / model id) or none; a partial config would otherwise self-skip green proving nothing.");
 
         if (OperatingSystem.IsWindows()) return null;

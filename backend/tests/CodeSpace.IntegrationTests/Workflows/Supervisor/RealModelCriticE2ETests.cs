@@ -34,7 +34,7 @@ public sealed class RealModelCriticE2ETests
 
     public RealModelCriticE2ETests(PostgresFixture fixture) { _fixture = fixture; }
 
-    [Theory]
+    [SkippableTheory]
     [InlineData(ReviewMode.Gate)]
     [InlineData(ReviewMode.Improve)]
     public async Task A_live_reviewer_produces_a_verdict_for_a_thin_plan(ReviewMode mode)
@@ -43,7 +43,7 @@ public sealed class RealModelCriticE2ETests
         var apiKey = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
         var model = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
-        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → skip
+        if (baseUrl is null || apiKey is null || model is null) throw RealModelGate.ReportSkipped(Custom, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass: NotExecuted in the trx, never a green that measured nothing
 
         var teamId = await SeedTeamAsync();
         var reviewerRowId = await SeedCredentialedModelAsync(teamId, model, baseUrl, apiKey);
@@ -73,14 +73,14 @@ public sealed class RealModelCriticE2ETests
     }
 
     /// <summary>The S6 EFFECTIVENESS gate: the same live reviewer must DISCRIMINATE — reject an agent change whose diff plants an egregious, material flaw against the goal, and approve a small, sound one. This is the claim the revise loop rests on (a critic that approves garbage feeds the loop nothing); unlike the thin-plan probe above, the verdicts here ARE gated. Infra failures (no verdict) stay non-gating.</summary>
-    [Fact]
+    [SkippableFact]
     public async Task A_live_reviewer_discriminates_a_planted_flaw_from_a_clean_change()
     {
         var baseUrl = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
         var apiKey = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
         var model = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
-        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → skip
+        if (baseUrl is null || apiKey is null || model is null) throw RealModelGate.ReportSkipped(Custom, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass: NotExecuted in the trx, never a green that measured nothing
 
         const string goal = "Reject empty or missing passwords in the login endpoint.";
 
@@ -132,14 +132,14 @@ public sealed class RealModelCriticE2ETests
     /// (so the artifact is NOT halted). This is the claim the calibration fix rests on — that adversarial review stops
     /// blocking on nitpicks WITHOUT going blind to real defects. The verdicts ARE gated; infra failures stay non-gating.
     /// </summary>
-    [Fact]
+    [SkippableFact]
     public async Task A_live_reviewer_blocks_a_fatal_flaw_but_not_a_cosmetic_one()
     {
         var baseUrl = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
         var apiKey = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
         var model = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
-        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → skip
+        if (baseUrl is null || apiKey is null || model is null) throw RealModelGate.ReportSkipped(Custom, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass: NotExecuted in the trx, never a green that measured nothing
 
         const string goal = "Reject empty or missing passwords in the login endpoint.";
 
@@ -202,14 +202,14 @@ public sealed class RealModelCriticE2ETests
     /// gated: text-fingerprinting catches re-wording, not arbitrary semantic paraphrase, so a live match is a bonus
     /// signal, never a flaky gate. Infra failures (no verdict) stay non-gating.
     /// </summary>
-    [Fact]
+    [SkippableFact]
     public async Task A_live_reviewer_consistently_re_flags_an_unremoved_flaw()
     {
         var baseUrl = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
         var apiKey = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
         var model = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
-        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → skip
+        if (baseUrl is null || apiKey is null || model is null) throw RealModelGate.ReportSkipped(Custom, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass: NotExecuted in the trx, never a green that measured nothing
 
         const string goal = "Reject empty or missing passwords in the login endpoint.";
 
@@ -254,14 +254,14 @@ public sealed class RealModelCriticE2ETests
     /// <summary>The S7 RUBRIC-JUDGE effectiveness gate: the live judge must answer per-criterion BINARY verdicts that
     /// DISCRIMINATE — an artifact that plainly satisfies both criteria gets both met, one that satisfies neither gets
     /// neither. This is what the non-coding oracle rests on; the verdicts ARE gated (infra failures stay non-gating).</summary>
-    [Fact]
+    [SkippableFact]
     public async Task A_live_rubric_judge_discriminates_per_criterion()
     {
         var baseUrl = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
         var apiKey = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
         var model = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
-        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → skip
+        if (baseUrl is null || apiKey is null || model is null) throw RealModelGate.ReportSkipped(Custom, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass: NotExecuted in the trx, never a green that measured nothing
 
         var rubric = new CodeSpace.Messages.Agents.AcceptanceRubric
         {
@@ -307,14 +307,14 @@ public sealed class RealModelCriticE2ETests
     /// dooms a subtask to endless retry (the forensics run's kill point). A plan with a concrete, runnable acceptance is
     /// REPORTED (it may draw other issues on a terse plan, so only the unsatisfiable side is gated). Infra failures stay non-gating.
     /// </summary>
-    [Fact]
+    [SkippableFact]
     public async Task A_live_plan_reviewer_blocks_an_unsatisfiable_acceptance()
     {
         var baseUrl = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
         var apiKey = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
         var model = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
-        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → skip
+        if (baseUrl is null || apiKey is null || model is null) throw RealModelGate.ReportSkipped(Custom, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass: NotExecuted in the trx, never a green that measured nothing
 
         const string goal = "Add a config validator to the API and prove it rejects malformed config.";
 

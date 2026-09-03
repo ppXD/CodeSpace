@@ -17,6 +17,10 @@
     <PackageReference Include="xunit" Version="2.9.*" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.*" />
     <PackageReference Include="Shouldly" Version="4.*" />
+    <!-- Dynamic, RUNTIME skip for the real-model gates: xunit 2.x has no native runtime skip, so an unmeasurable
+         lane (no live credentials, or a gateway-infra fault) recorded a PASS in the trx. SkippableFact turns those
+         into a NotExecuted the trx and the filter-clause guard can both see. -->
+    <PackageReference Include="Xunit.SkippableFact" Version="1.5.*" />
     <PackageReference Include="Npgsql" Version="10.0.*" />
   </ItemGroup>
 

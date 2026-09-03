@@ -50,7 +50,7 @@ public sealed class RealModelPublishManifestE2ETests
 
     public RealModelPublishManifestE2ETests(PostgresFixture fixture) { _fixture = fixture; }
 
-    [Fact]
+    [SkippableFact]
     public async Task A_real_agent_runs_diff_is_captured_pushed_and_recorded_in_the_publish_manifest_with_no_opt_in()
     {
         if (await EnsureLiveOrSkipAsync() is not { } live) return;   // skip ≠ pass (surfaced loudly)
@@ -131,7 +131,7 @@ public sealed class RealModelPublishManifestE2ETests
         });
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task A_repository_policy_of_patch_only_blocks_a_real_agents_push()
     {
         if (await EnsureLiveOrSkipAsync() is not { } live) return;   // skip ≠ pass (surfaced loudly)
@@ -222,12 +222,12 @@ public sealed class RealModelPublishManifestE2ETests
         var model = Environment.GetEnvironmentVariable(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
         var present = new[] { baseUrl, apiKey, model }.Count(v => !string.IsNullOrWhiteSpace(v));
-        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return null; }   // skip ≠ pass
+        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three (base url / api key / model id) or none; a partial config would otherwise self-skip green proving nothing.");
 
         if (OperatingSystem.IsWindows()) return null;   // the harness + sandbox are /bin/sh based
-        if (!await ClaudeReadyAsync()) { RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed (skip ≠ pass)"); return null; }
-        if (!await GitAvailableAsync()) { RealModelGate.ReportSkipped(Provider, "git is not installed (skip ≠ pass)"); return null; }
+        if (!await ClaudeReadyAsync()) throw RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed (skip ≠ pass)");
+        if (!await GitAvailableAsync()) throw RealModelGate.ReportSkipped(Provider, "git is not installed (skip ≠ pass)");
 
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         return new LiveContext(teamId, baseUrl!.TrimEnd('/'), apiKey!, model!);

@@ -13,14 +13,14 @@ namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 [Trait("Category", "RealModel")]
 public sealed class RealModelCustomProviderFlowTests
 {
-    [Fact]
+    [SkippableFact]
     public async Task A_Custom_tagged_credential_drives_the_live_supervisor_brain_correctly()
     {
         var baseUrl = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
         var apiKey = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
         var model = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
-        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → skip (honest CI/fork behaviour)
+        if (baseUrl is null || apiKey is null || model is null) throw RealModelGate.ReportSkipped("Custom", "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass: NotExecuted in the trx, never a green that measured nothing
 
         await RealModelGate.AssessLiveAsync("Custom", async () =>
         {

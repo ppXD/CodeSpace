@@ -20,7 +20,7 @@ public sealed class RealModelSupervisorDecisionFlowTests
     public const string ApiKeyEnvVar = "CODESPACE_LLM_API_KEY";
     public const string ModelIdEnvVar = "CODESPACE_LLM_MODEL_ID";
 
-    [Theory]
+    [SkippableTheory]
     [InlineData("Anthropic")]
     [InlineData("OpenAI")]
     public async Task The_real_model_makes_the_right_decision_at_every_golden_point(string provider)
@@ -29,7 +29,7 @@ public sealed class RealModelSupervisorDecisionFlowTests
         var apiKey = RealModelLiveWire.Env(ApiKeyEnvVar);
         var model = RealModelLiveWire.Env(ModelIdEnvVar);
 
-        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → skip (honest CI/fork behaviour)
+        if (baseUrl is null || apiKey is null || model is null) throw RealModelGate.ReportSkipped(provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass: NotExecuted in the trx, never a green that measured nothing
 
         // Non-gating on gateway latency: a per-call HTTP timeout / unreachable gateway is surfaced as informational, not
         // a RED — the blessed wire fails only on a genuine WRONG DECISION. (The gateway is sometimes slow enough to blow

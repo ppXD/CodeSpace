@@ -54,7 +54,7 @@ public sealed class RealModelPlannerWholeLoopE2ETests
 
     public RealModelPlannerWholeLoopE2ETests(PostgresFixture fixture) { _fixture = fixture; }
 
-    [Fact]
+    [SkippableFact]
     public async Task A_live_model_authors_the_plan_and_the_engine_fans_out_over_the_model_authored_subtasks()
     {
         var baseUrl = Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
@@ -62,7 +62,7 @@ public sealed class RealModelPlannerWholeLoopE2ETests
         var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
         var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
-        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live planner)"); return; }   // skip ≠ pass
+        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live planner)");   // skip ≠ pass
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none; a partial config would self-skip the blessed gate proving nothing.");
 
         if (OperatingSystem.IsWindows()) return;   // the fake-CLI agent body is a /bin/sh script the runner spawns
@@ -202,8 +202,7 @@ public sealed class RealModelPlannerWholeLoopE2ETests
         }
         catch (InfraParkUnresolvedException ex)
         {
-            RealModelGate.ReportSkipped(Provider, ex.Message);
-            return null;
+            throw RealModelGate.ReportSkipped(Provider, ex.Message);
         }
     }
 

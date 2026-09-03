@@ -58,7 +58,7 @@ public sealed class RealModelBenchmarkCorpusE2ETests
 
     public RealModelBenchmarkCorpusE2ETests(PostgresFixture fixture) { _fixture = fixture; }
 
-    [Fact]
+    [SkippableFact]
     public async Task A_real_coding_agent_runs_the_seed_corpus_and_reports_a_live_solve_rate()
     {
         var baseUrl = Environment.GetEnvironmentVariable(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
@@ -66,12 +66,12 @@ public sealed class RealModelBenchmarkCorpusE2ETests
         var model = Environment.GetEnvironmentVariable(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
         var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
-        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }   // skip ≠ pass
+        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three (base url / api key / model id) or none; a partial config would otherwise self-skip the benchmark gate green proving nothing.");
 
         if (OperatingSystem.IsWindows()) return;                          // the seed fixtures + checks are /bin/sh scripts
         if (!await GitReadyAsync()) return;
-        if (!await ClaudeReadyAsync()) { RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed — the benchmark needs a harness binary (skip ≠ pass)"); return; }   // honest-skip, NOT a pass
+        if (!await ClaudeReadyAsync()) throw RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed — the benchmark needs a harness binary (skip ≠ pass)");   // honest-skip, NOT a pass
 
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var credId = await SeedAgentCredentialAsync(teamId, baseUrl!.TrimEnd('/'), apiKey!);

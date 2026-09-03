@@ -38,7 +38,7 @@ public sealed class RealModelSessionResumeE2ETests
 
     private readonly List<string> _tempDirs = new();
 
-    [Fact]
+    [SkippableFact]
     public async Task A_real_claude_agent_recalls_a_codeword_from_the_restored_conversation()
     {
         var baseUrl = Environment.GetEnvironmentVariable(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
@@ -47,11 +47,11 @@ public sealed class RealModelSessionResumeE2ETests
 
         // A set-but-blank secret (an undefined ${{ secrets.X }} expands to "") counts as ABSENT — skip ≠ pass.
         var present = new[] { baseUrl, apiKey, model }.Count(v => !string.IsNullOrWhiteSpace(v));
-        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }
+        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three (base url / api key / model id) or none.");
 
         if (OperatingSystem.IsWindows()) return;
-        if (!await ClaudeReadyAsync()) { RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed — the resume gate needs the harness binary (skip ≠ pass)"); return; }
+        if (!await ClaudeReadyAsync()) throw RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed — the resume gate needs the harness binary (skip ≠ pass)");
 
         try
         {

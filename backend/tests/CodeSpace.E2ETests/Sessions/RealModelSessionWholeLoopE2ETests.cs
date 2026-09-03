@@ -61,7 +61,7 @@ public sealed class RealModelSessionWholeLoopE2ETests
 
     public RealModelSessionWholeLoopE2ETests(PostgresFixture fixture) { _fixture = fixture; }
 
-    [Fact]
+    [SkippableFact]
     public async Task The_real_model_continues_a_thread_on_a_production_built_digest_from_a_real_first_turn()
     {
         if (OperatingSystem.IsWindows()) return;   // the fake CLI is a /bin/sh script the runner spawns
@@ -117,7 +117,7 @@ public sealed class RealModelSessionWholeLoopE2ETests
         var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
         var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
-        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — scaffold proven, no live brain)"); return; }   // skip ≠ pass
+        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — scaffold proven, no live brain)");   // skip ≠ pass
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none; a partial config would self-skip the blessed gate proving nothing.");
 
         var scenario = new SupervisorGoldenScenario
