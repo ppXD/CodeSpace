@@ -880,6 +880,17 @@ public sealed class SupervisorAcceptanceFoldFlowTests
         AgentSupervisorNode.Finish(Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, result).Outputs["status"].GetString()
             .ShouldBe(expectedStatus, "the operator's floor grades ITS OWN check script, restored from the run's recorded base — a head that rewrote it cannot ship, a head that did the work can");
         result.IntegratedBranch.ShouldBe(rewritesTheCheck ? null : "integration/head", "a floor the head tampered with withholds the reviewable head");
+
+        // Neutralizing the tamper is half the job: the DURABLE stop row is what the journal, the decider prompt and
+        // the receipt read, and it carries pass + detail only. A voided tamper that never reaches it is invisible on
+        // exactly the lane this protection guards.
+        var detail = JsonDocument.Parse(await StopLedgerOutcomeAsync(runId, teamId) ?? "{}").RootElement
+            .GetProperty("acceptanceGrade").GetProperty("detail").GetString() ?? "";
+
+        if (rewritesTheCheck)
+            detail.ShouldContain("ORACLE TAMPER VOIDED", Case.Sensitive, "the operator must be told the head rewrote its judge, not merely that the check failed");
+        else
+            detail.ShouldNotContain("TAMPER", Case.Insensitive, "calling honest work tamper would teach the operator to ignore the warning");
     }
 
     // ─── Helpers ───
