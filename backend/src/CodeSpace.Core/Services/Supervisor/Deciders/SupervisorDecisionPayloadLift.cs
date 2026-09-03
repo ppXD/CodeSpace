@@ -1,14 +1,18 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using CodeSpace.Messages.Agents;
 
 namespace CodeSpace.Core.Services.Supervisor.Deciders;
 
 /// <summary>
-/// Deterministic repair of the ONE malformation the model reliably authors: writing the chosen kind's payload fields at
+/// Deterministic repair of the two malformations the model reliably authors. <see cref="Lift"/> owns the first and
+/// dominant one; <see cref="LiftStopNarration"/> owns the terminal-stop case the first cannot reach (see its own doc).
+///
+/// <para><see cref="Lift"/>: writing the chosen kind's payload fields at
 /// the ROOT of the decision instead of inside that kind's sub-object — <c>{"kind":"retry","subtaskId":"s2",…}</c> rather
 /// than <c>{"kind":"retry","retry":{"subtaskId":"s2",…}}</c>. The gateway 200s on the forced-tool schema either way (a
 /// per-kind conditional <c>required</c> needs <c>if/then</c>, which the wire accepts but does not enforce), so the shape
-/// arrives valid-but-unreadable and <see cref="SupervisorDecisionCoherence"/> names it.
+/// arrives valid-but-unreadable and <see cref="SupervisorDecisionCoherence"/> names it.</para>
 ///
 /// <para>WHY DETERMINISTIC: the flattened reply already contains every field the payload needs, in the right names, with
 /// the right values — only the nesting is wrong. Asking the model to fix that is a second round-trip to recover
@@ -80,6 +84,74 @@ internal static class SupervisorDecisionPayloadLift
 
         return JsonDocument.Parse(root.ToJsonString()).RootElement.Clone();
     }
+
+    /// <summary>
+    /// The NARRATION floor for <c>stop</c>: the decision with its <c>stop.summary</c> recovered from the root
+    /// <c>rationale</c> the model DID author, or null when there is nothing to recover (a summary already present,
+    /// no rationale prose, any other kind, a non-object reply).
+    ///
+    /// <para>WHY A SECOND REPAIR EXISTS: <see cref="Lift"/> moves fields; the live shape it cannot fix is a decision
+    /// carrying ONLY <c>kind</c> + <c>rationale</c> — no <c>stop</c> object and no stop field at the root (real-model
+    /// run 33755336097, 2026-09-03: three attempts, every one refused). Left unrepaired, the projector substitutes an
+    /// EMPTY summary and <see cref="SupervisorPublishGate"/> then rejects the terminal stop of a run that HAS published
+    /// work — "the run has published work but no summary" — and substitutes an <c>ask_human</c>, parking a finished run
+    /// on a question no human owes. The words that answer it are already in the reply.</para>
+    ///
+    /// <para>WHY <c>stop</c> ALONE, and why this is not the generic lift widened: every other verb's payload names
+    /// ENTITIES the run must then act on — a subtask id to re-run, a question to ask, a replacement oracle. Prose cannot
+    /// yield those, and a guess would fan out work the model never chose. <c>stop</c> commands nothing: its payload only
+    /// DESCRIBES the ending, which is exactly what the rationale describes. So this recovers WORDS THE MODEL WROTE and
+    /// never authors any of its own.</para>
+    ///
+    /// <para>IT NEVER STRENGTHENS THE TERMINAL CLAIM: an <c>outcome</c> the model nested is kept verbatim, and an absent
+    /// one is filled with <see cref="AbsentStopOutcome"/> — the SAME label <see cref="SupervisorDecisionProjector"/>
+    /// already substitutes for an absent stop — so the run's success/give-up reading is exactly what it would have been,
+    /// with the summary added. A unit drift-detector pins this constant against the projector's own substitute.</para>
+    /// </summary>
+    public static JsonElement? LiftStopNarration(JsonElement decision)
+    {
+        if (decision.ValueKind != JsonValueKind.Object) return null;
+        if (!IsKind(decision, SupervisorDecisionKinds.Stop)) return null;
+
+        var root = JsonNode.Parse(decision.GetRawText())!.AsObject();
+        var stop = root[StopProperty] as JsonObject;
+
+        if (stop is not null && StringField(stop, SummaryField) is not null) return null;
+
+        if (NarrationFrom(root) is not { } narration) return null;
+
+        stop = stop is null ? new JsonObject() : (JsonObject)stop.DeepClone();
+        stop[SummaryField] = narration;
+        stop[OutcomeField] = StringField(stop, OutcomeField) ?? AbsentStopOutcome;
+        root[StopProperty] = stop;
+
+        return JsonDocument.Parse(root.ToJsonString()).RootElement.Clone();
+    }
+
+    /// <summary>The terminal label a narrated stop carries when the model authored none — deliberately identical to <see cref="SupervisorDecisionProjector"/>'s own substitute for an absent stop, so this repair adds words without moving the verdict. Pinned by a drift test (Rule 8).</summary>
+    public const string AbsentStopOutcome = "completed";
+
+    /// <summary>The model's own prose off the root <c>rationale</c> — its <c>why</c>, then the <c>evidence</c> it cited — or null when it authored neither.</summary>
+    private static string? NarrationFrom(JsonObject root)
+    {
+        if (root[RationaleProperty] is not JsonObject rationale) return null;
+
+        var parts = new[] { StringField(rationale, "why"), StringField(rationale, "evidence") }.Where(part => part is not null).ToList();
+
+        return parts.Count == 0 ? null : string.Join(" ", parts);
+    }
+
+    /// <summary>A non-blank string property, trimmed — null for absent, blank, or a non-string value the model wrote where prose belongs.</summary>
+    private static string? StringField(JsonObject owner, string name) =>
+        owner[name] is JsonValue value && value.TryGetValue<string>(out var text) && !string.IsNullOrWhiteSpace(text) ? text.Trim() : null;
+
+    private static bool IsKind(JsonElement decision, string kind) =>
+        decision.TryGetProperty("kind", out var value) && value.ValueKind == JsonValueKind.String && value.GetString() == kind;
+
+    private const string StopProperty = "stop";
+    private const string RationaleProperty = "rationale";
+    private const string SummaryField = "summary";
+    private const string OutcomeField = "outcome";
 
     /// <summary>Every top-level object property the schema declares whose own <c>properties</c> map is non-empty — the payload sub-objects, keyed by name.</summary>
     private static IReadOnlyDictionary<string, IReadOnlySet<string>> BuildPayloadFields()

@@ -1,5 +1,6 @@
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Completion;
+using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Enums;
@@ -73,10 +74,12 @@ public class UpstreamStageTraceTests
     }
 
     [Fact]
-    public void Fresh_spawned_work_after_the_last_merge_reads_not_integrated()
+    public void A_merge_that_integrated_still_evidences_the_stage_past_later_un_merged_work()
     {
-        // The stale barrier: the walk is latest-first, and a spawn nothing later merged means the run's newest
-        // work is UN-combined — an earlier integrated branch must not evidence the stage past it.
+        // The stale barrier belongs to the "which head may we SHIP" readers, not to this cell. Integration that
+        // LANDED is a historical fact about the run; a later spawn / an unverified resolve / a refused stop cannot
+        // un-make it. Conflating the two parked a run that merged cleanly and then hit an unverified resolve as
+        // though it had never integrated (real-model run 33755336097) — a decider defect billed as missing work.
         var tape = new[]
         {
             Decision(1, SupervisorDecisionKinds.Merge, outcomeJson: """{"integration":{"status":"integrated","integratedBranch":"codespace/integration/x"}}"""),
@@ -84,7 +87,51 @@ public class UpstreamStageTraceTests
         };
 
         UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), tape, Array.Empty<AttemptProjection>(), Array.Empty<PublishManifest>())
+            .ShouldContain(CompletionStage.Integrate);
+    }
+
+    [Fact]
+    public void A_clean_merge_behind_an_unverified_resolve_and_a_refused_stop_evidences_integrate()
+    {
+        // The live shape, verbatim in tape order: merge (clean) → ask_human → resolve (verdict NOT verified) → stop.
+        // ReadFinalIntegratedBranch stops at the resolve and surfaces nothing to ship — correctly — but the run DID
+        // integrate, so the stage is evidenced and the terminal authority must not park on Integrate.
+        var tape = new[]
+        {
+            Decision(1, SupervisorDecisionKinds.Merge, outcomeJson: """{"integration":{"status":"integrated","integratedBranch":"codespace/integration/x"}}"""),
+            Decision(2, SupervisorDecisionKinds.AskHuman),
+            Decision(3, SupervisorDecisionKinds.Resolve, outcomeJson: """{"resolution":{"verified":false}}"""),
+            Decision(4, SupervisorDecisionKinds.Stop),
+        };
+
+        SupervisorOutcome.ReadFinalIntegratedBranch(tape).ShouldBeNull("the ship-a-head reader keeps its stale barrier — this change never widens what may be published");
+
+        UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), tape, Array.Empty<AttemptProjection>(), Array.Empty<PublishManifest>())
+            .ShouldContain(CompletionStage.Integrate);
+    }
+
+    [Theory]
+    [InlineData("""{"integration":{"status":"Conflicted"}}""")]        // ran, integrated nothing
+    [InlineData("""{"integration":{"status":"integrated"}}""")]        // clean but branch-less — nothing followable
+    [InlineData(null)]                                                 // no integration block at all
+    public void A_merge_that_integrated_nothing_still_evidences_nothing(string? outcomeJson)
+    {
+        // The rule is NOT weakened for a run without landed integration work — only a merge that actually produced a
+        // branch counts.
+        var tape = new[] { Decision(1, SupervisorDecisionKinds.Spawn), Decision(2, SupervisorDecisionKinds.Merge, outcomeJson: outcomeJson), Decision(3, SupervisorDecisionKinds.Stop) };
+
+        UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), tape, Array.Empty<AttemptProjection>(), Array.Empty<PublishManifest>())
             .ShouldNotContain(CompletionStage.Integrate);
+    }
+
+    [Fact]
+    public void The_new_ledger_reads_only_an_EXECUTED_merge()
+    {
+        // Asserted on the reader itself: at Derive level the pre-existing final-head walk (which does not filter on
+        // decision status) would mask this, and the ledger this change adds must not be the one that stops filtering.
+        var claimed = new[] { Decision(1, SupervisorDecisionKinds.Merge, SupervisorDecisionStatus.Failed, """{"integration":{"status":"integrated","integratedBranch":"codespace/integration/x"}}""") };
+
+        SupervisorOutcome.AnyMergeIntegratedABranch(claimed).ShouldBeFalse("a merge decision that never executed integrated nothing, whatever its recorded outcome claims");
     }
 
     [Fact]

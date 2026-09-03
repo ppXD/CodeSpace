@@ -1376,6 +1376,44 @@ public class SupervisorDeciderTests
     }
 
     [Fact]
+    public async Task A_stop_the_repair_could_not_fix_still_lands_carrying_the_summary_the_model_wrote()
+    {
+        // LIVE shape from real-model run 33755336097 (2026-09-03), refused on all three attempts of the headline arc:
+        // the model chose 'stop' and wrote only 'kind' + 'rationale'. The repair round-trip is still spent (it may yet
+        // return an honest 'failed' outcome), but when it misses too, the terminal stop must not reach the publish gate
+        // summary-less — that gate substitutes an ask_human and parks a finished run on a question no human owes.
+        var bare = JsonDocument.Parse("""{"kind":"stop","rationale":{"why":"Both plan units are accepted and every contract dimension reads settled.","evidence":"acceptance PASSED on both units"}}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(bare, bare);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Stop);
+        StopField(decision, "summary").ShouldContain("every contract dimension reads settled", customMessage: "the projected stop carries the model's OWN words as its summary, not the projector's empty substitute (the rationale the projector also injects sits at the payload root, where SupervisorPublishGate does not look)");
+        client.Requests.Count.ShouldBe(2, "the model still gets its one bounded repair — the floor only catches what that repair drops");
+    }
+
+    [Fact]
+    public async Task A_stop_that_nested_an_outcome_but_no_summary_is_narrated_with_no_round_trip()
+    {
+        // Coherence passes (the 'stop' object IS present), so nothing above this would ever fire — yet the publish gate
+        // rejects it for exactly the same reason. The words are in the rationale; the authored outcome is left alone.
+        var terse = JsonDocument.Parse("""{"kind":"stop","stop":{"outcome":"failed"},"rationale":{"why":"The baseline build is broken and three attempts could not fix it."}}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(terse);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        StopField(decision, "summary").ShouldContain("The baseline build is broken", customMessage: "the summary is recovered from the reply's own rationale");
+        StopField(decision, "outcome").ShouldBe("failed", "the terminal label the model authored survives — the floor restores words, never a verdict");
+        client.Requests.Count.ShouldBe(1, "recovering words the first reply already carried never costs a round-trip");
+    }
+
+    /// <summary>One field of a projected stop's canonical payload — read explicitly, because the projector ALSO injects the decision-level rationale at the payload root, so a substring probe over the whole payload passes whether or not the summary was ever filled.</summary>
+    private static string StopField(SupervisorDecision decision, string field) =>
+        JsonDocument.Parse(decision.PayloadJson).RootElement.TryGetProperty(field, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString()! : "";
+
+    [Fact]
     public async Task A_spawn_with_an_EMPTY_subtaskIds_array_is_repaired_before_projection()
     {
         // The shape that slips every earlier net: the sub-object is PRESENT (no bind error) and minItems is not

@@ -136,4 +136,84 @@ public class SupervisorDecisionPayloadLiftTests
         SupervisorDecisionPayloadLift.FieldsOf(SupervisorDecisionKinds.Spawn).ShouldContain("subtaskIds");
         SupervisorDecisionPayloadLift.FieldsOf(SupervisorDecisionKinds.Plan).ShouldContain("subtasks");
     }
+
+    // ─── The rationale-sourced stop narration floor ─────────────────────────────
+
+    [Fact]
+    public void A_live_stop_that_wrote_only_its_rationale_recovers_the_summary_the_model_did_author()
+    {
+        // LIVE fixture — verbatim from real-model run 33755336097 ("live-brain whole-loop — supervisor arcs",
+        // 2026-09-03T14:04:12Z). The model chose 'stop' and wrote NOTHING but 'kind' + 'rationale': there is no
+        // 'stop' object and no stop field at the root, so the generic root→sub-object lift has nothing to move.
+        var raw = Json("""
+            {"kind":"stop","rationale":{"why":"Both subtasks are done and accepted, but the integration remains CONFLICTED and the resolver's reconciliation was NOT verified. The resolve cap is spent, so the only honest path is to stop and leave the conflict for a human.","evidence":"Resolve outcome: 'resolution NOT verified'. Merge outcome: 'INTEGRATION CONFLICTED'."}}
+            """);
+
+        SupervisorDecisionPayloadLift.Lift(raw, SupervisorDecisionKinds.Stop).ShouldBeNull("the generic lift declines — there is no root field to move");
+
+        var narrated = SupervisorDecisionPayloadLift.LiftStopNarration(raw).ShouldNotBeNull();
+        var model = Bind(narrated);
+
+        SupervisorDecisionCoherence.MissingPayload(model).ShouldBeNull("a stop whose narration was recovered is executable");
+        model.Stop!.Summary.ShouldContain("the only honest path is to stop", customMessage: "the summary is the model's OWN words, never a manufactured sentence");
+        model.Stop!.Summary.ShouldContain("INTEGRATION CONFLICTED", customMessage: "the evidence the model cited rides along, so the terminal card explains itself");
+        model.Rationale!.Why.ShouldNotBeNullOrWhiteSpace("the root rationale is copied, never moved out of the trace");
+    }
+
+    [Fact]
+    public void A_stop_object_present_but_summary_blank_is_narrated_without_touching_the_outcome()
+    {
+        // The sibling shape: coherence's sub-object test passes, but SupervisorPublishGate rejects a published run's
+        // summary-less stop and substitutes an ask_human — the same park, one layer later.
+        var raw = Json("""{"kind":"stop","stop":{"outcome":"failed"},"rationale":{"why":"The build never went green.","evidence":"3 attempts, identical error."}}""");
+
+        var model = Bind(SupervisorDecisionPayloadLift.LiftStopNarration(raw).ShouldNotBeNull());
+
+        model.Stop!.Summary.ShouldContain("The build never went green.");
+        model.Stop!.Outcome.ShouldBe("failed", "the terminal label the model DID author is never overwritten — the repair restores words, it never changes the claim");
+    }
+
+    [Fact]
+    public void A_stop_that_already_carries_its_summary_is_left_alone()
+    {
+        var raw = Json("""{"kind":"stop","stop":{"outcome":"completed","summary":"Shipped the validator."},"rationale":{"why":"w","evidence":"e"}}""");
+
+        SupervisorDecisionPayloadLift.LiftStopNarration(raw).ShouldBeNull("nothing to recover — a no-op declines rather than rewriting an authored payload");
+    }
+
+    [Fact]
+    public void A_stop_with_no_rationale_prose_is_declined_rather_than_invented()
+    {
+        // The floor recovers WORDS THE MODEL WROTE. With no rationale there are none, and a manufactured summary
+        // would be the server claiming an ending on the model's behalf.
+        SupervisorDecisionPayloadLift.LiftStopNarration(Json("""{"kind":"stop"}""")).ShouldBeNull();
+        SupervisorDecisionPayloadLift.LiftStopNarration(Json("""{"kind":"stop","rationale":{"why":"   "}}""")).ShouldBeNull();
+    }
+
+    [Theory]
+    [InlineData(SupervisorDecisionKinds.Spawn)]
+    [InlineData(SupervisorDecisionKinds.Retry)]
+    [InlineData(SupervisorDecisionKinds.AmendAcceptance)]
+    [InlineData(SupervisorDecisionKinds.Plan)]
+    public void No_other_kind_is_ever_narrated_from_its_rationale(string kind)
+    {
+        // WHY STOP ALONE: every other verb's payload names ENTITIES the run must act on — a subtask id, a question,
+        // a replacement oracle. Prose cannot yield those, and a guess would fan out work the model never chose.
+        // 'stop' commands nothing; its payload only DESCRIBES the ending, which the rationale already does.
+        var raw = Json($$"""{"kind":"{{kind}}","rationale":{"why":"w","evidence":"e"} }""");
+
+        SupervisorDecisionPayloadLift.LiftStopNarration(raw).ShouldBeNull();
+    }
+
+    [Fact]
+    public void The_narrated_outcome_matches_the_projector_own_substitute_for_an_absent_stop()
+    {
+        // DRIFT DETECTOR. The floor must never make the terminal claim any MORE than the projector already makes for
+        // the same shape: today an absent stop projects with the substitute label read below. If that substitute
+        // changes, this floor has silently started claiming something different — fail here, not in production.
+        var narrated = Bind(SupervisorDecisionPayloadLift.LiftStopNarration(Json("""{"kind":"stop","rationale":{"why":"done"}}""")).ShouldNotBeNull());
+        var substituted = SupervisorDecisionProjector.Project(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Stop });
+
+        narrated.Stop!.Outcome.ShouldBe(JsonDocument.Parse(substituted.PayloadJson).RootElement.GetProperty("outcome").GetString());
+    }
 }
