@@ -171,6 +171,19 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             }
         }
 
+        // The STOP floor, applied after every repair above has had its chance (so a model that re-authors an honest
+        // 'failed' outcome still wins): a terminal stop whose summary is blank — because its payload was refused, or
+        // because the model nested an outcome and no words — is not merely unexplained. SupervisorPublishGate rejects
+        // the summary-less stop of a run that HAS published work and substitutes an ask_human, parking a finished run
+        // on a question no human owes. The answer is already in the reply's own rationale; move it there.
+        if (SupervisorDecisionPayloadLift.LiftStopNarration(completion.Json) is { } narrated && TryDeserialize(narrated, out _) is { } told)
+        {
+            _logger.LogInformation("Supervisor stop carried no summary — recovered it from the decision's own rationale rather than shipping a terminal the publish gate would refuse");
+
+            completion = completion with { Json = narrated };
+            model = told;
+        }
+
         // Capture the authoring model call (the pool-picked model + this reply's token usage) — the turn service folds it
         // into the NON-hashed outcome, never the payload, so it can't drift the idempotency key. It's how the journal shows
         // what authored the decision (e.g. the "via <model> · N tokens" line on a plan beat).

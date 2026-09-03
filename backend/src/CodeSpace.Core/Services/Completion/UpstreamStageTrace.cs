@@ -10,10 +10,11 @@ namespace CodeSpace.Core.Services.Completion;
 /// P4 (Lock Clause 4, the matrix's row assertions): WHICH of the protocol's UPSTREAM stages a run's durable
 /// evidence shows exercised — derived from the same ledgers the composer already reads, never self-reported.
 /// Deliberately covers ONLY the four stages the six-state decision does not: Contract (obligations staked),
-/// Plan (an authorized plan on the tape), Execute (attempts projected), Integrate (a final reviewable
-/// integrated head — the tape walk (<see cref="SupervisorOutcome.ReadFinalIntegratedBranch"/>, whose stale
-/// barrier means fresh un-merged work reads as NOT integrated) OR the run-level <c>Integration</c> manifest
-/// row a <c>git.integrate_run</c> step records, the plan-map lane's candidate fact — two ledgers, one cell).
+/// Plan (an authorized plan on the tape), Execute (attempts projected), Integrate (integration work that
+/// LANDED — the tape's final reviewable head (<see cref="SupervisorOutcome.ReadFinalIntegratedBranch"/>), any
+/// EXECUTED merge that integrated a branch (<see cref="SupervisorOutcome.AnyMergeIntegratedABranch"/>), OR the
+/// run-level <c>Integration</c> manifest row a <c>git.integrate_run</c> step records, the plan-map lane's
+/// candidate fact — three ledgers, one cell).
 /// The completion-side six (Verify/Capture/Deliver/Handoff/Assess/Terminal) are enforced by
 /// <see cref="TerminalDecider"/>'s own conjuncts — 4 by trace + 6 by decider covers the ten-stage chain
 /// exactly once, nothing double-encoded. Pure, so every mapping pins without a database.
@@ -41,10 +42,24 @@ public static class UpstreamStageTrace
         return exercised;
     }
 
-    /// <summary>The Integrate cell's two evidence ledgers: the supervisor tape's final reviewable head, OR a PUSHED run-level Integration manifest row with its branch named (a PatchOnly/branch-less row attests no reviewable candidate and stays silent).</summary>
+    /// <summary>
+    /// The Integrate cell's evidence ledgers: the supervisor tape's final reviewable head, OR an EXECUTED merge that
+    /// integrated a branch at any point (<see cref="SupervisorOutcome.AnyMergeIntegratedABranch"/>), OR a PUSHED
+    /// run-level Integration manifest row with its branch named (a PatchOnly/branch-less row attests no reviewable
+    /// candidate and stays silent).
+    ///
+    /// <para>The middle ledger is deliberately BARRIER-FREE while the first is not. The final-head readers answer
+    /// "which head may we ship now", so they must go silent past fresh un-integrated work; this cell asks whether the
+    /// run EXERCISED the stage, which a later decision cannot un-make. Without it a run that merged cleanly and then
+    /// hit an unverified resolve or a refused stop parked as though it had never integrated — attributing a decider
+    /// defect to missing integration work (real-model run 33755336097). A run with no merge, a conflicted merge, or a
+    /// branch-less merge still evidences nothing: this widens what counts as integration WORK, never what counts as a
+    /// shippable head.</para>
+    /// </summary>
     private static bool HasIntegratedCandidate(IReadOnlyList<SupervisorPriorDecision> decisions, IReadOnlyList<PublishManifest> integrationManifests) =>
         SupervisorOutcome.ReadFinalIntegratedBranch(decisions) is not null
         || SupervisorOutcome.ReadFinalRepositoryBranches(decisions).Count > 0
+        || SupervisorOutcome.AnyMergeIntegratedABranch(decisions)
         || integrationManifests.Any(m => m.Kind == PublishManifestKind.Integration && m.PublishStateValue == PublishState.Pushed && m.Branch is { Length: > 0 });
 
     /// <summary>The profile's Required upstream stages the trace does NOT evidence — non-empty means the Success claim skipped a declared stage and must park. A null trace (never derived — a legacy compose) evidences nothing: fail-close.</summary>

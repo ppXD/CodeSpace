@@ -1030,6 +1030,26 @@ public static class SupervisorOutcome
     }
 
     /// <summary>
+    /// Whether the tape shows integration WORK THAT LANDED at least once: an EXECUTED (<c>Succeeded</c>) <c>merge</c>
+    /// whose recorded outcome names a branch — the single-repo <c>integration.integratedBranch</c>, or a Clean
+    /// multi-repo block's per-repo heads.
+    ///
+    /// <para>Deliberately BARRIER-FREE, and that is the whole difference from <see cref="ReadFinalIntegratedBranch"/>:
+    /// that reader answers "which head may we ship NOW", so it must stop at fresh un-integrated work (shipping a stale
+    /// head would open a PR missing it). This one answers a different question — "did this run ever integrate" — for
+    /// the completion protocol's Integrate stage, which is a HISTORICAL fact about the run and cannot be un-made by a
+    /// later decision. Conflating the two made a run that merged cleanly and then hit an unverified resolve park as if
+    /// it had never integrated at all (real-model run 33755336097). Never true for a run with no merge, a merge that
+    /// conflicted, or a branch-less merge — the absence of integration work still evidences nothing.</para>
+    ///
+    /// <para>Pure + replay-deterministic, over the SAME <c>integration</c> block readers as every other consumer.</para>
+    /// </summary>
+    public static bool AnyMergeIntegratedABranch(IReadOnlyList<SupervisorPriorDecision> priorDecisions) =>
+        priorDecisions.Any(d => d.DecisionKind == SupervisorDecisionKinds.Merge
+            && d.Status == SupervisorDecisionStatus.Succeeded
+            && (ReadIntegration(d.OutcomeJson) is { IntegratedBranch: { Length: > 0 } } || ReadMergeRepositoryBranches(d.OutcomeJson).Count > 0));
+
+    /// <summary>
     /// Fold the run's FINAL reviewable integrated branch off the durable decision tape (resolver loop #379, S5) — the
     /// head a downstream <c>git.open_pr</c> / <c>git.open_change_set</c> node targets. A single reverse walk (latest
     /// decision wins) over two sources, uniformly: a <c>merge</c> that integrated CLEAN surfaces its

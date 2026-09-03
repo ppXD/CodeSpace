@@ -193,6 +193,31 @@ public sealed class CompletionTerminalAuthorityFlowTests
     }
 
     [Fact]
+    public async Task A_merge_that_landed_evidences_integrate_even_behind_an_unverified_resolve_and_a_payload_less_stop()
+    {
+        // The live shape from real-model run 33755336097: plan → spawn → merge (CLEAN, branch recorded) → resolve
+        // (unverified) → stop whose payload the model never authored. ReadFinalIntegratedBranch's stale barrier stops
+        // at the resolve and surfaces no shippable head — correctly — but the run DID integrate, so billing it as
+        // "Integrate has no evidence" charged a decider defect to missing integration work. The stage is evidenced
+        // off the merge itself; the merge-less tape above still parks, unchanged.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunningRunAsync(teamId, userId, mode: "Enforced");
+        var attemptId = await SeedGradedTapeAsync(runId, teamId, acceptancePassed: true, unverifiedResolveAfterMerge: true);
+        var repositoryId = await SeedRepositoryAsync(teamId);
+        await SeedManifestAsync(teamId, attemptId, repositoryId);
+        await StakeAsync(runId, teamId, "acceptance:s1", ContractKinds.Acceptance);
+        await StakeAsync(runId, teamId, "delivery:s1", ContractKinds.Delivery);
+        await StakeAsync(runId, teamId, "output:s1", ContractKinds.Output);
+
+        using var scope = _fixture.BeginScope();
+        var arbitration = await scope.Resolve<ICompletionTerminalAuthority>().ArbitrateAsync(runId, teamId, "Enforced", WorkflowRunStatus.Success, CancellationToken.None);
+
+        arbitration.Reason?.ShouldNotContain("Integrate", customMessage: "the run merged cleanly — Integrate must never read as a stage without evidence");
+        arbitration.Decision.ShouldBe(TerminalDecision.CleanSuccess);
+        arbitration.Status.ShouldBe(WorkflowRunStatus.Success);
+    }
+
+    [Fact]
     public async Task The_shadow_would_be_decision_mirrors_the_stage_gate()
     {
         // Same seeding as the stage park above, driven through the shadow sweep on a Shadow-mode run — parity
@@ -410,8 +435,8 @@ public sealed class CompletionTerminalAuthorityFlowTests
         await db.SaveChangesAsync();
     }
 
-    /// <summary>The canonical graded supervisor tape: plan → spawn → merge → stop. <paramref name="merged"/> false drops the merge decision — the exact tape P4's stage gate must refuse (fresh spawned work nothing ever integrated).</summary>
-    private async Task<Guid> SeedGradedTapeAsync(Guid runId, Guid teamId, bool acceptancePassed, bool merged = true)
+    /// <summary>The canonical graded supervisor tape: plan → spawn → merge → stop. <paramref name="merged"/> false drops the merge decision — the exact tape P4's stage gate must refuse (fresh spawned work nothing ever integrated). <paramref name="unverifiedResolveAfterMerge"/> appends an UNVERIFIED resolve between the merge and the stop — the live shape whose stale barrier hid the merge that did land.</summary>
+    private async Task<Guid> SeedGradedTapeAsync(Guid runId, Guid teamId, bool acceptancePassed, bool merged = true, bool unverifiedResolveAfterMerge = false)
     {
         var attemptId = Guid.NewGuid();
         var planId = Guid.NewGuid();
@@ -428,7 +453,12 @@ public sealed class CompletionTerminalAuthorityFlowTests
                 """{"branches":["codespace/agent/s1"]}""",
                 $$$"""{"integration":{"status":"integrated","integratedBranch":"codespace/integration/{{{runId:N}}}"}}""");
 
-        await SeedDecisionAsync(runId, teamId, merged ? 4 : 3, SupervisorDecisionKinds.Stop, "{}", "{}");
+        var sequence = merged ? 4 : 3;
+
+        if (unverifiedResolveAfterMerge)
+            await SeedDecisionAsync(runId, teamId, sequence++, SupervisorDecisionKinds.Resolve, "{}", "{}");
+
+        await SeedDecisionAsync(runId, teamId, sequence, SupervisorDecisionKinds.Stop, "{}", "{}");
         return attemptId;
     }
 
