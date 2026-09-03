@@ -95,14 +95,49 @@ describe("LaunchTaskModal (minimal box)", () => {
     expect(screen.getByTitle("Repositories")).toHaveTextContent("2 repositories");
   });
 
-  it("Permission menu maps the picked tier to autonomy", () => {
+  it("Permission menu offers only the reachable tiers and maps the pick to autonomy", () => {
+    // Every bounds preset's autonomy ceiling clamps a request down to Standard (TaskLaunchService.ClampAutonomy) —
+    // offering Trusted/Unleashed as pickable would silently lie about what the launch actually gets.
     renderBox();
     fireEvent.click(screen.getByTitle("Permission"));
-    expect(screen.getByText("controlled runner · high trust")).toBeInTheDocument();
-    fireEvent.click(screen.getByText("Trusted"));
+    expect(screen.queryByText("Trusted")).toBeNull();
+    expect(screen.queryByText("Unleashed")).toBeNull();
+    fireEvent.click(screen.getByText("Confined"));
     typeTask("Fix");
     fireEvent.click(screen.getByLabelText("Launch task"));
-    expect(lastInput).toMatchObject({ autonomy: "Trusted" });
+    expect(lastInput).toMatchObject({ autonomy: "Confined" });
+  });
+
+  it("Permissions tab drops the unwired decision-surface/notify/timeout controls and explains the ceiling", () => {
+    renderBox();
+    fireEvent.click(screen.getByText("Advanced"));
+    fireEvent.click(screen.getByText("Permissions"));
+    expect(screen.queryByText("Decision surface")).toBeNull();
+    expect(screen.queryByText("Notify in chat")).toBeNull();
+    expect(screen.queryByText("Timeout")).toBeNull();
+    // The picker in this tab is the same reachable-only set as the top pill.
+    expect(screen.queryByText("Trusted")).toBeNull();
+    expect(screen.queryByText("Unleashed")).toBeNull();
+    expect(screen.getByText(/Trusted and Unleashed aren't reachable from Launch yet/)).toBeInTheDocument();
+    // Time limit survives — it is the one control this tab's dead trio pointed back to.
+    expect(screen.getByText("Time limit")).toBeInTheDocument();
+  });
+
+  it("Time limit shows the tier's own untouched default (Deep = 2h) and stays byte-identical on the wire", () => {
+    renderBox();
+    typeTask("Ship it");
+    fireEvent.click(screen.getByText("Advanced"));
+    fireEvent.click(screen.getByText("Permissions"));
+    expect(screen.getByText("1 hour (default)")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle("Model and effort"));
+    fireEvent.click(screen.getByText("Effort"));
+    fireEvent.click(screen.getByText("Deep"));
+    // The Advanced tray + Permissions tab selection persist across the effort change.
+    expect(screen.getByText("2 hours (default)")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText("Launch task"));
+    expect(lastInput).not.toHaveProperty("timeoutSeconds");
   });
 
   it("picks a credentialed model — pins model + credential and shows 'model · Auto'", () => {

@@ -61,6 +61,18 @@ describe("buildLaunchInput — time limit (per-agent wall-clock)", () => {
     expect(buildLaunchInput(form({ effort: "quick", timeLimit: "1800" })).timeoutSeconds).toBe(1800);
     expect(buildLaunchInput(form({ effort: "standard", timeLimit: "0" })).timeoutSeconds).toBe(0);
   });
+
+  it("Deep's own default is 7200 (2h), matching TaskLaunchService.DeepAgentTimeoutSeconds — omitted when unset", () => {
+    expect(buildLaunchInput(form({ effort: "deep", timeLimit: "7200" }))).not.toHaveProperty("timeoutSeconds");
+  });
+
+  it("sends 3600 explicitly on Deep — it differs from Deep's own 7200 default", () => {
+    expect(buildLaunchInput(form({ effort: "deep", timeLimit: "3600" })).timeoutSeconds).toBe(3600);
+  });
+
+  it("quick still omits at 3600 (its own default), even though that differs from Deep's default", () => {
+    expect(buildLaunchInput(form({ effort: "quick", timeLimit: "3600" }))).not.toHaveProperty("timeoutSeconds");
+  });
 });
 
 describe("buildLaunchInput — base fields", () => {

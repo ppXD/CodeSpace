@@ -158,10 +158,13 @@ export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
   if (state.pushBranch !== "inherit") input.pushBranch = state.pushBranch === "on";
 
   // The per-agent wall-clock — sent on ALL tiers (a per-agent setting, unlike the deep/auto-gated caps). The default
-  // "3600" (1h) is OMITTED so an untouched launch stays byte-identical to the backend default; "0" = No limit
-  // (unbounded — the backend maps 0 → no wall-clock) is sent explicitly, as is any other non-default value.
+  // is "3600" (1h) for every tier EXCEPT Deep, which defaults to "7200" (2h) — matching
+  // TaskLaunchService.DefaultTimeoutSeconds' deep-only DeepAgentTimeoutSeconds fallback. The tier's own default is
+  // OMITTED so an untouched launch stays byte-identical to the backend default; "0" = No limit (unbounded — the
+  // backend maps 0 → no wall-clock) is sent explicitly, as is any other non-default value.
+  const defaultTimeLimit = state.effort === "deep" ? 7200 : 3600;
   const timeLimit = Number.parseInt(state.timeLimit, 10);
-  if (Number.isFinite(timeLimit) && timeLimit >= 0 && timeLimit !== 3600) input.timeoutSeconds = timeLimit;
+  if (Number.isFinite(timeLimit) && timeLimit >= 0 && timeLimit !== defaultTimeLimit) input.timeoutSeconds = timeLimit;
 
   const caps = buildCaps(state, tierExposesCaps(state.effort), tierExposesBudget(state.effort));
   if (caps) input.caps = caps;
