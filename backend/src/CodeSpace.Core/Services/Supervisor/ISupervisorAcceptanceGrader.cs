@@ -30,6 +30,30 @@ public interface ISupervisorAcceptanceGrader
     Task<BenchmarkGrade> GradeDirectoryAsync(string directory, SupervisorAcceptanceSpec spec, Guid teamId, int timeoutSeconds, CancellationToken cancellationToken) =>
         Task.FromResult(new BenchmarkGrade { Passed = false, Detail = "grade-error: directory grading is not supported by this grader", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault });
 
+    /// <summary>
+    /// The detail a repo-less unit's grade carries when the attempt captured no deliverable at all. GENUINE by class,
+    /// never infra: nothing about the check machinery failed — the agent produced nothing to check, which is exactly
+    /// what another agent pass CAN fix. Pinned by test (Rule 8); consumers key on the literal.
+    /// </summary>
+    public const string NoDeliverablesCaptured = "no-deliverables-captured";
+
+    /// <summary>
+    /// C2 — the fifth member of this interface's one family (build an independent world, grade it with the spec's
+    /// oracle), for the caller that no longer HAS the world: materialize the deliverables
+    /// <paramref name="agentRunId"/> durably captured (its <c>artifact_manifest</c> rows + their CAS bytes) into a
+    /// fresh temporary directory, grade it exactly as <see cref="GradeDirectoryAsync"/> would, then remove it.
+    ///
+    /// <para>The supervisor's terminal fold runs after the producing worker's scratch directory is deleted and, on a
+    /// multi-worker deployment, on a host that never held it — so the durable rows are the only sound world. Before
+    /// this, every repo-less unit was failed closed on <c>no-branch-or-repo</c>, which classifies GENUINE with no
+    /// work present, so a correctly-written report was met with "RETRY this exact subtask" forever.</para>
+    ///
+    /// <para>Fail-closed like its siblings: an attempt that captured NOTHING yields a failed grade carrying
+    /// <see cref="NoDeliverablesCaptured"/>, never a silent pass; only a genuine cancellation propagates.</para>
+    /// </summary>
+    Task<BenchmarkGrade> GradeCapturedAsync(Guid agentRunId, Guid teamId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken) =>
+        Task.FromResult(new BenchmarkGrade { Passed = false, Detail = "grade-error: captured-deliverable grading is not supported by this grader", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault });
+
     /// <summary>P3a-3 (B+V0+): grade with ORACLE RESTORE — when the spec names <c>ProtectedPaths</c> and the attempt's base sha is known, the grader restores those paths from the base before running, voiding any candidate tamper of its own judge (recorded in the evidence). Default forwards to the plain overload (fakes and non-git graders are unaffected).</summary>
     Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, string? oracleBaseSha, CancellationToken cancellationToken) =>
         GradeAsync(repositoryId, teamId, branch, spec, timeoutSeconds, cancellationToken);

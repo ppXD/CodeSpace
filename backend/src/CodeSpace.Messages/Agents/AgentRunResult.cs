@@ -48,6 +48,14 @@ public sealed record AgentRunResult
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public int CapturedArtifactCount { get; init; }
 
+    /// <summary>C2: how many UNDECLARED files the bounded scratch walk captured — the deliverables a repo-less run wrote without its contract naming them, which previously died with the scratch directory. 0-omitted (a git-backed run serializes byte-identical).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public int UndeclaredArtifactCount { get; init; }
+
+    /// <summary>C2: how many files the scratch walk SAW and did not take — a non-text extension, a dotfile, or the walk's own file/byte ceiling. The SHORTFALL half of the pair: without it an over-limit capture is indistinguishable from a world that held nothing more. 0-omitted.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public int UncapturedScratchFileCount { get; init; }
+
     /// <summary>D3: the FAITHFUL raw harness stream (every redacted line, including ones ParseEvent dropped) — the durable "replay the exact session" record. Inline when small; a larger transcript is offloaded and this is cleared, with <see cref="TranscriptArtifactId"/> holding the ref. Empty when there was no stream.</summary>
     public string Transcript { get; init; } = "";
 

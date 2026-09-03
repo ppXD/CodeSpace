@@ -730,9 +730,20 @@ public class SupervisorAcceptanceGraderTests
             new FakeProviderRegistry(new FakeProvider(new FakeHandle(directory), null)),
             new RealRunnerRegistry(),
             new BenchmarkGraderRegistry(new CodeSpace.Core.Services.Agents.Eval.Benchmark.IBenchmarkGrader[] { new CodeSpace.Core.Services.Agents.Eval.Benchmark.Graders.TestsPassGrader() }),
-            new FakeOffloader(), artifacts, NullLogger<SupervisorAcceptanceGrader>.Instance);
+            new FakeOffloader(), artifacts, new NoArtifactManifests(), NullLogger<SupervisorAcceptanceGrader>.Instance);
 
     private static bool GitAvailable() => Git(Path.GetTempPath(), out _, "--version");
+
+    /// <summary>The captured-deliverable seam these clone/patch/base tests never reach — an empty ledger, so nothing here can accidentally depend on C2's lane.</summary>
+    private sealed class NoArtifactManifests : CodeSpace.Core.Services.Agents.Publish.IArtifactManifestStore
+    {
+        public Task<IReadOnlyList<CodeSpace.Core.Persistence.Entities.ArtifactManifest>> ListForAgentRunAsync(Guid agentRunId, Guid teamId, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<CodeSpace.Core.Persistence.Entities.ArtifactManifest>>(Array.Empty<CodeSpace.Core.Persistence.Entities.ArtifactManifest>());
+
+        public Task<int> CaptureDeclaredAsync(AgentTask task, string workspaceDirectory, Guid agentRunId, Guid? workflowRunId, Guid teamId, long fenceEpoch, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<UndeclaredCaptureOutcome> CaptureUndeclaredAsync(AgentTask task, string workspaceDirectory, Guid agentRunId, Guid? workflowRunId, Guid teamId, long fenceEpoch, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<CodeSpace.Core.Persistence.Entities.ArtifactManifest>> ListForWorkflowRunAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
 
     private sealed class RealRunnerRegistry : ISandboxRunnerRegistry
     {
@@ -932,11 +943,11 @@ public class SupervisorAcceptanceGraderTests
 
     private static SupervisorAcceptanceGrader Build(FakeResolver resolver, FakeGrader oracle, string handleDir = "/tmp/clone", WorkspaceException? throwOnPrepare = null, ISandboxRunnerRegistry? runners = null, IArtifactOffloader? offloader = null, CodeSpace.Core.Services.Workflows.Artifacts.IArtifactStore? artifacts = null) =>
         new(resolver, new FakeProviderRegistry(new FakeProvider(new FakeHandle(handleDir), throwOnPrepare)),
-            runners ?? new FakeRunnerRegistry(), new FakeGraderRegistry(oracle), offloader ?? new FakeOffloader(), artifacts ?? new FakeArtifactStore(), NullLogger<SupervisorAcceptanceGrader>.Instance);
+            runners ?? new FakeRunnerRegistry(), new FakeGraderRegistry(oracle), offloader ?? new FakeOffloader(), artifacts ?? new FakeArtifactStore(), new NoArtifactManifests(), NullLogger<SupervisorAcceptanceGrader>.Instance);
 
     private static SupervisorAcceptanceGrader BuildWithHandle(FakeHandle handle, FakeGrader oracle) =>
         new(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeProviderRegistry(new FakeProvider(handle, null)),
-            new FakeRunnerRegistry(), new FakeGraderRegistry(oracle), new FakeOffloader(), new FakeArtifactStore(), NullLogger<SupervisorAcceptanceGrader>.Instance);
+            new FakeRunnerRegistry(), new FakeGraderRegistry(oracle), new FakeOffloader(), new FakeArtifactStore(), new NoArtifactManifests(), NullLogger<SupervisorAcceptanceGrader>.Instance);
 
     internal sealed class FakeArtifactStore : CodeSpace.Core.Services.Workflows.Artifacts.IArtifactStore
     {

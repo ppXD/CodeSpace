@@ -259,14 +259,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             var workspaceProvision = await _workspaceResolver.ResolveAsync(task, run.TeamId, cancellationToken).ConfigureAwait(false);
             workspace = workspaceProvision is null ? null : await _workspaces.Resolve(runnerKind).PrepareAsync(workspaceProvision, cancellationToken).ConfigureAwait(false);
 
-            // DC-4 slice 2: a REPO-LESS run with a DELIVERABLE-shaped contract (ArtifactPresent/LlmJudge — the
-            // kinds whose Command is a path list) still needs a WORLD — a scratch working directory the harness
-            // runs in, the declared-artifact capture reads from, and the oracle grades against. Without it the
-            // deliverable dies with the process and the contract fails closed on "no-branch-or-repo". A TestsPass
-            // contract presupposes a code world — running its argv in an empty scratch would be a category error
-            // (a bare `exit 0` check would even pass vacuously) — so it keeps failing closed, and a repo-less run
-            // without a contract keeps today's null workspace, both byte-identically.
-            workspace ??= Publish.ArtifactManifestStore.DeclaredDeliverablePaths(task).Count > 0 ? Workspace.ScratchWorkspaceHandle.Create(agentRunId) : null;
+            // DC-4 slice 2 / C2: EVERY repo-less run needs a WORLD — a scratch working directory the harness runs
+            // in, the capture reads from, and the oracle grades against. Without it the harness ran with a null
+            // working directory and anything it wrote (a report.md it was never asked to declare) died with the
+            // process, unreachable and unaccountable. The declared-deliverable condition that used to gate this is
+            // gone: a run only knows what it declared, and the interesting loss was always the file nobody declared.
+            workspace ??= Workspace.ScratchWorkspaceHandle.Create(agentRunId);
 
             // The primary repo's directory + cloned base SHA, stamped onto the durable handle at launch so a
             // re-attach can capture the diff even after the live workspace handle object dies with this worker.
@@ -1554,7 +1552,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         {
             var captured = await _artifactManifests.CaptureDeclaredAsync(task, workspace.Directory, runId, run.WorkflowRunId, run.TeamId, claimedEpoch, cancellationToken).ConfigureAwait(false);
 
-            return captured == 0 ? result : result with { CapturedArtifactCount = captured };
+            // C2: only a SCRATCH world (a repo-less run) gets the undeclared walk. A git-backed workspace's
+            // undeclared files are already captured — as the diff, with their history — so walking one would mint a
+            // second, weaker copy of what the patch already holds.
+            var walk = workspace.Repositories.Count == 0
+                ? await _artifactManifests.CaptureUndeclaredAsync(task, workspace.Directory, runId, run.WorkflowRunId, run.TeamId, claimedEpoch, cancellationToken).ConfigureAwait(false)
+                : UndeclaredCaptureOutcome.None;
+
+            return result with { CapturedArtifactCount = captured, UndeclaredArtifactCount = walk.Captured, UncapturedScratchFileCount = walk.Refused };
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1601,7 +1606,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             repos = result.RepositoryResults.Count,
             declaredDeliverables = declared,
             typedArtifacts = result.CapturedArtifactCount,
-            empty = result.ChangedFiles.Count == 0 && string.IsNullOrEmpty(result.Patch) && result.PatchArtifactId is null && result.RepositoryResults.Count == 0 && result.CapturedArtifactCount == 0 && declared == 0,
+            // C2: the scratch walk's PAIR — what it took, and what it left. The second number is the shortfall the
+            // walk's own file/byte ceiling can produce, which nothing else in these facts could reveal.
+            undeclaredArtifacts = result.UndeclaredArtifactCount,
+            uncapturedScratchFiles = result.UncapturedScratchFileCount,
+            empty = result.ChangedFiles.Count == 0 && string.IsNullOrEmpty(result.Patch) && result.PatchArtifactId is null && result.RepositoryResults.Count == 0 && result.CapturedArtifactCount == 0 && result.UndeclaredArtifactCount == 0 && declared == 0,
         }, AgentJson.Options);
     }
 
@@ -2043,9 +2052,24 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         return AcceptanceFailed(result, grade.Detail) with { AcceptanceEvidenceId = grade.EvidenceArtifactId };
     }
 
-    /// <summary>The repo-less grade fold: the same per-kind oracle over the still-alive scratch directory, the same pass/fail stamping as the branch/patch lanes — a grader escape degrades to not-accepted, never a crash.</summary>
+    /// <summary>
+    /// The repo-less grade fold: the same per-kind oracle over the still-alive scratch directory, the same pass/fail
+    /// stamping as the branch/patch lanes — a grader escape degrades to not-accepted, never a crash.
+    /// <para>C2: every repo-less run now HAS a scratch world (the walk needs one), so the kind check that used to be
+    /// implied by "no scratch existed for a TestsPass contract" is explicit here instead. A TestsPass argv in a
+    /// directory of captured documents is a category error — a bare <c>exit 0</c> would pass vacuously — so it keeps
+    /// failing closed on the exact same detail as before, from <see cref="AgentAcceptanceContract.GradesFromDeliverables"/>,
+    /// the one rule the supervisor fold's twin reads too.</para>
+    /// </summary>
     private async Task<AgentRunResult> GradeScratchAsync(AgentRun run, SupervisorAcceptanceSpec spec, AgentRunResult result, IWorkspaceHandle scratch, CancellationToken cancellationToken)
     {
+        if (!AgentAcceptanceContract.GradesFromDeliverables(spec))
+        {
+            _logger.LogWarning("Agent run {RunId}: a TestsPass acceptance contract is present but there is no repository to run it against — failing closed", run.Id);
+
+            return AcceptanceFailed(result, "no-branch-or-repo");
+        }
+
         BenchmarkGrade grade;
         try
         {

@@ -840,20 +840,22 @@ public sealed partial class SupervisorTurnService
     };
 
     /// <summary>
-    /// Grade ONE unit against its subtask acceptance SPEC, fail-closed: no repo → not-accepted; the grader is itself
+    /// Grade ONE unit against its subtask acceptance SPEC, fail-closed: the grader is itself
     /// fail-closed; any unexpected non-cancellation escape degrades to not-accepted so the terminal fold can never
-    /// crash + strand the row. S2: a unit with no pushed branch is graded against its own recorded patch (via the
+    /// crash + strand the row. C2: a unit with no REPO is graded against the deliverables it durably CAPTURED (see
+    /// <see cref="GradeCapturedUnitAsync"/>) instead of being failed closed on "no-branch-or-repo" — research /
+    /// report subtasks are a first-class supervisor path outside a repo too. S2: a unit with no pushed branch is graded against its own recorded patch (via the
     /// manifest, the single source of truth — I2) before falling back to <paramref name="expectsChanges"/>'s
     /// verdict — <c>true</c> (the default) fails closed exactly as before this field existed; <c>false</c> means the
     /// subtask never declared/implied a diff, so the absence is the CORRECTLY predicted outcome, not a failure.
     /// </summary>
     private async Task<BenchmarkGrade> GradeUnitAcceptanceAsync(SupervisorAgentResult result, Guid? repositoryId, SupervisorAcceptanceSpec spec, bool expectsChanges, Guid teamId, Guid decisionId, CancellationToken cancellationToken)
     {
-        if (repositoryId is null) return new BenchmarkGrade { Passed = false, Detail = "no-branch-or-repo" };
-
         try
         {
             var timeoutSeconds = spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds;
+
+            if (repositoryId is null) return await GradeCapturedUnitAsync(result, spec, timeoutSeconds, teamId, cancellationToken).ConfigureAwait(false);
 
             if (!string.IsNullOrEmpty(result.ProducedBranch))
             {
@@ -882,6 +884,28 @@ public sealed partial class SupervisorTurnService
             _logger.LogWarning(ex, "Per-unit acceptance grade for agent {AgentRunId} in decision {DecisionId} failed unexpectedly; recording not-accepted", result.AgentRunId, decisionId);
             return new BenchmarkGrade { Passed = false, Detail = $"grade-error: {ex.Message}", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault };
         }
+    }
+
+    /// <summary>
+    /// C2 — the REPO-LESS unit's verdict. A deliverable-shaped contract (ArtifactPresent / LlmJudge /
+    /// CitationsResolve / ArtifactSchema — the kinds whose Command is a path list) is graded against the
+    /// deliverables the attempt DURABLY captured, materialized back out of the artifact store; the producing
+    /// worker's scratch directory is gone by now and, on a multi-worker deployment, never existed on this host, so
+    /// the manifest rows are the only sound world. Before this, every such unit was failed closed on
+    /// "no-branch-or-repo" — a detail that classifies GENUINE with no work present, so the decider was told to
+    /// "RETRY this exact subtask" for a report it had already written correctly.
+    ///
+    /// <para>A <c>TestsPass</c> contract (or an absent kind, which defaults to it) keeps failing closed on today's
+    /// exact detail: its Command is an ARGV presupposing a code world, so running it in a directory of captured
+    /// documents would be a category error — a bare <c>exit 0</c> check would even pass vacuously. Mirrors the
+    /// executor's own scratch-lane reasoning verbatim.</para>
+    /// </summary>
+    private async Task<BenchmarkGrade> GradeCapturedUnitAsync(SupervisorAgentResult result, SupervisorAcceptanceSpec spec, int timeoutSeconds, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (!Agents.AgentAcceptanceContract.GradesFromDeliverables(spec))
+            return new BenchmarkGrade { Passed = false, Detail = "no-branch-or-repo" };
+
+        return await _acceptanceGrader.GradeCapturedAsync(result.AgentRunId, teamId, spec, timeoutSeconds, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

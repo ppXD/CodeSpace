@@ -18,6 +18,18 @@ public static class AgentAcceptanceContract
     public static bool RequiresGrade(AgentTask task) =>
         task.Acceptance is { } spec && spec.Command.Any(c => !string.IsNullOrWhiteSpace(c));
 
+    /// <summary>
+    /// C2 — whether the spec's oracle reads DELIVERABLE FILES (its <c>Command</c> is a path list: ArtifactPresent,
+    /// LlmJudge, CitationsResolve, ArtifactSchema) rather than an ARGV. The ONE rule the repo-less lane turns on, at
+    /// every tier: the executor's scratch grade, the supervisor fold's captured grade, and the capture's own
+    /// declared-path derivation all read it here, so they can never disagree about what a repo-less world means.
+    /// <c>TestsPass</c> — and an absent kind, which defaults to it — presupposes a code world: running its argv in a
+    /// directory of captured documents would be a category error (a bare <c>exit 0</c> would pass vacuously), so it
+    /// stays fail-closed with no repo.
+    /// </summary>
+    public static bool GradesFromDeliverables(SupervisorAcceptanceSpec? spec) =>
+        spec is { Kind: not null and not BenchmarkGradingKind.TestsPass };
+
     /// <summary>Whether the task is expected to produce a diff/branch at all (S2). Null (the caller didn't say) defaults to <c>true</c> — byte-identical to before this field existed, so an unmarked contract still fails closed on a missing branch/repo.</summary>
     public static bool ExpectsChanges(AgentTask task) => task.ExpectsChanges ?? true;
 

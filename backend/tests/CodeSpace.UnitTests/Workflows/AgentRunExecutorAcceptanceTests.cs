@@ -538,9 +538,62 @@ public class AgentRunExecutorAcceptanceTests
         grader.LastCommand.ShouldBe(new[] { "sh", "check.sh" });
     }
 
+    // ─── C2: the repo-less lane, now that EVERY repo-less run has a scratch world ─────────────────────────
+
+    /// <summary>
+    /// A repo-less run's scratch world used to exist only when its contract declared deliverable paths, which meant
+    /// a TestsPass contract could never reach the directory oracle. C2 gives every repo-less run a world (the
+    /// undeclared walk needs one), so the kind rule has to be explicit — or a bare <c>exit 0</c> check would run in
+    /// a directory of documents and pass VACUOUSLY, inventing a green verdict out of a category error.
+    /// </summary>
+    [Fact]
+    public async Task A_repo_less_tests_pass_contract_stays_fail_closed_even_though_a_scratch_world_now_exists()
+    {
+        var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "must-not-be-consulted" });
+
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), RepoLessTaskWith(Spec("sh", "check.sh")), SucceededRepoLess(), new FakeScratchWorkspace(), CancellationToken.None);
+
+        result.AcceptancePassed.ShouldBe(false);
+        result.AcceptanceDetail.ShouldBe("no-branch-or-repo", "the exact detail this lane has always failed closed on");
+        grader.DirectoryCalls.ShouldBe(0, "an argv oracle must never be pointed at a directory of captured documents");
+    }
+
+    [Fact]
+    public async Task A_repo_less_deliverable_contract_grades_against_the_scratch_world()
+    {
+        var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "artifact-present" });
+
+        var spec = new SupervisorAcceptanceSpec { Command = new[] { "report.md" }, Kind = BenchmarkGradingKind.ArtifactPresent };
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), RepoLessTaskWith(spec), SucceededRepoLess(), new FakeScratchWorkspace(), CancellationToken.None);
+
+        result.AcceptancePassed.ShouldBe(true);
+        result.AcceptanceDetail.ShouldBe("artifact-present");
+        grader.DirectoryCalls.ShouldBe(1, "the still-alive scratch directory IS the world — the same ONE directory oracle the supervisor fold rebuilds one for");
+    }
+
     // ─── fixtures ────────────────────────────────────────────────────────────────
 
     private static AgentRun Run() => new() { Id = Guid.NewGuid(), TeamId = Guid.NewGuid() };
+
+    private static AgentTask RepoLessTaskWith(SupervisorAcceptanceSpec acceptance) =>
+        new() { Goal = "write the findings report", Harness = "codex-cli", RepositoryId = null, Acceptance = acceptance };
+
+    /// <summary>A repo-less producer: no repository, so no branch and no diff — the report it wrote lives in the scratch world alone.</summary>
+    private static AgentRunResult SucceededRepoLess() => new() { Status = AgentRunStatus.Succeeded, ExitReason = "completed" };
+
+    /// <summary>A scratch handle's shape as the grade gate reads it: a directory, and NO repositories (the discriminator every git-shaped step skips on).</summary>
+    private sealed class FakeScratchWorkspace : Core.Services.Agents.Workspace.IWorkspaceHandle
+    {
+        public string Directory { get; } = Path.Combine(Path.GetTempPath(), "cs-scratch-fake-" + Guid.NewGuid().ToString("N"));
+
+        public IReadOnlyList<Core.Services.Agents.Workspace.WorkspaceRepositoryHandle> Repositories { get; } = Array.Empty<Core.Services.Agents.Workspace.WorkspaceRepositoryHandle>();
+
+        public string PrimaryAlias => "";
+
+        public Task<WorkspaceChanges> CaptureChangesAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<WorkspaceChanges> CaptureChangesAsync(string alias, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
 
     private static AgentTask TaskWith(SupervisorAcceptanceSpec? acceptance, bool? expectsChanges = null) =>
         new() { Goal = "g", Harness = "codex-cli", RepositoryId = Guid.NewGuid(), Acceptance = acceptance, ExpectsChanges = expectsChanges };
@@ -654,6 +707,19 @@ public class AgentRunExecutorAcceptanceTests
 
         public Task<BenchmarkGrade> GradeBaseAsync(Guid repositoryId, Guid teamId, string baseSha, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken) =>
             Task.FromResult(new BenchmarkGrade { Passed = true, Detail = "baseline-tests-passed" });
+
+        /// <summary>C2 — the repo-less directory lane. Counted separately from <see cref="Calls"/> so a test can assert an argv oracle was never pointed at a scratch world.</summary>
+        public int DirectoryCalls { get; private set; }
+
+        public Task<BenchmarkGrade> GradeDirectoryAsync(string directory, SupervisorAcceptanceSpec spec, Guid teamId, int timeoutSeconds, CancellationToken cancellationToken)
+        {
+            DirectoryCalls++;
+            LastCommand = spec.Command;
+
+            if (Throw is { } ex) throw ex;
+
+            return Task.FromResult(Grade);
+        }
     }
 
     /// <summary>Records every upsert (never persists — an in-memory list is enough to assert the AcceptanceState wiring). Shares the SAME <see cref="FakeGrader"/> the executor's DI scope resolves, so <see cref="NewExecutorWithManifests"/> can script per-branch grades exactly like <see cref="NewExecutor"/>'s callers do.</summary>
