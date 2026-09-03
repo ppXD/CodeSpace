@@ -29,6 +29,19 @@ public interface IModelPoolSelector
     Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken);
 
     /// <summary>
+    /// The COST-CEILINGED pick (Rule 7 sibling; D2) — <see cref="SelectAsync(Guid, string, IReadOnlyList{string}?, string?, CancellationToken)"/>
+    /// with a <paramref name="tierCeiling"/> a CHEAP caller declares: prefer rows whose EFFECTIVE tier is at or below it,
+    /// so the plane's short schema-bounded questions (effort classification, capability tiering, lesson distillation,
+    /// spec preview) stop automatically spending the team's Frontier model. Bounded by <see cref="ModelTierCeiling"/>'s two
+    /// invariants — an <c>IsDefault</c> row still wins outright (operator authority is absolute), and a pool where NOTHING
+    /// satisfies the ceiling falls back to the unceilinged ladder (never strand a call on cost). A <c>null</c> ceiling is
+    /// byte-identical to the unceilinged overload, which is why the default implementation delegates to it: every fake
+    /// inherits today's behavior unchanged, and only the real selector honours a ceiling.
+    /// </summary>
+    Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, ModelCapabilityTier? tierCeiling, CancellationToken cancellationToken) =>
+        SelectAsync(teamId, provider, allowedModels, pinnedModel, cancellationToken);
+
+    /// <summary>
     /// Resolve ONE credentialed-model row the operator picked by id (the supervisor's brain model) → its model id + the
     /// decrypted backing credential. Team-scoped, must be ENABLED under an ACTIVE credential. <c>null</c> when the row is
     /// missing / disabled / revoked / not the team's → the caller fails closed. Unambiguous by construction: a row id

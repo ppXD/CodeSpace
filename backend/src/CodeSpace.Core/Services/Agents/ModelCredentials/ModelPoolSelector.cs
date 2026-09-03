@@ -25,7 +25,10 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
         _encryptor = encryptor;
     }
 
-    public async Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken)
+    public async Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken) =>
+        await SelectAsync(teamId, provider, allowedModels, pinnedModel, tierCeiling: null, cancellationToken).ConfigureAwait(false);
+
+    public async Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, ModelCapabilityTier? tierCeiling, CancellationToken cancellationToken)
     {
         // The pool is the team's ENABLED credentialed models under an ACTIVE credential FOR THE PROVIDER the client
         // serves (so the key authenticates that API). GENERIC — no capability gate: structured output is the client's
@@ -71,6 +74,13 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
         {
             var reachable = candidates.Where(c => c.Available != false).ToList();
             if (reachable.Count > 0) pool = reachable;
+
+            // D2 — the CHEAP caller's cost ceiling, applied INSIDE the reachable set (availability is the outer bound on
+            // purpose: a known-dead row that satisfies the ceiling is still a NoModelStop, so anti-strand outranks cost).
+            // An IsDefault row survives the narrowing regardless of tier, and a pool where nothing satisfies the ceiling
+            // is returned whole — see ModelTierCeiling. A null ceiling (every caller but the four cheap ones) is the
+            // identity, so this line is byte-identical to before for the planner / decider / critics / judges / llm.complete.
+            pool = ModelTierCeiling.Apply(pool, tierCeiling, m => m.IsDefault, m => m.ProbedCapabilityTier, m => m.CapabilityTier);
         }
 
         // Rank by the EFFECTIVE tier = objectively-probed (opaque-id probe) ?? brain-inferred ?? Unknown, so a probed

@@ -14,6 +14,7 @@ using CodeSpace.Core.Services.Tasks.Recipes.SingleAgent;
 using CodeSpace.Core.Services.Tasks.Recipes.Supervisor;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks;
 using CodeSpace.Messages.Tasks.Effort;
 using Shouldly;
@@ -126,6 +127,21 @@ public class LlmEffortClassifierTests
         var decision = await Classifier(new RawThrowingClient(), Pick()).ClassifyAsync(Request(), CancellationToken.None);
 
         decision.ClassifierKind.ShouldBe(HeuristicEffortClassifier.ClassifierKind, "a raw client exception degrades to the heuristic — the launch never crashes (the 兜底 contract)");
+    }
+
+    // ── D2: the classifier is a CHEAP call — it declares a cost ceiling ──
+
+    [Fact]
+    public async Task It_asks_the_pool_for_a_ceilinged_model_never_the_teams_strongest()
+    {
+        // One short schema-bounded question the operator immediately reviews on the confirm card — it must not
+        // automatically spend the team's Frontier model, which the unceilinged "strongest available" ladder would give it.
+        var selector = new FakeSelector(Pick());
+
+        await new LlmEffortClassifier(new FakeClients(new CannedClient(Reply(confidence: 0.9))), selector, new FakeRecipes(), new HeuristicEffortClassifier())
+            .ClassifyAsync(Request(), CancellationToken.None);
+
+        selector.SeenCeiling.ShouldBe(InProcessStructuredModel.CheapBrainCeiling, "the launch effort classifier is one of D2's four cheap callers");
     }
 
     // ── End-to-end through the router: a confident LLM routes WITHOUT a confirm card ──
@@ -266,6 +282,16 @@ public class LlmEffortClassifierTests
     {
         private readonly ModelPoolPick? _pick;
         public FakeSelector(ModelPoolPick? pick) => _pick = pick;
+
+        /// <summary>The ceiling the classifier asked for (D2) — null until it resolves a model, so a test can prove the ARGUMENT, not merely the outcome.</summary>
+        public ModelCapabilityTier? SeenCeiling { get; private set; }
+
+        public Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, ModelCapabilityTier? tierCeiling, CancellationToken ct)
+        {
+            SeenCeiling = tierCeiling;
+            return Task.FromResult(_pick);
+        }
+
         public Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken ct) => Task.FromResult(_pick);
         public Task<ModelPoolPick?> ResolveByRowIdAsync(Guid teamId, Guid modelCredentialModelId, CancellationToken ct) => Task.FromResult(_pick);
         public Task<ModelDispatchRef?> ResolveDispatchAsync(Guid teamId, string modelName, IReadOnlyList<Guid>? allowedRowIds, CancellationToken ct) => Task.FromResult<ModelDispatchRef?>(null);

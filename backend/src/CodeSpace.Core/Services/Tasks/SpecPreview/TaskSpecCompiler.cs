@@ -86,7 +86,7 @@ public sealed class TaskSpecCompiler : ITaskSpecCompiler, IScopedDependency
     {
         try
         {
-            if (await InProcessStructuredModel.ResolveAsync(_clients, _models, teamId, cancellationToken).ConfigureAwait(false) is not { } resolved)
+            if (await InProcessStructuredModel.ResolveAsync(_clients, _models, teamId, cancellationToken, InProcessStructuredModel.CheapBrainCeiling).ConfigureAwait(false) is not { } resolved)
                 return null;
 
             var (structured, pick) = resolved;

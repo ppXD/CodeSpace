@@ -49,7 +49,7 @@ public sealed class ModelCapabilityTieringService : IModelCapabilityTieringServi
 
             var ids = rows.Select(r => r.ModelId).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
-            if (await InProcessStructuredModel.ResolveAsync(_clients, _models, teamId, cancellationToken).ConfigureAwait(false) is not { } resolved)
+            if (await InProcessStructuredModel.ResolveAsync(_clients, _models, teamId, cancellationToken, InProcessStructuredModel.CheapBrainCeiling).ConfigureAwait(false) is not { } resolved)
                 return;   // no structured provider with a team model → nothing to tier with; leave un-tiered (fail-closed)
 
             var (structured, pick) = resolved;

@@ -87,7 +87,7 @@ public sealed class LessonDistiller : ILessonDistiller, IScopedDependency
 
         if (candidates.Count == 0) return;
 
-        if (await InProcessStructuredModel.ResolveAsync(_clients, _models, teamId, cancellationToken).ConfigureAwait(false) is not { } resolved)
+        if (await InProcessStructuredModel.ResolveAsync(_clients, _models, teamId, cancellationToken, InProcessStructuredModel.CheapBrainCeiling).ConfigureAwait(false) is not { } resolved)
         {
             _logger.LogWarning("Lesson distillation for team {TeamId} skipped — no structured-capable pool model (fail-closed)", teamId);
             return;

@@ -82,6 +82,37 @@ public sealed class LessonDistillationFlowTests
         await Distiller(scope, client).DistillTeamAsync(teamId, CancellationToken.None);
     }
 
+    [Fact]
+    public async Task Distillation_runs_on_a_ceilinged_model_and_records_THAT_model_as_the_author()
+    {
+        // 🟢 High-fidelity: the REAL ModelPoolSelector + real Postgres decide the model; only the LLM transport is faked.
+        // The nightly distiller is one of D2's four CHEAP callers, so an unstarred Frontier + unstarred Strong pool must
+        // run it on the Strong row — and the ledger's distilled_by_model must name THAT model, not the pick the
+        // unceilinged ladder would have made. ('aaa-frontier' sorts first too, so alphabetical luck can't fake a pass.)
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (_, frontierRow) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "aaa-frontier");
+        var (_, strongRow) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "zzz-strong");
+        await SetTierAsync(frontierRow, ModelCapabilityTier.Frontier);
+        await SetTierAsync(strongRow, ModelCapabilityTier.Strong);
+
+        var runId = await SeedFailedRunAsync(teamId, userId, "acceptance: ./check.sh exited 2");
+        var canned = new CannedClient(Proposals(runId));
+
+        await DistillTeamAsync(teamId, canned);
+
+        using var scope = _fixture.BeginScope();
+        var lesson = await scope.Resolve<CodeSpaceDbContext>().Lesson.AsNoTracking().SingleAsync(l => l.TeamId == teamId);
+        lesson.DistilledByModel.ShouldBe("zzz-strong", "the distiller ran under InProcessStructuredModel.CheapBrainCeiling AND the provenance names the model that actually answered");
+    }
+
+    private async Task SetTierAsync(Guid rowId, ModelCapabilityTier tier)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        (await db.ModelCredentialModel.SingleAsync(m => m.Id == rowId)).CapabilityTier = tier;
+        await db.SaveChangesAsync();
+    }
+
     private static LessonDistiller Distiller(ILifetimeScope scope, IStructuredLLMClient client) =>
         new(new FakeClients(client), scope.Resolve<IModelPoolSelector>(), scope.Resolve<ISupervisorDecisionLog>(), scope.Resolve<CodeSpaceDbContext>(), NullLogger<LessonDistiller>.Instance);
 
