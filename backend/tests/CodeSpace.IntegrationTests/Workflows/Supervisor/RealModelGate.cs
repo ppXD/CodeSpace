@@ -179,7 +179,7 @@ public static class RealModelGate
         {
             var (outcome, note) = await drive().ConfigureAwait(false);
 
-            ReportThreeWay(outcome, note, stepSummaryPath);
+            ReportThreeWay(outcome, note, stepSummaryPath, test);
 
             if (IsRequired(provider))
                 (outcome != RealModelOutcome.CodeFault).ShouldBeTrue($"REQUIRED wire — the engine FAULTED driving the live brain (a CODE regression, NOT a model-capability miss): {note} {ModelStamp()}");
@@ -277,7 +277,7 @@ public static class RealModelGate
             {
                 var (ok, verdict) = await driveOnce().ConfigureAwait(false);
 
-                ReportInformational(provider, ok, verdict, stepSummaryPath, test);   // every attempt's verdict surfaced — a persistent miss is visible
+                ReportInformational(provider, ok, verdict, stepSummaryPath, test, informational: false);   // every attempt's verdict surfaced — a persistent miss is visible. NOT "informational": this is the gating wire's attempt N.
 
                 if (ok) return;   // any Ok among N → PASS
 
@@ -294,7 +294,11 @@ public static class RealModelGate
 
         // The budget ran out on gateway INFRA, so the eval never reached a full N-attempt verdict. Non-gating as before
         // — but a SKIP, not a pass: the trx records NotExecuted so "the lane measured nothing" is legible as itself.
-        if (infraSkip != null) throw new SkipException(infraSkip);
+        //
+        // ONLY when nothing was measured at all. `infra,infra,infra,fail` on a budget of 2 leaves one REAL fail verdict
+        // that the model actually produced; calling that NotExecuted would throw away the very measurement the lane
+        // exists to take (and hide it from the outcome table the guard prints).
+        if (failVerdicts.Count == 0 && infraSkip != null) throw new SkipException(infraSkip);
     }
 
     /// <summary>
@@ -310,11 +314,11 @@ public static class RealModelGate
     /// never a silent green. An informational wire never gates regardless. SKIP ≠ PASS: the caller's secret guard handles
     /// the no-credentials skip (surfaced via <see cref="ReportSkipped(string, string)"/>) — this method never sees it.
     /// </summary>
-    public static Task AssessLiveWholeLoopAsync(string provider, Func<Task<(RealModelOutcome Outcome, string Note)>> driveOnce, int? attempts = null) =>
-        AssessLiveWholeLoopAsync(provider, driveOnce, attempts ?? WholeLoopAttempts(), Environment.GetEnvironmentVariable(StepSummaryEnvVar));
+    public static Task AssessLiveWholeLoopAsync(string provider, Func<Task<(RealModelOutcome Outcome, string Note)>> driveOnce, int? attempts = null, [CallerMemberName] string? test = null) =>
+        AssessLiveWholeLoopAsync(provider, driveOnce, attempts ?? WholeLoopAttempts(), Environment.GetEnvironmentVariable(StepSummaryEnvVar), test: test);
 
     /// <summary>Testable core of the strict whole-loop gate — takes the attempt budget + step-summary path explicitly so a test pins the best-of-N / infra / gate logic with NO live call and without mutating process env. Any Drove → pass; a CodeFault → gate at once (never retried); a gateway-infra failure → non-gating skip that does not consume a slot; only when all <paramref name="attempts"/> non-infra attempts park short → gate (CapabilityMiss).</summary>
-    internal static async Task AssessLiveWholeLoopAsync(string provider, Func<Task<(RealModelOutcome Outcome, string Note)>> driveOnce, int attempts, string? stepSummaryPath, TimeSpan? attemptDeadline = null)
+    internal static async Task AssessLiveWholeLoopAsync(string provider, Func<Task<(RealModelOutcome Outcome, string Note)>> driveOnce, int attempts, string? stepSummaryPath, TimeSpan? attemptDeadline = null, [CallerMemberName] string? test = null)
     {
         var budget = Math.Max(1, attempts);   // defend the core: a non-positive budget would otherwise gate on ZERO misses (the public entrypoint already clamps via WholeLoopAttempts, but this core is callable directly)
         var missNotes = new List<string>();   // accumulate each park-short verdict so the gate message names WHY (rounds vs schema), visible in the CI console log — not just the job summary
@@ -332,7 +336,7 @@ public static class RealModelGate
             {
                 var (outcome, note) = await driveOnce().WaitAsync(attemptCts.Token).ConfigureAwait(false);
 
-                ReportThreeWay(outcome, note, stepSummaryPath);
+                ReportThreeWay(outcome, note, stepSummaryPath, test);
 
                 if (outcome == RealModelOutcome.Drove) return;   // any Drove among N → PASS (real model drove to completion)
 
@@ -353,7 +357,7 @@ public static class RealModelGate
                 // real "did not drive to completion" signal, so it accrues toward the budget and a PERSISTENT hang REDs
                 // fast (~budget×deadline), well under the CI job cap — instead of one stuck test silently killing the job.
                 var note = $"did not converge within {deadline.TotalMinutes:0}m — likely a hung agent or gateway call (per-attempt deadline)";
-                ReportThreeWay(RealModelOutcome.CapabilityMiss, note, stepSummaryPath);
+                ReportThreeWay(RealModelOutcome.CapabilityMiss, note, stepSummaryPath, test);
                 missNotes.Add(note);
             }
             catch (Exception ex) when (IsGatewayInfraFailure(ex))
@@ -367,7 +371,11 @@ public static class RealModelGate
 
         // misses < attempts only because gateway-infra exhausted the bounded attempt budget → non-gating infra skip.
         // Still non-gating, but recorded as a SKIP so the trx cannot pass off an unmeasured lane as a green one.
-        if (missNotes.Count < budget && infraSkip != null) throw new SkipException(infraSkip);
+        //
+        // Same rule as the boolean best-of-N above: only when NOTHING was measured. A run that produced a real
+        // CapabilityMiss before infra ate the rest of the budget did measure something, and reporting that as
+        // NotExecuted would discard it.
+        if (missNotes.Count == 0 && infraSkip != null) throw new SkipException(infraSkip);
     }
 
     /// <summary>Surface a no-credentials / unavailable-binary SKIP LOUDLY as explicitly NOT-A-PASS — so the ONLY honest green-skip (a fork/local run with no live model) is legible in the job summary and can never be mistaken for a real-model pass. Pure given <paramref name="stepSummaryPath"/>.</summary>
@@ -393,8 +401,8 @@ public static class RealModelGate
         return new SkipException(line);
     }
 
-    /// <summary>Surface a three-way whole-loop outcome (ALWAYS — a CapabilityMiss must never read as a silent green) to the step-summary FILE when present (capture-immune → the job-summary UI), else the console. Pure given <paramref name="stepSummaryPath"/>.</summary>
-    internal static void ReportThreeWay(RealModelOutcome outcome, string note, string? stepSummaryPath)
+    /// <summary>Surface a three-way whole-loop outcome (ALWAYS — a CapabilityMiss must never read as a silent green) to the step-summary FILE when present (capture-immune → the job-summary UI), else the console. Names the TEST it came from: a whole-loop job runs a dozen arms into ONE step summary, and an unattributed "CAPABILITY MISS" line cannot be traced back to the arm that produced it. Pure given <paramref name="stepSummaryPath"/>.</summary>
+    internal static void ReportThreeWay(RealModelOutcome outcome, string note, string? stepSummaryPath, [CallerMemberName] string? test = null)
     {
         var (icon, label) = outcome switch
         {
@@ -402,7 +410,7 @@ public static class RealModelGate
             RealModelOutcome.CapabilityMiss => ("ℹ️", "CAPABILITY MISS — the model did not drive the arc (REPORTED, NOT gating)"),
             _ => ("⚠️", "CODE FAULT — the engine faulted on the live brain's decisions (gates the blessed wire)"),
         };
-        var line = $"{icon} real-model whole-loop: {label} — {note} {ModelStamp()}";
+        var line = $"{icon} real-model whole-loop [{test ?? "(unnamed)"}]: {label} — {note} {ModelStamp()}";
 
         if (!string.IsNullOrWhiteSpace(stepSummaryPath))
             File.AppendAllText(stepSummaryPath, line + Environment.NewLine);
@@ -610,16 +618,22 @@ public static class RealModelGate
     /// completely silent in the job log while the trx recorded a one-second Passed. Pure given
     /// <paramref name="stepSummaryPath"/> → pinnable without mutating process env.
     /// </summary>
-    internal static void ReportInformational(string provider, bool ok, string verdict, string? stepSummaryPath, string? test = null)
+    internal static void ReportInformational(string provider, bool ok, string verdict, string? stepSummaryPath, string? test = null, bool informational = true)
     {
-        var line = $"{(ok ? "✅" : "⚠️")} real-model INFORMATIONAL wire (reported, NOT gating CI) — {verdict} {ModelStamp()}";
+        var label = informational
+            ? "INFORMATIONAL wire (reported, NOT gating CI)"
+            : "best-of-N ATTEMPT on the BLESSED wire (a later attempt can still pass; only an all-attempt failure gates)";
+        var line = $"{(ok ? "✅" : "⚠️")} real-model {label} — {verdict} {ModelStamp()}";
 
         if (!string.IsNullOrWhiteSpace(stepSummaryPath))
             File.AppendAllText(stepSummaryPath, line + Environment.NewLine);
         else
             Console.WriteLine(line);
 
-        if (!ok) Console.WriteLine($"[realmodel] INFORMATIONAL-FAIL {test ?? "(unnamed)"} wire={provider} reason={verdict} {ModelStamp()}");
+        // The two failures mean OPPOSITE things to a reader, so they must not share a tag: INFORMATIONAL-FAIL is
+        // "ignore this, the wire never gates", ATTEMPT-FAIL is "attempt 1 of N on the wire that DOES gate". Job
+        // 100548613534 printed the former for a blessed Anthropic attempt, which reads as a non-event.
+        if (!ok) Console.WriteLine($"[realmodel] {(informational ? "INFORMATIONAL-FAIL" : "ATTEMPT-FAIL")} {test ?? "(unnamed)"} wire={provider} reason={verdict} {ModelStamp()}");
     }
 
     /// <summary>Whether <paramref name="provider"/>'s verdict gates CI (it is in the blessed set), reading the override from the process env.</summary>
