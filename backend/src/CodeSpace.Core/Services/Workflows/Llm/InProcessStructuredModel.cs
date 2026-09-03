@@ -1,4 +1,5 @@
 using CodeSpace.Core.Services.Agents.ModelCredentials;
+using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Core.Services.Workflows.Llm;
 
@@ -17,20 +18,42 @@ namespace CodeSpace.Core.Services.Workflows.Llm;
 public static class InProcessStructuredModel
 {
     /// <summary>
+    /// D2 — the ONE cost ceiling every CHEAP in-process caller passes to <see cref="ResolveAsync"/>: the launch effort
+    /// classifier, model capability tiering, the nightly lesson distiller, the spec-preview compiler. Each asks ONE
+    /// short, schema-bounded question whose answer a human reviews or which is merely advisory, so none of them needs
+    /// the team's <see cref="ModelCapabilityTier.Frontier"/> model — before this ceiling every one of them got it, because
+    /// the pool's unpinned ladder ranks the EFFECTIVE tier DESCENDING ("auto = the strongest available brain").
+    /// <see cref="ModelCapabilityTier.Strong"/> is the ceiling rather than <see cref="ModelCapabilityTier.Basic"/> because
+    /// these calls still need reliable schema adherence — the goal is to stop reaching for the priciest tier, not to
+    /// route the plane's judgment onto its weakest model.
+    ///
+    /// <para>The DELIBERATE non-callers: the supervisor brain, the workflow planner, the critics, the rubric judges and
+    /// the agents themselves. Their output is the product, is not human-reviewed before it acts, or is the very thing
+    /// capability buys — so they keep the unceilinged "strongest available" ladder.</para>
+    /// </summary>
+    public const ModelCapabilityTier CheapBrainCeiling = ModelCapabilityTier.Strong;
+
+    /// <summary>
     /// L4 pool failover: EVERY registered structured provider the team has a model for becomes a candidate, in registry
     /// order. One candidate ⇒ returned directly (byte-identical to before). Several ⇒ the returned client is a
     /// <see cref="FailoverStructuredClient"/> over all of them and the returned pick is the FIRST candidate's — so a
     /// transient / rate-limit fault on the first provider hops to the next with its own credential, and the answering
     /// model rides <see cref="StructuredLLMCompletion.Model"/> (callers stamp provenance from THAT, never the pick).
     /// The operator-pinned row path (<see cref="ResolveByRowIdAsync"/>) never fails over: an explicit pin resolves verbatim.
+    ///
+    /// <para>D2: <paramref name="tierCeiling"/> (null = the unceilinged "strongest available" ladder, so every existing
+    /// caller is byte-identical) is applied PER CANDIDATE PROVIDER, which is how the ceiling composes with pool failover
+    /// — each provider contributes its own cheapest-satisfying row, and a provider whose pool has nothing under the
+    /// ceiling still contributes its unceilinged pick rather than dropping out of the failover chain. So a ceiling can
+    /// never shorten the chain, and a hop lands on a ceilinged row wherever one exists.</para>
     /// </summary>
-    public static async Task<(IStructuredLLMClient Client, ModelPoolPick Pick)?> ResolveAsync(ILLMClientRegistry clients, IModelPoolSelector models, Guid teamId, CancellationToken cancellationToken)
+    public static async Task<(IStructuredLLMClient Client, ModelPoolPick Pick)?> ResolveAsync(ILLMClientRegistry clients, IModelPoolSelector models, Guid teamId, CancellationToken cancellationToken, ModelCapabilityTier? tierCeiling = null)
     {
         var candidates = new List<(IStructuredLLMClient Client, ModelPoolPick Pick)>();
 
         foreach (var client in clients.All.OfType<IStructuredLLMClient>())
         {
-            var pick = await models.SelectAsync(teamId, client.Provider, allowedModels: null, pinnedModel: null, cancellationToken).ConfigureAwait(false);
+            var pick = await models.SelectAsync(teamId, client.Provider, allowedModels: null, pinnedModel: null, tierCeiling, cancellationToken).ConfigureAwait(false);
 
             if (pick != null) candidates.Add((client, pick));
         }

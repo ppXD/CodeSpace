@@ -72,7 +72,7 @@ public sealed class LlmEffortClassifier : IEffortClassifier, IScopedDependency
     {
         try
         {
-            if (await InProcessStructuredModel.ResolveAsync(_clients, _models, request.Seed.TeamId, ct).ConfigureAwait(false) is not { } resolved)
+            if (await InProcessStructuredModel.ResolveAsync(_clients, _models, request.Seed.TeamId, ct, InProcessStructuredModel.CheapBrainCeiling).ConfigureAwait(false) is not { } resolved)
                 return null;
 
             var (structured, pick) = resolved;

@@ -625,6 +625,78 @@ public class ModelPoolSelectorFlowTests
         (await SelectBrainRowIdAsync(teamId)).ShouldBeNull("an empty eligible-provider set → null");
     }
 
+    // ─── D2: the cheap-caller cost ceiling, against the real pool ───
+
+    [Fact]
+    public async Task A_ceilinged_pick_takes_the_Strong_row_while_the_brain_still_takes_the_Frontier_one()
+    {
+        // The SAME team, the SAME pool, two different questions: a CHEAP in-process call (effort classifier, capability
+        // tiering, lesson distiller, spec preview) declares a Strong ceiling and lands on the Strong row; the supervisor
+        // BRAIN keeps the unceilinged "strongest available" ladder and still lands on Frontier. Neither row is starred,
+        // so nothing but the ceiling separates the two picks — which is the whole of D2.
+        var teamId = await SeedTeamAsync();
+        var cred = await SeedCredentialAsync(teamId, "Anthropic", key: "sk");
+        var frontierRow = await AddModelReturningIdAsync(cred, "aaa-frontier", tier: ModelCapabilityTier.Frontier);   // sorts FIRST too
+        await AddModelReturningIdAsync(cred, "zzz-strong", tier: ModelCapabilityTier.Strong);
+
+        (await SelectAsync(teamId, "Anthropic", ceiling: ModelCapabilityTier.Strong))!.ModelId
+            .ShouldBe("zzz-strong", "a cheap call under a Strong ceiling stops spending the team's Frontier model — despite Frontier ALSO sorting first alphabetically");
+
+        (await SelectBrainRowIdAsync(teamId, "Anthropic")).ShouldBe(frontierRow, "SelectBrainRowIdAsync is untouched — the supervisor brain still gets the strongest available model");
+        (await SelectAsync(teamId, "Anthropic"))!.ModelId.ShouldBe("aaa-frontier", "an UNCEILINGED pick is byte-identical to before D2");
+    }
+
+    [Fact]
+    public async Task A_ceilinged_pick_still_honours_the_operator_default_over_the_ceiling()
+    {
+        // Operator authority is absolute: a team that STARRED its Frontier model gets that model for every call. The
+        // ceiling is a caller's cost hint; the star is the operator's decision, and a cheap call must not override it.
+        var teamId = await SeedTeamAsync();
+        var cred = await SeedCredentialAsync(teamId, "Anthropic", key: "sk");
+        await AddModelReturningIdAsync(cred, "zzz-starred-frontier", isDefault: true, tier: ModelCapabilityTier.Frontier);
+        await AddModelReturningIdAsync(cred, "aaa-strong", tier: ModelCapabilityTier.Strong);
+
+        (await SelectAsync(teamId, "Anthropic", ceiling: ModelCapabilityTier.Strong))!.ModelId
+            .ShouldBe("zzz-starred-frontier", "the starred row wins outright — even over a cheaper row that satisfies the ceiling, and even against alphabetical order");
+    }
+
+    [Fact]
+    public async Task A_ceilinged_pick_never_strands_a_call_on_a_Frontier_only_pool()
+    {
+        var teamId = await SeedTeamAsync();
+        var cred = await SeedCredentialAsync(teamId, "Anthropic", key: "sk");
+        await AddModelReturningIdAsync(cred, "only-frontier", tier: ModelCapabilityTier.Frontier);
+
+        (await SelectAsync(teamId, "Anthropic", ceiling: ModelCapabilityTier.Strong))!.ModelId
+            .ShouldBe("only-frontier", "nothing satisfies the ceiling → the unceilinged ladder decides; a pricier model beats a NoModelStop");
+    }
+
+    [Fact]
+    public async Task A_ceilinged_pick_accepts_an_untiered_row_it_cannot_prove_expensive()
+    {
+        var teamId = await SeedTeamAsync();
+        var cred = await SeedCredentialAsync(teamId, "Anthropic", key: "sk");
+        await AddModelReturningIdAsync(cred, "aaa-frontier", tier: ModelCapabilityTier.Frontier);
+        await AddModelReturningIdAsync(cred, "zzz-opaque", tier: null);   // never tiered — Unknown
+
+        (await SelectAsync(teamId, "Anthropic", ceiling: ModelCapabilityTier.Strong))!.ModelId
+            .ShouldBe("zzz-opaque", "an un-tiered row is not PROVEN expensive, so it satisfies the ceiling — an un-probed pool must not behave differently from a tiered one");
+    }
+
+    [Fact]
+    public async Task A_ceilinged_pick_still_avoids_a_known_unavailable_row()
+    {
+        // Availability bounds the ceiling, not the other way round: the only Strong row is known-dead, so the reachable
+        // Frontier row wins — a dead cheap model is a NoModelStop, and anti-strand outranks cost.
+        var teamId = await SeedTeamAsync();
+        var cred = await SeedCredentialAsync(teamId, "Anthropic", key: "sk");
+        await AddModelReturningIdAsync(cred, "reachable-frontier", tier: ModelCapabilityTier.Frontier, available: true);
+        await AddModelReturningIdAsync(cred, "dead-strong", tier: ModelCapabilityTier.Strong, available: false);
+
+        (await SelectAsync(teamId, "Anthropic", ceiling: ModelCapabilityTier.Strong))!.ModelId
+            .ShouldBe("reachable-frontier", "a known-dead row never wins on cost alone");
+    }
+
     // ─── Helpers ───
 
     private async Task<Guid?> SelectBrainRowIdAsync(Guid teamId, params string[] eligibleProviders)
@@ -692,10 +764,10 @@ public class ModelPoolSelectorFlowTests
         return id;
     }
 
-    private async Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowed = null, string? pinned = null)
+    private async Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowed = null, string? pinned = null, ModelCapabilityTier? ceiling = null)
     {
         using var scope = _fixture.BeginScope();
-        return await scope.Resolve<IModelPoolSelector>().SelectAsync(teamId, provider, allowed, pinned, CancellationToken.None);
+        return await scope.Resolve<IModelPoolSelector>().SelectAsync(teamId, provider, allowed, pinned, ceiling, CancellationToken.None);
     }
 
     private async Task AddModelAsync(Guid credId, string modelId, bool enabled = true, bool isDefault = false, ModelCapabilityTier? tier = null)

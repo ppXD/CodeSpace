@@ -145,6 +145,30 @@ public sealed class ModelCapabilityTieringFlowTests
             .Where(m => m.Credential.TeamId == teamId && m.ModelId == modelId).Select(m => m.LastTieredAt).SingleAsync();
     }
 
+    [Fact]
+    public async Task Tiering_runs_on_a_ceilinged_model_never_the_teams_Frontier_one()
+    {
+        // 🟢 High-fidelity: the REAL ModelPoolSelector + real Postgres decide which model the tiering call runs on; only
+        // the LLM transport is faked. Tiering is one of D2's four CHEAP callers, so with an unstarred Frontier AND an
+        // unstarred Strong row in the pool it must run on the Strong one — before D2 the pool's "strongest available"
+        // ladder handed every cheap call the Frontier model. ('aaa-frontier' also sorts first, so an accidental
+        // alphabetical pick would look like a pass — the tier is what must decide.)
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedCredentialAsync(teamId, "Anthropic");
+        await AddModelAsync(credId, "aaa-frontier", tier: ModelCapabilityTier.Frontier);
+        await AddModelAsync(credId, "zzz-strong", tier: ModelCapabilityTier.Strong);
+        await AddModelAsync(credId, "pending-model");   // the un-tiered row that gives the tick something to tier
+
+        var client = new CannedClient("Anthropic", Tiers(("pending-model", "basic")));
+        using (var scope = _fixture.BeginScope())
+            await new ModelCapabilityTieringService(new FakeClients(client), scope.Resolve<IModelPoolSelector>(), scope.Resolve<CodeSpaceDbContext>(), NullLogger<ModelCapabilityTieringService>.Instance)
+                .TierTeamAsync(teamId, CancellationToken.None);
+
+        client.Calls.ShouldBe(1, "the tick had a pending row, so it made exactly one tiering call");
+        client.LastModel.ShouldBe("zzz-strong", "the cheap tiering call ran under InProcessStructuredModel.CheapBrainCeiling — the team's Frontier model is left for the brain");
+        (await TierOf(teamId, "pending-model")).ShouldBe(ModelCapabilityTier.Basic, "the ceilinged model's verdict is what gets persisted");
+    }
+
     private static JsonElement Tiers(params (string Id, string Tier)[] models) =>
         JsonSerializer.SerializeToElement(new { models = models.Select(m => new { id = m.Id, tier = m.Tier }) });
 
@@ -158,11 +182,11 @@ public sealed class ModelCapabilityTieringFlowTests
         await db.SaveChangesAsync();
     }
 
-    private async Task AddModelAsync(Guid credId, string modelId)
+    private async Task AddModelAsync(Guid credId, string modelId, ModelCapabilityTier? tier = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
-        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = Guid.NewGuid(), ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual, Enabled = true });
+        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = Guid.NewGuid(), ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual, Enabled = true, CapabilityTier = tier });
         await db.SaveChangesAsync();
     }
 
@@ -208,10 +232,15 @@ public sealed class ModelCapabilityTieringFlowTests
         public CannedClient(string provider, JsonElement json) { Provider = provider; _json = json; }
         public string Provider { get; }
         public int Calls { get; private set; }
+
+        /// <summary>The model the REAL selector actually handed the tiering call — how D2's cost ceiling is observed end-to-end.</summary>
+        public string? LastModel { get; private set; }
+
         public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken ct) => throw new NotSupportedException();
         public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken ct)
         {
             Calls++;
+            LastModel = request.Model;
             return Task.FromResult(new StructuredLLMCompletion { Json = _json, Model = request.Model });
         }
     }

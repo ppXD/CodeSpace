@@ -1,6 +1,7 @@
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Enums;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Workflows;
@@ -38,6 +39,54 @@ public class InProcessStructuredModelTests
 
         (await InProcessStructuredModel.ResolveAsync(clients, models, Guid.NewGuid(), CancellationToken.None))
             .ShouldBeNull("no registered structured provider has a team model → the caller degrades / fails cleanly");
+    }
+
+    // ── D2: the cost ceiling threads to EVERY candidate provider (so it composes with pool failover) ──
+
+    [Fact]
+    public async Task It_threads_a_cost_ceiling_to_every_candidate_provider()
+    {
+        // Two providers the team has models under ⇒ the failover chain. The ceiling must reach BOTH SelectAsync calls,
+        // else a hop onto the second provider would silently spend its Frontier model.
+        var ceilings = new CeilingCapturingSelector();
+
+        await InProcessStructuredModel.ResolveAsync(new FakeRegistry(new FakeStructured("OpenAI"), new FakeStructured("Custom")), ceilings, Guid.NewGuid(), CancellationToken.None, ModelCapabilityTier.Strong);
+
+        ceilings.Seen.Count.ShouldBe(2, "both registered providers had a model, so both are failover candidates");
+        ceilings.Seen.ShouldAllBe(c => c == ModelCapabilityTier.Strong, "a ceiling can never shorten the failover chain — every candidate provider is asked for its own ceilinged row");
+    }
+
+    [Fact]
+    public async Task It_passes_no_ceiling_when_the_caller_declares_none()
+    {
+        var ceilings = new CeilingCapturingSelector();
+
+        await InProcessStructuredModel.ResolveAsync(new FakeRegistry(new FakeStructured("OpenAI")), ceilings, Guid.NewGuid(), CancellationToken.None);
+
+        ceilings.Seen.Count.ShouldBe(1);
+        ceilings.Seen[0].ShouldBeNull("the planner / decider / critics / judges keep the unceilinged 'strongest available' ladder — byte-identical to before D2");
+    }
+
+    /// <summary>Records the ceiling each per-provider <c>SelectAsync</c> was asked with, and always answers with a pick so every registered provider becomes a failover candidate.</summary>
+    private sealed class CeilingCapturingSelector : IModelPoolSelector
+    {
+        public List<ModelCapabilityTier?> Seen { get; } = new();
+
+        public Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, ModelCapabilityTier? tierCeiling, CancellationToken ct)
+        {
+            Seen.Add(tierCeiling);
+            return SelectAsync(teamId, provider, allowedModels, pinnedModel, ct);
+        }
+
+        public Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken ct) =>
+            Task.FromResult<ModelPoolPick?>(new ModelPoolPick { ModelId = $"{provider}-model", Credential = new ResolvedModelCredential { Provider = provider, ApiKey = "k" } });
+
+        public Task<ModelPoolPick?> ResolveByRowIdAsync(Guid teamId, Guid modelCredentialModelId, CancellationToken ct) => Task.FromResult<ModelPoolPick?>(null);
+        public Task<ModelDispatchRef?> ResolveDispatchAsync(Guid teamId, string modelName, IReadOnlyList<Guid>? allowedRowIds, CancellationToken ct) => Task.FromResult<ModelDispatchRef?>(null);
+        public Task<IReadOnlyList<PoolModelInfo>> ListPoolAsync(Guid teamId, IReadOnlyList<Guid>? allowedRowIds, CancellationToken ct) => Task.FromResult<IReadOnlyList<PoolModelInfo>>(Array.Empty<PoolModelInfo>());
+        public Task<Guid?> SelectBrainRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken ct) => Task.FromResult<Guid?>(null);
+        public Task<Guid?> ResolvePinnedBrainRowIdAsync(Guid teamId, Guid modelCredentialModelId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken) => Task.FromResult<Guid?>(null);
+        public Task<string?> ResolveTeamDefaultProviderAsync(Guid teamId, CancellationToken cancellationToken) => Task.FromResult<string?>(null);
     }
 
     // ── Fakes ──

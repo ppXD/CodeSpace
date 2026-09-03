@@ -4,6 +4,7 @@ using CodeSpace.Core.Services.Tasks.SpecPreview;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Planning;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
@@ -150,6 +151,20 @@ public class TaskSpecCompilerTests
         (await compiler.CompileAsync(Guid.NewGuid(), "fix it", null, CancellationToken.None)).Suggestion.ShouldBeNull();
     }
 
+    [Fact]
+    public async Task It_asks_the_pool_for_a_ceilinged_model_never_the_teams_strongest()
+    {
+        // The spec preview is a SUGGESTION the operator edits before anything is staked — one of D2's four cheap
+        // callers, so it must not automatically spend the team's Frontier model.
+        var client = new RecordingStructuredClient("""{"acceptanceChecks":[],"acceptanceCriteria":["done"],"hasDeliveryOpinion":false,"openPullRequest":false,"confidence":0.4,"rationale":"r"}""");
+        var selector = new OnePickSelector();
+
+        await new TaskSpecCompiler(new SingleRegistry(client), selector, new NullGrounding(), NullLogger<TaskSpecCompiler>.Instance)
+            .CompileAsync(Guid.NewGuid(), "fix it", null, CancellationToken.None);
+
+        selector.SeenCeiling.ShouldBe(InProcessStructuredModel.CheapBrainCeiling, "the spec-preview compiler is one of D2's four cheap callers");
+    }
+
     // ── Fakes at the honest seams ───────────────────────────────────────────────────
 
     private sealed class EmptyRegistry : ILLMClientRegistry
@@ -194,6 +209,16 @@ public class TaskSpecCompilerTests
     private sealed class OnePickSelector : IModelPoolSelector
     {
         private static readonly ModelPoolPick Pick = new() { ModelId = "test-model", Credential = new ResolvedModelCredential { Provider = "TestSpec", ApiKey = "sk-test" } };
+
+        /// <summary>The ceiling the compiler asked for (D2) — null until it resolves a model, so a test can prove the ARGUMENT, not merely the outcome.</summary>
+        public ModelCapabilityTier? SeenCeiling { get; private set; }
+
+        public Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, ModelCapabilityTier? tierCeiling, CancellationToken cancellationToken)
+        {
+            SeenCeiling = tierCeiling;
+            return SelectAsync(teamId, provider, allowedModels, pinnedModel, cancellationToken);
+        }
+
         public Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken) => Task.FromResult<ModelPoolPick?>(Pick);
         public Task<ModelPoolPick?> ResolveByRowIdAsync(Guid teamId, Guid modelCredentialModelId, CancellationToken cancellationToken) => Task.FromResult<ModelPoolPick?>(Pick);
         public Task<ModelDispatchRef?> ResolveDispatchAsync(Guid teamId, string modelName, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => Task.FromResult<ModelDispatchRef?>(null);
