@@ -1195,7 +1195,6 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     /// <summary>The pure fold (unit-pinned): no alternates ⇒ the raw client, byte-identical; otherwise a <see cref="FailoverStructuredClient"/> over [current, alternates…] — the current brain always tries first.</summary>
     internal static IStructuredLLMClient BuildBrainClient(IStructuredLLMClient current, ModelPoolPick currentPick, IReadOnlyList<(IStructuredLLMClient Client, ModelPoolPick Pick)> alternates)
     {
-        if (alternates.Count == 0) return current;
 
         var candidates = new List<(IStructuredLLMClient, ModelPoolPick)> { (current, currentPick) };
         candidates.AddRange(alternates);
