@@ -22,8 +22,10 @@ public sealed record RunAgentWork(Guid AgentRunId, string? NodeId, string? Itera
 /// attempt ended — so a retried subtask leaves a row per attempt, and feeding all of them to a single sequential
 /// apply made the unit conflict with ITSELF and parked the run on a conflict it manufactured. The abandoned
 /// attempts are dropped here, at the INPUT: the integrator's sequential apply and set-level abort are correct
-/// fail-closed behaviour and stay untouched. Superseded DUPLICATES are what goes — never an outcome filter, so a
-/// unit whose only attempt failed but captured a diff still contributes.</para>
+/// fail-closed behaviour and stay untouched. Superseded DUPLICATES are what the REDUCTION drops — it is not an
+/// outcome filter, so a unit whose attempt merely ENDED badly (crashed, timed out, self-reported failure) but
+/// captured a diff still contributes. The ONE outcome that withholds work is a rejected definition-of-done, and
+/// that is a separate, explicit gate: <see cref="IsWithheldFromHead"/>.</para>
 ///
 /// <para>The LANE FENCE is load-bearing, because the (node, iteration) cell is not a unit everywhere. A supervisor
 /// stamps ONE turn cell (<c>&lt;nodeId&gt;#turn{N}</c>) on every agent it spawns in that turn, so those K rows are
@@ -50,6 +52,7 @@ public static class RunIntegrationContributions
 
         var produced = manifests
             .Where(m => m.Kind == PublishManifestKind.Agent && m.AgentRunId is not null && m.RepositoryId == repositoryId && m.PublishStateValue != PublishState.None)
+            .Where(m => !IsWithheldFromHead(m))
             .Select(m => (Manifest: m, Work: workByRunId.GetValueOrDefault(m.AgentRunId!.Value)))
             .Where(pair => pair.Work is not null)
             .Select(pair => (pair.Manifest, Work: pair.Work!));
@@ -67,6 +70,27 @@ public static class RunIntegrationContributions
             })
             .ToList();
     }
+
+    /// <summary>
+    /// "This unit's work is WITHHELD from the reviewable head" — the ledger-row analogue of the supervisor lane's
+    /// <c>SupervisorOutcome.IsWithheldFromHead</c> (its per-unit grade rejected it, or a human WAIVED its
+    /// verification), read off the verdict the executor already stamps on the row
+    /// (<c>AgentRunExecutor.BuildManifestUpsert</c>: passed ⇒ Passed, failed ⇒ Failed, ungraded ⇒ NotApplicable;
+    /// a supervisor unit's rows are stamped later by the fold's write-back seam).
+    ///
+    /// <para>The deep lane has always enforced this at every door to the head (merge, resolver, publish gate). The
+    /// map lane could not reach the question: its <c>flow.map</c> ran terminate-on-error, so a run containing a
+    /// flunked unit failed the map and never ran the integrate step at all. Under continue-on-error it does run —
+    /// and without this gate the FIRST thing the newly-reachable path would do is put work its own oracle rejected
+    /// onto the one branch a human reviews as the run's candidate. Ungraded work (NotApplicable — no per-item
+    /// contract, the dominant case) integrates exactly as before.</para>
+    ///
+    /// <para>SCOPE: an INFRA-classified failure is withheld too, because the row records only the tri-state verdict —
+    /// the same coarseness the supervisor's own door accepts. Distinguishing "the check could not run" from "the
+    /// check ran and said no" would need a new column on the manifest; deliberately out of scope here.</para>
+    /// </summary>
+    private static bool IsWithheldFromHead(PublishManifest manifest) =>
+        manifest.AcceptanceState is PublishAcceptanceState.Failed or PublishAcceptanceState.Waived;
 
     /// <summary>Keep each unit's unsuperseded attempt, but ONLY in the lane where the (node, iteration) cell is the unit — a lane whose cell is a fan-out container (the supervisor's turn) passes through whole, so its K concurrent siblings all contribute. The caller re-orders, so the two lanes concatenate in any order.</summary>
     private static IEnumerable<(PublishManifest Manifest, RunAgentWork Work)> LatestAttemptPerUnit(IEnumerable<(PublishManifest Manifest, RunAgentWork Work)> produced)

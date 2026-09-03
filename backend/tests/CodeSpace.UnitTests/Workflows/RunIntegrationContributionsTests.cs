@@ -20,8 +20,13 @@ namespace CodeSpace.UnitTests.Workflows;
 ///
 /// <para>And ONE attempt per unit: a retried subtask respawns a fresh agent run whose manifest row lands beside
 /// the abandoned attempt's, so without the reduction the unit conflicted with ITSELF and parked the run. Pinned
-/// as a reduction over superseded DUPLICATES, never an outcome filter — a lone failed-but-captured attempt still
+/// as a reduction over superseded DUPLICATES and not an outcome filter — a lone failed-but-captured attempt still
 /// contributes, and a fan-out's distinct units all survive.</para>
+///
+/// <para>The ONE verdict that DOES withhold work: a unit whose own definition-of-done rejected it (or whose
+/// verification a human waived) never reaches the reviewable candidate — the ledger-row analogue of the deep
+/// lane's <c>SupervisorOutcome.IsWithheldFromHead</c>. Pinned as a theory over all four
+/// <c>PublishAcceptanceState</c> values, plus that withholding one unit never withholds its siblings.</para>
 ///
 /// <para>Pinned with it, the LANE FENCE that keeps that reduction honest: a supervisor stamps one turn cell on all
 /// K agents it spawns in a turn, so a supervisor-staked row is never reduced against a cell-sharing peer — K
@@ -181,6 +186,53 @@ public class RunIntegrationContributionsTests
         contribution.Patch.ShouldBe("partial");
     }
 
+    /// <summary>
+    /// The head invariant, per manifest row: a unit its OWN definition-of-done rejected (or whose verification a
+    /// human waived) never reaches the reviewable candidate — the ledger-row analogue of the deep lane's
+    /// <c>SupervisorOutcome.IsWithheldFromHead</c>, which every door to the supervisor's head already enforces.
+    ///
+    /// <para>The map lane could not previously reach this question: its <c>flow.map</c> ran terminate-on-error, so a
+    /// flunked unit failed the map and the integrate step never ran. Now the map continues past a failure, so the
+    /// FIRST thing the newly-reachable path would otherwise do is put oracle-rejected work onto the one branch a
+    /// human reviews. UNGRADED work (NotApplicable — no per-item contract, the dominant case) is not withheld, and
+    /// <see cref="A_lone_failed_attempt_that_captured_a_diff_still_contributes"/> keeps pinning that how an attempt
+    /// ENDED is still not a filter — only the verdict is.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(PublishAcceptanceState.Passed, true)]
+    [InlineData(PublishAcceptanceState.NotApplicable, true)]
+    [InlineData(PublishAcceptanceState.Failed, false)]
+    [InlineData(PublishAcceptanceState.Waived, false)]
+    public void A_unit_whose_definition_of_done_rejected_it_is_withheld_from_the_candidate(PublishAcceptanceState state, bool contributes)
+    {
+        var runId = Guid.NewGuid();
+
+        var contributions = RunIntegrationContributions.Build(Repo,
+            new[] { Manifest(runId, Repo, PublishState.Pushed, branch: "codespace/agent/a", acceptance: state) },
+            new[] { Work(runId, "agent", "map#0", minute: 1) });
+
+        contributions.Count.ShouldBe(contributes ? 1 : 0,
+            customMessage: $"AcceptanceState={state} must {(contributes ? "reach" : "be withheld from")} the integrated candidate — the same rule SupervisorOutcome.IsWithheldFromHead applies at every door to the deep lane's head");
+    }
+
+    /// <summary>A flunked unit is withheld WITHOUT taking its siblings with it: the surviving sibling still integrates, which is the whole point of the map running continue-on-error rather than terminating.</summary>
+    [Fact]
+    public void A_withheld_unit_does_not_withhold_its_siblings()
+    {
+        var flunked = Guid.NewGuid();
+        var passed = Guid.NewGuid();
+
+        var contributions = RunIntegrationContributions.Build(Repo,
+            new[]
+            {
+                Manifest(flunked, Repo, PublishState.Pushed, branch: "codespace/agent/flunked", acceptance: PublishAcceptanceState.Failed),
+                Manifest(passed, Repo, PublishState.Pushed, branch: "codespace/agent/passed", acceptance: PublishAcceptanceState.Passed),
+            },
+            new[] { Work(flunked, "agent", "map#0", minute: 1), Work(passed, "agent", "map#1", minute: 2) });
+
+        contributions.ShouldHaveSingleItem().ProducedBranch.ShouldBe("codespace/agent/passed");
+    }
+
     [Fact]
     public void A_surviving_attempts_sibling_alias_rows_all_stay()
     {
@@ -302,11 +354,11 @@ public class RunIntegrationContributionsTests
     private static string Patch(string patch) =>
         JsonSerializer.Serialize(new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Patch = patch }, AgentJson.Options);
 
-    private static PublishManifest Manifest(Guid agentRunId, Guid repositoryId, PublishState state, string? branch = null, Guid? patchArtifactId = null, string alias = "primary") => new()
+    private static PublishManifest Manifest(Guid agentRunId, Guid repositoryId, PublishState state, string? branch = null, Guid? patchArtifactId = null, string alias = "primary", PublishAcceptanceState acceptance = PublishAcceptanceState.NotApplicable) => new()
     {
         Id = Guid.NewGuid(), TeamId = Guid.NewGuid(), Kind = PublishManifestKind.Agent, AgentRunId = agentRunId,
         RepositoryId = repositoryId, RepositoryAlias = alias, BaseSha = "base1", Branch = branch,
-        PatchArtifactId = patchArtifactId, PublishStateValue = state,
+        PatchArtifactId = patchArtifactId, PublishStateValue = state, AcceptanceState = acceptance,
     };
 
     /// <summary>A row from a lane whose (node, iteration) cell IS the unit — a map branch / loop iteration / top-level node, whose task envelope carries no supervisor stamp.</summary>

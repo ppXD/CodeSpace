@@ -186,7 +186,9 @@ public class PlanMapSynthFanoutFlowTests
             var research = agentRuns.Select(r => JsonSerializer.Deserialize<Messages.Agents.AgentTask>(r.TaskJson, AgentJson.Options)!)
                 .Single(t => t.Goal == "do the first thing");
             research.PushProducedBranch.ShouldBe(false, customMessage: "kind=research ⇒ the node maps mode=research ⇒ no produced branch — the planner's per-item posture now reaches the standard lane");
-            research.Permissions.WriteScope.ShouldBe(AgentWriteScope.ReadOnly, customMessage: "kind=research ⇒ a read-only agent");
+            research.Permissions.Network.ShouldBe(AgentNetworkAccess.Off, customMessage: "kind=research ⇒ no network — research reads the tree it was given");
+            research.Permissions.WriteScope.ShouldBe(AgentWriteScope.ReadOnly,
+                customMessage: "this launch's profile is Confined, whose tier baseline is read-only — research does NOT force that (it keeps the tier's write scope so a deliverable oracle can be satisfied); the mode-driven signal on this lane is the push above. The Trusted-tier contrast lives in PlanMapDynamicFanoutFlowTests");
 
             var checklist = await verify.Resolve<CodeSpace.Core.Services.Plans.IWorkPlanChecklistService>().GetCurrentAsync(runId, teamId, CancellationToken.None);
             var states = checklist!.Items.Select(i => i.State).ToList();

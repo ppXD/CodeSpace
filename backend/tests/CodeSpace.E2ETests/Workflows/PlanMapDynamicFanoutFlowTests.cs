@@ -31,10 +31,12 @@ namespace CodeSpace.E2ETests.Workflows;
 /// <para>The work-plan fake (<see cref="DeterministicWorkPlanLlmClient"/>, heterogeneous-kinds script) authors a HETEROGENEOUS plan: one
 /// <c>research</c> item ("Work on alpha") + two <c>code</c> items ("Work on beta", "Work on gamma"). The map
 /// binds <c>{{item.instruction}}</c> + <c>{{item.kind}}</c> per branch; the agent.run node maps each mode to a base
-/// (research = read-only + no produced branch; code = workspace write + push its own branch) UNDER the
+/// (research = no network + no produced branch, writing its deliverables into its own workspace; code = workspace
+/// write + push its own branch) UNDER the
 /// autonomy-tier + override precedence. The assertions read the PERSISTED <c>AgentRun.TaskJson</c> → <c>AgentTask</c>
-/// and prove the model→platform DECISION per branch: the research branch resolved to <c>WriteScope=ReadOnly</c> +
-/// <c>PushProducedBranch=false</c>, the code branches to <c>WriteScope=Workspace</c> + <c>PushProducedBranch=true</c>.</para>
+/// and prove the model→platform DECISION per branch: the research branch resolved to <c>Network=Off</c> +
+/// <c>PushProducedBranch=false</c> (keeping the tier's workspace write for its deliverables), the code branches to
+/// <c>WriteScope=Workspace</c> + <c>PushProducedBranch=true</c>.</para>
 ///
 /// <para><b>The env push flag is OFF for the whole test.</b> The fan-out profile has NO RepositoryId (analysis-only,
 /// no workspace) → the workspace is not an <c>IWorkspacePushHandle</c> → the executor's push step returns early
@@ -167,22 +169,26 @@ public class PlanMapDynamicFanoutFlowTests
     /// THE crown assertion — the model→platform DECISION, per branch. The planner authored a heterogeneous plan
     /// (one research + two code); the node mapped each authored <c>mode</c> to a permission + push posture. Read
     /// from the PERSISTED <c>AgentRun.TaskJson</c> → <c>AgentTask</c>: the research branch resolved to
-    /// <c>WriteScope=ReadOnly</c> + <c>PushProducedBranch=false</c> (analysis-only, no branch), the code branches to
+    /// <c>Network=Off</c> + <c>PushProducedBranch=false</c> (analysis, publishing nothing — while KEEPING the tier's
+    /// workspace write, without which its deliverable oracle could never be satisfied), the code branches to
     /// <c>WriteScope=Workspace</c> + <c>PushProducedBranch=true</c> (each publishes its own branch). The dynamic
     /// builder binds NO explicit pushBranch, so the persisted <c>PushProducedBranch</c> is purely the node's mapping
     /// of the planner's <c>mode</c> (code→true, research→false) — the model's decision.
     ///
     /// <para>The discriminating signal differs per side: the profile is <c>Trusted</c> (whose tier baseline is
-    /// <c>WriteScope=Workspace</c>), so the research branch resolving to <c>ReadOnly</c> proves <c>mode=research</c>
-    /// OVERRODE the tier (a mode-driven write-scope decision); for the code branches <c>Workspace</c> equals the tier
-    /// baseline (mode=code never raises the tier — clamp-safe), so THEIR mode-driven signal is <c>PushProducedBranch=true</c>.</para>
+    /// <c>WriteScope=Workspace</c> AND <c>Network=On</c>), so the research branch resolving to <c>Network=Off</c>
+    /// proves <c>mode=research</c> LOWERED the tier — a mode may always lower privilege, never raise it; for the code
+    /// branches <c>Workspace</c> equals the tier baseline (mode=code never raises the tier — clamp-safe), so THEIR
+    /// mode-driven signal is <c>PushProducedBranch=true</c>.</para>
     /// </summary>
     private static async Task AssertPlannerAuthoredModeDrovePerBranchPermissionsAsync(CodeSpaceDbContext db, Guid runId)
     {
-        // Baseline contrast: the profile's Trusted tier alone derives Workspace write — so the research branch's
-        // ReadOnly below can ONLY be mode=research overriding the tier, not the tier's own posture.
+        // Baseline contrast: the profile's Trusted tier alone derives Workspace write AND network ON — so the
+        // research branch's network OFF below can ONLY be mode=research lowering the tier, not the tier's own posture.
         AgentAutonomyPolicy.Derive(AgentAutonomyLevel.Trusted).WriteScope.ShouldBe(AgentWriteScope.Workspace,
-            customMessage: "the Trusted tier baseline is Workspace write — so a research branch resolving to ReadOnly is provably the mode override, not the tier");
+            customMessage: "the Trusted tier baseline is Workspace write — a research branch KEEPS it, because its deliverables are files it must be able to write");
+        AgentAutonomyPolicy.Derive(AgentAutonomyLevel.Trusted).Network.ShouldBe(AgentNetworkAccess.On,
+            customMessage: "the Trusted tier baseline grants network — so a research branch resolving to Off is provably the mode lowering it, not the tier");
 
         var byGoal = (await AgentTasksFor(db, runId)).ToDictionary(t => t.Goal);
 
@@ -192,10 +198,12 @@ public class PlanMapDynamicFanoutFlowTests
 
             if (kind == "research")
             {
-                task.Permissions.WriteScope.ShouldBe(AgentWriteScope.ReadOnly,
-                    customMessage: $"the planner tagged '{instruction}' as research → the node resolved a READ-ONLY agent, OVERRIDING the Trusted tier's Workspace baseline (the kind-driven write-scope decision)");
+                task.Permissions.Network.ShouldBe(AgentNetworkAccess.Off,
+                    customMessage: $"the planner tagged '{instruction}' as research → the node turned the network OFF, LOWERING the Trusted tier's grant (a mode may always lower privilege)");
+                task.Permissions.WriteScope.ShouldBe(AgentWriteScope.Workspace,
+                    customMessage: $"a research branch ('{instruction}') KEEPS the tier's workspace write — its oracle grades DELIVERABLE FILES (PlannerSchema pairs research/analysis kinds with ArtifactPresent / LlmJudge / CitationsResolve / ArtifactSchema over deliverable paths), so a forced read-only made every such contract unsatisfiable");
                 task.PushProducedBranch.ShouldBe(false,
-                    customMessage: $"a research branch ('{instruction}') produces no branch — the node maps kind=research → PushProducedBranch=false");
+                    customMessage: $"a research branch ('{instruction}') produces no branch — the node maps kind=research → PushProducedBranch=false, and THAT (not read-only) is the boundary: it writes into its own workspace and publishes nothing");
             }
             else
             {

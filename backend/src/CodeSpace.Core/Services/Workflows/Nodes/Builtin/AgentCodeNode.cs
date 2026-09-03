@@ -68,7 +68,7 @@ public sealed class AgentCodeNode : INodeRuntime
                 "reviseRounds": { "type": "integer", "minimum": 0, "maximum": 3, "description": "How many bounded revise rounds the executor may run when the acceptance check fails or the Improve-mode critic flags the output — each round feeds the failure back to the same agent (same conversation, same workspace) and re-verifies. Leave unset for the default: 1 when outputReviewMode is Improve, else 0." },
                 "reviewerAgent": { "type": "boolean", "description": "S8: run the output review as a REAL independent agent (read-only, clones the produced branch, prefers a different harness) instead of only the in-process model critic; falls back to the model critic when the agent cannot produce a verdict. Only used when outputReviewMode is not None." },
                 "acceptance": { "type": "object", "description": "This task's OBJECTIVE definition-of-done: { command: [argv-or-deliverable-paths...], kind?: TestsPass|ArtifactPresent|LlmJudge|CitationsResolve|ArtifactSchema, description?, rubric? (LlmJudge: { criteria: [{id, requirement, weight?}], threshold? }), schema? (ArtifactSchema: a JSON schema object) }. The executor grades it against the produced branch at completion, fail-closed — a failing oracle re-grades the run to Failed. In a fan-out, bind {{item.acceptance}} to carry each plan item's authored contract." },
-                "mode":           { "type": "string", "enum": ["research", "code"], "title": "Mode", "x-control": "radioCards", "x-enumLabels": { "research": "Research (read-only)", "code": "Code (edit & branch)" }, "x-optionConsequence": { "research": "Runs read-only for analysis — no file edits, no network, and no branch is published.", "code": "Edits files up to the autonomy tier's write limit and opts into publishing its diff as its own branch." }, "description": "The model-authored intent — the base a fan-out planner picks per subtask. The autonomyLevel tier + the network/readOnly/pushBranch overrides still layer ON TOP, so the autonomy ceiling always bounds it. Leave unset for today's tier-derived behaviour." }
+                "mode":           { "type": "string", "enum": ["research", "code"], "title": "Mode", "x-control": "radioCards", "x-enumLabels": { "research": "Research (no publish)", "code": "Code (edit & branch)" }, "x-optionConsequence": { "research": "Runs for analysis with no network and publishes nothing — it may write its deliverables (a report, notes) into its own workspace so a deliverable contract can be graded, but no branch is published.", "code": "Edits files up to the autonomy tier's write limit and opts into publishing its diff as its own branch." }, "description": "The model-authored intent — the base a fan-out planner picks per subtask. The autonomyLevel tier + the network/readOnly/pushBranch overrides still layer ON TOP, so the autonomy ceiling always bounds it. Leave unset for today's tier-derived behaviour." }
               },
               "required": ["harness"]
             }
@@ -509,18 +509,28 @@ public sealed class AgentCodeNode : INodeRuntime
 
     /// <summary>
     /// Resolves permissions over THREE layers, low→high: the mode BASE (the model's intent), the autonomy TIER, then
-    /// explicit per-field overrides. <see cref="AgentMode.Research"/> is the most restrictive base (ReadOnly + no
-    /// network — always safe); <see cref="AgentMode.Code"/> / <see cref="AgentMode.Unset"/> use the tier-derived
-    /// baseline (byte-identical to before this knob existed). An override applies ONLY when the field is explicitly
-    /// present, so a tier-only config inherits cleanly and a legacy network/readOnly config keeps its prior meaning.
-    /// Clamp-safe: Code's base is still <see cref="AgentAutonomyPolicy.Derive"/> of the (already-clamped) tier, so a
-    /// Standard/Confined ceiling still caps the write scope — mode never raises the tier or turns network on by itself.
+    /// explicit per-field overrides. <see cref="AgentMode.Research"/> forces the network OFF (analysis reads the
+    /// tree it was given, never the internet) and, via <see cref="ResolvePushBranch"/>, publishes nothing;
+    /// <see cref="AgentMode.Code"/> / <see cref="AgentMode.Unset"/> use the tier-derived baseline (byte-identical to
+    /// before this knob existed). An override applies ONLY when the field is explicitly present, so a tier-only
+    /// config inherits cleanly and a legacy network/readOnly config keeps its prior meaning.
+    ///
+    /// <para><b>Research WRITES to its workspace</b> (the tier's write scope, not a forced ReadOnly). A research /
+    /// analysis subtask's objective oracle is a DELIVERABLE-FILE contract — <c>PlannerSchema</c> pairs those kinds
+    /// with ArtifactPresent / LlmJudge / CitationsResolve / ArtifactSchema over "the repo-relative deliverable file
+    /// paths" — so an agent that cannot write cannot produce the report it is graded on, and every such item flunked
+    /// a contract it was never able to satisfy. Read-only was a plausible-sounding default, not a safety boundary:
+    /// the boundary is that nothing research writes is PUBLISHED (push stays false) and it has no network.</para>
+    ///
+    /// <para>Clamp-safe, unchanged: every mode's base is <see cref="AgentAutonomyPolicy.Derive"/> of the
+    /// (already-clamped) tier, so a Standard/Confined ceiling still caps the write scope — a mode never raises the
+    /// tier, and Research can only ever LOWER what the tier granted (network off, no publish).</para>
     /// </summary>
     private static AgentPermissions ResolvePermissions(IReadOnlyDictionary<string, JsonElement> bag, AgentAutonomyLevel autonomy, AgentMode mode)
     {
-        var permissions = mode == AgentMode.Research
-            ? new AgentPermissions { Network = AgentNetworkAccess.Off, WriteScope = AgentWriteScope.ReadOnly }
-            : AgentAutonomyPolicy.Derive(autonomy);
+        var permissions = AgentAutonomyPolicy.Derive(autonomy);
+
+        if (mode == AgentMode.Research) permissions = permissions with { Network = AgentNetworkAccess.Off };
 
         if (ReadOptionalBool(bag, "network") is { } network)
             permissions = permissions with { Network = network ? AgentNetworkAccess.On : AgentNetworkAccess.Off };
@@ -585,7 +595,7 @@ public sealed class AgentCodeNode : INodeRuntime
 /// </summary>
 internal enum AgentMode
 {
-    /// <summary>Analysis-only: read-only, no network, no produced branch — the most restrictive base, always safe.</summary>
+    /// <summary>Analysis: no network and no produced branch, but WRITES its deliverables into its own workspace (the tier's write scope) — a research subtask's oracle grades the report files it was asked to write, so a forced read-only made every deliverable contract unsatisfiable. Nothing it writes is published.</summary>
     Research,
 
     /// <summary>Edits the codebase: workspace write (the tier-derived posture) and publishes its own branch.</summary>
