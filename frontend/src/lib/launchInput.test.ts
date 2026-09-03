@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildLaunchInput, DEFAULT_ACCEPTANCE, type LaunchFormState, type LaunchWorkspaceRepo } from "./launchInput";
+import { buildLaunchInput, buildRoutePreviewInput, DEFAULT_ACCEPTANCE, type LaunchFormState, type LaunchWorkspaceRepo } from "./launchInput";
 
 const repo = (over: Partial<LaunchWorkspaceRepo> = {}): LaunchWorkspaceRepo => ({
   repositoryId: "r1", branch: "", access: "write", alias: "repo", isPrimary: false, ...over,
@@ -495,5 +495,56 @@ describe("buildLaunchInput — quality tier (P3.2)", () => {
     expect(buildLaunchInput(form({ effort: "quick", tier: "Delivery" })).tier).toBe("Delivery");
     expect(buildLaunchInput(form({ effort: "standard", tier: "Delivery" })).tier).toBe("Delivery");
     expect(buildLaunchInput(form({ effort: "deep", tier: "Unattended" })).tier).toBe("Unattended");
+  });
+});
+
+describe("buildRoutePreviewInput (B1)", () => {
+  /** The fields that genuinely change the router's answer — the preview is only meaningful if it carries all of them. */
+  const ROUTING_FIELDS = ["taskText", "surfaceKind", "repositoryId", "baseBranch", "effort", "relatedRepositories", "caps", "autonomyCeiling"] as const;
+
+  it("carries EVERY routing field the launch would send, with the same values", () => {
+    // Deep + a related repo + caps + a ceiling: the shape where all eight fields are populated at once. A preview
+    // that dropped any of them would predict a different recipe, projection or bounds than the launch produces.
+    const state = form({
+      effort: "deep",
+      taskText: "  Migrate the billing schema  ",
+      workspace: [
+        repo({ repositoryId: "primary", branch: "release", isPrimary: true }),
+        repo({ repositoryId: "second", alias: "web", access: "read" }),
+      ],
+      maxParallel: "4",
+      budget: "25",
+      autonomyCeiling: "Confined",
+    });
+
+    const launch = buildLaunchInput(state);
+    const preview = buildRoutePreviewInput(state);
+
+    for (const field of ROUTING_FIELDS) {
+      expect(preview[field], `routing field '${field}' must match the launch`).toEqual(launch[field] ?? undefined);
+    }
+
+    expect(preview.taskText).toBe("Migrate the billing schema");
+    expect(preview.caps).toEqual({ maxParallelism: 4, maxCostUsd: 25 });
+    expect(preview.autonomyCeiling).toBe("Confined");
+    expect(preview.relatedRepositories).toEqual([{ repositoryId: "second", access: "read", alias: "web" }]);
+  });
+
+  it("omits the execution overrides the router never reads", () => {
+    // Including them would imply the preview predicts more than it does — the router sees none of these.
+    const preview = buildRoutePreviewInput(form({ model: "gpt-5-codex", harness: "codex", agentDefinitionId: "a1", runnerKind: "local", tier: "Delivery", acceptanceChecks: ["sh", "check.sh"] }));
+
+    for (const field of ["model", "harness", "agentDefinitionId", "runnerKind", "autonomy", "tier", "acceptanceChecks", "timeoutSeconds"]) {
+      expect(preview).not.toHaveProperty(field);
+    }
+  });
+
+  it("omits an unset optional rather than sending null (the backend treats absent as 'not named')", () => {
+    const preview = buildRoutePreviewInput(form({ workspace: [], effort: "quick" }));
+
+    expect(preview).not.toHaveProperty("repositoryId");
+    expect(preview).not.toHaveProperty("baseBranch");
+    expect(preview).not.toHaveProperty("caps");
+    expect(preview).toMatchObject({ taskText: "do the thing", surfaceKind: "chat", effort: "quick" });
   });
 });

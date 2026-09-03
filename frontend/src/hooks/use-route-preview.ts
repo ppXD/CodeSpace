@@ -1,36 +1,52 @@
 import { useEffect, useRef, useState } from "react";
 
-import { tasksApi, type RoutePlan } from "@/api/tasks";
+import { tasksApi, type RoutePlan, type RoutePreviewInput } from "@/api/tasks";
 
 /** Fire after the goal has been stable this long — the classifier may be a model call; keystrokes must never race it. */
 export const ROUTE_PREVIEW_DEBOUNCE_MS = 700;
-/** Below this the goal is too thin to classify honestly — no call, no card. */
-export const ROUTE_PREVIEW_MIN_GOAL_LENGTH = 12;
+/**
+ * The shortest goal worth asking about. Deliberately TINY: this is the launch GATE's input, so anything the
+ * minimum skips is a task that launches with no confirm at all — and short goals are exactly where the danger
+ * lives ("drop prod db" is 12 characters, "rm -rf /" is 8). The earlier 12-character floor, copied from the
+ * spec-preview lane, silently exempted them. Only a goal too short to classify at all is skipped, and the
+ * composer's own non-blank requirement already blocks launching those.
+ */
+export const ROUTE_PREVIEW_MIN_GOAL_LENGTH = 3;
 
 /**
  * B1: the route-preview lane's debounced fetch. Once the goal settles, ask the backend where this launch WOULD
  * go — which effort tier, recipe and projection, under which bounds, and whether the router wants the operator
  * to confirm before anything runs. Read-only end to end: the endpoint opens no session and stages no run.
  *
- * <p>Only asked on the AUTO tier: an explicitly chosen tier is already the operator's decision, so there is
- * nothing to preview and nothing to confirm. `enabled: false` therefore means no call AND no card, and the
- * composer's launch gate reads clear again the instant a tier is picked.</p>
+ * <p>Pass `null` to disable (the composer does so for an explicitly chosen tier — that is already the operator's
+ * decision, so there is nothing to preview and nothing to confirm). Disabled reads as ANSWERED, so the launch
+ * gate opens immediately.</p>
  *
- * <p>Best-effort BY DESIGN — a transport fault yields `failed: true` and NO card, so the launch stays allowed.
- * A preview outage must never be able to block launching, which is exactly the failure mode a hard gate on an
- * optional enhancement would create.</p>
+ * <p><b>`answered` is the load-bearing return value, not `route`.</b> A gate built on `route?.needsConfirmCard`
+ * alone is OPEN for the whole debounce window and the whole in-flight request — one to three seconds in which a
+ * risky goal can be typed and launched before the router has said a word. `answered` is false from the moment
+ * the goal changes until a reply (or a failure) lands for THAT goal, so the composer can hold Launch until the
+ * question has actually been asked and answered.</p>
+ *
+ * <p>Failure still opens the gate: a transport fault records a reply with a null route, which makes `answered`
+ * true and `failed` true — the composer says the preview is unavailable and allows the launch. Only a genuinely
+ * outstanding question closes it. This is the deliberate trade: a preview OUTAGE must not be able to block
+ * launching, but a preview still IN FLIGHT must.</p>
  *
  * <p>Staleness is handled by DERIVATION, not by clearing state in the effect (the lint-enforced
- * no-sync-setState-in-effect rule): every reply is stored WITH the (goal, repo, effort) key that produced it
- * and exposed only while that key is current; a sequence guard drops out-of-order resolutions of one key.</p>
+ * no-sync-setState-in-effect rule): every reply is stored WITH the key that produced it and exposed only while
+ * that key is current; a sequence guard drops out-of-order resolutions of one key.</p>
  */
-export function useRoutePreview(goal: string, repositoryId: string | null | undefined, effort: string, enabled: boolean) {
+export function useRoutePreview(input: RoutePreviewInput | null) {
   const [reply, setReply] = useState<{ key: string; route: RoutePlan | null } | null>(null);
   const [pendingKey, setPendingKey] = useState<string | null>(null);
   const seq = useRef(0);
 
-  const text = goal.trim();
-  const key = !enabled || text.length < ROUTE_PREVIEW_MIN_GOAL_LENGTH ? null : `${text} ${repositoryId ?? ""} ${effort}`;
+  // The key IS the serialized request — so it identifies the reply AND carries the payload, which removes any
+  // question of the effect firing with a newer input than the key it was scheduled for.
+  const key = input === null || input.taskText.trim().length < ROUTE_PREVIEW_MIN_GOAL_LENGTH
+    ? null
+    : JSON.stringify(input);
 
   useEffect(() => {
     const mySeq = ++seq.current;
@@ -40,12 +56,12 @@ export function useRoutePreview(goal: string, repositoryId: string | null | unde
     const timer = setTimeout(async () => {
       setPendingKey(key);
       try {
-        const result = await tasksApi.routePreview({ taskText: text, repositoryId: repositoryId ?? undefined, effort });
+        const result = await tasksApi.routePreview(JSON.parse(key) as RoutePreviewInput);
         if (seq.current !== mySeq) return;
         setReply({ key, route: result.route ?? null });
       } catch {
-        // A failed preview is NOT a failed launch — record the miss so the composer can say so, and leave the
-        // route null so no card is rendered and nothing is gated.
+        // A failed preview is NOT a failed launch — record the miss (which counts as ANSWERED, so the gate
+        // opens) and leave the route null so no card renders and nothing is blocked.
         if (seq.current === mySeq) setReply({ key, route: null });
       } finally {
         if (seq.current === mySeq) setPendingKey(p => (p === key ? null : p));
@@ -53,7 +69,7 @@ export function useRoutePreview(goal: string, repositoryId: string | null | unde
     }, ROUTE_PREVIEW_DEBOUNCE_MS);
 
     return () => clearTimeout(timer);
-  }, [key, text, repositoryId, effort]);
+  }, [key]);
 
   const current = key !== null && reply?.key === key ? reply : null;
 
@@ -62,5 +78,7 @@ export function useRoutePreview(goal: string, repositoryId: string | null | unde
     /** A reply arrived for the current key but carried no route — the preview is unavailable; say so, gate nothing. */
     failed: current !== null && current.route === null,
     loading: pendingKey !== null && pendingKey === key,
+    /** Whether the question for the CURRENT input has been settled. False through the debounce window AND the in-flight request; true when disabled or when a reply/failure has landed. */
+    answered: key === null || current !== null,
   };
 }

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 import type { RoutePlan, TaskSpecSuggestion, TaskSurfaceKind } from "@/api/tasks";
-import { buildLaunchInput, DEFAULT_ACCEPTANCE, type LaunchBooleanOverride } from "@/lib/launchInput";
+import { buildLaunchInput, buildRoutePreviewInput, DEFAULT_ACCEPTANCE, type LaunchBooleanOverride, type LaunchFormState } from "@/lib/launchInput";
 import { presetOf, QUALITY_PRESETS, type QualityTier } from "@/lib/qualityPresets";
 import { Combo, type Option } from "@/components/common/Combo";
 import { DecisionLadderDiagram, EvaluationPipelineDiagram, HelpTip, PlanCriticDiagram } from "@/components/tasks/LaunchHelp";
@@ -215,16 +215,37 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   const primary = workspace.find(r => r.isPrimary) ?? workspace[0];
   const reposLabel = workspace.length === 0 ? "Repositories" : workspace.length === 1 ? repoName(workspace[0].repositoryId) : `${workspace.length} repositories`;
 
+  // Resolve the picked (model, credential) to its concrete row id so the backend can pin the supervisor brain
+  // (Deep) / the agent model (single-agent) by row, not guess between two credentials of the same model name.
+  const modelCredentialModelId = credModels.data?.find(o => o.modelId === model && o.credentialId === modelCredentialId)?.rowId ?? "";
+
+  // ONE snapshot of the form, shared by the launch and the route preview. Two snapshots would let the preview
+  // predict a launch that differs from the one the button sends — the whole point of previewing.
+  const formState: LaunchFormState = {
+    taskText, surface, sessionId, workspace, effort, autonomy, model, modelCredentialId, modelCredentialModelId, harness, agentDefinitionId, runnerKind,
+    cwdMode: cfg.cwdMode, enableMcp: cfg.enableMcp, tools: cfg.tools, pushBranch: cfg.pushBranch,
+    maxParallel: cfg.maxParallel, budget: cfg.budget,
+    agentModels: cfg.agentModels, agentPool: cfg.agentPool, autonomyCeiling: cfg.autonomyCeiling, timeLimit: effectiveTimeLimit,
+    integrateBranches: cfg.integrateBranches, acceptanceCriteria: cfg.acceptance, acceptanceChecks: cfg.acceptanceChecks,
+    requirePlanConfirmation: cfg.requirePlanConfirmation, plannerReview: cfg.plannerReview,
+    decisionReview: cfg.decisionReview, outputReview: cfg.outputReview, reviewerModel: cfg.reviewerModel, reviseRounds: cfg.reviseRounds, reviewerAgent: cfg.reviewerAgent,
+    tier,
+  };
+
   // B1 route preview: on the AUTO tier the backend tells us where this launch WOULD go before it goes anywhere.
   // The router has always built a confirm card for a low-confidence or risky-side-effect auto route — nothing ever
   // showed it, so a task flagged for delete/drop/migrate/deploy/production/secrets was routed and STARTED with no
   // human gate. Asking is free: the endpoint opens no session and stages no run. An explicit tier is already the
-  // operator's decision, so the preview is not asked for one at all.
-  const routePreview = useRoutePreview(taskText, primary?.repositoryId, effort, effort === "auto");
+  // operator's decision, so the preview is not asked for one at all (null disables it).
+  const routePreview = useRoutePreview(effort === "auto" ? buildRoutePreviewInput(formState) : null);
   const routeCard = routePreview.route?.needsConfirmCard ? routePreview.route : null;
   // The gate: an auto launch WAITS on the operator's answer. Answering means picking a tier, which then rides the
   // wire as an EXPLICIT effort — the confirmation is the tier itself, never a separate flag the backend must trust.
   const routeConfirmPending = !!routeCard;
+  // …and it waits on the QUESTION too. Gating on the card alone leaves Launch live through the debounce window and
+  // the in-flight request, so a risky goal typed and sent inside ~1-3s would start unconfirmed — the card would
+  // arrive after the run did. A settled failure counts as answered, so an outage never wedges the button.
+  const routeUnanswered = !routePreview.answered;
   const confirmEffort = (mode: string) => { setEffort(mode); closeMenu(); };
 
   const effLabel = EFFORT_OPTS.find(e => e.v === effort)?.l ?? "Auto";
@@ -259,9 +280,18 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   // submit. Standard is excluded: it verifies per item via the plan's own contracts and never sends this field for
   // ANY tier (the same `effort !== "standard"` gate the Acceptance-checks row itself is already shown/sent under).
   if (tier !== "Prototype" && effort !== "standard" && cfg.acceptanceChecks.length === 0) missing.push("an acceptance check");
-  // B1: an auto route the router wants confirmed BLOCKS the launch until the operator picks a tier. This is the one
-  // place the confirm card stops being decoration — a risky auto-classified task can no longer start unattended.
-  const canLaunch = missing.length === 0 && !routeConfirmPending && !launch.isPending;
+  // B1: an auto route the router wants confirmed BLOCKS the launch until the operator picks a tier, and an auto
+  // route not yet ANSWERED blocks it until the router has spoken. This is the one place the confirm card stops
+  // being decoration — a risky auto-classified task can no longer start unattended, or beat its own preview.
+  const canLaunch = missing.length === 0 && !routeConfirmPending && !routeUnanswered && !launch.isPending;
+
+  // A disabled send button must say WHY. Missing inputs first (the operator can act on those immediately), then
+  // the confirm card, then the still-open question — never a bare disabled button the operator reads as broken.
+  const launchBlockedReason = canLaunch ? "Launch"
+    : missing.length ? `Add ${missing.join(" and ")}`
+      : routeConfirmPending ? "Confirm the effort above to launch"
+        : routeUnanswered ? "Checking where this task will run…"
+          : "Launching…";
 
   const toggleRepo = (id: string) => {
     const short = repoName(id).split("/").pop() || "repo";
@@ -278,19 +308,8 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
 
   const submit = () => {
     if (!canLaunch) return;
-    // Resolve the picked (model, credential) to its concrete row id so the backend can pin the supervisor brain
-    // (Deep) / the agent model (single-agent) by row, not guess between two credentials of the same model name.
-    const modelCredentialModelId = credModels.data?.find(o => o.modelId === model && o.credentialId === modelCredentialId)?.rowId ?? "";
-    const input = buildLaunchInput({
-      taskText, surface, sessionId, workspace, effort, autonomy, model, modelCredentialId, modelCredentialModelId, harness, agentDefinitionId, runnerKind, cwdMode: cfg.cwdMode, enableMcp: cfg.enableMcp, tools: cfg.tools, pushBranch: cfg.pushBranch,
-      maxParallel: cfg.maxParallel, budget: cfg.budget,
-      agentModels: cfg.agentModels, agentPool: cfg.agentPool, autonomyCeiling: cfg.autonomyCeiling, timeLimit: effectiveTimeLimit,
-      integrateBranches: cfg.integrateBranches, acceptanceCriteria: cfg.acceptance, acceptanceChecks: cfg.acceptanceChecks,
-      requirePlanConfirmation: cfg.requirePlanConfirmation, plannerReview: cfg.plannerReview,
-      decisionReview: cfg.decisionReview, outputReview: cfg.outputReview, reviewerModel: cfg.reviewerModel, reviseRounds: cfg.reviseRounds, reviewerAgent: cfg.reviewerAgent,
-      tier,
-    });
-    launch.mutate(input, { onSuccess: res => onLaunched?.(res.runId) });
+    // The SAME form snapshot the route preview was built from, so the launch cannot differ from what was previewed.
+    launch.mutate(buildLaunchInput(formState), { onSuccess: res => onLaunched?.(res.runId) });
   };
 
   // Surface the model's intelligence in the picker: the EFFECTIVE capability tier (so the operator sees how auto ranks
@@ -459,7 +478,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
               )}
             </div>
 
-            <button className="lt3-send" aria-label="Launch task" disabled={!canLaunch} onClick={submit} title={canLaunch ? "Launch" : routeConfirmPending ? "Confirm the effort above to launch" : `Add ${missing.join(" and ")}`}>
+            <button className="lt3-send" aria-label="Launch task" disabled={!canLaunch} onClick={submit} title={launchBlockedReason}>
               <SendGlyph />
             </button>
           </div>
@@ -755,10 +774,9 @@ function SToggleRow({ label, on, onToggle, locked }: { label: string; on: boolea
   );
 }
 
-/** The tier labels the composer already uses, keyed by the backend's open effort string, so a confirm option
- *  reads the same as the Effort flyout ("Fast", not "quick"). An unknown mode falls back to its own string —
- *  the options come from the live bounds registry, so a new preset must render rather than vanish. */
-const TIER_LABEL: Record<string, string> = Object.fromEntries(EFFORT_OPTS.map(e => [e.v, e.l]));
+/** Title-case an open effort string for display — the same transform the backend applies when it builds an
+ *  option label, used only where no backend label exists (the hint has no confirm card, so no options). */
+const titleCase = (v: string) => (v ? v[0].toUpperCase() + v.slice(1) : v);
 
 /**
  * B1 — the ROUTE CONFIRM card, above the composer box. The router builds this whenever an auto route landed
@@ -774,6 +792,9 @@ function RouteConfirmCard({ route, onPick }: { route: RoutePlan; onPick: (mode: 
   if (!confirm) return null;
 
   const risky = route.decision?.signals?.riskySideEffects === true;
+  // The BACKEND owns tier copy: every label here comes from the option the router emitted, so a renamed or new
+  // preset reads correctly with no frontend edit. Only a suggested mode with no matching option falls back.
+  const suggestedLabel = confirm.options.find(o => o.mode === confirm.suggestedMode)?.label ?? titleCase(confirm.suggestedMode);
 
   return (
     <div className="lt3-route" data-risk={risky} data-testid="route-confirm-card">
@@ -784,7 +805,7 @@ function RouteConfirmCard({ route, onPick }: { route: RoutePlan; onPick: (mode: 
       </div>
 
       <div className="lt3-route-why">
-        <b>{TIER_LABEL[confirm.suggestedMode] ?? confirm.suggestedMode}</b> suggested · {confirm.rationale}
+        <b>{suggestedLabel}</b> suggested · {confirm.rationale}
       </div>
 
       {route.degradedReason && <div className="lt3-route-degraded">{route.degradedReason}</div>}
@@ -798,7 +819,7 @@ function RouteConfirmCard({ route, onPick }: { route: RoutePlan; onPick: (mode: 
             data-suggested={o.mode === confirm.suggestedMode}
             onClick={() => onPick(o.mode)}
           >
-            <span className="lt3-route-opt-t">{TIER_LABEL[o.mode] ?? o.mode}</span>
+            <span className="lt3-route-opt-t">{o.label || titleCase(o.mode)}</span>
             {o.hint && <span className="lt3-route-opt-d">{o.hint}</span>}
           </button>
         ))}
@@ -810,13 +831,14 @@ function RouteConfirmCard({ route, onPick }: { route: RoutePlan; onPick: (mode: 
 }
 
 /** B1 — the quiet route hint for an auto launch the router was confident about: one line naming where it goes and
- *  why, so "Auto" is never an unexplained black box even when there is nothing to confirm. */
+ *  why, so "Auto" is never an unexplained black box even when there is nothing to confirm. There is no confirm
+ *  card here and therefore no backend-authored label, so the tier renders as the router's own open string. */
 function RouteHint({ route }: { route: RoutePlan }) {
   const why = route.degradedReason || route.decision?.rationale || "";
 
   return (
     <div className="lt3-route-quiet" data-testid="route-hint">
-      Auto → <b>{TIER_LABEL[route.effortMode] ?? route.effortMode}</b>{why && <> · {why}</>}
+      Auto → <b>{titleCase(route.effortMode)}</b>{why && <> · {why}</>}
     </div>
   );
 }

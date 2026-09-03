@@ -23,15 +23,20 @@ type SpecState = {
 let specState: SpecState = { suggestion: null, grounded: false, loading: false };
 vi.mock("@/hooks/use-spec-preview", () => ({ useSpecPreview: () => specState }));
 
-// B1 route preview. The hook is mocked so the card's inputs are exactly the backend contract; `enabledSeen`
-// records the hook's own `enabled` argument so a test can prove the preview is not even ASKED for an explicit tier.
-type RouteState = { route: import("@/api/tasks").RoutePlan | null; failed: boolean; loading: boolean };
-let routeState: RouteState = { route: null, failed: false, loading: false };
-let enabledSeen: boolean[] = [];
+// B1 route preview. The hook is mocked so the card's inputs are exactly the backend contract; `inputSeen` records
+// the payload the composer asked with, so a test can prove BOTH that an explicit tier is never previewed (null)
+// and that the request carries the routing fields the launch itself would send.
+type RouteState = { route: import("@/api/tasks").RoutePlan | null; failed: boolean; loading: boolean; answered: boolean };
+// The default is ANSWERED with no route: the preview settled and had nothing to confirm, so Launch is open. Every
+// pre-B1 test in this file relies on that, and a test that wants the gate CLOSED must say so explicitly.
+const ROUTE_ANSWERED: RouteState = { route: null, failed: false, loading: false, answered: true };
+let routeState: RouteState = ROUTE_ANSWERED;
+let inputSeen: (import("@/api/tasks").RoutePreviewInput | null)[] = [];
 vi.mock("@/hooks/use-route-preview", () => ({
-  useRoutePreview: (_g: string, _r: string | null | undefined, _e: string, enabled: boolean) => {
-    enabledSeen.push(enabled);
-    return enabled ? routeState : { route: null, failed: false, loading: false };
+  useRoutePreview: (input: import("@/api/tasks").RoutePreviewInput | null) => {
+    inputSeen.push(input);
+    // Disabled (null) reads as answered — exactly what the real hook returns, so the gate opens immediately.
+    return input === null ? { route: null, failed: false, loading: false, answered: true } : routeState;
   },
 }));
 
@@ -66,8 +71,8 @@ beforeEach(() => {
   launchSpy.mockClear();
   lastInput = null;
   specState = { suggestion: null, grounded: false, loading: false };
-  routeState = { route: null, failed: false, loading: false };
-  enabledSeen = [];
+  routeState = ROUTE_ANSWERED;
+  inputSeen = [];
 });
 
 describe("LaunchTaskModal (minimal box)", () => {
@@ -430,7 +435,7 @@ const ROUTE: import("@/api/tasks").RoutePlan = {
 
 describe("LaunchTaskModal — route preview (B1)", () => {
   it("renders the confirm card and BLOCKS Launch until a depth is picked", () => {
-    routeState = { route: ROUTE, failed: false, loading: false };
+    routeState = { route: ROUTE, failed: false, loading: false, answered: true };
     renderBox({ surface: "chat", autofill: {} });
     typeTask("Refactor the auth module across several files");
 
@@ -446,7 +451,7 @@ describe("LaunchTaskModal — route preview (B1)", () => {
   });
 
   it("picking an option sets the effort EXPLICITLY, clears the card, and enables Launch", () => {
-    routeState = { route: ROUTE, failed: false, loading: false };
+    routeState = { route: ROUTE, failed: false, loading: false, answered: true };
     renderBox({ surface: "chat", autofill: {} });
     typeTask("Refactor the auth module across several files");
 
@@ -456,7 +461,7 @@ describe("LaunchTaskModal — route preview (B1)", () => {
 
     // Effort is no longer "auto", so the preview is not even asked (enabled=false) and no card can render.
     expect(screen.queryByTestId("route-confirm-card")).toBeNull();
-    expect(enabledSeen.at(-1)).toBe(false);
+    expect(inputSeen.at(-1)).toBeNull();
 
     const send = screen.getByLabelText("Launch task");
     expect(send).not.toBeDisabled();
@@ -467,7 +472,7 @@ describe("LaunchTaskModal — route preview (B1)", () => {
   it("flags a risky route with a badge and its own header copy (colour is never the only signal)", () => {
     routeState = {
       route: { ...ROUTE, decision: { ...ROUTE.decision!, signals: { riskySideEffects: true } } },
-      failed: false, loading: false,
+      failed: false, loading: false, answered: true,
     };
     renderBox({ surface: "chat", autofill: {} });
     typeTask("Drop the legacy tables and deploy the migration to production");
@@ -478,7 +483,7 @@ describe("LaunchTaskModal — route preview (B1)", () => {
   });
 
   it("a confident route shows a one-line hint instead of a card and never blocks Launch", () => {
-    routeState = { route: { ...ROUTE, needsConfirmCard: false, confirm: null }, failed: false, loading: false };
+    routeState = { route: { ...ROUTE, needsConfirmCard: false, confirm: null }, failed: false, loading: false, answered: true };
     renderBox({ surface: "chat", autofill: {} });
     typeTask("Fix the parser crash on blank lines");
 
@@ -488,7 +493,7 @@ describe("LaunchTaskModal — route preview (B1)", () => {
   });
 
   it("a FAILED preview says so quietly and still allows the launch (best-effort, never a hard gate)", () => {
-    routeState = { route: null, failed: true, loading: false };
+    routeState = { route: null, failed: true, loading: false, answered: true };
     renderBox({ surface: "chat", autofill: {} });
     typeTask("Fix the parser crash on blank lines");
 
@@ -501,11 +506,60 @@ describe("LaunchTaskModal — route preview (B1)", () => {
     expect(launchSpy).toHaveBeenCalledTimes(1);
   });
 
+  // THE window the first version left wide open. Gating on `route?.needsConfirmCard` alone means Launch is live
+  // for the whole debounce + request — a risky goal typed and sent inside ~1-3s starts before the router speaks,
+  // and the confirm card arrives after the run. Both states below have route:null, so only `answered` can catch it.
+
+  it("holds Launch through the DEBOUNCE window, before any request has even been sent", () => {
+    routeState = { route: null, failed: false, loading: false, answered: false };
+    renderBox({ surface: "chat", autofill: {} });
+    typeTask("Drop the legacy tables and deploy the migration to production");
+
+    const send = screen.getByLabelText("Launch task");
+    expect(send).toBeDisabled();
+    expect(send).toHaveAttribute("title", "Checking where this task will run…");
+    fireEvent.click(send);
+    expect(launchSpy).not.toHaveBeenCalled();
+  });
+
+  it("holds Launch while the preview is IN FLIGHT", () => {
+    routeState = { route: null, failed: false, loading: true, answered: false };
+    renderBox({ surface: "chat", autofill: {} });
+    typeTask("Drop the legacy tables and deploy the migration to production");
+
+    expect(screen.getByLabelText("Launch task")).toBeDisabled();
+    fireEvent.click(screen.getByLabelText("Launch task"));
+    expect(launchSpy).not.toHaveBeenCalled();
+  });
+
+  it("a SHORT risky goal is previewed too — the minimum must not exempt 'drop prod db'", () => {
+    routeState = { route: null, failed: false, loading: false, answered: false };
+    renderBox({ surface: "chat", autofill: {} });
+    typeTask("drop prod db");
+
+    // The composer asked (the payload is non-null); the real hook's 3-char floor is what lets it through.
+    expect(inputSeen.at(-1)).not.toBeNull();
+    expect(screen.getByLabelText("Launch task")).toBeDisabled();
+  });
+
+  it("asks with the routing fields the LAUNCH would send, not just the goal", () => {
+    // A preview of a different request predicts a different run. Repo, branch and surface all move the answer.
+    renderBox();
+    typeTask("Refactor the auth module across several files");
+
+    expect(inputSeen.at(-1)).toMatchObject({
+      taskText: "Refactor the auth module across several files",
+      surfaceKind: "repo",
+      repositoryId: "r1",
+      effort: "auto",
+    });
+  });
+
   it("an explicitly chosen tier never asks for a preview at all", () => {
     renderBox({ surface: "chat", autofill: { effort: "quick" } });
     typeTask("Fix the parser crash on blank lines");
 
-    expect(enabledSeen.every(e => e === false)).toBe(true);
+    expect(inputSeen.every(i => i === null)).toBe(true);
     expect(screen.queryByTestId("route-confirm-card")).toBeNull();
     expect(screen.queryByTestId("route-hint")).toBeNull();
   });
