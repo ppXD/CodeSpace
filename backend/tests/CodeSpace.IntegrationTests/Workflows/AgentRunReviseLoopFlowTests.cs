@@ -252,6 +252,105 @@ public sealed class AgentRunReviseLoopFlowTests
         events.Single(e => e.Contains("revising")).ShouldContain("acceptance check failed", Case.Insensitive, "the round was bought by the ORACLE, not the critic — order proven");
     }
 
+    // ─── D3: model escalation across revise rounds ───────────────────────────
+
+    [Fact]
+    public async Task A_round_that_over_claims_escalates_the_next_round_to_a_stronger_model()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        var credentialId = await SeedModelCredentialAsync(teamId);
+        await SeedTieredModelAsync(credentialId, "test-model", ModelCapabilityTier.Basic);
+        await SeedTieredModelAsync(credentialId, "test-model-pro", ModelCapabilityTier.Strong);
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(CheckScript);
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+
+        var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { MaxReviseRounds = 1 });
+
+        var harness = new ReviseAwareHarness(first: DraftScript, revised: RevisedScript);
+        await ExecuteAsync(runId, harness);
+
+        var (run, result) = await LoadAsync(runId);
+
+        run.Status.ShouldBe(AgentRunStatus.Succeeded, "the revision fixed the work — the re-grade against the REAL check passed");
+
+        // The load-bearing wiring fact: the escalated model reached the HARNESS INVOCATION, not just a record.
+        harness.InvokedModels.AsEnumerable().ShouldBe(new[] { "test-model", "test-model-pro" },
+            customMessage: "round 1 ran the operator's model; round 2 — bought by an over-claim against a check that failed on real work — ran the stronger credentialed one");
+
+        result.ModelEscalation.ShouldNotBeNull();
+        result.ModelEscalation!.From.ShouldBe("test-model");
+        result.ModelEscalation.To.ShouldBe("test-model-pro");
+        result.ModelEscalation.Reason.ShouldContain("claimed success");
+
+        var events = await LoadEventsAsync(runId);
+        events.ShouldContain(e => e.StartsWith(AgentRunExecutor.ModelEscalationPrefix, StringComparison.Ordinal) && e.Contains("test-model → test-model-pro"),
+            "the operator sees the run reached for a stronger model and why");
+    }
+
+    [Fact]
+    public async Task A_one_model_team_keeps_its_only_model_and_says_no_stronger_one_exists()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        var credentialId = await SeedModelCredentialAsync(teamId);
+        await SeedTieredModelAsync(credentialId, "test-model", ModelCapabilityTier.Basic);
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(CheckScript);
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+
+        var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { MaxReviseRounds = 1 });
+
+        var harness = new ReviseAwareHarness(first: DraftScript, revised: RevisedScript);
+        await ExecuteAsync(runId, harness);
+
+        var (_, result) = await LoadAsync(runId);
+
+        harness.InvokedModels.AsEnumerable().ShouldBe(new[] { "test-model", "test-model" }, customMessage: "there is nothing stronger to move to — the dispatch is untouched");
+
+        // Never SILENT: the attempt is on the durable result and on the timeline, so "we tried to reach higher and
+        // this team has nothing higher" can be told apart from "nobody tried".
+        result.ModelEscalation.ShouldNotBeNull();
+        result.ModelEscalation!.To.ShouldBeNull();
+        result.ModelEscalation.From.ShouldBe("test-model");
+
+        (await LoadEventsAsync(runId)).ShouldContain(e => e.Contains("no model stronger than test-model"), "the no-op is said out loud");
+    }
+
+    [Fact]
+    public async Task A_run_whose_check_passes_first_time_records_no_escalation_at_all()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        var credentialId = await SeedModelCredentialAsync(teamId);
+        await SeedTieredModelAsync(credentialId, "test-model", ModelCapabilityTier.Basic);
+        await SeedTieredModelAsync(credentialId, "test-model-pro", ModelCapabilityTier.Strong);
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(CheckScript);
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+
+        var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { MaxReviseRounds = 1 });
+
+        var harness = new ReviseAwareHarness(first: RevisedScript, revised: RevisedScript);
+        await ExecuteAsync(runId, harness);
+
+        var (_, result) = await LoadAsync(runId);
+
+        result.AcceptancePassed.ShouldBe(true);
+        harness.InvokedModels.AsEnumerable().ShouldBe(new[] { "test-model" }, customMessage: "one round, the operator's own model — escalation must never fire on a passing check");
+        result.ModelEscalation.ShouldBeNull("no trigger, no record — a passing run's result stays byte-identical to pre-D3");
+    }
+
     // ─── Seeding ─────────────────────────────────────────────────────────────
 
     private static AgentTask TaskWith(Guid repositoryId) => new()
@@ -287,6 +386,34 @@ public sealed class AgentRunReviseLoopFlowTests
 
         await db.SaveChangesAsync();
         return teamId;
+    }
+
+    /// <summary>An ACTIVE model credential under a provider tag no registered harness drives — so the escalation pool is real while the harness reconciliation stays a no-op (the scripted fake projects no credentials).</summary>
+    private async Task<Guid> SeedModelCredentialAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var credentialId = Guid.NewGuid();
+        db.ModelCredential.Add(new ModelCredential
+        {
+            Id = credentialId, TeamId = teamId, Provider = "ScriptedTestProvider", DisplayName = "escalation pool",
+            Status = CredentialStatus.Active, CreatedBy = CodeSpace.Messages.Constants.SystemUsers.SeederId, LastModifiedBy = CodeSpace.Messages.Constants.SystemUsers.SeederId,
+        });
+
+        await db.SaveChangesAsync();
+        return credentialId;
+    }
+
+    /// <summary>One credentialed pool model with a DECLARED capability tier — the ordering the escalation pick reads (<c>WorkflowsTestSeed.SeedCredentialedModelAsync</c> leaves the tier Unknown, which no escalation can rank).</summary>
+    private async Task SeedTieredModelAsync(Guid credentialId, string modelId, ModelCapabilityTier tier)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = Guid.NewGuid(), ModelCredentialId = credentialId, ModelId = modelId, Source = ModelSource.Manual, Enabled = true, CapabilityTier = tier });
+
+        await db.SaveChangesAsync();
     }
 
     /// <summary>The reviewer model row under the content-keyed critic fake's provider tag — pinned onto the task so the reviewer resolution is deterministic even beside other seeded rows.</summary>
@@ -457,13 +584,21 @@ public sealed class AgentRunReviseLoopFlowTests
         public string Version => "test";
         public IReadOnlyList<string> Models { get; } = new[] { "test-model" };
 
-        public SandboxSpec BuildInvocation(AgentTask task) => new()
+        /// <summary>The model of every invocation, in order — the ground truth for whether an escalated pick reached the actual dispatch (D3), not merely a record.</summary>
+        public List<string> InvokedModels { get; } = new();
+
+        public SandboxSpec BuildInvocation(AgentTask task)
         {
-            Command = "/bin/sh",
-            Args = new[] { "-c", task.Goal.StartsWith(AgentRunExecutor.ReviseInstructionPrefix, StringComparison.Ordinal) ? _revised : _first },
-            WorkingDirectory = task.WorkspaceDirectory,
-            TimeoutSeconds = task.TimeoutSeconds,
-        };
+            InvokedModels.Add(task.Model ?? "(none)");
+
+            return new SandboxSpec
+            {
+                Command = "/bin/sh",
+                Args = new[] { "-c", task.Goal.StartsWith(AgentRunExecutor.ReviseInstructionPrefix, StringComparison.Ordinal) ? _revised : _first },
+                WorkingDirectory = task.WorkspaceDirectory,
+                TimeoutSeconds = task.TimeoutSeconds,
+            };
+        }
 
         public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) =>
             string.IsNullOrWhiteSpace(rawLine) ? Array.Empty<AgentEvent>() : new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine.Trim() } };

@@ -69,6 +69,42 @@ public class WorkflowResumeAgentRunPayloadTests
     }
 
     [Fact]
+    public void BuildResumePayload_carries_the_contradiction_and_the_dispatched_model_for_the_escalation_trigger()
+    {
+        // D3: the respawning node decides escalation from the payload ALONE (it has no DB). It needs the
+        // over-claim fact and the model the prior attempt actually ran, so a chain of respawns escalates
+        // MONOTONICALLY instead of re-deriving the same first step from the authored model every time.
+        var result = new AgentRunResult
+        {
+            Status = AgentRunStatus.Failed, ExitReason = AgentAcceptanceContract.FailClosedExitReason,
+            AcceptanceDetail = "tests-failed-exit-1", Contradiction = AgentContradiction.OverClaim, Model = "claude-sonnet-4-5",
+        };
+        var run = new AgentRun { Status = AgentRunStatus.Failed, ResultJson = JsonSerializer.Serialize(result, AgentJson.Options) };
+
+        var payload = JsonDocument.Parse(WorkflowResumeAgentRunCompletionNotifier.BuildResumePayload(run)).RootElement;
+
+        payload.GetProperty("contradiction").GetString().ShouldBe("over_claim");
+        payload.GetProperty("model").GetString().ShouldBe("claude-sonnet-4-5");
+    }
+
+    [Fact]
+    public void BuildResumePayload_falls_back_to_the_dispatched_tasks_model_when_the_harness_reported_none()
+    {
+        // A harness that never names its model in-stream would otherwise erase the tier floor, and an escalation
+        // over a null floor can pick a LOWER-tier starred row — de-escalating the very retry that asked for more.
+        var result = new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = AgentAcceptanceContract.FailClosedExitReason, AcceptanceDetail = "tests-failed-exit-1" };
+        var run = new AgentRun
+        {
+            Status = AgentRunStatus.Failed,
+            ResultJson = JsonSerializer.Serialize(result, AgentJson.Options),
+            TaskJson = JsonSerializer.Serialize(new AgentTask { Goal = "g", Harness = "claude-code", Model = "claude-sonnet-4-5" }, AgentJson.Options),
+        };
+
+        JsonDocument.Parse(WorkflowResumeAgentRunCompletionNotifier.BuildResumePayload(run)).RootElement
+            .GetProperty("model").GetString().ShouldBe("claude-sonnet-4-5");
+    }
+
+    [Fact]
     public void BuildResumePayload_surfaces_per_repo_branches_WITHOUT_leaking_the_diff()
     {
         // S7-C0 — a multi-repo run's resume payload (the agent.run node output source) carries each repo's branch +

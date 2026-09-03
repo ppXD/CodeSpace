@@ -10,8 +10,14 @@ namespace CodeSpace.Messages.Agents;
 /// </summary>
 public sealed record SupervisorRetryEscalationOutcome
 {
-    /// <summary>The escalated model's wire id this retry actually dispatched on.</summary>
-    public required string To { get; init; }
+    /// <summary>
+    /// The escalated model's wire id this retry actually dispatched on — or NULL when the trigger fired and the
+    /// team's credentialed pool held nothing above <see cref="From"/>'s effective tier (D3). A null <c>To</c> is a
+    /// RECORD, not an absence: the retry ran on the same model on purpose, and the next turn's decider is told so
+    /// rather than left to wonder why a retry changed nothing. A retry with no trigger at all records no outcome
+    /// object whatsoever, so the ordinary decision tape stays byte-identical.
+    /// </summary>
+    public string? To { get; init; }
 
     /// <summary>The prior attempt's model, when known (null if the prior attempt never resolved one, or none existed).</summary>
     public string? From { get; init; }

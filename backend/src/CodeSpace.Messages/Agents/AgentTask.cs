@@ -135,6 +135,18 @@ public sealed record AgentTask
     public Guid? ModelCredentialModelId { get; init; }
 
     /// <summary>
+    /// D3 — a model-tier escalation the DISPATCHER already decided this attempt owes, carrying WHY and the prior
+    /// attempt's model (the tier floor). Set by the agent.run node when it respawns after an attempt whose own
+    /// evidence said the model was the limit; the EXECUTOR resolves it into a concrete pick against the team's
+    /// credentialed pool at launch (only it can read the pool), and records the outcome on the result. It overrides
+    /// <see cref="Model"/> when a stronger candidate exists — an ordinary model choice is a floor for untested work,
+    /// not a ceiling once the run's own check has disproved it. Null (the default) on every ordinary dispatch;
+    /// <c>[JsonIgnore(WhenWritingNull)]</c> so an un-escalated task's <c>task_json</c> stays byte-identical.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public AgentModelEscalation? Escalation { get; init; }
+
+    /// <summary>
     /// Tool allow-list the harness restricts the agent to — null = the harness's default toolset, empty = no tools,
     /// non-empty = exactly these. A harness that supports allow-lists projects it (Claude Code → <c>--allowed-tools</c>);
     /// one that doesn't (Codex, which restricts via sandbox) carries it without enforcement. Resolved from the persona's

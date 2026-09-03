@@ -152,6 +152,17 @@ public sealed record AgentRunResult
     /// </summary>
     public string? Contradiction { get; init; }
 
+    /// <summary>
+    /// D3 — the model-tier ESCALATION this run applied, when the run's own evidence said the model was the limit
+    /// (an over-claim, or a check that failed on real work — never a grader/environment/gateway fault). Carries the
+    /// model it moved FROM, the model it moved TO, and WHY. A non-null record with a null <c>To</c> means the
+    /// escalation was requested and the team's credentialed pool held nothing stronger — the attempt ran on the same
+    /// model, said out loud instead of silently. Null when no escalation was ever triggered; null-omitted so
+    /// pre-D3 rows stay byte-identical.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public AgentModelEscalation? ModelEscalation { get; init; }
+
     /// <summary>The output critic's rationale + issues when it flagged this run (<c>ExitReason</c> "output-flagged") — WHY a human should look, persisted on the result (not only a timeline event), and the food the S6 revise loop feeds back to the agent under <c>ReviewMode.Improve</c>. Null when the critic approved, failed open, or never ran.</summary>
     public string? ReviewFeedback { get; init; }
 

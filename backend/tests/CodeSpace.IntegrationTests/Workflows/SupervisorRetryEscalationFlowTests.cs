@@ -218,8 +218,59 @@ public sealed class SupervisorRetryEscalationFlowTests
 
         var (task, outcomeJson) = await ExecuteRetryAsync(context, "s1");
 
-        task.Model.ShouldBeNull("the only candidate in the allowed pool is the prior model itself (Basic) — nothing in-pool beats its tier, so no escalation fires and the ordinary (no profile model authored) resolution stands untouched");
-        SupervisorOutcome.ReadEscalation(outcomeJson).ShouldBeNull();
+        task.Model.ShouldBeNull("the only candidate in the allowed pool is the prior model itself (Basic) — nothing in-pool beats its tier, so the ordinary (no profile model authored) resolution stands untouched");
+
+        // D3: the DISPATCH is untouched, but the ATTEMPT is recorded. Before, this returned nothing at all and the
+        // next turn's brain read a still-failing retry with no way to tell "reaching higher was impossible" from
+        // "nobody reached" — and re-asked for the same retry.
+        var escalation = SupervisorOutcome.ReadEscalation(outcomeJson);
+        escalation.ShouldNotBeNull();
+        escalation!.To.ShouldBeNull("nothing in the bounded pool beat the prior tier");
+        escalation.From.ShouldBe("claude-haiku-4-5");
+        escalation.Reason.ShouldContain("over_claim");
+    }
+
+    [Fact]
+    public async Task A_one_model_team_records_the_no_op_escalation_and_the_decider_prompt_says_so()
+    {
+        // The one-model case end to end: the trigger fires, the team has literally nothing stronger, and the fact
+        // reaches the BRAIN — the retry's outcome carries it and the next turn's rendered prompt names it.
+        var teamId = await SeedTeamAsync();
+        var credentialId = await SeedCredentialAsync(teamId);
+        await SeedModelAsync(credentialId, "claude-haiku-4-5", ModelCapabilityTier.Basic);
+        var runId = await SeedSupervisorRunAsync(teamId);
+
+        var context = Context(runId, teamId,
+            Plan("s1"),
+            SpawnResult(2, "s1", Guid.NewGuid(), contradiction: "over_claim", model: "claude-haiku-4-5"));
+
+        var (task, outcomeJson) = await ExecuteRetryAsync(context, "s1");
+
+        task.Model.ShouldBeNull("a one-model team keeps its only model — the dispatch is untouched");
+
+        var escalation = SupervisorOutcome.ReadEscalation(outcomeJson);
+        escalation.ShouldNotBeNull();
+        escalation!.To.ShouldBeNull();
+
+        // Replay the recorded retry decision into the NEXT turn's prompt, exactly as production gets there: the
+        // staged agent finishes and its result is folded onto this same outcome (SupervisorOutcome.FoldAgentResults,
+        // which must preserve the escalation block it never wrote), then the decider renders the tape.
+        var stagedAgentRunId = SupervisorOutcome.ReadStagedAgentRunIds(outcomeJson).ShouldHaveSingleItem();
+        var foldedOutcome = SupervisorOutcome.FoldAgentResults(outcomeJson, new[]
+        {
+            new SupervisorAgentResult { AgentRunId = stagedAgentRunId, Status = "Failed", Error = "still failing", Model = "claude-haiku-4-5" },
+        });
+
+        var retryDecision = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 3, DecisionKind = SupervisorDecisionKinds.Retry, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = JsonSerializer.Serialize(new { subtaskId = "s1" }, AgentJson.Options), OutcomeJson = foldedOutcome,
+        };
+
+        var prompt = CodeSpace.Core.Services.Supervisor.Deciders.LlmSupervisorDecider.BuildUserPromptForTest(Context(runId, teamId, Plan("s1"), retryDecision));
+
+        prompt.ShouldContain("no stronger model in this team's pool", customMessage: "the brain must be told escalating again buys nothing");
+        prompt.ShouldContain("claude-haiku-4-5");
     }
 
     [Fact]
