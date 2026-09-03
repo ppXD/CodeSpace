@@ -22,44 +22,9 @@ internal static class RealModelLiveWire
     /// <summary>The env var's value, or null when absent/blank — the honest self-skip signal (secrets unset ⇒ the gate skips green).</summary>
     public static string? Env(string name) => string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(name)) ? null : Environment.GetEnvironmentVariable(name);
 
-    /// <summary>The real Anthropic + OpenAI + Custom structured clients over the shared HttpClient — the registry the live decider/arbiter resolves its provider-routed client from. Custom is the OpenAI-compatible wire re-tagged, so a Custom-tagged credential routes to it. Each is wrapped in <see cref="ModelObservingClient"/> so the gate can name WHICH model actually answered.</summary>
+    /// <summary>The real Anthropic + OpenAI + Custom structured clients over the shared HttpClient — the registry the live decider/arbiter resolves its provider-routed client from. Custom is the OpenAI-compatible wire re-tagged, so a Custom-tagged credential routes to it. Each is wrapped by <see cref="ModelObserving.Wrap"/> so the gate can name WHICH model actually answered.</summary>
     public static ILLMClientRegistry Registry() =>
-        new LLMClientRegistry(new ILLMClient[] { Observed(new AnthropicClient(SharedHttp)), Observed(new OpenAiClient(SharedHttp)), Observed(new CustomClient(SharedHttp)) });
-
-    private static ILLMClient Observed<T>(T client) where T : ILLMClient, IStructuredLLMClient, IStreamingLLMClient => new ModelObservingClient(client, client, client);
-
-    /// <summary>
-    /// A pass-through client that reports the PROVIDER-REPORTED model of every live response to
-    /// <see cref="RealModelGate.ObserveModel"/>. Without it a gate verdict can only name the model id it ASKED for —
-    /// which is a repository secret, masked in the CI log — so a gateway that quietly starts answering with a different
-    /// model is indistinguishable from a capability regression. Test-side only: production wiring is untouched.
-    /// </summary>
-    private sealed class ModelObservingClient : ILLMClient, IStructuredLLMClient, IStreamingLLMClient
-    {
-        private readonly ILLMClient _text;
-        private readonly IStructuredLLMClient _structured;
-        private readonly IStreamingLLMClient _streaming;
-
-        public ModelObservingClient(ILLMClient text, IStructuredLLMClient structured, IStreamingLLMClient streaming) { _text = text; _structured = structured; _streaming = streaming; }
-
-        public string Provider => _text.Provider;
-
-        public async Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken)
-        {
-            var completion = await _text.CompleteAsync(request, cancellationToken).ConfigureAwait(false);
-            RealModelGate.ObserveModel(completion.Model);
-            return completion;
-        }
-
-        public async Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
-        {
-            var completion = await _structured.CompleteStructuredAsync(request, cancellationToken).ConfigureAwait(false);
-            RealModelGate.ObserveModel(completion.Model);
-            return completion;
-        }
-
-        public IAsyncEnumerable<LlmStreamEvent> StreamAsync(LLMCompletionRequest request, CancellationToken cancellationToken) => _streaming.StreamAsync(request, cancellationToken);
-    }
+        new LLMClientRegistry(new[] { ModelObserving.Wrap(new AnthropicClient(SharedHttp)), ModelObserving.Wrap(new OpenAiClient(SharedHttp)), ModelObserving.Wrap(new CustomClient(SharedHttp)) });
 
     /// <summary>The live credential for one wire: the provider + the per-provider base URL (derived from the single configured host) + the configured key.</summary>
     public static ResolvedModelCredential Credential(string provider, string baseUrl, string apiKey) =>

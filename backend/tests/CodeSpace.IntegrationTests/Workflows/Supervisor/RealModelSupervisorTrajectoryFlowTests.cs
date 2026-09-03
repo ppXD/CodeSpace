@@ -1,8 +1,5 @@
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Supervisor.Deciders;
-using CodeSpace.Core.Services.Workflows.Llm;
-using CodeSpace.Core.Services.Workflows.Llm.Anthropic;
-using CodeSpace.Core.Services.Workflows.Llm.OpenAi;
 using CodeSpace.Messages.Agents;
 
 namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
@@ -39,7 +36,12 @@ public sealed class RealModelSupervisorTrajectoryFlowTests
         if (baseUrl is null || apiKey is null || model is null) throw RealModelGate.ReportSkipped(provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass: NotExecuted in the trx, never a green that measured nothing
 
         var credential = new ResolvedModelCredential { Provider = provider, BaseUrl = BaseUrlFor(provider, baseUrl), ApiKey = apiKey };
-        var registry = new LLMClientRegistry(new ILLMClient[] { new AnthropicClient(SharedHttp), new OpenAiClient(SharedHttp) });
+        // The SHARED live-wire registry, not a hand-rolled one: its clients are wrapped by ModelObserving.Wrap, so the
+        // PROVIDER-REPORTED model of every turn feeds RealModelGate's sink and this gate's verdict names WHICH model
+        // answered. A locally-constructed registry bypassed that wrapper, and all ten of this theory's stamps read
+        // "(configured)" — the asked-for secret id — leaving a gateway that quietly answers with another model
+        // indistinguishable from a trajectory regression (real-model run 33723910434).
+        var registry = RealModelLiveWire.Registry();
         var decider = new LlmSupervisorDecider(registry, new FixedCredentialSelector(model, credential), new CodeSpace.Core.Services.Agents.AgentHarnessRegistry(System.Array.Empty<CodeSpace.Core.Services.Agents.IAgentHarness>()), RealModelLiveWire.Personas(), new InMemoryTapeSummaryStore(), new NullRepoGrounding(), new ConsoleTestLogger<LlmSupervisorDecider>());
 
         // The SUCCESS path proves convergence; the four RECOVERY paths prove the live brain handles a merge conflict,
@@ -92,17 +94,6 @@ public sealed class RealModelSupervisorTrajectoryFlowTests
     }
 
     private static string? Env(string name) => string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(name)) ? null : Environment.GetEnvironmentVariable(name);
-
-    private static readonly IHttpClientFactory SharedHttp = new SimpleHttpClientFactory();
-
-    private sealed class SimpleHttpClientFactory : IHttpClientFactory
-    {
-        // Generous PER-CALL timeout: this gateway is slow (~50-90s/turn with the progressive structured-output
-        // double-attempt), so a tight per-call cap would abort a legitimately-slow turn. A turn that STILL exceeds 150s
-        // throws a TimeoutException that AssessLiveAsync treats as non-gating gateway infra (not a flaky RED). The
-        // WHOLE-trajectory wall-clock bound is the 6-min CancellationTokenSource at the call site (a non-converging run).
-        public HttpClient CreateClient(string name) => new() { Timeout = TimeSpan.FromSeconds(150) };
-    }
 
     private sealed class FixedCredentialSelector : IModelPoolSelector
     {

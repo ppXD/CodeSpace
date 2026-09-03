@@ -434,5 +434,15 @@ public sealed class PostgresFixture : IAsyncLifetime
                     ? c.Resolve<CodeSpace.Core.Services.Supervisor.Deciders.LlmSupervisorDecider>()
                     : c.Resolve<Workflows.Infrastructure.ScriptedSupervisorDecider>())
             .InstancePerLifetimeScope();
+
+        // The OUTERMOST ILLMClient decorator (registered after CodeSpaceModule, so it wraps the production recording
+        // decorators): it reports the PROVIDER-REPORTED model of every response to RealModelGate's per-assessment sink,
+        // so a real-model gate that resolves its client through DI — the whole-loop E2E, whose live brain reads its
+        // credential from a seeded DB row — can name WHICH model actually answered. Without it every whole-loop stamp
+        // read the asked-for secret id tagged "(configured)", and a gateway quietly answering with a different model
+        // was indistinguishable from a capability regression (real-model run 33723910434 stamped 16 of them).
+        // Inert for every faked-LLM lane: RealModelGate.ObserveModel is a no-op until a gate arms a sink. The three-way
+        // conditional split mirrors the production recording family so a wrapper never claims a face its inner lacks.
+        Workflows.Supervisor.ModelObserving.RegisterDecorators(builder);
     }
 }
