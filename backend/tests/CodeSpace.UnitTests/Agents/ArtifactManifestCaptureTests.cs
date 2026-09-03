@@ -286,6 +286,103 @@ public class ArtifactManifestCaptureTests
 
     private sealed class CaptureProbeCompletedException : Exception;
 
+    // ── C2: the UNDECLARED scratch walk — its pinned limits, its allowlist, its determinism ──────────────
+
+    /// <summary>
+    /// Rule 8: these four literals decide what a repo-less run's world keeps. Raising the caps silently is how an
+    /// artifact store fills up; lowering them silently is how a deliverable disappears. Widening the allowlist
+    /// silently is how a walk nobody asked for starts lifting binaries. Every change stays a visible decision.
+    /// </summary>
+    [Fact]
+    public void The_undeclared_walks_limits_and_allowlist_are_pinned()
+    {
+        ArtifactManifestStore.MaxUndeclaredCaptureFiles.ShouldBe(32);
+        ArtifactManifestStore.MaxUndeclaredCaptureBytes.ShouldBe(8L * 1024 * 1024);
+        ArtifactManifestStore.MaxUndeclaredScanFiles.ShouldBe(2000);
+
+        ArtifactManifestStore.CapturableUndeclaredExtensions.ShouldBe(
+            new[] { ".csv", ".html", ".json", ".jsonl", ".md", ".mmd", ".puml", ".rst", ".svg", ".tsv", ".txt", ".xml", ".yaml", ".yml" },
+            customMessage: "text and text-shaped documents only — a walk nobody asked for must not spend the byte budget on bytes no grader opens");
+    }
+
+    [Theory]
+    [InlineData("report.md", true)]
+    [InlineData("notes/findings.txt", true)]
+    [InlineData("data/rows.CSV", true)]                  // extension casing never changes the verdict
+    [InlineData("build/agent.bin", false)]               // not a text/document extension
+    [InlineData("archive.tar.gz", false)]
+    [InlineData("report", false)]                        // no extension at all
+    [InlineData(".env", false)]                          // a dotfile is never lifted — this is the credential case
+    [InlineData(".claude/settings.json", false)]         // …nor one nested under a harness's own dot-directory
+    [InlineData("docs/.secret.md", false)]               // …at any depth
+    public void The_walk_takes_only_non_dotfile_text_documents(string relativePath, bool capturable)
+    {
+        ArtifactManifestStore.IsCapturableUndeclared(relativePath).ShouldBe(capturable);
+    }
+
+    /// <summary>
+    /// The walk's ORDER is the walk's fairness: a bounded selection that took a different subset each run would make
+    /// "what did this attempt keep?" unanswerable. Ordinal by relative path, and symlinks never enter the list.
+    /// </summary>
+    [Fact]
+    public void The_walk_is_ordinally_deterministic_and_never_descends_a_symlink()
+    {
+        using var dir = new TempDir();
+        Directory.CreateDirectory(Path.Combine(dir.Path, "notes"));
+        File.WriteAllText(Path.Combine(dir.Path, "zebra.md"), "z");
+        File.WriteAllText(Path.Combine(dir.Path, "alpha.md"), "aa");
+        File.WriteAllText(Path.Combine(dir.Path, "notes", "beta.txt"), "bbb");
+
+        var walked = ArtifactManifestStore.Walk(dir.Path);
+
+        walked.Select(f => f.Path).ShouldBe(new[] { "alpha.md", "notes/beta.txt", "zebra.md" });
+        walked.Single(f => f.Path == "notes/beta.txt").LengthBytes.ShouldBe(3, "the byte budget is spent against real lengths");
+
+        if (OperatingSystem.IsWindows()) return;
+
+        using var outside = new TempDir();
+        File.WriteAllText(Path.Combine(outside.Path, "stolen.md"), "not yours");
+        Directory.CreateSymbolicLink(Path.Combine(dir.Path, "escape"), outside.Path);
+
+        ArtifactManifestStore.Walk(dir.Path).Select(f => f.Path)
+            .ShouldNotContain("escape/stolen.md", "the recursion never descends a reparse point — and the capture guard re-clamps every component besides");
+    }
+
+    /// <summary>
+    /// C2's shortfall half: the walk's own ceiling is the one loss nothing else in the capture facts could reveal —
+    /// a run that captured three files because the cap stopped it looks identical, without this, to a world that
+    /// held exactly three.
+    /// </summary>
+    [Fact]
+    public void The_capture_facts_carry_the_scratch_walks_pair_and_a_walk_only_run_is_not_empty()
+    {
+        var facts = JsonDocument.Parse(AgentRunExecutor.CaptureFactsOf(
+            new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", UndeclaredArtifactCount = 3, UncapturedScratchFileCount = 41 },
+            NothingDeclared)).RootElement;
+
+        facts.GetProperty("undeclaredArtifacts").GetInt32().ShouldBe(3);
+        facts.GetProperty("uncapturedScratchFiles").GetInt32().ShouldBe(41, "an over-limit capture must be VISIBLE, not silent");
+        facts.GetProperty("empty").GetBoolean().ShouldBeFalse("a run whose only capture was the walk still captured something — recording it empty would be the same lie the typed-only case used to tell");
+    }
+
+    /// <summary>
+    /// The ONE kind rule the whole repo-less lane turns on (the executor's scratch grade, the supervisor fold's
+    /// captured grade, and the declared-path derivation all read it here). A TestsPass argv in a directory of
+    /// captured documents is a category error — a bare <c>exit 0</c> would pass vacuously — so it stays fail-closed.
+    /// </summary>
+    [Theory]
+    [InlineData(BenchmarkGradingKind.ArtifactPresent, true)]
+    [InlineData(BenchmarkGradingKind.LlmJudge, true)]
+    [InlineData(BenchmarkGradingKind.CitationsResolve, true)]
+    [InlineData(BenchmarkGradingKind.ArtifactSchema, true)]
+    [InlineData(BenchmarkGradingKind.TestsPass, false)]
+    [InlineData(null, false)]
+    public void Only_a_deliverable_shaped_kind_grades_from_files(BenchmarkGradingKind? kind, bool fromDeliverables)
+    {
+        AgentAcceptanceContract.GradesFromDeliverables(new SupervisorAcceptanceSpec { Command = new[] { "x" }, Kind = kind }).ShouldBe(fromDeliverables);
+        AgentAcceptanceContract.GradesFromDeliverables(null).ShouldBeFalse("no contract grades from nothing");
+    }
+
     private sealed class TempDir : IDisposable
     {
         public string Path { get; } = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "cs-artifact-capture-" + Guid.NewGuid().ToString("N"));

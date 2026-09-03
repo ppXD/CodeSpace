@@ -371,6 +371,49 @@ public class SupervisorDeciderTests
         prompt.ShouldContain("do NOT retry", Case.Insensitive, "the work is objectively fine — retrying it wastes a round-trip");
     }
 
+    /// <summary>
+    /// C2's refutation evidence, in the one place it was visible: a REPO-LESS research/report unit whose deliverable
+    /// was captured and PASSED must not be told to retry itself. The fold used to hand every repo-less unit
+    /// <c>no-branch-or-repo</c> with no work present — which classifies GENUINE, not infra (the sibling test above
+    /// covers the work-present arm) — so a correctly written report produced the "RETRY this exact subtask" steer,
+    /// forever, and non-code work was a first-class supervisor path only inside a repo. Two arms, one fixture: the
+    /// PASSED verdict the fold now reaches, and the fail-closed grade it used to reach, so the difference in what the
+    /// brain is told is asserted rather than assumed.
+    /// </summary>
+    [Theory]
+    [InlineData(true, "artifact-present", "objectively verified", "RETRY this exact subtask")]
+    [InlineData(false, "no-branch-or-repo", "RETRY this exact subtask", "objectively verified")]
+    public void A_repo_less_units_captured_deliverable_verdict_decides_whether_the_brain_hears_retry(bool passed, string detail, string expectedSteer, string forbiddenSteer)
+    {
+        var agentId = Guid.NewGuid();
+        var outcome = SupervisorOutcome.FoldAgentResults(
+            $$"""{"agentRunIds":["{{agentId}}"],"agentCount":1}""",
+            new[]
+            {
+                // No repo ⇒ no produced branch and no changed files: work-present is FALSE, which is exactly why
+                // 'no-branch-or-repo' reads GENUINE here instead of infra.
+                new SupervisorAgentResult
+                {
+                    AgentRunId = agentId, Status = "Succeeded", Summary = "wrote the findings report",
+                    AcceptancePassed = passed, AcceptanceDetail = detail,
+                },
+            });
+
+        var spawn = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 2, DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = """{"subtaskIds":["s1"]}""", OutcomeJson = outcome,
+        };
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 2, spawn));
+
+        prompt.ShouldContain(expectedSteer, Case.Insensitive);
+        prompt.ShouldNotContain(forbiddenSteer, Case.Insensitive,
+            customMessage: passed
+                ? "a repo-less unit whose captured deliverable PASSED must never be told to retry itself — that is the exact refutation evidence C2 must not leave behind"
+                : "the fail-closed arm is the OLD behaviour this PR removes from the repo-less lane; it must not also claim the work is verified");
+    }
+
     [Fact]
     public void The_user_prompt_renders_an_infra_classed_rejection_as_unverified_never_as_retry_bait()
     {

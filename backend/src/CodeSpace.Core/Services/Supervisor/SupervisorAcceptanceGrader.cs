@@ -1,5 +1,6 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark;
+using CodeSpace.Core.Services.Agents.Eval.Benchmark.Graders;
 using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Workspace;
@@ -41,10 +42,12 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
     private readonly IBenchmarkGraderRegistry _graders;
     private readonly IArtifactOffloader _offloader;
     private readonly Workflows.Artifacts.IArtifactStore _artifacts;
+    private readonly IArtifactManifestStore _artifactManifests;
     private readonly ILogger<SupervisorAcceptanceGrader> _logger;
 
-    public SupervisorAcceptanceGrader(IAgentWorkspaceResolver workspaceResolver, IWorkspaceProviderRegistry providers, ISandboxRunnerRegistry runners, IBenchmarkGraderRegistry graders, IArtifactOffloader offloader, Workflows.Artifacts.IArtifactStore artifacts, ILogger<SupervisorAcceptanceGrader> logger)
+    public SupervisorAcceptanceGrader(IAgentWorkspaceResolver workspaceResolver, IWorkspaceProviderRegistry providers, ISandboxRunnerRegistry runners, IBenchmarkGraderRegistry graders, IArtifactOffloader offloader, Workflows.Artifacts.IArtifactStore artifacts, IArtifactManifestStore artifactManifests, ILogger<SupervisorAcceptanceGrader> logger)
     {
+        _artifactManifests = artifactManifests;
         _workspaceResolver = workspaceResolver;
         _providers = providers;
         _runners = runners;
@@ -103,6 +106,76 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
             return new BenchmarkGrade { Passed = false, Detail = "grade-error: the workspace directory no longer exists", Class = Messages.Agents.Benchmark.GradeFailureClass.Environment };
 
         return await GradeWorkspaceAsync(directory, spec, teamId, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<BenchmarkGrade> GradeCapturedAsync(Guid agentRunId, Guid teamId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
+    {
+        var directory = Path.Combine(LocalGitWorkspaceProvider.WorkspacesRoot, "captured-" + Guid.NewGuid().ToString("N"));
+
+        try
+        {
+            if (await MaterializeCapturedAsync(agentRunId, teamId, directory, cancellationToken).ConfigureAwait(false) == 0)
+            {
+                _logger.LogWarning("Agent run {AgentRunId}: no captured deliverable to grade the repo-less acceptance against — failing closed as {Detail}", agentRunId, ISupervisorAcceptanceGrader.NoDeliverablesCaptured);
+
+                return Failed(ISupervisorAcceptanceGrader.NoDeliverablesCaptured, GradeFailureClass.Genuine);
+            }
+
+            return await GradeWorkspaceAsync(directory, spec, teamId, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // The world-rebuild itself failed (a CAS read fault, a disk fault) — the check never RAN, so this is the
+            // grader's own fault class, never a verdict on the work. Fail closed rather than strand the fold.
+            _logger.LogWarning(ex, "Agent run {AgentRunId}: could not rebuild the captured deliverables to grade against; failing closed to not-accepted", agentRunId);
+
+            return Failed($"grade-error: {ex.Message}", GradeFailureClass.GraderFault);
+        }
+        finally
+        {
+            try { Directory.Delete(directory, recursive: true); } catch { /* best-effort: a leaked temp dir on the worker's ephemeral disk is harmless */ }
+        }
+    }
+
+    /// <summary>
+    /// Write every CURRENT manifest row's bytes to <paramref name="directory"/> under its own logical path, and
+    /// return how many landed. A row whose logical path would escape the rebuilt root, or whose CAS bytes no longer
+    /// resolve team-scoped, is SKIPPED with a named warning — the oracle then judges the world as it actually is (an
+    /// absent deliverable is its business), the same posture the capture side takes.
+    /// </summary>
+    private async Task<int> MaterializeCapturedAsync(Guid agentRunId, Guid teamId, string directory, CancellationToken cancellationToken)
+    {
+        var rows = await _artifactManifests.ListForAgentRunAsync(agentRunId, teamId, cancellationToken).ConfigureAwait(false);
+
+        Directory.CreateDirectory(directory);
+
+        var written = 0;
+
+        foreach (var row in rows.Where(r => r.SupersededByManifestId is null))
+        {
+            var target = Path.GetFullPath(Path.Combine(directory, row.LogicalPath));
+
+            if (!WorkspaceArtifactGuard.IsStrictlyWithin(directory, target))
+            {
+                _logger.LogWarning("Agent run {AgentRunId}: captured deliverable '{Path}' would escape the grading directory — not materialized", agentRunId, row.LogicalPath);
+                continue;
+            }
+
+            var bytes = await _artifacts.GetBytesAsync(teamId, row.ContentArtifactId, cancellationToken).ConfigureAwait(false);
+
+            if (bytes is null)
+            {
+                _logger.LogWarning("Agent run {AgentRunId}: captured deliverable '{Path}' has no resolvable bytes ({ArtifactId}) — not materialized", agentRunId, row.LogicalPath, row.ContentArtifactId);
+                continue;
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            await File.WriteAllBytesAsync(target, bytes.Bytes, cancellationToken).ConfigureAwait(false);
+
+            written++;
+        }
+
+        return written;
     }
 
     public async Task<BenchmarkGrade> GradePatchAsync(Guid repositoryId, Guid teamId, string baseSha, string inlinePatch, Guid? patchArtifactId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)

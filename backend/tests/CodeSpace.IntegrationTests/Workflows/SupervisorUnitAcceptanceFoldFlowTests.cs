@@ -602,6 +602,72 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
         unit.AcceptanceDetail.ShouldStartWith("not-applicable");
     }
 
+    // ─── C2: a REPO-LESS unit is graded against what it captured, not failed closed on "no repo" ──────────
+
+    /// <summary>
+    /// The defect C2 closes, end to end through the real fold: a research/report subtask with NO repository and an
+    /// <c>ArtifactPresent</c> oracle used to be handed <c>no-branch-or-repo</c> unconditionally. With no work
+    /// present that detail classifies GENUINE — so the decider was told "RETRY this exact subtask" about a report it
+    /// had already written correctly, forever. The fold now grades it against the deliverables the unit durably
+    /// captured, and the prompt is asserted directly so the refutation evidence cannot survive this test.
+    /// </summary>
+    [Fact]
+    public async Task A_repo_less_unit_is_graded_against_its_captured_deliverables_and_the_brain_is_never_told_to_retry()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var agentRunId = Guid.NewGuid();
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, ArtifactPlanPayload("s1", new[] { "report.md" }));
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(agentRunId, producedBranch: null)));
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = false, Detail = "should-not-run" });
+        var ctx = await RehydrateAsync(runId, teamId, RepoLessGoalConfig(), grader);
+
+        grader.CallCount.ShouldBe(0, "there is no branch to clone");
+        grader.PatchCalls.Count.ShouldBe(0, "and no repo to apply a patch onto");
+
+        var captured = grader.CapturedCalls.ShouldHaveSingleItem();
+        captured.AgentRunId.ShouldBe(agentRunId, "the unit's OWN captured deliverables are the world — addressed by its attempt id");
+        captured.Kind.ShouldBe(BenchmarkGradingKind.ArtifactPresent);
+        captured.Command.ShouldBe(new[] { "report.md" });
+
+        var spawn = ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn);
+        var unit = SupervisorOutcome.ReadAgentResults(spawn.OutcomeJson).Single();
+        unit.AcceptancePassed.ShouldBe(true, "the captured report satisfied its own oracle");
+        unit.AcceptanceDetail.ShouldBe("artifact-present");
+        unit.AcceptanceDetail.ShouldNotBe("no-branch-or-repo", "non-code work is now a first-class supervisor path OUTSIDE a repo too");
+
+        var prompt = CodeSpace.Core.Services.Supervisor.Deciders.LlmSupervisorDecider.BuildUserPromptForTest(ctx);
+        prompt.ShouldContain("acceptance PASSED", Case.Sensitive);
+        prompt.ShouldNotContain("RETRY this exact subtask", Case.Sensitive,
+            "the refutation evidence this PR must not leave behind: a repo-less unit with a captured, passing deliverable that the decider is still told to RETRY");
+    }
+
+    /// <summary>
+    /// The category error stays fail-closed: a <c>TestsPass</c> argv has no code world to run in without a repo, so
+    /// the captured-deliverable lane is never even consulted and the detail is byte-identical to before C2.
+    /// </summary>
+    [Fact]
+    public async Task A_repo_less_tests_pass_unit_still_fails_closed_and_never_reaches_the_captured_lane()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", Check)));
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(Guid.NewGuid(), producedBranch: null)));
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = false, Detail = "should-not-run" });
+        var ctx = await RehydrateAsync(runId, teamId, RepoLessGoalConfig(), grader);
+
+        grader.CapturedCalls.ShouldBeEmpty("a bare `exit 0` argv in a directory of captured documents would pass VACUOUSLY — that is a category error, not a verdict");
+
+        var spawn = ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn);
+        var unit = SupervisorOutcome.ReadAgentResults(spawn.OutcomeJson).Single();
+        unit.AcceptancePassed.ShouldBe(false);
+        unit.AcceptanceDetail.ShouldBe("no-branch-or-repo", "the exact detail this arm has always failed closed on");
+    }
+
     [Fact]
     public async Task A_unit_with_no_branch_no_patch_and_expects_changes_true_fails_closed_exactly_like_the_default()
     {
@@ -1036,6 +1102,13 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
         AgentProfile = new SupervisorAgentProfile { RepositoryId = repoId },
     };
 
+    /// <summary>C2 — a goal with NO repository bound: the research/report shape whose units the fold must grade from what they captured.</summary>
+    private static SupervisorGoalConfig RepoLessGoalConfig() => new()
+    {
+        Goal = Goal,
+        AgentProfile = new SupervisorAgentProfile { RepositoryId = null },
+    };
+
     private async Task<Guid> SeedSupervisorRunAsync(Guid teamId, Guid userId)
     {
         var workflowId = await CreateSupervisorWorkflowAsync(teamId, userId);
@@ -1118,6 +1191,19 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
             BaseCalls.Add((repositoryId, baseSha, spec.Command));
             if (ThrowOnBase != null) throw ThrowOnBase;
             return Task.FromResult(BaseGrade);
+        }
+
+        /// <summary>C2 — the repo-less lane: which units the fold asked to be graded against their CAPTURED deliverables.</summary>
+        public List<(Guid AgentRunId, Guid TeamId, IReadOnlyList<string> Command, BenchmarkGradingKind Kind)> CapturedCalls { get; } = new();
+
+        /// <summary>The verdict the rebuilt-world grade returns. Its default is the passing ArtifactPresent verdict a captured, correct report earns.</summary>
+        public BenchmarkGrade CapturedGrade { get; set; } = new() { Passed = true, Detail = "artifact-present" };
+
+        public Task<BenchmarkGrade> GradeCapturedAsync(Guid agentRunId, Guid teamId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
+        {
+            CapturedCalls.Add((agentRunId, teamId, spec.Command, spec.Kind ?? BenchmarkGradingKind.TestsPass));
+            if (_throw != null) throw _throw;
+            return Task.FromResult(CapturedGrade);
         }
     }
 }

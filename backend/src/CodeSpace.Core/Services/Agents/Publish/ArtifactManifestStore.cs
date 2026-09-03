@@ -28,6 +28,21 @@ public interface IArtifactManifestStore
     /// </summary>
     Task<int> CaptureDeclaredAsync(AgentTask task, string workspaceDirectory, Guid agentRunId, Guid? workflowRunId, Guid teamId, long fenceEpoch, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// C2 — the DECLARED capture's sibling for everything a repo-less run wrote that its contract never named: a
+    /// BOUNDED, deterministic walk of the scratch world that captures text/document files the same way, minting the
+    /// same typed rows through the same containment guard. A run only knows what it declared, and the deliverable
+    /// worth keeping was routinely the one nobody declared — before this it died with the scratch directory.
+    ///
+    /// <para>Bounded on purpose (<see cref="ArtifactManifestStore.MaxUndeclaredCaptureFiles"/>,
+    /// <see cref="ArtifactManifestStore.MaxUndeclaredCaptureBytes"/>, <see cref="ArtifactManifestStore.MaxUndeclaredScanFiles"/>): an
+    /// unbounded walk of a directory an agent had shell access to is a way to fill the artifact store, not a
+    /// capability. The limits are VISIBLE rather than silent — the returned outcome reports what the walk refused,
+    /// which the caller commits into the capture promise's facts. DECLARED paths are skipped here entirely: they
+    /// keep <see cref="CaptureDeclaredAsync"/>'s exact semantics, including its shortfall accounting.</para>
+    /// </summary>
+    Task<UndeclaredCaptureOutcome> CaptureUndeclaredAsync(AgentTask task, string workspaceDirectory, Guid agentRunId, Guid? workflowRunId, Guid teamId, long fenceEpoch, CancellationToken cancellationToken);
+
     Task<IReadOnlyList<ArtifactManifest>> ListForAgentRunAsync(Guid agentRunId, Guid teamId, CancellationToken cancellationToken);
 
     Task<IReadOnlyList<ArtifactManifest>> ListForWorkflowRunAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken);
@@ -52,6 +67,25 @@ public sealed class ArtifactManifestStore : IArtifactManifestStore, IScopedDepen
     /// <summary>Historical capture-source value retained for readers of pre-streaming bound-exceeded rows; this store no longer produces new gaps.</summary>
     public const string CompletenessCaptureSource = "artifact-manifest-store";
 
+    /// <summary>C2 — how many UNDECLARED scratch files one walk may capture. Rule 8: pinned by test, because raising it silently is how an artifact store fills up and lowering it silently is how a deliverable disappears.</summary>
+    public const int MaxUndeclaredCaptureFiles = 32;
+
+    /// <summary>C2 — the total byte budget one walk's UNDECLARED captures share. A single file bigger than what is left is refused whole (never clipped — a truncated deliverable is a lie). Rule 8: pinned by test.</summary>
+    public const long MaxUndeclaredCaptureBytes = 8L * 1024 * 1024;
+
+    /// <summary>C2 — how many filesystem entries one walk will even LOOK at before it stops scanning. Separate from the capture cap so a pathological tree cannot turn the walk itself into the cost. Rule 8: pinned by test.</summary>
+    public const int MaxUndeclaredScanFiles = 2000;
+
+    /// <summary>
+    /// C2 — the ONLY extensions an undeclared walk will take: text and text-shaped document formats an oracle can
+    /// actually read. Binaries, archives and images are refused — not because they are dangerous, but because a walk
+    /// nobody asked for should not spend a run's byte budget on bytes no grader will open. A DECLARED path is never
+    /// filtered by this list (an agent asked for that one by name). Rule 8: pinned by test.
+    /// </summary>
+    public static readonly IReadOnlyList<string> CapturableUndeclaredExtensions = new[] { ".csv", ".html", ".json", ".jsonl", ".md", ".mmd", ".puml", ".rst", ".svg", ".tsv", ".txt", ".xml", ".yaml", ".yml" };
+
+    private static readonly HashSet<string> Capturable = new(CapturableUndeclaredExtensions, StringComparer.Ordinal);
+
     private readonly CodeSpaceDbContext _db;
     private readonly IArtifactStreamRetentionWriter _retention;
     private readonly ILogger<ArtifactManifestStore> _logger;
@@ -69,55 +103,148 @@ public sealed class ArtifactManifestStore : IArtifactManifestStore, IScopedDepen
 
         if (paths.Count == 0) return 0;
 
+        var coordinates = new CaptureCoordinates(agentRunId, workflowRunId, teamId, fenceEpoch);
         var captured = 0;
 
         foreach (var path in paths)
+            if (await CaptureOneAsync(coordinates, workspaceDirectory, path, cancellationToken).ConfigureAwait(false)) captured++;
+
+        return captured;
+    }
+
+    public async Task<UndeclaredCaptureOutcome> CaptureUndeclaredAsync(AgentTask task, string workspaceDirectory, Guid agentRunId, Guid? workflowRunId, Guid teamId, long fenceEpoch, CancellationToken cancellationToken)
+    {
+        var declared = DeclaredDeliverablePaths(task).ToHashSet(StringComparer.Ordinal);
+        var coordinates = new CaptureCoordinates(agentRunId, workflowRunId, teamId, fenceEpoch);
+
+        var captured = 0;
+        var refused = 0;
+        var spent = 0L;
+
+        foreach (var candidate in Walk(workspaceDirectory))
         {
-            if (!WorkspaceArtifactGuard.TryResolveFileWithin(workspaceDirectory, path, out var file, out var failure))
+            if (declared.Contains(candidate.Path)) continue;
+
+            if (!IsCapturableUndeclared(candidate.Path) || captured >= MaxUndeclaredCaptureFiles || spent + candidate.LengthBytes > MaxUndeclaredCaptureBytes)
             {
-                NoticeSkip(new DeclaredDeliverableSkip(agentRunId, path, failure!.Value));
+                refused++;
                 continue;
             }
 
-            // Declaring write (see IArtifactRetentionWriter): content_artifact_id below is the ONLY reference this
-            // method writes, and it is written AFTER the bytes land, so a throw in between leaves bytes nothing ever
-            // pointed at. The declaration is what lets the retention reaper reclaim exactly those. A dedup hit declares
-            // nothing — the bytes are then shared with a producer whose references are not enumerable — so this call is
-            // safe to make unconditionally.
-            ArtifactStreamRetentionWrite write;
-            using (var source = new WorkspaceArtifactSource(file))
-                write = await _retention.PutDeclaredAsync(Declaration(teamId, source, path, agentRunId), cancellationToken).ConfigureAwait(false);
-            var artifactId = write.ArtifactId;
-
-            await UpsertAsync(new ArtifactManifest
+            if (!await CaptureOneAsync(coordinates, workspaceDirectory, candidate.Path, cancellationToken).ConfigureAwait(false))
             {
-                Id = Guid.NewGuid(),
-                TeamId = teamId,
-                AgentRunId = agentRunId,
-                WorkflowRunId = workflowRunId,
-                FenceEpoch = fenceEpoch,
-                Kind = KindFor(path),
-                LogicalPath = path,
-                ContentArtifactId = artifactId,
-                Sha256 = write.Sha256,
-                SizeBytes = write.SizeBytes,
-                ContentType = ContentTypeFor(path),
-            }, cancellationToken).ConfigureAwait(false);
+                refused++;
+                continue;
+            }
 
             captured++;
+            spent += candidate.LengthBytes;
         }
 
-        return captured;
+        if (refused > 0)
+            _logger.LogWarning("Agent run {RunId}: the scratch walk captured {Captured} undeclared file(s) and left {Refused} — a non-text extension, a dotfile, or the walk's own {FileCap}-file / {ByteCap}-byte ceiling", agentRunId, captured, refused, MaxUndeclaredCaptureFiles, MaxUndeclaredCaptureBytes);
+
+        return new UndeclaredCaptureOutcome { Captured = captured, Refused = refused };
+    }
+
+    /// <summary>
+    /// Capture ONE workspace-relative path — the single write path both the declared list and the undeclared walk go
+    /// through, so containment, the declaring write's ordering, the typed row's shape and the skip notice have one
+    /// implementation. False = nothing was captured (the guard refused it); the notice names why.
+    /// </summary>
+    private async Task<bool> CaptureOneAsync(CaptureCoordinates coordinates, string workspaceDirectory, string path, CancellationToken cancellationToken)
+    {
+        if (!WorkspaceArtifactGuard.TryResolveFileWithin(workspaceDirectory, path, out var file, out var failure))
+        {
+            NoticeSkip(new DeclaredDeliverableSkip(coordinates.AgentRunId, path, failure!.Value));
+            return false;
+        }
+
+        // Declaring write (see IArtifactRetentionWriter): content_artifact_id below is the ONLY reference this
+        // method writes, and it is written AFTER the bytes land, so a throw in between leaves bytes nothing ever
+        // pointed at. The declaration is what lets the retention reaper reclaim exactly those. A dedup hit declares
+        // nothing — the bytes are then shared with a producer whose references are not enumerable — so this call is
+        // safe to make unconditionally.
+        ArtifactStreamRetentionWrite write;
+        using (var source = new WorkspaceArtifactSource(file))
+            write = await _retention.PutDeclaredAsync(Declaration(coordinates.TeamId, source, path, coordinates.AgentRunId), cancellationToken).ConfigureAwait(false);
+        var artifactId = write.ArtifactId;
+
+        await UpsertAsync(new ArtifactManifest
+        {
+            Id = Guid.NewGuid(),
+            TeamId = coordinates.TeamId,
+            AgentRunId = coordinates.AgentRunId,
+            WorkflowRunId = coordinates.WorkflowRunId,
+            FenceEpoch = coordinates.FenceEpoch,
+            Kind = KindFor(path),
+            LogicalPath = path,
+            ContentArtifactId = artifactId,
+            Sha256 = write.Sha256,
+            SizeBytes = write.SizeBytes,
+            ContentType = ContentTypeFor(path),
+        }, cancellationToken).ConfigureAwait(false);
+
+        return true;
+    }
+
+    /// <summary>
+    /// The scratch world's files as workspace-relative paths, ordered ORDINALLY so the bounded selection is
+    /// deterministic — a cap that took a different subset per run would make "what did this attempt keep?"
+    /// unanswerable. Symlinked files and directories are skipped at enumeration (the recursion never descends a
+    /// reparse point) and <see cref="CaptureOneAsync"/>'s guard independently re-clamps every component, so an
+    /// escape has to beat both. Stops scanning at <see cref="MaxUndeclaredScanFiles"/>.
+    /// </summary>
+    internal static IReadOnlyList<ScratchFile> Walk(string root)
+    {
+        var options = new EnumerationOptions
+        {
+            RecurseSubdirectories = true,
+            IgnoreInaccessible = true,
+            AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.System,
+        };
+
+        var files = new List<ScratchFile>();
+
+        foreach (var full in Directory.EnumerateFiles(root, "*", options))
+        {
+            if (files.Count >= MaxUndeclaredScanFiles) break;
+
+            files.Add(new ScratchFile(Path.GetRelativePath(root, full).Replace(Path.DirectorySeparatorChar, '/'), LengthOf(full)));
+        }
+
+        return files.OrderBy(f => f.Path, StringComparer.Ordinal).ToList();
+    }
+
+    /// <summary>A file that vanished between enumeration and measurement reads as zero-length — the capture's own guard is the authority on whether it still exists, and it fails closed there.</summary>
+    private static long LengthOf(string full)
+    {
+        try { return new FileInfo(full).Length; }
+        catch (IOException) { return 0; }
+        catch (UnauthorizedAccessException) { return 0; }
+    }
+
+    /// <summary>
+    /// Whether an UNDECLARED walked path is one this store will take: no dotfile / dot-directory anywhere in it (a
+    /// harness's own config and cache live there — <c>.git</c>, <c>.codex</c>, <c>.claude</c>, and a credential file
+    /// is exactly the thing a walk must never lift), and a text/document extension off the pinned allowlist.
+    /// </summary>
+    internal static bool IsCapturableUndeclared(string relativePath)
+    {
+        foreach (var component in relativePath.Split('/'))
+            if (component.StartsWith('.')) return false;
+
+        return Capturable.Contains(Path.GetExtension(relativePath).ToLowerInvariant());
     }
 
     /// <summary>The declaring write's request for one captured deliverable. The holder it names is the <c>artifact_manifest</c> row the caller writes next.</summary>
     private static ArtifactStreamRetentionWriteRequest Declaration(Guid teamId, WorkspaceArtifactSource source, string path, Guid agentRunId) =>
         new(new ArtifactStreamWriteRequest(teamId, ContentTypeFor(path), source), ArtifactRetentionClass.ArtifactManifestContent, HolderKind, agentRunId);
 
-    /// <summary>The workspace-relative deliverable list a non-<c>TestsPass</c> acceptance declares — <c>TestsPass</c> (or an absent kind, which defaults to it) carries an ARGV, never paths, so it declares nothing capturable.</summary>
+    /// <summary>The workspace-relative deliverable list a non-<c>TestsPass</c> acceptance declares — <c>TestsPass</c> (or an absent kind, which defaults to it) carries an ARGV, never paths, so it declares nothing capturable. The kind rule itself lives on <see cref="AgentAcceptanceContract.GradesFromDeliverables"/>, the single place every tier of the repo-less lane reads it.</summary>
     internal static IReadOnlyList<string> DeclaredDeliverablePaths(AgentTask task) =>
-        task.Acceptance is { Kind: not null and not Messages.Agents.Benchmark.BenchmarkGradingKind.TestsPass } spec
-            ? spec.Command.Where(p => !string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.Ordinal).ToList()
+        AgentAcceptanceContract.GradesFromDeliverables(task.Acceptance)
+            ? task.Acceptance!.Command.Where(p => !string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.Ordinal).ToList()
             : Array.Empty<string>();
 
     /// <summary>
@@ -210,6 +337,12 @@ public sealed class ArtifactManifestStore : IArtifactManifestStore, IScopedDepen
     /// type no consumer can name, which is the cost the rule exists to avoid, not incur.</para>
     /// </summary>
     private sealed record DeclaredDeliverableSkip(Guid AgentRunId, string Path, WorkspaceArtifactReadFailure Failure);
+
+    /// <summary>The attempt coordinates every captured row is stamped with — this class's own parameter bundle (the same Rule 18.1 exemption <see cref="DeclaredDeliverableSkip"/> documents), keeping <see cref="CaptureOneAsync"/> inside the five-parameter cap.</summary>
+    private sealed record CaptureCoordinates(Guid AgentRunId, Guid? WorkflowRunId, Guid TeamId, long FenceEpoch);
+
+    /// <summary>One file the scratch walk saw, and what it would cost the byte budget. Internal (not private) so the walk's ordering and limits are unit-pinned without a database.</summary>
+    internal sealed record ScratchFile(string Path, long LengthBytes);
 
     /// <summary>
     /// Re-reads the exact handle the workspace guard admitted, never its mutable path. Each pass gets an independent
