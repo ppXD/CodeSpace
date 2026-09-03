@@ -29,6 +29,9 @@ public class WorkflowRunConfiguration : IEntityTypeConfiguration<WorkflowRun>
         builder.Property(r => r.DefinitionSnapshotJson).HasColumnName("definition_snapshot_jsonb").HasColumnType("jsonb");
         builder.Property(r => r.DefinitionSnapshotHash).HasColumnName("definition_snapshot_hash");
 
+        // The route provenance a task run was projected from (migration 0190). NULL for an authored run.
+        builder.Property(r => r.RoutePlanJson).HasColumnName("route_plan_jsonb").HasColumnType("jsonb");
+
         // WorkflowId is nullable now (a snapshot run has no parent workflow), so the FK is optional.
         builder.HasOne(r => r.Workflow).WithMany().HasForeignKey(r => r.WorkflowId).IsRequired(false);
 

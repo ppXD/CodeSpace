@@ -7133,6 +7133,30 @@ input.lt3-chip2-add::placeholder { color: var(--accent); opacity: 0.75; }
 .lt3-spec-all:disabled { opacity: .5; cursor: default; }
 .lt3-spec-load { font-size: 11px; color: var(--muted); padding: 7px 6px 0; }
 
+/* ── B1 route confirm card (above the composer box) ────────────────────────────────
+   Same warm card language as .lt3-spec, but it sits ABOVE the box because it GATES the
+   Launch button rather than proposing an edit. `data-risk` shifts the border + header to
+   the warning ramp; the badge is never the only signal (the header copy changes too). */
+.lt3-route { margin: 0 0 10px; border: 1px solid #ECC5B0; background: #FDF8F2; border-radius: 12px; padding: 11px 14px 10px; }
+.lt3-route[data-risk="true"] { border-color: #E3B98D; background: #FDF6EA; }
+.lt3-route-h { display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 600; color: #8A4A2B; padding-bottom: 8px; }
+.lt3-route-h > svg { color: var(--accent); flex-shrink: 0; }
+.lt3-route[data-risk="true"] .lt3-route-h { color: #8A5A18; }
+.lt3-route[data-risk="true"] .lt3-route-h > svg { color: #C08422; }
+.lt3-route-badge { margin-left: auto; font-size: 10.5px; font-weight: 600; padding: 1.5px 9px; border-radius: 999px; background: #FBEFDC; color: #9A6B24; border: 1px dashed #E3C08D; white-space: nowrap; }
+.lt3-route-why { border-top: 1px solid #F2E7D8; padding: 8px 0 0; font-size: 12.5px; line-height: 1.55; color: var(--ink); }
+.lt3-route-why b { color: #8A4A2B; }
+.lt3-route-degraded { font-size: 11.5px; line-height: 1.5; color: #9A6B24; padding-top: 5px; }
+.lt3-route-opts { display: flex; flex-wrap: wrap; gap: 7px; padding-top: 10px; }
+.lt3-route-opt { display: flex; flex-direction: column; gap: 1px; text-align: left; padding: 6px 13px; border-radius: 8px; border: 1px solid #E0CDB4; background: #fff; cursor: pointer; }
+.lt3-route-opt:hover { border-color: var(--accent); }
+.lt3-route-opt[data-suggested="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.lt3-route-opt-t { font-size: 12.5px; font-weight: 600; color: #5C4A33; }
+.lt3-route-opt-d { font-size: 10.5px; color: #A08D76; }
+.lt3-route-f { padding-top: 9px; margin-top: 9px; border-top: 1px solid #F2E7D8; font-size: 10.5px; line-height: 1.45; color: #B3A18A; }
+.lt3-route-quiet { font-size: 11px; line-height: 1.5; color: var(--muted); padding: 0 6px 7px; }
+.lt3-route-quiet b { color: #8A4A2B; font-weight: 600; }
+
 /* ── Repository → Webhook tab ──────────────────────────────────────────────────────
    Rows are `.cn-row` plus a state stripe down the left edge. The stripe is an inset
    box-shadow rather than a border so it can never shift the row's text against its
