@@ -869,6 +869,88 @@ public sealed class RealModelGateTests
         await Should.ThrowAsync<InvalidOperationException>(() => RealModelGate.AssessLiveBestOfNAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
     }
 
+    [Fact]
+    public async Task An_infra_exhausted_budget_that_still_MEASURED_a_fail_verdict_is_not_reported_as_a_skip()
+    {
+        // infra, infra, infra, fail on a budget of 2: the attempt budget (2 + 2 infra retries = 4) runs out with ONE
+        // real fail verdict recorded. That verdict is a measurement — the model answered and answered wrong — so it
+        // must NOT be re-labelled NotExecuted. It also does not GATE (one fail < the 2-attempt floor), so the honest
+        // result is a plain green pass carrying the reported verdict.
+        var (drive, calls) = BoolSequence(new TimeoutException("a"), new TimeoutException("b"), new TimeoutException("c"), false);
+
+        var thrown = await Record.ExceptionAsync(() => RealModelGate.AssessLiveBestOfNAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
+
+        thrown.ShouldBeNull("a measured fail verdict below the gating floor is neither a gate nor a skip");
+        calls().ShouldBe(4, "the three infra attempts consumed no capability slot, so the fail verdict was reached");
+    }
+
+    [Fact]
+    public async Task An_all_infra_boolean_eval_that_measured_NOTHING_is_still_a_skip()
+    {
+        // The other side of the same boundary: every attempt was infra, so zero verdicts exist. That IS unmeasured and
+        // must stay a SkipException — the fix for the case above must not disarm the skip entirely.
+        var (drive, _) = BoolSequence(new TimeoutException("a"), new TimeoutException("b"), new TimeoutException("c"), new TimeoutException("d"), new TimeoutException("e"));
+
+        await Should.ThrowAsync<SkipException>(() => RealModelGate.AssessLiveBestOfNAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
+    }
+
+    [Fact]
+    public async Task A_whole_loop_run_that_MEASURED_a_miss_before_infra_ate_the_budget_is_not_reported_as_a_skip()
+    {
+        // Same boundary on the strict whole-loop gate: one real CapabilityMiss was measured before infra exhausted the
+        // rest of the budget. Non-gating (one miss < the 2-attempt floor) but NOT NotExecuted.
+        var (drive, _) = Sequence(new TimeoutException("a"), new TimeoutException("b"), new TimeoutException("c"), RealModelOutcome.CapabilityMiss);
+
+        var thrown = await Record.ExceptionAsync(() => RealModelGate.AssessLiveWholeLoopAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
+
+        thrown.ShouldBeNull("a measured CapabilityMiss below the gating floor is neither a gate nor a skip");
+    }
+
+    [Fact]
+    public async Task A_blessed_best_of_N_attempt_is_tagged_ATTEMPT_FAIL_not_INFORMATIONAL_FAIL()
+    {
+        // Live proof this was wrong: job 100548613534 printed `INFORMATIONAL-FAIL … wire=Anthropic` for a blessed
+        // best-of-N attempt. The two tags mean opposite things to a reader — "ignore, never gates" versus "attempt 1
+        // of N on the wire that DOES gate" — so a blessed attempt must never borrow the informational one.
+        var console = Console.Out;
+        var captured = new StringWriter();
+        try
+        {
+            Console.SetOut(captured);
+
+            var (drive, _) = BoolSequence(false, true);   // attempt 1 fails, attempt 2 passes → the eval passes
+            await RealModelGate.AssessLiveBestOfNAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null);
+        }
+        finally
+        {
+            Console.SetOut(console);
+        }
+
+        var stdout = captured.ToString();
+        stdout.ShouldContain("[realmodel] ATTEMPT-FAIL");
+        stdout.ShouldContain("wire=Anthropic");
+        stdout.ShouldNotContain("INFORMATIONAL-FAIL", Case.Sensitive, "the blessed wire's attempt is not an informational verdict");
+        stdout.ShouldContain("A_blessed_best_of_N_attempt_is_tagged_ATTEMPT_FAIL_not_INFORMATIONAL_FAIL", Case.Sensitive, "the attempt line names WHICH test it came from");
+    }
+
+    [Fact]
+    public void A_whole_loop_summary_line_names_the_test_arm_that_produced_it()
+    {
+        // A whole-loop job runs a dozen arms into ONE step summary, so an unattributed "CAPABILITY MISS" line cannot be
+        // traced back to the arm that produced it.
+        var path = Path.Combine(Path.GetTempPath(), $"realmodel-3way-attrib-{Guid.NewGuid():N}.md");
+        try
+        {
+            RealModelGate.ReportThreeWay(RealModelOutcome.CapabilityMiss, "parked at plan", path);
+
+            File.ReadAllText(path).ShouldContain("A_whole_loop_summary_line_names_the_test_arm_that_produced_it");
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     /// <summary>Boolean analogue of <see cref="Sequence"/>: yields (Ok, "verdict#N") for a <see cref="bool"/> step, throws an <see cref="Exception"/> step.</summary>
     private static (Func<Task<(bool Ok, string Verdict)>> Drive, Func<int> Calls) BoolSequence(params object[] steps)
     {

@@ -57,7 +57,10 @@ for token in "$@"; do
     continue
   fi
 
-  if [ "$passed" -eq 0 ] && [ "$skipped" -gt 0 ]; then
+  # "Measured nothing" means NOTHING ran to a verdict — a FAILED test is a measurement (a loud one), so a clause with
+  # failures is not unmeasured no matter how many of its siblings skipped. Without the `failed` term the warning fired
+  # on exactly the lane that had just caught a real regression, burying it under a "measured nothing" notice.
+  if [ "$passed" -eq 0 ] && [ "$failed" -eq 0 ] && [ "$skipped" -gt 0 ]; then
     printf '  %-9s %-9s %-9s %-9s %s\n' UNMEASURED "$passed" "$failed" "$skipped" "$token"
     unmeasured="${unmeasured} ${token}(${skipped} skipped)"
     continue

@@ -127,6 +127,29 @@ expect_output lacks "::warning::" "never warns when every clause measured someth
 expect_output has "skipped" "prints a per-clause outcome table" \
   bash "$guard" "$trx" RealModelSupervisor
 
+# A FAILED test is a measurement — the loudest kind. A clause with failures alongside skips must NOT be called
+# unmeasured, or the "measured nothing" notice buries the regression the lane just caught.
+mixed_trx="${tmp}/mixed.trx"
+cat > "$mixed_trx" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<TestRun>
+  <Results>
+    <UnitTestResult testName="CodeSpace.IntegrationTests.Workflows.Supervisor.RealModelSupervisorDecisionFlowTests.The_real_model_decides(provider: &quot;Anthropic&quot;)" outcome="Failed" />
+    <UnitTestResult testName="CodeSpace.IntegrationTests.Workflows.Supervisor.RealModelSupervisorDecisionFlowTests.The_real_model_decides(provider: &quot;OpenAI&quot;)" outcome="NotExecuted" />
+  </Results>
+</TestRun>
+XML
+
+expect_output lacks "::warning::" "never warns about a clause whose tests FAILED (a failure is a measurement)" \
+  bash "$guard" "$mixed_trx" RealModelSupervisor
+
+expect_output lacks "UNMEASURED" "reports a failed+skipped clause as measured, not unmeasured" \
+  bash "$guard" "$mixed_trx" RealModelSupervisor
+
+# ...and the guard itself still exits 0 there: the TEST outcome reds the job, never this guard.
+expect 0 "a failed+skipped clause does not fail the guard" \
+  bash "$guard" "$mixed_trx" RealModelSupervisor
+
 if [ "$failures" -ne 0 ]; then
   echo "${failures} guard self-test(s) failed"
   exit 1
