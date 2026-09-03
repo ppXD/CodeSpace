@@ -23,12 +23,13 @@ public class AgentCardFactsSourceTests
 {
     private static AgentRunMetrics Metrics(string? goal = "Build the login form", AgentRunStatus status = AgentRunStatus.Succeeded,
         int? inTok = 1200, int? outTok = 340, int tools = 6, string? model = "claude-opus-4-8", decimal? cost = 0.42m, long? durationMs = 45000,
-        int? files = 3, FileDiffStat[]? stats = null, string? harness = "codex-cli", string? error = null) =>
+        int? files = 3, FileDiffStat[]? stats = null, string? harness = "codex-cli", string? error = null, string? contradiction = null) =>
         new()
         {
             Status = status, Goal = goal, Error = error, DurationMs = durationMs, InputTokens = inTok, OutputTokens = outTok,
             ToolCount = tools, Model = model, Harness = harness, CostUsd = cost, FilesChanged = files,
             ChangedFileStats = stats ?? new[] { new FileDiffStat("auth/session.ts", 42, 3) }, Resumed = true,
+            Contradiction = contradiction,
         };
 
     [Fact]
@@ -84,6 +85,26 @@ public class AgentCardFactsSourceTests
     {
         AgentCardFactsSource.ToCard(Guid.NewGuid(), Metrics(), allocation: null, compact: null).Contradiction.ShouldBeNull();
         AgentCardFactsSource.ToCard(Guid.NewGuid(), Metrics(), allocation: null, compact: Compact("a.cs")).Contradiction.ShouldBeNull("Compact() carries no per-unit grade — nothing to contradict");
+    }
+
+    [Fact]
+    public void A_single_agents_own_under_claim_rides_onto_the_card_with_no_compact()
+    {
+        // D4b: a plain / map agent has no supervisor compact at all, so before this its durable under-claim was
+        // invisible on every surface — the exact "write-only field" the fold was supposed to make legible.
+        AgentCardFactsSource.ToCard(Guid.NewGuid(), Metrics(contradiction: AgentContradiction.UnderClaim), allocation: null, compact: null).Contradiction
+            .ShouldBe(AgentContradiction.UnderClaim, "the single-agent lane's verdict reaches the card through the metrics projection");
+    }
+
+    [Fact]
+    public void A_supervisor_units_compact_verdict_outranks_the_metrics_copy()
+    {
+        // Both lanes can carry a value for the same run (the compact is the supervisor fold's, the metrics one is
+        // the run's own). The compact is what the decider prompt reads, so the card must agree with THAT.
+        var compact = new SupervisorAgentResult { AgentRunId = Guid.NewGuid(), Status = "Succeeded", Contradiction = AgentContradiction.OverClaim };
+
+        AgentCardFactsSource.ToCard(Guid.NewGuid(), Metrics(contradiction: AgentContradiction.UnderClaim), allocation: null, compact: compact).Contradiction
+            .ShouldBe(AgentContradiction.OverClaim);
     }
 
     [Fact]

@@ -126,7 +126,10 @@ public sealed class AgentCardFactsSource : IJournalFactsSource
             Files = m.ChangedFileStats.Count > 0 ? m.ChangedFileStats : compactFiles.Select(p => new FileDiffStat(p, null, null)).ToList(),
             Resumed = m.Resumed,
             Review = review,
-            Contradiction = compact?.Contradiction,
+            // The supervisor lane's per-unit fold writes the compact's copy; a plain / map agent has no compact, so the
+            // SINGLE-agent lane's own durable verdict (D4b's under-claim included) rides the metrics projection. One
+            // card shape, either lane — never a contradiction that is durable but invisible.
+            Contradiction = compact?.Contradiction ?? m.Contradiction,
         };
     }
 

@@ -137,18 +137,17 @@ public sealed record AgentRunResult
 
     /// <summary>
     /// Whether this run's self-report contradicted its objective grade (P4-1) — a
-    /// <c>CodeSpace.Core.Services.Agents.AgentContradiction</c> value. In THIS lane the only reachable value is
-    /// <c>over_claim</c>: <see cref="Core.Services.Agents.AgentAcceptanceContract.FailClosed"/> is the sole write
-    /// site, and every one of its call sites only ever fires on a would-be <see cref="AgentRunStatus.Succeeded"/>
-    /// result whose check FAILED (the grading gate returns early on any other self-reported status, so an
-    /// under-claim — a self-reported Failed run whose check actually passed — can never occur here). Null when the
-    /// run carried no oracle, the grade agreed, or grading never ran.
+    /// <c>CodeSpace.Core.Services.Agents.AgentContradiction</c> value. BOTH values are reachable on this lane:
+    /// <c>over_claim</c> from <see cref="Core.Services.Agents.AgentAcceptanceContract.FailClosed"/> (the run
+    /// claimed success and its check failed), and — since D4b — <c>under_claim</c> from
+    /// <c>AgentRunExecutor.FoldSelfReportedFailureGrade</c> (the run claimed FAILURE but left work behind whose
+    /// check passed, so the objective verdict outranks the claim and the run folds to
+    /// <see cref="AgentRunStatus.Succeeded"/>). Null when the run carried no oracle, the grade agreed, the grade
+    /// was infra-classed (no verdict was minted), or grading never ran.
     ///
-    /// <para><b>Write-only as of P4-1</b> — persisted so it survives on the run's durable result and is available
-    /// to a future single-agent-lane consumer (the run-detail acceptance chip only shows <see cref="AcceptancePassed"/>
-    /// today), mirroring how the supervisor lane's twin field feeds the decider prompt + the journal card. No
-    /// current reader exists for THIS lane's value; that's an intentional asymmetry (single-agent runs have no
-    /// decider prompt to correct and no journal card of their own yet), not an oversight.</para>
+    /// <para>Read by the journal agent card (via <c>AgentRunMetrics.Contradiction</c> →
+    /// <c>AgentCardFactsSource.ToCard</c>), the same surface the supervisor lane's twin field feeds — so a
+    /// single-agent under-claim is visible to the operator instead of only durable.</para>
     /// </summary>
     public string? Contradiction { get; init; }
 

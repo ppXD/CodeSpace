@@ -55,6 +55,7 @@ import { statusWord } from "@/lib/runStatus";
 import { shortRunTitle } from "@/lib/runTitle";
 import { useRunRoomStream } from "@/hooks/use-run-room-stream";
 import { useNowTick } from "@/hooks/use-now-tick";
+import { contradictionChip } from "./agent-contradiction";
 import { liveRunSummary } from "./live-run-summary";
 import { finalAnswerHeading, partitionForFailureHoist } from "./room-blocks";
 import { RoomRunPane, type PaneView } from "./RoomRunPane";
@@ -925,6 +926,7 @@ function journalToRoomCard(c: JournalAgentCard): RoomAgentCard {
     durationMs: c.durationMs ?? null,
     resumed: c.resumed,
     review: c.review ?? null,
+    contradiction: c.contradiction ?? null,
   };
 }
 
@@ -1852,19 +1854,21 @@ function AgentRow({ a }: { a: RoomAgentCard }) {
   const action = running ? "Open terminal" : queued ? "View" : cls === "err" ? "View trace" : "Details";
   const fileCount = a.changedFiles?.length ?? a.filesChanged ?? 0;
   const tokens = a.tokens ?? 0;
+  const contradiction = contradictionChip(a.contradiction);
 
   return (
     <div className="room-arow-wrap">
       <button className="room-arow" data-queued={queued || undefined} disabled={!run} onClick={() => run && openDrawer({ kind: "agent", agent: a, runId: run.runId })}>
         <span className={`room-adot room-adot-${cls}`} />
         <span className="room-arow-name" title={a.summary ?? a.label}>{a.label}</span>
-        {(tokens > 0 || fileCount > 0 || a.model || a.harness || a.resumed || a.review) && (
+        {(tokens > 0 || fileCount > 0 || a.model || a.harness || a.resumed || a.review || contradiction) && (
           <span className="room-arow-meta">
             {a.harness && <span className={`room-arow-metaitem room-arow-harness room-arow-hn-${harnessTint(a.harness)}`} title={`Harness · ${a.harness}`}><Sym n="terminal" s={11} cls="room-arow-metaic room-arow-hic" /></span>}
             {tokens > 0 && <span className="room-arow-metaitem" title={`${tokens.toLocaleString()} tokens`}><Sym n="cpu" s={10} cls="room-arow-metaic" /> {formatTokens(tokens)} tokens</span>}
             {a.model && <span className="room-arow-metaitem room-arow-model" title={`Model · ${a.model}`}><Sym n="sparkle" s={10} cls="room-arow-metaic" /> {a.model}</span>}
             {fileCount > 0 && <span className="room-arow-metaitem" title={`${fileCount} file${fileCount === 1 ? "" : "s"} changed`}><Sym n="file" s={10} cls="room-arow-metaic" /> {fileCount} {fileCount === 1 ? "file" : "files"}</span>}
             {a.resumed && <span className="room-arow-metaitem room-arow-resumed" title="Continued its earlier conversation (the retry resumed the session)"><Sym n="rerun" s={10} cls="room-arow-metaic" /> resumed</span>}
+            {contradiction && <span className={`room-arow-metaitem room-arow-review-${contradiction.tone}`} title={contradiction.title}>{contradiction.text}</span>}
             {a.review && <span className={`room-arow-metaitem room-arow-review-${a.review.approved ? "ok" : "warn"}`} title={`Independent review — ${a.review.approved ? "approved" : "flagged"}: ${a.review.rationale}`}>{a.review.approved ? "✓ reviewed" : `⚠ flagged${a.review.issues.length > 0 ? ` · ${a.review.issues.length}` : ""}`}</span>}
           </span>
         )}

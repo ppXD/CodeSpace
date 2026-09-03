@@ -462,6 +462,25 @@ public class AgentCodeNodeTests
     }
 
     [Fact]
+    public async Task A_folded_under_claim_maps_exactly_like_a_normal_success()
+    {
+        // D4b: the executor folds a self-reported FAILURE whose acceptance check PASSED to Succeeded, keeping the
+        // agent's own error + non-zero exit reason for the journal. The node must read the STATUS, not the leftovers
+        // of the claim — otherwise the objectively-delivered work fails the node (and burns a retry) anyway.
+        var resume = JsonDocument.Parse("""
+            {"status":"Succeeded","error":"I could not finish the task.","exitReason":"non-zero-exit","contradiction":"under_claim","acceptancePassed":true,"summary":"Gave up before verifying.","changedFiles":["src/a.ts"],"branch":"agent/fix-billing"}
+            """).RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(new(), resume), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success, "the objective check passed — the node binds the work like any other success, never a retryable failure");
+        result.Error.ShouldBeNull("the agent's own failure text must not leak into the node's error on a folded success");
+        result.Outputs["status"].GetString().ShouldBe("Succeeded");
+        result.Outputs["branch"].GetString().ShouldBe("agent/fix-billing");
+        result.Outputs["changedFiles"].GetArrayLength().ShouldBe(1);
+    }
+
+    [Fact]
     public async Task Resumed_success_maps_the_result_onto_outputs()
     {
         var resume = JsonDocument.Parse("""

@@ -47,16 +47,149 @@ public class AgentRunExecutorAcceptanceTests
     }
 
     [Fact]
-    public async Task A_non_success_result_skips_the_gate()
+    public async Task A_self_reported_failure_that_produced_nothing_skips_the_gate()
     {
         var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "ok" });
 
-        var failed = Succeeded() with { Status = AgentRunStatus.Failed };
+        var failed = new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = "I could not finish." };
         var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), failed, workspace: null, CancellationToken.None);
 
-        result.ShouldBe(failed, "a failed run is already the truth — nothing to gate");
+        result.ShouldBe(failed, "a failure with NO work has nothing to grade — byte-identical, exactly as before D4b");
         grader.Calls.ShouldBe(0);
-        result.Contradiction.ShouldBeNull("this early return is EXACTLY why an under-claim (Failed self-report, passing grade) can never occur in this lane — a self-reported failure is never graded at all");
+        result.Contradiction.ShouldBeNull();
+    }
+
+    [Theory]
+    [InlineData(AgentRunStatus.Cancelled)]
+    [InlineData(AgentRunStatus.TimedOut)]
+    [InlineData(AgentRunStatus.NeedsReview)]
+    public async Task A_status_that_is_not_a_genuine_self_report_skips_the_gate_even_with_work(AgentRunStatus status)
+    {
+        // The SAME exact-status matching the supervisor lane's per-unit fold applies
+        // (SupervisorTurnService.Rehydrate.ClassifyUnitContradiction): only "Succeeded" and "Failed" are claims about
+        // the work. A cancelled / watchdog-killed / human-owed run never reached a verdict of its own, so grading it
+        // would mint an objective verdict for an attempt that never claimed to be finished.
+        var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "ok" });
+
+        var nonReport = Succeeded() with { Status = status };
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), nonReport, workspace: null, CancellationToken.None);
+
+        result.ShouldBe(nonReport);
+        grader.Calls.ShouldBe(0);
+    }
+
+    // ── D4b: a self-reported FAILURE that produced work is graded, and an under-claim is named ───────────
+
+    [Fact]
+    public async Task A_self_reported_failure_whose_check_passes_folds_to_succeeded_and_names_the_under_claim()
+    {
+        // The defect this closes: an agent that did the work but said "I couldn't finish" terminalized Failure with
+        // the work discarded. The objective verdict OUTRANKS the claim — the same rule the supervisor lane's per-unit
+        // fold already applies (an under-claimed unit with a PASSED gate folds as finished).
+        var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "exit 0" });
+
+        var claimed = FailedWithWork();
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), claimed, workspace: null, CancellationToken.None);
+
+        grader.PatchCalls.ShouldBe(1, "the work is there — grade the recorded patch instead of taking the agent's word for the failure");
+        grader.Calls.ShouldBe(0, "a Failed run was never pushed, so there is no branch to grade — the S2 patch lane is the production path here");
+        grader.LastPatchBaseSha.ShouldBe("deadbeef", "the run's own recorded base anchors the oracle, exactly as on the Succeeded lane");
+        result.Status.ShouldBe(AgentRunStatus.Succeeded, "the check passed — the run delivered, whatever the agent believed");
+        result.AcceptancePassed.ShouldBe(true);
+        result.AcceptanceDetail.ShouldBe("exit 0");
+        result.Contradiction.ShouldBe(AgentContradiction.UnderClaim, "the agent gave up on work that was actually fine");
+        result.Error.ShouldBe(claimed.Error, "the agent's own words survive on the durable result — the status is corrected, the account is not rewritten");
+        result.ExitReason.ShouldBe(claimed.ExitReason);
+        result.Patch.ShouldBe(claimed.Patch, "the captured work is untouched by the fold");
+    }
+
+    [Fact]
+    public async Task A_folded_under_claim_never_buys_a_revise_round()
+    {
+        // The revise loop exists to fix an oracle FAILURE; an under-claim has no failure to fix.
+        var (executor, _) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "exit 0" });
+        var task = TaskWith(Spec("sh", "check.sh"));
+
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), task, FailedWithWork(), workspace: null, CancellationToken.None);
+
+        AgentRunExecutor.ReviseReasonFor(task, result).ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task A_self_reported_failure_whose_check_also_fails_stays_failed_with_no_contradiction()
+    {
+        var evidenceId = Guid.NewGuid();
+        var (executor, _) = NewExecutor(new BenchmarkGrade { Passed = false, Detail = "tests-failed-exit-1", EvidenceArtifactId = evidenceId });
+
+        var claimed = FailedWithWork();
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), claimed, workspace: null, CancellationToken.None);
+
+        result.Status.ShouldBe(AgentRunStatus.Failed);
+        result.AcceptancePassed.ShouldBe(false, "the check ran and rejected the work — that verdict is recorded, not left null");
+        result.AcceptanceDetail.ShouldBe("tests-failed-exit-1");
+        result.AcceptanceEvidenceId.ShouldBe(evidenceId);
+        result.Contradiction.ShouldBeNull("the claim and the verdict AGREE — an over-claim stamp here would be a lie");
+        result.Error.ShouldBe(claimed.Error, "the agent's own failure text is not overwritten by the fail-closed sentence");
+        result.ExitReason.ShouldBe(claimed.ExitReason, "the run failed on its own report, not on a fail-closed re-grade");
+    }
+
+    [Fact]
+    public async Task A_multi_repo_failure_whose_work_is_only_in_a_secondary_repo_is_still_graded()
+    {
+        // A multi-repo run's TOP-LEVEL fields carry the primary repo only. Reading just those, a failure whose work
+        // landed in a secondary repo looks work-less — and would be waved through ungraded, discarding exactly the
+        // work this gate exists to save.
+        var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "exit 0" });
+
+        var secondaryOnly = new AgentRunResult
+        {
+            Status = AgentRunStatus.Failed,
+            ExitReason = "non-zero-exit",
+            Error = "I could not finish the task.",
+            RepositoryResults = new[]
+            {
+                new RepositoryRunResult { RepositoryId = Guid.NewGuid(), Alias = "web" },
+                new RepositoryRunResult { RepositoryId = Guid.NewGuid(), Alias = "api", ProducedBranch = "agent/api", ChangedFiles = new[] { "api/a.cs" } },
+            },
+        };
+
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), secondaryOnly, workspace: null, CancellationToken.None);
+
+        grader.Calls.ShouldBe(1, "the repo that produced a branch is graded — the top-level fields' silence is not the run's whole truth");
+        result.Status.ShouldBe(AgentRunStatus.Succeeded);
+        result.Contradiction.ShouldBe(AgentContradiction.UnderClaim);
+    }
+
+    [Fact]
+    public async Task A_vacuous_pass_never_overturns_a_self_reported_failure()
+    {
+        // ExpectsChanges=false + nothing gradeable is a pass by CONSTRUCTION — no check ran. Treating it as a verdict
+        // would fold a run to Succeeded with an under-claim on the strength of nothing having been verified at all.
+        var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "unused" });
+
+        // Work present (changed files) but nothing GRADEABLE: no branch, and no base to anchor a patch on.
+        var claimed = FailedWithWork() with { BaseSha = null, Patch = null };
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh"), expectsChanges: false), claimed, workspace: null, CancellationToken.None);
+
+        grader.Calls.ShouldBe(0);
+        grader.PatchCalls.ShouldBe(0, "there was nothing to grade — no check ran");
+        result.ShouldBe(claimed, "a vacuous pass is not a verdict; the run keeps its own outcome, byte-identical");
+        result.Contradiction.ShouldBeNull("nothing was checked, so nothing contradicted the claim");
+    }
+
+    [Fact]
+    public async Task A_self_reported_failure_whose_grade_is_infra_mints_no_verdict_at_all()
+    {
+        var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "unused" });
+        grader.Throw = new InvalidOperationException("clone exploded");
+
+        var claimed = FailedWithWork();
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), claimed, workspace: null, CancellationToken.None);
+
+        result.Status.ShouldBe(AgentRunStatus.Failed);
+        result.AcceptancePassed.ShouldBeNull("an infra fault means the CHECK never ran — never mint a verdict from it");
+        result.AcceptanceDetail.ShouldStartWith("grade-error:");
+        result.Contradiction.ShouldBeNull();
     }
 
     [Fact]
@@ -420,6 +553,24 @@ public class AgentRunExecutorAcceptanceTests
         ExitReason = "completed",
         ProducedBranch = "agent/s5-test",
         ChangedFiles = new[] { "a.cs" },
+    };
+
+    /// <summary>
+    /// D4b's PRODUCTION shape: the agent SAID it failed and left a recorded diff — and NO produced branch, because
+    /// <c>PushProducedBranchIfEnabledAsync</c> skips a Failed run, so the work is only ever published AFTER the fold
+    /// overturns the claim. A branch here would send every arm down the branch lane while production takes the
+    /// PATCH lane (<c>GradePatchAsync</c>) — a fixture production cannot produce.
+    /// </summary>
+    private static AgentRunResult FailedWithWork() => new()
+    {
+        Status = AgentRunStatus.Failed,
+        ExitReason = "non-zero-exit",
+        Error = "I could not finish the task.",
+        Summary = "Gave up before verifying.",
+        ProducedBranch = null,
+        ChangedFiles = new[] { "a.cs" },
+        BaseSha = "deadbeef",
+        Patch = "diff --git a/a.cs b/a.cs\n",
     };
 
     /// <summary>A patch-only producer (PR-2 policy, or a guard-blocked push): no pushed branch, but a real recorded diff a patch-based grade can act on.</summary>
