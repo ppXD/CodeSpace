@@ -28,6 +28,7 @@ public sealed class AgentMetricsReaderQueryTests
         sql.ShouldContain("jsonb_array_length", customMessage: "the full changed-file count is computed without transferring the full array");
         sql.ShouldContain("WITH ORDINALITY", customMessage: "only the first bounded file/stat observations cross the process boundary in stable array order");
         sql.ShouldContain("LIMIT 40");
+        sql.ShouldContain("'contradiction'", customMessage: "D4b: the self-report/grade contradiction is a bounded card leaf — without it a single-agent under-claim is durable but invisible");
         sql.ShouldContain("left(", Case.Insensitive, customMessage: "human strings are bounded before crossing the process boundary");
         sql.ShouldNotContain("a.result_jsonb AS", Case.Insensitive);
         sql.ShouldNotContain("a.task_jsonb AS", Case.Insensitive);

@@ -88,6 +88,7 @@ public sealed class AgentMetricsReader : IScopedDependency
                    CASE WHEN char_length(leaves.result_model) <= 512 THEN leaves.result_model END AS result_model,
                    CASE WHEN char_length(leaves.task_model) <= 512 THEN leaves.task_model END AS task_model,
                    CASE WHEN char_length(leaves.harness) <= 512 THEN leaves.harness END AS harness,
+                   CASE WHEN char_length(leaves.contradiction) <= 512 THEN leaves.contradiction END AS contradiction,
                    leaves.resumed AS resumed,
                    tokens.input_tokens AS input_tokens,
                    tokens.output_tokens AS output_tokens,
@@ -105,6 +106,7 @@ public sealed class AgentMetricsReader : IScopedDependency
                        COALESCE(a.result_jsonb -> 'fileStats', a.result_jsonb -> 'FileStats') AS file_stats,
                        CASE WHEN jsonb_typeof(COALESCE(a.result_jsonb -> 'model', a.result_jsonb -> 'Model')) = 'string' THEN COALESCE(a.result_jsonb ->> 'model', a.result_jsonb ->> 'Model') END AS result_model,
                        CASE WHEN jsonb_typeof(COALESCE(a.result_jsonb -> 'error', a.result_jsonb -> 'Error')) = 'string' THEN COALESCE(a.result_jsonb ->> 'error', a.result_jsonb ->> 'Error') END AS result_error,
+                       CASE WHEN jsonb_typeof(COALESCE(a.result_jsonb -> 'contradiction', a.result_jsonb -> 'Contradiction')) = 'string' THEN COALESCE(a.result_jsonb ->> 'contradiction', a.result_jsonb ->> 'Contradiction') END AS contradiction,
                        CASE WHEN jsonb_typeof(COALESCE(a.task_jsonb -> 'model', a.task_jsonb -> 'Model')) = 'string' THEN COALESCE(a.task_jsonb ->> 'model', a.task_jsonb ->> 'Model') END AS task_model,
                        CASE WHEN jsonb_typeof(COALESCE(a.task_jsonb -> 'harness', a.task_jsonb -> 'Harness')) = 'string' THEN COALESCE(a.task_jsonb ->> 'harness', a.task_jsonb ->> 'Harness') END AS harness,
                        COALESCE(a.task_jsonb -> 'displayTitle', a.task_jsonb -> 'DisplayTitle') AS display_title_json,
@@ -264,6 +266,7 @@ public sealed class AgentMetricsReader : IScopedDependency
             ChangedFileStats = (result?.FileStats ?? Array.Empty<FileDiffStat>()).Take(MaxChangedFiles).ToList(),
             Resumed = !string.IsNullOrWhiteSpace(task?.ResumeFromSessionId),
             Harness = string.IsNullOrWhiteSpace(task?.Harness) ? null : task!.Harness,
+            Contradiction = string.IsNullOrWhiteSpace(result?.Contradiction) ? null : result!.Contradiction,
         };
     }
 
@@ -289,6 +292,7 @@ public sealed class AgentMetricsReader : IScopedDependency
             ChangedFileStats = DeserializeBounded<IReadOnlyList<FileDiffStat>>(row.FileStatsJson) ?? Array.Empty<FileDiffStat>(),
             Resumed = row.Resumed,
             Harness = string.IsNullOrWhiteSpace(row.Harness) ? null : row.Harness,
+            Contradiction = string.IsNullOrWhiteSpace(row.Contradiction) ? null : row.Contradiction,
         };
     }
 
@@ -356,8 +360,8 @@ public sealed class AgentMetricsReader : IScopedDependency
         return string.Concat(text.AsSpan(0, cut).TrimEnd(), "…");
     }
 
-    /// <summary>The leaves of <c>AgentRunResult</c> the metric needs — token usage + the model the run actually ran + the changed-file list (for its COUNT) + the per-file diffstat + the failure error — a narrow projection so the result blob's heavy fields (patch / summary / transcript) are never materialized on this poll-path.</summary>
-    private sealed record ResultSlice(AgentTokenUsage? TokenUsage, string? Model, IReadOnlyList<string>? ChangedFiles, IReadOnlyList<FileDiffStat>? FileStats, string? Error);
+    /// <summary>The leaves of <c>AgentRunResult</c> the metric needs — token usage + the model the run actually ran + the changed-file list (for its COUNT) + the per-file diffstat + the failure error + the self-report/grade contradiction — a narrow projection so the result blob's heavy fields (patch / summary / transcript) are never materialized on this poll-path.</summary>
+    private sealed record ResultSlice(AgentTokenUsage? TokenUsage, string? Model, IReadOnlyList<string>? ChangedFiles, IReadOnlyList<FileDiffStat>? FileStats, string? Error, string? Contradiction);
 
     /// <summary>The display leaves of <c>AgentTask</c> — its model + goal + display title + resume marker + harness kind — a narrow projection so the task envelope's heavy fields (workspace / permissions / tools) are never materialized here.</summary>
     private sealed record TaskSlice(string? Model, string? Goal, string? DisplayTitle, string? ResumeFromSessionId, string? Harness);
@@ -396,6 +400,7 @@ internal sealed class WorkflowAgentMetricsRow
     public string? ResultModel { get; set; }
     public string? TaskModel { get; set; }
     public string? Harness { get; set; }
+    public string? Contradiction { get; set; }
     public bool Resumed { get; set; }
     public int? InputTokens { get; set; }
     public int? OutputTokens { get; set; }

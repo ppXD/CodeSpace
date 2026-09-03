@@ -46,6 +46,9 @@ public sealed record AgentRunMetrics
     /// <summary>The git-truth per-file line diffstat (bounded) off the result — the same paths as <see cref="ChangedFiles"/> plus their +added / −removed counts (a binary file's counts are null). Empty for a pre-diffstat run / before the result lands, so a consumer degrades to the plain <see cref="ChangedFiles"/> list.</summary>
     public IReadOnlyList<FileDiffStat> ChangedFileStats { get; init; } = Array.Empty<FileDiffStat>();
 
+    /// <summary>Whether this agent's own self-report CONTRADICTED its objective acceptance grade — a <c>CodeSpace.Core.Services.Agents.AgentContradiction</c> value ("over_claim" / "under_claim"), off the run's durable result. This is the SINGLE-agent lane's copy of the supervisor compact's twin field, so a plain / map agent card can name an under-claim too. Null when the run carried no oracle, the claim and the grade agreed, or no verdict was minted.</summary>
+    public string? Contradiction { get; init; }
+
     /// <summary>Whether this agent CONTINUED a prior conversation (its task carried a resume session id) rather than starting fresh — the "⟳ resumed" provenance a retry's re-run agent shows. False for a first-run agent.</summary>
     public bool Resumed { get; init; }
 }

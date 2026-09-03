@@ -53,11 +53,15 @@ public static class AgentAcceptanceContract
 
     /// <summary>
     /// The fail-closed re-grade: the work (branch, diff, transcript) is preserved — the STATUS tells the truth, the
-    /// contract was not met (or could not be verified). Every call site guards on the result already being a
-    /// would-be <see cref="AgentRunStatus.Succeeded"/> before reaching here (the grading gate returns early on any
-    /// other self-reported status) — so THIS is unconditionally the over-claim correction site (P4-1): the agent
+    /// contract was not met (or could not be verified). This is the OVER-claim correction site (P4-1): the agent
     /// believed it was done; the check disagreed. <see cref="AgentRunResult.Contradiction"/> records that fact
     /// durably, at the SAME instant the status is corrected — never re-derived ad-hoc downstream.
+    ///
+    /// <para>The stamp assumes a would-be <see cref="AgentRunStatus.Succeeded"/> self-report, which is what every
+    /// call site outside D4b's lane carries. The one lane that grades a self-reported FAILURE
+    /// (<c>AgentRunExecutor.GradeAcceptanceIfPresentAsync</c>, when the failure left work behind) re-folds the
+    /// claim-side fields through <c>AgentRunExecutor.FoldSelfReportedFailureGrade</c> immediately afterwards, so
+    /// this over-claim stamp never survives onto a run that never claimed success.</para>
     /// </summary>
     public static AgentRunResult FailClosed(AgentRunResult result, string? detail) => result with
     {
@@ -69,6 +73,17 @@ public static class AgentAcceptanceContract
         AcceptanceDetail = detail,
         Contradiction = AgentContradiction.OverClaim,
     };
+
+    /// <summary>
+    /// The <see cref="AgentRunResult.AcceptanceDetail"/> a VACUOUS pass carries — the marker that separates "the
+    /// contract was satisfied by construction, nothing ran" from "the check ran and passed". A reader that must not
+    /// treat an unrun check as a verdict (D4b's self-reported-failure fold) keys on this prefix, so the two cannot
+    /// drift apart. Pinned by a unit test (Rule 8).
+    /// </summary>
+    public const string NotApplicableDetail = "not-applicable: no changes were expected and none were produced";
+
+    /// <summary>Whether <paramref name="detail"/> is a VACUOUS pass (<see cref="NotApplicableDetail"/>) rather than an executed check's verdict — prefix-matched so a future variant that names WHICH expectation was vacuous still classifies.</summary>
+    public static bool IsVacuousPass(string? detail) => detail is not null && detail.StartsWith("not-applicable", StringComparison.Ordinal);
 
     /// <summary>
     /// S2's vacuous pass: the contract's own OWNER declared no diff was expected, and none was produced — so the

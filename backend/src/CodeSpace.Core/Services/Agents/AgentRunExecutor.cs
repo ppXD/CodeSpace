@@ -1448,7 +1448,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         result = await MintPublishEvidenceAsync(runId, run.TeamId, result, cancellationToken).ConfigureAwait(false);
 
+        var claimedOutcome = result;
+
         result = await GradeAcceptanceIfPresentAsync(run, task, result, workspace, cancellationToken).ConfigureAwait(false);
+
+        result = await PublishFoldedUnderClaimAsync(runId, run, task, claimedOutcome, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
 
         // Publish-or-park (I1/I2): record what this pass produced + published REGARDLESS of Status — a Failed or
         // TimedOut run's captured diff gets a row exactly like a Succeeded one. Idempotent (upserts), so an S6 revise
@@ -1456,6 +1460,33 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         await PersistPublishManifestAsync(runId, run, task, result, claimedEpoch, cancellationToken).ConfigureAwait(false);
 
         return await ReviewOutputIfEnabledAsync(task, result, run, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// D4b: PUBLISH the work of a run whose grade just overturned its own self-reported failure. The push step runs
+    /// BEFORE the grade (it feeds the branch lane) and <see cref="PushProducedBranchIfEnabledAsync"/> deliberately
+    /// skips a <see cref="AgentRunStatus.Failed"/> run — so without this a folded under-claim landed Succeeded with
+    /// an acceptance PASS and nothing published: the manifest read <c>PublishState.PatchOnly</c> while its
+    /// <c>AcceptanceState</c> read Passed (the accepted-but-unpublished state publish-or-park exists to prevent),
+    /// and the node bound no <c>branch</c> output for a downstream PR-open to consume. The run now qualifies, so it
+    /// gets the SAME push + evidence mint every Succeeded run gets, BEFORE the manifest upsert reads the result —
+    /// so one manifest row states the pushed truth rather than a stale patch-only claim.
+    ///
+    /// <para>Keyed on the STATUS transition, not on <see cref="AgentRunResult.Contradiction"/>: the fold is the only
+    /// thing that turns a Failed self-report into a Succeeded run, and reading the transition keeps this independent
+    /// of how that fact is labelled. Every other outcome returns the graded result untouched (byte-identical), and
+    /// the push step keeps its own guards — the publish opt-in, the empty-diff gate, the fence epoch, the publish
+    /// guard chain — so this buys no bypass, only the round the fold earned.</para>
+    /// </summary>
+    private async Task<AgentRunResult> PublishFoldedUnderClaimAsync(Guid runId, AgentRun run, AgentTask task, AgentRunResult claimed, AgentRunResult graded, IWorkspaceHandle? workspace, long claimedEpoch, CancellationToken cancellationToken)
+    {
+        if (claimed.Status != AgentRunStatus.Failed || graded.Status != AgentRunStatus.Succeeded) return graded;
+
+        _logger.LogInformation("Agent run {RunId}: the acceptance check overturned a self-reported failure — publishing the work the run had withheld", runId);
+
+        var pushed = await PushProducedBranchIfEnabledAsync(runId, task, graded, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
+
+        return await MintPublishEvidenceAsync(runId, run.TeamId, pushed, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1627,7 +1658,35 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
     /// <summary>An oracle failure the agent can plausibly fix with another pass — the negation of the SHARED infra classification (<see cref="AgentAcceptanceContract.IsInfraFailure"/>): grader failures, half-authored specs (<c>no-rubric</c>/<c>no-schema</c> — an agent cannot author the missing half), and publish failures with work present never buy a revise round.</summary>
     private static bool IsAgentFixableOracleFailure(AgentRunResult result, string detail) =>
-        !AgentAcceptanceContract.IsInfraFailure(detail, workPresent: result.ChangedFiles.Count > 0 || !string.IsNullOrEmpty(result.Patch));
+        !AgentAcceptanceContract.IsInfraFailure(detail, WorkPresent(result));
+
+    /// <summary>
+    /// The ONE "this run produced WORK" read this executor shares — the infra classification above (which uses it to
+    /// tell a publish failure from "the fix is to do the work") and D4b's gate (<see cref="SelfReportedSuccess"/>,
+    /// which uses it to decide whether a self-reported failure has anything to grade), so the two can never drift on
+    /// what "work exists" means. Git ground truth off the captured diff, which
+    /// <c>EnrichWithWorkspaceChangesAsync</c> records for EVERY terminal status.
+    /// <para>Deliberately no <see cref="AgentRunResult.ProducedBranch"/> disjunct, unlike
+    /// <c>SupervisorOutcome.ResultShowsWork</c>'s supervisor-side twin: <see cref="PushProducedBranchIfEnabledAsync"/>
+    /// never publishes a branch for a <see cref="AgentRunStatus.Failed"/> run, so on the one lane that would gain
+    /// from it there is never a branch to read — while adding it would silently reclassify the pre-existing
+    /// <c>no-branch-or-repo</c> revise verdict.</para>
+    /// </summary>
+    internal static bool WorkPresent(AgentRunResult result) =>
+        result.ChangedFiles.Count > 0 || !string.IsNullOrEmpty(result.Patch);
+
+    /// <summary>
+    /// D4b's OWN work-present read: <see cref="WorkPresent"/> plus any PER-REPO work. A multi-repo run's top-level
+    /// fields carry the PRIMARY repo only, so a Failed run whose work lives in a secondary repo reads as
+    /// work-less there — and would never be graded, which is precisely the discarded work this gate exists to stop
+    /// (<see cref="GradeMultiRepoAcceptanceAsync"/> grades every repo that produced one).
+    /// <para>Deliberately a SEPARATE read from the one <see cref="IsAgentFixableOracleFailure"/> shares: widening
+    /// that one would silently reclassify the pre-existing <c>no-branch-or-repo</c> revise verdict for a multi-repo
+    /// run. This wider read is used only where D4b itself decides — the gate and its fold.</para>
+    /// </summary>
+    internal static bool AnyWorkPresent(AgentRunResult result) =>
+        WorkPresent(result)
+        || result.RepositoryResults.Any(repo => repo.ChangedFiles.Count > 0 || !string.IsNullOrEmpty(repo.Patch) || !string.IsNullOrEmpty(repo.ProducedBranch));
 
     // ─── D3: model escalation ────────────────────────────────────────────────
 
@@ -1829,8 +1888,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// contract with no branch/repo to grade — re-grades the would-be Succeeded run to Failed
     /// ("acceptance-failed"); the captured work (branch, diff, transcript) is preserved for diagnosis. Runs BEFORE
     /// the subjective output critic, so a failed oracle never bills a review. Deferred (verdict null, run intact):
-    /// no contract, a non-success result, or a multi-repo result (per-repo grading is a follow-on, mirroring the
-    /// supervisor fold's same deferral). Grader errors record not-accepted rather than crashing the completion.
+    /// no contract, a result that is not a genuine self-report (see <see cref="SelfReportedSuccess"/>), or an
+    /// unanswered decision. Grader errors record not-accepted rather than crashing the completion.
+    ///
+    /// <para>D4b: a run that self-reported FAILURE but left WORK behind (<see cref="AnyWorkPresent"/>) is graded too —
+    /// a self-report is a claim, not a verdict, and an agent that did the work but said "I couldn't finish" used to
+    /// terminalize Failure with its work discarded. Its grade folds through
+    /// <see cref="FoldSelfReportedFailureGrade"/>, the single-agent twin of the supervisor lane's per-unit
+    /// under-claim fold. A failure with NOTHING to grade skips the gate exactly as before.</para>
     ///
     /// <para>S2: a run with NO pushed branch (a patch-only publish policy, or a guard-blocked push) is graded
     /// against its own RECORDED PATCH instead of failing closed, when one exists — the same agent-independent
@@ -1842,7 +1907,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     internal async Task<AgentRunResult> GradeAcceptanceIfPresentAsync(AgentRun run, AgentTask task, AgentRunResult result, IWorkspaceHandle? workspace, CancellationToken cancellationToken)
     {
         if (!AgentAcceptanceContract.RequiresGrade(task)) return result;
-        if (result.Status != AgentRunStatus.Succeeded) return result;
+        if (SelfReportedSuccess(result) is not { } claimedSuccess) return result;
 
         // A1 always takes precedence (the same defer the output critic honours): a run that left a decision.request
         // unanswered re-grades to NeedsReview(NeedsDecision) WITH the decision linkage at the completion choke point
@@ -1854,6 +1919,62 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             if (await ledger.FindBlockingDecisionIdAsync(run.Id, cancellationToken).ConfigureAwait(false) is not null) return result;
         }
 
+        var graded = await GradeAgainstOracleAsync(run, task, result, workspace, cancellationToken).ConfigureAwait(false);
+
+        return claimedSuccess ? graded : FoldSelfReportedFailureGrade(result, graded);
+    }
+
+    /// <summary>
+    /// Whether this result carries a genuine SELF-REPORT about the work — <c>true</c> (it says it finished),
+    /// <c>false</c> (it says it failed AND left work the oracle can grade), or null when there is no claim to check
+    /// against a verdict. The exact-status matching mirrors the supervisor lane's per-unit
+    /// <c>SupervisorTurnService.Rehydrate.ClassifyUnitContradiction</c>: Cancelled (the user's own stop), TimedOut
+    /// and NeedsReview (a watchdog / a human-owed park) never reached a verdict of their own, so grading them would
+    /// mint an objective verdict for an attempt that never claimed to be finished. A self-reported failure with NO
+    /// work has nothing to grade, which is the pre-D4b behaviour for every failure.
+    /// </summary>
+    internal static bool? SelfReportedSuccess(AgentRunResult result) => result.Status switch
+    {
+        AgentRunStatus.Succeeded => true,
+        AgentRunStatus.Failed when AnyWorkPresent(result) => false,
+        _ => null,
+    };
+
+    /// <summary>
+    /// D4b: fold an objective grade onto a run that self-reported FAILURE — the single-agent twin of the supervisor
+    /// lane's per-unit under-claim fold (<c>ClassifyUnitContradiction</c> + <see cref="AgentContradiction.Detect"/>,
+    /// where an under-claimed unit with a PASSED gate folds as finished and recites as "objectively fine"):
+    /// <list type="bullet">
+    /// <item>PASSED ⇒ the verdict OUTRANKS the claim: the run lands <see cref="AgentRunStatus.Succeeded"/> with
+    /// <see cref="AgentContradiction.UnderClaim"/> recorded, keeping the agent's own summary / error / exit reason
+    /// intact — the status is corrected, its account of itself is not rewritten.</item>
+    /// <item>FAILED ⇒ claim and verdict AGREE: the run stays Failed with the grade recorded and NO contradiction.
+    /// The claim-side fields come from the ORIGINAL result, which is what keeps
+    /// <see cref="AgentAcceptanceContract.FailClosed"/>'s over-claim stamp (correct for a Succeeded self-report,
+    /// a lie for this one) off the folded result.</item>
+    /// <item>INFRA (<see cref="AgentAcceptanceContract.IsInfraFailure"/>) ⇒ the check never ran, so no verdict is
+    /// minted at all: <see cref="AgentRunResult.AcceptancePassed"/> stays null and only the detail is recorded.</item>
+    /// </list>
+    /// </summary>
+    internal static AgentRunResult FoldSelfReportedFailureGrade(AgentRunResult claimed, AgentRunResult graded) => graded.AcceptancePassed switch
+    {
+        // A VACUOUS pass is not a verdict: nothing was checked (the contract declared no diff was expected and the
+        // lane found no branch/patch to grade), so it can never outrank a claim. The run keeps its own outcome,
+        // exactly as it did before this gate existed.
+        true when AgentAcceptanceContract.IsVacuousPass(graded.AcceptanceDetail) => claimed,
+        true => graded with { Status = AgentRunStatus.Succeeded, Contradiction = AgentContradiction.UnderClaim },
+        false => claimed with
+        {
+            AcceptancePassed = AgentAcceptanceContract.IsInfraFailure(graded.AcceptanceDetail, AnyWorkPresent(claimed)) ? null : false,
+            AcceptanceDetail = graded.AcceptanceDetail,
+            AcceptanceEvidenceId = graded.AcceptanceEvidenceId,
+        },
+        null => graded,
+    };
+
+    /// <summary>The oracle grade itself, once the gate has decided this result is gradable: the multi-repo fold, the repo-less scratch fold, or the single-repo branch/patch fold.</summary>
+    private async Task<AgentRunResult> GradeAgainstOracleAsync(AgentRun run, AgentTask task, AgentRunResult result, IWorkspaceHandle? workspace, CancellationToken cancellationToken)
+    {
         if (result.RepositoryResults.Count > 0) return await GradeMultiRepoAcceptanceAsync(run, task, result, cancellationToken).ConfigureAwait(false);
 
         var spec = task.Acceptance!;
@@ -1880,7 +2001,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             if (!AgentAcceptanceContract.ExpectsChanges(task))
             {
                 _logger.LogInformation("Agent run {RunId}: no diff was expected and none was produced — the acceptance contract is vacuously satisfied", run.Id);
-                return AgentAcceptanceContract.NotApplicable(result, "not-applicable: no changes were expected and none were produced");
+                return AgentAcceptanceContract.NotApplicable(result, AgentAcceptanceContract.NotApplicableDetail);
             }
 
             _logger.LogWarning("Agent run {RunId}: an acceptance contract is present but there is no produced branch or recorded patch to grade — failing closed", run.Id);
@@ -1979,7 +2100,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             if (!AgentAcceptanceContract.ExpectsChanges(task))
             {
                 _logger.LogInformation("Agent run {RunId}: no diff was expected in any repo and none was produced — the acceptance contract is vacuously satisfied", run.Id);
-                return AgentAcceptanceContract.NotApplicable(result, "not-applicable: no changes were expected and none were produced");
+                return AgentAcceptanceContract.NotApplicable(result, AgentAcceptanceContract.NotApplicableDetail);
             }
 
             _logger.LogWarning("Agent run {RunId}: an acceptance contract is present but no repo produced a branch to grade — failing closed", run.Id);

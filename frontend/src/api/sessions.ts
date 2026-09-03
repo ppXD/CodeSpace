@@ -240,6 +240,9 @@ export interface RoomAgentCard {
   resumed?: boolean;
   /// The LATEST independent reviewer's verdict on this agent's output — the "✓ reviewed" / "⚠ flagged" chip.
   review?: JournalReviewVerdict | null;
+  /// Whether the agent's self-report disagreed with its objective acceptance check ("over_claim" / "under_claim").
+  /// On a journal card it comes from the backend; on a room card the journal→room adapter fills it, like `error`.
+  contradiction?: string | null;
 }
 
 export interface RoomDecisionOption {
@@ -473,6 +476,10 @@ export interface JournalAgentCard {
   /// The LATEST independent reviewer's verdict on this agent's produced work — the "✓ reviewed" / "⚠ flagged" chip
   /// + the reviewer-run deep-link. Null when the output was never agent-reviewed (or the review hasn't landed).
   review?: JournalReviewVerdict | null;
+  /// Whether this agent's own self-report CONTRADICTED its objective acceptance check — an `AgentContradiction` kind
+  /// ("over_claim" / "under_claim"), from a supervisor unit's folded compact or the run's own graded result. Null
+  /// when the run carried no oracle, the claim and the check agreed, or no verdict was minted.
+  contradiction?: string | null;
 }
 
 /// A reviewer's VERDICT — a real reviewer agent run's conclusion, or an in-process MODEL critic's — rides a REVIEW

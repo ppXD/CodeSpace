@@ -34,6 +34,20 @@ public class AgentMetricsReaderTests
         AgentMetricsReader.Build(id, status, startedAt, completedAt, resultJson, taskJson, rowError, toolCount, now);
 
     [Fact]
+    public void Projects_the_runs_own_contradiction_so_a_single_agent_card_can_name_it()
+    {
+        // D4b: the single-agent lane's under-claim lives on the run's OWN durable result (no supervisor compact
+        // exists for a plain / map agent), so the card can only show it if this projection carries it.
+        var underClaimed = JsonSerializer.Serialize(new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "non-zero-exit", Error = "I could not finish.", AcceptancePassed = true, Contradiction = AgentContradiction.UnderClaim }, AgentJson.Options);
+
+        Build(Guid.NewGuid(), AgentRunStatus.Succeeded, Now.AddSeconds(-5), Now, underClaimed, Task("m"), toolCount: 0, Now)
+            .Contradiction.ShouldBe(AgentContradiction.UnderClaim);
+
+        Build(Guid.NewGuid(), AgentRunStatus.Succeeded, Now.AddSeconds(-5), Now, Result(1, 1), Task("m"), toolCount: 0, Now)
+            .Contradiction.ShouldBeNull("a run whose claim agreed with its grade carries no contradiction");
+    }
+
+    [Fact]
     public void Projects_tokens_model_and_a_final_duration_from_the_persisted_blobs()
     {
         var started = Now.AddSeconds(-30);
