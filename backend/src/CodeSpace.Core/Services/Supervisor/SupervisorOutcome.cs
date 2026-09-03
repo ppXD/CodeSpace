@@ -955,13 +955,15 @@ public static class SupervisorOutcome
             if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("escalation", out var escalation) || escalation.ValueKind != JsonValueKind.Object)
                 return null;
 
-            if (!escalation.TryGetProperty("to", out var toEl) || toEl.ValueKind != JsonValueKind.String
-                || !escalation.TryGetProperty("reason", out var reasonEl) || reasonEl.ValueKind != JsonValueKind.String)
+            // The REASON is what makes an escalation record exist; `to` is OPTIONAL (D3) — absent or an explicit
+            // null means the trigger fired and the pool held nothing above the prior tier, which is a record the
+            // decider must see, not a malformed block to drop.
+            if (!escalation.TryGetProperty("reason", out var reasonEl) || reasonEl.ValueKind != JsonValueKind.String)
                 return null;
 
             return new SupervisorRetryEscalationOutcome
             {
-                To = toEl.GetString()!,
+                To = escalation.TryGetProperty("to", out var toEl) && toEl.ValueKind == JsonValueKind.String ? toEl.GetString() : null,
                 From = escalation.TryGetProperty("from", out var f) && f.ValueKind == JsonValueKind.String ? f.GetString() : null,
                 Reason = reasonEl.GetString()!,
             };

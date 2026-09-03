@@ -67,6 +67,21 @@ public class SupervisorOutcomeEscalationTests
     }
 
     [Theory]
+    [InlineData("""{"agentRunIds":["a"],"agentCount":1,"escalation":{"from":"claude-haiku-4-5","to":null,"reason":"one away from the no-progress cap"}}""")]
+    [InlineData("""{"agentRunIds":["a"],"agentCount":1,"escalation":{"from":"claude-haiku-4-5","reason":"one away from the no-progress cap"}}""")]
+    public void ReadEscalation_reads_a_NO_OP_escalation_whose_pool_held_nothing_stronger(string outcomeJson)
+    {
+        // D3: an explicit null (or absent) `to` is a RECORD, not a malformed block — the trigger fired and the pool
+        // had nothing above the prior tier. Dropping it here would put the no-op back to being invisible.
+        var escalation = SupervisorOutcome.ReadEscalation(outcomeJson);
+
+        escalation.ShouldNotBeNull();
+        escalation!.To.ShouldBeNull();
+        escalation.From.ShouldBe("claude-haiku-4-5");
+        escalation.Reason.ShouldBe("one away from the no-progress cap");
+    }
+
+    [Theory]
     [InlineData(null)]
     [InlineData("")]
     [InlineData("{}")]

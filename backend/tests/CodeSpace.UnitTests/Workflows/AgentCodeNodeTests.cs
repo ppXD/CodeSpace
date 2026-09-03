@@ -590,6 +590,43 @@ public class AgentCodeNodeTests
     }
 
     [Fact]
+    public async Task D3_a_respawn_after_a_failed_check_with_work_asks_the_executor_for_a_stronger_model()
+    {
+        // The node itself never reads the pool (it has no DB) — it stamps the REQUEST (why + the tier floor) and the
+        // executor resolves the pick against the team's credentialed models at launch. The floor is the prior
+        // attempt's OWN model, so escalation is monotonic across a chain of respawns.
+        var priorAttempt = JsonDocument.Parse("""
+            {"status":"Failed","exitReason":"acceptance-failed","acceptanceDetail":"tests-failed-exit-1","contradiction":"over_claim","model":"claude-haiku-4-5","changedFiles":["a.cs"],"branch":"codespace/agent/x"}
+            """).RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, priorAttemptPayload: priorAttempt), CancellationToken.None);
+
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+
+        task.Escalation.ShouldNotBeNull("the prior attempt claimed success against a check that failed on real work — the respawn must reach higher, not re-run the same model blind");
+        task.Escalation!.From.ShouldBe("claude-haiku-4-5");
+        task.Escalation.To.ShouldBeNull("the node only REQUESTS — the executor resolves the pick where the pool lives");
+        task.Escalation.Reason.ShouldContain("claimed success");
+    }
+
+    [Theory]
+    // A grader fault: the check never ran, so no model can move the verdict.
+    [InlineData("""{"status":"Failed","exitReason":"acceptance-failed","acceptanceDetail":"grade-error: clone exploded","contradiction":"over_claim","changedFiles":["a.cs"]}""")]
+    // A gateway wire fault: the cause-aware retry owns it (fresh start, thinking disabled) — a pricier model hits the same gateway.
+    [InlineData("""{"status":"Failed","exitReason":"acceptance-failed","acceptanceDetail":"tests-failed-exit-1","error":"400 messages.1.content.0.type: is not a thinking block","changedFiles":["a.cs"]}""")]
+    // A transient death with no acceptance verdict at all: nothing was proved about the model.
+    [InlineData("""{"status":"Failed","exitReason":"non-zero-exit","error":"gateway 429","changedFiles":["a.cs"]}""")]
+    // A failed check with NO work and no over-claim: no evidence about the model either way.
+    [InlineData("""{"status":"Failed","exitReason":"acceptance-failed","acceptanceDetail":"tests-failed-exit-1"}""")]
+    public async Task D3_a_respawn_with_no_model_evidence_asks_for_no_escalation(string priorAttemptJson)
+    {
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, priorAttemptPayload: JsonDocument.Parse(priorAttemptJson).RootElement), CancellationToken.None);
+
+        JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!.Escalation
+            .ShouldBeNull("escalation costs real money — it fires only on evidence the MODEL was the limit");
+    }
+
+    [Fact]
     public async Task P2_3_a_respawn_carrying_a_prior_transcript_artifact_ref_threads_it_through()
     {
         var artifactId = Guid.NewGuid();

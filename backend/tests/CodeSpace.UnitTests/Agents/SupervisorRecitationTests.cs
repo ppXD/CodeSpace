@@ -262,6 +262,24 @@ public sealed class SupervisorRecitationTests
     }
 
     [Fact]
+    public void A_retry_whose_escalation_found_no_stronger_model_says_so_instead_of_going_silent()
+    {
+        // D3: the trigger fired, the pool held nothing above the prior tier. The recitation must say the retry ran
+        // on the SAME model on purpose — a blank note reads as "nobody tried", which is the wrong steer.
+        var priors = new[]
+        {
+            Plan(1, ("s1", "First")),
+            Spawn(2, new[] { "s1" }, Result("Failed", error: "flaked")),
+            Retry(3, "s1", Result("Failed", error: "still flaking"), escalatedTo: null, escalatedFrom: "claude-haiku-4-5", reason: "the prior attempt's self-report contradicted its acceptance grade (over_claim)"),
+        };
+
+        var recitation = SupervisorRecitation.Render(priors)!;
+
+        recitation.ShouldContain("[no stronger model than claude-haiku-4-5 in the pool: the prior attempt's self-report contradicted its acceptance grade (over_claim)]");
+        recitation.ShouldNotContain("[escalated to", customMessage: "nothing was escalated");
+    }
+
+    [Fact]
     public void A_non_escalated_retry_shows_no_escalation_note()
     {
         var priors = new[]
@@ -281,7 +299,8 @@ public sealed class SupervisorRecitationTests
             JsonSerializer.Serialize(new
             {
                 agentResults = new[] { result },
-                escalation = escalatedTo is null ? null : new { to = escalatedTo, from = escalatedFrom, reason },
+                // The REASON is what makes an escalation record exist — `to` is null on a no-op (the trigger fired, the pool had nothing stronger).
+                escalation = reason is null ? null : (object)new { to = escalatedTo, from = escalatedFrom, reason },
             }, AgentJson.Options));
 
     private static SupervisorPriorDecision Plan(int seq, params (string Id, string Title)[] subtasks) =>

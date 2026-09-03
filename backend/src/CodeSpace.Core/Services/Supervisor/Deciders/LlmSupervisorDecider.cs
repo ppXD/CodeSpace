@@ -785,8 +785,14 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             // A2 (P4-2): name the tier escalation THIS decision applied, if any — so the model sees a stronger
             // model was already tried before it considers escalating again (or before it reads a still-failing
             // result and wonders why a retry didn't just fix things with the same model as before).
+            // D3: a trigger that found NO stronger model reads as a different sentence, not a missing one — the
+            // model must be able to tell "we already reached higher" from "reaching higher was impossible", and
+            // both from "nobody tried". Retrying a unit again on the same model it already exhausted is the exact
+            // loop this line exists to stop.
             if (SupervisorOutcome.ReadEscalation(prior.OutcomeJson) is { } escalation)
-                builder.AppendLine($"    ESCALATED model for this retry: {escalation.From ?? "(unknown)"} → {escalation.To} — {escalation.Reason}");
+                builder.AppendLine(escalation.To is { Length: > 0 } to
+                    ? $"    ESCALATED model for this retry: {escalation.From ?? "(unknown)"} → {to} — {escalation.Reason}"
+                    : $"    Escalation was requested for this retry ({escalation.Reason}) but there is no stronger model in this team's pool — it re-ran on the SAME model ({escalation.From ?? "unknown"}); escalating again would change nothing.");
 
             for (var k = 0; k < agentResults.Count; k++)
             {

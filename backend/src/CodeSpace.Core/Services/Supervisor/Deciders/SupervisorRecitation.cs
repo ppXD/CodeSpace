@@ -103,7 +103,11 @@ public static class SupervisorRecitation
     /// </summary>
     private static string EscalationNoteFor(string subtaskId, IReadOnlyList<SupervisorPriorDecision> priors) =>
         FindCoveringDecision(subtaskId, priors) is { } decision && SupervisorOutcome.ReadEscalation(decision.OutcomeJson) is { } escalation
-            ? $" [escalated to {escalation.To}: {escalation.Reason}]"
+            ? escalation.To is { Length: > 0 } to
+                ? $" [escalated to {to}: {escalation.Reason}]"
+                // D3: the trigger fired and the pool had nothing above the prior tier. Rendering nothing here would
+                // recite this item as an ordinary retry and invite the brain to ask for the escalation all over again.
+                : $" [no stronger model than {escalation.From ?? "the prior model"} in the pool: {escalation.Reason}]"
             : "";
 
     /// <summary>The LATEST spawn/retry decision that staged this subtask id — the one shared walk <see cref="StateFor"/> and <see cref="EscalationNoteFor"/> both join off, so they can never disagree about WHICH attempt is the freshest one.</summary>

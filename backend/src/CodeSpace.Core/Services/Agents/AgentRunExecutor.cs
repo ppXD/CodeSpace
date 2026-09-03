@@ -294,6 +294,30 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             var effectiveTask = (workspace is null ? task : task with { WorkspaceDirectory = workspace.Directory }) with { Environment = MergeEnvironment(task.Environment, secretEnv), Model = effectiveModel };
 
+            // D3: an escalation the DISPATCHER already decided this attempt owes — the agent.run node's respawn after
+            // an attempt whose own evidence said the MODEL was the limit. It arrives as a request (why + the prior
+            // model, the tier floor) because only the executor reads the credentialed pool. Resolved HERE, after the
+            // credential resolve, so the pick is bounded to the credential/provider already in hand — which is what
+            // keeps the decrypted key, the egress base URL and the reconciled harness valid for the escalated model.
+            var escalation = task.Escalation is { } requested
+                ? await ResolveEscalationAsync(requested.Reason, task, run.TeamId, modelProvider, requested.From ?? effectiveModel, cancellationToken).ConfigureAwait(false)
+                : null;
+
+            if (escalation is not null)
+            {
+                effectiveTask = ApplyEscalation(effectiveTask, escalation);
+                await AppendEscalationEventAsync(agentRunId, escalation, cancellationToken).ConfigureAwait(false);
+
+                // Surface the escalated model on the run the same way the resolved model is surfaced above — the
+                // identity strip must show what this attempt is ACTUALLY running, not the model it was authored with.
+                if (escalation.To is { Length: > 0 } escalated)
+                    await PersistResolvedModelAsync(agentRunId, task with { Model = escalated }, cancellationToken).ConfigureAwait(false);
+            }
+
+            // The model in force for the NEXT harness invocation, carried across revise rounds: an escalation won in
+            // round 1 must not evaporate in round 2 just because round 2's own result asked for nothing further.
+            var dispatchedModel = effectiveTask.Model;
+
             // P3 (3.2c): resolve a REFERENCED (offloaded) restored transcript to bytes NOW — the producer kept only the
             // ref in task_jsonb to bound its size; the harness needs the bytes to lay down the resume file. Bounded: the
             // stored transcript was captured under the capture cap, so this never fetches an unbounded blob.
@@ -381,7 +405,21 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
                 await AppendReviseEventAsync(agentRunId, reason, round, reviseBudget, cancellationToken).ConfigureAwait(false);
 
-                var reviseTask = BuildReviseTask(effectiveTask, result, reason);
+                var reviseTask = BuildReviseTask(effectiveTask, result, reason) with { Model = dispatchedModel };
+
+                // D3: the round that just failed IS the evidence. When it says the model was the limit — an
+                // over-claim, or a check that failed on real work, never a grader / environment / gateway fault —
+                // this round reaches for a stronger credentialed model instead of re-running the same one and
+                // expecting a different answer. A pool with nothing stronger records the fact and changes nothing.
+                if (EscalationReasonFor(result) is { } escalationReason)
+                {
+                    escalation = await ResolveEscalationAsync(escalationReason, effectiveTask, run.TeamId, modelProvider, dispatchedModel, cancellationToken).ConfigureAwait(false);
+                    reviseTask = ApplyEscalation(reviseTask, escalation);
+                    dispatchedModel = reviseTask.Model;
+
+                    await AppendEscalationEventAsync(agentRunId, escalation, cancellationToken).ConfigureAwait(false);
+                }
+
                 var reviseSpec = HardenSpec(harness.BuildInvocation(AugmentToolsForMcp(reviseTask, mcp, mcpWiring)) with { Mcp = mcpWiring }, reviseTask, modelBaseUrl, modelProvider, workspaceProvision);
 
                 var priorUsage = result.TokenUsage;
@@ -401,6 +439,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
                 priorReason = reason;
             }
+
+            // D3: the escalation belongs on the durable result — the LAST one applied, which is the model the run
+            // actually ended on. A record whose To is null (nothing in the pool beat the floor) still lands: the
+            // one-model case must read as "we tried to reach higher and could not", never as silence.
+            if (escalation is not null) result = result with { ModelEscalation = escalation };
 
             // P0-B2: stamp what the fabric ACTUALLY did — observed off the live endpoint while it is still open
             // (the await-using disposes it at scope end). The re-attach path deliberately leaves this null: the
@@ -1558,6 +1601,83 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// <summary>An oracle failure the agent can plausibly fix with another pass — the negation of the SHARED infra classification (<see cref="AgentAcceptanceContract.IsInfraFailure"/>): grader failures, half-authored specs (<c>no-rubric</c>/<c>no-schema</c> — an agent cannot author the missing half), and publish failures with work present never buy a revise round.</summary>
     private static bool IsAgentFixableOracleFailure(AgentRunResult result, string detail) =>
         !AgentAcceptanceContract.IsInfraFailure(detail, workPresent: result.ChangedFiles.Count > 0 || !string.IsNullOrEmpty(result.Patch));
+
+    // ─── D3: model escalation ────────────────────────────────────────────────
+
+    /// <summary>
+    /// WHY the next attempt should reach for a stronger model, or null when this round proved nothing about the
+    /// model. The single-agent lane's projection into the SHARED <see cref="AgentModelEscalationTrigger"/> (the
+    /// agent.run node projects its flat resume payload into the same primitives), so "the model was the limit"
+    /// cannot come to mean two different things in the two lanes.
+    /// </summary>
+    internal static string? EscalationReasonFor(AgentRunResult result) =>
+        AgentModelEscalationTrigger.Reason(result.Contradiction, result.AcceptancePassed is false, result.AcceptanceDetail, EscalationWorkPresent(result), result.Error);
+
+    /// <summary>Git ground truth that the round produced SOMETHING — changed files, an inline diff, a pushed branch, or any writable repo's own contribution in a multi-repo run.</summary>
+    private static bool EscalationWorkPresent(AgentRunResult result) =>
+        result.ChangedFiles.Count > 0
+        || !string.IsNullOrEmpty(result.Patch)
+        || !string.IsNullOrEmpty(result.ProducedBranch)
+        || result.RepositoryResults.Any(r => r.ChangedFiles.Count > 0 || !string.IsNullOrEmpty(r.ProducedBranch));
+
+    /// <summary>Apply a resolved escalation to the task it governs: the picked model REPLACES whatever the task carried (a pin is a floor for untested work, not a ceiling once the run's own check has disproved it). A null pick — nothing in the pool beat the floor — leaves the task byte-identical; the fact lives on the result and the timeline, never in a perturbed dispatch.</summary>
+    internal static AgentTask ApplyEscalation(AgentTask task, AgentModelEscalation? escalation) =>
+        escalation?.To is { Length: > 0 } model ? task with { Model = model } : task;
+
+    /// <summary>The escalation announcement's pinned prefix — the operator-visible marker on the run's timeline (and a stable hook for tests).</summary>
+    internal const string ModelEscalationPrefix = "Model escalation";
+
+    /// <summary>The one-line escalation note: the move it made, or — when the team credentialed nothing stronger — the honest no-op. Pure, so the timeline text and the tests can't drift.</summary>
+    internal static string DescribeEscalation(AgentModelEscalation escalation) =>
+        escalation.To is { Length: > 0 } to
+            ? $"{ModelEscalationPrefix}: {escalation.From ?? "(unknown)"} → {to}. {escalation.Reason}"
+            : $"{ModelEscalationPrefix}: no model stronger than {escalation.From ?? "the current one"} is credentialed for this team — staying on {escalation.From ?? "it"}. {escalation.Reason}";
+
+    /// <summary>
+    /// Resolve an escalation REQUEST into a concrete pick over the team's credentialed pool, reusing the supervisor
+    /// lane's pure <see cref="SupervisorRetryEscalation.PickStrongerModel"/> — strictly above the floor's effective
+    /// tier, <c>IsDefault</c>-first among the qualifying candidates, Frontier allowed (escalating is exactly the
+    /// case that earns the priciest tier).
+    ///
+    /// <para>The pool is BOUNDED so the escalated model stays runnable on everything already resolved for this
+    /// attempt: to the PINNED credential's own models when the task names one (the operator/supervisor chose that
+    /// key — the escalation overrides the MODEL choice, never the credential one), else to the resolved credential's
+    /// PROVIDER, so the decrypted key, the egress base URL and the harness↔provider reconciliation all remain valid
+    /// by construction and no re-reconcile is needed. Unbounded only when no credential resolved at all, where
+    /// there is nothing to stay compatible with.</para>
+    ///
+    /// <para>Always returns a record — a null pick is the OUTCOME "nothing stronger exists", not an absence.</para>
+    /// </summary>
+    private async Task<AgentModelEscalation> ResolveEscalationAsync(string reason, AgentTask task, Guid teamId, string? provider, string? priorModel, CancellationToken cancellationToken)
+    {
+        var rows = await _db.ModelCredentialModel.AsNoTracking()
+            .Where(m => m.Enabled && m.Credential.TeamId == teamId && m.Credential.DeletedDate == null && m.Credential.Status == CredentialStatus.Active)
+            .Select(m => new { m.ModelId, m.IsDefault, m.CapabilityTier, m.ProbedCapabilityTier, m.ModelCredentialId, m.Credential.Provider })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        // Provider matching in memory + case-insensitively: the pool is a team's handful of rows, and a provider tag
+        // stored with different casing under two credentials must not silently shrink the candidate set.
+        var bounded = task.ModelCredentialId is { } pinned ? rows.Where(m => m.ModelCredentialId == pinned).ToList()
+            : provider is { Length: > 0 } ? rows.Where(m => string.Equals(m.Provider, provider, StringComparison.OrdinalIgnoreCase)).ToList()
+            : rows;
+
+        var picked = SupervisorRetryEscalation.PickStrongerModel(bounded, m => m.IsDefault, m => m.ProbedCapabilityTier, m => m.CapabilityTier, m => m.ModelId, priorModel)?.ModelId;
+
+        return new AgentModelEscalation { From = priorModel, To = picked, Reason = reason };
+    }
+
+    /// <summary>Announce the escalation on the timeline — the operator sees the run reached for a stronger model and WHY, or that it wanted to and the team had nothing stronger. Best-effort like the other completion-tail events.</summary>
+    private async Task AppendEscalationEventAsync(Guid runId, AgentModelEscalation escalation, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _runs.AppendEventAsync(runId, new AgentEvent { Kind = AgentEventKind.Warning, Text = DescribeEscalation(escalation) }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Agent run {RunId}: could not record the model-escalation event", runId);
+        }
+    }
 
     /// <summary>Sum the rounds' token usage — the final result must bill the WHOLE run (the cost plane prices <c>ResultJson.TokenUsage</c>), not just the last round. Null when neither round reported usage.</summary>
     internal static AgentTokenUsage? SumTokenUsage(AgentTokenUsage? prior, AgentTokenUsage? current) =>

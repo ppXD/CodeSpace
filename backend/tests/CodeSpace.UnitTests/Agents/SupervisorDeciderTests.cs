@@ -291,6 +291,35 @@ public class SupervisorDeciderTests
     }
 
     [Fact]
+    public void The_user_prompt_says_when_an_escalation_was_requested_but_no_stronger_model_exists()
+    {
+        // D3: the trigger fired and the pool held nothing above the prior model's tier. Before, the retry silently
+        // re-ran the SAME model with no trace at all — so the decider read a still-failing result and could not tell
+        // "we already tried harder" from "nobody tried". Now the no-op is on the tape and in the prompt.
+        var agentId = Guid.NewGuid();
+        var outcome = JsonSerializer.Serialize(new
+        {
+            agentRunIds = new[] { agentId },
+            agentCount = 1,
+            escalation = new { from = "claude-haiku-4-5", to = (string?)null, reason = "the prior attempt's self-report contradicted its acceptance grade (over_claim)" },
+            agentResults = new[] { new { agentRunId = agentId, status = "Failed", summary = "still failing" } },
+        }, CodeSpace.Core.Services.Agents.AgentJson.Options);
+
+        var retry = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 2, DecisionKind = SupervisorDecisionKinds.Retry, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = """{"subtaskId":"s1"}""", OutcomeJson = outcome,
+        };
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 2, retry));
+
+        prompt.ShouldContain("no stronger model", customMessage: "the decider must be told escalation was ATTEMPTED and the pool had nothing above the prior tier — retrying again buys nothing");
+        prompt.ShouldContain("claude-haiku-4-5", customMessage: "the model it stayed on is named");
+        prompt.ShouldContain("contradicted its acceptance grade", customMessage: "the trigger that requested the escalation is still named");
+        prompt.ShouldNotContain("ESCALATED model for this retry", customMessage: "nothing was escalated — the affirmative line would be a lie");
+    }
+
+    [Fact]
     public void The_user_prompt_names_no_escalation_for_an_ordinary_retry()
     {
         var agentId = Guid.NewGuid();

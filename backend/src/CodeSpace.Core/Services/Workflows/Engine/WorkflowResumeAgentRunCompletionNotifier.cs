@@ -108,6 +108,12 @@ public sealed class WorkflowResumeAgentRunCompletionNotifier : IAgentRunCompleti
             // node's retry verdict tell a grader INFRA fault (AgentAcceptanceContract.IsInfraFailure) from a
             // genuine failed check even though both share exitReason "acceptance-failed".
             acceptanceDetail = result?.AcceptanceDetail,
+            // D3: the over-claim fact + the model the attempt ACTUALLY ran — the two facts the respawning node needs
+            // to decide (and to FLOOR) a model escalation without a DB re-query. The model falls back to the
+            // dispatched task's own, because a harness that never names its model in-stream would otherwise erase
+            // the floor, and an escalation over a null floor can land on a lower-tier starred row.
+            contradiction = result?.Contradiction,
+            model = result?.Model ?? DispatchedModel(run),
             // Warm-resume triple (P2.3): unused on a Succeeded outcome, but on a RETRYABLE failure this is the exact
             // payload the engine carries forward as NodeRunContext.PriorAttemptPayload so agent.run's fresh respawn
             // can stamp AgentTask.ResumeFromSessionId/RestoredTranscript(ArtifactId) — the same triple
@@ -117,5 +123,14 @@ public sealed class WorkflowResumeAgentRunCompletionNotifier : IAgentRunCompleti
             sessionTranscript = result?.SessionTranscript,
             sessionTranscriptArtifactId = result?.SessionTranscriptArtifactId,
         }, AgentJson.Options);
+    }
+
+    /// <summary>The model this attempt was DISPATCHED on, read off its persisted task envelope (the executor stamps the resolved — and, when it escalated, the escalated — model there at launch). The fallback for a harness whose stream never names a model, and BEST-EFFORT: this is informational metadata for the next attempt's escalation floor, so an unreadable envelope reads as "unknown" rather than failing the resume that carries the run's actual outcome.</summary>
+    private static string? DispatchedModel(AgentRun run)
+    {
+        if (string.IsNullOrWhiteSpace(run.TaskJson)) return null;
+
+        try { return JsonSerializer.Deserialize<AgentTask>(run.TaskJson, AgentJson.Options)?.Model; }
+        catch (JsonException) { return null; }
     }
 }

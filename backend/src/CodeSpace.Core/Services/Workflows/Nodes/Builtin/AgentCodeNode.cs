@@ -207,7 +207,7 @@ public sealed class AgentCodeNode : INodeRuntime
             AcceptanceAuthority = ReadAcceptanceAuthority(context.Config),
         };
 
-        task = ApplyRespawnResumeHint(task, context.PriorAttemptPayload);
+        task = ApplyRespawnEscalation(ApplyRespawnResumeHint(task, context.PriorAttemptPayload), context.PriorAttemptPayload);
 
         return Task.FromResult(NodeResult.Suspend(new SuspensionToken
         {
@@ -356,6 +356,30 @@ public sealed class AgentCodeNode : INodeRuntime
             RestoredTranscript = ReadOptionalString(payload, "sessionTranscript"),
             RestoredTranscriptArtifactId = ReadOptionalGuid(payload, "sessionTranscriptArtifactId"),
         };
+    }
+
+    /// <summary>
+    /// D3: stamp a model-ESCALATION request when the retiring attempt's own evidence says the MODEL was the limit —
+    /// it claimed success against a check that failed, or it produced real work the check still rejected. The node
+    /// has no database, so it only names WHY and the tier FLOOR (the prior attempt's own model, carried on the
+    /// payload so a chain of respawns escalates monotonically instead of re-deriving the same first step); the
+    /// EXECUTOR resolves the pick against the team's credentialed pool at launch. Infra faults (a grader that never
+    /// ran, a broken environment, a mangled gateway wire) are excluded by the shared trigger — a pricier model
+    /// cannot move any of those verdicts. Returns the task unchanged when this isn't a respawn, or the prior
+    /// attempt proved nothing about its model (the common case, byte-identical to before).
+    /// </summary>
+    private static AgentTask ApplyRespawnEscalation(AgentTask task, JsonElement? priorAttemptPayload)
+    {
+        if (priorAttemptPayload is not { } payload) return task;
+
+        var reason = AgentModelEscalationTrigger.Reason(
+            ReadOptionalString(payload, "contradiction"),
+            acceptanceFailed: ReadOptionalString(payload, "exitReason") == AgentAcceptanceContract.FailClosedExitReason,
+            ReadOptionalString(payload, "acceptanceDetail"),
+            WorkPresent(payload),
+            ReadOptionalString(payload, "error"));
+
+        return reason is null ? task : task with { Escalation = new AgentModelEscalation { Reason = reason, From = ReadOptionalString(payload, "model") } };
     }
 
     /// <summary>Whether the resumed payload shows produced WORK (git ground truth: changed files or a branch, single- or multi-repo) — mirrors <c>SupervisorOutcome.ResultShowsWork</c>'s definition (the one "work exists" read every infra classification shares) over the flat resume payload's own fields.</summary>

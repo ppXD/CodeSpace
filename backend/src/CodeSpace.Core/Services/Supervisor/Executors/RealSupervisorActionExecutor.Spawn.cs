@@ -454,7 +454,11 @@ public sealed partial class RealSupervisorActionExecutor
 
         var picked = await ResolveEscalatedModelAsync(priorResult?.Model, context, cancellationToken).ConfigureAwait(false);
 
-        if (picked is null) return (builtTask, null);
+        // D3: nothing in the (bounded) pool beats the prior model's tier — a one-model team, or a run already at the
+        // top. The retry's ordinary model resolution stands UNTOUCHED, but the attempt is RECORDED: previously this
+        // returned null and the brain saw a still-failing retry with no hint that reaching higher had already been
+        // tried and found impossible, which reads as "nobody tried" and invites the same retry again.
+        if (picked is null) return (builtTask, new SupervisorRetryEscalationOutcome { From = priorResult?.Model, To = null, Reason = reason });
 
         return (builtTask with { Model = picked }, new SupervisorRetryEscalationOutcome { From = priorResult?.Model, To = picked, Reason = reason });
     }
@@ -708,7 +712,10 @@ public sealed partial class RealSupervisorActionExecutor
         // pass actually baked into that orphan (the team's model pool may have changed between the crash and this
         // replay: a model disabled/enabled, re-tiered, or newly credentialed). Reconcile against the one AgentRun
         // this retry actually dispatches on, so the recorded "to" always describes truth, never a stale re-guess.
-        if (escalation is not null && reclaimedAny)
+        // A NO-OP escalation (To null — nothing in the pool beat the prior tier) has no dispatched model to
+        // reconcile against: stamping the orphan's own model there would turn "no stronger model existed" into a
+        // claim that one was picked.
+        if (escalation is { To: not null } && reclaimedAny)
             escalation = await ReconcileEscalationWithDispatchedModelAsync(escalation, agentRunIds[0], cancellationToken).ConfigureAwait(false);
 
         var outcome = JsonSerializer.Serialize(new { agentRunIds, agentCount = agentRunIds.Count, escalation }, AgentJson.Options);
