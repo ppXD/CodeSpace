@@ -60,6 +60,26 @@ public interface IModelPoolSelector
     Task<ModelDispatchRef?> ResolveDispatchAsync(Guid teamId, string modelName, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Auto-pick ONE (model, credential) row for a spawned agent that carries NO effective model name at all (an
+    /// unfilled persona/profile default), bounded to the operator's <paramref name="allowedRowIds"/> pool. The real
+    /// <see cref="ModelPoolSelector"/> ranks it with the SAME agent-plane precedence
+    /// <see cref="ModelCredentialResolver"/>'s own full-team-pool default uses (<c>AgentPlaneModelRanking</c>:
+    /// <c>IsDefault</c> first, then capability tier with Frontier soft-avoided, then row id) — just bounded to this
+    /// pool instead of the whole team, so a pool of one still forces that one model instead of silently falling
+    /// through to the unbounded team default. Default implementation (for fakes that don't model IsDefault/tier)
+    /// resolves the pool catalog's first entry through <see cref="ResolveDispatchAsync"/> — no new ranking invented
+    /// here, only composed from this interface's own existing members. <paramref name="allowedRowIds"/> is REQUIRED
+    /// non-empty (an empty/null pool is the caller's job to special-case — there is nothing to bound to). <c>null</c>
+    /// when nothing in the pool resolves (fail-closed).
+    /// </summary>
+    async Task<ModelDispatchRef?> ResolvePoolDefaultAsync(Guid teamId, IReadOnlyList<Guid> allowedRowIds, CancellationToken cancellationToken)
+    {
+        var pool = await ListPoolAsync(teamId, allowedRowIds, cancellationToken).ConfigureAwait(false);
+
+        return pool.Count == 0 ? null : await ResolveDispatchAsync(teamId, pool[0].ModelId, allowedRowIds, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// List the team's credentialed pool models (model id + provider) the brain MAY dispatch — bounded to
     /// <paramref name="allowedRowIds"/> (null/empty = ALL the team's enabled rows under active credentials). For
     /// rendering the capability catalog into the supervisor/planner prompt so the model authors a provider-compatible

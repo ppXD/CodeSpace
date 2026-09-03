@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Harnesses;
+using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
@@ -908,7 +909,11 @@ public sealed partial class RealSupervisorActionExecutor
     /// Resolve the spawned agent's effective model NAME to a credentialed pool row (option B): the model + the credential
     /// it runs on both come from that row, so a dispatched agent can only run a model the team credentialed — and on that
     /// model's own key. Bounded to the operator's <see cref="SupervisorTurnContext.AllowedModelIds"/> pool (empty = all
-    /// the team's credentialed models). A null effective model is the harness default (no name → no gate).
+    /// the team's credentialed models). A null effective model with NO bound pool is the harness default (no name, no
+    /// pool → no gate); a null effective model WITH a bound pool still resolves + gates against it
+    /// (<see cref="ApplyPoolBoundDefaultAsync"/>) — a persona/profile that left the model unset must not let an
+    /// operator's "Agent model pool" of one silently escape to <c>ModelCredentialResolver</c>'s unbounded full-team
+    /// default at execution.
     /// <para>This is NO LONGER the path a model-AUTHORED name takes: <c>ExecuteSpawnAsync</c> screens every authored name
     /// before staging (<see cref="ScreenAuthoredModelsAsync"/>) and rejects an unresolvable one re-authorably, because
     /// reaching the throw here killed the run mid fan-out. What still arrives here is an effective model the MODEL did
@@ -918,14 +923,35 @@ public sealed partial class RealSupervisorActionExecutor
     /// </summary>
     private async Task<AgentTask> ApplyDispatchModelAsync(AgentTask resolved, SupervisorTurnContext context, CancellationToken cancellationToken)
     {
-        if (NullIfBlank(resolved.Model) is not { } effectiveModel) return resolved;
+        if (NullIfBlank(resolved.Model) is not { } effectiveModel) return await ApplyPoolBoundDefaultAsync(resolved, context, cancellationToken).ConfigureAwait(false);
 
         var dispatch = await _modelSelector.ResolveDispatchAsync(context.TeamId, effectiveModel, context.AllowedModelIds, cancellationToken).ConfigureAwait(false)
             ?? throw new SupervisorModelAccessException($"agent.supervisor spawn requests model '{effectiveModel}', which is not a credentialed model in this run's allowed model pool.");
 
-        // Authoring-time compatibility clamp (P1): the resolved model runs on a credential of THIS provider, so pin a
-        // harness that can drive it — the authored/default harness if it already can, else a registered one that does.
-        // The model authored the MODEL; the server makes the harness match it (the run-time reconciler is the backstop).
+        return WithDispatchedModel(resolved, dispatch, context);
+    }
+
+    /// <summary>
+    /// No effective model name at all (an unfilled persona/profile default) but the operator bound an agent-model
+    /// POOL: that pool must still constrain the dispatch, else the agent falls through to
+    /// <c>ModelCredentialResolver.ResolveTeamDefaultAsync</c>'s FULL team pool at execution, silently ignoring a pool
+    /// of one. Ranked with the SAME agent-plane precedence the full-team default uses, just bounded to this pool
+    /// (<see cref="IModelPoolSelector.ResolvePoolDefaultAsync"/> — reused, not reinvented). Null/empty pool ⇒
+    /// unchanged (the harness's own no-name default applies, byte-identical to before this fix).
+    /// </summary>
+    private async Task<AgentTask> ApplyPoolBoundDefaultAsync(AgentTask resolved, SupervisorTurnContext context, CancellationToken cancellationToken)
+    {
+        if (context.AllowedModelIds is not { Count: > 0 } pool) return resolved;
+
+        var dispatch = await _modelSelector.ResolvePoolDefaultAsync(context.TeamId, pool, cancellationToken).ConfigureAwait(false)
+            ?? throw new SupervisorModelAccessException("agent.supervisor spawn has no model name, and none of this run's allowed model pool resolves to an enabled, active-credential row.");
+
+        return WithDispatchedModel(resolved, dispatch, context);
+    }
+
+    /// <summary>Authoring-time compatibility clamp (P1), shared by the named-model and pool-bound-default dispatch paths: the resolved model runs on a credential of THIS provider, so pin a harness that can drive it — the authored/default harness if it already can, else a registered one that does. The model (or the pool) decided the MODEL; the server makes the harness match it (the run-time reconciler is the backstop).</summary>
+    private AgentTask WithDispatchedModel(AgentTask resolved, ModelDispatchRef dispatch, SupervisorTurnContext context)
+    {
         var allowedHarnesses = AgentHarnessPool.Clamp(_harnesses.All, context.AllowedAgentKinds);
         var harness = HarnessModelReconciler.Reconcile(resolved.Harness, dispatch.Provider, allowedHarnesses, AgentHarnessDefaults.DefaultHarness).HarnessKind;
 

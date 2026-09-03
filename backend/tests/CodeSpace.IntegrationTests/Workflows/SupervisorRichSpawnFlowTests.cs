@@ -722,6 +722,63 @@ public class SupervisorRichSpawnFlowTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task A_spawn_with_no_effective_model_still_dispatches_from_a_one_model_pool()
+    {
+        // The Spawn.cs regression this pins: when neither a per-agent dispatch NOR the profile/persona names a
+        // model, ApplyDispatchModelAsync used to early-return the task unchanged (null effective model = "no name
+        // to gate"), so the agent fell through to ModelCredentialResolver's UNBOUNDED full-team-pool default at
+        // execution — an "Agent model pool" of exactly one model never actually forced it. No persona, no profile
+        // model, no per-agent dispatch model — ONLY the pool (deliberately non-default: IsDefault ranking would
+        // have masked a pool bound that silently widened to the whole team).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (credentialId, rowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "pool-only-model");
+
+        var workflowId = await CreatePoolOnlyWorkflowAsync(teamId, userId, rowId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;   // inspect the staged TaskJson; no harness binary runs
+
+        try
+        {
+            // Turn 0 plan → self-advance → turn 1 spawn[both] stages 2 real agent runs, neither carrying a model name.
+            await RunEngineAsync(runId);
+            await ResolveSelfAdvanceAsync(runId);
+            await RunEngineAsync(runId);
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            var spawned = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).ToListAsync();
+            spawned.Count.ShouldBe(2, "spawn[both] staged exactly 2 real agent runs despite no model anywhere in the dispatch");
+
+            var tasks = spawned.Select(r => JsonSerializer.Deserialize<AgentTask>(r.TaskJson, AgentJson.Options)!).ToList();
+
+            tasks.ShouldAllBe(t => t.Model == "pool-only-model", "the pool's one model filled the dispatch — not left null for the unbounded team default to pick up later");
+            tasks.ShouldAllBe(t => t.ModelCredentialId == credentialId, "the credential comes from the SAME pool row the model resolved to");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    private async Task<Guid> CreatePoolOnlyWorkflowAsync(Guid teamId, Guid userId, Guid allowedRowId)
+    {
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        var config = $$"""{ "goal": "ship it", "allowedModelIds": ["{{allowedRowId}}"] }""";
+        return await scope.Resolve<IMediator>().Send(new CreateWorkflowCommand
+        {
+            Name = "sup-pool-only-" + Guid.NewGuid().ToString("N")[..6],
+            Description = null,
+            Definition = SupervisorDefinitionWithConfig(config),
+            Activations = new List<WorkflowActivationInput>(),
+            Enabled = true,
+        });
+    }
+
     private async Task<Guid> CreatePersonaPoolWorkflowAsync(Guid teamId, Guid userId, Guid personaId, Guid allowedRowId)
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);

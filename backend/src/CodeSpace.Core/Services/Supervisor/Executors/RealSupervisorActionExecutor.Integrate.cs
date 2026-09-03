@@ -183,9 +183,15 @@ public sealed partial class RealSupervisorActionExecutor
         // serves text. This intentionally differs from the decider/planner's structured-first resolution: those NEED
         // structured output; a text reduce does not. A deployment with no LLM provider degrades to a note.
         // Pure pool-driven (S6b): the model + credential come from the team's pool for the chosen client's provider —
-        // the profile's model is a PIN (it must be a qualifying pool model), else the pool's recommended one. A text
-        // reduce doesn't need structured output. No pool model → degrade to a note (never an env key, never a default).
-        var resolved = await InProcessTextModel.ResolveAsync(_llm, _modelSelector, context.TeamId, context.AgentProfile?.Model, cancellationToken).ConfigureAwait(false);
+        // the BAKED BRAIN model (context.SupervisorModelId) is the pin when the supervisor has one — this is a
+        // brain-plane call (synthesizing the supervisor's own summary of the fan-out), so it should ride the same
+        // model the decider runs on, not whatever the agentProfile's own model happens to be (that field is the
+        // per-agent default and, once a brain pin was authored, is withheld from the baked profile entirely — see
+        // SupervisorDefinitionBuilder.BuildAgentProfile). Falls back to the profile's model (today's pre-existing
+        // behaviour) only when there is no baked brain to prefer. A text reduce doesn't need structured output.
+        // No pool model → degrade to a note (never an env key, never a default).
+        var pinnedSynthesisModel = await ResolveSynthesisPinnedModelAsync(context, cancellationToken).ConfigureAwait(false);
+        var resolved = await InProcessTextModel.ResolveAsync(_llm, _modelSelector, context.TeamId, pinnedSynthesisModel, cancellationToken).ConfigureAwait(false);
 
         if (resolved is not { } model) return new { note = "no registered LLM provider has a qualifying pool model for synthesis" };
 
@@ -201,6 +207,20 @@ public sealed partial class RealSupervisorActionExecutor
         var completion = await model.Client.CompleteAsync(request, cancellationToken).ConfigureAwait(false);
 
         return new { text = completion.Text, model = completion.Model, coverage = projection.Coverage };
+    }
+
+    /// <summary>The model NAME to pin the synthesis text-reduce to: the baked supervisor BRAIN (<c>context.SupervisorModelId</c>,
+    /// resolved to its own model id) when the row still resolves, else the agent profile's model (the pre-existing
+    /// behaviour, and the only option when no brain was baked at all — a non-supervisor caller can't reach this
+    /// method, but a brain row that has since been disabled/deleted degrades to it too, rather than throwing out of
+    /// a best-effort enrichment).</summary>
+    private async Task<string?> ResolveSynthesisPinnedModelAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+    {
+        if (context.SupervisorModelId is { } brainModelId
+            && await _modelSelector.ResolveByRowIdAsync(context.TeamId, brainModelId, cancellationToken).ConfigureAwait(false) is { } brainPick)
+            return brainPick.ModelId;
+
+        return context.AgentProfile?.Model;
     }
 
     /// <summary>Project internal merge scratch into the pure prompt noun. Multi-repo untouched results remain excluded exactly as before; deterministic integration still retains every full patch.</summary>

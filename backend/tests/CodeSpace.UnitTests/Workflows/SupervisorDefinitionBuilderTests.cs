@@ -218,19 +218,19 @@ public class SupervisorDefinitionBuilderTests
     }
 
     [Fact]
-    public void Agent_profile_omits_model_and_credential_when_a_supervisor_brain_model_was_resolved()
+    public void Agent_profile_omits_model_and_credential_when_the_brain_pin_was_honored()
     {
-        // The "Brain model" chip pins the SUPERVISOR's own brain (SupervisorBrainModelId) — agents draw from the
-        // model pool instead (locked design, PR #771). Model/ModelCredentialId are the SAME chip's picks, so once
-        // a brain is baked they must NOT also leak in as every spawned agent's default.
+        // The "Brain model" chip was AUTHORED as a pin and it resolved verbatim (SupervisorBrainModelPinned) —
+        // agents draw from the model pool instead (locked design, PR #771). Model/ModelCredentialId are the SAME
+        // chip's picks, so once the pin is honored they must NOT also leak in as every spawned agent's default.
         var repoId = Guid.NewGuid();
         var credId = Guid.NewGuid();
         var profile = new ResolvedAgentProfile { RepositoryId = repoId, Harness = "claude-code", Model = "claude-opus", ModelCredentialId = credId, RunnerKind = "local" };
 
-        var agentProfile = Builder.Build(Context(profile, brainModelId: Guid.NewGuid())).Nodes.Single(n => n.Id == "sup").Config.GetProperty("agentProfile");
+        var agentProfile = Builder.Build(Context(profile, brainModelId: Guid.NewGuid(), brainModelPinned: true)).Nodes.Single(n => n.Id == "sup").Config.GetProperty("agentProfile");
 
-        agentProfile.TryGetProperty("model", out _).ShouldBeFalse("the brain model must not become the spawned agents' default");
-        agentProfile.TryGetProperty("modelCredentialId", out _).ShouldBeFalse("the brain's credential must not become the spawned agents' default");
+        agentProfile.TryGetProperty("model", out _).ShouldBeFalse("the honored brain pin must not become the spawned agents' default");
+        agentProfile.TryGetProperty("modelCredentialId", out _).ShouldBeFalse("the honored brain pin's credential must not become the spawned agents' default");
         // Untouched fields still bake — only the brain-only pair is withheld.
         agentProfile.GetProperty("repositoryId").GetString().ShouldBe(repoId.ToString());
         agentProfile.GetProperty("harness").GetString().ShouldBe("claude-code");
@@ -238,10 +238,41 @@ public class SupervisorDefinitionBuilderTests
     }
 
     [Fact]
+    public void Agent_profile_omits_model_and_credential_when_the_authored_pin_was_ineligible()
+    {
+        // The operator's pin was authored but didn't resolve (SupervisorBrainModelPinIneligible) — the run falls
+        // back to an auto-selected brain, but the chip was still AUTHORED as a pin, so the same withholding
+        // applies: the operator's request must not become the spawned agents' default either.
+        var profile = new ResolvedAgentProfile { Harness = "claude-code", Model = "claude-opus", ModelCredentialId = Guid.NewGuid() };
+
+        var agentProfile = Builder.Build(Context(profile, brainModelId: Guid.NewGuid(), brainModelPinIneligible: true)).Nodes.Single(n => n.Id == "sup").Config.GetProperty("agentProfile");
+
+        agentProfile.TryGetProperty("model", out _).ShouldBeFalse();
+        agentProfile.TryGetProperty("modelCredentialId", out _).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void Agent_profile_keeps_an_explicit_model_when_the_brain_was_only_auto_selected_with_no_pin_authored()
+    {
+        // ResolveStructuredBrainRowAsync auto-selects SOME brain on every deep launch whenever a structured client
+        // exists at all — SupervisorBrainModelId is non-null on nearly every real launch, pinned or not. Gating the
+        // withholding on that alone would silently swallow an explicit agent model an operator (or API caller) set
+        // directly via Overrides.Model without ever authoring a brain pin. Regression coverage for that exact bug.
+        var repoId = Guid.NewGuid();
+        var credId = Guid.NewGuid();
+        var profile = new ResolvedAgentProfile { RepositoryId = repoId, Harness = "claude-code", Model = "claude-opus", ModelCredentialId = credId };
+
+        var agentProfile = Builder.Build(Context(profile, brainModelId: Guid.NewGuid())).Nodes.Single(n => n.Id == "sup").Config.GetProperty("agentProfile");
+
+        agentProfile.GetProperty("model").GetString().ShouldBe("claude-opus");
+        agentProfile.GetProperty("modelCredentialId").GetString().ShouldBe(credId.ToString());
+    }
+
+    [Fact]
     public void Agent_profile_stays_byte_identical_on_an_unpinned_deep_launch_with_no_brain_resolved()
     {
-        // No brain resolved at all (e.g. the pool can't supply a structured-capable model) ⇒ the byte-identical
-        // pre-existing shape: an absent Model/ModelCredentialId on the profile means there was nothing to withhold.
+        // No brain resolved at all (e.g. the pool can't supply a structured-capable model) and no explicit model
+        // was set either ⇒ the byte-identical pre-existing shape: nothing to bake, nothing to withhold.
         var profile = new ResolvedAgentProfile { Harness = "claude-code" };
 
         var agentProfile = Builder.Build(Context(profile, brainModelId: null)).Nodes.Single(n => n.Id == "sup").Config.GetProperty("agentProfile");

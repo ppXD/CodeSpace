@@ -123,6 +123,22 @@ describe("LaunchTaskModal (minimal box)", () => {
     expect(screen.getByText("Time limit")).toBeInTheDocument();
   });
 
+  it("Coordination's Autonomy ceiling also restricts to the reachable tiers and explains why", () => {
+    // The ceiling can only TIGHTEN a preset's own Standard ceiling (EffortRouter.TightenCeiling), never raise it —
+    // so Trusted/Unleashed are inert picks here too, not just on the request-side Permission picker.
+    renderBox();
+    fireEvent.click(screen.getByTitle("Model and effort"));
+    fireEvent.click(screen.getByText("Effort"));
+    fireEvent.click(screen.getByText("Deep"));
+    fireEvent.click(screen.getByText("Advanced"));
+    fireEvent.click(screen.getByText("Coordination"));
+    fireEvent.click(screen.getByText("Autonomy ceiling"));
+
+    expect(screen.queryByText("Trusted")).toBeNull();
+    expect(screen.queryByText("Unleashed")).toBeNull();
+    expect(screen.getByText(/never raise it/)).toBeInTheDocument();
+  });
+
   it("Time limit shows the tier's own untouched default (Deep = 2h) and stays byte-identical on the wire", () => {
     renderBox();
     typeTask("Ship it");

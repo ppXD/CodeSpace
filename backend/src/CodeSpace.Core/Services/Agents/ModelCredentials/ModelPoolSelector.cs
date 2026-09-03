@@ -135,6 +135,26 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
         return row == null ? null : new ModelDispatchRef { ModelId = row.ModelId, ModelCredentialId = row.ModelCredentialId, Provider = row.Provider };
     }
 
+    public async Task<ModelDispatchRef?> ResolvePoolDefaultAsync(Guid teamId, IReadOnlyList<Guid> allowedRowIds, CancellationToken cancellationToken)
+    {
+        // No effective model name at all (an unfilled persona/profile default) but the operator DID bind an agent-model
+        // pool — that pool must still constrain the dispatch, so query it directly rather than falling through to
+        // ApplyDispatchModelAsync's no-name early return (which used to leave the pool unconsulted entirely and let
+        // ModelCredentialResolver's full-team-pool default pick instead). Ranked with the SAME agent-plane precedence
+        // ResolveTeamDefaultAsync applies to the full team (AgentPlaneModelRanking), just bounded to this pool of rows.
+        var rows = await _db.ModelCredentialModel.AsNoTracking()
+            .Where(m => m.Enabled && allowedRowIds.Contains(m.Id)
+                && m.Credential.TeamId == teamId && m.Credential.DeletedDate == null && m.Credential.Status == CredentialStatus.Active)
+            .Select(m => new { m.Id, m.ModelId, m.ModelCredentialId, m.Credential.Provider, m.IsDefault, m.CapabilityTier, m.ProbedCapabilityTier })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var pick = AgentPlaneModelRanking.Rank(rows, m => m.IsDefault, m => m.ProbedCapabilityTier, m => m.CapabilityTier)
+            .ThenBy(m => m.Id)
+            .FirstOrDefault();
+
+        return pick is null ? null : new ModelDispatchRef { ModelId = pick.ModelId, ModelCredentialId = pick.ModelCredentialId, Provider = pick.Provider };
+    }
+
     public async Task<IReadOnlyList<PoolModelInfo>> ListPoolAsync(Guid teamId, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken)
     {
         var query = _db.ModelCredentialModel.AsNoTracking()
