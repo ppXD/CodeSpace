@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Persistence;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Constants;
@@ -250,7 +251,12 @@ public sealed class RunRecordLogger : IRunRecordLogger, IRedactedNodeOutputLedge
             CorrelationId = correlationId,
             ParentRecordId = parentRecordId,
             OccurredAt = DateTimeOffset.UtcNow,
-            PayloadJson = payloadJson,
+
+            // The ONE place every record's payload is written, so the ONE place it has to be storable. These payloads
+            // carry model and harness words — an LLM completion, a node's outputs, an error line off a subprocess —
+            // and a stray U+0000 in any of them is refused by jsonb, failing the write that was recording what
+            // happened. See PersistedText: `jsonb` rejects the ESCAPE, so a raw-byte strip alone would not do.
+            PayloadJson = PersistedText.SanitizeJson(payloadJson)!,
         };
 
         _db.WorkflowRunRecord.Add(record);
