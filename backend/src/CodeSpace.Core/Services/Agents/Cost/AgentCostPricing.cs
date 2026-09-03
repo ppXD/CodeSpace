@@ -72,10 +72,19 @@ public static class AgentCostPricing
 
         var name = model.Trim();
 
-        if (rowPrices is not null && rowPrices.TryGetValue(name, out var rowPrice)) return rowPrice;
+        // A row price rides the SAME magnitude bound the env override does. The column is an unconstrained
+        // `numeric`, so a fat-fingered 1e30 would overflow the multiplication below into a throw — and "pricing
+        // never throws" is a contract the enforcement fold depends on. An out-of-bound row is SKIPPED (it falls
+        // through to the env/built-in tables, and reads as unpriced if neither has it), never fatal.
+        if (rowPrices is not null && rowPrices.TryGetValue(name, out var rowPrice) && IsUsable(rowPrice)) return rowPrice;
 
         return ResolveTable().TryGetValue(name, out var price) ? price : null;
     }
+
+    /// <summary>Whether a price can be used in <see cref="CostUsd"/>'s arithmetic without risking an overflow throw — the same bound <see cref="TryParseEntry"/> enforces on an env entry, applied to an operator's DB row.</summary>
+    private static bool IsUsable(ModelPrice price) =>
+        price.InputPerMillionUsd >= 0 && price.OutputPerMillionUsd >= 0
+        && price.InputPerMillionUsd <= MaxPricePerMillionUsd && price.OutputPerMillionUsd <= MaxPricePerMillionUsd;
 
     /// <summary>The seeded defaults overlaid by the lenient env CSV. Internal so a test can drive the env override + the malformed-entry tolerance.</summary>
     internal static IReadOnlyDictionary<string, ModelPrice> ResolveTable()

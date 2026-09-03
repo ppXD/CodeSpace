@@ -119,12 +119,12 @@ public sealed class InteractionSpendTests
         // Codex/OpenAI/Custom-gateway model at all — the built-in table carries only the six Claude ids.
         var prices = new Dictionary<string, CodeSpace.Messages.Agents.ModelPrice>(StringComparer.OrdinalIgnoreCase)
         {
-            ["unpriced"] = new() { InputPerMillionUsd = 1_000_000m, OutputPerMillionUsd = 0m },
+            ["unpriced"] = new() { InputPerMillionUsd = 2m, OutputPerMillionUsd = 10m },
         };
 
-        var row = InteractionSpend.From(Record("""{"kind":"x","model":"unpriced","usage":{"inputTokens":1,"outputTokens":1}}"""), prices);
+        var row = InteractionSpend.From(Record("""{"kind":"x","model":"unpriced","usage":{"inputTokens":1000000,"outputTokens":1000000}}"""), prices);
 
-        row.CostUsd.ShouldBe(1m);
+        row.CostUsd.ShouldBe(12m);
         BrainPlaneSpendSummary.From(new[] { row }).UnpricedModel.ShouldBeNull("everything priced");
     }
 
