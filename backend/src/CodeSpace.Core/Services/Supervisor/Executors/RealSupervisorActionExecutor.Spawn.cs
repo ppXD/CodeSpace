@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Cost;
 using CodeSpace.Core.Services.Agents.Harnesses;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Agents.Workspace;
@@ -576,6 +577,25 @@ public sealed partial class RealSupervisorActionExecutor
         // Scope keys are the per-spawn iteration keys, so a crash-replayed staging lands on its own reservations
         // (admitted as already-reserved). An uncapped run (no MaxCostUsd) reserves nothing — same authority as
         // the realized-spend bound, which stays the user-facing stop.
+        // D1 fail-CLOSED, BEFORE any reservation: a wave that would run a model nobody can price cannot be admitted
+        // under a cost cap — its spend folds back as $0, so the cap it is admitted against would never trip. Blocking
+        // is the same shape as the ledger's own refusal below (a synchronous budget-blocked outcome the decider reads,
+        // never a truncated mid-wave stage), and the reason NAMES the model + the remedy. An unnamed model is the
+        // harness default, which this layer never knew — it is not an unpriced pool pick and is not blocked here; the
+        // tape fold catches whatever it turns out to have been (SupervisorBounds.PostDecision).
+        if (context.MaxCostUsd is { } cap && tasks.Select(t => t.Task.Model).FirstOrDefault(m => UnpricedModelUnderCap.Blocks(m, cap, context.ModelPrices)) is { } unpriced)
+        {
+            _logger.LogWarning("Budget admission blocked a {Count}-agent wave on run {RunId}: model {Model} has no price under the ${Cap} cost cap", tasks.Count, context.SupervisorRunId, unpriced, cap);
+
+            return SupervisorExecution.Synchronous(JsonSerializer.Serialize(new
+            {
+                budgetBlocked = tasks.Select(t => t.Task.SubtaskId).ToArray(),
+                reason = UnpricedModelUnderCap.Detail(unpriced, cap),
+                unpricedModel = unpriced,
+                capUsd = cap,
+            }, AgentJson.Options));
+        }
+
         if (context.MaxCostUsd is { } capUsd && context.SupervisorRunId != Guid.Empty && context.TeamId != Guid.Empty)
         {
             var estimate = capUsd / Math.Max(context.MaxTotalSpawns ?? SupervisorLane.DefaultMaxTotalSpawns, 1);

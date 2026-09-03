@@ -104,6 +104,11 @@ public sealed partial class SupervisorTurnService
         // Hoisted ABOVE the walk (pure over goalConfig) so the grading scopes below can carry the run's cost cap.
         var plan = SupervisorGoalPlan.From(goalConfig);
 
+        // D1 — the team's operator-typed per-model prices, loaded ONCE for the whole rehydrate: every pricing read
+        // below (the grading scopes' budget guard, the agent-execution fold, the brain-plane fold) resolves against
+        // the SAME table, so a pool model the built-in table never heard of prices identically everywhere.
+        var modelPrices = await ModelPriceResolver.LoadAsync(_db, teamId, cancellationToken).ConfigureAwait(false);
+
         foreach (var row in rows)
         {
             var decision = FoldAskHumanAnswer(ToPriorDecision(row), answersByToken);
@@ -121,7 +126,7 @@ public sealed partial class SupervisorTurnService
                 // P3.5 — an LlmJudge-kind acceptance check makes a real model call; label it "grader.acceptance" so
                 // its spend lands on the ledger (RecordingLLMClientDecorator records nothing with no ambient scope) and
                 // counts toward the run's cost cap. A no-op for every OTHER grader kind (TestsPass etc. make no model call).
-                using (Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(supervisorRunId, teamId, nodeId, "", GraderAcceptanceCallKind, _recordLogger, _offloader, _budget, plan.MaxCostUsd)))
+                using (Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(supervisorRunId, teamId, nodeId, "", GraderAcceptanceCallKind, _recordLogger, _offloader, _budget, plan.MaxCostUsd, modelPrices)))
                 {
                     decision = await FoldAcceptanceGradeAsync(decision, goalConfig, acceptanceCommand, supervisorRunId, nodeId, teamId, cancellationToken).ConfigureAwait(false);
                     decision = await FoldUnitAcceptanceGradeAsync(decision, priorDecisions, goalConfig, supervisorRunId, nodeId, teamId, cancellationToken).ConfigureAwait(false);
@@ -140,13 +145,12 @@ public sealed partial class SupervisorTurnService
         }
 
         // P3.5 — brain-plane spend (the supervisor's own decision calls, a decision critic's review, an
-        // acceptance-grading judge, any future in-process model call) is DB-gated on a cost cap actually being set:
-        // an uncapped run (the common case — MaxCostUsd defaults to null) never pays this extra query, staying
-        // byte-identical to before. When capped, it's summed alongside the agent-execution spend below.
-        var agentExecutionSpend = FoldRunSpendUsd(priorDecisions);
-        var brainPlaneSpend = plan.MaxCostUsd is not null
-            ? await FoldBrainPlaneSpendAsync(supervisorRunId, cancellationToken).ConfigureAwait(false)
-            : BrainPlaneSpendSummary.Empty;
+        // acceptance-grading judge, any future in-process model call), summed alongside the agent-execution spend.
+        // D1: folded for EVERY run, not only a capped one. It used to be gated on MaxCostUsd to save a query, which
+        // meant an UNCAPPED run's reported spend silently omitted every dollar the brain spent — the bill has to be
+        // the bill whether or not anyone set a limit on it. It is one indexed read per turn.
+        var agentExecutionSpend = FoldRunSpendUsd(priorDecisions, modelPrices);
+        var brainPlaneSpend = await FoldBrainPlaneSpendAsync(supervisorRunId, modelPrices, cancellationToken).ConfigureAwait(false);
 
         // D2 — the run's lesson arm (frozen on the tape after turn 1) + the lines this turn's prompt carries.
         var lessons = await ResolveLessonInjectionAsync(goal, goalConfig, rows, teamId, cancellationToken).ConfigureAwait(false);
@@ -169,6 +173,10 @@ public sealed partial class SupervisorTurnService
             AgentExecutionSpendUsd = agentExecutionSpend,
             BrainPlaneSpendUsd = brainPlaneSpend.TotalUsd,
             BrainPlaneSpendByKind = brainPlaneSpend.ByKind,
+            // D1 — either lane can hold an unpriceable model; the agent lane is named first because that is where a
+            // capped run's money actually goes. Null when every dollar this run spent could be priced.
+            UnpricedSpendModel = FoldUnpricedSpendModel(priorDecisions, modelPrices) ?? brainPlaneSpend.UnpricedModel,
+            ModelPrices = modelPrices,
             MaxCostUsd = plan.MaxCostUsd,
             MaxTotalSpawns = plan.MaxTotalSpawns,
             MaxResolveAttempts = plan.MaxResolveAttempts,
@@ -254,18 +262,31 @@ public sealed partial class SupervisorTurnService
     /// survives replay + re-entry deterministically. An outcome not yet folded (or folded before token fields existed)
     /// has no agentResults → 0 (fail-open), so cost is realized-spend backpressure that can never block the first spawn.
     /// </summary>
-    private static decimal FoldRunSpendUsd(IReadOnlyList<SupervisorPriorDecision> priorDecisions) =>
+    private static decimal FoldRunSpendUsd(IReadOnlyList<SupervisorPriorDecision> priorDecisions, IReadOnlyDictionary<string, Messages.Agents.ModelPrice> modelPrices) =>
         priorDecisions
             .Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind))
-            .Sum(d => SupervisorOutcome.SpendUsd(SupervisorOutcome.ReadAgentResults(d.OutcomeJson)));
+            .Sum(d => SupervisorOutcome.SpendUsd(SupervisorOutcome.ReadAgentResults(d.OutcomeJson), modelPrices));
+
+    /// <summary>
+    /// D1 — the FIRST agent-execution model this run spent tokens on that NOBODY can price, or null when every named
+    /// model priced. The companion honesty read to <see cref="FoldRunSpendUsd"/>: that sum silently treats an unpriced
+    /// model as $0, so under a cost cap this is the ONLY signal that the sum is a lie. Pure over the same tape → the
+    /// forced stop it drives is replay-deterministic.
+    /// </summary>
+    private static string? FoldUnpricedSpendModel(IReadOnlyList<SupervisorPriorDecision> priorDecisions, IReadOnlyDictionary<string, Messages.Agents.ModelPrice> modelPrices) =>
+        priorDecisions
+            .Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind))
+            .Select(d => SupervisorOutcome.FirstUnpricedModel(SupervisorOutcome.ReadAgentResults(d.OutcomeJson), modelPrices))
+            .FirstOrDefault(m => m is not null);
 
     /// <summary>
     /// P3.5 — sum the run's REALIZED brain-plane USD spend: every <c>interaction.completed</c> ledger row this run
     /// recorded (the supervisor's own decision calls, a decision critic's review, an acceptance-grading judge, any
     /// future in-process model call — <c>RecordingLLMClientDecorator</c>/<c>RecordingStructuredLLMClientDecorator</c>
     /// record EVERY one with zero per-caller wiring), priced the SAME way agent-execution spend is
-    /// (<see cref="AgentCostPricing"/>), grouped by kind for the recitation/stop-detail breakdown. Only called when a
-    /// cost cap is actually set (the caller gates this) — an uncapped run never pays the extra query.
+    /// (<see cref="AgentCostPricing"/>, against the team's own per-row prices), grouped by kind for the
+    /// recitation/stop-detail breakdown. D1: called for EVERY run — a bill that omits the brain's dollars unless
+    /// someone happened to set a cap is not the bill.
     /// </summary>
     /// <summary>
     /// P5-6: prerender the "if you stopped now" contract recital — the completion reducer's own verdict on the
@@ -289,13 +310,13 @@ public sealed partial class SupervisorTurnService
         }
     }
 
-    private async Task<BrainPlaneSpendSummary> FoldBrainPlaneSpendAsync(Guid supervisorRunId, CancellationToken cancellationToken)
+    private async Task<BrainPlaneSpendSummary> FoldBrainPlaneSpendAsync(Guid supervisorRunId, IReadOnlyDictionary<string, Messages.Agents.ModelPrice> modelPrices, CancellationToken cancellationToken)
     {
         var records = await _db.WorkflowRunRecord.AsNoTracking()
             .Where(r => r.RunId == supervisorRunId && r.RecordType == WorkflowRunRecordTypes.InteractionCompleted)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        return BrainPlaneSpendSummary.From(records.Select(InteractionSpend.From).ToList());
+        return BrainPlaneSpendSummary.From(records.Select(r => InteractionSpend.From(r, modelPrices)).ToList());
     }
 
     /// <summary>
@@ -1175,7 +1196,7 @@ public sealed partial class SupervisorTurnService
         // P3.5 — see the identical rationale on the rehydrate-fold's own grading wrap: labels any LlmJudge model call
         // "grader.acceptance" so its spend is recorded + counts toward the cost cap.
         BenchmarkGrade grade;
-        using (Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(context.SupervisorRunId, teamId, context.NodeId, "", GraderAcceptanceCallKind, _recordLogger, _offloader, _budget, context.MaxCostUsd)))
+        using (Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(context.SupervisorRunId, teamId, context.NodeId, "", GraderAcceptanceCallKind, _recordLogger, _offloader, _budget, context.MaxCostUsd, context.ModelPrices)))
             grade = await GradeStopTargetsWithHeartbeatAsync(context.SupervisorRunId, context.NodeId, teamId, targets, gates, oracleBaseShas, cancellationToken).ConfigureAwait(false);
 
         return execution with { OutcomeJson = SupervisorOutcome.AppendAcceptanceGrade(execution.OutcomeJson, grade.Passed, grade.Detail) };

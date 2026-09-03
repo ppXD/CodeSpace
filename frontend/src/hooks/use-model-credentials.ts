@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { modelCredentialsApi, type AddCredentialedModelInput, type AddModelCredentialInput, type CredentialedModelSummary, type UpdateModelCredentialInput } from "@/api/modelCredentials";
+import { modelCredentialsApi, type AddCredentialedModelInput, type AddModelCredentialInput, type CredentialedModelSummary, type ModelPriceInput, type UpdateModelCredentialInput } from "@/api/modelCredentials";
 
 const MODEL_CREDENTIALS_KEY = ["model-credentials"] as const;
 
@@ -101,8 +101,23 @@ export function useSetDefaultCredentialedModel(credentialId: string) {
   });
 }
 
+/**
+ * Price one model row, or clear its price (both blank). Applied IMMEDIATELY, like the default star — the price is
+ * what makes a run's cost cap enforceable for this model, so it should not wait behind an unrelated Save.
+ */
+export function useSetCredentialedModelPrice(credentialId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ modelRowId, input }: { modelRowId: string; input: ModelPriceInput }) =>
+      modelCredentialsApi.setModelPrice(credentialId, modelRowId, input),
+    // Same reasoning as useSetDefaultCredentialedModel: invalidate ONLY the flattened pool, never the per-credential
+    // list the open editor is bound to — refetching it would rebuild the rows and wipe unsaved model-id edits.
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["credentialed-models"] }),
+  });
+}
+
 /** A row in the model editor — `id` present means it already exists on the credential. */
-export interface EditableModelRow { id?: string; modelId: string; displayName: string; }
+export interface EditableModelRow { id?: string; modelId: string; displayName: string; inputUsdPerMillion?: string; outputUsdPerMillion?: string; }
 
 /**
  * Reconcile an edited set of model rows against the credential's current models. There is no update
@@ -120,11 +135,15 @@ export function useSaveCredentialedModels(credentialId: string) {
         const modelId = r.modelId.trim();
         if (!modelId) continue;
 
+        // The row's price rides along on every add: a rename is a remove-then-add, and dropping the price there
+        // would silently un-enforce the cost cap the operator had just made enforceable.
+        const price = { inputUsdPerMillion: parsePrice(r.inputUsdPerMillion), outputUsdPerMillion: parsePrice(r.outputUsdPerMillion) };
+
         const orig = r.id ? original.find(o => o.id === r.id) : undefined;
-        if (!orig) { toAdd.push({ modelId, displayName: r.displayName.trim() || null }); continue; }
+        if (!orig) { toAdd.push({ modelId, displayName: r.displayName.trim() || null, ...price }); continue; }
         if (orig.modelId !== modelId || (orig.displayName ?? "") !== r.displayName.trim()) {
           toRemove.push(orig);
-          toAdd.push({ modelId, displayName: r.displayName.trim() || null });
+          toAdd.push({ modelId, displayName: r.displayName.trim() || null, ...price });
         }
       }
 
@@ -135,6 +154,15 @@ export function useSaveCredentialedModels(credentialId: string) {
     },
     onSuccess: invalidate,
   });
+}
+
+/** A blank / unparseable price field is "unpriced" (null), never 0 — a $0 model would read as free and defeat the cap. */
+export function parsePrice(raw: string | undefined): number | null {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return null;
+
+  const value = Number(trimmed);
+  return Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 /** Add input plus an optional set of models to seed onto the new credential in one user action. */

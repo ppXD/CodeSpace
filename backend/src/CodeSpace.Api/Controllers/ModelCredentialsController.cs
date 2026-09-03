@@ -75,6 +75,14 @@ public class ModelCredentialsController : ControllerBase
         return Ok(new { refreshed });
     }
 
+    [HttpPut("{credentialId:guid}/models/{modelRowId:guid}/price")]
+    public async Task<IActionResult> SetModelPrice([FromRoute] Guid credentialId, [FromRoute] Guid modelRowId, [FromBody] SetCredentialedModelPriceCommand command, CancellationToken cancellationToken)
+    {
+        // Route ids are authoritative; merge them in so the body can't target a different credential or row (Rule 17).
+        var id = await _mediator.Send(command with { ModelCredentialId = credentialId, ModelRowId = modelRowId }, cancellationToken).ConfigureAwait(false);
+        return Ok(new { id });
+    }
+
     [HttpPost("{credentialId:guid}/models/{modelRowId:guid}/default")]
     public async Task<IActionResult> SetDefaultModel([FromRoute] Guid credentialId, [FromRoute] Guid modelRowId, CancellationToken cancellationToken)
     {

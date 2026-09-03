@@ -113,7 +113,7 @@ public sealed class ModelCredentialService : IModelCredentialService, IScopedDep
         return rows.Select(ToModelSummary).ToList();
     }
 
-    public async Task<Guid> AddModelAsync(Guid credentialId, string modelId, string? displayName, CancellationToken cancellationToken)
+    public async Task<Guid> AddModelAsync(Guid credentialId, string modelId, string? displayName, ModelPrice? price, CancellationToken cancellationToken)
     {
         var normalized = (modelId ?? "").Trim();
 
@@ -131,6 +131,8 @@ public sealed class ModelCredentialService : IModelCredentialService, IScopedDep
             ModelId = normalized,
             DisplayName = NullIfBlank(displayName),
             Source = ModelSource.Manual,
+            InputUsdPerMillion = price?.InputPerMillionUsd,
+            OutputUsdPerMillion = price?.OutputPerMillionUsd,
         };
 
         await _db.ModelCredentialModel.AddAsync(row, cancellationToken).ConfigureAwait(false);
@@ -180,6 +182,28 @@ public sealed class ModelCredentialService : IModelCredentialService, IScopedDep
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
         return target.Id;
+    }
+
+    /// <summary>
+    /// D1 — price ONE model row, or clear its price (null). The price is what lets a run with a cost cap spend on a
+    /// model the built-in table never heard of; without it that run now fail-CLOSED stops instead of spending blind.
+    /// A DISABLED row can still be priced (unlike <see cref="SetDefaultModelAsync"/>): a hidden model may still have
+    /// spend on the books to bill honestly. Needs no advisory lock — it writes ONE row's own columns, so two
+    /// concurrent writers cannot leave the credential in a self-contradictory state the way two defaults would.
+    /// </summary>
+    public async Task<Guid> SetModelPriceAsync(Guid credentialId, Guid modelRowId, ModelPrice? price, CancellationToken cancellationToken)
+    {
+        await LoadActiveAsync(credentialId, cancellationToken).ConfigureAwait(false);   // team-scope guard
+
+        var row = await _db.ModelCredentialModel.FirstOrDefaultAsync(m => m.Id == modelRowId && m.ModelCredentialId == credentialId, cancellationToken).ConfigureAwait(false)
+            ?? throw new KeyNotFoundException($"Model {modelRowId} not found on credential {credentialId}.");
+
+        row.InputUsdPerMillion = price?.InputPerMillionUsd;
+        row.OutputUsdPerMillion = price?.OutputPerMillionUsd;
+
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+        return row.Id;
     }
 
     public async Task<int> RefreshModelsAsync(Guid credentialId, CancellationToken cancellationToken)
@@ -264,6 +288,8 @@ public sealed class ModelCredentialService : IModelCredentialService, IScopedDep
         CapabilityTier = m.CapabilityTier,
         ProbedCapabilityTier = m.ProbedCapabilityTier,
         Available = m.Available,
+        InputUsdPerMillion = m.InputUsdPerMillion,
+        OutputUsdPerMillion = m.OutputUsdPerMillion,
     };
 
     private ModelCredentialSummary ToSummary(ModelCredential c)

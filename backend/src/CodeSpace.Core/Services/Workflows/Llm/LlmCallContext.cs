@@ -29,6 +29,8 @@ public sealed record LlmCallScope(
     Budget.IBudgetLedger? Budget = null,
     /// <summary>The run's cost cap the guard admits against. Null = no cap known here — no reservation.</summary>
     decimal? CapUsd = null,
+    /// <summary>D1: the team's operator-typed per-model prices, so the guard can price (and, under <see cref="CapUsd"/>, REFUSE) a pool model the built-in table never heard of. Null/empty = fall through to the env + built-in tables.</summary>
+    IReadOnlyDictionary<string, Messages.Agents.ModelPrice>? ModelPrices = null,
     /// <summary>Optional exact-value masker applied only to persisted/offloaded model-call capture.</summary>
     PersistenceSecretRedactor? CaptureRedactor = null,
     /// <summary>Observation-only fail-open completeness accounting for this call's capture intent and gaps.</summary>

@@ -201,7 +201,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         // decisions; the guard closes the window DURING one.
         SupervisorDecision decision;
         var iterationKey = SupervisorOutcome.SelfAdvanceWaitKey(context.NodeId, context.TurnNumber);
-        using (Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(context.SupervisorRunId, context.TeamId, context.NodeId, iterationKey, "supervisor.decision", _recordLogger, _offloader, _budget, plan.MaxCostUsd)))
+        using (Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(context.SupervisorRunId, context.TeamId, context.NodeId, iterationKey, "supervisor.decision", _recordLogger, _offloader, _budget, plan.MaxCostUsd, context.ModelPrices)))
         {
             try
             {
@@ -215,6 +215,15 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
                 _logger.LogWarning("Supervisor run {RunId} hit the cost cap at the budget ledger (committed ${Committed} against ${Cap}) — forcing the cost-cap stop", context.SupervisorRunId, refused.CommittedUsd, refused.CapUsd);
 
                 return GateForcedStop(context, SupervisorStopReasons.CostCapReached, Deciders.SupervisorBudgetRecitation.Summary(refused.CapUsd, context.AgentExecutionSpendUsd, context.BrainPlaneSpendUsd, context.BrainPlaneSpendByKind));
+            }
+            catch (Workflows.Llm.LlmUnpricedModelException refused)
+            {
+                // D1 — the brain would spend on a model this run cannot price under its own cap. Terminal, not a park:
+                // the price is a stored fact, so retrying the identical call refuses forever. The detail NAMES the
+                // model + the remedy, so the operator can price it and relaunch.
+                _logger.LogWarning("Supervisor run {RunId} refused a brain call on unpriced model {Model} under a ${Cap} cost cap — forcing the unpriced-model stop", context.SupervisorRunId, refused.Model, refused.CapUsd);
+
+                return GateForcedStop(context, SupervisorStopReasons.UnpricedModelUnderCap, refused.Detail);
             }
         }
 
@@ -492,6 +501,11 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
 
         // P3.5 — the cost cap is the one bound with a per-run figure worth citing (which cap, how much over/left,
         // broken down by lane) — every other bound's reason is already fully self-explanatory as a bare string.
+        // D1 — the unpriced-model stop is only actionable if it NAMES the model and the remedy; the bound itself is a
+        // bare string, so the detail carries both (the same sentence the brain-plane guard's refusal carries).
+        if (postBound == SupervisorStopReasons.UnpricedModelUnderCap)
+            return GateForcedStop(context, postBound, Agents.Cost.UnpricedModelUnderCap.Detail(context.UnpricedSpendModel!, plan.MaxCostUsd!.Value));
+
         if (postBound == SupervisorStopReasons.CostCapReached)
             return GateForcedStop(context, postBound, Deciders.SupervisorBudgetRecitation.Summary(plan.MaxCostUsd!.Value, context.AgentExecutionSpendUsd, context.BrainPlaneSpendUsd, context.BrainPlaneSpendByKind));
 
@@ -714,7 +728,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
             if (decision.Kind == SupervisorDecisionKinds.Merge)
             {
                 var iterationKey = SupervisorOutcome.SelfAdvanceWaitKey(context.NodeId, context.TurnNumber);
-                using (Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(context.SupervisorRunId, context.TeamId, context.NodeId, iterationKey, SupervisorSynthesisCallKind, _recordLogger, _offloader, _budget, context.MaxCostUsd)))
+                using (Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(context.SupervisorRunId, context.TeamId, context.NodeId, iterationKey, SupervisorSynthesisCallKind, _recordLogger, _offloader, _budget, context.MaxCostUsd, context.ModelPrices)))
                     return await _executor.ExecuteAsync(decision, context, cancellationToken).ConfigureAwait(false);
             }
 

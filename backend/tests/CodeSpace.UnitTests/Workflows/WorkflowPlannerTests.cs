@@ -475,7 +475,7 @@ public class WorkflowPlannerTests
     public async Task Grounding_for_a_null_repository_is_null_so_the_planner_runs_task_only()
     {
         // null repositoryId returns before any DB/provider use — db is never dereferenced, so null! is safe here.
-        var provider = new RepoGroundingProvider(db: null!, registry: null!, scopeChecker: null!, logger: NullLogger<RepoGroundingProvider>.Instance);
+        var provider = new RepoGroundingProvider(db: Infrastructure.EmptyTestDb.New(), registry: null!, scopeChecker: null!, logger: NullLogger<RepoGroundingProvider>.Instance);
 
         var grounding = await provider.BuildGroundingAsync(repositoryId: null, teamId: Guid.NewGuid(), reference: null, CancellationToken.None);
 
