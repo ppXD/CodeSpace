@@ -41,7 +41,12 @@ internal static class AgentNodeMapping
     /// when present it is PREPENDED to the goal (the agent's prompt) so a follow-up builds on earlier turns. Null
     /// (a fresh launch) leaves the goal byte-identical.</para>
     /// </summary>
-    public static JsonElement BuildAgentConfig(string goal, ResolvedAgentProfile? profile, string? mode = null, string? grounding = null, object? acceptance = null, IReadOnlyList<string>? criteria = null, string? acceptanceAuthority = null)
+    /// <param name="fallbackModel">
+    /// A model the node uses ONLY when the profile pins none — the plan-map body passes the per-item binding
+    /// <c>"{{item.model}}"</c> here, so the planner's per-subtask allocation reaches the agent while an
+    /// operator-pinned profile model still wins outright. Null (every other caller) ⇒ nothing changes.
+    /// </param>
+    public static JsonElement BuildAgentConfig(string goal, ResolvedAgentProfile? profile, string? mode = null, string? grounding = null, object? acceptance = null, IReadOnlyList<string>? criteria = null, string? acceptanceAuthority = null, string? fallbackModel = null)
     {
         var config = new Dictionary<string, object?>
         {
@@ -62,7 +67,10 @@ internal static class AgentNodeMapping
         // legacy) ⇒ staked as ModelProposal (under-claim, never inflate).
         AddIfPresent(config, "acceptanceAuthority", acceptanceAuthority);
 
-        AddIfPresent(config, "model", NullIfBlank(profile?.Model));
+        // The operator's pin FIRST, the per-item fallback second: a launch that pinned a model gets that model on every
+        // branch (an operator choice is never overridden by a model-authored one), and a launch that pinned none lets
+        // the plan's own per-item pick through. Neither present ⇒ the key is omitted ⇒ the harness/credential default.
+        AddIfPresent(config, "model", NullIfBlank(profile?.Model) ?? NullIfBlank(fallbackModel));
         AddIfPresent(config, "agentDefinitionId", profile?.AgentDefinitionId?.ToString());
         AddIfPresent(config, "modelCredentialId", profile?.ModelCredentialId?.ToString());
         AddIfPresent(config, "modelCredentialModelId", profile?.ModelCredentialModelId?.ToString());

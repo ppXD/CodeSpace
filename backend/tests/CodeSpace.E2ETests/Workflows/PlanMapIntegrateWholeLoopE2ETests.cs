@@ -107,6 +107,79 @@ public sealed class PlanMapIntegrateWholeLoopE2ETests
         outputs.GetProperty("combined").GetString().ShouldNotBeNullOrWhiteSpace("the synth still narrates — the code reduce rides beside it, not instead of it");
     }
 
+    /// <summary>
+    /// The failure arm of the same loop: ONE item flunks its objective contract while its sibling succeeds. Under
+    /// the <c>flow.map</c> schema's <c>terminate</c> default this killed the map — which SKIPPED
+    /// <c>git.integrate_run</c> and the reduce, so the surviving item's real, pushed work never became a reviewable
+    /// candidate and the run's outputs were empty. With the projection declaring <c>continue</c>, the map finishes,
+    /// the integrate step runs over the run's publish ledger, and the reduce narrates with the failure counted.
+    ///
+    /// <para>Which contributions integrate is a LEDGER question, not an outcome one (<c>RunIntegrationContributions</c>
+    /// deliberately applies no outcome filter): a unit that captured a diff contributes even if its own gate later
+    /// flunked it, so a human reviews the produced work instead of losing it. What this test pins is the part that
+    /// was broken — that the candidate exists at all, and that the SUCCEEDED sibling's work is in its tree.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_flunked_item_still_leaves_its_siblings_work_on_one_reviewable_candidate()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitAvailableAsync()) return;
+
+        // s2 carries an objective acceptance whose command does not exist in the seeded tree → it flunks for real.
+        using (var knob = _fixture.BeginScope()) knob.Resolve<WorkPlanPlanScript>().AuthorContract = true;
+
+        try
+        {
+            var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+            var (_, plannerRowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "workplan-model", provider: DeterministicWorkPlanLlmClient.ProviderTag);
+
+            using var cli = new FileWritingFakeCli();
+
+            using var remote = new BareRemote();
+            await remote.SeedBaseAsync();
+            var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+
+            var jobClient = ResolveJobClient();
+            jobClient.Clear();
+            jobClient.AutoExecute = true;
+
+            var runId = await ProjectAndStartAsync(teamId, userId, plannerRowId, repoId);
+
+            await RunEngineAsync(runId);
+            await jobClient.WaitForPendingAsync();
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+
+            run.Status.ShouldBe(WorkflowRunStatus.Success,
+                customMessage: $"one flunked item must not sink the whole fan-out — error: {run.Error}");
+
+            (await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).ToListAsync())
+                .Count(r => r.Status == AgentRunStatus.Failed)
+                .ShouldBe(1, customMessage: "the contract item really flunked — this arm is worthless if both items simply passed");
+
+            var outputs = JsonDocument.Parse(run.OutputsJson!).RootElement;
+
+            outputs.GetProperty(WorkflowOutputKeys.MapFailed).GetInt32().ShouldBe(1, "the run row counts the failure beside the answer it qualifies");
+
+            var integrationBranch = $"codespace/integration/{runId:N}";
+            outputs.GetProperty("integratedBranch").GetString().ShouldBe(integrationBranch,
+                customMessage: "the integrate step RAN — under terminate the map's failure skipped it entirely and the produced work stayed fragments");
+
+            (await remote.BranchFileContentAsync(integrationBranch, FileWritingFakeCli.FileFor("do the first thing")))
+                .ShouldContain("do the first thing", customMessage: "the surviving item's real work is on the candidate — exactly what one sibling's failure used to discard");
+
+            outputs.GetProperty("combined").GetString().ShouldNotBeNullOrWhiteSpace("the reduce ran too — the run narrates instead of dying at the map");
+        }
+        finally
+        {
+            using var reset = _fixture.BeginScope();
+            reset.Resolve<WorkPlanPlanScript>().Reset();
+        }
+    }
+
     [Fact]
     public async Task A_conflicted_candidate_parks_for_review_and_resumes_to_an_honest_finish()
     {

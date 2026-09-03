@@ -6,6 +6,7 @@ using CodeSpace.Messages.Constants;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
+using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks;
@@ -277,11 +278,118 @@ public class PlanMapSynthDefinitionBuilderTests
             "same for the budget: an absent cap must not write the key");
 
         // The Config is no longer the empty object it was before the reduce gained an input bound: promptBudgetChars
-        // rides on EVERY plan-map graph, because a capless route is exactly the common case whose reduce prompt used
-        // to grow without limit. It is the ONLY unconditional key — a cap the route did not set still writes nothing.
-        map.Config.EnumerateObject().Select(p => p.Name).ShouldBe(new[] { "promptBudgetChars" },
-            customMessage: "a capless map Config carries the reduce's input budget and nothing else");
+        // and the error policy ride on EVERY plan-map graph, because a capless route is exactly the common case whose
+        // reduce prompt used to grow without limit — and whose fan-out must survive one branch's death. Those two are
+        // the ONLY unconditional keys — a cap the route did not set still writes nothing.
+        map.Config.EnumerateObject().Select(p => p.Name).ShouldBe(new[] { "errorHandling", "promptBudgetChars" },
+            customMessage: "a capless map Config carries the error policy + the reduce's input budget and nothing else");
     }
+
+    /// <summary>
+    /// One subtask's death must not destroy its siblings' work. The <c>flow.map</c> schema DEFAULTS to
+    /// <c>terminate</c>: a branch that exhausted its attempts failed the whole map, which skips
+    /// <c>git.integrate_run</c> AND the synth reduce — so N-1 successful subtasks survived only as per-agent
+    /// branches nobody was told about, and the run's own outputs came out empty. The projection must therefore
+    /// declare the policy explicitly; inheriting the node default is the defect.
+    /// </summary>
+    [Fact]
+    public void Map_config_declares_continue_on_error_so_one_dead_branch_never_discards_its_siblings_work()
+    {
+        var map = Builder.Build(Context()).Nodes.Single(n => n.Id == "map");
+
+        map.Config.GetProperty("errorHandling").GetString().ShouldBe("continue",
+            customMessage: "the plan-map fan-out must keep going and mark failures — under the schema's 'terminate' default one failed subtask skips integrate + synth and the run loses every sibling's work");
+    }
+
+    /// <summary>
+    /// Continue-on-error only pays off if the reduce TELLS THE TRUTH about it: the run now reaches Success with a
+    /// failed subtask inside it, so a reduce that read an <c>{"error": ...}</c> entry as just another result would
+    /// narrate a partial run as a whole one. The prompt names the marker, instructs the model to say what failed,
+    /// and carries the map's own failed-branch count.
+    /// </summary>
+    [Fact]
+    public void The_reduce_is_told_which_subtasks_failed_so_a_partial_answer_cannot_read_as_a_whole_one()
+    {
+        var synth = Builder.Build(Context()).Nodes.Single(n => n.Id == "synth");
+
+        var systemPrompt = synth.Inputs.GetProperty("systemPrompt").GetString()!;
+        systemPrompt.ShouldContain("error", Case.Insensitive, customMessage: "the reduce must know a failed branch appears as an {\"error\": ...} entry, not as a result");
+        systemPrompt.ShouldContain("failed", Case.Insensitive, customMessage: "the reduce is instructed to name the failed subtasks and what is missing because of them");
+
+        synth.Inputs.GetProperty("userPrompt").GetString()!
+            .ShouldContain($"{{{{nodes.map.outputs.{WorkflowOutputKeys.MapFailed}}}}}",
+                customMessage: "the reduce binds the map's own failed-branch count — the number is the map's fact, never the model's guess");
+    }
+
+    /// <summary>The other half of the same fact: the failed-branch count reaches the RUN ROW beside the combined answer, so a partial result is legible from the run's outcome and not only from the map node's bag (the coverage binding's reasoning, applied to the second way an answer can be less than whole).</summary>
+    [Fact]
+    public void The_done_terminal_surfaces_the_failed_branch_count_beside_the_combined_answer()
+    {
+        var done = Builder.Build(Context()).Nodes.Single(n => n.Id == "done");
+
+        done.Inputs.GetProperty(WorkflowOutputKeys.MapFailed).GetString()
+            .ShouldBe($"{{{{nodes.map.outputs.{WorkflowOutputKeys.MapFailed}}}}}");
+    }
+
+    /// <summary>
+    /// The planner types each item with an open kind, and the DEFAULT lane must read it too: <c>agent.run</c> maps a
+    /// recognised <c>research</c> kind to read-only + no produced branch under the autonomy ceiling. Privilege only
+    /// lowers, so this is safe on the standard projection — the opt-in dynamic sibling was never the only place a
+    /// plan item's kind meant something.
+    /// </summary>
+    [Fact]
+    public void Agent_body_mode_binds_to_the_per_branch_item_kind()
+    {
+        var agent = Builder.Build(Context()).Nodes.Single(n => n.Id == "agent");
+
+        agent.Config.GetProperty("mode").GetString().ShouldBe("{{item.kind}}",
+            customMessage: "the plan item's kind must reach the body, or the planner's per-item posture decision is thrown away");
+    }
+
+    /// <summary>
+    /// The planner is invited to pick each subtask's best-fit model from the team's catalog; on the Launch path that
+    /// pick had no binding at all, so every branch ran the profile's model. It now binds as a FALLBACK — an
+    /// operator-pinned profile model still wins outright, because an operator's choice is never overridden by a
+    /// model-authored one.
+    /// </summary>
+    [Fact]
+    public void The_body_model_binds_the_plan_items_pick_only_when_the_profile_pins_none()
+    {
+        Builder.Build(Context()).Nodes.Single(n => n.Id == "agent").Config.GetProperty("model").GetString()
+            .ShouldBe("{{item.model}}", customMessage: "with no operator pin, each branch runs the model its own plan item asked for");
+
+        Builder.Build(Context(new ResolvedAgentProfile { Model = "claude-sonnet" })).Nodes.Single(n => n.Id == "agent").Config.GetProperty("model").GetString()
+            .ShouldBe("claude-sonnet", customMessage: "an operator-pinned model wins on every branch — a model-authored pick never overrides it");
+    }
+
+    /// <summary>
+    /// The per-item binding resolved through the REAL <see cref="VariableResolver"/>, both ways: an item that named a
+    /// model resolves to that name, and an item that named none resolves to JSON null — which <c>AgentCodeNode</c>
+    /// reads as an ABSENT model (<c>ReadOptionalString</c> returns null for any non-string kind), i.e. exactly the
+    /// task a bare profile built before this binding existed. That second arm is the whole safety of the change.
+    /// </summary>
+    [Fact]
+    public void The_item_model_binding_resolves_per_branch_and_an_item_that_named_none_resolves_to_no_model()
+    {
+        var config = Builder.Build(Context()).Nodes.Single(n => n.Id == "agent").Config;
+
+        var authored = VariableResolver.ResolveBag(config, BranchScope("""{ "instruction": "do it", "model": "gpt-5-codex" }"""));
+        authored["model"].GetString().ShouldBe("gpt-5-codex");
+
+        var bare = VariableResolver.ResolveBag(config, BranchScope("""{ "instruction": "do it" }"""));
+        bare["model"].ValueKind.ShouldBe(JsonValueKind.Null,
+            customMessage: "an item with no model must resolve to null — AgentCodeNode reads that as no model at all, so the branch runs the harness/credential default exactly as it did before");
+
+        bare["mode"].ValueKind.ShouldBe(JsonValueKind.Null,
+            customMessage: "same for an untyped item: a null mode is AgentMode.Unset, the tier-derived posture (byte-identical to a no-mode node)");
+    }
+
+    /// <summary>A map-branch scope carrying ONE plan item as <c>{{item}}</c> — the same Iteration slot the engine's BuildMapBranchScope fills per element.</summary>
+    private static NodeRunScope BranchScope(string itemJson) => new()
+    {
+        Trigger = new Dictionary<string, JsonElement>(),
+        Iteration = new Dictionary<string, JsonElement> { ["item"] = JsonDocument.Parse(itemJson).RootElement.Clone() },
+    };
 
     [Fact]
     public void Agent_body_goal_binds_to_the_per_branch_item()
