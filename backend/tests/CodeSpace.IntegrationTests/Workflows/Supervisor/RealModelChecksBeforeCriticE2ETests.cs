@@ -91,7 +91,7 @@ public sealed class RealModelChecksBeforeCriticE2ETests
     {
         using var scope = _fixture.BeginScope();
 
-        var liveCritic = new LlmStructuredCritic(RealModelLiveWire.Registry(), scope.Resolve<IModelPoolSelector>());
+        var liveCritic = new LlmStructuredCritic(RealModelLiveWire.Registry(), scope.Resolve<IModelPoolSelector>(), Microsoft.Extensions.Logging.Abstractions.NullLogger<LlmStructuredCritic>.Instance);
         var decider = new CriticSupervisorDeciderDecorator(new PlanDecider(subtasks), liveCritic, new NoAgentPlanReviewer());
 
         var service = new SupervisorTurnService(

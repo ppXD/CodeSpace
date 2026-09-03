@@ -242,6 +242,60 @@ public class ModelPoolSelectorFlowTests
     }
 
     [Fact]
+    public async Task SelectReviewerRowId_excludes_the_producers_model_under_a_second_credential()
+    {
+        // D5: independence is a property of the MODEL, not of the row. The same model under a second credential is
+        // the producer reviewing itself; a row-id exclusion counted that as a second opinion. With no OTHER model in
+        // the pool, both rows are excluded and the pick falls back — honestly — to the producer's own model.
+        var teamId = await SeedTeamAsync();
+        var credA = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-a");
+        var credB = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-b");
+        var producer = await AddModelReturningIdAsync(credA, "claude-opus-4-8");
+        var sameModelOtherCredential = await AddModelReturningIdAsync(credB, "claude-opus-4-8");
+
+        using var scope = _fixture.BeginScope();
+        var picked = await scope.Resolve<IModelPoolSelector>().SelectReviewerRowIdAsync(teamId, new[] { "Anthropic" }, producer, CancellationToken.None);
+
+        picked.ShouldNotBe(sameModelOtherCredential, "the same model under a second key is NOT an independent reviewer");
+        picked.ShouldBe(producer, "with no distinct model in the pool the pick falls back to the producer's own row — the honest one-model fallback");
+    }
+
+    [Fact]
+    public async Task SelectReviewerRowId_still_finds_a_distinct_model_past_a_same_model_duplicate()
+    {
+        // The exclusion must not cost the team its real second opinion when one exists.
+        var teamId = await SeedTeamAsync();
+        var credA = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-a");
+        var credB = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-b");
+        var producer = await AddModelReturningIdAsync(credA, "claude-opus-4-8");
+        await AddModelReturningIdAsync(credB, "claude-opus-4-8");
+        var distinct = await AddModelReturningIdAsync(credB, "claude-sonnet-4-6");
+
+        using var scope = _fixture.BeginScope();
+
+        (await scope.Resolve<IModelPoolSelector>().SelectReviewerRowIdAsync(teamId, new[] { "Anthropic" }, producer, CancellationToken.None))
+            .ShouldBe(distinct, "a genuinely different model is still preferred over both same-model rows");
+    }
+
+    [Fact]
+    public async Task SelectBrainRowId_is_untouched_by_the_reviewer_exclusion()
+    {
+        // The brain pick excludes nothing — a duplicated model must not change which brain the team gets, or a
+        // replay would re-derive a different one.
+        var teamId = await SeedTeamAsync();
+        var credA = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-a");
+        var credB = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-b");
+        var first = await AddModelReturningIdAsync(credA, "claude-opus-4-8");
+        await AddModelReturningIdAsync(credB, "claude-opus-4-8");
+
+        using var scope = _fixture.BeginScope();
+        var selector = scope.Resolve<IModelPoolSelector>();
+
+        (await selector.SelectBrainRowIdAsync(teamId, new[] { "Anthropic" }, CancellationToken.None)).ShouldBe(first, "the deterministic total order is unchanged");
+        (await selector.ListBrainRowIdsAsync(teamId, new[] { "Anthropic" }, CancellationToken.None)).Count.ShouldBe(2, "the failover candidate list still carries every eligible row");
+    }
+
+    [Fact]
     public async Task SelectReviewerRowId_without_a_producer_matches_the_brain_pick()
     {
         var teamId = await SeedTeamAsync();

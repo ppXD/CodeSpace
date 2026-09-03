@@ -74,6 +74,22 @@ public class CriticPlannerDecoratorTests
         result.Risks.ShouldContain(r => r.Contains("flagged concerns") && r.Contains("40"), "the verdict + score is surfaced for the human reviewer");
     }
 
+    [Theory]
+    [InlineData("claude-sonnet-4-6", "Independent review on claude-sonnet-4-6 — approved")]
+    [InlineData(null, "Independent review — approved")]
+    public async Task The_annotated_risk_header_names_the_reviewing_model_when_the_critic_named_one(string? reviewerModel, string expectedHeader)
+    {
+        // D5: the risks line is where a human reads the verdict, so it is where "independent" has to be checkable
+        // against the plan's own authoring model. A verdict that names no reviewer leaves the header byte-identical.
+        var planner = new FakePlanner();
+        var critic = new FakeCritic { Verdict = new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "sound", ReviewerModel = reviewerModel } };
+        var decorator = new CriticPlannerDecorator(planner, critic, new NoAgentPlanReviewer());
+
+        var result = await decorator.PlanAsync(Request(ReviewMode.Gate), CancellationToken.None);
+
+        result.Risks.ShouldContain(r => r.StartsWith(expectedHeader));
+    }
+
     [Fact]
     public async Task A_failed_review_falls_back_to_the_original_plan()
     {

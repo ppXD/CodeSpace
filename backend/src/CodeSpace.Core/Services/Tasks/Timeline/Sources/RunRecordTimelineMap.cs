@@ -94,6 +94,12 @@ public static class RunRecordTimelineMap
             WorkflowRunRecordTypes.NodeStorageUnavailable => Event(r, "Storage unavailable", TimelineSeverity.Warning, TimelineLevel.Milestone, ReadString(r, "reason")),
             WorkflowRunRecordTypes.AttemptFailed => Event(r, $"{node} retry", TimelineSeverity.Warning, TimelineLevel.Milestone, RetrySummary(r)),
 
+            // A MILESTONE for the same reason storage-unavailable is: nothing failed, but something the operator
+            // CONFIGURED did not happen, and the run is green either way. The critic fails open by contract, so this
+            // beat is the only place a reader learns the "independent review" stopped running. The backend owns the
+            // copy — "Review skipped" + the machine-readable reason the critic recorded.
+            WorkflowRunRecordTypes.ReviewSkipped => Event(r, "Review skipped", TimelineSeverity.Warning, TimelineLevel.Milestone, ReadString(r, "reason")),
+
             // An operator force-resolved a stranded wait — a manual intervention that explains WHY a parked run resumed,
             // so it's a story MILESTONE (Warning-toned: it's an override of the normal signal path).
             WorkflowRunRecordTypes.WaitReissued  => Event(r, "Wait re-issued", TimelineSeverity.Warning, TimelineLevel.Milestone, ReadString(r, "wait_kind")),

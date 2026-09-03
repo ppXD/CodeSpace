@@ -31,6 +31,14 @@ public sealed record CriticVerdict
     /// <summary>The review could not be produced (no reviewer model / a resolve, call, or parse failure) — the caller keeps the original output.</summary>
     public bool Failed { get; init; }
 
-    /// <summary>A failed review — the caller falls back to the producer's original output.</summary>
+    /// <summary>
+    /// The model NAME that actually produced this verdict — the independence claim, made checkable: a reviewer that
+    /// reads the same as the producer's model is the producer reviewing itself (the one-model pool's honest fallback),
+    /// which the reader could previously not see. Null on a failed review and for a reviewer whose model is unknown
+    /// (a real reviewer AGENT's verdict — its own run carries the attribution).
+    /// </summary>
+    public string? ReviewerModel { get; init; }
+
+    /// <summary>A failed review — the caller falls back to the producer's original output. <paramref name="reason"/> is the machine-readable WHY (it rides <see cref="Rationale"/>, the one reason field), carried onto the durable review-skipped record.</summary>
     public static CriticVerdict ReviewFailed(ReviewMode mode, string reason) => new() { Mode = mode, Approved = false, Rationale = reason, Failed = true };
 }

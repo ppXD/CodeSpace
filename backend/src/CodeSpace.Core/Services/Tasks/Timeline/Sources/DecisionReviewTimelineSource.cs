@@ -66,10 +66,14 @@ public static class DecisionReviewTimelineMap
     {
         var subject = review.Scope == "plan" ? "plan" : "decision";
 
-        if (review.Approved) return $"Model critic approved the {(index > 0 ? "revised " : "")}{subject}";
+        if (review.Approved) return $"Model critic approved the {(index > 0 ? "revised " : "")}{subject}{ReviewedOn(review)}";
 
         var what = review.DraftAttribution is not null ? $"the {subject} draft" : index > 0 ? $"the revised {subject}" : $"the {subject}";
 
-        return $"Model critic flagged {what}{(review.Issues.Count > 0 ? $" — {review.Issues.Count} issue{(review.Issues.Count == 1 ? "" : "s")}" : "")}";
+        return $"Model critic flagged {what}{(review.Issues.Count > 0 ? $" — {review.Issues.Count} issue{(review.Issues.Count == 1 ? "" : "s")}" : "")}{ReviewedOn(review)}";
     }
+
+    /// <summary>The model the verdict actually ran on, appended to the beat — so a reader can check the independence claim against the decision's own authoring model instead of taking "model critic" on trust. Empty for a verdict that names no reviewer (an agent verdict, every pre-existing outcome), which keeps those beats byte-identical.</summary>
+    private static string ReviewedOn(SupervisorDecisionReview review) =>
+        string.IsNullOrWhiteSpace(review.ReviewerModelId) ? "" : $" · reviewed on {review.ReviewerModelId}";
 }

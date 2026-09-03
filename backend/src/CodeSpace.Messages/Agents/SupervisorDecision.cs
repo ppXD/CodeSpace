@@ -67,6 +67,15 @@ public sealed record SupervisorDecisionReview
 
     /// <summary>True when a REAL AGENT produced this verdict (its reviewer run is already a first-class journal beat — the projection must not beat it twice; the entry rides for its <see cref="DraftAttribution"/>). False for the in-process model critic.</summary>
     public bool ViaAgent { get; init; }
+
+    /// <summary>
+    /// The model NAME the review actually RAN ON — the independence claim, made checkable against the producer's own
+    /// model in <see cref="SupervisorDecision.Usage"/>. A one-model pool legitimately reviews on the producer's model
+    /// (an independent prompt, never a silent no-review), and this is what lets a reader SEE that rather than read
+    /// "independent review" and assume a second model. Null for an agent verdict (its run carries the attribution)
+    /// and for every pre-existing outcome (the field is additive JSON on the decision's non-hashed outcome).
+    /// </summary>
+    public string? ReviewerModelId { get; init; }
 }
 
 /// <summary>The model call that authored a supervisor decision — the model id + its token usage, captured off the decider's LLM response. A data noun (Rule 18.1) folded into the decision's outcome so a read can attribute the decision.</summary>

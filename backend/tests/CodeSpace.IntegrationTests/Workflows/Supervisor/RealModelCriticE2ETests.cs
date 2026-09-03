@@ -51,7 +51,7 @@ public sealed class RealModelCriticE2ETests
         await RealModelGate.AssessLiveAsync(Custom, async () =>
         {
             using var scope = _fixture.BeginScope();
-            var critic = new LlmStructuredCritic(RealModelLiveWire.Registry(), scope.Resolve<CodeSpace.Core.Services.Agents.ModelCredentials.IModelPoolSelector>());
+            var critic = new LlmStructuredCritic(RealModelLiveWire.Registry(), scope.Resolve<CodeSpace.Core.Services.Agents.ModelCredentials.IModelPoolSelector>(), Microsoft.Extensions.Logging.Abstractions.NullLogger<LlmStructuredCritic>.Instance);
 
             var verdict = await critic.ReviewAsync(
                 new CriticRequest { Mode = mode, ArtifactKind = "workflow plan", Artifact = ThinPlan, Goal = "Add secure user authentication to the API." },
@@ -107,7 +107,7 @@ public sealed class RealModelCriticE2ETests
         await RealModelGate.AssessLiveAsync(Custom, async () =>
         {
             using var scope = _fixture.BeginScope();
-            var critic = new LlmStructuredCritic(RealModelLiveWire.Registry(), scope.Resolve<CodeSpace.Core.Services.Agents.ModelCredentials.IModelPoolSelector>());
+            var critic = new LlmStructuredCritic(RealModelLiveWire.Registry(), scope.Resolve<CodeSpace.Core.Services.Agents.ModelCredentials.IModelPoolSelector>(), Microsoft.Extensions.Logging.Abstractions.NullLogger<LlmStructuredCritic>.Instance);
 
             var flawed = await critic.ReviewAsync(
                 new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "agent change", Artifact = flawedChange, Goal = goal },
@@ -169,7 +169,7 @@ public sealed class RealModelCriticE2ETests
         await RealModelGate.AssessLiveAsync(Custom, async () =>
         {
             using var scope = _fixture.BeginScope();
-            var critic = new LlmStructuredCritic(RealModelLiveWire.Registry(), scope.Resolve<CodeSpace.Core.Services.Agents.ModelCredentials.IModelPoolSelector>());
+            var critic = new LlmStructuredCritic(RealModelLiveWire.Registry(), scope.Resolve<CodeSpace.Core.Services.Agents.ModelCredentials.IModelPoolSelector>(), Microsoft.Extensions.Logging.Abstractions.NullLogger<LlmStructuredCritic>.Instance);
 
             var fatal = await critic.ReviewAsync(
                 new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "agent change", Artifact = fatalChange, Goal = goal },
@@ -230,7 +230,7 @@ public sealed class RealModelCriticE2ETests
         await RealModelGate.AssessLiveAsync(Custom, async () =>
         {
             using var scope = _fixture.BeginScope();
-            var critic = new LlmStructuredCritic(RealModelLiveWire.Registry(), scope.Resolve<CodeSpace.Core.Services.Agents.ModelCredentials.IModelPoolSelector>());
+            var critic = new LlmStructuredCritic(RealModelLiveWire.Registry(), scope.Resolve<CodeSpace.Core.Services.Agents.ModelCredentials.IModelPoolSelector>(), Microsoft.Extensions.Logging.Abstractions.NullLogger<LlmStructuredCritic>.Instance);
 
             var first = await critic.ReviewAsync(new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "agent change", Artifact = firstChange, Goal = goal }, teamId, reviewerRowId, CancellationToken.None);
             var second = await critic.ReviewAsync(new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "agent change", Artifact = superficiallyRevised, Goal = goal }, teamId, reviewerRowId, CancellationToken.None);
@@ -337,7 +337,7 @@ public sealed class RealModelCriticE2ETests
         await RealModelGate.AssessLiveAsync(Custom, async () =>
         {
             using var scope = _fixture.BeginScope();
-            var critic = new LlmStructuredCritic(RealModelLiveWire.Registry(), scope.Resolve<CodeSpace.Core.Services.Agents.ModelCredentials.IModelPoolSelector>());
+            var critic = new LlmStructuredCritic(RealModelLiveWire.Registry(), scope.Resolve<CodeSpace.Core.Services.Agents.ModelCredentials.IModelPoolSelector>(), Microsoft.Extensions.Logging.Abstractions.NullLogger<LlmStructuredCritic>.Instance);
 
             var unsat = await critic.ReviewAsync(
                 new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "workflow plan", Artifact = unsatisfiablePlan, Goal = goal },

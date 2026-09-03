@@ -3,8 +3,10 @@ using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Workflows.Llm;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Review;
+using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Review;
 
@@ -20,15 +22,23 @@ public sealed class LlmStructuredCritic : IStructuredCritic, IScopedDependency
 {
     private readonly ILLMClientRegistry _clientRegistry;
     private readonly IModelPoolSelector _modelSelector;
+    private readonly ILogger<LlmStructuredCritic> _logger;
 
-    public LlmStructuredCritic(ILLMClientRegistry clientRegistry, IModelPoolSelector modelSelector)
+    public LlmStructuredCritic(ILLMClientRegistry clientRegistry, IModelPoolSelector modelSelector, ILogger<LlmStructuredCritic> logger)
     {
         _clientRegistry = clientRegistry;
         _modelSelector = modelSelector;
+        _logger = logger;
     }
 
     /// <summary>The interaction kind every critic review call records under (the journal's intent label) — pinned by a unit test.</summary>
     public const string ReviewCallKind = "critic.review";
+
+    /// <summary>The payload <c>kind</c> a <see cref="WorkflowRunRecordTypes.ReviewSkipped"/> record carries — the sibling of <see cref="ReviewCallKind"/> for the review that did NOT happen. Pinned by a unit test (Rule 8).</summary>
+    public const string SkippedCallKind = "critic.skipped";
+
+    /// <summary>How much of a fault's message rides the machine-readable reason — enough to name the cause (a revoked key, a schema refusal), never a whole provider payload on the ledger.</summary>
+    private const int ReasonMessageHeadChars = 200;
 
     public async Task<CriticVerdict> ReviewAsync(CriticRequest request, Guid teamId, Guid? reviewerModelId, CancellationToken cancellationToken)
     {
@@ -44,24 +54,72 @@ public sealed class LlmStructuredCritic : IStructuredCritic, IScopedDependency
         {
             var rowId = reviewerModelId ?? await ResolveAutoReviewerAsync(teamId, request.ProducerModelRowId, cancellationToken).ConfigureAwait(false);
 
-            if (rowId is not { } id) return CriticVerdict.ReviewFailed(request.Mode, "No reviewer model is available in the team's pool.");
+            if (rowId is not { } id) return await SkippedAsync(request, "No reviewer model is available in the team's pool.").ConfigureAwait(false);
 
             var pick = await _modelSelector.ResolveByRowIdAsync(teamId, id, cancellationToken).ConfigureAwait(false);
 
-            if (pick == null) return CriticVerdict.ReviewFailed(request.Mode, "The reviewer model is not available in the team's pool.");
+            if (pick == null) return await SkippedAsync(request, "The reviewer model is not available in the team's pool.").ConfigureAwait(false);
 
             var structured = _clientRegistry.All.OfType<IStructuredLLMClient>().FirstOrDefault(c => string.Equals(c.Provider, pick.Credential.Provider, StringComparison.OrdinalIgnoreCase));
 
-            if (structured == null) return CriticVerdict.ReviewFailed(request.Mode, "No structured-output provider for the reviewer model.");
+            if (structured == null) return await SkippedAsync(request, "No structured-output provider for the reviewer model.").ConfigureAwait(false);
 
             var completion = await structured.CompleteStructuredAsync(BuildRequest(request, pick), cancellationToken).ConfigureAwait(false);
 
-            return Project(request.Mode, completion.Json);
+            var verdict = Project(request.Mode, completion.Json);
+
+            // The reviewer's own model NAME rides every verdict that HAPPENED, so the reader can check the independence
+            // claim against the producer's model instead of taking "independent" on trust.
+            return verdict.Failed ? await SkippedAsync(request, verdict.Rationale).ConfigureAwait(false) : verdict with { ReviewerModel = pick.ModelId };
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return CriticVerdict.ReviewFailed(request.Mode, "The reviewer could not produce a valid review.");
+            return await SkippedAsync(request, Reason(ex)).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// The one exit for a review that did NOT happen: say so at Warning, leave a DURABLE user-visible beat on the run's
+    /// ledger, and hand the caller its fail-open verdict carrying the same reason. Every silent-review path funnels
+    /// through here, so a revoked reviewer credential can no longer turn a configured review off with zero trace.
+    /// </summary>
+    private async Task<CriticVerdict> SkippedAsync(CriticRequest request, string reason)
+    {
+        _logger.LogWarning("The independent {ReviewMode} review of a {ArtifactKind} did not run, so the producer's original output stands unreviewed: {Reason}", request.Mode, request.ArtifactKind, reason);
+
+        await RecordSkippedAsync(request, reason).ConfigureAwait(false);
+
+        return CriticVerdict.ReviewFailed(request.Mode, reason);
+    }
+
+    /// <summary>
+    /// Append the <see cref="WorkflowRunRecordTypes.ReviewSkipped"/> beat onto the ambient run's ledger. FAIL-OPEN in
+    /// both directions: a call outside any run (no ambient scope) records nothing, and a ledger write that faults is
+    /// swallowed — saying a review was skipped may never itself break the run. Written on <see cref="CancellationToken.None"/>
+    /// because the caller's token is commonly cancelled by the very failure being recorded.
+    /// </summary>
+    private async Task RecordSkippedAsync(CriticRequest request, string reason)
+    {
+        if (LlmCallContext.Current is not { } scope) return;
+
+        try
+        {
+            var payload = JsonSerializer.SerializeToElement(new { kind = SkippedCallKind, mode = request.Mode.ToString(), artifact_kind = request.ArtifactKind, reason });
+
+            await scope.Logger.RecordInteractionAsync(scope.RunId, WorkflowRunRecordTypes.ReviewSkipped, scope.NodeId, scope.IterationKey, Guid.NewGuid(), parentRecordId: null, payload, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "The review-skipped beat of workflow run {WorkflowRunId} could not be recorded; the skipped review is reported by this log line alone", scope.RunId);
+        }
+    }
+
+    /// <summary>The machine-readable reason a fault gives a skipped review — the exception TYPE (the stable half a consumer can group on) plus the head of its message (the human half). Internal for direct unit pinning.</summary>
+    internal static string Reason(Exception ex)
+    {
+        var message = ex.Message.ReplaceLineEndings(" ").Trim();
+
+        return message.Length <= ReasonMessageHeadChars ? $"{ex.GetType().Name}: {message}" : $"{ex.GetType().Name}: {message[..ReasonMessageHeadChars]}…";
     }
 
     /// <summary>Auto-pick the reviewer via the distinct-first ladder: prefer a model DIFFERENT from the producer (a real second opinion), fall back to the producer's own model on a one-model pool — an independent call either way, never a silent no-review. Null only when NOTHING structured-eligible exists.</summary>

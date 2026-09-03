@@ -134,6 +134,17 @@ public static class WorkflowRunRecordTypes
     /// <summary>An incremental slice of a STREAMED model call's output as it arrives — COALESCED (not per-token) and correlated to the enclosing interaction.started/completed by the same correlation id. Payload: {"ordinal":N,"text":...} — the text fragment inline-or-$artifact_id. A progressive VIEW only: interaction.completed carries the whole authoritative output, and replay ignores deltas.</summary>
     public const string InteractionDelta = "interaction.delta";
 
+    // ─── Review honesty ───────────────────────────────────────────────────────
+
+    /// <summary>
+    /// An independent REVIEW that WAS configured did not run — the reviewer model could not be resolved, no
+    /// structured provider serves it, the call faulted, or the answer did not parse — so the producer's original
+    /// output stands UNREVIEWED. Payload: {"kind":"critic.skipped","mode":"Gate|Improve","artifact_kind":"...","reason":"..."}.
+    /// A record rather than only a log line because the symptom — a green run whose configured review silently
+    /// stopped happening — is otherwise invisible: the critic fails OPEN by contract, so nothing else can say it.
+    /// </summary>
+    public const string ReviewSkipped = "review.skipped";
+
     // ─── Wait control (operator overrides) ────────────────────────────────────
 
     /// <summary>An operator force-resolved a STRANDED signal-driven wait — a Timer whose scheduled wake was dropped, or a Callback whose external system never posted — to un-strand the run. The audit trail for the override. Payload: {"wait_kind":"Timer|Callback","wait_id":"...","by":"<userId>"}.</summary>
