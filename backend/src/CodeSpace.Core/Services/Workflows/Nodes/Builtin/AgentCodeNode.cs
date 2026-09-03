@@ -357,15 +357,16 @@ public sealed class AgentCodeNode : INodeRuntime
     /// <para>World-state conservation: the CONVERSATION is only half of what carries forward. The retry's workspace
     /// is repinned to the branch the prior attempt pushed FIRST (below), independently of whether a session was
     /// captured — restoring a conversation over a fresh default-branch clone hands the agent a "warm transcript,
-    /// cold tree" it believes contains edits its sandbox does not have. When nothing was preserved, the goal is told
-    /// so in the same words the supervisor lane uses (<see cref="AgentRetryContinuity.HonestNoContinuityHint"/>), and
-    /// ONLY then — the line asserts a restored conversation, so it must never fire on a session-less respawn.</para>
+    /// cold tree" it believes contains edits its sandbox does not have. When the PRIMARY repo's work was not
+    /// preserved, the goal is told so in the same words the supervisor lane uses
+    /// (<see cref="AgentRetryContinuity.HonestNoContinuityHint"/>), and ONLY then — the line asserts a restored
+    /// conversation, so it must never fire on a session-less respawn.</para>
     /// </summary>
     private static AgentTask ApplyRespawnResumeHint(AgentTask task, JsonElement? priorAttemptPayload)
     {
         if (priorAttemptPayload is not { } payload) return task;
 
-        var (repinned, worldStateConserved) = RepinWorkspaceToPriorAttempt(task, payload);
+        var (repinned, honestyOwed) = RepinWorkspaceToPriorAttempt(task, payload);
 
         if (ReadOptionalString(payload, "sessionId") is not { } sessionId) return repinned;
 
@@ -376,7 +377,7 @@ public sealed class AgentCodeNode : INodeRuntime
             RestoredTranscriptArtifactId = ReadOptionalGuid(payload, "sessionTranscriptArtifactId"),
         };
 
-        return worldStateConserved ? resumed : resumed with { Goal = AgentRetryContinuity.WithHonestNoContinuityHint(resumed.Goal) };
+        return honestyOwed ? resumed with { Goal = AgentRetryContinuity.WithHonestNoContinuityHint(resumed.Goal) } : resumed;
     }
 
     /// <summary>
@@ -390,10 +391,18 @@ public sealed class AgentCodeNode : INodeRuntime
     /// <para>Refs are HARD (never soft-fallback), matching that lane: a produced branch that has vanished must fail
     /// the provision loud rather than silently re-clone the default branch under a conversation that says otherwise.
     /// A repinned repo drops its base PIN — hard-checking-out the commit the branch was BUILT ON would discard the
-    /// very work being conserved. Nothing pushed (or no primary repo at all) ⇒ the task passes through untouched,
-    /// keeping the launch's authored base ref/pin byte-identical, and the caller says so honestly.</para>
+    /// very work being conserved. Nothing pushed ⇒ the task passes through untouched, keeping the launch's authored
+    /// base ref/pin byte-identical.</para>
+    ///
+    /// <para>The returned flag is whether the honest-redo line is OWED, and it follows the PRIMARY repo alone —
+    /// the same <c>workspaceHasPriorWork: effectiveStaging.Ref is not null</c> read the supervisor's retry uses. A
+    /// multi-repo attempt whose primary push FAILED while a sibling's succeeded still repins that sibling, but its
+    /// primary re-clones the default branch, so the resumed conversation must still be told its changes are not
+    /// there: an OR across repos would suppress the line precisely where the agent's own repo lost its work. Nothing
+    /// is owed when there is no repository at all (an analysis-only run has no tree to have lost — the line would
+    /// assert a git fact about a run that never had one).</para>
     /// </summary>
-    private static (AgentTask Task, bool Conserved) RepinWorkspaceToPriorAttempt(AgentTask task, JsonElement payload)
+    private static (AgentTask Task, bool HonestyOwed) RepinWorkspaceToPriorAttempt(AgentTask task, JsonElement payload)
     {
         if (task.RepositoryId is not { } primaryId) return (task, false);
 
@@ -402,7 +411,7 @@ public sealed class AgentCodeNode : INodeRuntime
         var authored = task.Workspace?.Primary;
         var (related, relatedRepinned) = RepinRelatedRepositories(RelatedRepositories(task.Workspace), produced);
 
-        if (primaryBranch is null && !relatedRepinned) return (task, false);
+        if (primaryBranch is null && !relatedRepinned) return (task, true);
 
         var workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(primaryId, related,
             primaryRef: primaryBranch ?? authored?.Ref,
@@ -411,7 +420,7 @@ public sealed class AgentCodeNode : INodeRuntime
             primaryPinnedSha: primaryBranch is null ? authored?.PinnedSha : null,
             primaryRefRecoverySha: primaryBranch is null ? authored?.RefRecoverySha : null);
 
-        return (task with { Workspace = workspace }, true);
+        return (task with { Workspace = workspace }, primaryBranch is null);
     }
 
     /// <summary>Each repository the prior attempt PUSHED a branch for, keyed by repository id — the multi-repo half of the pin (the top-level <c>branch</c> mirrors the primary's). An entry with no id or no produced branch contributes nothing: it pushed nothing to continue from.</summary>
