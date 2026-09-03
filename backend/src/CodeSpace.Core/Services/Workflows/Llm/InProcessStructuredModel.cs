@@ -16,16 +16,31 @@ namespace CodeSpace.Core.Services.Workflows.Llm;
 /// </summary>
 public static class InProcessStructuredModel
 {
+    /// <summary>
+    /// L4 pool failover: EVERY registered structured provider the team has a model for becomes a candidate, in registry
+    /// order. One candidate ⇒ returned directly (byte-identical to before). Several ⇒ the returned client is a
+    /// <see cref="FailoverStructuredClient"/> over all of them and the returned pick is the FIRST candidate's — so a
+    /// transient / rate-limit fault on the first provider hops to the next with its own credential, and the answering
+    /// model rides <see cref="StructuredLLMCompletion.Model"/> (callers stamp provenance from THAT, never the pick).
+    /// The operator-pinned row path (<see cref="ResolveByRowIdAsync"/>) never fails over: an explicit pin resolves verbatim.
+    /// </summary>
     public static async Task<(IStructuredLLMClient Client, ModelPoolPick Pick)?> ResolveAsync(ILLMClientRegistry clients, IModelPoolSelector models, Guid teamId, CancellationToken cancellationToken)
     {
+        var candidates = new List<(IStructuredLLMClient Client, ModelPoolPick Pick)>();
+
         foreach (var client in clients.All.OfType<IStructuredLLMClient>())
         {
             var pick = await models.SelectAsync(teamId, client.Provider, allowedModels: null, pinnedModel: null, cancellationToken).ConfigureAwait(false);
 
-            if (pick != null) return (client, pick);
+            if (pick != null) candidates.Add((client, pick));
         }
 
-        return null;
+        return candidates.Count switch
+        {
+            0 => null,
+            1 => candidates[0],
+            _ => (new FailoverStructuredClient(candidates), candidates[0].Pick),
+        };
     }
 
     /// <summary>

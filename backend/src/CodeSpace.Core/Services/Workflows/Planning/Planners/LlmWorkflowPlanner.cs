@@ -68,10 +68,11 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
 
         var completion = await structured.CompleteStructuredAsync(BuildRequest(request, pick, catalog, injected), cancellationToken).ConfigureAwait(false);
 
-        // Stamped from the pick this call actually dispatched on, so the plan carries its own provenance.
+        // Stamped from the model that actually ANSWERED (a pool failover may have hopped past the resolved pick), so
+        // the plan carries its own provenance.
         return Deserialize(completion.Json) with
         {
-            AuthoredByModel = pick.ModelId,
+            AuthoredByModel = completion.Model,
             LessonArm = arm,
             InjectedLessonIds = injected.Count > 0 ? injected.Select(l => l.Id).ToList() : null,
         };
