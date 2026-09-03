@@ -146,17 +146,18 @@ public sealed class ModelCapabilityTieringFlowTests
     }
 
     [Fact]
-    public async Task Tiering_runs_on_a_ceilinged_model_never_the_teams_Frontier_one()
+    public async Task Tiering_runs_UNCEILINGED_on_the_teams_strongest_model_because_it_PRODUCES_the_tiers()
     {
         // 🟢 High-fidelity: the REAL ModelPoolSelector + real Postgres decide which model the tiering call runs on; only
-        // the LLM transport is faked. Tiering is one of D2's four CHEAP callers, so with an unstarred Frontier AND an
-        // unstarred Strong row in the pool it must run on the Strong one — before D2 the pool's "strongest available"
-        // ladder handed every cheap call the Frontier model. ('aaa-frontier' also sorts first, so an accidental
-        // alphabetical pick would look like a pass — the tier is what must decide.)
+        // the LLM transport is faked. D2 gave the plane's cheap callers a Strong cost ceiling and deliberately did NOT
+        // give tiering one: this service PRODUCES the tiers the ceiling reads, so a weak verdict here would not cost one
+        // call, it would mis-rank the pool for every later auto pick — including the unceilinged supervisor brain's. With
+        // an unstarred Frontier AND an unstarred Strong row present, tiering must still take Frontier. ('zzz-frontier'
+        // sorts LAST, so an accidental ordinal or ceilinged pick would take 'aaa-strong' and fail this test.)
         var teamId = await SeedTeamAsync();
         var credId = await SeedCredentialAsync(teamId, "Anthropic");
-        await AddModelAsync(credId, "aaa-frontier", tier: ModelCapabilityTier.Frontier);
-        await AddModelAsync(credId, "zzz-strong", tier: ModelCapabilityTier.Strong);
+        await AddModelAsync(credId, "zzz-frontier", tier: ModelCapabilityTier.Frontier);
+        await AddModelAsync(credId, "aaa-strong", tier: ModelCapabilityTier.Strong);
         await AddModelAsync(credId, "pending-model");   // the un-tiered row that gives the tick something to tier
 
         var client = new CannedClient("Anthropic", Tiers(("pending-model", "basic")));
@@ -165,8 +166,8 @@ public sealed class ModelCapabilityTieringFlowTests
                 .TierTeamAsync(teamId, CancellationToken.None);
 
         client.Calls.ShouldBe(1, "the tick had a pending row, so it made exactly one tiering call");
-        client.LastModel.ShouldBe("zzz-strong", "the cheap tiering call ran under InProcessStructuredModel.CheapBrainCeiling — the team's Frontier model is left for the brain");
-        (await TierOf(teamId, "pending-model")).ShouldBe(ModelCapabilityTier.Basic, "the ceilinged model's verdict is what gets persisted");
+        client.LastModel.ShouldBe("zzz-frontier", "tiering keeps the unceilinged 'strongest available' ladder — its verdict is selection ground truth for everyone else, so it must not be produced by a weaker model");
+        (await TierOf(teamId, "pending-model")).ShouldBe(ModelCapabilityTier.Basic, "and the strongest model's verdict is what gets persisted");
     }
 
     private static JsonElement Tiers(params (string Id, string Tier)[] models) =>

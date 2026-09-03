@@ -20,9 +20,19 @@ namespace CodeSpace.Core.Services.Agents.ModelCredentials;
 /// </list>
 ///
 /// <para><see cref="ModelCapabilityTier.Unknown"/> satisfies EVERY ceiling by construction of the enum's ascending
-/// order (Unknown = 0): an un-tiered / opaque gateway id is not PROVEN expensive, and treating it as over-ceiling would
-/// make an entirely un-probed pool behave differently from one with tiers — the ceiling must be byte-identical to
-/// today's ordering for a pool it cannot rank. A <c>null</c> ceiling is the identity: no filter at all.</para>
+/// order (Unknown = 0): an un-tiered / opaque gateway id is not PROVEN expensive. This is a real trade, not a free one —
+/// in a pool of {opaque-Unknown, Frontier} the ceiling elects the OPAQUE row, which may in fact be the pricier of the
+/// two. It is taken because the alternative is worse: treating Unknown as over-ceiling would exclude every row of a pool
+/// the tiering service has not reached yet, so a brand-new team's cheap calls would be decided by the anti-strand
+/// fallback rather than by the ceiling, and a pool would change behavior the moment it happened to get tiered. The
+/// "no change from today" claim is therefore exact only for an ALL-Unknown pool (where the narrowing keeps every row);
+/// for a partly-tiered pool the ceiling deliberately prefers the un-ranked row over a known-Frontier one. A
+/// <c>null</c> ceiling is the true identity: no filter at all.</para>
+///
+/// <para>The bound is <c>&lt;=</c>, not "the tier named by the ceiling": a pool whose only sub-ceiling row is
+/// <see cref="ModelCapabilityTier.Basic"/> DOES route a ceilinged caller onto Basic. Deliberate — see
+/// <c>InProcessStructuredModel.CheapBrainCeiling</c> for which callers accept that and why (each has its own fail-open
+/// floor), and note that an <c>IsDefault</c> star overrides the ceiling entirely.</para>
 /// </summary>
 public static class ModelTierCeiling
 {
