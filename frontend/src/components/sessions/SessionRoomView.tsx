@@ -56,7 +56,7 @@ import { shortRunTitle } from "@/lib/runTitle";
 import { useRunRoomStream } from "@/hooks/use-run-room-stream";
 import { useNowTick } from "@/hooks/use-now-tick";
 import { liveRunSummary } from "./live-run-summary";
-import { partitionForFailureHoist } from "./room-blocks";
+import { finalAnswerHeading, partitionForFailureHoist } from "./room-blocks";
 import { RoomRunPane, type PaneView } from "./RoomRunPane";
 import { WorkflowRunModelCallContent, type WorkflowRunModelCallTab } from "./WorkflowRunModelCallContent";
 import { artifactUnavailableReason, roomFileNote, roomFileUnavailableNote, type StorageUnavailableReason } from "./roomFileUnavailable";
@@ -1396,14 +1396,17 @@ function FinalAnswer({ answer }: { answer: FinalAnswerBlock }) {
   const files = atts.filter((a) => a.kind === "FileLink");
   const prs = atts.filter((a) => a.kind === "Pr");
 
-  // A degraded stop (the supervisor gave up — no-decision / no-model — no work delivered) is NOT a success: render a
-  // neutral "Stopped" card with an alert glyph, not the green "Result", so its own "stopping cleanly" text isn't dressed
-  // up as done. The run status is still a clean terminal Success at the engine level; only the outcome reads degraded.
+  // A degraded stop (the supervisor gave up — no-decision / no-model — no work delivered, or its acceptance check
+  // FAILED) is NOT a success: render a neutral card with an alert glyph, not the green "Result", so its own "stopping
+  // cleanly" text isn't dressed up as done. The run status is still a clean terminal Success at the engine level; only
+  // the outcome reads degraded. The heading is the backend's own account when it authored one ("Checks failed") — the
+  // FE never maps an outcome kind to copy; "Stopped" is the fallback for a degrade the card's TEXT already explains.
   const degraded = answer.degraded === true;
+  const heading = finalAnswerHeading(answer);
 
   return (
     <div className={`room-final${degraded ? " room-final-degraded" : ""}`}>
-      <div className="room-final-head"><Sym n={degraded ? "alert" : "check"} s={13} cls="room-final-ic" /> {degraded ? "Stopped" : "Result"}</div>
+      <div className="room-final-head"><Sym n={degraded ? "alert" : "check"} s={13} cls="room-final-ic" /> {heading}</div>
       {answer.text && <p className="room-final-text"><Inline text={answer.text} /></p>}
       {images.length > 0 && (
         <div className="room-final-gallery">

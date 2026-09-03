@@ -403,8 +403,11 @@ public sealed record FinalAnswerBlock : RoomBlock
     /// <summary>Typed result attachments — file links, the PR, images. Empty when the turn produced only text.</summary>
     public IReadOnlyList<AnswerAttachment> Attachments { get; init; } = Array.Empty<AnswerAttachment>();
 
-    /// <summary>True when this "result" is actually a graceful-FAILURE stop (the supervisor couldn't decide / had no model — no work delivered), so the FE renders a neutral "Stopped" card instead of a green success. Default false = a genuine success result.</summary>
+    /// <summary>True when this "result" is actually a graceful-FAILURE stop (the supervisor couldn't decide / had no model — no work delivered) OR a stop whose objective acceptance check FAILED, so the FE renders a neutral "Stopped" card instead of a green success. Default false = a genuine success result.</summary>
     public bool Degraded { get; init; }
+
+    /// <summary>Backend-authored account of WHY the card is degraded, for the case <see cref="Text"/> does not already carry it — a failed acceptance grade leaves the model's own success-sounding closing line intact, so the verdict ("Checks failed") is stated on its own line. Null when the text already is the reason (a give-up / forced stop) and on every clean success. The FE renders this string; it never maps an outcome kind to copy.</summary>
+    public string? DegradedReason { get; init; }
 }
 
 /// <summary>One typed attachment of a <see cref="FinalAnswerBlock"/> — the frontend renders each <see cref="Kind"/> distinctly.</summary>

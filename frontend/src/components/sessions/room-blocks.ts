@@ -1,4 +1,15 @@
-import type { DiagnosticBlock, RoomBlock } from "@/api/sessions";
+import type { DiagnosticBlock, FinalAnswerBlock, RoomBlock } from "@/api/sessions";
+
+/**
+ * The RESULT card's heading. A degraded card is never the green "Result" — and when the backend authored an account of
+ * WHY ("Checks failed", for a run whose acceptance check failed behind its own confident closing line) that account IS
+ * the heading, verbatim. The FE owns no outcome vocabulary of its own: "Stopped" is only the fallback for a degrade
+ * whose reason the card's own TEXT already carries (a give-up / forced stop).
+ */
+export function finalAnswerHeading(answer: Pick<FinalAnswerBlock, "degraded" | "degradedReason">): string {
+  if (answer.degraded !== true) return "Result";
+  return answer.degradedReason?.trim() || "Stopped";
+}
 
 /**
  * Failure-first ordering for a turn's blocks. On a failed turn the backend emits a `diagnostic` block — the humanized

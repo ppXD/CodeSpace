@@ -246,6 +246,33 @@ public class RoomNarrativeTests
     }
 
     [Fact]
+    public void A1_the_result_card_carries_the_backend_authored_reason_it_is_degraded()
+    {
+        // A failed acceptance grade degrades the card WITHOUT touching the model's own closing line, so the reason has
+        // to ride its own field — the FE renders this string and never maps an outcome kind to copy of its own.
+        var facts = new RoomTurnFacts { FinalAnswer = new RoomFinalAnswer { Text = "Fixed the flaky tests.", Degraded = true, DegradedReason = "Checks failed" } };
+
+        var card = Build(new[] { Structural("agent", "Run", 1) }, WorkflowRunStatus.Success, facts: facts).Blocks.OfType<FinalAnswerBlock>().ShouldHaveSingleItem();
+
+        card.Degraded.ShouldBeTrue();
+        card.DegradedReason.ShouldBe("Checks failed", "the projector's verdict reaches the block verbatim");
+        card.Text.ShouldBe("Fixed the flaky tests.", "the model's claim is preserved — the card contradicts it, it does not rewrite it");
+    }
+
+    [Fact]
+    public void A1_a_FAILED_acceptance_grade_makes_Review_read_failed_not_the_vaguer_stopped()
+    {
+        // The card degrades on a failed grade, and the map reads from that same degraded flag — but Review must still
+        // report the OBJECTIVE verdict it has ("failed"), never collapse it into the give-up vocabulary.
+        var facts = new RoomTurnFacts { AcceptancePassed = false, FinalAnswer = new RoomFinalAnswer { Text = "Fixed it.", Degraded = true, DegradedReason = "Checks failed" } };
+
+        var review = Build(new[] { Tape("plan", 1), Tape("stop", 2, summary: "Fixed it.") }, WorkflowRunStatus.Success, facts: facts).Map!.Steps.Single(s => s.Label == "Review");
+
+        review.Status.ShouldBe(ExecutionStepStatus.Failed);
+        review.Detail.ShouldBe("failed", "an objective grade outranks the stop's own classification — the map must not soften it to 'stopped'");
+    }
+
+    [Fact]
     public void Map_status_maps_each_phase_status_to_the_step_vocabulary()
     {
         var n = Build(new[]

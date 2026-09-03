@@ -112,6 +112,9 @@ public sealed record RoomFinalAnswer
 
     /// <summary>True when the run STOPPED on a graceful FAILURE (a fail-closed no-decision / no-model / unknown-decision outcome — no task work delivered) rather than a genuine success. The card renders neutral/degraded, not a green "Result", so a supervisor that gave up doesn't read as done.</summary>
     public bool Degraded { get; init; }
+
+    /// <summary>Why the card is degraded, when <see cref="Text"/> does NOT already say so — a give-up / forced stop's text IS its own account, but a FAILED objective acceptance grade leaves the model's success-sounding closing line untouched, so the ledger's verdict is stated here. Backend-authored copy. Null whenever the text already accounts for the degrade (and always on a clean success).</summary>
+    public string? DegradedReason { get; init; }
 }
 
 /// <summary>One typed final-answer attachment (a file, the PR, or an image).</summary>

@@ -360,6 +360,9 @@ export interface FinalAnswerBlock extends RoomBlockBase {
   text?: string | null;
   attachments?: AnswerAttachment[] | null;
   degraded?: boolean;
+  /// Backend-authored account of WHY the card is degraded, when `text` doesn't already carry it (a failed acceptance
+  /// check leaves the model's own success-sounding line intact). Rendered verbatim as the card's heading.
+  degradedReason?: string | null;
 }
 /// A live "working…" line pinned at the bottom of an active turn (latest public activity, never raw CoT).
 export interface LiveActivityBlock extends RoomBlockBase {
