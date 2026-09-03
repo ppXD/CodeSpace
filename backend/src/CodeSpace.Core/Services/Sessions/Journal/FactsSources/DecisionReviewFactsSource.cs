@@ -27,6 +27,10 @@ public sealed class DecisionReviewFactsSource : IJournalFactsSource
         {
             var reviews = SupervisorOutcome.ReadReviews(decision.OutcomeJson);
 
+            // The decision's OWN authoring model — the other half of the independence question. Read once per
+            // decision: a verdict is only a second OPINION if it ran on a different model than the thing it judged.
+            var producerModel = SupervisorOutcome.ReadModelUsage(decision.OutcomeJson)?.Model;
+
             for (var i = 0; i < reviews.Count; i++)
             {
                 var r = reviews[i];
@@ -41,6 +45,8 @@ public sealed class DecisionReviewFactsSource : IJournalFactsSource
                             Issues = r.Issues,
                             ReviewerRunId = null,
                             ReviewerHarness = null,
+                            ReviewerModel = r.ReviewerModelId,
+                            SameModelAsProducer = SameModel(r.ReviewerModelId, producerModel),
                             Scope = r.Scope,
                         },
                     };
@@ -57,4 +63,9 @@ public sealed class DecisionReviewFactsSource : IJournalFactsSource
 
         return facts;
     }
+
+    /// <summary>Whether the review ran on the producer's own model — case-insensitive, and FALSE whenever either side is unknown, so an un-attributed verdict reads as today's copy rather than as a false same-model claim. Internal for direct unit pinning.</summary>
+    internal static bool SameModel(string? reviewerModel, string? producerModel) =>
+        !string.IsNullOrWhiteSpace(reviewerModel) && !string.IsNullOrWhiteSpace(producerModel)
+        && string.Equals(reviewerModel, producerModel, StringComparison.OrdinalIgnoreCase);
 }

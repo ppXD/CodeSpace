@@ -23,6 +23,17 @@ public sealed record JournalReviewVerdict
     /// <summary>The harness the reviewer ran on (e.g. <c>claude-code</c> when the producer ran <c>codex-cli</c>) — the independence line the card shows. Null when unknown / a model critic.</summary>
     public string? ReviewerHarness { get; init; }
 
+    /// <summary>The MODEL a model critic's verdict ran on — the independence line's substance, so the card can name the reviewer instead of saying "a second AI" about a model it never identified. Null for an agent reviewer (its harness + run carry the attribution) and for every pre-existing verdict.</summary>
+    public string? ReviewerModel { get; init; }
+
+    /// <summary>
+    /// TRUE when the reviewer ran on the PRODUCER's own model — the legitimate one-model-pool fallback, an
+    /// independently prompted call but NOT a second opinion. The card must not call such a review "independent". The
+    /// BACKEND owns this judgement because only it holds both halves (the verdict's reviewer and the decision's
+    /// authoring model); false when either is unknown, which reads as today's copy.
+    /// </summary>
+    public bool SameModelAsProducer { get; init; }
+
     /// <summary>WHAT was reviewed — <see cref="OutputScope"/> (a produced change) or <see cref="PlanScope"/> (a plan verified against the repository).</summary>
     public required string Scope { get; init; }
 

@@ -1201,9 +1201,12 @@ function JournalStepRow({ step, muted, planCard, planVersion, planSuperseded, as
 /** The reviewer's verdict card under a REVIEW beat — COLLAPSED by default to one line (badge + rationale + chevron)
  *  so a run with several verdicts stays scannable; expanding reveals the evidence-attached issues and the independence
  *  line — "independent agent · claude-code" with a deep-link into the reviewer's OWN run, or "model critic —
- *  independently prompted" when the verdict came from the in-process critic. The WHOLE card toggles (open or closed) —
- *  clicking the expanded body collapses it again; only the deep-link button opts out. */
-function ReviewVerdictCard({ review }: { review: JournalReviewVerdict }) {
+ *  independently prompted" when the verdict came from the in-process critic. A model critic's line NAMES the model it
+ *  ran on, and drops the word "independent" when the backend says that model IS the producer's — a one-model pool's
+ *  legitimate fallback is an independently prompted call, not a second opinion, and the card may not blur the two.
+ *  The WHOLE card toggles (open or closed) — clicking the expanded body collapses it again; only the deep-link button
+ *  opts out. */
+export function ReviewVerdictCard({ review }: { review: JournalReviewVerdict }) {
   const openDrawer = useRoomDrawer();
   const run = useContext(RunActionsContext);
   const [open, setOpen] = useState(false);
@@ -1226,8 +1229,10 @@ function ReviewVerdictCard({ review }: { review: JournalReviewVerdict }) {
                 <span className="room-jmodel-x"> — a real {review.scope === "plan" ? "grounded plan" : "output"} review</span>
               </>
             : <>
-                <span className="room-jmodel-model">a second AI</span>
-                <span className="room-jmodel-x"> — an independent {review.scope} review</span>
+                <span className="room-jmodel-model">{review.reviewerModel ?? "a second AI"}</span>
+                <span className="room-jmodel-x"> — {review.sameModelAsProducer
+                  ? `the producer's own model, independently prompted — not a second opinion`
+                  : `an independent ${review.scope} review`}</span>
               </>}
           {run && reviewerRunId && (
             <button className="room-jverdict-open" onClick={(e) => { e.stopPropagation(); openDrawer({ kind: "agent", agent: reviewerCard(review, reviewerRunId), runId: run.runId }); }}>

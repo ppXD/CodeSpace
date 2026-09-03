@@ -80,12 +80,42 @@ public sealed class AgentRunExecutorOutputReviewTests
     [Fact]
     public async Task A_failed_review_falls_open_to_the_original_success()
     {
-        var (runId, executor, runs, _) = NewExecutor(CriticVerdict.ReviewFailed(ReviewMode.Gate, "no reviewer model"));
+        var (runId, executor, runs, _) = NewExecutor(CriticVerdict.ReviewFailed(ReviewMode.Gate, "InvalidOperationException: the reviewer credential was revoked"));
 
         var result = await executor.ReviewOutputIfEnabledAsync(GatedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Succeeded, "a failed review is never worse than no review — fail-open");
-        runs.AppendedEvents.ShouldBeEmpty();
+        result.ExitReason.ShouldNotBe("output-flagged", "a review that did not run must not masquerade as a flag");
+
+        // D5 — this assertion USED to be `ShouldBeEmpty()`: the change shipped ungated and the lane said nothing. A
+        // STANDALONE run has no workflow ledger for the critic's review.skipped beat, so its own event stream is the
+        // only surface its operator reads. Fail-open is unchanged; the silence is not.
+        runs.AppendedEvents.Count.ShouldBe(1);
+        runs.AppendedEvents[0].Kind.ShouldBe(AgentEventKind.Warning);
+        runs.AppendedEvents[0].Text.ShouldContain("Review skipped", customMessage: "the agent lane says the configured review did not run");
+        runs.AppendedEvents[0].Text.ShouldContain("revoked", customMessage: "and says why, so the operator can act on it");
+    }
+
+    [Fact]
+    public async Task A_flagged_change_persists_the_model_the_review_ran_on()
+    {
+        // D5: this lane could not tell a real second opinion from the one-model fallback. The attribution TRAILS the
+        // critique because the same string is fed back to the agent for its revise round — guidance comes first.
+        var (runId, executor, _, _) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = false, Rationale = "incomplete", ReviewerModel = "claude-sonnet-4-6" });
+
+        var result = await executor.ReviewOutputIfEnabledAsync(GatedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
+
+        result.ReviewFeedback.ShouldBe("incomplete (reviewed on claude-sonnet-4-6)");
+    }
+
+    [Fact]
+    public async Task An_approved_change_warns_about_nothing()
+    {
+        var (runId, executor, runs, _) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "clean" });
+
+        await executor.ReviewOutputIfEnabledAsync(GatedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
+
+        runs.AppendedEvents.ShouldBeEmpty("a clean pass is byte-identical — no flag, and no skipped-review warning either");
     }
 
     [Fact]

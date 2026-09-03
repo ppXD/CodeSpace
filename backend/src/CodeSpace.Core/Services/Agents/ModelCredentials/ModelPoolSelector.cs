@@ -211,9 +211,10 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
         // The distinct-first ladder (S4d): a reviewer on a DIFFERENT model is a real second opinion, so exclude the
         // producer's MODEL — not merely its row. Independence is a property of the model, so the same model under a
         // second credential is the producer reviewing itself; excluding only the row counted that as independent. A
-        // one-model team must still get its critic, so an empty excluded pick falls back to the full pool (the
-        // producer's own model, independently prompted) — and the verdict now NAMES the model it ran on, so the
-        // fallback reads as the fallback instead of as a second opinion.
+        // one-model team must still get its critic, so an empty excluded pick falls back to the full pool — which
+        // yields A ROW CARRYING the producer's model (not necessarily the producer's own row: any credential backing
+        // that model serves, and the pool's total order decides which), independently prompted. The verdict now NAMES
+        // the model it ran on, so the fallback reads as the fallback instead of as a second opinion.
         if (producerRowId is { } producer)
         {
             var distinct = await SelectBrainRowIdCoreAsync(teamId, eligibleProviders, await ProducerModelIdAsync(teamId, producer, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
