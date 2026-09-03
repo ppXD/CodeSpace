@@ -317,9 +317,19 @@ public sealed class AgentCodeNode : INodeRuntime
             // guess: the runner classified it from the cgroup's own oom_kill counter (SandboxStatus.ResourceExhausted).
             var resourceExhausted = exitReason == AgentRunExecutor.ResourceExhaustedExitReason;
 
+            // D3: the third carve-out, and the only one that is not about the FAILURE's nature but about whether
+            // anything can be done differently. A non-infra acceptance failure is a verdict the SAME model will
+            // reproduce — which is why it is deterministic — but the finished attempt may have left a resolved
+            // proposal naming a STRONGER credentialed model. Then a respawn is not a re-run: it is the same task on
+            // a better model, which is exactly the escalation the supervisor lane's `retry` has always had. A null
+            // proposal (nothing stronger is credentialed) stays terminal, so a one-model team never pays for an
+            // identical second attempt.
+            var escalationAvailable = ReadOptionalString(payload, "proposedEscalation", "to") is { Length: > 0 };
+
             var deterministic = (status is nameof(AgentRunStatus.NeedsReview) or nameof(AgentRunStatus.Cancelled) || acceptanceFailed || resourceExhausted)
                                 && !acceptanceInfraFault
-                                && !stalled;
+                                && !stalled
+                                && !escalationAvailable;
 
             return NodeResult.Fail($"Agent run did not succeed: {(string.IsNullOrEmpty(error) ? status : error)}", retryable: !deterministic);
         }
@@ -372,14 +382,14 @@ public sealed class AgentCodeNode : INodeRuntime
     {
         if (priorAttemptPayload is not { } payload) return task;
 
-        var reason = AgentModelEscalationTrigger.Reason(
-            ReadOptionalString(payload, "contradiction"),
-            acceptanceFailed: ReadOptionalString(payload, "exitReason") == AgentAcceptanceContract.FailClosedExitReason,
-            ReadOptionalString(payload, "acceptanceDetail"),
-            WorkPresent(payload),
-            ReadOptionalString(payload, "error"));
+        if (ReadOptionalString(payload, "proposedEscalation", "to") is not { Length: > 0 }) return task;
 
-        return reason is null ? task : task with { Escalation = new AgentModelEscalation { Reason = reason, From = ReadOptionalString(payload, "model") } };
+        if (ReadOptionalString(payload, "proposedEscalation", "reason") is not { Length: > 0 } reason) return task;
+
+        // Carried as a REQUEST (no `to`) on purpose: the pool can change between attempts — a model disabled, a
+        // credential revoked, a stronger one added — so the executor re-resolves against the pool as it is at
+        // launch. The FLOOR travels, not the answer.
+        return task with { Escalation = new AgentModelEscalation { Reason = reason, From = ReadOptionalString(payload, "proposedEscalation", "from") } };
     }
 
     /// <summary>Whether the resumed payload shows produced WORK (git ground truth: changed files or a branch, single- or multi-repo) — mirrors <c>SupervisorOutcome.ResultShowsWork</c>'s definition (the one "work exists" read every infra classification shares) over the flat resume payload's own fields.</summary>
@@ -499,6 +509,12 @@ public sealed class AgentCodeNode : INodeRuntime
 
     private static Guid? ReadOptionalGuid(JsonElement bag, string key) =>
         Guid.TryParse(ReadOptionalString(bag, key), out var id) ? id : null;
+
+    /// <summary>One optional string inside a nested object of the payload (e.g. <c>proposedEscalation.to</c>) — null when either level is absent, null, or not the expected kind. Tolerant by design: this reads an informational hint, and a malformed one must degrade to "no hint", never fail the node.</summary>
+    private static string? ReadOptionalString(JsonElement bag, string objectKey, string key) =>
+        bag.ValueKind == JsonValueKind.Object && bag.TryGetProperty(objectKey, out var nested) && nested.ValueKind == JsonValueKind.Object
+            ? ReadOptionalString(nested, key)
+            : null;
 
     private static string? ReadOptionalString(IReadOnlyDictionary<string, JsonElement> bag, string key)
     {

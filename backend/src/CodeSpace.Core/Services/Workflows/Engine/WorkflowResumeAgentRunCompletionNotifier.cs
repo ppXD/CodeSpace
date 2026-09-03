@@ -108,12 +108,16 @@ public sealed class WorkflowResumeAgentRunCompletionNotifier : IAgentRunCompleti
             // node's retry verdict tell a grader INFRA fault (AgentAcceptanceContract.IsInfraFailure) from a
             // genuine failed check even though both share exitReason "acceptance-failed".
             acceptanceDetail = result?.AcceptanceDetail,
-            // D3: the over-claim fact + the model the attempt ACTUALLY ran — the two facts the respawning node needs
-            // to decide (and to FLOOR) a model escalation without a DB re-query. The model falls back to the
-            // dispatched task's own, because a harness that never names its model in-stream would otherwise erase
-            // the floor, and an escalation over a null floor can land on a lower-tier starred row.
+            // D3: the over-claim fact + the model the attempt ACTUALLY ran. The model falls back to the dispatched
+            // task's own envelope (the executor keeps it truthful per round), because a harness that never names
+            // its model in-stream would otherwise leave the next attempt blind about what already ran.
             contradiction = result?.Contradiction,
             model = result?.Model ?? DispatchedModel(run),
+            // D3: the escalation the finished attempt says the NEXT one should apply — already RESOLVED against the
+            // pool (only the executor can read it). The node's retry verdict keys on its `to`: a stronger model
+            // means a deterministic acceptance failure is still worth respawning; a null `to` means it is not, and
+            // the run stays terminal instead of re-burning the identical model. Null on every run that owes none.
+            proposedEscalation = result?.ProposedEscalation,
             // Warm-resume triple (P2.3): unused on a Succeeded outcome, but on a RETRYABLE failure this is the exact
             // payload the engine carries forward as NodeRunContext.PriorAttemptPayload so agent.run's fresh respawn
             // can stamp AgentTask.ResumeFromSessionId/RestoredTranscript(ArtifactId) — the same triple

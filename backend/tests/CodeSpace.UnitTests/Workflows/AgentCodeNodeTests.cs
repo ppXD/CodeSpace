@@ -590,40 +590,73 @@ public class AgentCodeNodeTests
     }
 
     [Fact]
-    public async Task D3_a_respawn_after_a_failed_check_with_work_asks_the_executor_for_a_stronger_model()
+    public async Task D3_a_deterministic_acceptance_failure_becomes_RETRYABLE_when_a_stronger_model_exists()
     {
-        // The node itself never reads the pool (it has no DB) — it stamps the REQUEST (why + the tier floor) and the
-        // executor resolves the pick against the team's credentialed models at launch. The floor is the prior
-        // attempt's OWN model, so escalation is monotonic across a chain of respawns.
+        // The reachability fix: a non-infra acceptance failure is deterministic (the SAME model reproduces the
+        // verdict) and so was finalized with retryable:false — which meant the engine never wrote a
+        // PriorAttemptPayload and the respawn half could never run. A resolved proposal naming a stronger model
+        // makes the respawn a different experiment, so the failure is retryable again.
+        var resume = JsonDocument.Parse("""
+            {"status":"Failed","exitReason":"acceptance-failed","acceptanceDetail":"tests-failed-exit-1","changedFiles":["a.cs"],
+             "proposedEscalation":{"from":"claude-haiku-4-5","to":"claude-sonnet-4-5","reason":"the prior round claimed success but its acceptance check failed (tests-failed-exit-1)"}}
+            """).RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Retryable.ShouldBeTrue("a stronger credentialed model exists — the respawn runs the same task on a better model, not the same experiment twice");
+    }
+
+    [Fact]
+    public async Task D3_a_deterministic_acceptance_failure_stays_terminal_when_nothing_stronger_exists()
+    {
+        // The other arm, and the one that protects the budget: the trigger fired, the team credentialed nothing
+        // above the model that just failed, so a respawn would re-burn the identical model. Terminal, as today.
+        var resume = JsonDocument.Parse("""
+            {"status":"Failed","exitReason":"acceptance-failed","acceptanceDetail":"tests-failed-exit-1","changedFiles":["a.cs"],
+             "proposedEscalation":{"from":"claude-haiku-4-5","to":null,"reason":"the prior round claimed success but its acceptance check failed (tests-failed-exit-1)"}}
+            """).RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Retryable.ShouldBeFalse("a null pick means there is nothing better to try — respawning would only re-bill the same model");
+    }
+
+    [Fact]
+    public async Task D3_a_respawn_carrying_a_proposal_asks_the_executor_to_re_resolve_it()
+    {
+        // The node has no DB, so it forwards the FLOOR and the reason, never the answer: the pool can change
+        // between attempts, and the executor re-resolves at launch.
         var priorAttempt = JsonDocument.Parse("""
-            {"status":"Failed","exitReason":"acceptance-failed","acceptanceDetail":"tests-failed-exit-1","contradiction":"over_claim","model":"claude-haiku-4-5","changedFiles":["a.cs"],"branch":"codespace/agent/x"}
+            {"status":"Failed","exitReason":"acceptance-failed","acceptanceDetail":"tests-failed-exit-1","changedFiles":["a.cs"],
+             "proposedEscalation":{"from":"claude-haiku-4-5","to":"claude-sonnet-4-5","reason":"the prior round claimed success but its acceptance check failed (tests-failed-exit-1)"}}
             """).RootElement;
 
         var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, priorAttemptPayload: priorAttempt), CancellationToken.None);
 
         var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
 
-        task.Escalation.ShouldNotBeNull("the prior attempt claimed success against a check that failed on real work — the respawn must reach higher, not re-run the same model blind");
-        task.Escalation!.From.ShouldBe("claude-haiku-4-5");
-        task.Escalation.To.ShouldBeNull("the node only REQUESTS — the executor resolves the pick where the pool lives");
+        task.Escalation.ShouldNotBeNull("the respawn must reach higher, not re-run the same model blind");
+        task.Escalation!.From.ShouldBe("claude-haiku-4-5", "the tier floor travels");
+        task.Escalation.To.ShouldBeNull("the answer does NOT travel — the executor re-resolves against the pool as it is at launch");
         task.Escalation.Reason.ShouldContain("claimed success");
     }
 
     [Theory]
-    // A grader fault: the check never ran, so no model can move the verdict.
-    [InlineData("""{"status":"Failed","exitReason":"acceptance-failed","acceptanceDetail":"grade-error: clone exploded","contradiction":"over_claim","changedFiles":["a.cs"]}""")]
-    // A gateway wire fault: the cause-aware retry owns it (fresh start, thinking disabled) — a pricier model hits the same gateway.
-    [InlineData("""{"status":"Failed","exitReason":"acceptance-failed","acceptanceDetail":"tests-failed-exit-1","error":"400 messages.1.content.0.type: is not a thinking block","changedFiles":["a.cs"]}""")]
-    // A transient death with no acceptance verdict at all: nothing was proved about the model.
-    [InlineData("""{"status":"Failed","exitReason":"non-zero-exit","error":"gateway 429","changedFiles":["a.cs"]}""")]
-    // A failed check with NO work and no over-claim: no evidence about the model either way.
-    [InlineData("""{"status":"Failed","exitReason":"acceptance-failed","acceptanceDetail":"tests-failed-exit-1"}""")]
-    public async Task D3_a_respawn_with_no_model_evidence_asks_for_no_escalation(string priorAttemptJson)
+    // No proposal at all — the finished attempt's evidence said nothing about its model.
+    [InlineData("""{"status":"Failed","exitReason":"acceptance-failed","acceptanceDetail":"tests-failed-exit-1","changedFiles":["a.cs"]}""")]
+    // A proposal that found nothing stronger: there is no model to move to, so the respawn must not claim one.
+    [InlineData("""{"status":"Failed","exitReason":"acceptance-failed","changedFiles":["a.cs"],"proposedEscalation":{"from":"m","to":null,"reason":"r"}}""")]
+    // Malformed / half-written proposals degrade to "no hint" rather than failing the node.
+    [InlineData("""{"status":"Failed","exitReason":"acceptance-failed","changedFiles":["a.cs"],"proposedEscalation":{"to":"stronger"}}""")]
+    [InlineData("""{"status":"Failed","exitReason":"acceptance-failed","changedFiles":["a.cs"],"proposedEscalation":"nonsense"}""")]
+    public async Task D3_a_respawn_without_a_usable_proposal_asks_for_no_escalation(string priorAttemptJson)
     {
         var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, priorAttemptPayload: JsonDocument.Parse(priorAttemptJson).RootElement), CancellationToken.None);
 
         JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!.Escalation
-            .ShouldBeNull("escalation costs real money — it fires only on evidence the MODEL was the limit");
+            .ShouldBeNull("escalation costs real money — it fires only on a resolved proposal naming a real, stronger model");
     }
 
     [Fact]

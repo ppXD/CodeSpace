@@ -88,6 +88,26 @@ public class WorkflowResumeAgentRunPayloadTests
     }
 
     [Fact]
+    public void BuildResumePayload_carries_the_proposed_escalation_the_retry_verdict_keys_on()
+    {
+        // D3: this is the fact that makes a deterministic acceptance failure respawnable at all — the node reads
+        // `to` to decide, and `from`/`reason` to forward as the next attempt's request. Dropping it from the
+        // projection would make the whole quick-lane respawn half unreachable again, silently.
+        var result = new AgentRunResult
+        {
+            Status = AgentRunStatus.Failed, ExitReason = AgentAcceptanceContract.FailClosedExitReason, AcceptanceDetail = "tests-failed-exit-1",
+            ProposedEscalation = new AgentModelEscalation { From = "claude-haiku-4-5", To = "claude-sonnet-4-5", Reason = "the prior round claimed success but its acceptance check failed (tests-failed-exit-1)" },
+        };
+        var run = new AgentRun { Status = AgentRunStatus.Failed, ResultJson = JsonSerializer.Serialize(result, AgentJson.Options) };
+
+        var proposal = JsonDocument.Parse(WorkflowResumeAgentRunCompletionNotifier.BuildResumePayload(run)).RootElement.GetProperty("proposedEscalation");
+
+        proposal.GetProperty("to").GetString().ShouldBe("claude-sonnet-4-5");
+        proposal.GetProperty("from").GetString().ShouldBe("claude-haiku-4-5");
+        proposal.GetProperty("reason").GetString().ShouldContain("claimed success");
+    }
+
+    [Fact]
     public void BuildResumePayload_falls_back_to_the_dispatched_tasks_model_when_the_harness_reported_none()
     {
         // A harness that never names its model in-stream would otherwise erase the tier floor, and an escalation

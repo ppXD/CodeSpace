@@ -6,14 +6,21 @@ namespace CodeSpace.Messages.Agents;
 /// <see cref="SupervisorRetryEscalationOutcome"/> (same three facts, a different carrier: that one rides a
 /// supervisor decision's outcome JSON, this one rides the agent task/result envelope). A pure data noun (Rule 18.1).
 ///
-/// <para>It is BOTH the request and the outcome, distinguished by its carrier, not by a flag:</para>
+/// <para>Three carriers, each with an unambiguous meaning — the CARRIER says which, never a flag:</para>
 /// <list type="bullet">
-/// <item><b>On an <c>AgentTask</c></b> (<c>AgentTask.Escalation</c>) it is a REQUEST the dispatcher already decided
-/// this attempt owes — <see cref="Reason"/> plus <see cref="From"/>, the prior attempt's model that sets the tier
-/// FLOOR. <see cref="To"/> is always null there: the executor owns the pool read, so it resolves the pick.</item>
-/// <item><b>On an <c>AgentRunResult</c></b> (<c>AgentRunResult.ModelEscalation</c>) it is the OUTCOME:
-/// <see cref="To"/> names the model the escalated attempt actually ran, or is null when the team's credentialed pool
-/// held nothing above the floor — the one-model case, recorded rather than silently dropped.</item>
+/// <item><b><c>AgentTask.Escalation</c></b> — a REQUEST the dispatcher already decided this attempt owes:
+/// <see cref="Reason"/> plus <see cref="From"/>, the prior attempt's model that sets the tier FLOOR.
+/// <see cref="To"/> is always null there — the executor owns the pool read, so it resolves the pick against the
+/// pool as it is NOW, never a stale one.</item>
+/// <item><b><c>AgentRunResult.ModelEscalation</c></b> — what this run APPLIED: <see cref="To"/> is the model an
+/// escalated round actually ran, or null when the pool held nothing above the floor (the one-model case, recorded
+/// rather than silently dropped).</item>
+/// <item><b><c>AgentRunResult.ProposedEscalation</c></b> — what the NEXT attempt should do, stamped when the run
+/// ended with its own evidence still saying the model was the limit: <see cref="From"/> is the model this run
+/// finished on, <see cref="To"/> the pick for the next attempt (null = nothing stronger exists, so a respawn would
+/// only re-burn the same model). Deliberately SEPARATE from the applied record: an `agent.run` node reads this one
+/// to decide whether a deterministic failure is worth respawning, and an applied record must never flip that
+/// verdict for a run whose acceptance actually passed.</item>
 /// </list>
 /// </summary>
 public sealed record AgentModelEscalation

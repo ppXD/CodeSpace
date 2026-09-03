@@ -251,7 +251,6 @@ public sealed class AgentRunReviseLoopFlowTests
         var events = await LoadEventsAsync(runId);
         events.Single(e => e.Contains("revising")).ShouldContain("acceptance check failed", Case.Insensitive, "the round was bought by the ORACLE, not the critic — order proven");
     }
-
     // ─── D3: model escalation across revise rounds ───────────────────────────
 
     [Fact]
@@ -261,15 +260,24 @@ public sealed class AgentRunReviseLoopFlowTests
         if (!await GitAvailableAsync()) return;
 
         var teamId = await SeedTeamAsync();
+
+        // The run's OWN credential holds the ladder it may climb…
         var credentialId = await SeedModelCredentialAsync(teamId);
         await SeedTieredModelAsync(credentialId, "test-model", ModelCapabilityTier.Basic);
         await SeedTieredModelAsync(credentialId, "test-model-pro", ModelCapabilityTier.Strong);
+
+        // …and a SECOND credential of the SAME provider holds a stronger model still. A team credentials one
+        // provider twice all the time (a direct vendor key beside a gateway with its own base URL and family), and
+        // this model would run on the WRONG key: the environment carries the pinned credential's. A provider-wide
+        // bound would happily pick it, which is why the bound is the credential ROW.
+        var otherCredentialId = await SeedModelCredentialAsync(teamId);
+        await SeedTieredModelAsync(otherCredentialId, "test-model-ultra", ModelCapabilityTier.Frontier);
 
         using var remote = new BareRemote();
         await remote.SeedBaseAsync(CheckScript);
         var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
 
-        var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { MaxReviseRounds = 1 });
+        var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { ModelCredentialId = credentialId, MaxReviseRounds = 1 });
 
         var harness = new ReviseAwareHarness(first: DraftScript, revised: RevisedScript);
         await ExecuteAsync(runId, harness);
@@ -278,14 +286,16 @@ public sealed class AgentRunReviseLoopFlowTests
 
         run.Status.ShouldBe(AgentRunStatus.Succeeded, "the revision fixed the work — the re-grade against the REAL check passed");
 
-        // The load-bearing wiring fact: the escalated model reached the HARNESS INVOCATION, not just a record.
+        // The load-bearing wiring fact: the escalated model reached the HARNESS INVOCATION, not just a record — and
+        // it is the strongest model on THIS run's own key, never the stronger one on someone else's.
         harness.InvokedModels.AsEnumerable().ShouldBe(new[] { "test-model", "test-model-pro" },
-            customMessage: "round 1 ran the operator's model; round 2 — bought by an over-claim against a check that failed on real work — ran the stronger credentialed one");
+            customMessage: "round 1 ran the operator's model; round 2 — bought by an over-claim against a check that failed on real work — ran the strongest model under the run's OWN credential, NOT test-model-ultra under the other one");
 
         result.ModelEscalation.ShouldNotBeNull();
         result.ModelEscalation!.From.ShouldBe("test-model");
         result.ModelEscalation.To.ShouldBe("test-model-pro");
         result.ModelEscalation.Reason.ShouldContain("claimed success");
+        result.ProposedEscalation.ShouldBeNull("the run ended PASSING — it owes the next attempt nothing");
 
         var events = await LoadEventsAsync(runId);
         events.ShouldContain(e => e.StartsWith(AgentRunExecutor.ModelEscalationPrefix, StringComparison.Ordinal) && e.Contains("test-model → test-model-pro"),
@@ -293,7 +303,52 @@ public sealed class AgentRunReviseLoopFlowTests
     }
 
     [Fact]
-    public async Task A_one_model_team_keeps_its_only_model_and_says_no_stronger_one_exists()
+    public async Task Escalation_jumps_to_the_strongest_model_above_the_floor_and_then_says_it_is_out_of_room()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        var credentialId = await SeedModelCredentialAsync(teamId);
+        await SeedTieredModelAsync(credentialId, "test-model", ModelCapabilityTier.Basic);
+        await SeedTieredModelAsync(credentialId, "test-model-pro", ModelCapabilityTier.Strong);
+        await SeedTieredModelAsync(credentialId, "test-model-ultra", ModelCapabilityTier.Frontier);
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync("#!/bin/sh\nexit 1\n");   // an unfixable check — every round fails its grade
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+
+        var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { ModelCredentialId = credentialId, MaxReviseRounds = 2 });
+
+        var harness = new ReviseAwareHarness(first: DraftScript, revised: RevisedScript);
+        await ExecuteAsync(runId, harness);
+
+        var (run, result) = await LoadAsync(runId);
+
+        run.Status.ShouldBe(AgentRunStatus.Failed, "the check never passes — Failed is the truth");
+
+        // Escalation is NOT a rung-by-rung ladder: SupervisorRetryEscalation.PickStrongerModel takes the STRONGEST
+        // candidate above the floor in one jump — the check has already proved this unit needs more, so spending a
+        // round on the next tier up would just buy another failure. Strong is skipped on purpose.
+        //
+        // What round 3 proves is MONOTONICITY: the second failing round measures its floor from the model that just
+        // ran (Frontier), so it finds nothing above it and STAYS there — it does not fall back to the authored model
+        // or to the Strong row it skipped, which is exactly what would happen if the floor were re-derived from the
+        // task envelope each round.
+        harness.InvokedModels.AsEnumerable().ShouldBe(new[] { "test-model", "test-model-ultra", "test-model-ultra" },
+            customMessage: "Basic → Frontier in one jump, and then held — never re-derived from the authored model");
+
+        (await LoadEventsAsync(runId)).Count(e => e.Contains("no model stronger than test-model-ultra")).ShouldBe(1,
+            "the second failing round asked to escalate, found the run already at the top, and said so once");
+
+        result.ModelEscalation!.To.ShouldBeNull("the LAST escalation this run resolved found nothing above Frontier");
+        result.ProposedEscalation.ShouldNotBeNull("the run ended still failing — it owes the NEXT attempt an answer");
+        result.ProposedEscalation!.From.ShouldBe("test-model-ultra", "the floor for the next attempt is the model this run ended on");
+        result.ProposedEscalation.To.ShouldBeNull("nothing is credentialed above Frontier — a respawn would re-burn the same model, so the node keeps the failure terminal");
+    }
+
+    [Fact]
+    public async Task A_one_model_team_keeps_its_only_model_and_says_no_stronger_one_exists_ONCE()
     {
         if (OperatingSystem.IsWindows()) return;
         if (!await GitAvailableAsync()) return;
@@ -303,17 +358,18 @@ public sealed class AgentRunReviseLoopFlowTests
         await SeedTieredModelAsync(credentialId, "test-model", ModelCapabilityTier.Basic);
 
         using var remote = new BareRemote();
-        await remote.SeedBaseAsync(CheckScript);
+        await remote.SeedBaseAsync("#!/bin/sh\nexit 1\n");   // every round fails, so every round asks to escalate
         var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
 
-        var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { MaxReviseRounds = 1 });
+        var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { ModelCredentialId = credentialId, MaxReviseRounds = 2 });
 
         var harness = new ReviseAwareHarness(first: DraftScript, revised: RevisedScript);
         await ExecuteAsync(runId, harness);
 
         var (_, result) = await LoadAsync(runId);
 
-        harness.InvokedModels.AsEnumerable().ShouldBe(new[] { "test-model", "test-model" }, customMessage: "there is nothing stronger to move to — the dispatch is untouched");
+        harness.InvokedModels.AsEnumerable().ShouldBe(new[] { "test-model", "test-model", "test-model" },
+            customMessage: "there is nothing stronger to move to — the dispatch is untouched, every round");
 
         // Never SILENT: the attempt is on the durable result and on the timeline, so "we tried to reach higher and
         // this team has nothing higher" can be told apart from "nobody tried".
@@ -321,7 +377,9 @@ public sealed class AgentRunReviseLoopFlowTests
         result.ModelEscalation!.To.ShouldBeNull();
         result.ModelEscalation.From.ShouldBe("test-model");
 
-        (await LoadEventsAsync(runId)).ShouldContain(e => e.Contains("no model stronger than test-model"), "the no-op is said out loud");
+        // …but said ONCE. The fact does not change between rounds, and repeating it would bury each round's own reason.
+        var events = await LoadEventsAsync(runId);
+        events.Count(e => e.Contains("no model stronger than test-model")).ShouldBe(1, "the no-op is announced once per run, not once per round");
     }
 
     [Fact]
@@ -339,7 +397,7 @@ public sealed class AgentRunReviseLoopFlowTests
         await remote.SeedBaseAsync(CheckScript);
         var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
 
-        var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { MaxReviseRounds = 1 });
+        var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { ModelCredentialId = credentialId, MaxReviseRounds = 1 });
 
         var harness = new ReviseAwareHarness(first: RevisedScript, revised: RevisedScript);
         await ExecuteAsync(runId, harness);
@@ -349,6 +407,7 @@ public sealed class AgentRunReviseLoopFlowTests
         result.AcceptancePassed.ShouldBe(true);
         harness.InvokedModels.AsEnumerable().ShouldBe(new[] { "test-model" }, customMessage: "one round, the operator's own model — escalation must never fire on a passing check");
         result.ModelEscalation.ShouldBeNull("no trigger, no record — a passing run's result stays byte-identical to pre-D3");
+        result.ProposedEscalation.ShouldBeNull();
     }
 
     // ─── Seeding ─────────────────────────────────────────────────────────────
