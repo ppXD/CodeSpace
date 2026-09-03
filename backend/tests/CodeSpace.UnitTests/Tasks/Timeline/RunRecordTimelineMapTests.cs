@@ -157,6 +157,28 @@ public class RunRecordTimelineMapTests
     }
 
     [Fact]
+    public void A_skipped_review_is_a_warning_milestone_carrying_the_reason()
+    {
+        // D5: the critic fails OPEN, so nothing else can tell the reader a configured review stopped happening. The
+        // beat is a MILESTONE for the same reason storage-unavailable is — the run is green and something did not run.
+        var ev = RunRecordTimelineMap.ToEvent(Record(WorkflowRunRecordTypes.ReviewSkipped, nodeId: "sup", payloadJson: """{"kind":"critic.skipped","mode":"Gate","artifact_kind":"workflow plan","reason":"InvalidOperationException: the reviewer credential was revoked"}""")).ShouldNotBeNull();
+
+        ev.Title.ShouldBe("Review skipped", "the backend owns the copy");
+        ev.Severity.ShouldBe(TimelineSeverity.Warning, "nothing failed — something the operator configured did not happen");
+        ev.Level.ShouldBe(TimelineLevel.Milestone, "an unreviewed output is a story beat, not folded detail");
+        ev.Summary.ShouldBe("InvalidOperationException: the reviewer credential was revoked");
+        ev.NodeId.ShouldBe("sup");
+    }
+
+    [Fact]
+    public void A_skipped_review_is_narrative_so_the_pushed_down_record_filter_selects_it()
+    {
+        // The source's SQL `record_type IN (…)` predicate is DERIVED from the switch — a new arm that the derivation
+        // missed would be a beat written to the ledger and never read back.
+        RunRecordTimelineMap.NarrativeRecordTypes.ShouldContain(WorkflowRunRecordTypes.ReviewSkipped);
+    }
+
+    [Fact]
     public void A_failed_model_call_is_a_detail_error_carrying_the_kind_and_error()
     {
         var ev = RunRecordTimelineMap.ToEvent(Record(WorkflowRunRecordTypes.InteractionFailed, nodeId: "gen", payloadJson: """{"kind":"llm.complete","provider":"anthropic","error":"gateway timed out"}""")).ShouldNotBeNull();

@@ -133,6 +133,7 @@ public sealed class CriticSupervisorDeciderDecorator : ISupervisorDecider
                 Scope = scope,
                 DraftAttribution = draft is null ? null : DescribeDraft(draft),
                 ViaAgent = agentReviewed,
+                ReviewerModelId = verdict.ReviewerModel,
             },
         };
     }

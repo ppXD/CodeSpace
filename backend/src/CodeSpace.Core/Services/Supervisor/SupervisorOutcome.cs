@@ -351,6 +351,7 @@ public static class SupervisorOutcome
                 ["scope"] = r.Scope,
                 ["draftAttribution"] = r.DraftAttribution,
                 ["viaAgent"] = r.ViaAgent,
+                ["reviewerModelId"] = r.ReviewerModelId,
             });
         }
 
@@ -393,6 +394,7 @@ public static class SupervisorOutcome
                     Scope = r.TryGetProperty("scope", out var sc) && sc.ValueKind == JsonValueKind.String ? sc.GetString()! : "decision",
                     DraftAttribution = r.TryGetProperty("draftAttribution", out var da) && da.ValueKind == JsonValueKind.String ? da.GetString() : null,
                     ViaAgent = r.TryGetProperty("viaAgent", out var va) && va.ValueKind == JsonValueKind.True,
+                    ReviewerModelId = r.TryGetProperty("reviewerModelId", out var rm) && rm.ValueKind == JsonValueKind.String ? rm.GetString() : null,
                 });
             }
 

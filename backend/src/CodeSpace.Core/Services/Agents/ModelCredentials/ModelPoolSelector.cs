@@ -154,19 +154,19 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
     }
 
     public async Task<Guid?> SelectBrainRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken) =>
-        await SelectBrainRowIdCoreAsync(teamId, eligibleProviders, excludeRowId: null, cancellationToken).ConfigureAwait(false);
+        await SelectBrainRowIdCoreAsync(teamId, eligibleProviders, excludeModelId: null, cancellationToken).ConfigureAwait(false);
 
     public async Task<IReadOnlyList<Guid>> ListBrainRowIdsAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken) =>
-        await OrderedBrainRowIdsAsync(teamId, eligibleProviders, excludeRowId: null, cancellationToken).ConfigureAwait(false);
+        await OrderedBrainRowIdsAsync(teamId, eligibleProviders, excludeModelId: null, cancellationToken).ConfigureAwait(false);
 
-    private async Task<Guid?> SelectBrainRowIdCoreAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, Guid? excludeRowId, CancellationToken cancellationToken)
+    private async Task<Guid?> SelectBrainRowIdCoreAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, string? excludeModelId, CancellationToken cancellationToken)
     {
-        var ordered = await OrderedBrainRowIdsAsync(teamId, eligibleProviders, excludeRowId, cancellationToken).ConfigureAwait(false);
+        var ordered = await OrderedBrainRowIdsAsync(teamId, eligibleProviders, excludeModelId, cancellationToken).ConfigureAwait(false);
         return ordered.Count == 0 ? null : ordered[0];
     }
 
     /// <summary>The ONE total order every brain pick derives from — the single pick is its head, the failover candidate list is the whole of it, so they can never disagree.</summary>
-    private async Task<IReadOnlyList<Guid>> OrderedBrainRowIdsAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, Guid? excludeRowId, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<Guid>> OrderedBrainRowIdsAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, string? excludeModelId, CancellationToken cancellationToken)
     {
         if (eligibleProviders.Count == 0) return Array.Empty<Guid>();
 
@@ -184,7 +184,10 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
         // ONLY that eligible subset. The anti-strand fallback (all-unavailable ⇒ keep the full eligible set) must never
         // widen PAST eligibility, else it could bake a provider-ineligible brain the decider can't run (a post-launch
         // NoModelStop). `Available != false` keeps NULL/never-probed rows preferred (byte-identical when un-probed).
-        var eligibleRows = rows.Where(r => eligible.Contains(r.Provider.ToLower()) && (excludeRowId == null || r.Id != excludeRowId)).ToList();
+        // The exclusion is by MODEL NAME, not by row: two credentials backing the same model are the same brain, so a
+        // row-id exclusion would hand the reviewer pick the producer's own model under a second key and call it a
+        // second opinion. Case-insensitive, like every other model-id match in this selector.
+        var eligibleRows = rows.Where(r => eligible.Contains(r.Provider.ToLower()) && (excludeModelId == null || !string.Equals(r.ModelId, excludeModelId, StringComparison.OrdinalIgnoreCase))).ToList();
 
         var reachable = eligibleRows.Where(r => r.Available != false).ToList();
 
@@ -205,18 +208,28 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
 
     public async Task<Guid?> SelectReviewerRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, Guid? producerRowId, CancellationToken cancellationToken)
     {
-        // The distinct-first ladder (S4d): a reviewer on a DIFFERENT model is a real second opinion, so exclude
-        // the producer's row from the pick — but a one-model team must still get its critic, so an empty
-        // excluded pick falls back to the full pool (the producer's own model, independently prompted).
+        // The distinct-first ladder (S4d): a reviewer on a DIFFERENT model is a real second opinion, so exclude the
+        // producer's MODEL — not merely its row. Independence is a property of the model, so the same model under a
+        // second credential is the producer reviewing itself; excluding only the row counted that as independent. A
+        // one-model team must still get its critic, so an empty excluded pick falls back to the full pool (the
+        // producer's own model, independently prompted) — and the verdict now NAMES the model it ran on, so the
+        // fallback reads as the fallback instead of as a second opinion.
         if (producerRowId is { } producer)
         {
-            var distinct = await SelectBrainRowIdCoreAsync(teamId, eligibleProviders, producer, cancellationToken).ConfigureAwait(false);
+            var distinct = await SelectBrainRowIdCoreAsync(teamId, eligibleProviders, await ProducerModelIdAsync(teamId, producer, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
 
             if (distinct != null) return distinct;
         }
 
         return await SelectBrainRowIdAsync(teamId, eligibleProviders, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>The producer row's model NAME — what the reviewer pick excludes. Deliberately UNGUARDED by enabled/active: the producer already ran on this model, so its independence claim stands regardless of what happened to that row since. Null (a row of another team / gone) excludes nothing, which is the pre-existing pick.</summary>
+    private async Task<string?> ProducerModelIdAsync(Guid teamId, Guid producerRowId, CancellationToken cancellationToken) =>
+        await _db.ModelCredentialModel.AsNoTracking()
+            .Where(m => m.Id == producerRowId && m.Credential.TeamId == teamId)
+            .Select(m => m.ModelId)
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
     public async Task<Guid?> ResolvePinnedBrainRowIdAsync(Guid teamId, Guid modelCredentialModelId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken)
     {

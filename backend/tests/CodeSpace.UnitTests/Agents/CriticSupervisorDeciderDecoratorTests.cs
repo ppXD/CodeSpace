@@ -533,6 +533,31 @@ public class CriticSupervisorDeciderDecoratorTests
     }
 
     [Fact]
+    public async Task A_carried_review_records_the_model_the_reviewer_actually_ran_on()
+    {
+        // D5: the persisted verdict carried no reviewer identity, so a user could not see that the "independent"
+        // review ran on the producer's own model (the legitimate one-model-pool fallback). Thread it through.
+        var inner = new FakeDecider();
+        var critic = new FakeCritic { Verdict = new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "sound", ReviewerModel = "claude-sonnet-4-6" } };
+        var decorator = new CriticSupervisorDeciderDecorator(inner, critic, new NoAgentPlanReviewer());
+
+        var decision = await decorator.DecideAsync(Context(ReviewMode.Gate), CancellationToken.None);
+
+        decision.Reviews.ShouldHaveSingleItem().ReviewerModelId.ShouldBe("claude-sonnet-4-6", "the verdict's reviewer rides the durable review the journal reads back");
+    }
+
+    [Fact]
+    public async Task A_verdict_that_names_no_reviewer_carries_none()
+    {
+        var inner = new FakeDecider();
+        var critic = new FakeCritic { Verdict = new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "sound" } };
+        var decorator = new CriticSupervisorDeciderDecorator(inner, critic, new NoAgentPlanReviewer());
+
+        (await decorator.DecideAsync(Context(ReviewMode.Gate), CancellationToken.None)).Reviews.ShouldHaveSingleItem()
+            .ReviewerModelId.ShouldBeNull("an agent verdict / a pre-existing outcome names no model — never a guessed one");
+    }
+
+    [Fact]
     public async Task The_gate_ladder_carries_both_rungs_and_the_escalation_inherits_the_chain()
     {
         var inner = new FakeDecider();
@@ -573,7 +598,7 @@ public class CriticSupervisorDeciderDecoratorTests
     {
         var reviews = new[]
         {
-            new SupervisorDecisionReview { Approved = false, Rationale = "thin", Issues = new[] { "no tests (evidence: none named)" }, Scope = "plan", DraftAttribution = "plan draft · authored via m1 · 8,200 tokens", ViaAgent = true },
+            new SupervisorDecisionReview { Approved = false, Rationale = "thin", Issues = new[] { "no tests (evidence: none named)" }, Scope = "plan", DraftAttribution = "plan draft · authored via m1 · 8,200 tokens", ViaAgent = true, ReviewerModelId = "claude-sonnet-4-6" },
             new SupervisorDecisionReview { Approved = true, Rationale = "fixed", Scope = "plan" },
         };
 
@@ -587,8 +612,10 @@ public class CriticSupervisorDeciderDecoratorTests
         read[0].Scope.ShouldBe("plan");
         read[0].DraftAttribution.ShouldBe("plan draft · authored via m1 · 8,200 tokens");
         read[0].ViaAgent.ShouldBeTrue("the agent flag survives the fold — the projection needs it to skip the double beat");
+        read[0].ReviewerModelId.ShouldBe("claude-sonnet-4-6", "the reviewer's model must survive the FOLD — the journal renders it off the read-back, so a field the writer drops is a field nobody ever sees");
         read[1].Approved.ShouldBeTrue();
         read[1].ViaAgent.ShouldBeFalse();
+        read[1].ReviewerModelId.ShouldBeNull("an unnamed reviewer reads back unnamed, never a guessed model");
 
         SupervisorOutcome.WriteReviews("""{"outcome":"planned"}""", Array.Empty<SupervisorDecisionReview>())
             .ShouldBe("""{"outcome":"planned"}""", "no reviews ⇒ byte-identical — every pre-chain decision replays exactly as before");

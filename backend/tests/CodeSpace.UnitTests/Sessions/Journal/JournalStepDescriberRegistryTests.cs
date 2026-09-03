@@ -167,6 +167,21 @@ public class JournalStepDescriberRegistryTests
     }
 
     [Fact]
+    public void A_review_beat_names_the_model_it_ran_on_so_the_independence_claim_is_checkable()
+    {
+        // D5: "Model critic approved" alone cannot be checked against the producer's own model — a one-model pool
+        // legitimately reviews on the producer's model, and the reader could not see it. Naming the reviewer is the fix.
+        Core.Services.Tasks.Timeline.Sources.DecisionReviewTimelineMap.TitleFor(new Messages.Agents.SupervisorDecisionReview { Approved = true, Rationale = "r", Scope = "decision", ReviewerModelId = "claude-sonnet-4-6" })
+            .ShouldBe("Model critic approved the decision · reviewed on claude-sonnet-4-6");
+
+        Core.Services.Tasks.Timeline.Sources.DecisionReviewTimelineMap.TitleFor(new Messages.Agents.SupervisorDecisionReview { Approved = false, Rationale = "r", Issues = new[] { "a" }, Scope = "plan", ReviewerModelId = "claude-opus-4-8" })
+            .ShouldBe("Model critic flagged the plan — 1 issue · reviewed on claude-opus-4-8");
+
+        Core.Services.Tasks.Timeline.Sources.DecisionReviewTimelineMap.TitleFor(new Messages.Agents.SupervisorDecisionReview { Approved = true, Rationale = "r", Scope = "decision", ReviewerModelId = "  " })
+            .ShouldBe("Model critic approved the decision", "an unnamed reviewer (an agent verdict, every pre-existing outcome) leaves the beat byte-identical");
+    }
+
+    [Fact]
     public void An_unknown_source_still_becomes_a_step_via_the_fallback()
     {
         // THE genericity guarantee: a future source / kind no describer claims is NEVER dropped — it degrades to a
