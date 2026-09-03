@@ -246,18 +246,23 @@ public class ModelPoolSelectorFlowTests
     {
         // D5: independence is a property of the MODEL, not of the row. The same model under a second credential is
         // the producer reviewing itself; a row-id exclusion counted that as a second opinion. With no OTHER model in
-        // the pool, both rows are excluded and the pick falls back — honestly — to the producer's own model.
+        // the pool, BOTH rows are excluded and the pick falls back — honestly — to a row carrying the producer's model.
+        //
+        // The producer row is STARRED so the fallback's winner is deterministic: with two rows of the SAME model id
+        // and no default, the total order falls through to ThenBy(row id) over random Guids and either row could win,
+        // which would make this assertion a coin flip. IsDefault outranks the model-id/row-id tie-break, so the
+        // fallback lands on the producer's row every run — while a row-id exclusion still lands on the OTHER row.
         var teamId = await SeedTeamAsync();
         var credA = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-a");
         var credB = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-b");
-        var producer = await AddModelReturningIdAsync(credA, "claude-opus-4-8");
+        var producer = await AddModelReturningIdAsync(credA, "claude-opus-4-8", isDefault: true);
         var sameModelOtherCredential = await AddModelReturningIdAsync(credB, "claude-opus-4-8");
 
         using var scope = _fixture.BeginScope();
         var picked = await scope.Resolve<IModelPoolSelector>().SelectReviewerRowIdAsync(teamId, new[] { "Anthropic" }, producer, CancellationToken.None);
 
         picked.ShouldNotBe(sameModelOtherCredential, "the same model under a second key is NOT an independent reviewer");
-        picked.ShouldBe(producer, "with no distinct model in the pool the pick falls back to the producer's own row — the honest one-model fallback");
+        picked.ShouldBe(producer, "with no distinct model in the pool the pick falls back to a row carrying the producer's own model — the honest one-model fallback");
     }
 
     [Fact]
@@ -280,19 +285,27 @@ public class ModelPoolSelectorFlowTests
     [Fact]
     public async Task SelectBrainRowId_is_untouched_by_the_reviewer_exclusion()
     {
-        // The brain pick excludes nothing — a duplicated model must not change which brain the team gets, or a
-        // replay would re-derive a different one.
+        // The brain pick excludes nothing — a duplicated model must not cost the team a candidate, or an auto brain
+        // would lose its failover partner the moment a second credential backed the same model.
+        //
+        // Asserted as the two invariants that hold WITHOUT a tie-break: the candidate list keeps BOTH rows, and the
+        // single pick is that list's head. Naming an expected winner here would be a coin flip — two rows of the same
+        // model id with no default fall through to ThenBy(row id) over random Guids.
         var teamId = await SeedTeamAsync();
         var credA = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-a");
         var credB = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-b");
-        var first = await AddModelReturningIdAsync(credA, "claude-opus-4-8");
-        await AddModelReturningIdAsync(credB, "claude-opus-4-8");
+        var rowA = await AddModelReturningIdAsync(credA, "claude-opus-4-8");
+        var rowB = await AddModelReturningIdAsync(credB, "claude-opus-4-8");
 
         using var scope = _fixture.BeginScope();
         var selector = scope.Resolve<IModelPoolSelector>();
 
-        (await selector.SelectBrainRowIdAsync(teamId, new[] { "Anthropic" }, CancellationToken.None)).ShouldBe(first, "the deterministic total order is unchanged");
-        (await selector.ListBrainRowIdsAsync(teamId, new[] { "Anthropic" }, CancellationToken.None)).Count.ShouldBe(2, "the failover candidate list still carries every eligible row");
+        var candidates = await selector.ListBrainRowIdsAsync(teamId, new[] { "Anthropic" }, CancellationToken.None);
+
+        candidates.ShouldBe(new[] { rowA, rowB }, ignoreOrder: true, customMessage: "the failover candidate list still carries every eligible row — the reviewer's exclusion is the reviewer's alone");
+
+        (await selector.SelectBrainRowIdAsync(teamId, new[] { "Anthropic" }, CancellationToken.None))
+            .ShouldBe(candidates[0], "the single pick is the head of the ONE total order the candidate list derives from — they can never disagree");
     }
 
     [Fact]

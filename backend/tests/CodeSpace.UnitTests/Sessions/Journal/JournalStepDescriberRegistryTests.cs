@@ -166,6 +166,17 @@ public class JournalStepDescriberRegistryTests
             .ShouldBe("Model critic flagged the revised decision");
     }
 
+    [Theory]
+    // The card drops the word "independent" on a same-model review, so this predicate decides a CLAIM, not a label.
+    [InlineData("claude-opus-4-8", "claude-opus-4-8", true)]
+    [InlineData("CLAUDE-OPUS-4-8", "claude-opus-4-8", true)]   // case-insensitive, like every other model-id match
+    [InlineData("claude-sonnet-4-6", "claude-opus-4-8", false)]
+    [InlineData(null, "claude-opus-4-8", false)]                // an un-attributed verdict reads as today's copy…
+    [InlineData("claude-opus-4-8", null, false)]                // …and so does an un-attributed producer
+    [InlineData("  ", "claude-opus-4-8", false)]
+    public void Same_model_as_producer_is_false_whenever_either_side_is_unknown(string? reviewerModel, string? producerModel, bool expected) =>
+        Core.Services.Sessions.Journal.FactsSources.DecisionReviewFactsSource.SameModel(reviewerModel, producerModel).ShouldBe(expected);
+
     [Fact]
     public void A_review_beat_names_the_model_it_ran_on_so_the_independence_claim_is_checkable()
     {

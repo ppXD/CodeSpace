@@ -485,6 +485,10 @@ export interface JournalReviewVerdict {
   /// The reviewer's own agent run — deep-linked as "view reviewer run →". NULL for a model critic (no run to open).
   reviewerRunId?: string | null;
   reviewerHarness?: string | null;
+  /// The MODEL a model critic ran on — names the reviewer instead of "a second AI". Null for an agent reviewer / a pre-existing verdict.
+  reviewerModel?: string | null;
+  /// True when the reviewer ran on the PRODUCER's own model — an independently prompted call, but NOT a second opinion, so the card must not say "independent". Decided by the backend, which holds both models.
+  sameModelAsProducer?: boolean;
   /// What was reviewed — "output" / "plan" / "decision".
   scope: string;
 }

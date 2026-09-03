@@ -122,12 +122,14 @@ public interface IRunRecordLogger
     Task WaitReissuedAsync(Guid runId, string nodeId, string iterationKey, string waitKind, Guid waitId, Guid byUserId, CancellationToken cancellationToken);
 
     /// <summary>
-    /// The ONE generic low-level writer for the <c>interaction.*</c> family — every model-touching step (a supervisor
-    /// decision, a planner plan, an llm.complete node, any future caller) rides it. The CALLER mints the correlation id
-    /// and builds the typed-open <paramref name="payload"/> (kind + model + params/prompt or usage/output or error); this
-    /// method just stamps the envelope (node/iteration/correlation/parent linkage) onto the ledger. Open by design — a
-    /// new <paramref name="recordType"/> / payload <c>kind</c> is a new STRING, never a new method or column. Returns the
-    /// record id (for parent chaining).
+    /// The ONE generic low-level writer for the <c>interaction.*</c> family AND its siblings — every model-touching
+    /// step (a supervisor decision, a planner plan, an llm.complete node, any future caller) rides it, as does a
+    /// record ABOUT a model step that did not happen (<c>review.skipped</c>, written by the structured critic when a
+    /// configured review could not run). The CALLER mints the correlation id and builds the typed-open
+    /// <paramref name="payload"/> (kind + model + params/prompt or usage/output or error); this method just stamps the
+    /// envelope (node/iteration/correlation/parent linkage) onto the ledger. Open by design — a new
+    /// <paramref name="recordType"/> / payload <c>kind</c> is a new STRING, never a new method or column, which is why
+    /// a non-<c>interaction.*</c> type needs no new member here. Returns the record id (for parent chaining).
     /// </summary>
     Task<Guid> RecordInteractionAsync(Guid runId, string recordType, string? nodeId, string iterationKey, Guid correlationId, Guid? parentRecordId, JsonElement payload, CancellationToken cancellationToken);
 }

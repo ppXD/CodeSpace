@@ -224,6 +224,46 @@ public class LlmStructuredCriticTests
         log.Entries.Count.ShouldBe(2, "the skipped-review warning, plus the warning that its beat could not be written");
     }
 
+    [Fact]
+    public async Task A_fault_message_carrying_a_run_secret_is_masked_before_it_reaches_the_beat_or_the_rationale()
+    {
+        // An LlmApiException's message IS the gateway's raw error body, and a provider commonly echoes the offending
+        // Authorization header back in it. Unmasked, that lands on the ledger, in the verdict rationale, in the plan's
+        // risks, and in outcome_json — four durable places, none of them redacted before this.
+        const string secret = "sk-live-FAKE-DO-NOT-USE-000111";
+
+        var ledger = new CapturingLedger();
+        var log = new CapturingLogger<LlmStructuredCritic>();
+        var critic = new LlmStructuredCritic(
+            new SingleClientRegistry(new ThrowingClient(new InvalidOperationException($"401 unauthorized for key {secret} on this account"))),
+            new PickByRowSelector(), log);
+
+        var scope = new Core.Services.Workflows.Llm.LlmCallScope(Guid.NewGuid(), Guid.NewGuid(), "sup", "sup#turn0", "supervisor.decision", ledger, Offloader: null!,
+            CaptureRedactor: new Core.Services.Workflows.Runtime.PersistenceSecretRedactor(new[] { secret }));
+
+        CriticVerdict verdict;
+        using (Core.Services.Workflows.Llm.LlmCallContext.Push(scope))
+        {
+            verdict = await critic.ReviewAsync(Request(), Guid.NewGuid(), Guid.NewGuid(), CancellationToken.None);
+        }
+
+        verdict.Rationale.ShouldNotContain(secret, customMessage: "the rationale rides into plan risks + outcome_json — it may not carry the run's key");
+        verdict.Rationale.ShouldContain(Core.Services.Workflows.Runtime.PersistenceSecretRedactor.Marker);
+
+        var beat = ledger.Calls.ShouldHaveSingleItem();
+        beat.Payload.GetProperty("reason").GetString().ShouldNotContain(secret, customMessage: "the durable ledger beat may not carry the run's key");
+        beat.Payload.GetProperty("reason").GetString().ShouldContain(Core.Services.Workflows.Runtime.PersistenceSecretRedactor.Marker);
+
+        log.Entries.ShouldAllBe(e => !e.Message.Contains(secret));
+    }
+
+    [Fact]
+    public void A_reason_reads_through_verbatim_when_the_run_configured_no_redactor()
+    {
+        // The overwhelmingly common case must stay byte-identical — masking is a boundary, not a rewrite.
+        LlmStructuredCritic.Redacted("InvalidOperationException: plain").ShouldBe("InvalidOperationException: plain");
+    }
+
     [Theory]
     [InlineData("short", "InvalidOperationException: short")]
     [InlineData("line one\nline two", "InvalidOperationException: line one line two")]

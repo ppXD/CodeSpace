@@ -1919,7 +1919,18 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 verdict = coSign with { Rationale = $"The reviewer agent approved, but the independent model co-check disagreed: {coSign.Rationale}" };
         }
 
-        if (verdict.Failed || verdict.Approved) return result;   // fail-open, or a clean pass ⇒ byte-identical
+        // FAIL-OPEN, but no longer in silence. A Failed verdict here means BOTH rungs could not produce one — the
+        // configured output review did not happen and the change ships ungated. A STANDALONE run (no WorkflowRunId)
+        // has no workflow ledger for the critic's review.skipped beat to land on, so the agent's own event stream is
+        // the only surface its operator ever reads; the beat rides here for every agent run alike.
+        if (verdict.Failed)
+        {
+            await AppendReviewSkippedWarningAsync(runId, verdict, cancellationToken).ConfigureAwait(false);
+
+            return result;
+        }
+
+        if (verdict.Approved) return result;   // a clean pass ⇒ byte-identical
 
         await AppendOutputFlaggedWarningAsync(runId, verdict, cancellationToken).ConfigureAwait(false);
 
@@ -1959,8 +1970,16 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     }
 
     /// <summary>The critic's verdict as one feedback string — persisted on the result (WHY the run was flagged) and fed back verbatim by an Improve revise round.</summary>
-    internal static string RenderReviewFeedback(CriticVerdict verdict) =>
-        verdict.Issues.Count > 0 ? $"{verdict.Rationale} Issues: {string.Join("; ", verdict.Issues)}" : verdict.Rationale;
+    internal static string RenderReviewFeedback(CriticVerdict verdict)
+    {
+        var body = verdict.Issues.Count > 0 ? $"{verdict.Rationale} Issues: {string.Join("; ", verdict.Issues)}" : verdict.Rationale;
+
+        // The reviewer's model is ATTRIBUTION, so it trails the actionable critique rather than leading it (this same
+        // string is fed back to the agent for its bounded revise round — the guidance has to come first). It lets this
+        // lane tell a real second opinion from the one-model fallback, which it previously could not. Absent for an
+        // agent reviewer's verdict, which leaves the feedback byte-identical.
+        return string.IsNullOrWhiteSpace(verdict.ReviewerModel) ? body : $"{body} (reviewed on {verdict.ReviewerModel})";
+    }
 
     /// <summary>Render the produced change for the critic — the git unified diff (already capped), with the agent's summary + the changed-file list as context.</summary>
     private static string RenderChange(AgentRunResult result)
@@ -1987,6 +2006,19 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Agent run {RunId}: could not record the output-flagged warning event", runId);
+        }
+    }
+
+    /// <summary>Append a Warning event saying the configured output review did NOT run, so a change that shipped ungated says so on the lane its operator actually reads (a standalone run has no workflow ledger for the critic's <c>review.skipped</c> beat). Best-effort, exactly like the flagged warning: reporting a skipped review may never mask the run's terminal write.</summary>
+    private async Task AppendReviewSkippedWarningAsync(Guid runId, CriticVerdict verdict, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _runs.AppendEventAsync(runId, new AgentEvent { Kind = AgentEventKind.Warning, Text = $"Review skipped — the configured output review could not run, so this change was not gated: {verdict.Rationale}" }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Agent run {RunId}: could not record the review-skipped warning event", runId);
         }
     }
 

@@ -85,12 +85,23 @@ public sealed class LlmStructuredCritic : IStructuredCritic, IScopedDependency
     /// </summary>
     private async Task<CriticVerdict> SkippedAsync(CriticRequest request, string reason)
     {
+        // MASK BEFORE THE REASON ESCAPES. A fault's message is not a curated string: an LlmApiException's message IS
+        // the gateway's raw error body, and a malformed-response fault can carry a content preview. This reason reaches
+        // FOUR durable or human-visible places — the log line below, the ledger beat, the verdict rationale the planner
+        // folds into the plan's risks, and outcome_json — so it passes the run's persistence redactor exactly once,
+        // here, the same masking the model-call capture applies. No configured redactor ⇒ verbatim (today's behavior).
+        reason = Redacted(reason);
+
         _logger.LogWarning("The independent {ReviewMode} review of a {ArtifactKind} did not run, so the producer's original output stands unreviewed: {Reason}", request.Mode, request.ArtifactKind, reason);
 
         await RecordSkippedAsync(request, reason).ConfigureAwait(false);
 
         return CriticVerdict.ReviewFailed(request.Mode, reason);
     }
+
+    /// <summary>The reason with the run's exact-value secrets masked, off the ambient scope's persistence redactor. A call outside any run, or a run with no redactor configured, reads through verbatim. Internal for direct unit pinning.</summary>
+    internal static string Redacted(string reason) =>
+        LlmCallContext.Current?.CaptureRedactor is { } redactor ? redactor.Redact(reason).Value ?? reason : reason;
 
     /// <summary>
     /// Append the <see cref="WorkflowRunRecordTypes.ReviewSkipped"/> beat onto the ambient run's ledger. FAIL-OPEN in
