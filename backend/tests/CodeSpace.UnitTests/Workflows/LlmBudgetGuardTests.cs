@@ -9,7 +9,8 @@ namespace CodeSpace.UnitTests.Workflows;
 /// model call rides. Pins: a scope without a ledger+cap (every pre-slice pusher) passes through untouched; a
 /// refused admission throws BEFORE the model is ever invoked (the overshoot never happens); an admitted call
 /// settles at its actual spend; a faulted call settles pessimistically (null actual = at the reserve); an
-/// unpriceable model fails open like the cost plane; the pessimistic estimate constants are committed values.
+/// unpriceable model UNDER A CAP is refused before the call (D1 fail-closed) while an uncapped one passes through,
+/// and a failed-over successor is judged on its own price; the pessimistic estimate constants are committed values.
 /// </summary>
 [Trait("Category", "Unit")]
 public class LlmBudgetGuardTests
@@ -68,13 +69,75 @@ public class LlmBudgetGuardTests
     }
 
     [Fact]
-    public async Task An_unpriceable_model_fails_open_like_the_cost_plane()
+    public async Task An_unpriceable_model_UNDER_A_CAP_is_refused_before_the_model_is_ever_called()
     {
+        // D1 — the behaviour this test used to pin (fail-OPEN: pass the call through) is exactly the defect: the
+        // spend then folds back as $0, the cap never trips, and the run bills unbounded while terminalizing
+        // Success. Under a cap an unpriceable model is a cap that cannot be enforced, so it is refused.
+        var ledger = new RecordingLedger(admit: true);
+        var called = false;
+
+        var refusal = await Should.ThrowAsync<LlmUnpricedModelException>(() =>
+            LlmBudgetGuard.GuardedAsync(Scope(ledger, 5m), "totally-unknown-model", "s", "u", 100, _ => { called = true; return Task.FromResult(1); }, _ => 0m, CancellationToken.None));
+
+        called.ShouldBeFalse("the money is never spent — the refusal precedes the call");
+        ledger.Reserves.ShouldBe(0, "nothing is reserved either; there is no price to reserve against");
+        refusal.Model.ShouldBe("totally-unknown-model");
+        refusal.Detail.ShouldContain("totally-unknown-model");
+        refusal.Detail.ShouldContain("model manager", Case.Insensitive, "the refusal must name the remedy, not just the problem");
+    }
+
+    [Fact]
+    public async Task An_unpriceable_model_with_NO_cap_still_passes_through_untouched()
+    {
+        // The fail-closed rule is scoped to a declared cap. An uncapped run is byte-identical to before D1 — an
+        // unknown cost stays unknown and nothing blocks.
         var ledger = new RecordingLedger(admit: false);   // would refuse if consulted
 
-        (await LlmBudgetGuard.GuardedAsync(Scope(ledger, 5m), "totally-unknown-model", "s", "u", 100, _ => Task.FromResult(1), _ => 0m, CancellationToken.None)).ShouldBe(1);
+        (await LlmBudgetGuard.GuardedAsync(Scope(ledger, cap: null), "totally-unknown-model", "s", "u", 100, _ => Task.FromResult(1), _ => 0m, CancellationToken.None)).ShouldBe(1);
 
         ledger.Reserves.ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task A_model_priced_only_by_the_operators_OWN_row_is_admitted_under_a_cap()
+    {
+        // The whole point of the per-row price: a Codex/OpenAI/Custom pool id the built-in table never heard of
+        // becomes spendable under a cap the moment the operator prices it — no code change, no env var.
+        var ledger = new RecordingLedger(admit: true);
+        var prices = new Dictionary<string, CodeSpace.Messages.Agents.ModelPrice>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["gpt-5.4-codex"] = new() { InputPerMillionUsd = 2m, OutputPerMillionUsd = 10m },
+        };
+
+        var scope = Scope(ledger, 5m) with { ModelPrices = prices };
+
+        (await LlmBudgetGuard.GuardedAsync(scope, "gpt-5.4-codex", "s", "u", 100, _ => Task.FromResult(1), _ => 0.01m, CancellationToken.None)).ShouldBe(1);
+
+        ledger.Reserves.ShouldBe(1, "priced ⇒ estimable ⇒ reserved, exactly like a built-in model");
+    }
+
+    [Fact]
+    public async Task A_FAILED_OVER_successor_model_is_judged_on_ITS_OWN_price_not_the_first_picks()
+    {
+        // The brain pool fails a call over to another row (#1737/#1738); each attempt re-enters this guard under
+        // its own model name. So a PRICED first pick can never launder an UNPRICED successor past the cap, and an
+        // unpriced first pick can never poison a priced successor.
+        var ledger = new RecordingLedger(admit: true);
+        var prices = new Dictionary<string, CodeSpace.Messages.Agents.ModelPrice>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["priced-primary"] = new() { InputPerMillionUsd = 1m, OutputPerMillionUsd = 1m },
+        };
+        var scope = Scope(ledger, 5m) with { ModelPrices = prices };
+
+        // Attempt 1: the priced primary is admitted.
+        (await LlmBudgetGuard.GuardedAsync(scope, "priced-primary", "s", "u", 100, _ => Task.FromResult(1), _ => 0.01m, CancellationToken.None)).ShouldBe(1);
+
+        // Attempt 2 (the failover): the successor carries NO price → refused on its own merits.
+        var refusal = await Should.ThrowAsync<LlmUnpricedModelException>(() =>
+            LlmBudgetGuard.GuardedAsync(scope, "unpriced-successor", "s", "u", 100, _ => Task.FromResult(1), _ => 0.01m, CancellationToken.None));
+
+        refusal.Model.ShouldBe("unpriced-successor", "the stop names the model that actually could not be priced");
     }
 
     [Fact]

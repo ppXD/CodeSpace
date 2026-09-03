@@ -91,12 +91,41 @@ public sealed class InteractionSpendTests
     }
 
     [Fact]
-    public void An_empty_or_all_unpriceable_set_summarizes_to_the_shared_Empty_instance()
+    public void An_empty_set_summarizes_to_the_shared_Empty_instance()
     {
         BrainPlaneSpendSummary.From(Array.Empty<InteractionSpendRow>()).ShouldBe(BrainPlaneSpendSummary.Empty);
+    }
 
+    [Fact]
+    public void An_all_unpriceable_set_still_NAMES_the_model_it_could_not_price()
+    {
+        // D1: summing to $0 is not the same as costing $0. Before D1 this collapsed to the shared Empty instance,
+        // which is exactly how a capped run's spend read $0 forever while real money went out the door — the cap
+        // then never tripped. The total is still 0 (nothing priceable to add), but the summary now carries WHICH
+        // model made it a lie, so the bounds can fail closed and the stop can name it.
         var allUnknown = new[] { InteractionSpend.From(Record("""{"kind":"x","model":"unpriced","usage":{"inputTokens":1,"outputTokens":1}}""")) };
-        BrainPlaneSpendSummary.From(allUnknown).ShouldBe(BrainPlaneSpendSummary.Empty);
+
+        var summary = BrainPlaneSpendSummary.From(allUnknown);
+
+        summary.TotalUsd.ShouldBe(0m);
+        summary.ByKind.ShouldBeEmpty("a kind with only unpriceable rows is absent, never a bogus $0 entry");
+        summary.UnpricedModel.ShouldBe("unpriced");
+    }
+
+    [Fact]
+    public void A_row_price_makes_an_otherwise_unpriceable_brain_call_priceable()
+    {
+        // The per-row price table (the operator's own $/M in the model manager) is what lets the brain plane bill a
+        // Codex/OpenAI/Custom-gateway model at all — the built-in table carries only the six Claude ids.
+        var prices = new Dictionary<string, CodeSpace.Messages.Agents.ModelPrice>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["unpriced"] = new() { InputPerMillionUsd = 1_000_000m, OutputPerMillionUsd = 0m },
+        };
+
+        var row = InteractionSpend.From(Record("""{"kind":"x","model":"unpriced","usage":{"inputTokens":1,"outputTokens":1}}"""), prices);
+
+        row.CostUsd.ShouldBe(1m);
+        BrainPlaneSpendSummary.From(new[] { row }).UnpricedModel.ShouldBeNull("everything priced");
     }
 
     private static WorkflowRunRecord Record(string payloadJson) => new()

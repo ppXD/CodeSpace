@@ -338,7 +338,7 @@ public class WorkspaceSpecTests
     [Fact]
     public async Task ResolveAsync_returns_null_for_a_no_repo_run()
     {
-        var resolver = new RepositoryWorkspaceResolver(db: null!, auth: null!);
+        var resolver = new RepositoryWorkspaceResolver(db: Infrastructure.EmptyTestDb.New(), auth: null!);
 
         (await resolver.ResolveAsync(new AgentTask { Goal = "g", Harness = "claude-code" }, Guid.NewGuid(), CancellationToken.None))
             .ShouldBeNull();
@@ -350,7 +350,7 @@ public class WorkspaceSpecTests
     [Fact]
     public async Task ResolveAsync_refuses_an_empty_repositories_spec_with_a_distinct_error()
     {
-        var resolver = new RepositoryWorkspaceResolver(db: null!, auth: null!);
+        var resolver = new RepositoryWorkspaceResolver(db: Infrastructure.EmptyTestDb.New(), auth: null!);
         var task = new AgentTask
         {
             Goal = "g",

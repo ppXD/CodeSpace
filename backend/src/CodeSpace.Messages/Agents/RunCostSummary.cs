@@ -25,6 +25,12 @@ public sealed record RunCostSummary
 
     /// <summary>How many of the counted runs could NOT be priced (no usage captured, or an unknown/blank model) — the fail-open honesty qualifier on the estimate.</summary>
     public int UnknownCostRuns { get; init; }
+
+    /// <summary>D1 — the run's BRAIN-PLANE spend: its supervisor decision calls, critic reviews, and acceptance graders (the <c>interaction.completed</c> ledger rows), priced. Null when the run recorded no priceable in-process model call. Kept SEPARATE from <see cref="EstimatedCostUsd"/> so neither displayed number changes meaning.</summary>
+    public decimal? BrainPlaneUsd { get; init; }
+
+    /// <summary>D1 — what the run ACTUALLY cost: <see cref="EstimatedCostUsd"/> + <see cref="BrainPlaneUsd"/>. Null only when NEITHER lane could be priced. Before this existed, the bill showed the coding agents' dollars and silently dropped the brain's.</summary>
+    public decimal? TotalUsd { get; init; }
 }
 
 /// <summary>
@@ -55,6 +61,12 @@ public sealed record TeamCostRollup
 
     /// <summary>True when <see cref="Runs"/> was bounded for payload size; the summed totals still cover the full window.</summary>
     public bool Truncated { get; init; }
+
+    /// <summary>D1 — the window's BRAIN-PLANE spend (supervisor decisions, critic reviews, acceptance graders), priced. Null when nothing in the window recorded a priceable in-process model call. Separate from <see cref="EstimatedCostUsd"/> so neither displayed number changes meaning.</summary>
+    public decimal? BrainPlaneUsd { get; init; }
+
+    /// <summary>D1 — what the window ACTUALLY cost: <see cref="EstimatedCostUsd"/> + <see cref="BrainPlaneUsd"/>. Null only when NEITHER lane could be priced.</summary>
+    public decimal? TotalUsd { get; init; }
 
     /// <summary>The per-run breakdown (most-recent first), possibly payload-bounded (see <see cref="Truncated"/>).</summary>
     public IReadOnlyList<RunCostSummary> Runs { get; init; } = Array.Empty<RunCostSummary>();

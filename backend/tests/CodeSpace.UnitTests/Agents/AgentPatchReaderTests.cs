@@ -31,7 +31,7 @@ public class AgentPatchReaderTests
     public async Task An_offloaded_patch_resolves_from_the_artifact_store_without_ever_reading_the_run_result()
     {
         var artifactId = Guid.NewGuid();
-        var reader = new AgentPatchReader(db: null!, new FakeOffloader((_, id) => id == artifactId ? "diff --git a/big b/big" : ""));
+        var reader = new AgentPatchReader(db: Infrastructure.EmptyTestDb.New(), new FakeOffloader((_, id) => id == artifactId ? "diff --git a/big b/big" : ""));
 
         var patch = await reader.ReadAsync(TeamId, new AgentPatchSource { AgentRunId = Guid.NewGuid(), RepositoryAlias = "primary", PatchArtifactId = artifactId }, CancellationToken.None);
 
@@ -44,7 +44,7 @@ public class AgentPatchReaderTests
     {
         var artifactId = Guid.NewGuid();
         var seen = new List<(string? Inline, Guid? ArtifactId)>();
-        var reader = new AgentPatchReader(db: null!, new FakeOffloader((inline, id) => { seen.Add((inline, id)); return "resolved"; }));
+        var reader = new AgentPatchReader(db: Infrastructure.EmptyTestDb.New(), new FakeOffloader((inline, id) => { seen.Add((inline, id)); return "resolved"; }));
 
         await reader.ReadAsync(TeamId, new AgentPatchSource { AgentRunId = Guid.NewGuid(), PatchArtifactId = artifactId }, CancellationToken.None);
 

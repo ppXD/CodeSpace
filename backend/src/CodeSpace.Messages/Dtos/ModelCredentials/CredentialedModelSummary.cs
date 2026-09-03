@@ -32,4 +32,10 @@ public sealed record CredentialedModelSummary
 
     /// <summary>Endpoint reachability (#774): <c>true</c> = last probe reached it, <c>false</c> = a self-hosted gateway that didn't respond (auto avoids it), <c>null</c> = not probed (a vendor model, assumed available). The picker shows a dot.</summary>
     public bool? Available { get; init; }
+
+    /// <summary>D1 — USD per 1,000,000 INPUT tokens, as the operator priced this model. Null = unpriced here (the pricer falls back to the env override, then the built-in table). A run with a cost cap CANNOT spend on a model that is unpriced everywhere.</summary>
+    public decimal? InputUsdPerMillion { get; init; }
+
+    /// <summary>D1 — USD per 1,000,000 OUTPUT tokens. Null = unpriced (see <see cref="InputUsdPerMillion"/>). BOTH must be set for the row to price a call.</summary>
+    public decimal? OutputUsdPerMillion { get; init; }
 }

@@ -53,5 +53,11 @@ public class ModelCredentialModel : IEntity<Guid>
     /// <summary>When <see cref="ProbedCapabilityTier"/> was last probed — the staleness gate (a days-long re-probe window; an opaque alias's backing model rarely changes). Null = never probed.</summary>
     public DateTimeOffset? LastProbedCapabilityAt { get; set; }
 
+    /// <summary>USD charged per 1,000,000 INPUT (prompt) tokens on this model, as the operator priced it. Null = unpriced here; the pricer then falls back to the env override table, then the built-in table. Together with <see cref="OutputUsdPerMillion"/> this is what makes a cost cap enforceable for a non-Claude pool model.</summary>
+    public decimal? InputUsdPerMillion { get; set; }
+
+    /// <summary>USD charged per 1,000,000 OUTPUT (completion) tokens on this model. Null = unpriced (see <see cref="InputUsdPerMillion"/>). BOTH must be set for the row to price a call — a half-filled row is not a price.</summary>
+    public decimal? OutputUsdPerMillion { get; set; }
+
     public ModelCredential Credential { get; set; } = default!;
 }

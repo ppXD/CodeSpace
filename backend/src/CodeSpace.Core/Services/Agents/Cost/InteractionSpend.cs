@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Messages.Agents;
 
 namespace CodeSpace.Core.Services.Agents.Cost;
 
@@ -17,8 +18,8 @@ namespace CodeSpace.Core.Services.Agents.Cost;
 /// </summary>
 public static class InteractionSpend
 {
-    /// <summary>Price one <c>interaction.completed</c> row. <see cref="CostUsd"/> is null when the model is unknown/unpriceable (fail-open, mirrors <see cref="AgentCostPricing.CostUsd"/>'s own null contract) — the caller sums only the known ones.</summary>
-    public static InteractionSpendRow From(WorkflowRunRecord record)
+    /// <summary>Price one <c>interaction.completed</c> row against the operator's per-row price table (D1; null = env + built-in tables only). <see cref="CostUsd"/> is null when the model is unknown/unpriceable (fail-open, mirrors <see cref="AgentCostPricing.CostUsd"/>'s own null contract) — the caller sums only the known ones.</summary>
+    public static InteractionSpendRow From(WorkflowRunRecord record, IReadOnlyDictionary<string, ModelPrice>? rowPrices = null)
     {
         var kind = ReadString(record, "kind");
         var model = ReadString(record, "model");
@@ -30,7 +31,7 @@ public static class InteractionSpend
             Model = model,
             InputTokens = input ?? 0,
             OutputTokens = output ?? 0,
-            CostUsd = string.IsNullOrWhiteSpace(model) ? null : AgentCostPricing.CostUsd(model, input ?? 0, output ?? 0),
+            CostUsd = string.IsNullOrWhiteSpace(model) ? null : AgentCostPricing.CostUsd(model, input ?? 0, output ?? 0, rowPrices),
         };
     }
 
@@ -84,19 +85,23 @@ public sealed record BrainPlaneSpendSummary
     public decimal TotalUsd { get; init; }
     public IReadOnlyDictionary<string, decimal> ByKind { get; init; } = new Dictionary<string, decimal>();
 
+    /// <summary>D1 — the FIRST named model whose brain-plane spend could NOT be priced, or null when every row priced. Under a cost cap this is not a cosmetic qualifier: it means <see cref="TotalUsd"/> UNDERSTATES the bill, so the cap cannot be enforced and the run must fail closed (<see cref="UnpricedModelUnderCap"/>).</summary>
+    public string? UnpricedModel { get; init; }
+
     public static readonly BrainPlaneSpendSummary Empty = new();
 
-    /// <summary>Fold a set of priced rows into the summary — sums ONLY the known-cost rows (fail-open), grouped by kind.</summary>
+    /// <summary>Fold a set of priced rows into the summary — sums ONLY the known-cost rows (fail-open), grouped by kind, and NAMES the first unpriceable model so a capped run can refuse to spend blind.</summary>
     public static BrainPlaneSpendSummary From(IReadOnlyList<InteractionSpendRow> rows)
     {
+        var unpriced = rows.FirstOrDefault(r => r.CostUsd is null && !string.IsNullOrWhiteSpace(r.Model))?.Model;
         var known = rows.Where(r => r.CostUsd is not null).ToList();
 
-        if (known.Count == 0) return Empty;
+        if (known.Count == 0) return unpriced is null ? Empty : new BrainPlaneSpendSummary { UnpricedModel = unpriced };
 
         var byKind = known
             .GroupBy(r => r.Kind, StringComparer.Ordinal)
             .ToDictionary(g => g.Key, g => g.Sum(r => r.CostUsd!.Value), StringComparer.Ordinal);
 
-        return new BrainPlaneSpendSummary { TotalUsd = byKind.Values.Sum(), ByKind = byKind };
+        return new BrainPlaneSpendSummary { TotalUsd = byKind.Values.Sum(), ByKind = byKind, UnpricedModel = unpriced };
     }
 }

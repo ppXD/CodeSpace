@@ -70,12 +70,27 @@ export const modelCredentialsApi = {
   /** Mark one model as the credential's default for an "auto" run (clears any other default on the same credential). */
   setDefaultModel: (credentialId: string, modelRowId: string) =>
     fetchJson<{ id: string }>(`/api/model-credentials/${encodeURIComponent(credentialId)}/models/${encodeURIComponent(modelRowId)}/default`, { method: "POST" }),
+
+  /** Price one model (USD per 1M input/output tokens), or clear it with both nulls. A run with a cost cap refuses to
+   *  spend on a model nobody can price, so this is what makes a cap enforceable for a model outside the built-in table. */
+  setModelPrice: (credentialId: string, modelRowId: string, input: ModelPriceInput) =>
+    fetchJson<{ id: string }>(`/api/model-credentials/${encodeURIComponent(credentialId)}/models/${encodeURIComponent(modelRowId)}/price`, { method: "PUT", body: JSON.stringify(input) }),
 };
+
+/** Body for pricing a model row. Both null clears the price; exactly one set is rejected by the backend. */
+export interface ModelPriceInput {
+  inputUsdPerMillion: number | null;
+  outputUsdPerMillion: number | null;
+}
 
 /** Body for adding a model to a credential (mirror of backend AddCredentialedModelCommand). */
 export interface AddCredentialedModelInput {
   modelId: string;
   displayName?: string | null;
+  /** USD per 1M input tokens. Carried on add so the editor's rename (a remove-then-add) never drops the price. */
+  inputUsdPerMillion?: number | null;
+  /** USD per 1M output tokens. */
+  outputUsdPerMillion?: number | null;
 }
 
 /** One model a credential can authenticate (mirror of backend CredentialedModelSummary). */
@@ -93,4 +108,8 @@ export interface CredentialedModelSummary {
   probedCapabilityTier?: "Unknown" | "Basic" | "Strong" | "Frontier" | null;
   /** Endpoint reachability: true = reachable, false = a self-hosted gateway that didn't respond (auto avoids it), null = not probed. */
   available?: boolean | null;
+  /** USD per 1M input tokens, as the operator priced it. Null = unpriced — a run with a cost cap cannot spend on it. */
+  inputUsdPerMillion?: number | null;
+  /** USD per 1M output tokens. Null = unpriced. */
+  outputUsdPerMillion?: number | null;
 }

@@ -571,8 +571,20 @@ public static class SupervisorOutcome
     /// Both contribute 0, so the strict <c>&gt;</c> cap is unaffected either way; the divergence only matters if a
     /// future change surfaces unknown-cost FROM the fold — align <see cref="ProjectCompact"/> then, not now.</para>
     /// </summary>
-    public static decimal SpendUsd(IReadOnlyList<SupervisorAgentResult> agentResults) =>
-        agentResults.Sum(r => AgentCostPricing.CostUsd(r.Model, r.InputTokens, r.OutputTokens) ?? 0m);
+    public static decimal SpendUsd(IReadOnlyList<SupervisorAgentResult> agentResults, IReadOnlyDictionary<string, Messages.Agents.ModelPrice>? rowPrices = null) =>
+        agentResults.Sum(r => AgentCostPricing.CostUsd(r.Model, r.InputTokens, r.OutputTokens, rowPrices) ?? 0m);
+
+    /// <summary>
+    /// D1 — the FIRST named model in these results whose spend could NOT be priced, or null when every named model
+    /// priced. Only a result that actually CONSUMED tokens counts: a zero-token compact (a result folded before the
+    /// token fields existed, or an agent that captured no usage) cost nothing to run whatever its model, so naming it
+    /// would force-stop capped runs on rows that spent nothing. Pure over the tape → replay-deterministic, exactly
+    /// like <see cref="SpendUsd"/> beside it.
+    /// </summary>
+    public static string? FirstUnpricedModel(IReadOnlyList<SupervisorAgentResult> agentResults, IReadOnlyDictionary<string, Messages.Agents.ModelPrice>? rowPrices = null) =>
+        agentResults
+            .Where(r => (r.InputTokens > 0 || r.OutputTokens > 0) && !string.IsNullOrWhiteSpace(r.Model))
+            .FirstOrDefault(r => AgentCostPricing.PriceFor(r.Model, rowPrices) is null)?.Model;
 
     /// <summary>
     /// True when a staging decision's folded agent results carry REAL settled EVIDENCE of forward progress — at

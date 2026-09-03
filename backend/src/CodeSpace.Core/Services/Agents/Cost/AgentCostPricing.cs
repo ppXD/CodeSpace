@@ -7,10 +7,16 @@ namespace CodeSpace.Core.Services.Agents.Cost;
 /// Turns a captured <see cref="AgentTokenUsage"/> into a USD cost by pricing the run's model (SOTA #4). Pure +
 /// static — no DB, no I/O — so it is unit-pinned and safe to call from a read query or the enforcement fold.
 ///
-/// <para><b>Fail-open on unknown</b> (the locked policy): a null/blank model, or a model with no price entry (Codex
-/// today, a brand-new model), returns <c>null</c> cost — NOT zero, NOT a throw. The caller treats null as
-/// "cost-unknown" (surfaced, never counted as over-budget), so a usage-silent harness or a new model can never
-/// spuriously force-stop a run; the hard agent-COUNT cap still bounds it.</para>
+/// <para><b>Resolution order</b>: the caller-supplied PER-ROW price table (what the operator typed next to the model
+/// in the model manager) → the <see cref="PriceTableEnvVar"/> override → the built-in table → unknown. The row table
+/// is handed IN (a plain dictionary a caller loaded from <c>IModelPriceResolver</c>) so this class stays pure and
+/// unit-pinned — it never touches the DB.</para>
+///
+/// <para><b>Fail-open on unknown</b> (the locked policy HERE): a null/blank model, or a model with no price entry,
+/// returns <c>null</c> cost — NOT zero, NOT a throw. The caller treats null as "cost-unknown". A run with NO cost cap
+/// is unaffected by that unknown. A run WITH a cap is a different matter: an unpriced model makes the cap
+/// unenforceable, so the admission points fail CLOSED via <see cref="UnpricedModelUnderCap"/> rather than spending
+/// blind — see that class for the policy.</para>
 ///
 /// <para><b>Prices DRIFT and the provider API does not expose them</b>, so the seeded default table is
 /// operator-correctable via the <see cref="PriceTableEnvVar"/> env override (Rule 8 — the const name is pinned by a
@@ -43,13 +49,13 @@ public static class AgentCostPricing
 
     /// <summary>
     /// The USD cost of <paramref name="inputTokens"/> + <paramref name="outputTokens"/> on <paramref name="model"/>,
-    /// or <c>null</c> when the model is null/blank/unknown (fail-open). Pure.
+    /// or <c>null</c> when the model is null/blank/unpriced (fail-open). Pure. <paramref name="rowPrices"/> is the
+    /// operator's per-model-row price table (from <c>IModelPriceResolver</c>) and WINS over the env + built-in tables;
+    /// omitting it is byte-identical to the pre-row behaviour.
     /// </summary>
-    public static decimal? CostUsd(string? model, int inputTokens, int outputTokens)
+    public static decimal? CostUsd(string? model, int inputTokens, int outputTokens, IReadOnlyDictionary<string, ModelPrice>? rowPrices = null)
     {
-        if (string.IsNullOrWhiteSpace(model)) return null;
-
-        if (!ResolveTable().TryGetValue(model.Trim(), out var price)) return null;
+        if (PriceFor(model, rowPrices) is not { } price) return null;
 
         // Clamp negative token counts to 0: a harness/corrupt result reporting a negative count must NEVER yield a
         // negative cost — that would SUBTRACT from the summed RunSpendUsd the cost cap reads, masking real spend.
@@ -59,9 +65,17 @@ public static class AgentCostPricing
         return input * price.InputPerMillionUsd / 1_000_000m + output * price.OutputPerMillionUsd / 1_000_000m;
     }
 
-    /// <summary>The effective price for <paramref name="model"/> (env override layered over the defaults), or null when unknown. Internal so it's unit-pinned.</summary>
-    internal static ModelPrice? PriceFor(string? model) =>
-        !string.IsNullOrWhiteSpace(model) && ResolveTable().TryGetValue(model.Trim(), out var price) ? price : null;
+    /// <summary>The effective price for <paramref name="model"/> in resolution order — the operator's per-row price, then the env override, then the built-in default — or null when the model is null/blank/unpriced everywhere. PUBLIC because the fail-closed admission points (<see cref="UnpricedModelUnderCap"/>) ask "is this model priceable?" without pricing a call.</summary>
+    public static ModelPrice? PriceFor(string? model, IReadOnlyDictionary<string, ModelPrice>? rowPrices = null)
+    {
+        if (string.IsNullOrWhiteSpace(model)) return null;
+
+        var name = model.Trim();
+
+        if (rowPrices is not null && rowPrices.TryGetValue(name, out var rowPrice)) return rowPrice;
+
+        return ResolveTable().TryGetValue(name, out var price) ? price : null;
+    }
 
     /// <summary>The seeded defaults overlaid by the lenient env CSV. Internal so a test can drive the env override + the malformed-entry tolerance.</summary>
     internal static IReadOnlyDictionary<string, ModelPrice> ResolveTable()

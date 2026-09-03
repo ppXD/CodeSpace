@@ -4,7 +4,7 @@ import { createPortal } from "react-dom";
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { ModelCredentialSummary } from "@/api/modelCredentials";
 import { ApiError } from "@/api/request";
-import { useCredentialedModelList, useRefreshCredentialedModels, useSaveCredentialedModels, useSetDefaultCredentialedModel } from "@/hooks/use-model-credentials";
+import { parsePrice, useCredentialedModelList, useRefreshCredentialedModels, useSaveCredentialedModels, useSetCredentialedModelPrice, useSetDefaultCredentialedModel } from "@/hooks/use-model-credentials";
 import { providerForm } from "@/lib/providerForms";
 
 import { ModelRowsEditor, type ModelRow } from "./ModelRowsEditor";
@@ -24,6 +24,7 @@ export function ModelCredentialModelsModal({ credential, onClose }: ModelCredent
   const refresh = useRefreshCredentialedModels(credential.id);
   const save = useSaveCredentialedModels(credential.id);
   const setDefault = useSetDefaultCredentialedModel(credential.id);
+  const setPrice = useSetCredentialedModelPrice(credential.id);
 
   const [rows, setRows] = useState<ModelRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -33,7 +34,16 @@ export function ModelCredentialModelsModal({ credential, onClose }: ModelCredent
   const [syncedData, setSyncedData] = useState<unknown>(undefined);
   if (list.data !== syncedData) {
     setSyncedData(list.data);
-    setRows(list.data ? list.data.map(m => ({ id: m.id, modelId: m.modelId, displayName: m.displayName ?? "", isDefault: m.isDefault })) : null);
+    setRows(list.data
+      ? list.data.map(m => ({
+        id: m.id,
+        modelId: m.modelId,
+        displayName: m.displayName ?? "",
+        isDefault: m.isDefault,
+        inputUsdPerMillion: m.inputUsdPerMillion?.toString() ?? "",
+        outputUsdPerMillion: m.outputUsdPerMillion?.toString() ?? "",
+      }))
+      : null);
   }
 
   useEffect(() => {
@@ -52,6 +62,17 @@ export function ModelCredentialModelsModal({ credential, onClose }: ModelCredent
     setError(null);
     setRows(rs => rs?.map(r => ({ ...r, isDefault: r.id === rowId })) ?? rs);   // optimistic: flip the star without a refetch that would wipe unsaved edits
     setDefault.mutate(rowId, { onError });
+  };
+  const doSetPrice = (rowId: string, row: ModelRow) => {
+    const input = parsePrice(row.inputUsdPerMillion);
+    const output = parsePrice(row.outputUsdPerMillion);
+
+    // Half a price is not a price — the backend rejects it, so don't send it. The operator sees the hint on the
+    // still-blank field and finishes the pair; only a complete pair (or a cleared pair) is committed.
+    if ((input === null) !== (output === null)) return;
+
+    setError(null);
+    setPrice.mutate({ modelRowId: rowId, input: { inputUsdPerMillion: input, outputUsdPerMillion: output } }, { onError });
   };
 
   return createPortal(
@@ -76,7 +97,7 @@ export function ModelCredentialModelsModal({ credential, onClose }: ModelCredent
 
           {list.isLoading && rows === null && <div className="mc-models-empty">Loading…</div>}
           {list.error instanceof ApiError && <div className="mc-models-empty">Couldn't load models — {list.error.message}</div>}
-          {rows !== null && <ModelRowsEditor rows={rows} onChange={setRows} onSetDefault={doSetDefault} />}
+          {rows !== null && <ModelRowsEditor rows={rows} onChange={setRows} onSetDefault={doSetDefault} onSetPrice={doSetPrice} />}
 
           {error && <div className="mc-models-err">{error}</div>}
         </div>

@@ -88,11 +88,22 @@ public sealed record SupervisorTurnContext
     /// <summary>P3.5 — the SPAWNED-AGENT (coding harness) share of <see cref="RunSpendUsd"/> — every prior spawn/retry decision's folded agent token usage, priced. Broken out from the brain-plane share so the recitation/stop-detail can show a real breakdown, not just one merged figure.</summary>
     public decimal AgentExecutionSpendUsd { get; init; }
 
-    /// <summary>P3.5 — the IN-PROCESS MODEL-CALL share of <see cref="RunSpendUsd"/>: the supervisor's own decision calls, a decision critic's review, a plan-authoring call, an acceptance-grading judge — every <c>interaction.completed</c> ledger row this run recorded, priced. 0 when no cost cap is set (the fold is skipped entirely — zero DB cost for the common uncapped run).</summary>
+    /// <summary>P3.5 — the IN-PROCESS MODEL-CALL share of <see cref="RunSpendUsd"/>: the supervisor's own decision calls, a decision critic's review, a plan-authoring call, an acceptance-grading judge — every <c>interaction.completed</c> ledger row this run recorded, priced. D1: folded for EVERY run, capped or not — the brain's dollars are part of the bill whether or not anyone set a limit on it.</summary>
     public decimal BrainPlaneSpendUsd { get; init; }
 
-    /// <summary>P3.5 — <see cref="BrainPlaneSpendUsd"/> broken out by its open <c>kind</c> label (e.g. <c>"supervisor.decision"</c>, <c>"critic.review"</c>, <c>"grader.acceptance"</c>) — the per-lane figures the budget recitation and the cost-cap stop detail both render. Empty when no cost cap is set.</summary>
+    /// <summary>P3.5 — <see cref="BrainPlaneSpendUsd"/> broken out by its open <c>kind</c> label (e.g. <c>"supervisor.decision"</c>, <c>"critic.review"</c>, <c>"grader.acceptance"</c>) — the per-lane figures the budget recitation and the cost-cap stop detail both render.</summary>
     public IReadOnlyDictionary<string, decimal> BrainPlaneSpendByKind { get; init; } = EmptySpendByKind;
+
+    /// <summary>
+    /// D1 — the NAME of a model this run has already spent on that NOBODY can price (no per-row price, no env entry,
+    /// no built-in entry), or null when every spend priced. It means <see cref="RunSpendUsd"/> UNDERSTATES the bill by
+    /// an unknown amount. On an UNCAPPED run that is merely a reporting qualifier; on a CAPPED one the cap is
+    /// unenforceable, so the bounds force-STOP rather than keep spending blind (<c>UnpricedModelUnderCap</c>).
+    /// </summary>
+    public string? UnpricedSpendModel { get; init; }
+
+    /// <summary>D1 — the team's operator-typed per-model prices (<c>IModelPriceResolver</c>), folded on rehydrate so every downstream pricing + admission read in this turn resolves a pool model the built-in table never heard of. Empty = no team row is priced; the env + built-in tables still apply.</summary>
+    public IReadOnlyDictionary<string, ModelPrice> ModelPrices { get; init; } = EmptyModelPrices;
 
     /// <summary>P3.5 — the run's realized-spend cap in USD (carried from <c>SupervisorGoalPlan.MaxCostUsd</c> so the DECIDER can recite it — <c>DecideAsync</c> receives only this context, never the plan). Null = no cost cap; the budget recitation renders nothing.</summary>
     public decimal? MaxCostUsd { get; init; }
@@ -104,6 +115,8 @@ public sealed record SupervisorTurnContext
     public int? MaxResolveAttempts { get; init; }
 
     private static readonly IReadOnlyDictionary<string, decimal> EmptySpendByKind = new Dictionary<string, decimal>();
+
+    private static readonly IReadOnlyDictionary<string, ModelPrice> EmptyModelPrices = new Dictionary<string, ModelPrice>(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// How many of the MOST RECENT consecutive decisions produced NO new SETTLED agent result, folded from the

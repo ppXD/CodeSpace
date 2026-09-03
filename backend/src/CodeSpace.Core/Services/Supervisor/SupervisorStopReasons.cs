@@ -15,6 +15,9 @@ public static class SupervisorStopReasons
     /// <summary>The run's REALIZED spend (summed agent token cost) EXCEEDED <c>MaxCostUsd</c> (SOTA #4) — a further spend-incurring decision is refused. Realized-spend backpressure: exactly-at-budget proceeds, spend ABOVE budget force-STOPs (a terminal stop salvages already-paid-for work).</summary>
     public const string CostCapReached = "cost cap reached";
 
+    /// <summary>D1: the run declares <c>MaxCostUsd</c> but has spent on a model NOBODY can price, so the summed spend the cap compares against understates the real bill by an unknown amount — the cap is unenforceable. A further spend-incurring decision is refused fail-CLOSED (the alternative is the refutation this exists to prevent: a capped run that spends past its cap and terminalizes Success). The stop's DETAIL names the model + the remedy.</summary>
+    public const string UnpricedModelUnderCap = "unpriced model under cost cap";
+
     /// <summary>A single spawn decision's fan-out (K) exceeds the per-decision cap (<c>MaxParallelism</c> ≤ the schema maxItems) — refused.</summary>
     public const string SpawnFanOutExceedsCap = "spawn fan-out exceeds cap";
 

@@ -55,6 +55,12 @@ public static class SupervisorBounds
 
         if (context.TotalSpawnedAgents + k > plan.MaxTotalSpawns) return SupervisorStopReasons.TotalSpawnCapReached;
 
+        // D1 fail-CLOSED, and BEFORE the cap comparison below because it invalidates that comparison: this run already
+        // spent on a model nobody can price, so RunSpendUsd is an underestimate of unknown size and "spend > cap" can
+        // read false forever. Refusing here is what stops a $5-capped Codex run from spending unbounded and finishing
+        // Success. An UNCAPPED run is untouched (the predicate needs a cap) — a null cost stays null and nothing blocks.
+        if (plan.MaxCostUsd is not null && context.UnpricedSpendModel is not null) return SupervisorStopReasons.UnpricedModelUnderCap;
+
         // SOTA #4: realized-spend backpressure. STRICT > matches the total-spawn convention above (exactly-at-budget
         // still proceeds; spend that has ALREADY EXCEEDED the cap stops the next spend-incurring decision). Spend lands
         // only at agent completion, so this sees the PRIOR wave's realized cost — worst-case overshoot is one wave.
