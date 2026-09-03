@@ -36,9 +36,10 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
     private readonly ICompletionContractStore _contracts;
     private readonly ICompletionHandoffProbe _handoff;
     private readonly IModeProfileRegistry _modes;
+    private readonly IRunScorecardWriter _scorecards;
     private readonly ILogger<CompletionShadowService> _logger;
 
-    public CompletionShadowService(CodeSpaceDbContext db, ICompletionAssessmentComposer composer, IPublishManifestStore manifests, ICompletionContractStore contracts, ICompletionHandoffProbe handoff, IModeProfileRegistry modes, ILogger<CompletionShadowService> logger)
+    public CompletionShadowService(CodeSpaceDbContext db, ICompletionAssessmentComposer composer, IPublishManifestStore manifests, ICompletionContractStore contracts, ICompletionHandoffProbe handoff, IModeProfileRegistry modes, IRunScorecardWriter scorecards, ILogger<CompletionShadowService> logger)
     {
         _db = db;
         _composer = composer;
@@ -46,6 +47,7 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
         _contracts = contracts;
         _handoff = handoff;
         _modes = modes;
+        _scorecards = scorecards;
         _logger = logger;
     }
 
@@ -114,9 +116,32 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
             {
                 _logger.LogWarning(ex, "Shadow assessment failed for run {RunId}; the sweep continues — the run stays a candidate", run.Id);
             }
+
+            await ProjectScorecardAsync(run.Id, run.TeamId, cancellationToken).ConfigureAwait(false);
         }
 
         return appended;
+    }
+
+    /// <summary>
+    /// A4: project the run's durable north-star row (<c>run_scorecard</c>) AFTER its assessment settled — this sweep
+    /// is the seam every terminal contract-era run passes through, and the assessment this pass just wrote is where
+    /// the row's <c>solved</c> bit comes from. Idempotent by run, so it runs on every pass through a candidate
+    /// whether or not the assessment itself changed.
+    ///
+    /// <para>Best-effort by design: the row is OBSERVATION-ONLY (nothing in the engine reads it), so a projection
+    /// fault must never cost the sweep its assessment work. The run stays a candidate for the bounded backfill.</para>
+    /// </summary>
+    private async Task ProjectScorecardAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _scorecards.WriteAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Run scorecard projection failed for run {RunId}; the sweep continues — the backfill job retries it", runId);
+        }
     }
 
     private async Task<bool> RecordAsync(Guid runId, Guid teamId, WorkflowRunStatus status, CancellationToken cancellationToken)

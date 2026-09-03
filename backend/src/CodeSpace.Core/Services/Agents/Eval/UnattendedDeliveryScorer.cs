@@ -12,6 +12,15 @@ namespace CodeSpace.Core.Services.Agents.Eval;
 /// </summary>
 public static class UnattendedDeliveryScorer
 {
+    /// <summary>
+    /// The scorer CONTRACT this class implements, stamped onto every durable <c>run_scorecard</c> row so a rate is
+    /// never silently compared across two different definitions of "solved with delivery". BUMP IT whenever
+    /// <see cref="Score"/>'s headline predicate changes — a persisted trend spanning a definition change is not a
+    /// trend, it is two measurements wearing one line. Pinned by a unit test: renaming or drifting the literal
+    /// makes every existing row's provenance a lie, so it must be a deliberate, test-visible edit.
+    /// </summary>
+    public const string ScorerVersion = "unattended-delivery/v1";
+
     public static UnattendedDeliveryScorecard Compute(IReadOnlyList<UnattendedDeliveryRunOutcome> runs) =>
         Build(runs.Select(Score).ToList());
 

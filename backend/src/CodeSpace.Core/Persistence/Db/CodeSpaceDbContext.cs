@@ -122,6 +122,12 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork, IDataProtectionKeyCont
     public DbSet<CompletionAssessmentRecord> CompletionAssessmentRecord => Set<CompletionAssessmentRecord>();
     public DbSet<BudgetReservation> BudgetReservation => Set<BudgetReservation>();
 
+    /// <summary>A4: the durable north-star row per terminal run (observation-only, upserted by run) — what makes "the rate went from X to Y" answerable.</summary>
+    public DbSet<RunScorecard> RunScorecard => Set<RunScorecard>();
+
+    /// <summary>A4: one row per benchmark (task × mode) cell the corpus runner ran (append-only, observation-only).</summary>
+    public DbSet<BenchmarkResultRecord> BenchmarkResultRecord => Set<BenchmarkResultRecord>();
+
     /// <summary>The shared ASP.NET Data Protection key-ring (<see cref="IDataProtectionKeyContext"/>) — persisted in Postgres so every API/worker pod decrypts the same credentials. Mapped to <c>data_protection_keys</c> below; the table is created by DbUp 0074.</summary>
     public DbSet<DataProtectionKey> DataProtectionKeys => Set<DataProtectionKey>();
 

@@ -206,6 +206,14 @@ public class AgentsController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>A4: the north-star OVER TIME — daily buckets (runs, rate, spend) plus the lesson A/B slices, read from the DURABLE per-run scorecard rows rather than recomputed. The question the live scorecard cannot answer: it scores the most recent 100 runs and discards the result, so "the rate went from X to Y" had no source. Team-scoped (the team is the X-Team-Id header, never the query string); a window with no persisted rows comes back empty rather than as a fabricated flat line.</summary>
+    [HttpGet("scorecard-trend")]
+    public async Task<IActionResult> GetScorecardTrend([FromQuery] GetScorecardTrendQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     /// <summary>Q4 (SOTA-claim gate): the qualification claim board — every registered (mode × capability) pair's measured performance standing, resolved from the immutable qualification-receipt ledger at read time. Sealed appears only while a current sealed receipt backs it (receipt id + suite digest + expiry on the row); expiry or revocation downgrades the board with no code change. Platform-level; any team member may read.</summary>
     /// <summary>Q-ops: mint ONE qualification round against the operator-staged hidden suite on this worker host. Spends real model budget and appends a durable receipt — global-admin only; the paying team is the X-Team-Id header. An absent suite is a 500 naming the misconfiguration, never a silent pass.</summary>
     [HttpPost("qualification-rounds")]
