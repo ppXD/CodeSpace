@@ -111,6 +111,45 @@ public sealed record UnattendedDeliveryRollup
 
     /// <summary>Contract-era runs with NO metric@1 verdict yet — no shadow assessment row, or a pre-projection row. They count in every denominator and never as solved; the shadow sweep converges them.</summary>
     public int UnassessedRuns { get; init; }
+
+    /// <summary>
+    /// A4: the SAME window sliced by the Arc-D lesson A/B arm — one entry per arm actually present. The arm has been
+    /// recorded per supervisor decision since Arc D and surfaced per run on <see cref="SupervisorEvalScorecard"/>,
+    /// but no rollup ever divided a RATE by it, so lesson injection's effect on the north-star had never been
+    /// measured. Empty when the window holds no runs.
+    /// </summary>
+    public IReadOnlyList<LessonArmSlice> ByLessonArm { get; init; } = Array.Empty<LessonArmSlice>();
+}
+
+/// <summary>
+/// One run reduced to the two fields a by-arm slice needs: which lesson A/B arm it ran under, and its already-scored
+/// north-star bits. A data noun (Rule 18.1) so <c>LessonArmSlicer</c> stays pure + DB-free.
+/// </summary>
+public sealed record ArmedRunScore
+{
+    /// <summary>The <c>LessonArms</c> value the run ran under (<c>injected</c> / <c>withheld</c> / <c>none</c>), or null when the run has no decision ledger at all (a single-agent or plan-map run) — null and <c>none</c> are DISTINCT: one is "not measurable", the other is "measured as the empty-lesson control".</summary>
+    public string? LessonArm { get; init; }
+
+    public required bool Solved { get; init; }
+    public required bool Delivered { get; init; }
+    public required bool UnattendedSolvedWithDelivery { get; init; }
+}
+
+/// <summary>
+/// The north-star rate over ONE lesson A/B arm — the slice that turns "the arm is recorded" into "the arm is
+/// measured". <see cref="Arm"/> is a <c>LessonArms</c> value, or <c>unmeasured</c> for the runs that carry no arm at
+/// all; the arms are never merged, because an absent arm is not the same claim as the <c>none</c> control.
+/// </summary>
+public sealed record LessonArmSlice
+{
+    public required string Arm { get; init; }
+    public required int Runs { get; init; }
+    public required int SolvedRuns { get; init; }
+    public required int DeliveredRuns { get; init; }
+    public required int UnattendedSolvedWithDeliveryRuns { get; init; }
+
+    /// <summary><see cref="UnattendedSolvedWithDeliveryRuns"/> / <see cref="Runs"/>, in 0..1. <see cref="Runs"/> is never 0 (an arm with no runs has no slice).</summary>
+    public required double UnattendedSolveWithDeliveryRate { get; init; }
 }
 
 /// <summary>The team's unattended-delivery scorecard — the cross-run north-star roll-up plus recent per-run scores. The north-star-metric analogue of <see cref="SupervisorScorecard"/> / <see cref="AgentRunScorecard"/>.</summary>

@@ -59,7 +59,7 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
         var latestAssessments = await LatestAssessmentsAsync(teamId, runIds, cancellationToken).ConfigureAwait(false);
 
         var manifestsByRun = await _manifests.ListForWorkflowRunsAsync(runIds, teamId, cancellationToken).ConfigureAwait(false);
-        var typedDeliveredRuns = await TypedDeliveredRunIdsAsync(runIds, teamId, cancellationToken).ConfigureAwait(false);
+        var typedDeliveredRuns = await TypedDeliveredRunIdsAsync(_db, runIds, teamId, cancellationToken).ConfigureAwait(false);
         var touchesByRun = await _humanTouches.CountByWorkflowRunAsync(runIds, teamId, cancellationToken).ConfigureAwait(false);
         var costsByRun = await _cost.ComputeRunsAsync(teamId, runIds, cancellationToken).ConfigureAwait(false);
         var degradedStopRuns = await DegradedStopRunIdsAsync(_db, runIds, teamId, cancellationToken).ConfigureAwait(false);
@@ -84,10 +84,13 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
             .Where(a => a.WouldBeTerminalDecision == nameof(Messages.Contracts.TerminalDecision.CleanSuccess))
             .ToList();
 
+        var byLessonArm = await SliceByLessonArmAsync(teamId, runIds, card.Runs, cancellationToken).ConfigureAwait(false);
+
         return card with
         {
             Rollup = card.Rollup with
             {
+                ByLessonArm = byLessonArm,
                 LegacyRuns = legacyRuns,
                 SuspendedRuns = suspendedRuns,
                 AssessedRuns = latestAssessments.Count,
@@ -122,6 +125,34 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
     }
 
     private readonly record struct LatestAssessment(string Outcome, string? WouldBeTerminalDecision, string? MetricOutcome, string? RunMode, string? CapabilityKey);
+
+    /// <summary>
+    /// A4: the window divided by the Arc-D lesson A/B arm — the fold that turns "the arm is recorded on every
+    /// supervisor decision" into "the arm is MEASURED against the north-star". Nothing sliced a rate by it before,
+    /// so injection's effect had never been measured at all.
+    ///
+    /// <para>A run's arm + bits come from its DURABLE <c>run_scorecard</c> row when one exists; a run without one
+    /// falls back to the live score computed just above plus one batched read of its decision ledger's frozen arm.
+    /// So an empty table degrades to a purely live slice rather than an empty one, and a partly-filled table never
+    /// reports a partial population — the slice's denominator always equals the rollup's.</para>
+    /// </summary>
+    private async Task<IReadOnlyList<LessonArmSlice>> SliceByLessonArmAsync(Guid teamId, IReadOnlyList<Guid> runIds, IReadOnlyList<UnattendedDeliveryRunScore> liveScores, CancellationToken cancellationToken)
+    {
+        var persisted = await _db.RunScorecard.AsNoTracking()
+            .Where(s => s.TeamId == teamId && runIds.Contains(s.WorkflowRunId))
+            .Select(s => new { s.WorkflowRunId, s.LessonArm, s.Solved, s.Delivered, s.UnattendedSolvedWithDelivery })
+            .ToDictionaryAsync(s => s.WorkflowRunId, cancellationToken).ConfigureAwait(false);
+
+        var liveArms = await RunLessonArms.ReadAsync(_db, runIds, teamId, cancellationToken).ConfigureAwait(false);
+
+        var rows = liveScores
+            .Select(score => persisted.TryGetValue(score.WorkflowRunId, out var row)
+                ? new ArmedRunScore { LessonArm = row.LessonArm, Solved = row.Solved, Delivered = row.Delivered, UnattendedSolvedWithDelivery = row.UnattendedSolvedWithDelivery }
+                : new ArmedRunScore { LessonArm = liveArms.GetValueOrDefault(score.WorkflowRunId), Solved = score.Solved, Delivered = score.Delivered, UnattendedSolvedWithDelivery = score.UnattendedSolvedWithDelivery })
+            .ToList();
+
+        return LessonArmSlicer.Slice(rows);
+    }
 
     /// <summary>
     /// The team's recent TERMINAL runs (most-recent first by CreatedDate), capped at <see cref="RecentRunCap"/> and
@@ -224,9 +255,9 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
     private static bool IsDelivered(IReadOnlyList<PublishManifest> manifests) =>
         manifests.Any(m => m.PublishStateValue == PublishState.Pushed || m.PullRequestNumber != null);
 
-    /// <summary>The runs whose attempts captured at least one CURRENT typed artifact — the repo-less lane's delivery fact (a superseded row alone is history, not an arrival).</summary>
-    private async Task<HashSet<Guid>> TypedDeliveredRunIdsAsync(IReadOnlyList<Guid> runIds, Guid teamId, CancellationToken cancellationToken) =>
-        (await _db.ArtifactManifest.AsNoTracking()
+    /// <summary>The runs whose attempts captured at least one CURRENT typed artifact — the repo-less lane's delivery fact (a superseded row alone is history, not an arrival). Static + db-taking (mirroring <see cref="DegradedStopRunIdsAsync"/>) so the durable per-run writer reads the SAME predicate instead of forking a second one.</summary>
+    public static async Task<HashSet<Guid>> TypedDeliveredRunIdsAsync(CodeSpaceDbContext db, IReadOnlyList<Guid> runIds, Guid teamId, CancellationToken cancellationToken) =>
+        (await db.ArtifactManifest.AsNoTracking()
             .Where(m => m.TeamId == teamId && m.WorkflowRunId != null && runIds.Contains(m.WorkflowRunId.Value) && m.SupersededByManifestId == null)
             .Select(m => m.WorkflowRunId!.Value)
             .Distinct()
