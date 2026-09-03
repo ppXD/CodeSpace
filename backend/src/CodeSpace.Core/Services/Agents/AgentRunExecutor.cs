@@ -278,7 +278,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // project it onto the harness's env vars. The secret lives only in this in-memory effectiveTask →
             // SandboxSpec.Environment; it is NEVER re-persisted (CompleteAsync writes only the result). The
             // redactor (keyed on the decrypted key) strips it from any echoed event / error before it persists.
-            var (secretEnv, secretRedactor, modelBaseUrl, modelProvider, defaultModel) = await ResolveModelCredentialEnvAsync(task, run.TeamId, harness, cancellationToken).ConfigureAwait(false);
+            var (secretEnv, secretRedactor, modelBaseUrl, modelProvider, defaultModel, modelCredentialId) = await ResolveModelCredentialEnvAsync(task, run.TeamId, harness, cancellationToken).ConfigureAwait(false);
             redactor = secretRedactor;
 
             // An "auto" run (no pinned model) falls back to the resolved credential's own default model, so a custom
@@ -297,15 +297,21 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // D3: an escalation the DISPATCHER already decided this attempt owes — the agent.run node's respawn after
             // an attempt whose own evidence said the MODEL was the limit. It arrives as a request (why + the prior
             // model, the tier floor) because only the executor reads the credentialed pool. Resolved HERE, after the
-            // credential resolve, so the pick is bounded to the credential/provider already in hand — which is what
-            // keeps the decrypted key, the egress base URL and the reconciled harness valid for the escalated model.
+            // credential resolve, so the pick is bounded to the very credential ROW whose key is now in this
+            // sandbox's environment — which is what keeps that key, the egress base URL and the reconciled harness
+            // valid for the escalated model without re-resolving any of them.
             var escalation = task.Escalation is { } requested
-                ? await ResolveEscalationAsync(requested.Reason, task, run.TeamId, modelProvider, requested.From ?? effectiveModel, cancellationToken).ConfigureAwait(false)
+                ? await ResolveEscalationAsync(requested.Reason, run.TeamId, modelCredentialId, modelProvider, requested.From ?? effectiveModel, cancellationToken).ConfigureAwait(false)
                 : null;
+
+            // A no-op escalation is announced ONCE per run: the fact that this team has nothing stronger does not
+            // change between rounds, and repeating it every round would bury the round's real reason under noise.
+            var noStrongerModelNoted = false;
 
             if (escalation is not null)
             {
                 effectiveTask = ApplyEscalation(effectiveTask, escalation);
+                noStrongerModelNoted = escalation.To is null;
                 await AppendEscalationEventAsync(agentRunId, escalation, cancellationToken).ConfigureAwait(false);
 
                 // Surface the escalated model on the run the same way the resolved model is surfaced above — the
@@ -413,11 +419,24 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 // expecting a different answer. A pool with nothing stronger records the fact and changes nothing.
                 if (EscalationReasonFor(result) is { } escalationReason)
                 {
-                    escalation = await ResolveEscalationAsync(escalationReason, effectiveTask, run.TeamId, modelProvider, dispatchedModel, cancellationToken).ConfigureAwait(false);
+                    escalation = await ResolveEscalationAsync(escalationReason, run.TeamId, modelCredentialId, modelProvider, dispatchedModel, cancellationToken).ConfigureAwait(false);
                     reviseTask = ApplyEscalation(reviseTask, escalation);
-                    dispatchedModel = reviseTask.Model;
 
-                    await AppendEscalationEventAsync(agentRunId, escalation, cancellationToken).ConfigureAwait(false);
+                    if (escalation.To is { Length: > 0 })
+                    {
+                        dispatchedModel = reviseTask.Model;
+                        await AppendEscalationEventAsync(agentRunId, escalation, cancellationToken).ConfigureAwait(false);
+
+                        // Keep the PERSISTED envelope truthful per round, not just at launch: the identity strip
+                        // reads it live, and it is the fallback floor a later attempt's escalation measures from
+                        // when the harness's own stream never names a model.
+                        await PersistResolvedModelAsync(agentRunId, task with { Model = dispatchedModel }, cancellationToken).ConfigureAwait(false);
+                    }
+                    else if (!noStrongerModelNoted)
+                    {
+                        noStrongerModelNoted = true;
+                        await AppendEscalationEventAsync(agentRunId, escalation, cancellationToken).ConfigureAwait(false);
+                    }
                 }
 
                 var reviseSpec = HardenSpec(harness.BuildInvocation(AugmentToolsForMcp(reviseTask, mcp, mcpWiring)) with { Mcp = mcpWiring }, reviseTask, modelBaseUrl, modelProvider, workspaceProvision);
@@ -444,6 +463,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // actually ended on. A record whose To is null (nothing in the pool beat the floor) still lands: the
             // one-model case must read as "we tried to reach higher and could not", never as silence.
             if (escalation is not null) result = result with { ModelEscalation = escalation };
+
+            // The run is OVER and its evidence still says the model was the limit — so the escalation this run can
+            // no longer spend belongs to the NEXT attempt. Resolved here rather than left for the respawning node
+            // to derive: only the executor reads the pool, and the answer decides whether the failure is worth
+            // respawning at all (a null To means a respawn would re-burn the identical model, and stays
+            // deterministic). Costs one bounded read, and only on a run that already failed its own check.
+            if (EscalationReasonFor(result) is { } nextReason)
+                result = result with { ProposedEscalation = await ResolveEscalationAsync(nextReason, run.TeamId, modelCredentialId, modelProvider, dispatchedModel, cancellationToken).ConfigureAwait(false) };
 
             // P0-B2: stamp what the fabric ACTUALLY did — observed off the live endpoint while it is still open
             // (the await-using disposes it at scope end). The re-attach path deliberately leaves this null: the
@@ -1639,29 +1666,40 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// tier, <c>IsDefault</c>-first among the qualifying candidates, Frontier allowed (escalating is exactly the
     /// case that earns the priciest tier).
     ///
-    /// <para>The pool is BOUNDED so the escalated model stays runnable on everything already resolved for this
-    /// attempt: to the PINNED credential's own models when the task names one (the operator/supervisor chose that
-    /// key — the escalation overrides the MODEL choice, never the credential one), else to the resolved credential's
-    /// PROVIDER, so the decrypted key, the egress base URL and the harness↔provider reconciliation all remain valid
-    /// by construction and no re-reconcile is needed. Unbounded only when no credential resolved at all, where
-    /// there is nothing to stay compatible with.</para>
+    /// <para>The pool is BOUNDED to the CREDENTIAL ROW whose key is already in this sandbox's environment
+    /// (<paramref name="credentialId"/>) — never merely to its provider. A team can credential one provider twice (a
+    /// direct vendor key and a gateway with its own base URL and model family), so a provider-wide bound could hand
+    /// the escalated model a key and endpoint that never served it, silently breaking the resolver's own guarantee
+    /// that a model id and its key come from the same row. Bounding to the row keeps the decrypted key, the egress
+    /// base URL and the harness↔provider reconciliation valid by construction, so escalation NEVER crosses
+    /// providers or credentials and nothing needs re-resolving. Only the operator-global key (no row) falls back to
+    /// its provider, and only a run with no credential at all is unbounded — there is then no key to be
+    /// inconsistent with.</para>
+    ///
+    /// <para>Known-unavailable rows are soft-filtered out first, the same anti-strand rule
+    /// <see cref="ModelCredentials.ModelPoolSelector"/> applies to every other unpinned auto-pick (<c>Available !=
+    /// false</c> keeps never-probed rows preferred; the full set stands when EVERY candidate is known-dead, since a
+    /// maybe-dead stronger model still beats no escalation).</para>
     ///
     /// <para>Always returns a record — a null pick is the OUTCOME "nothing stronger exists", not an absence.</para>
     /// </summary>
-    private async Task<AgentModelEscalation> ResolveEscalationAsync(string reason, AgentTask task, Guid teamId, string? provider, string? priorModel, CancellationToken cancellationToken)
+    private async Task<AgentModelEscalation> ResolveEscalationAsync(string reason, Guid teamId, Guid? credentialId, string? provider, string? priorModel, CancellationToken cancellationToken)
     {
         var rows = await _db.ModelCredentialModel.AsNoTracking()
             .Where(m => m.Enabled && m.Credential.TeamId == teamId && m.Credential.DeletedDate == null && m.Credential.Status == CredentialStatus.Active)
-            .Select(m => new { m.ModelId, m.IsDefault, m.CapabilityTier, m.ProbedCapabilityTier, m.ModelCredentialId, m.Credential.Provider })
+            .Select(m => new { m.ModelId, m.IsDefault, m.CapabilityTier, m.ProbedCapabilityTier, m.Available, m.ModelCredentialId, m.Credential.Provider })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         // Provider matching in memory + case-insensitively: the pool is a team's handful of rows, and a provider tag
         // stored with different casing under two credentials must not silently shrink the candidate set.
-        var bounded = task.ModelCredentialId is { } pinned ? rows.Where(m => m.ModelCredentialId == pinned).ToList()
+        var bounded = credentialId is { } row ? rows.Where(m => m.ModelCredentialId == row).ToList()
             : provider is { Length: > 0 } ? rows.Where(m => string.Equals(m.Provider, provider, StringComparison.OrdinalIgnoreCase)).ToList()
             : rows;
 
-        var picked = SupervisorRetryEscalation.PickStrongerModel(bounded, m => m.IsDefault, m => m.ProbedCapabilityTier, m => m.CapabilityTier, m => m.ModelId, priorModel)?.ModelId;
+        var reachable = bounded.Where(m => m.Available != false).ToList();
+        var candidates = reachable.Count > 0 ? reachable : bounded;
+
+        var picked = SupervisorRetryEscalation.PickStrongerModel(candidates, m => m.IsDefault, m => m.ProbedCapabilityTier, m => m.CapabilityTier, m => m.ModelId, priorModel)?.ModelId;
 
         return new AgentModelEscalation { From = priorModel, To = picked, Reason = reason };
     }
@@ -2367,7 +2405,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// run then relies on whatever env the runner already provides. A PINNED-but-unresolvable credential throws
     /// (the executor's catch lands a clean Failed), never silently using a different key.
     /// </summary>
-    private async Task<(IReadOnlyDictionary<string, string> Env, SecretRedactor Redactor, string? ModelBaseUrl, string? ModelProvider, string? DefaultModel)> ResolveModelCredentialEnvAsync(AgentTask task, Guid teamId, IAgentHarness harness, CancellationToken cancellationToken)
+    private async Task<(IReadOnlyDictionary<string, string> Env, SecretRedactor Redactor, string? ModelBaseUrl, string? ModelProvider, string? DefaultModel, Guid? CredentialId)> ResolveModelCredentialEnvAsync(AgentTask task, Guid teamId, IAgentHarness harness, CancellationToken cancellationToken)
     {
         var projector = harness as IModelCredentialProjector;
 
@@ -2379,8 +2417,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         // The non-secret base URL + provider tag flow out so a restricted (Allowlist) run can pin its model-API host
         // in the egress allowlist (B3.3b). DefaultModel flows out so a model-less ("auto") run falls back to one of the
-        // credential's own models instead of the CLI default. All null when no credential resolved.
-        return (env, redactor, credential?.BaseUrl, credential?.Provider, credential?.DefaultModel);
+        // credential's own models instead of the CLI default. All null when no credential resolved. CredentialId
+        // names the ROW whose key is now in the environment (null for the operator-global key, which has no row) —
+        // D3 bounds an escalation's candidate models to exactly that row.
+        return (env, redactor, credential?.BaseUrl, credential?.Provider, credential?.DefaultModel, credential?.CredentialId);
     }
 
     /// <summary>Re-persist the run's stored task with its RESOLVED model filled, so the live projection shows what an "auto" run actually dispatches from the moment it starts (mirrors the harness-reconciliation write). The task is the ORIGINAL (no injected secret env) with only <see cref="AgentTask.Model"/> set, so serializing it is safe.</summary>

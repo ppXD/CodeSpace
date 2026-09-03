@@ -163,6 +163,19 @@ public sealed record AgentRunResult
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public AgentModelEscalation? ModelEscalation { get; init; }
 
+    /// <summary>
+    /// D3 — what the NEXT attempt should run, stamped when this run ENDED with its own evidence still saying the
+    /// model was the limit: <c>From</c> is the model this run finished on, <c>To</c> the stronger pick (null when
+    /// the team credentialed nothing above it). It is the reason a deterministic <c>acceptance-failed</c> can still
+    /// be worth respawning: the agent.run node's retry verdict reads it, and re-runs ONLY when a stronger model
+    /// actually exists — a null <c>To</c> stays deterministic, so a one-model team never pays for an identical
+    /// second attempt. Distinct from <see cref="ModelEscalation"/> (what this run APPLIED), because an applied
+    /// record must never make a passing-but-flagged run look respawnable. Null-omitted; null when no escalation is
+    /// owed, which is every succeeding run.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public AgentModelEscalation? ProposedEscalation { get; init; }
+
     /// <summary>The output critic's rationale + issues when it flagged this run (<c>ExitReason</c> "output-flagged") — WHY a human should look, persisted on the result (not only a timeline event), and the food the S6 revise loop feeds back to the agent under <c>ReviewMode.Improve</c>. Null when the critic approved, failed open, or never ran.</summary>
     public string? ReviewFeedback { get; init; }
 

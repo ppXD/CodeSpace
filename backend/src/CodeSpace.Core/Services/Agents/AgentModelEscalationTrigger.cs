@@ -10,6 +10,14 @@ namespace CodeSpace.Core.Services.Agents;
 /// an <c>AgentRunResult</c> into these primitives and the agent.run node projects its flat resume payload into the
 /// same ones, so "the model was the limit" can never mean two different things in the two lanes.</para>
 ///
+/// <para>REACHABILITY of the two positive arms, so a later reader does not mistake one for dead code: the
+/// <c>over_claim</c> arm fires today, because <see cref="AgentAcceptanceContract.FailClosed"/> stamps that
+/// contradiction on every graded self-reported SUCCESS whose check failed — which is currently the only shape the
+/// single-agent lane grades. The bare <c>workPresent</c> arm is therefore UNREACHED at the moment (a self-reported
+/// FAILURE never reaches a grade in this lane, so it carries no verdict to fail). It is kept, not speculative:
+/// D4b grades self-reported failures that produced real work, and a check that fails on such work is exactly the
+/// evidence this arm names — with no contradiction to key on, since the agent never claimed otherwise.</para>
+///
 /// <para>Escalation costs real money, so the bar is EVIDENCE, not merely failure. Three exclusions, each because a
 /// stronger model provably cannot change the outcome: an INFRA-classed acceptance detail (the check itself never
 /// ran — <see cref="AgentAcceptanceContract.IsInfraFailure"/>, the one shared classification); a gateway wire fault

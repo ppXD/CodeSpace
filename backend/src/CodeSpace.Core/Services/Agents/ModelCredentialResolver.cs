@@ -156,6 +156,7 @@ public sealed class ModelCredentialResolver : IModelCredentialResolver, IScopedD
     private ResolvedModelCredential Decrypt(ModelCredential credential) => new()
     {
         Provider = credential.Provider,
+        CredentialId = credential.Id,
         ApiKey = string.IsNullOrEmpty(credential.EncryptedApiKey) ? null : _encryptor.Decrypt(credential.EncryptedApiKey),
         BaseUrl = credential.BaseUrl,
     };
