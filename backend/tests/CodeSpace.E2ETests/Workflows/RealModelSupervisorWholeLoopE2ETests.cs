@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Chat;
+using CodeSpace.Core.Services.Learning;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Tasks.Phases;
 using CodeSpace.Core.Services.Workflows.Engine;
@@ -148,6 +149,190 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
 
             return (outcome, $"{Provider} model '{model}' whole-loop — {note}");
         });
+    }
+
+    /// <summary>The literal header <c>LlmSupervisorDecider</c> prints above the injected lesson bullets — the observable proof the treatment reached the prompt, not merely the ledger.</summary>
+    private const string LessonPromptHeader = "Lessons distilled from this team's prior failed runs";
+
+    /// <summary>
+    /// REPORT-ONLY (non-gating): the first live exercise of the Arc-D lesson A/B <c>injected</c> arm. Every real-model
+    /// lane so far seeded no <c>Lesson</c> row, so <c>LessonArms.For</c> saw an empty window and returned
+    /// <c>none</c> — outside the experiment. The arm was recorded on every decision row and the injection code path
+    /// had never once run against a real brain.
+    ///
+    /// <para>This case seeds one current lesson, deliberately picks a goal that HASHES into the treatment arm, drives
+    /// the loop, and then observes two facts: the run's decision rows read <c>injected</c>, and a turn prompt actually
+    /// carried the seeded lesson's own rendered line. It is INFORMATIONAL by design (<c>gating: false</c>) — it
+    /// measures whether the treatment reaches the brain, not whether the brain then solves the task, so a live model
+    /// that converges some other way must never red main.</para>
+    /// </summary>
+    [SkippableFact]
+    public async Task The_real_model_runs_under_the_injected_lesson_arm_and_its_prompt_carries_the_lesson()
+    {
+        var baseUrl = Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
+        var apiKey = Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
+        var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
+
+        var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
+        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass
+        present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none.");
+
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitReadyAsync()) return;
+
+        using var cli = new FileWritingFakeCli();
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nif ls agent_*.txt >/dev/null 2>&1; then exit 0; else exit 1; fi\n", ["base.txt"] = "base\n" });
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+
+        var (brainModelId, _) = await SeedBrainModelAsync(teamId, BaseUrlFor(baseUrl), apiKey, model);
+
+        // THE intervention: one CURRENT lesson in this team's ledger. Without a row the window is empty, the arm is
+        // `none`, and the prompt is byte-identical — which is exactly why the injected path had never run live.
+        var lessonLine = await SeedLessonAsync(teamId);
+
+        // The arm is a pure hash of (team, undecorated goal) — no toggle, no randomness — and the team id is fresh
+        // per run, so the only deliberate way into the treatment is to pick a goal that hashes there. Asserted
+        // BEFORE the run so a mis-picked goal reds as a plumbing fault instead of passing silently at arm=withheld.
+        var goal = InjectedArmGoal(teamId);
+        LessonArms.Assign(teamId, goal).ShouldBe(LessonArms.Injected, "the case measures the TREATMENT — outside the injected arm it observes nothing");
+
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, goal);
+
+        await RealModelGate.AssessLiveAsync(Provider, async () =>
+        {
+            var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+            await DriveUntilSettledAsync(runId);
+
+            var (ok, note) = await ObserveLessonInjectionAsync(runId, teamId, lessonLine);
+
+            return (ok, $"{Provider} model '{model}' lesson-arm probe — {note}");
+        }, gating: false);
+    }
+
+    /// <summary>
+    /// Seed ONE current lesson for the team and hand back the exact line <c>LessonArms.Line</c> will render for it —
+    /// rendered through the production helper, never a hand-copied string, so the prompt check cannot pass against a
+    /// format the decider does not actually print. Distinctive wording so the line is unmistakable in a long prompt.
+    /// </summary>
+    private async Task<string> SeedLessonAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var lesson = new Lesson
+        {
+            Id = Guid.NewGuid(),
+            TeamId = teamId,
+            Mode = CodeSpace.Core.Services.Completion.RunModeKeys.Supervisor,
+            FailureClass = "invented-acceptance-command",
+            WhatFailed = "a subtask authored an acceptance command this repository has no tooling for",
+            Why = "the check was invented from the task text instead of read off the repository",
+            HowToApply = "author every acceptance check as the repository's own seeded gate",
+            SourceRunIds = [Guid.NewGuid()],
+            DistilledByModel = "a4-lesson-arm-probe",
+            ValidFrom = DateTimeOffset.UtcNow.AddMinutes(-5),
+        };
+
+        db.Lesson.Add(lesson);
+        await db.SaveChangesAsync();
+
+        return LessonArms.Line(lesson);
+    }
+
+    /// <summary>
+    /// A goal that hashes into <see cref="LessonArms.Injected"/> for THIS team. The assignment is a fair coin per
+    /// distinct goal string, so a bounded search finds one almost immediately; exhausting it means the hash is
+    /// broken, not that the run was unlucky. Every variant keeps the oracle anchor the other arms carry — without
+    /// it a live model authors an acceptance command the marker-file fakes can never satisfy, and the run parks
+    /// short for a reason that has nothing to do with lessons.
+    /// </summary>
+    private static string InjectedArmGoal(Guid teamId)
+    {
+        const string oracleAnchor = " For EVERY subtask, author its acceptance check as exactly the command `sh check.sh` (the repository's own seeded gate) "
+                                  + "— this repository has NO other test tooling, so any other acceptance command will fail regardless of the work.";
+
+        for (var variant = 0; variant < 64; variant++)
+        {
+            var goal = $"Add server-side email-format validation to the signup endpoint (probe {variant})." + oracleAnchor;
+
+            if (LessonArms.Assign(teamId, goal) == LessonArms.Injected) return goal;
+        }
+
+        throw new InvalidOperationException("no goal variant hashed into the injected arm in 64 tries — at ~50% per variant that is a broken assignment hash, not bad luck");
+    }
+
+    /// <summary>
+    /// The two observations: (1) every decision row the run recorded reads the <c>injected</c> arm, and (2) a turn
+    /// prompt actually carried the seeded lesson's own rendered line. The second is the one that matters — an arm
+    /// recorded on the tape while the prompt stayed byte-identical would be a measurement of nothing, and no test
+    /// before this looked at the prompt at all.
+    ///
+    /// <para>A prompt whose user text was OFFLOADED to the artifact store carries no inline copy; that is reported
+    /// as an honest "could not inspect", never quietly counted as a pass.</para>
+    /// </summary>
+    private async Task<(bool Ok, string Verdict)> ObserveLessonInjectionAsync(Guid runId, Guid teamId, string lessonLine)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var arms = await db.SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.TeamId == teamId && d.SupervisorRunId == runId)
+            .OrderBy(d => d.Sequence)
+            .Select(d => d.LessonArm)
+            .ToListAsync();
+
+        if (arms.Count == 0) return (false, "the run recorded no supervisor decision at all — there is no arm to observe");
+
+        var recorded = arms.Where(a => !string.IsNullOrWhiteSpace(a)).Distinct().ToList();
+
+        if (recorded.Count != 1 || recorded[0] != LessonArms.Injected)
+            return (false, $"decision rows carry arm(s) [{string.Join(", ", arms.Select(a => a ?? "(null)"))}] — every row should read '{LessonArms.Injected}' (the arm is frozen per RUN, not per turn)");
+
+        var payloads = await db.WorkflowRunRecord.AsNoTracking()
+            .Where(r => r.RunId == runId && r.RecordType == WorkflowRunRecordTypes.InteractionStarted)
+            .Select(r => r.PayloadJson)
+            .ToListAsync();
+
+        var inlinePrompts = payloads.Select(InlineUserPrompt).Where(p => p is not null).Select(p => p!).ToList();
+
+        if (inlinePrompts.Count == 0)
+            return (false, $"arm reads '{LessonArms.Injected}' on {arms.Count} row(s), but every decision prompt's user text was offloaded to the artifact store — the injection itself could not be inspected from the ledger");
+
+        var carrying = inlinePrompts.Count(p => p.Contains(LessonPromptHeader, StringComparison.Ordinal));
+
+        if (carrying == 0)
+            return (false, $"arm reads '{LessonArms.Injected}' but NOT ONE of {inlinePrompts.Count} inspectable turn prompts carried the lesson header — the arm is recorded and the treatment never reached the brain");
+
+        if (!inlinePrompts.Any(p => p.Contains(lessonLine, StringComparison.Ordinal)))
+            return (false, $"the lesson header rode {carrying} prompt(s) but the seeded lesson's own rendered line did not — the injected evidence is not the ledger's lesson");
+
+        return (true, $"arm='{LessonArms.Injected}' on {arms.Count} decision row(s); {carrying} of {inlinePrompts.Count} inspectable turn prompts carried the seeded lesson line");
+    }
+
+    /// <summary>One <c>interaction.started</c> payload's INLINE user prompt, or null when the record offloaded it to the artifact store (a <c>$artifact_id</c> object rather than a string) or is unreadable.</summary>
+    private static string? InlineUserPrompt(string payloadJson)
+    {
+        try
+        {
+            var root = JsonDocument.Parse(payloadJson).RootElement;
+
+            if (!root.TryGetProperty("prompt", out var prompt) || !prompt.TryGetProperty("user", out var user)) return null;
+
+            return user.ValueKind == JsonValueKind.String ? user.GetString() : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     [SkippableFact]

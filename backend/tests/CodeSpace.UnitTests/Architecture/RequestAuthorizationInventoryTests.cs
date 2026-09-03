@@ -72,6 +72,7 @@ public class RequestAuthorizationInventoryTests
         ["ReconcileStuckWebhookRegistrationsCommand"] = "sweep",
         ["SweepBudgetSettlementCommand"] = "sweep",
         ["SweepCompletionShadowCommand"] = "sweep",
+        ["BackfillRunScorecardsCommand"] = "projects the observation-only north-star row for terminal runs that terminalized before the table existed, across every team, in bounded batches; a run that already has a row is not a candidate, so it can only ever add a measurement of a settled run — it authors nothing a user owns and changes no run's outcome.",
         ["SweepStaleAgentWorkspacesCommand"] = "sweep",
         ["TierStaleModelCapabilitiesCommand"] = "sweep",
         ["WarnUnrotatedBootstrapPasswordsCommand"] = "sweep",
