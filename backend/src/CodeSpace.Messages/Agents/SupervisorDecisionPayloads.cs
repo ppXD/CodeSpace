@@ -238,6 +238,16 @@ public sealed record SupervisorStopPayload
     public string Summary { get; init; } = "";
 
     /// <summary>
+    /// Set ONLY when the server supplied <see cref="Outcome"/> because the model authored none — it names the
+    /// assumption ("gave_up (no outcome authored)") so a reader can tell a server label from a model verdict, and so
+    /// the journal can say why a run with a perfectly readable summary did not terminalize as a success. Null-omitted
+    /// (<c>[JsonIgnore(WhenWritingNull)]</c>): every stop whose outcome the model DID author serializes byte-identical
+    /// to before, leaving the idempotency-key bytes and exactly-once replay untouched.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? OutcomeAssumed { get; init; }
+
+    /// <summary>
     /// Optional model-authored OBJECTIVE acceptance for the terminal result — the L3→L4 "definition of done": a
     /// server-run check the supervisor declares so "done" is a verified fact, not a self-report. Null-omitted
     /// (<c>[JsonIgnore(WhenWritingNull)]</c>) so a stop WITHOUT acceptance serializes byte-identical to before —

@@ -103,10 +103,20 @@ internal static class SupervisorDecisionPayloadLift
     /// DESCRIBES the ending, which is exactly what the rationale describes. So this recovers WORDS THE MODEL WROTE and
     /// never authors any of its own.</para>
     ///
-    /// <para>IT NEVER STRENGTHENS THE TERMINAL CLAIM: an <c>outcome</c> the model nested is kept verbatim, and an absent
-    /// one is filled with <see cref="AbsentStopOutcome"/> — the SAME label <see cref="SupervisorDecisionProjector"/>
-    /// already substitutes for an absent stop — so the run's success/give-up reading is exactly what it would have been,
-    /// with the summary added. A unit drift-detector pins this constant against the projector's own substitute.</para>
+    /// <para>IT NEVER STRENGTHENS THE TERMINAL CLAIM, and this is the whole reason the fill is FAIL-CLOSED. An
+    /// <c>outcome</c> the model nested is kept verbatim. An ABSENT one is filled with <see cref="AssumedGiveUpOutcome"/>
+    /// — never a success label — because the recovered prose is the model's REASONING, not a terminal verdict: a
+    /// rationale reading "I could not finish" would otherwise terminalize as a SUCCESSFUL stop carrying that very text.
+    /// The empty summary used to be the accidental backstop (the publish gate parked such a run); replacing it with a
+    /// summary means the honesty must now be carried explicitly. The assumption is recorded in the payload's
+    /// <c>outcomeAssumed</c> so the journal says the label was the server's, not the model's — and it is a fixed
+    /// constant, never inferred from the prose: matching English give-up words would be a classifier no one could
+    /// audit. A unit test pins the constant to a NON-success, NON-clarification classification rather than to its
+    /// spelling.</para>
+    ///
+    /// <para>This deliberately DIFFERS from <see cref="SupervisorDecisionProjector"/>'s own substitute, which covers a
+    /// different path: a stop that reached projection with NO payload and NO recovered words, where nothing was claimed
+    /// on the model's behalf because nothing was said at all. This path claims words, so it must not also claim a win.</para>
     /// </summary>
     public static JsonElement? LiftStopNarration(JsonElement decision)
     {
@@ -122,14 +132,23 @@ internal static class SupervisorDecisionPayloadLift
 
         stop = stop is null ? new JsonObject() : (JsonObject)stop.DeepClone();
         stop[SummaryField] = narration;
-        stop[OutcomeField] = StringField(stop, OutcomeField) ?? AbsentStopOutcome;
+
+        if (StringField(stop, OutcomeField) is null)
+        {
+            stop[OutcomeField] = AssumedGiveUpOutcome;
+            stop[OutcomeAssumedField] = AssumedOutcomeNote;
+        }
+
         root[StopProperty] = stop;
 
         return JsonDocument.Parse(root.ToJsonString()).RootElement.Clone();
     }
 
-    /// <summary>The terminal label a narrated stop carries when the model authored none — deliberately identical to <see cref="SupervisorDecisionProjector"/>'s own substitute for an absent stop, so this repair adds words without moving the verdict. Pinned by a drift test (Rule 8).</summary>
-    public const string AbsentStopOutcome = "completed";
+    /// <summary>The NON-success terminal label a narrated stop carries when the model authored none. Fixed, never inferred from the prose. Pinned by a drift test against <c>SupervisorStopPayload</c>'s own classification (Rule 8) — the pin is on the reading, not the spelling.</summary>
+    public const string AssumedGiveUpOutcome = "gave_up";
+
+    /// <summary>What the payload records alongside an assumed outcome, so a reader can tell a server assumption from a model verdict.</summary>
+    public const string AssumedOutcomeNote = "gave_up (no outcome authored)";
 
     /// <summary>The model's own prose off the root <c>rationale</c> — its <c>why</c>, then the <c>evidence</c> it cited — or null when it authored neither.</summary>
     private static string? NarrationFrom(JsonObject root)
@@ -152,6 +171,7 @@ internal static class SupervisorDecisionPayloadLift
     private const string RationaleProperty = "rationale";
     private const string SummaryField = "summary";
     private const string OutcomeField = "outcome";
+    private const string OutcomeAssumedField = "outcomeAssumed";
 
     /// <summary>Every top-level object property the schema declares whose own <c>properties</c> map is non-empty — the payload sub-objects, keyed by name.</summary>
     private static IReadOnlyDictionary<string, IReadOnlySet<string>> BuildPayloadFields()
