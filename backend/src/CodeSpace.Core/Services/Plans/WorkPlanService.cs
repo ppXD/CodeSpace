@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Persistence;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
@@ -94,12 +95,15 @@ public sealed class WorkPlanService : IWorkPlanService, IScopedDependency
             Status = WorkPlanStatuses.Authored,
             OriginKind = draft.OriginKind,
             OriginKey = draft.OriginKey,
-            Goal = draft.Goal,
-            ItemsJson = JsonSerializer.Serialize(draft.Items, AgentJson.Options),
-            SuccessCriteriaJson = draft.SuccessCriteria is { Count: > 0 } criteria ? JsonSerializer.Serialize(criteria, AgentJson.Options) : null,
-            RisksJson = draft.Risks is { Count: > 0 } risks ? JsonSerializer.Serialize(risks, AgentJson.Options) : null,
-            AssumptionsJson = draft.Assumptions is { Count: > 0 } assumptions ? JsonSerializer.Serialize(assumptions, AgentJson.Options) : null,
-            QuestionsJson = draft.Questions is { Count: > 0 } questions ? JsonSerializer.Serialize(questions, AgentJson.Options) : null,
+            // Every field below is the planner MODEL's own words — a goal it restated, items it named, criteria it
+            // wrote. One U+0000 anywhere in them and the plan cannot be stored at all, so the run loses the plan
+            // rather than a character. Goal is `text` (raw byte); the five below are `jsonb` (the escape too).
+            Goal = PersistedText.Sanitize(draft.Goal)!,
+            ItemsJson = PersistedText.SanitizeJson(JsonSerializer.Serialize(draft.Items, AgentJson.Options))!,
+            SuccessCriteriaJson = draft.SuccessCriteria is { Count: > 0 } criteria ? PersistedText.SanitizeJson(JsonSerializer.Serialize(criteria, AgentJson.Options)) : null,
+            RisksJson = draft.Risks is { Count: > 0 } risks ? PersistedText.SanitizeJson(JsonSerializer.Serialize(risks, AgentJson.Options)) : null,
+            AssumptionsJson = draft.Assumptions is { Count: > 0 } assumptions ? PersistedText.SanitizeJson(JsonSerializer.Serialize(assumptions, AgentJson.Options)) : null,
+            QuestionsJson = draft.Questions is { Count: > 0 } questions ? PersistedText.SanitizeJson(JsonSerializer.Serialize(questions, AgentJson.Options)) : null,
         };
 
         _db.WorkPlan.Add(row);

@@ -3,6 +3,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Supervisor.Executors;
 using CodeSpace.Core.Services.Workflows.Lifecycle;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -112,6 +113,64 @@ public class AgentRunNulBytePersistenceTests
         stored.DataJson!.ShouldNotContain(@"\u0000", Case.Sensitive);
         JsonDocument.Parse(stored.DataJson!).RootElement.GetProperty("exitCode").GetInt32()
             .ShouldBe(0, "the rest of the payload survives as valid json");
+    }
+
+    [Fact]
+    public async Task An_event_whose_json_payload_carries_a_nul_in_a_KEY_appends()
+    {
+        // jsonb refuses the escape in a KEY exactly as it does in a value, so the key position needs its own
+        // round-trip. Two keys differing ONLY by a nul would collide here — documented on SanitizeJson, and
+        // pathological enough that keeping the document beats refusing all of it.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedAgentRunAsync(teamId);
+
+        var payload = JsonSerializer.SerializeToElement(new Dictionary<string, int> { ["ex" + Nul + "it"] = 7 });
+        payload.GetRawText().ShouldContain(@"\u0000", Case.Sensitive, "the escape must really be in the KEY");
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().AppendEventAsync(runId,
+                new AgentEvent { Kind = AgentEventKind.CommandExecuted, Text = "keyed", Data = payload }, CancellationToken.None);
+
+        var stored = (await ReadEventsAsync(runId)).ShouldHaveSingleItem();
+
+        stored.DataJson.ShouldNotBeNull();
+        JsonDocument.Parse(stored.DataJson!).RootElement.GetProperty("exit").GetInt32()
+            .ShouldBe(7, "the key survives with the nul removed and keeps its value");
+    }
+
+    [Fact]
+    public async Task A_retry_whose_evidence_tail_carries_a_nul_can_be_created()
+    {
+        // The incident's OWN retry path. A failed acceptance check's raw subprocess output is folded verbatim into
+        // the retried task's goal, and the whole task envelope is serialized into `task_jsonb` — so the byte that
+        // killed the first attempt arrives at a SECOND column, and the retry that was supposed to recover the run
+        // dies before the agent starts. Drives the real production fold, not a hand-built goal.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var priorFailure = new SupervisorAgentResult
+        {
+            AgentRunId = Guid.NewGuid(),
+            Status = "Succeeded",
+            ProducedBranch = "codespace/agent/s1",
+            AcceptancePassed = false,
+            AcceptanceDetail = "tests-failed-exit-1",
+            AcceptanceEvidenceTail = "exit=1" + Nul + "\nFAILED Foo.Bar: expected 42",
+        };
+
+        var retried = RealSupervisorActionExecutor.ApplyPriorFailureDiagnosis(BuildTask(), priorFailure);
+        retried.Goal.ShouldContain(Nul, Case.Sensitive, "the fold really does splice the raw tail through verbatim");
+
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+            runId = (await scope.Resolve<IAgentRunService>().CreateAsync(retried, teamId, null, null, cancellationToken: CancellationToken.None)).Id;
+
+        using var verify = _fixture.BeginScope();
+        var run = await verify.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+
+        run.TaskJson.ShouldNotBeNull();
+        run.TaskJson!.ShouldNotContain(@"\u0000", Case.Sensitive);
+        JsonDocument.Parse(run.TaskJson!).RootElement.GetProperty("goal").GetString()
+            .ShouldNotBeNull().ShouldContain("FAILED Foo.Bar: expected 42", customMessage: "the diagnosis still reaches the retried agent");
     }
 
     [Fact]

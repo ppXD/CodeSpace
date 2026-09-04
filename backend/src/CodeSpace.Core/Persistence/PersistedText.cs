@@ -36,6 +36,13 @@ public static class PersistedText
     /// Strip both shapes a NUL takes in a JSON document bound for a <c>jsonb</c> column: the raw byte, and the
     /// escape a JSON writer produced for it. Null in, null out. The result is still valid JSON — removing a whole
     /// escape leaves the scanner in the state it was already in.
+    ///
+    /// <para>KEYS are stripped too, and two keys that differed ONLY by a NUL therefore become the same key — jsonb
+    /// keeps the last and the other value is gone, silently. That is accepted rather than worked around: the
+    /// alternative is refusing the whole document, which loses every value instead of one, and a producer that emits
+    /// two keys differing only by an unprintable byte has already lost the distinction for every reader downstream.
+    /// Nothing in this system authors such keys — they would have to come from a harness echoing binary as an object
+    /// key — so the case is pathological, not merely rare.</para>
     /// </summary>
     public static string? SanitizeJson(string? json) => Sanitize(json) is { } value ? RemoveNulEscapes(value) : null;
 
