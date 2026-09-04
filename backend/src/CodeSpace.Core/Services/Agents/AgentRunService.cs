@@ -183,7 +183,12 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
             Harness = task.Harness,
             AgentDefinitionId = task.AgentDefinitionId,   // promoted from task_jsonb to a column so the runs index can filter by agent
             Status = AgentRunStatus.Queued,
-            TaskJson = JsonSerializer.Serialize(task, AgentJson.Options),
+
+            // The task envelope is NOT all our own words: the P5-2 retry path folds the prior attempt's acceptance
+            // check output — a raw subprocess tail — into task.Goal, so the incident's own retry can arrive here
+            // carrying the very byte that killed the first attempt. Sanitized at THIS seam rather than at the splice
+            // because this is where the bytes meet the column.
+            TaskJson = PersistedText.SanitizeJson(JsonSerializer.Serialize(task, AgentJson.Options))!,
         };
 
         _db.AgentRun.Add(run);
