@@ -230,10 +230,96 @@ public class LlmEffortClassifierTests
             .ShouldNotContain("rationale", "rationale is optional — a model may omit the why without failing the schema");
     }
 
+    // ── B2: the deliverable-SHAPE axis ──
+
+    [Fact]
+    public void Schema_carries_the_deliverable_shape_as_a_required_closed_set_with_a_description()
+    {
+        var shape = LlmEffortClassifierSchema.ResponseSchema.GetProperty("properties").GetProperty("deliverableShape");
+
+        shape.GetProperty("enum").EnumerateArray().Select(e => e.GetString())
+            .ShouldBe(new[] { "answer", "document", "code", "research" }, "the shape vocabulary is the closed set the classifier normalizes against");
+
+        var description = shape.GetProperty("description").GetString()!;
+        foreach (var cue in new[] { "answer", "document", "code", "research" })
+            description.ShouldContain(cue, customMessage: $"the model needs the '{cue}' shape explained, not just enumerated");
+
+        LlmEffortClassifierSchema.ResponseSchema.GetProperty("required").EnumerateArray().Select(e => e.GetString())
+            .ShouldContain("deliverableShape", "the shape is REQUIRED — a router that guesses the shape is the defect this axis exists to fix");
+    }
+
+    [Theory]
+    [InlineData("answer", "answer")]
+    [InlineData("document", "document")]
+    [InlineData("research", "research")]
+    [InlineData("code", "code")]
+    [InlineData("  ANSWER ", "answer")]      // trimmed + case-insensitive
+    [InlineData("interpretive-dance", "code")]  // outside the vocabulary ⇒ the status-quo shape, never a disarmed oracle
+    [InlineData("", "code")]
+    public async Task It_maps_and_normalizes_the_model_deliverable_shape(string reported, string expected)
+    {
+        var decision = await Classifier(new CannedClient(Reply(confidence: 0.8, deliverableShape: reported)), Pick()).ClassifyAsync(Request(), CancellationToken.None);
+
+        decision.Signals.DeliverableShape.ShouldBe(expected);
+    }
+
+    [Fact]
+    public async Task The_shape_does_NOT_change_the_effort_tier_the_policy_decides()
+    {
+        // Shape and effort are independent axes: the SAME signals classify to the same tier whatever the shape says.
+        foreach (var shape in new[] { "answer", "document", "code", "research" })
+        {
+            var decision = await Classifier(new CannedClient(Reply(needsCodeChange: true, crossFile: true, confidence: 0.8, deliverableShape: shape)), Pick())
+                .ClassifyAsync(Request(), CancellationToken.None);
+
+            decision.SuggestedEffort.ShouldBe(TaskEffortModes.Standard, $"shape '{shape}' must not move the tier — it flows downstream, it does not re-decide effort");
+        }
+    }
+
+    [Fact]
+    public void The_system_prompt_is_no_longer_code_framed_and_asks_for_the_shape()
+    {
+        var prompt = LlmEffortClassifier.SystemPromptForTest;
+
+        prompt.ShouldNotContain("coding-task router", customMessage: "a code-framed router primes every task as a code change — the defect this PR fixes");
+        prompt.ShouldContain("DELIVERABLE SHAPE", customMessage: "the classifier must be asked for the shape, not only the effort");
+        prompt.ShouldContain("INDEPENDENT", customMessage: "the prompt must say effort and shape are separate axes");
+    }
+
+    [Fact]
+    public void The_user_prompt_carries_the_repo_presence_and_the_fresh_turn_flag()
+    {
+        var prompt = LlmEffortClassifier.BuildUserPrompt(Request("Explain how the retry loop works"));
+
+        prompt.ShouldContain("Explain how the retry loop works");
+        prompt.ShouldContain("A repository is bound to this task: no", customMessage: "an unbound task cannot be a code change — the model must be told");
+        prompt.ShouldContain("This is a follow-up turn continuing earlier work: no");
+        prompt.ShouldNotContain("Earlier context", customMessage: "a fresh launch carries no grounding excerpt");
+    }
+
+    [Fact]
+    public void The_user_prompt_carries_a_bounded_grounding_excerpt_for_a_continuing_turn()
+    {
+        var grounding = new string('g', LlmEffortClassifier.GroundingExcerptChars + 500);
+
+        var request = new EffortRouteRequest
+        {
+            Seed = new TaskLaunchSeed { Goal = "and now the second half", SurfaceKind = "chat", TeamId = Guid.NewGuid(), RepositoryId = Guid.NewGuid(), GroundingContext = grounding },
+        };
+
+        var prompt = LlmEffortClassifier.BuildUserPrompt(request);
+
+        prompt.ShouldContain("A repository is bound to this task: yes");
+        prompt.ShouldContain("This is a follow-up turn continuing earlier work: yes");
+        prompt.ShouldContain("Earlier context (excerpt):");
+        prompt.Length.ShouldBeLessThan(grounding.Length, "the excerpt is capped — a long thread digest must never crowd out the goal");
+        prompt.ShouldContain("…", customMessage: "an over-cap excerpt is visibly truncated");
+    }
+
     // ── Helpers + fakes ──
 
-    private static JsonElement Reply(bool needsCodeChange = false, bool crossFile = false, bool needsTestsOrCi = false, bool ambiguous = false, bool riskySideEffects = false, string estimatedCostTier = "low", double confidence = 0.5, string rationale = "ok") =>
-        JsonSerializer.SerializeToElement(new { needsCodeChange, crossFile, needsTestsOrCi, ambiguous, riskySideEffects, estimatedCostTier, confidence, rationale });
+    private static JsonElement Reply(bool needsCodeChange = false, bool crossFile = false, bool needsTestsOrCi = false, bool ambiguous = false, bool riskySideEffects = false, string estimatedCostTier = "low", double confidence = 0.5, string rationale = "ok", string deliverableShape = "code") =>
+        JsonSerializer.SerializeToElement(new { needsCodeChange, crossFile, needsTestsOrCi, ambiguous, riskySideEffects, estimatedCostTier, deliverableShape, confidence, rationale });
 
     private sealed class FakeClients : ILLMClientRegistry
     {

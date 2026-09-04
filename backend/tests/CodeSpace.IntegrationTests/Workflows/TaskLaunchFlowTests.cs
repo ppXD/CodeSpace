@@ -1368,6 +1368,82 @@ public class TaskLaunchFlowTests
 
     // ─── Helpers ─────────────────────────────────────────────────────────────
 
+    // ── B2: the deliverable SHAPE reaches the projected node — a question is no longer launched as a coding run ──
+
+    /// <summary>An AUTO-effort launch of <paramref name="taskText"/> with no repository — the classifier decides the shape, and the frozen snapshot records what the projection made of it.</summary>
+    private async Task<JsonElement> LaunchAndReadAgentConfigAsync(string taskText, IReadOnlyList<string>? acceptanceChecks = null)
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;   // inspect the frozen snapshot; the run itself is pinned by the quick-tier E2E above
+
+        var result = await LaunchAsync(new TaskLaunchRequest
+        {
+            TeamId = teamId,
+            ActorUserId = userId,
+            SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+            TaskText = taskText,
+            RequestedEffort = TaskEffortModes.Auto,
+            Overrides = new TaskExecutionOverrides { Harness = "codex-cli", RunnerKind = "local" },
+            AcceptanceChecks = acceptanceChecks,
+        });
+
+        result.ProjectionKind.ShouldBe(TaskProjectionKinds.SingleAgent, "these seeds all classify to the quick tier — the shape axis must not move the tier");
+
+        using var verify = _fixture.BeginScope();
+        var run = await verify.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == result.RunId);
+
+        run.DefinitionSnapshotJson.ShouldNotBeNull("the launched definition is frozen inline on the run");
+
+        return JsonDocument.Parse(run.DefinitionSnapshotJson!).RootElement
+            .GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "agent")
+            .GetProperty("config").Clone();
+    }
+
+    [Fact]
+    public async Task A_repo_less_question_launched_on_auto_is_projected_as_research_and_judged_not_tested()
+    {
+        // The refutation this closes: a repo-less "explain how X works" used to project the IDENTICAL graph, permissions
+        // and oracle as a one-file code edit — no mode, and (with no operator argv) nothing verifying the answer at all.
+        var config = await LaunchAndReadAgentConfigAsync("Explain how the retry loop works");
+
+        config.GetProperty("mode").GetString().ShouldBe("research", "a question runs read-only with no network — not as a coding run");
+
+        var acceptance = config.GetProperty("acceptance");
+        acceptance.GetProperty("kind").GetString().ShouldBe("LlmJudge", "an answer has no test to pass; it is judged against a rubric");
+        acceptance.GetProperty("command").EnumerateArray().Select(e => e.GetString()).ShouldBe(new[] { "DELIVERABLE.md" });
+        acceptance.GetProperty("rubric").GetProperty("criteria").GetArrayLength().ShouldBeGreaterThan(0, "an LlmJudge contract without a rubric is incomplete and would be rejected at staging");
+
+        config.GetProperty("goal").GetString().ShouldContain("DELIVERABLE.md", customMessage: "the agent must be told where to write what it is graded on");
+    }
+
+    [Fact]
+    public async Task A_document_launch_keeps_the_write_scope_and_still_earns_a_judged_contract()
+    {
+        var config = await LaunchAndReadAgentConfigAsync("Write a design doc for the new scheduler");
+
+        config.GetProperty("mode").GetString().ShouldBe("code", "a written deliverable IS a workspace write — the research clamp would be wrong here");
+        config.GetProperty("acceptance").GetProperty("kind").GetString().ShouldBe("LlmJudge");
+    }
+
+    [Fact]
+    public async Task A_code_launch_with_operator_checks_is_unchanged_by_the_shape_axis()
+    {
+        // Operator authority + the byte-identical floor: a coding task with an authored argv keeps TestsPass, emits no
+        // mode, and is never told to write a deliverable file.
+        var config = await LaunchAndReadAgentConfigAsync("Fix the failing login test", acceptanceChecks: new[] { "sh", "check.sh" });
+
+        config.TryGetProperty("mode", out _).ShouldBeFalse("a code-shaped launch emits no mode — byte-identical to before this axis existed");
+
+        var acceptance = config.GetProperty("acceptance");
+        acceptance.GetProperty("kind").GetString().ShouldBe("TestsPass");
+        acceptance.GetProperty("command").EnumerateArray().Select(e => e.GetString()).ShouldBe(new[] { "sh", "check.sh" });
+        config.GetProperty("acceptanceAuthority").GetString().ShouldBe("Operator");
+        config.GetProperty("goal").GetString().ShouldNotContain("DELIVERABLE.md", customMessage: "a coding run is never told to write a deliverable file");
+    }
+
     private async Task<LaunchTaskResult> LaunchAsync(TaskLaunchRequest request)
     {
         using var scope = _fixture.BeginScope();

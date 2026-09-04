@@ -96,13 +96,43 @@ public sealed class LlmEffortClassifier : IEffortClassifier, IScopedDependency
         Model = pick.ModelId,
         Credential = pick.Credential,
         SystemPrompt = SystemPrompt,
-        UserPrompt = $"Task to route:\n{request.Seed.Goal}",
+        UserPrompt = BuildUserPrompt(request),
         JsonSchema = LlmEffortClassifierSchema.ResponseSchema,
         MaxOutputTokens = 512,
         Temperature = 0.0,
     };
 
-    /// <summary>Map the model's reply onto the generic signals — every bool verbatim, the cost tier normalized to the closed low/medium/high set (an out-of-set value degrades to the cheap reading).</summary>
+    /// <summary>
+    /// The classifier's user prompt: the goal PLUS the launch context a router needs and a bare goal cannot carry —
+    /// whether a repository is bound (an unbound task cannot be a code change), whether this is a follow-up turn in an
+    /// existing thread, and a bounded excerpt of the grounding the surface gathered. Without it the model judged
+    /// "explain how the retry loop works" identically whether it arrived with a repo or with nothing at all.
+    /// </summary>
+    internal static string BuildUserPrompt(EffortRouteRequest request)
+    {
+        var seed = request.Seed;
+        var continuing = !string.IsNullOrWhiteSpace(seed.GroundingContext);
+
+        var builder = new System.Text.StringBuilder();
+        builder.AppendLine("Task to route:").AppendLine(seed.Goal).AppendLine();
+        builder.AppendLine("Context:");
+        builder.AppendLine($"- A repository is bound to this task: {(seed.RepositoryId is not null ? "yes" : "no — there is no code to change")}");
+        builder.AppendLine($"- This is a follow-up turn continuing earlier work: {(continuing ? "yes" : "no — a fresh task")}");
+
+        if (continuing) builder.AppendLine().AppendLine("Earlier context (excerpt):").AppendLine(Excerpt(seed.GroundingContext!));
+
+        return builder.ToString().TrimEnd();
+    }
+
+    /// <summary>The leading <see cref="GroundingExcerptChars"/> of the grounding — enough to tell a continuation apart from a fresh ask, bounded so a long thread digest never dominates a 512-token classification call.</summary>
+    private static string Excerpt(string grounding)
+    {
+        var trimmed = grounding.Trim();
+
+        return trimmed.Length <= GroundingExcerptChars ? trimmed : trimmed[..GroundingExcerptChars] + "…";
+    }
+
+    /// <summary>Map the model's reply onto the generic signals — every bool verbatim, the cost tier normalized to the closed low/medium/high set (an out-of-set value degrades to the cheap reading), the deliverable shape normalized to the open shape vocabulary (an out-of-set value degrades to <c>code</c>, the status quo).</summary>
     private static EffortSignals ToSignals(LlmEffortClassification c) => new()
     {
         NeedsCodeChange = c.NeedsCodeChange,
@@ -111,6 +141,7 @@ public sealed class LlmEffortClassifier : IEffortClassifier, IScopedDependency
         Ambiguous = c.Ambiguous,
         RiskySideEffects = c.RiskySideEffects,
         EstimatedCostTier = NormalizeCostTier(c.EstimatedCostTier),
+        DeliverableShape = DeliverableShapes.Normalize(c.DeliverableShape),
     };
 
     private static string NormalizeCostTier(string? tier)
@@ -123,11 +154,18 @@ public sealed class LlmEffortClassifier : IEffortClassifier, IScopedDependency
     /// <summary>Internal test accessor (InternalsVisibleTo) — pins the classifier's framing as a tested contract without a real LLM round-trip.</summary>
     internal static string SystemPromptForTest => SystemPrompt;
 
+    /// <summary>How much of the seed's grounding context rides in the classification prompt — enough to tell a continuation from a fresh ask, bounded so a long digest never crowds out the goal.</summary>
+    internal const int GroundingExcerptChars = 600;
+
     private const string SystemPrompt =
-        "You are an effort classifier for a coding-task router. Read a task and extract OBSERVABLE properties of the " +
-        "work (NOT a task type): does it change code, span multiple files, need tests/CI, is it ambiguous/under-specified, " +
+        "You are a task router. A task may ask for anything — an explanation, a written document, a code change, an " +
+        "investigation — so do NOT assume it is code. Read the task and its context, then extract OBSERVABLE properties " +
+        "of the work (NOT a task type): does it change code, span multiple files, need tests/CI, is it ambiguous/under-specified, " +
         "does it have risky/irreversible side effects (delete/drop/migrate/deploy/production/secrets), and a rough cost " +
-        "tier (low/medium/high). Also report your CONFIDENCE 0..1: >= 0.6 means you are confident enough to route " +
+        "tier (low/medium/high). Also report the DELIVERABLE SHAPE — what the user is asking you to PRODUCE: an answer " +
+        "in chat, a written document file, a code change, or read-only research findings. Effort and shape are " +
+        "INDEPENDENT: a deep investigation and a one-line fix can cost the same, and a task with no repository bound to " +
+        "it cannot be a code change. Also report your CONFIDENCE 0..1: >= 0.6 means you are confident enough to route " +
         "automatically without asking the human; below 0.6 means the task is ambiguous and the operator should confirm " +
         "the effort. Be calibrated — a clear, well-scoped task earns high confidence; a vague one-liner earns low. " +
         "Return ONLY the schema-constrained JSON.";

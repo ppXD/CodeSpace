@@ -161,6 +161,8 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
     // these production seams, so a prompt edit moves the pinned cassette key loudly (Rule 12.5).
     internal const string SystemPrompt =
         "You are a senior engineer turning a free-text task into a concrete, reviewable plan. " +
+        "A task's DELIVERABLE may be an answer, a written document, a code change or read-only research findings — " +
+        "read which one is being asked for and match each subtask's kind and acceptance to it, rather than assuming code. " +
         "Break the task into a small number of ordered, independently-executable subtasks (1–20). " +
         "Give each subtask a stable id, a short title, and a concrete instruction. " +
         "State the success criteria a reviewer would check and the main risks. " +

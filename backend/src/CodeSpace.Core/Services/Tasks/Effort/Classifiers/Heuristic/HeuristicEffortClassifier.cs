@@ -55,7 +55,21 @@ public sealed class HeuristicEffortClassifier : IEffortClassifier, ISingletonDep
         RiskySideEffects = ContainsAny(goal, RiskyWords),
         Ambiguous = goal.Trim().Length < AmbiguousLengthThreshold,
         EstimatedCostTier = EstimateCostTier(goal),
+        DeliverableShape = InferShape(goal),
     };
+
+    /// <summary>
+    /// A COARSE deliverable shape from the same transparent keyword groups, first match wins in escalating
+    /// specificity: an explicit written artefact (design doc / RFC / report) ⇒ <c>document</c>; an investigation verb
+    /// ⇒ <c>research</c>; a question / explanation verb ⇒ <c>answer</c>; everything else ⇒ <c>code</c>. Deliberately
+    /// CONSERVATIVE — the fall-through is the status quo, so an unrecognised goal keeps today's coding projection and
+    /// only an unmistakable non-code phrasing moves it. The heuristic still always asks the operator to confirm.
+    /// </summary>
+    private static string InferShape(string goal) =>
+        ContainsAny(goal, DocumentWords) ? DeliverableShapes.Document
+        : ContainsAny(goal, ResearchWords) ? DeliverableShapes.Research
+        : ContainsAny(goal, AnswerWords) ? DeliverableShapes.Answer
+        : DeliverableShapes.Code;
 
     /// <summary>A rough cost tier from goal length — a longer goal implies more surface, so high/medium/low by two length thresholds.</summary>
     private static string EstimateCostTier(string goal) =>
@@ -95,4 +109,7 @@ public sealed class HeuristicEffortClassifier : IEffortClassifier, ISingletonDep
     private static readonly IReadOnlyList<string> CrossFileWords = new[] { "across", "multiple", "all ", "several", "every", "throughout", "codebase" };
     private static readonly IReadOnlyList<string> TestWords = new[] { "test", "ci", "coverage", "spec", "lint" };
     private static readonly IReadOnlyList<string> RiskyWords = new[] { "delete", "drop", "migrate", "migration", "deploy", "production", "prod", "secret", "credential", "rotate" };
+    private static readonly IReadOnlyList<string> DocumentWords = new[] { "design doc", "design document", "rfc", "write a report", "write a design", "write a proposal", "proposal document", "postmortem", "post-mortem", "whitepaper", "one-pager" };
+    private static readonly IReadOnlyList<string> ResearchWords = new[] { "investigate", "analyse", "analyze", "research ", "compare ", "audit ", "evaluate ", "survey ", "look into" };
+    private static readonly IReadOnlyList<string> AnswerWords = new[] { "explain", "why ", "what ", "how does", "how do ", "describe ", "summarise", "summarize", "?" };
 }

@@ -30,8 +30,43 @@ public sealed class DeterministicPlannerLlmClient : ILLMClient, IStructuredLLMCl
 
     public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
     {
-        var json = JsonSerializer.SerializeToElement(new { subtasks = Subtasks });
+        var json = IsEffortClassification(request.JsonSchema)
+            ? ClassifyEffort(request.UserPrompt)
+            : JsonSerializer.SerializeToElement(new { subtasks = Subtasks });
 
         return Task.FromResult(new StructuredLLMCompletion { Json = json, Model = request.Model, Usage = new() { InputTokens = 11, OutputTokens = 13 } });
     }
+
+    /// <summary>The team pool makes this client the in-process structured answerer for EVERY caller, so it answers by the SCHEMA it was handed: an effort-classification schema (it declares <c>deliverableShape</c>) is not a plan request and must not be answered with subtasks — the classifier would then bind an all-default reply and read every task as a code change.</summary>
+    private static bool IsEffortClassification(JsonElement schema) =>
+        schema.ValueKind == JsonValueKind.Object
+        && schema.TryGetProperty("properties", out var props)
+        && props.TryGetProperty("deliverableShape", out _);
+
+    /// <summary>A deterministic classification derived from the prompt's own wording — enough for a flow test to prove the SHAPE reaches the projection, with the signals left cheap so the policy routes to the quick tier.</summary>
+    private static JsonElement ClassifyEffort(string userPrompt)
+    {
+        var shape = Contains(userPrompt, "design doc", "report", "proposal") ? "document"
+            : Contains(userPrompt, "investigate", "analyse", "analyze", "compare") ? "research"
+            : Contains(userPrompt, "explain", "why", "what ", "how does") ? "answer"
+            : "code";
+
+        return JsonSerializer.SerializeToElement(new
+        {
+            needsCodeChange = shape == "code",
+            crossFile = false,
+            needsTestsOrCi = false,
+            ambiguous = false,
+            riskySideEffects = false,
+            estimatedCostTier = "low",
+            deliverableShape = shape,
+            // Below EffortPolicy.ConfirmConfidenceFloor on purpose: a deterministic fake has no calibrated belief to
+            // report, and the auto path's confirm-card affordance is what these flow tests expect to ride along.
+            confidence = 0.4,
+            rationale = $"Deterministic fake: read the ask as '{shape}'.",
+        });
+    }
+
+    private static bool Contains(string text, params string[] needles) =>
+        needles.Any(n => text.Contains(n, StringComparison.OrdinalIgnoreCase));
 }

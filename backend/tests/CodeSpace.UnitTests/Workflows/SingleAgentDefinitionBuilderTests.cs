@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Tasks;
+using CodeSpace.Messages.Tasks.Effort;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Workflows;
@@ -302,5 +303,108 @@ public class SingleAgentDefinitionBuilderTests
     {
         Builder.Build(Context(Seed(), profile: null)).Nodes.Single(n => n.TypeKey == "agent.run").Config.TryGetProperty("acceptance", out _)
             .ShouldBeFalse("no floor ⇒ no oracle ⇒ byte-identical");
+    }
+
+    // ── B2: the route's deliverable SHAPE decides the agent's mode + (absent an operator floor) its oracle ──
+
+    private static TaskBuildContext Shaped(string shape, IReadOnlyList<string>? checks = null, IReadOnlyList<string>? criteria = null) => new()
+    {
+        Seed = Seed(),
+        Route = new RoutePlan { ProjectionKind = TaskProjectionKinds.SingleAgent, DeliverableShape = shape },
+        AgentProfile = null,
+        AcceptanceChecks = checks,
+        AcceptanceCriteria = criteria,
+    };
+
+    [Theory]
+    // shape, operator argv authored?, expected mode key (null ⇒ omitted), expected acceptance kind (null ⇒ omitted)
+    [InlineData(DeliverableShapes.Code, false, null, null)]                 // the status quo — no mode, no oracle
+    [InlineData(DeliverableShapes.Code, true, null, "TestsPass")]           // the operator's floor, unchanged
+    [InlineData(DeliverableShapes.Answer, false, "research", "LlmJudge")]   // a question: no network, judged not tested
+    [InlineData(DeliverableShapes.Answer, true, "research", "TestsPass")]   // operator authority survives the shape
+    [InlineData(DeliverableShapes.Research, false, "research", "LlmJudge")]
+    [InlineData(DeliverableShapes.Research, true, "research", "TestsPass")]
+    [InlineData(DeliverableShapes.Document, false, "code", "LlmJudge")]     // a written file IS a workspace write
+    [InlineData(DeliverableShapes.Document, true, "code", "TestsPass")]
+    [InlineData("a-shape-nobody-has-heard-of", false, null, null)]          // unknown ⇒ folds to code ⇒ status quo
+    public void The_shape_and_the_operator_floor_decide_the_mode_and_the_acceptance_kind(string shape, bool operatorArgv, string? expectedMode, string? expectedKind)
+    {
+        var config = AgentConfigOf(Builder.Build(Shaped(shape, checks: operatorArgv ? new[] { "sh", "check.sh" } : null)));
+
+        if (expectedMode is null) config.TryGetProperty("mode", out _).ShouldBeFalse("a code-shaped run emits no mode — byte-identical to before this axis existed");
+        else config.GetProperty("mode").GetString().ShouldBe(expectedMode);
+
+        if (expectedKind is null) config.TryGetProperty("acceptance", out _).ShouldBeFalse("no floor and a code shape ⇒ no oracle");
+        else config.GetProperty("acceptance").GetProperty("kind").GetString().ShouldBe(expectedKind);
+    }
+
+    [Fact]
+    public void A_code_shaped_launch_with_operator_argv_is_byte_identical_to_the_pre_shape_config()
+    {
+        // The refutation guard the other direction: the ordinary coding launch must not shift one byte.
+        var withShape = AgentConfigOf(Builder.Build(Shaped(DeliverableShapes.Code, checks: new[] { "sh", " ", "check.sh" }, criteria: new[] { "no regressions" })));
+
+        var context = Context(Seed(), profile: null) with { AcceptanceChecks = new[] { "sh", " ", "check.sh" }, AcceptanceCriteria = new[] { "no regressions" } };
+        var withDefaultRoute = AgentConfigOf(Builder.Build(context));
+
+        withShape.GetRawText().ShouldBe(withDefaultRoute.GetRawText(), "an explicit code shape and the default route must emit the SAME agent config");
+
+        withShape.GetProperty("acceptance").GetProperty("command").EnumerateArray().Select(e => e.GetString()).ShouldBe(new[] { "sh", "check.sh" });
+        withShape.GetProperty("acceptanceAuthority").GetString().ShouldBe("Operator");
+        withShape.GetProperty("goal").GetString().ShouldNotContain("DELIVERABLE.md", customMessage: "a coding run is never told to write a deliverable file");
+    }
+
+    [Fact]
+    public void A_shape_derived_contract_names_the_deliverable_file_in_the_goal_and_grades_that_file()
+    {
+        // The oracle reads DECLARED FILES, so the agent must be told which file — otherwise the contract grades
+        // something nobody asked for and every answer-shaped run flunks a check it was never able to satisfy.
+        var config = AgentConfigOf(Builder.Build(Shaped(DeliverableShapes.Answer)));
+
+        config.GetProperty("acceptance").GetProperty("command").EnumerateArray().Select(e => e.GetString())
+            .ShouldBe(new[] { SingleAgentDefinitionBuilder.DeliverableFileName }, "the LlmJudge command IS the deliverable path list");
+
+        config.GetProperty("goal").GetString().ShouldContain(SingleAgentDefinitionBuilder.DeliverableFileName,
+            customMessage: "the agent is told where to write what it is graded on");
+
+        config.GetProperty("displayTitle").GetString().ShouldBe("Fix the failing login test", "the deliverable line never leaks into the card title");
+    }
+
+    [Fact]
+    public void A_shape_derived_contract_is_NOT_staked_as_operator_authority()
+    {
+        // The server composed this contract from the shape; crediting the operator with it would inflate the claim.
+        AgentConfigOf(Builder.Build(Shaped(DeliverableShapes.Research))).TryGetProperty("acceptanceAuthority", out _)
+            .ShouldBeFalse("only the operator's own argv is staked as Operator authority");
+    }
+
+    [Fact]
+    public void The_judge_rubric_is_the_operator_criteria_when_authored_else_the_goal()
+    {
+        var fromCriteria = AgentConfigOf(Builder.Build(Shaped(DeliverableShapes.Document, criteria: new[] { "cites sources", " ", "names the trade-offs" })))
+            .GetProperty("acceptance").GetProperty("rubric").GetProperty("criteria");
+
+        fromCriteria.EnumerateArray().Select(c => c.GetProperty("requirement").GetString())
+            .ShouldBe(new[] { "cites sources", "names the trade-offs" }, "blank criteria are dropped; each becomes one binary requirement");
+        fromCriteria.EnumerateArray().Select(c => c.GetProperty("id").GetString()).ShouldBe(new[] { "c1", "c2" });
+
+        var fromGoal = AgentConfigOf(Builder.Build(Shaped(DeliverableShapes.Document)))
+            .GetProperty("acceptance").GetProperty("rubric").GetProperty("criteria");
+
+        fromGoal.GetArrayLength().ShouldBe(1, "with no criteria authored, the goal itself is the single binary criterion");
+        fromGoal[0].GetProperty("requirement").GetString().ShouldContain("Fix the failing login test");
+    }
+
+    [Theory]
+    [InlineData(DeliverableShapes.Answer)]
+    [InlineData(DeliverableShapes.Document)]
+    [InlineData(DeliverableShapes.Research)]
+    public void Every_shape_derived_definition_still_passes_the_real_validator(string shape)
+    {
+        var def = Builder.Build(Shaped(shape));
+
+        var result = RealValidator().Validate(def);
+
+        result.IsValid.ShouldBeTrue(customMessage: $"the '{shape}' projection must satisfy agent.run's real schema: " + string.Join(" | ", result.Errors));
     }
 }

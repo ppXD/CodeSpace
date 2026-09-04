@@ -18,6 +18,15 @@ public sealed record RoutePlan
     /// <summary>The projection strategy to build the run with — an OPEN STRING the <c>ITaskProjectionRegistry</c> resolves a builder by (see <see cref="TaskProjectionKinds"/>). The single load-bearing field for dispatch.</summary>
     public required string ProjectionKind { get; init; }
 
+    /// <summary>
+    /// WHAT this task is asked to produce, as an open <c>DeliverableShapes</c> string (<c>answer</c> / <c>document</c>
+    /// / <c>code</c> / <c>research</c>) — carried FIRST-CLASS off the classifier's signals so the projection layer can
+    /// route by shape, not only by effort: the shape decides the projected agent's mode and (when the operator authored
+    /// no executable floor) which objective oracle grades it. Defaults to <c>code</c> — the historical assumption — so
+    /// a hand-built route and an explicit-tier launch project byte-identically.
+    /// </summary>
+    public string DeliverableShape { get; init; } = Effort.DeliverableShapes.Code;
+
     /// <summary>The bounds preset the router selected (e.g. <c>"standard"</c>) — an open string naming where <see cref="Caps"/> came from.</summary>
     public string BoundsPreset { get; init; } = "";
 

@@ -56,4 +56,53 @@ public sealed class RealModelEffortClassifierFlowTests
             return (ok, $"{provider} model '{model}' classified a prod drop-table+deploy task as '{decision.SuggestedEffort}' @ confidence {decision.Confidence:0.00} (risky={decision.Signals.RiskySideEffects}). Expected risky → deep @ >= {EffortPolicy.ConfirmConfidenceFloor}.");
         });
     }
+
+    /// <summary>
+    /// B2's live measurement: the SHAPE axis, not the tier. Three unmistakable asks — a question, a written document,
+    /// a code change — each with the launch context the router now supplies (a question and a report carry no
+    /// repository; the code change does). Coarse on purpose: only the shape is asserted, and the two non-code shapes
+    /// pass on EITHER non-code reading, because "answer vs research" is a judgement call the downstream projection
+    /// treats identically (both run research-mode + a judged contract) while "code" is the reading that would put a
+    /// question back on the coding lane — the exact defect this axis exists to prevent.
+    /// </summary>
+    [SkippableTheory]
+    [InlineData("Anthropic", "Explain how our retry-with-backoff loop decides to give up", false, "answer-or-research")]
+    [InlineData("OpenAI", "Explain how our retry-with-backoff loop decides to give up", false, "answer-or-research")]
+    [InlineData("Anthropic", "Write a design document proposing how we should shard the events table", false, DeliverableShapes.Document)]
+    [InlineData("OpenAI", "Write a design document proposing how we should shard the events table", false, DeliverableShapes.Document)]
+    [InlineData("Anthropic", "Fix the off-by-one in the pagination cursor and add a regression test", true, DeliverableShapes.Code)]
+    [InlineData("OpenAI", "Fix the off-by-one in the pagination cursor and add a regression test", true, DeliverableShapes.Code)]
+    public async Task The_real_model_reads_the_deliverable_shape_out_of_the_ask(string provider, string goal, bool withRepository, string expectedShape)
+    {
+        var baseUrl = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
+        var apiKey = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
+        var model = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
+
+        if (baseUrl is null || apiKey is null || model is null) throw RealModelGate.ReportSkipped(provider, "CODESPACE_LLM_* absent (fork/local — no live model)");
+
+        await RealModelGate.AssessLiveAsync(provider, async () =>
+        {
+            var credential = RealModelLiveWire.Credential(provider, baseUrl, apiKey);
+            var recipes = new TaskRecipeRegistry(new ITaskRecipe[] { new SingleAgentRecipe(), new MapFanoutRecipe(), new SupervisorRecipe() });
+            var classifier = new LlmEffortClassifier(RealModelLiveWire.Registry(), RealModelLiveWire.Selector(model, credential), recipes, new HeuristicEffortClassifier());
+
+            var request = new EffortRouteRequest
+            {
+                Seed = new TaskLaunchSeed { Goal = goal, SurfaceKind = "test", TeamId = Guid.NewGuid(), RepositoryId = withRepository ? Guid.NewGuid() : null },
+            };
+
+            var decision = await classifier.ClassifyAsync(request, CancellationToken.None);
+
+            if (decision.ClassifierKind != LlmEffortClassifier.ClassifierKind)
+                return (false, $"{provider} model '{model}' fell back to the heuristic — the live structured classifier produced no usable decision");
+
+            var shape = decision.Signals.DeliverableShape;
+
+            var ok = expectedShape == "answer-or-research"
+                ? shape is DeliverableShapes.Answer or DeliverableShapes.Research
+                : shape == expectedShape;
+
+            return (ok, $"{provider} model '{model}' read the shape of \"{goal}\" (repository bound: {withRepository}) as '{shape}'. Expected '{expectedShape}'.");
+        });
+    }
 }
