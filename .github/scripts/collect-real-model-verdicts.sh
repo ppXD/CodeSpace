@@ -37,6 +37,17 @@ MIN_NEEDLE_LENGTH=8
 # The side file RealModelGate appends provider-reported model names to (RealModelGate.ObservedModelsFileName).
 OBSERVED_MODELS_FILE="codespace_observed_models"
 
+# LlmCompleteNode logs `"LLM completion {Model} in={InTok} out={OutTok} finish={Finish}"` (LlmCompleteNode.cs), and
+# xUnit captures that into <StdOut>. Every lane that reaches the gate registers its provider-reported name in the
+# side file above — but a lane that never calls ObserveModel (real-model-footer-signals is one; run 33814929951's
+# trx named a live model on line 249) has no needle to strike, so the name shipped in the clear.
+#
+# So the model token is masked by POSITION as well as by value: whatever follows "LLM completion " on a line is the
+# provider's model name by construction, whether or not this job ever learned it. Only the VALUE is struck; the
+# template's own words and the in=/out=/finish= fields stay readable, because the count and the finish reason are
+# what makes the line worth uploading at all.
+LLM_COMPLETION_PREFIX="LLM completion "
+
 results="${1:-}"
 if [ -z "$results" ]; then
   echo "::error::collect-real-model-verdicts.sh needs a results directory"
@@ -106,6 +117,28 @@ redact() {
         line = out line
       }
       print line
+    }' | mask_completion_models
+}
+
+# The positional pass. A model name is a bare token — it never contains a space, and in a trx it is bounded by the
+# surrounding XML/quoting — so the value is the run of characters after the prefix up to the first space, '<' or '"'.
+# Stopping at '<' matters: a completion line at the very end of a <StdOut> element would otherwise swallow the
+# closing tag into the mask and corrupt the XML the artifact is supposed to remain.
+mask_completion_models() {
+  awk -v prefix="$LLM_COMPLETION_PREFIX" '
+    {
+      line = $0
+      out = ""
+      while ((p = index(line, prefix)) > 0) {
+        out = out substr(line, 1, p + length(prefix) - 1)
+        line = substr(line, p + length(prefix))
+
+        if (match(line, /^[^ <"]+/) > 0) {
+          out = out "***"
+          line = substr(line, RSTART + RLENGTH)
+        }
+      }
+      print out line
     }'
 }
 

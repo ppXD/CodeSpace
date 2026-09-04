@@ -306,8 +306,43 @@ public sealed class SupervisorTrajectoryEvalTests
 
         result.ReachedStop.ShouldBeTrue("it does eventually stop — but only after wasteful re-spawning");
         var (ok, note) = SupervisorTrajectoryScore.Score(result);
-        ok.ShouldBeFalse("staging work far more than the happy path needs is non-converging churn");
+        ok.ShouldBeFalse("re-staging the SAME units five times over is non-converging churn");
         note.ShouldContain("churning");
+        note.ShouldContain("s1 ×5", Case.Insensitive, "the verdict names WHICH unit was re-attempted and how often — a bare count gave the reader no move");
+    }
+
+    /// <summary>
+    /// The calibration this cap was BUILT for is a brain that fans its whole plan out in one wide spawn. Run
+    /// 33814929951's persistent-conflict lane staged its dependency chain SERIALLY instead — a distinct planned unit
+    /// per turn, each waiting on the one before — and the flat "staged work 5 times (&gt; 4)" ceiling scored five
+    /// honest FIRST attempts as churn. Staging distinct planned units one at a time is a legitimate strategy; churn
+    /// is re-staging the SAME unit without progress. The scorer must be able to tell the two apart, or the gate
+    /// measures fan-out shape rather than judgment.
+    /// </summary>
+    [Fact]
+    public async Task A_brain_that_stages_distinct_planned_units_one_at_a_time_is_not_churn()
+    {
+        var result = await SupervisorTrajectory.RunAsync(new SerialFanoutDecider(), maxTurns: 12, CancellationToken.None);
+
+        result.ReachedStop.ShouldBeTrue();
+        result.Kinds.Count(k => k == SupervisorDecisionKinds.Spawn).ShouldBe(5, "the arc under adjudication: five spawns, one planned unit each");
+
+        var (ok, note) = SupervisorTrajectoryScore.Score(result);
+        ok.ShouldBeTrue($"five DISTINCT planned units staged serially is a dependency chain, not churn ({note})");
+    }
+
+    /// <summary>The other half of the boundary: the same unit staged over and over is churn no matter how few OTHER units the run touched — the property the flat count could not express.</summary>
+    [Fact]
+    public async Task A_brain_that_restages_one_unit_five_times_is_churn()
+    {
+        var result = await SupervisorTrajectory.RunAsync(new SingleUnitRestagingDecider(), maxTurns: 12, CancellationToken.None);
+
+        result.ReachedStop.ShouldBeTrue("it stops — the failure is the road it took, not the ending");
+
+        var (ok, note) = SupervisorTrajectoryScore.Score(result);
+        ok.ShouldBeFalse("one unit handed to an agent five times, with nothing else attempted, is the definition of re-attempting without progress");
+        note.ShouldContain("churning");
+        note.ShouldContain("only-unit ×5", Case.Insensitive);
     }
 
     [Fact]
@@ -687,6 +722,53 @@ public sealed class SupervisorTrajectoryEvalTests
         }
     }
 
+    /// <summary>
+    /// The SERIAL fan-out shape run 33814929951 was failed for: plan five units, then stage them ONE PER TURN — a
+    /// dependency chain walked in order, every spawn naming a unit no earlier spawn touched.
+    /// </summary>
+    private sealed class SerialFanoutDecider : ISupervisorDecider
+    {
+        private static readonly string[] Units = { "u1", "u2", "u3", "u4", "u5" };
+
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+        {
+            var kinds = context.PriorDecisions.Select(d => d.DecisionKind).ToList();
+
+            if (!kinds.Contains(SupervisorDecisionKinds.Plan))
+                return Decision(SupervisorDecisionKinds.Plan, $$"""{"subtasks":[{{string.Join(",", Units.Select(u => $$"""{"id":"{{u}}","title":"{{u}}","instruction":"do {{u}}"}"""))}}]}""");
+
+            var staged = kinds.Count(k => k == SupervisorDecisionKinds.Spawn);
+            if (staged < Units.Length) return Decision(SupervisorDecisionKinds.Spawn, $$"""{"subtaskIds":["{{Units[staged]}}"]}""");
+
+            return !kinds.Contains(SupervisorDecisionKinds.Merge)
+                ? Decision(SupervisorDecisionKinds.Merge, "{}")
+                : Decision(SupervisorDecisionKinds.Stop, "{\"outcome\":\"completed\"}");
+        }
+
+        private static Task<SupervisorDecision> Decision(string kind, string payload) => Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = payload });
+    }
+
+    /// <summary>The mirror image of <see cref="SerialFanoutDecider"/>: five spawns that all name the SAME unit. Same verb count, opposite judgment.</summary>
+    private sealed class SingleUnitRestagingDecider : ISupervisorDecider
+    {
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+        {
+            var kinds = context.PriorDecisions.Select(d => d.DecisionKind).ToList();
+            var kind =
+                !kinds.Contains(SupervisorDecisionKinds.Plan) ? SupervisorDecisionKinds.Plan
+                : kinds.Count(k => k == SupervisorDecisionKinds.Spawn) < 5 ? SupervisorDecisionKinds.Spawn
+                : !kinds.Contains(SupervisorDecisionKinds.Merge) ? SupervisorDecisionKinds.Merge
+                : SupervisorDecisionKinds.Stop;
+
+            var payload =
+                kind == SupervisorDecisionKinds.Plan ? """{"subtasks":[{"id":"only-unit","title":"t","instruction":"i"}]}"""
+                : kind == SupervisorDecisionKinds.Spawn ? """{"subtaskIds":["only-unit"]}"""
+                : kind == SupervisorDecisionKinds.Stop ? "{\"outcome\":\"completed\"}"
+                : "{}";
+
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = payload });
+        }
+    }
     /// <summary>A cautious-but-correct brain: plan, ask ONE question, then spawn → merge → stop. The ask is answered (the harness folds a real reply) and the scorer must tolerate the detour.</summary>
     private sealed class AskThenConvergeDecider : ISupervisorDecider
     {
