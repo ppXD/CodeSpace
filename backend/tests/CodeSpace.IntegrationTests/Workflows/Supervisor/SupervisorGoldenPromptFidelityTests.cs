@@ -86,6 +86,33 @@ public class SupervisorGoldenPromptFidelityTests
     }
 
     [Fact]
+    public void An_answered_ask_human_reaches_the_model_as_the_answer_never_as_the_wait_token()
+    {
+        // D6: these tapes are built by the PRODUCTION card builders and carry a real askHumanToken. The prompt used
+        // to render the whole outcome jsonb, so the brain read a server correlation key it can do nothing with, and
+        // the human's actual words arrived wrapped in json. The answer is the fact the next decision turns on.
+        var answered = SupervisorDecisionGoldenScenarios.All
+            .Where(s => s.Context.PriorDecisions.Any(d => d.DecisionKind == SupervisorDecisionKinds.AskHuman && SupervisorOutcome.ReadAskHumanAnswer(d.OutcomeJson) is not null))
+            .ToList();
+
+        answered.ShouldNotBeEmpty("the corpus must keep at least one answered-ask tape, or this pins nothing");
+
+        foreach (var scenario in answered)
+        {
+            var prompt = LlmSupervisorDecider.BuildUserPromptForTest(scenario.Context);
+
+            foreach (var decision in scenario.Context.PriorDecisions.Where(d => d.DecisionKind == SupervisorDecisionKinds.AskHuman))
+            {
+                if (SupervisorOutcome.ReadHumanWaitToken(decision.OutcomeJson) is { } token)
+                    prompt.ShouldNotContain(token, Case.Sensitive, $"'{scenario.Name}' leaks the internal wait token into the model-facing prompt");
+
+                if (SupervisorOutcome.ReadAskHumanAnswer(decision.OutcomeJson) is { } answer)
+                    prompt.ShouldContain(answer, Case.Sensitive, $"'{scenario.Name}' must show the model what the human actually answered");
+            }
+        }
+    }
+
+    [Fact]
     public void Every_planned_scenario_recites_its_plan_state_the_way_production_does()
     {
         // The block that names which subtask is done, which failed, and which is still unfinished. It was absent from

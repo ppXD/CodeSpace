@@ -9,9 +9,23 @@ public sealed class SupervisorBudgetRecitationTests
     private static readonly IReadOnlyDictionary<string, decimal> NoBrainSpend = new Dictionary<string, decimal>();
 
     [Fact]
-    public void Render_is_null_when_no_cap_is_set()
+    public void Render_is_null_when_no_cap_and_nothing_has_been_spent()
     {
-        SupervisorBudgetRecitation.Render(null, agentExecutionSpendUsd: 5m, brainPlaneSpendUsd: 1m, NoBrainSpend).ShouldBeNull("an uncapped run's prompt must stay byte-identical — no budget section at all");
+        SupervisorBudgetRecitation.Render(null, agentExecutionSpendUsd: 0m, brainPlaneSpendUsd: 0m, NoBrainSpend).ShouldBeNull("a fresh uncapped run's prompt stays byte-identical — no budget section at all");
+    }
+
+    [Fact]
+    public void Render_shows_spend_so_far_on_an_uncapped_run_that_has_spent_something()
+    {
+        // D6: the null-when-uncapped rule hid REALIZED spend from every uncapped run's brain — the common case.
+        // The cap line is what needs a cap; the spend figure does not, and a brain that cannot see what it has
+        // burned cannot moderate itself at all.
+        var text = SupervisorBudgetRecitation.Render(null, agentExecutionSpendUsd: 5m, brainPlaneSpendUsd: 1.25m, new Dictionary<string, decimal> { ["supervisor.decision"] = 1.25m });
+
+        text.ShouldNotBeNull();
+        text.ShouldStartWith(SupervisorBudgetRecitation.UncappedHeader);
+        text!.ShouldContain("$6.25 spent so far — agent execution $5.00, supervisor.decision $1.25");
+        text.ShouldNotContain("cap", Case.Insensitive, "there is no cap to recite — inventing one would be a lie the model plans against");
     }
 
     [Fact]

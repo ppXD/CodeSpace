@@ -77,6 +77,10 @@ public sealed record SupervisorAgentDispatch
     /// over the plan's static <c>DependsOn</c> for staging purposes, so the model can hand this specific spawn a base
     /// even when the plan declared none, or narrow a multi-dependency subtask to ONE producer for this attempt. Null
     /// → the planned subtask's own <c>DependsOn</c> (byte-identical to a homogeneous spawn).
+    ///
+    /// <para>D6: the executor read this from the day it shipped, but <c>SupervisorDecisionSchema</c>'s
+    /// <c>agents[]</c> object never listed it and is <c>additionalProperties:false</c> — so no live model could
+    /// author it. The schema now exposes it; a capability with no reachable caller is not a capability.</para>
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? BaseSubtaskId { get; init; }

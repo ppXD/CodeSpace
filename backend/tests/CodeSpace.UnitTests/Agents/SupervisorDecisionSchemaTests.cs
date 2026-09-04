@@ -133,4 +133,17 @@ public class SupervisorDecisionSchemaTests
         merge.GetProperty("properties").TryGetProperty("subtaskIds", out _).ShouldBeFalse("merge must not expose a subtaskIds subset it cannot honor");
         merge.GetProperty("required").EnumerateArray().Any().ShouldBeFalse("merge requires no fields — it folds all prior results");
     }
+
+    [Fact]
+    public void The_per_agent_dispatch_exposes_the_baseSubtaskId_the_executor_already_reads()
+    {
+        // D6: RealSupervisorActionExecutor.DependsOnFor reads SupervisorAgentDispatch.BaseSubtaskId as the handoff
+        // override, but the agents[] object is additionalProperties:false and never listed the field — so a live
+        // model literally COULD NOT author it. A server capability with no reachable caller is not a capability.
+        var agent = Schema.GetProperty("properties").GetProperty("spawn").GetProperty("properties").GetProperty("agents").GetProperty("items");
+
+        agent.GetProperty("properties").TryGetProperty("baseSubtaskId", out var baseSubtaskId).ShouldBeTrue("the handoff override must be reachable by the model");
+        baseSubtaskId.GetProperty("type").GetString().ShouldBe("string");
+        baseSubtaskId.GetProperty("description").GetString().ShouldContain("dependsOn", Case.Insensitive, "the description must say it overrides the plan's dependsOn");
+    }
 }

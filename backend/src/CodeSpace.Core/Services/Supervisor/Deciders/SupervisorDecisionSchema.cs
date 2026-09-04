@@ -145,6 +145,7 @@ public static class SupervisorDecisionSchema
                       "harness": { "type": "string", "description": "Optional harness request (granted only if the operator allow-list permits)." },
                       "model": { "type": "string", "description": "Optional model request." },
                       "autonomyLevel": { "type": "string", "enum": ["confined", "standard", "trusted", "unleashed"], "description": "Optional autonomy request (one of the four tiers) — clamped to the run profile's ceiling, never raised past it." },
+                      "baseSubtaskId": { "type": "string", "description": "Optional handoff base — the ONE producer subtask whose branch this agent should build on. Overrides the plan's dependsOn for THIS spawn: use it to hand an agent a base the plan never declared, or to narrow a multi-dependency subtask to a single producer. Must be a plan-local subtask id that already produced work. Omit to use the planned subtask's own dependsOn." },
                       "agentDefinition": { "type": "string", "description": "Optional Agent persona for this agent — the SLUG of one of the team's personas listed in the capability catalog (e.g. 'security-reviewer'). Gives this agent that persona's specialist prompt/model/tools. Must be a slug the catalog lists (fail-closed otherwise). Omit to use the run-level profile persona." }
                     },
                     "required": ["subtaskId"]
