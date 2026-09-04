@@ -86,6 +86,8 @@ public class UpstreamStageTraceTests
             Decision(2, SupervisorDecisionKinds.Spawn),
         };
 
+        SupervisorOutcome.ReadFinalIntegratedBranch(tape).ShouldBeNull("the ship-a-head reader KEEPS its stale barrier — this change never widens what may be published");
+
         UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), tape, Array.Empty<AttemptProjection>(), Array.Empty<PublishManifest>())
             .ShouldContain(CompletionStage.Integrate);
     }

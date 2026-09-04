@@ -1419,6 +1419,8 @@ public class SupervisorDeciderTests
 
         decision.Kind.ShouldBe(SupervisorDecisionKinds.Stop);
         StopField(decision, "summary").ShouldContain("every contract dimension reads settled", customMessage: "the projected stop carries the model's OWN words as its summary, not the projector's empty substitute (the rationale the projector also injects sits at the payload root, where SupervisorPublishGate does not look)");
+        SupervisorStopPayload.IsSuccessOutcome(StopField(decision, "outcome")).ShouldBeFalse("the model authored no outcome, so the server's fill fails closed — a confident-sounding rationale is reasoning, not a verdict");
+        StopField(decision, "outcomeAssumed").ShouldNotBeNullOrWhiteSpace("…and the payload says the label was assumed, so the journal does not present it as the model's own");
         client.Requests.Count.ShouldBe(2, "the model still gets its one bounded repair — the floor only catches what that repair drops");
     }
 
@@ -1435,6 +1437,7 @@ public class SupervisorDeciderTests
 
         StopField(decision, "summary").ShouldContain("The baseline build is broken", customMessage: "the summary is recovered from the reply's own rationale");
         StopField(decision, "outcome").ShouldBe("failed", "the terminal label the model authored survives — the floor restores words, never a verdict");
+        StopField(decision, "outcomeAssumed").ShouldBeEmpty("nothing was assumed here, so the note must not appear");
         client.Requests.Count.ShouldBe(1, "recovering words the first reply already carried never costs a round-trip");
     }
 

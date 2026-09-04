@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Deciders;
 using CodeSpace.Messages.Agents;
 using Shouldly;
@@ -206,14 +207,42 @@ public class SupervisorDecisionPayloadLiftTests
     }
 
     [Fact]
-    public void The_narrated_outcome_matches_the_projector_own_substitute_for_an_absent_stop()
+    public void A_narrated_stop_the_model_gave_no_outcome_for_never_reads_as_a_success()
     {
-        // DRIFT DETECTOR. The floor must never make the terminal claim any MORE than the projector already makes for
-        // the same shape: today an absent stop projects with the substitute label read below. If that substitute
-        // changes, this floor has silently started claiming something different — fail here, not in production.
-        var narrated = Bind(SupervisorDecisionPayloadLift.LiftStopNarration(Json("""{"kind":"stop","rationale":{"why":"done"}}""")).ShouldNotBeNull());
-        var substituted = SupervisorDecisionProjector.Project(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Stop });
+        // THE FAIL-CLOSED RULE. The recovered prose is the model's REASONING, not a terminal verdict — a rationale
+        // saying the work could not be finished must not terminalize as a SUCCESSFUL stop carrying that very text.
+        // Before this floor existed the EMPTY summary was the accidental backstop (the publish gate parked the run);
+        // now that the summary is filled, the honesty has to be carried explicitly.
+        var raw = Json("""{"kind":"stop","rationale":{"why":"I could not finish — the baseline build is broken and I am out of retries."}}""");
 
-        narrated.Stop!.Outcome.ShouldBe(JsonDocument.Parse(substituted.PayloadJson).RootElement.GetProperty("outcome").GetString());
+        var model = Bind(SupervisorDecisionPayloadLift.LiftStopNarration(raw).ShouldNotBeNull());
+
+        SupervisorStopPayload.IsSuccessOutcome(model.Stop!.Outcome).ShouldBeFalse("a summary the SERVER recovered can never be a success the MODEL never claimed");
+        SupervisorStopPayload.IsClarificationOutcome(model.Stop!.Outcome).ShouldBeFalse("nor an abstention — the model asked nothing");
+        SupervisorOutcome.ClassifyStop(null, $$"""{"outcome":"{{model.Stop!.Outcome}}","summary":"s"}""").Kind.ShouldBe(SupervisorStopKind.GaveUp,
+            customMessage: "pinned on the CLASSIFICATION, not the spelling — the label may be renamed, its reading may not drift");
+        model.Stop!.OutcomeAssumed.ShouldBe(SupervisorDecisionPayloadLift.AssumedOutcomeNote, "the payload records that the label was the server's assumption, so the journal can say why a readable summary did not end in a win");
+    }
+
+    [Fact]
+    public void A_narrated_stop_keeps_a_success_outcome_the_model_itself_authored()
+    {
+        // The fail-closed fill is for an ABSENT outcome only. A model that nested its own verdict is believed.
+        var raw = Json("""{"kind":"stop","stop":{"outcome":"completed"},"rationale":{"why":"Both units are accepted."}}""");
+
+        var model = Bind(SupervisorDecisionPayloadLift.LiftStopNarration(raw).ShouldNotBeNull());
+
+        SupervisorStopPayload.IsSuccessOutcome(model.Stop!.Outcome).ShouldBeTrue();
+        model.Stop!.OutcomeAssumed.ShouldBeNull("nothing was assumed — the note must not appear on a model-authored verdict");
+    }
+
+    [Fact]
+    public void A_stop_with_its_own_summary_serializes_byte_identical()
+    {
+        // The dominant path stays untouched: no narration, no assumed-outcome note, so the idempotency-key bytes of
+        // every stop the model authored properly are exactly what they were before this floor existed.
+        var authored = new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Stop, Stop = new SupervisorStopPayload { Outcome = "completed", Summary = "Shipped the validator." } };
+
+        SupervisorDecisionProjector.Project(authored).PayloadJson.ShouldBe("""{"outcome":"completed","summary":"Shipped the validator."}""");
     }
 }
