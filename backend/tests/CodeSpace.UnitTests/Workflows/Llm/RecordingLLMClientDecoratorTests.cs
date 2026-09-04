@@ -549,6 +549,35 @@ public class RecordingLLMClientDecoratorTests
         logger.Calls[^1].Payload.GetProperty("failureKind").GetString().ShouldBe("cancelled");
     }
 
+    /// <summary>
+    /// D1: the SETTLE has to price the same way the admission did. Both recording faces reserve pessimistically off
+    /// the scope's row prices and then correct to the observed usage — so a model priced ONLY on its pool row must
+    /// settle at its real cost. Passing no price map to the settle callback made it null, and a null actual settles
+    /// AT the reserve, so every capped run's committed spend permanently over-counted and its cap tripped early.
+    /// </summary>
+    [Theory]
+    [InlineData("plain")]
+    [InlineData("structured")]
+    public async Task A_ROW_PRICED_model_settles_at_its_real_cost_rather_than_holding_the_whole_reservation(string face)
+    {
+        var ledger = new SettleRecordingLedger();
+        var prices = new Dictionary<string, CodeSpace.Messages.Agents.ModelPrice>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["pool-model-x"] = new() { InputPerMillionUsd = 3m, OutputPerMillionUsd = 0m },   // 1M input tokens ⇒ $3
+        };
+
+        using (LlmCallContext.Push(new LlmCallScope(Run, Team, "sup", "sup#turn1", "supervisor.decision", new CapturingLogger(), new NoopOffloader(), ledger, CapUsd: 50m, ModelPrices: prices)))
+        {
+            var request = new LLMCompletionRequest { Model = "pool-model-x", SystemPrompt = "s", UserPrompt = "u" };
+
+            if (face == "plain") await new RecordingLLMClientDecorator(new RowPricedClient()).CompleteAsync(request, CancellationToken.None);
+            else await new RecordingStructuredLLMClientDecorator(new RowPricedClient()).CompleteStructuredAsync(Request() with { Model = "pool-model-x" }, CancellationToken.None);
+        }
+
+        ledger.Reserves.ShouldBe(1, "the row price is what made the call admissible at all");
+        ledger.LastSettleActual.ShouldBe(3m, "the settle must read the SAME row prices the reserve did — a null actual settles at the pessimistic reserve forever");
+    }
+
     private static async Task ConsumeAsync(IStreamingLLMClient client, CancellationToken cancellationToken)
     {
         await foreach (var _ in client.StreamAsync(new LLMCompletionRequest { Model = "m", SystemPrompt = "s", UserPrompt = "u" }, cancellationToken)) { }
@@ -568,6 +597,44 @@ public class RecordingLLMClientDecoratorTests
             ObservedStructuredRequest = request;
             return Task.FromResult(StructuredResult);
         }
+    }
+
+    /// <summary>A completion on a model NOTHING but the scope's row prices can price, with usage worth exactly $3 at that row price.</summary>
+    private sealed class RowPricedClient : ILLMClient, IStructuredLLMClient
+    {
+        public string Provider => "pool";
+
+        public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken ct) =>
+            Task.FromResult(new LLMCompletion { Text = "t", Model = "pool-model-x", Usage = Usage });
+
+        public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken ct) =>
+            Task.FromResult(new StructuredLLMCompletion { Json = JsonSerializer.SerializeToElement(new { ok = true }), Model = "pool-model-x", Usage = Usage });
+
+        private static LlmUsage Usage => new() { InputTokens = 1_000_000, OutputTokens = 0, FinishReason = "stop" };
+    }
+
+    /// <summary>Admits everything and remembers what the guard settled at — the one figure this fix is about.</summary>
+    private sealed class SettleRecordingLedger : CodeSpace.Core.Services.Workflows.Budget.IBudgetLedger
+    {
+        public int Reserves;
+        public decimal? LastSettleActual;
+
+        public Task<CodeSpace.Core.Services.Workflows.Budget.BudgetAdmission> ReserveAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, decimal estimateUsd, decimal capUsd, string priceVersion, Guid? parentReservationId, DateTimeOffset? expiresAt, CancellationToken cancellationToken)
+        {
+            Reserves++;
+            return Task.FromResult(new CodeSpace.Core.Services.Workflows.Budget.BudgetAdmission(true, Guid.NewGuid(), 0m, capUsd, null));
+        }
+
+        public Task SettleAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, decimal? actualUsd, CancellationToken cancellationToken)
+        {
+            LastSettleActual = actualUsd;
+            return Task.CompletedTask;
+        }
+
+        public Task ReleaseAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<int> ExpireOverdueAsync(int batchSize, CancellationToken cancellationToken) => Task.FromResult(0);
+        public Task<decimal> CommittedUsdAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken) => Task.FromResult(0m);
+        public Task<int> ReconcileDanglingAsync(string kindPrefix, int batchSize, CancellationToken cancellationToken) => Task.FromResult(0);
     }
 
     private sealed class PlainClient : ILLMClient

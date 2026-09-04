@@ -134,9 +134,10 @@ public sealed class UnpricedModelUnderCapTests
     [Fact]
     public void The_unpriced_refusal_is_a_SIBLING_of_the_budget_refusal_not_a_subclass()
     {
-        // The two demand different remedies (raise/drop the cap vs. price the model) and the turn loop stamps
-        // different stop reasons; a subclass would let one catch swallow the other and report the wrong one.
-        var refusal = new LlmUnpricedModelException("supervisor.decision", PoolModel, 5m);
+        // The two demand different remedies AND different endings: a spent budget only the run's own config can
+        // heal, so it STOPS; a missing price an operator heals elsewhere, so the run PARKS. A subclass would let one
+        // catch swallow the other and turn a resumable park into a terminal stop.
+        var refusal = new UnpricedModelUnderCapException(PoolModel, 5m, "the brain call");
 
         refusal.ShouldNotBeAssignableTo<LlmBudgetExceededException>();
         refusal.Model.ShouldBe(PoolModel);

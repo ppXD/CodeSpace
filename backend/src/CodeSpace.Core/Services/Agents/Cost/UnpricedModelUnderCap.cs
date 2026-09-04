@@ -30,3 +30,35 @@ public static class UnpricedModelUnderCap
     public static string Detail(string model, decimal capUsd) =>
         $"Model '{model}' has no price, so this run's ${capUsd:0.####} cost cap cannot be enforced — price it in the model manager (Settings → Models: $/M in, $/M out) or remove the cap.";
 }
+
+/// <summary>
+/// The run cannot proceed under its cost cap because a model it would spend on has no price
+/// (<see cref="UnpricedModelUnderCap"/>). Thrown by all three admission points — the brain-plane budget guard, the
+/// post-decision bound, and the agent-wave staging — so ONE catch in <c>AgentSupervisorNode</c> handles them alike.
+///
+/// <para>The remedy is a STORED FACT the operator can change while the run is parked (price the model), so this is
+/// deliberately NOT a terminal condition: the node parks the run on the existing wake ladder and the next wake
+/// re-evaluates the price. That is why it is a distinct type from <c>LlmBudgetExceededException</c> — a spent budget
+/// heals only by changing the run's own configuration, so it stops; a missing price heals by an edit elsewhere, so
+/// it waits. Only when the whole park window elapses unpriced does the run end honestly.</para>
+/// </summary>
+public sealed class UnpricedModelUnderCapException(string model, decimal capUsd, string where)
+    : InvalidOperationException($"Refused {where}: {UnpricedModelUnderCap.Detail(model, capUsd)}"), Messages.Failures.IFailure
+{
+    /// <summary>The model nobody could price — what the park's reason names so the operator knows which row to edit.</summary>
+    public string Model { get; } = model;
+
+    public decimal CapUsd { get; } = capUsd;
+
+    /// <summary>Which admission point refused, for the log line only — never for control flow.</summary>
+    public string Where { get; } = where;
+
+    /// <summary>The operator-facing sentence on its own, without the "Refused …:" frame — what the park/stop carries as its detail.</summary>
+    public string Detail { get; } = UnpricedModelUnderCap.Detail(model, capUsd);
+
+    // The failure taxonomy (#1353): PreconditionRequired — price this model (or drop the cap) and the very same
+    // request works. NOT Exhausted: no budget is spent, and retrying the identical call unchanged never succeeds.
+    Messages.Failures.FailureKind Messages.Failures.IFailure.Kind => Messages.Failures.FailureKind.PreconditionRequired;
+    string Messages.Failures.IFailure.Code => Messages.Failures.FailureCodes.ModelPriceRequired;
+    string? Messages.Failures.IFailure.ClientMessage => "This run has a cost cap, but one of its models has no price.";
+}

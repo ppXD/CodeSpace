@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Cost;
+using CodeSpace.Core.Services.Workflows.Budget;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Decisions;
 using CodeSpace.Core.Services.Supervisor;
@@ -38,8 +39,11 @@ namespace CodeSpace.IntegrationTests.Agents;
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
-public class ModelPricingUnderCapFlowTests
+public class ModelPricingUnderCapFlowTests : IDisposable
 {
+    /// <summary>The scripted decider is a fixture SINGLETON — reset it after every test so a mode set here can never leak into a sibling.</summary>
+    public void Dispose() => ResetScript();
+
     private const string NodeId = "sup";
     private const string Goal = "ship it";
     private const string UnpricedPoolModel = "gpt-5.4-codex";   // absent from the built-in price table by design
@@ -166,7 +170,7 @@ public class ModelPricingUnderCapFlowTests
     // ── THE CROWN JEWEL: a capped run cannot spend on an unpriced model ──────────────
 
     [Fact]
-    public async Task A_capped_run_that_spent_on_an_UNPRICED_model_force_stops_naming_the_model()
+    public async Task A_capped_run_that_spent_on_an_UNPRICED_model_REFUSES_to_spend_further_naming_the_model()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var runId = await SeedSupervisorRunAsync(teamId, userId);
@@ -180,13 +184,122 @@ public class ModelPricingUnderCapFlowTests
         context.RunSpendUsd.ShouldBe(0m, "the defect's mechanism: an unpriced model contributes ?? 0m, so 'spend > cap' reads false forever");
         context.UnpricedSpendModel.ShouldBe(UnpricedPoolModel, "…and this is the signal that makes that $0 legible as a lie");
 
-        var result = await RunSpawningTurnAsync(runId, teamId, Capped(5m));
+        // The refusal is a THROW, not a forced stop: the remedy is a stored fact an operator changes while the run
+        // waits, so the node parks on it rather than terminalizing (see the park test below).
+        var refusal = await Should.ThrowAsync<UnpricedModelUnderCapException>(() => RunSpawningTurnAsync(runId, teamId, Capped(5m)));
 
-        result.IsFinished.ShouldBeTrue("the run stops on its own unenforceable cap rather than spending unbounded");
-        result.TerminalReason.ShouldBe(SupervisorStopReasons.UnpricedModelUnderCap);
-        (await LatestStopDetailAsync(runId, teamId)).ShouldSatisfyAllConditions(
-            detail => detail.ShouldContain(UnpricedPoolModel, Case.Sensitive, "an operator cannot act on a stop that doesn't name the model"),
-            detail => detail.ShouldContain("model manager", Case.Insensitive, "…nor on one that doesn't name the remedy"));
+        refusal.Model.ShouldBe(UnpricedPoolModel, "an operator cannot act on a refusal that doesn't name the model");
+        refusal.Detail.ShouldContain("model manager", Case.Insensitive, "…nor on one that doesn't name the remedy");
+
+        // And nothing was claimed on the ledger for the refused turn — a park must leave no half-written decision.
+        (await DecisionKindsAsync(runId, teamId)).ShouldAllBe(k => k == SupervisorDecisionKinds.Spawn, "only the seeded wave; the refused turn wrote nothing");
+    }
+
+    [Fact]
+    public async Task The_run_PARKS_on_the_unpriced_model_and_the_wake_carries_on_once_it_is_priced()
+    {
+        // OWNER DIRECTION: pricing a model is a stored-fact change an operator makes ELSEWHERE, so an unenforceable
+        // cap must not throw away the work already paid for. The run waits (Suspended, on a wait whose payload names
+        // the model) and the wake re-prices — the operator's edit alone resumes it, with no relaunch. Drives the REAL
+        // engine, so the suspension is a real durable wait row, not a NodeResult in memory.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateCappedSupervisorWorkflowAsync(teamId, userId, capUsd: 5m);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        var credentialId = await SeedCredentialAsync(teamId, "OpenAI");
+
+        // A settled wave already burned 5M tokens on an unpriced model, so the run's realized spend reads $0.
+        await SeedSettledSpawnAsync(runId, teamId, UnpricedPoolModel, inputTokens: 5_000_000, outputTokens: 250_000);
+
+        // The decider WANTS to spawn again: the bound only refuses spend-incurring decisions, so a decider that just
+        // stops would (correctly) sail through and prove nothing.
+        Script(s => s.PlanThenSpawnForever());
+
+        await RunEngineAsync(runId);
+
+        Guid waitId;
+        string markerJson;
+
+        using (var mid = _fixture.BeginScope())
+        {
+            var db = mid.Resolve<CodeSpaceDbContext>();
+
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+                .ShouldBe(WorkflowRunStatus.Suspended, "an unenforceable cap PARKS the run — it must never terminalize work the operator can still rescue");
+
+            var wait = await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending);
+
+            wait.WaitKind.ShouldBe(WorkflowWaitKinds.SupervisorInfraPark);
+            wait.WakeAt.ShouldNotBeNull("a park with no wake is a hang");
+            wait.PayloadJson.ShouldContain(UnpricedPoolModel, Case.Sensitive, "the operator reads WHICH model to price straight off the parked run");
+            wait.PayloadJson.ShouldContain("model manager", Case.Insensitive, "…and what to do about it");
+
+            waitId = wait.Id;
+            markerJson = wait.PayloadJson!;
+        }
+
+        // The operator prices the model while the run sits parked.
+        await SeedModelRowAsync(credentialId, UnpricedPoolModel, input: 0.0001m, output: 0.0001m);
+
+        (await RehydrateAsync(runId, teamId, Capped(5m))).UnpricedSpendModel
+            .ShouldBeNull("the fold RE-PRICES the recorded model rather than trusting the old verdict — that is what makes the park resumable");
+
+        // The wake re-enters the same turn and the run continues rather than re-parking.
+        await FireDeadlineAsync(runId, waitId, markerJson);
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var vdb = verify.Resolve<CodeSpaceDbContext>();
+
+        (await vdb.WorkflowRunWait.AsNoTracking()
+            .AnyAsync(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.SupervisorInfraPark && w.Status == WorkflowWaitStatuses.Pending))
+            .ShouldBeFalse("the price landed — the run is no longer waiting on it");
+
+        (await vdb.SupervisorDecisionRecord.AsNoTracking().Where(d => d.SupervisorRunId == runId).ToListAsync())
+            .ShouldAllBe(d => d.Status == SupervisorDecisionStatus.Succeeded, "the park stranded no decision row — it threw before this turn claimed anything");
+    }
+
+    [Fact]
+    public async Task A_park_that_is_NEVER_priced_ends_honestly_rather_than_waiting_forever()
+    {
+        // The park has a ceiling. Once the whole window has elapsed with the model still unpriced, the run stops with
+        // the reason that names the problem — a degraded Stopped, never a fake success and never an eternal wait.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateCappedSupervisorWorkflowAsync(teamId, userId, capUsd: 5m);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await SeedSettledSpawnAsync(runId, teamId, UnpricedPoolModel, inputTokens: 5_000_000, outputTokens: 250_000);
+
+        Script(s => s.PlanThenSpawnForever());
+
+        await RunEngineAsync(runId);
+
+        Guid waitId;
+        using (var mid = _fixture.BeginScope())
+            waitId = (await mid.Resolve<CodeSpaceDbContext>().WorkflowRunWait.AsNoTracking()
+                .SingleAsync(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending)).Id;
+
+        // Wake with a marker whose FIRST park is older than the whole window — the exhausted-window ending.
+        var exhausted = JsonSerializer.Serialize(new
+        {
+            infraPark = true,
+            parks = 6,
+            firstParkedAtUtc = DateTimeOffset.UtcNow.Subtract(SupervisorInfraPark.MaxParkWindow).AddMinutes(-5).ToString("o"),
+            error = "still unpriced",
+        });
+
+        await FireDeadlineAsync(runId, waitId, exhausted);
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var vdb = verify.Resolve<CodeSpaceDbContext>();
+
+        var stop = (await vdb.SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.SupervisorRunId == runId && d.DecisionKind == SupervisorDecisionKinds.Stop)
+            .OrderByDescending(d => d.Sequence)
+            .ToListAsync()).FirstOrDefault();
+
+        stop.ShouldNotBeNull("the exhausted window ends the run through the ledger, honestly");
+        SupervisorOutcome.ReadStopReason(stop!.PayloadJson).ShouldBe(SupervisorStopReasons.UnpricedModelUnderCap);
     }
 
     [Fact]
@@ -292,9 +405,105 @@ public class ModelPricingUnderCapFlowTests
         (await service.ComputeRunsAsync(teamId, new[] { runId }, CancellationToken.None))[runId].BrainPlaneUsd.ShouldBe(5m);
     }
 
+    [Fact]
+    public async Task The_settlement_sweep_prices_a_ROW_PRICED_model_instead_of_holding_the_whole_reservation()
+    {
+        // The sweep turns a wave's RESERVED estimate into its ACTUAL cost. Pricing without the team's row table made
+        // a row-priced-only model settle null — which the ledger treats pessimistically as "spend the whole
+        // reservation". The run's committed spend then permanently over-counted what it really cost, and the cap
+        // tripped early on money nobody spent. The sweep has to price exactly the way the fold does.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateCappedSupervisorWorkflowAsync(teamId, userId, capUsd: 100m);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        var credentialId = await SeedCredentialAsync(teamId, "OpenAI");
+
+        // Priced ONLY on its pool row — the built-in table has never heard of it.
+        await SeedModelRowAsync(credentialId, UnpricedPoolModel, input: 2m, output: 10m);
+
+        // One reserved attempt, then the wave settles: 1M in + 0.5M out = $2.00 + $5.00 = $7.00.
+        const decimal reserved = 50m;
+        var scopeKey = $"{NodeId}#turn0#0";
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IBudgetLedger>().ReserveAsync(runId, teamId, "agent-attempt", scopeKey, reserved, capUsd: 100m, priceVersion: "realized-v1", parentReservationId: null, expiresAt: null, CancellationToken.None))
+                .Admitted.ShouldBeTrue();
+
+        await SeedSettledSpawnAsync(runId, teamId, UnpricedPoolModel, inputTokens: 1_000_000, outputTokens: 500_000);
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IBudgetSettlementService>().SweepAsync(batchSize: 100, CancellationToken.None);
+
+        using var verify = _fixture.BeginScope();
+        var reservation = await verify.Resolve<CodeSpaceDbContext>().BudgetReservation.AsNoTracking()
+            .SingleAsync(r => r.WorkflowRunId == runId && r.ScopeKey == scopeKey);
+
+        reservation.SettledUsd.ShouldBe(7m, "the row price is what this call actually cost — settling at the $50 reservation would bill money nobody spent");
+        reservation.SettledUsd.ShouldNotBe(reserved);
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────────
 
     private static SupervisorGoalConfig Capped(decimal cap) => new() { Goal = Goal, MaxCostUsd = cap };
+
+    /// <summary>Every decision kind on the run's ledger — used to prove a refused turn claimed nothing.</summary>
+    private async Task<IReadOnlyList<string>> DecisionKindsAsync(Guid runId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        return (await scope.Resolve<ISupervisorDecisionLog>().GetForRunAsync(runId, teamId, CancellationToken.None)).Select(d => d.DecisionKind).ToList();
+    }
+
+    /// <summary>A start → sup → end workflow whose supervisor node carries a cost cap — the shape the engine actually walks.</summary>
+    private async Task<Guid> CreateCappedSupervisorWorkflowAsync(Guid teamId, Guid userId, decimal capUsd)
+    {
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+
+        return await scope.Resolve<IMediator>().Send(new Messages.Commands.Workflows.CreateWorkflowCommand
+        {
+            Name = "d1-park-" + Guid.NewGuid().ToString("N")[..6],
+            Description = null,
+            Definition = new Messages.Dtos.Workflows.WorkflowDefinition
+            {
+                SchemaVersion = 1,
+                Nodes = new List<Messages.Dtos.Workflows.NodeDefinition>
+                {
+                    new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+                    new() { Id = NodeId, TypeKey = "agent.supervisor", Config = WorkflowsTestSeed.Json($$"""{"goal":"{{Goal}}","maxCostUsd":{{capUsd}}}"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+                    new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+                },
+                Edges = new List<Messages.Dtos.Workflows.EdgeDefinition>
+                {
+                    new() { From = "start", To = NodeId },
+                    new() { From = NodeId, To = "end" },
+                },
+            },
+            Activations = new List<Messages.Commands.Workflows.WorkflowActivationInput>(),
+            Enabled = true,
+        });
+    }
+
+    /// <summary>Point the shared scripted decider at a mode for this test. Reset in <see cref="ResetScript"/> so it never leaks into a sibling.</summary>
+    private void Script(Action<SupervisorDecisionScript> configure)
+    {
+        using var scope = _fixture.BeginScope();
+        configure(scope.Resolve<SupervisorDecisionScript>());
+    }
+
+    private void ResetScript() => Script(s => s.PlanThenStop());
+
+    private async Task RunEngineAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<Core.Services.Workflows.Engine.IWorkflowEngine>().ExecuteRunAsync(runId, CancellationToken.None);
+    }
+
+    /// <summary>Fire a park's deadline — what the scheduled job does at wake_at.</summary>
+    private async Task FireDeadlineAsync(Guid runId, Guid waitId, string timeoutPayloadJson)
+    {
+        using var scope = _fixture.BeginScope();
+        (await scope.Resolve<Core.Services.Workflows.Engine.IWorkflowResumeService>().ResumeByDeadlineAsync(waitId, timeoutPayloadJson, CancellationToken.None))
+            .ShouldBeTrue($"the deadline must resolve pending wait {waitId} on run {runId} — inspect workflow_run_wait manually if this fails");
+    }
+
 
     private async Task<IReadOnlyList<Messages.Dtos.ModelCredentials.CredentialedModelSummary>> ListModelsAsync(Guid userId, Guid teamId, Guid credentialId)
     {

@@ -216,15 +216,6 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
 
                 return GateForcedStop(context, SupervisorStopReasons.CostCapReached, Deciders.SupervisorBudgetRecitation.Summary(refused.CapUsd, context.AgentExecutionSpendUsd, context.BrainPlaneSpendUsd, context.BrainPlaneSpendByKind));
             }
-            catch (Workflows.Llm.LlmUnpricedModelException refused)
-            {
-                // D1 — the brain would spend on a model this run cannot price under its own cap. Terminal, not a park:
-                // the price is a stored fact, so retrying the identical call refuses forever. The detail NAMES the
-                // model + the remedy, so the operator can price it and relaunch.
-                _logger.LogWarning("Supervisor run {RunId} refused a brain call on unpriced model {Model} under a ${Cap} cost cap — forcing the unpriced-model stop", context.SupervisorRunId, refused.Model, refused.CapUsd);
-
-                return GateForcedStop(context, SupervisorStopReasons.UnpricedModelUnderCap, refused.Detail);
-            }
         }
 
         decision = ClampSpawnToDependencyFrontier(context, decision);
@@ -501,10 +492,12 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
 
         // P3.5 — the cost cap is the one bound with a per-run figure worth citing (which cap, how much over/left,
         // broken down by lane) — every other bound's reason is already fully self-explanatory as a bare string.
-        // D1 — the unpriced-model stop is only actionable if it NAMES the model and the remedy; the bound itself is a
-        // bare string, so the detail carries both (the same sentence the brain-plane guard's refusal carries).
+        // D1 — a cap that cannot be enforced is not a terminal condition: the remedy (price the model) is a stored
+        // fact an operator can change WHILE the run waits. Throw rather than force-stop, so AgentSupervisorNode parks
+        // the run on the wake ladder and the next wake re-prices. Thrown from ChooseDecisionAsync — BEFORE this turn
+        // claims anything on the ledger — so a park leaves no half-written decision behind.
         if (postBound == SupervisorStopReasons.UnpricedModelUnderCap)
-            return GateForcedStop(context, postBound, Agents.Cost.UnpricedModelUnderCap.Detail(context.UnpricedSpendModel!, plan.MaxCostUsd!.Value));
+            throw new Agents.Cost.UnpricedModelUnderCapException(context.UnpricedSpendModel!, plan.MaxCostUsd!.Value, "the run's next spend-incurring decision");
 
         if (postBound == SupervisorStopReasons.CostCapReached)
             return GateForcedStop(context, postBound, Deciders.SupervisorBudgetRecitation.Summary(plan.MaxCostUsd!.Value, context.AgentExecutionSpendUsd, context.BrainPlaneSpendUsd, context.BrainPlaneSpendByKind));

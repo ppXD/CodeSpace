@@ -276,8 +276,22 @@ public sealed partial class SupervisorTurnService
     private static string? FoldUnpricedSpendModel(IReadOnlyList<SupervisorPriorDecision> priorDecisions, IReadOnlyDictionary<string, Messages.Agents.ModelPrice> modelPrices) =>
         priorDecisions
             .Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind))
-            .Select(d => SupervisorOutcome.FirstUnpricedModel(SupervisorOutcome.ReadAgentResults(d.OutcomeJson), modelPrices))
+            .Select(d => SupervisorOutcome.FirstUnpricedModel(SupervisorOutcome.ReadAgentResults(d.OutcomeJson), modelPrices)
+                         ?? StillUnpricedBlockedModel(d.OutcomeJson, modelPrices))
             .FirstOrDefault(m => m is not null);
+
+    /// <summary>
+    /// The model a BLOCKED wave named (<c>unpricedModel</c> on the staging outcome), re-priced against the CURRENT
+    /// table — null once someone has priced it. A blocked wave realizes no spend, so without this the run's unpriced
+    /// signal would be silent and the bound would never fire; re-PRICING rather than trusting the recorded name is
+    /// what makes the park resumable, since the operator's whole remedy is to change that stored fact mid-park.
+    /// </summary>
+    private static string? StillUnpricedBlockedModel(string? outcomeJson, IReadOnlyDictionary<string, Messages.Agents.ModelPrice> modelPrices)
+    {
+        var blocked = SupervisorOutcome.ReadBlockedUnpricedModel(outcomeJson);
+
+        return blocked is not null && AgentCostPricing.PriceFor(blocked, modelPrices) is null ? blocked : null;
+    }
 
     /// <summary>
     /// P3.5 — sum the run's REALIZED brain-plane USD spend: every <c>interaction.completed</c> ledger row this run

@@ -23,29 +23,6 @@ public sealed class LlmBudgetExceededException(string kind, decimal committedUsd
 }
 
 /// <summary>
-/// D1: a model call could not be admitted because the run declares a cost cap and the model has NO price in any
-/// table — spending on it would sum as <c>$0</c> and let the run sail past its own cap (see
-/// <see cref="UnpricedModelUnderCap"/>). A SIBLING of <see cref="LlmBudgetExceededException"/>, not a subclass: the
-/// two demand different remedies (raise/drop the cap vs. price the model), and the stop must say which.
-/// </summary>
-public sealed class LlmUnpricedModelException(string kind, string model, decimal capUsd)
-    : InvalidOperationException($"Model call '{kind}' refused: {UnpricedModelUnderCap.Detail(model, capUsd)}"), Messages.Failures.IFailure
-{
-    public string Kind { get; } = kind;
-    public string Model { get; } = model;
-    public decimal CapUsd { get; } = capUsd;
-
-    /// <summary>The operator-facing half of the message — what the forced stop carries as its detail, without the "Model call 'x' refused:" frame.</summary>
-    public string Detail { get; } = UnpricedModelUnderCap.Detail(model, capUsd);
-
-    // The failure taxonomy (#1353): nameably PreconditionRequired — price this model (or drop the cap) and the very
-    // same request works. NOT Exhausted: no budget is spent, and a retry of the identical call can never succeed.
-    Messages.Failures.FailureKind Messages.Failures.IFailure.Kind => Messages.Failures.FailureKind.PreconditionRequired;
-    string Messages.Failures.IFailure.Code => Messages.Failures.FailureCodes.ModelPriceRequired;
-    string? Messages.Failures.IFailure.ClientMessage => "This run has a cost cap, but one of its models has no price.";
-}
-
-/// <summary>
 /// W-hard: the ATOMIC half of the brain-plane cost bound, applied at the ONE funnel every model call already rides
 /// (the recording decorator family — all faces route their inner call through <see cref="GuardedAsync"/>). The
 /// per-turn bound (<c>SupervisorBounds</c> over realized spend) checks BETWEEN decisions; this closes the
@@ -73,7 +50,7 @@ public static class LlmBudgetGuard
         // brain call sum to $0 and spend past the operator's cap forever. Refuse, naming the model + the remedy.
         // A brain call that FAILED OVER to another pool row (#1737/#1738) re-enters this guard under the SUCCESSOR's
         // own name, so each candidate is judged on its own price — never admitted on the first pick's.
-        if (estimate is null) throw new LlmUnpricedModelException(scope.Kind, model, capUsd);
+        if (estimate is null) throw new UnpricedModelUnderCapException(model, capUsd, $"model call '{scope.Kind}'");
 
         // One reservation per PHYSICAL call (a replayed turn makes a new call and spends real money again), scoped
         // under the run: the ledger's advisory lock serializes concurrent reserves, so the second caller sees the
@@ -94,7 +71,7 @@ public static class LlmBudgetGuard
             return completion;
         }
         catch (LlmBudgetExceededException) { throw; }
-        catch (LlmUnpricedModelException) { throw; }
+        catch (UnpricedModelUnderCapException) { throw; }
         catch
         {
             // The call itself failed — the actual spend is unknowable here; the ledger's null-actual settle is

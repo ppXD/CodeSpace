@@ -4,7 +4,7 @@ import { createPortal } from "react-dom";
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { ModelCredentialSummary } from "@/api/modelCredentials";
 import { ApiError } from "@/api/request";
-import { parsePrice, useCredentialedModelList, useRefreshCredentialedModels, useSaveCredentialedModels, useSetCredentialedModelPrice, useSetDefaultCredentialedModel } from "@/hooks/use-model-credentials";
+import { parsePrice, priceFieldIssue, useCredentialedModelList, useRefreshCredentialedModels, useSaveCredentialedModels, useSetCredentialedModelPrice, useSetDefaultCredentialedModel } from "@/hooks/use-model-credentials";
 import { providerForm } from "@/lib/providerForms";
 
 import { ModelRowsEditor, type ModelRow } from "./ModelRowsEditor";
@@ -64,11 +64,18 @@ export function ModelCredentialModelsModal({ credential, onClose }: ModelCredent
     setDefault.mutate(rowId, { onError });
   };
   const doSetPrice = (rowId: string, row: ModelRow) => {
+    // Say what is wrong instead of dropping the keystrokes: a typed field that isn't a non-negative number, or one
+    // too large to price a call with, would otherwise vanish into a silent null and the model would stay unpriced
+    // for no visible reason — the operator would only find out when a capped run refused to start.
+    const invalid = priceFieldIssue(row);
+
+    if (invalid) { setError(invalid); return; }
+
     const input = parsePrice(row.inputUsdPerMillion);
     const output = parsePrice(row.outputUsdPerMillion);
 
-    // Half a price is not a price — the backend rejects it, so don't send it. The operator sees the hint on the
-    // still-blank field and finishes the pair; only a complete pair (or a cleared pair) is committed.
+    // Half a price is not a price — the backend rejects it, so don't send it. This is the ordinary mid-edit state
+    // (the operator blurs the first field on the way to the second), so it is silent rather than an error.
     if ((input === null) !== (output === null)) return;
 
     setError(null);
