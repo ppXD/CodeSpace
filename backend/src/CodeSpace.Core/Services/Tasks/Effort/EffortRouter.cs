@@ -184,6 +184,10 @@ public sealed class EffortRouter : IEffortRouter, IScopedDependency
     private static RoutePlan BuildPlan(EffortDecision decision, bool wasAutoClassified, string effortMode, ITaskRecipe recipe, string projectionKind, IBoundsPreset? preset, RouteCaps caps, bool needsConfirmCard, ConfirmCard? confirm, string? degradedReason) => new()
     {
         EffortMode = effortMode,
+        // The shape the classifier read out of the task, carried first-class so the projection layer routes by WHAT is
+        // being asked for, not only by how much of it. An explicit operator tier classifies nothing, so its decision's
+        // default shape ("code") flows through — the operator's own choice, unchanged.
+        DeliverableShape = DeliverableShapes.Normalize(decision.Signals.DeliverableShape),
         RecipeKind = recipe.RecipeKind,
         ProjectionKind = projectionKind,
         BoundsPreset = preset?.PresetKind ?? effortMode,

@@ -30,4 +30,14 @@ public sealed record EffortSignals
 
     /// <summary>A rough cost / complexity tier as an open string (e.g. <c>"low"</c>, <c>"medium"</c>, <c>"high"</c>). Defaults to the cheapest reading.</summary>
     public string EstimatedCostTier { get; init; } = "low";
+
+    /// <summary>
+    /// WHAT the task is asked to produce, as an open <see cref="DeliverableShapes"/> string (<c>answer</c> /
+    /// <c>document</c> / <c>code</c> / <c>research</c>) — the axis ORTHOGONAL to effort: a tier says how much work,
+    /// a shape says what done looks like. It deliberately changes NO policy row (a question and a one-line edit are
+    /// both cheap); it flows DOWNSTREAM onto the projected agent's mode + objective oracle, where a pure question
+    /// stops being graded as if it were a code change. Defaults to <see cref="DeliverableShapes.Code"/> — the
+    /// historical assumption, so an un-shaped signal set projects byte-identically.
+    /// </summary>
+    public string DeliverableShape { get; init; } = DeliverableShapes.Code;
 }

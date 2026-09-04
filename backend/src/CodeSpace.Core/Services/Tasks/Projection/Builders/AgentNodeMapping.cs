@@ -46,11 +46,17 @@ internal static class AgentNodeMapping
     /// <c>"{{item.model}}"</c> here, so the planner's per-subtask allocation reaches the agent while an
     /// operator-pinned profile model still wins outright. Null (every other caller) ⇒ nothing changes.
     /// </param>
-    public static JsonElement BuildAgentConfig(string goal, ResolvedAgentProfile? profile, string? mode = null, string? grounding = null, object? acceptance = null, IReadOnlyList<string>? criteria = null, string? acceptanceAuthority = null, string? fallbackModel = null)
+    /// <param name="deliverablePath">
+    /// The repo-relative file the agent's DELIVERABLE must be written to, named in the goal so the agent knows where the
+    /// oracle will look. Set only by a shape-derived (non-code) acceptance, whose grader reads declared files rather
+    /// than running an argv — without this line the contract would grade a file the agent was never asked to write.
+    /// Null (every code-shaped launch, every map body) ⇒ the goal is composed byte-identically.
+    /// </param>
+    public static JsonElement BuildAgentConfig(string goal, ResolvedAgentProfile? profile, string? mode = null, string? grounding = null, object? acceptance = null, IReadOnlyList<string>? criteria = null, string? acceptanceAuthority = null, string? fallbackModel = null, string? deliverablePath = null)
     {
         var config = new Dictionary<string, object?>
         {
-            ["goal"] = ComposeGoalWithCriteria(ComposeGoal(goal, grounding), criteria),
+            ["goal"] = ComposeGoalWithDeliverable(ComposeGoalWithCriteria(ComposeGoal(goal, grounding), criteria), deliverablePath),
             // The CLEAN pre-grounding/pre-criteria task text — AgentTask.DisplayTitle's source, so a CONTINUE's card
             // title never shows the grounding digest's heading instead of what the user actually asked.
             ["displayTitle"] = goal,
@@ -113,6 +119,18 @@ internal static class AgentNodeMapping
         var builder = new System.Text.StringBuilder(goal);
         builder.AppendLine().AppendLine().AppendLine("Acceptance criteria (the operator's definition of done):");
         foreach (var c in kept) builder.AppendLine($"- {c.Trim()}");
+
+        return builder.ToString().TrimEnd();
+    }
+
+    /// <summary>Name the deliverable FILE the shape-derived oracle reads, so the agent writes what it is graded on. Null / blank ⇒ the goal verbatim (byte-identical).</summary>
+    private static string ComposeGoalWithDeliverable(string goal, string? deliverablePath)
+    {
+        if (string.IsNullOrWhiteSpace(deliverablePath)) return goal;
+
+        var builder = new System.Text.StringBuilder(goal);
+        builder.AppendLine().AppendLine();
+        builder.AppendLine($"Write your deliverable to `{deliverablePath.Trim()}` in your workspace — the complete answer / report / findings, standing on its own. That file is what this task is graded on.");
 
         return builder.ToString().TrimEnd();
     }

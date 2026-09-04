@@ -93,6 +93,48 @@ public class EffortPolicyTests
         }
     }
 
+    [Theory]
+    [InlineData(DeliverableShapes.Answer)]
+    [InlineData(DeliverableShapes.Document)]
+    [InlineData(DeliverableShapes.Code)]
+    [InlineData(DeliverableShapes.Research)]
+    [InlineData("a-shape-nobody-has-heard-of")]
+    public void The_deliverable_shape_adds_NO_policy_row_every_tier_decision_is_unchanged(string shape)
+    {
+        // B2's axis is deliberately NOT a tier input: shape says what done looks like, effort says how much work it is.
+        // Every row's decision must be byte-identical whatever the shape carries — the shape flows downstream instead.
+        var cases = new (bool Code, bool CrossFile, bool Tests, bool Risky, string Cost, string Expected)[]
+        {
+            (false, false, false, true, "low", TaskEffortModes.Deep),
+            (true, true, true, false, "high", TaskEffortModes.Deep),
+            (true, true, false, false, "low", TaskEffortModes.Standard),
+            (true, false, true, false, "low", TaskEffortModes.Standard),
+            (true, false, false, false, "low", TaskEffortModes.Quick),
+            (false, false, false, false, "low", TaskEffortModes.Quick),
+        };
+
+        foreach (var c in cases)
+        {
+            var signals = new EffortSignals
+            {
+                NeedsCodeChange = c.Code,
+                CrossFile = c.CrossFile,
+                NeedsTestsOrCi = c.Tests,
+                RiskySideEffects = c.Risky,
+                EstimatedCostTier = c.Cost,
+                DeliverableShape = shape,
+            };
+
+            EffortPolicy.Decide(signals, requestedEffort: null).ShouldBe(c.Expected, $"shape '{shape}' must not change the tier for {c}");
+        }
+    }
+
+    [Fact]
+    public void An_unshaped_signal_set_reads_as_code_the_historical_assumption()
+    {
+        new EffortSignals().DeliverableShape.ShouldBe(DeliverableShapes.Code, "the default keeps every pre-B2 route projecting byte-identically");
+    }
+
     [Fact]
     public void ConfirmConfidenceFloor_is_pinned()
     {

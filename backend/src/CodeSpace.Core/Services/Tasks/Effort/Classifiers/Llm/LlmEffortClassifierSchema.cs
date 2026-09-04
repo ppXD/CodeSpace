@@ -24,10 +24,11 @@ public static class LlmEffortClassifierSchema
             "ambiguous": { "type": "boolean", "description": "The goal is under-specified / open-ended enough that a human confirm or plan review is warranted." },
             "riskySideEffects": { "type": "boolean", "description": "The task may produce risky / irreversible side effects (delete, drop, migrate, deploy, production, secrets)." },
             "estimatedCostTier": { "type": "string", "enum": ["low", "medium", "high"], "description": "A rough complexity / cost tier for the work." },
+            "deliverableShape": { "type": "string", "enum": ["answer", "document", "code", "research"], "description": "WHAT the user is asking you to PRODUCE — the deliverable's shape, independent of how much work it is. 'answer': the user wants an explanation / answer in chat, no files and no code change. 'document': a written deliverable file such as a report, design doc, RFC or plan. 'code': a change to the code. 'research': investigate and report read-only findings, no code change. Pick 'code' only when the task genuinely edits code." },
             "confidence": { "type": "number", "description": "Your confidence in this classification, 0..1. >= 0.6 means route AUTOMATICALLY without a human confirm; below 0.6 the task is ambiguous and the operator is asked to confirm the effort." },
             "rationale": { "type": "string", "description": "One short line: why this effort, for the confirm card / observability." }
           },
-          "required": ["needsCodeChange", "crossFile", "needsTestsOrCi", "ambiguous", "riskySideEffects", "estimatedCostTier", "confidence"]
+          "required": ["needsCodeChange", "crossFile", "needsTestsOrCi", "ambiguous", "riskySideEffects", "estimatedCostTier", "deliverableShape", "confidence"]
         }
         """).RootElement.Clone();
 
@@ -44,6 +45,10 @@ public sealed record LlmEffortClassification
     public bool Ambiguous { get; init; }
     public bool RiskySideEffects { get; init; }
     public string EstimatedCostTier { get; init; } = "low";
+
+    /// <summary>The deliverable SHAPE the model read out of the task — normalized against <c>DeliverableShapes</c> before it reaches the signals (an unknown value folds to <c>code</c>, the status quo).</summary>
+    public string DeliverableShape { get; init; } = Messages.Tasks.Effort.DeliverableShapes.Code;
+
     public double Confidence { get; init; }
     public string Rationale { get; init; } = "";
 }

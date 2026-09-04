@@ -91,6 +91,33 @@ public class HeuristicEffortClassifierTests
         decision.Confidence.ShouldBeLessThanOrEqualTo(HeuristicEffortClassifier.ConfidenceCap);
     }
 
+    [Theory]
+    // Document — an explicit written artefact is named.
+    [InlineData("Write a design doc for the new scheduler", DeliverableShapes.Document)]
+    [InlineData("Draft an RFC for the storage rewrite", DeliverableShapes.Document)]
+    // Research — an investigation verb, ahead of the question words it often co-occurs with.
+    [InlineData("Investigate why the nightly job stalls", DeliverableShapes.Research)]
+    [InlineData("Compare the two retry strategies", DeliverableShapes.Research)]
+    // Answer — a question / explanation, no artefact named.
+    [InlineData("Explain how the retry loop works", DeliverableShapes.Answer)]
+    [InlineData("What does this function return?", DeliverableShapes.Answer)]
+    // Code — the conservative fall-through: anything unrecognised keeps today's coding projection.
+    [InlineData("Fix the failing login test", DeliverableShapes.Code)]
+    [InlineData("Add a tooltip to the button", DeliverableShapes.Code)]
+    [InlineData("", DeliverableShapes.Code)]
+    public async Task Infers_a_coarse_deliverable_shape_from_verbs(string goal, string expected)
+    {
+        (await ClassifyAsync(goal)).Signals.DeliverableShape.ShouldBe(expected);
+    }
+
+    [Fact]
+    public async Task The_inferred_shape_never_moves_the_suggested_effort()
+    {
+        // Shape is a downstream axis, not a tier input: a question and a typo fix are both cheap.
+        (await ClassifyAsync("Explain how the retry loop works")).SuggestedEffort.ShouldBe(TaskEffortModes.Quick);
+        (await ClassifyAsync("Fix a typo")).SuggestedEffort.ShouldBe(TaskEffortModes.Quick);
+    }
+
     [Fact]
     public void Confidence_cap_is_strictly_below_the_confirm_floor()
     {
