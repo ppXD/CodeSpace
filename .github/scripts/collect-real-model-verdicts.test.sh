@@ -61,6 +61,12 @@ BASE_URL="https://gateway.internal.example.com:8443/v1/openai"
 API_KEY="sk-codespace-0123456789abcdef"
 SUITE_URL="https://hidden-suite.example.com/qualification.json"
 OBSERVED="ZhipuAI/GLM-5.3-Flash"
+# A model name NO side file ever registered — the real-model-footer-signals lane never calls the gate's ObserveModel,
+# so run 33814929951's trx named its live model with no needle to strike it by. URL-shaped on purpose: ':' and '/'
+# are exactly what a value-based redaction has to escape, and the positional pass must not care.
+# The host is deliberately unrelated to BASE_URL, so nothing on the needle list can strike it by value — the ONLY
+# thing that can mask it is the positional pass.
+UNOBSERVED="https://models.private-vendor.example:8443/v1/glm-5.3-flash"
 
 # Run the collect step with every secret present.
 run_collect() {
@@ -109,6 +115,10 @@ printf "[realmodel] key=%s suite=%s\n" "$API_KEY" "$SUITE_URL" > "${root}/summar
 {
   printf '<StdOut>Start processing HTTP request POST %s/messages</StdOut>\n' "$BASE_URL"
   printf '<StdOut>LLM completion %s in=120 out=45 finish=stop</StdOut>\n' "$OBSERVED"
+  # The footer-signals shape: a lane that never registered its model, so no needle exists for it. Two variants —
+  # one followed by the usual fields, one where the name ENDS the element and the closing tag must survive.
+  printf '<StdOut>[.. INF] LLM completion %s in=0 out=1427 finish=end_turn</StdOut>\n' "$UNOBSERVED"
+  printf '<StdOut>LLM completion %s</StdOut>\n' "$UNOBSERVED"
   printf '<Message>REQUIRED wire - Anthropic model %s missed [key %s]</Message>\n' "$MODEL_ID" "$API_KEY"
 } > "${root}/results/real-model.trx"
 printf '%s\n' "$OBSERVED" > "${root}/summaries/codespace_observed_models"
@@ -121,6 +131,10 @@ check lacks "$API_KEY"   "${root}/results/step-summary.md" "redacts the gateway 
 check lacks "$SUITE_URL" "${root}/results/step-summary.md" "redacts the hidden-suite URL"
 check lacks "$OBSERVED"  "${root}/results/real-model.trx" "redacts an OBSERVED model name out of the trx, from the gate's side file"
 check has   "LLM completion ***" "${root}/results/real-model.trx" "leaves the surrounding log line intact around the struck name"
+check lacks "$UNOBSERVED" "${root}/results/real-model.trx" "masks a model name NO side file registered — by POSITION after 'LLM completion ', ':' and '/' and all"
+check lacks "private-vendor.example" "${root}/results/real-model.trx" "masks the whole unobserved name, not a prefix of it"
+check has   "LLM completion *** in=0 out=1427 finish=end_turn" "${root}/results/real-model.trx" "keeps the token counts and the finish reason — the only reason the line is worth uploading"
+check has   "LLM completion ***</StdOut>" "${root}/results/real-model.trx" "stops the mask at the closing tag when the name ends the element, rather than eating the XML"
 check lacks "$BASE_URL"  "${root}/results/real-model.trx" "redacts the gateway URL - ':' and '/' and all - out of the TRX, not just the summary"
 check lacks "gateway.internal.example.com" "${root}/results/real-model.trx" "redacts the gateway HOST out of the trx"
 check has   "Start processing HTTP request POST ***" "${root}/results/real-model.trx" "leaves the HttpClient log line readable around the struck URL"
@@ -179,6 +193,24 @@ printf "OpenAI scored 12/14\n" > "${root}/summaries/step_summary_1"
 CODESPACE_LLM_MODEL_ID= CODESPACE_LLM_BASE_URL= CODESPACE_LLM_API_KEY= CODESPACE_HIDDEN_SUITE_URL= bash "$collect" "${root}/results" "${root}/summaries" >/dev/null 2>&1
 
 check has "OpenAI scored 12/14" "${root}/results/step-summary.md" "passes content through unchanged when no secret is configured"
+rm -rf "$root"
+
+# The positional model mask does NOT depend on any needle being configured — a fork with no secrets set still must
+# not upload a live model name — and it must not touch text that merely mentions the phrase.
+root="$(stage)"
+{
+  printf 'LLM completion %s in=7 out=9 finish=stop\n' "$UNOBSERVED"
+  printf 'ran the LLM completion node twice\n'
+} > "${root}/summaries/step_summary_1"
+CODESPACE_LLM_MODEL_ID= CODESPACE_LLM_BASE_URL= CODESPACE_LLM_API_KEY= CODESPACE_HIDDEN_SUITE_URL= bash "$collect" "${root}/results" "${root}/summaries" >/dev/null 2>&1
+
+check lacks "$UNOBSERVED" "${root}/results/step-summary.md" "masks the completion model even with NO secret configured — the mask is positional, not needle-driven"
+check has "LLM completion *** in=7 out=9 finish=stop" "${root}/results/step-summary.md" "keeps the rest of the completion line"
+# The mask is positional and unconditional, so prose that happens to use the phrase loses its next word too. That is
+# the DELIBERATE direction to fail in: the alternative is matching the full Serilog line shape, which stops masking
+# the moment someone edits the template — and a redaction that quietly stops working is the disease this file exists
+# to prevent. Pinned so the tradeoff is a visible decision rather than a surprise in an artifact.
+check has "ran the LLM completion *** twice" "${root}/results/step-summary.md" "masks unconditionally — prose after the phrase is collateral, and failing CLOSED is the right direction"
 rm -rf "$root"
 
 # ── Best-effort: never a crash, never a mangled artifact, whatever the runner hands it ──────────────────────────

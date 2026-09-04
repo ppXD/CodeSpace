@@ -478,8 +478,22 @@ public static class SupervisorTrajectoryScore
     /// <summary>The replan ceiling — plan decisions after the first are rework; more than this is a non-converging brain.</summary>
     public const int MaxReplans = 2;
 
-    /// <summary>The work-unit ceiling — agent-staging verbs (spawn/retry/resolve). The happy path needs ONE; a recovery path needs two; far more is a brain that churns on re-spawns without converging.</summary>
-    public const int MaxWorkUnits = 4;
+    /// <summary>
+    /// The PER-UNIT staging ceiling — how many times one planned unit may be handed to an agent (spawn / retry /
+    /// resolve) before the brain is re-attempting rather than converging. Two: the original attempt plus ONE
+    /// recovery, which is exactly what the failure and conflict arcs need.
+    ///
+    /// <para>This replaced a FLAT ceiling of four stagings per run, which was calibrated for a brain that fans its
+    /// plan out in ONE wide spawn. Run 33814929951's persistent-conflict lane failed on it while doing nothing
+    /// wrong: the model staged its dependency chain SERIALLY — a distinct planned unit per turn, each waiting on the
+    /// one before — and five honest first attempts tripped a cap meant to catch re-spawning. Staging DISTINCT
+    /// planned units one at a time is a legitimate strategy, not churn; churn is re-staging the SAME unit without
+    /// progress, which is what this counts now.</para>
+    /// </summary>
+    public const int MaxAttemptsPerUnit = 2;
+
+    /// <summary>The bucket a staging verb that NAMES no unit falls in. Production stages nothing for such a decision, so repeating it makes no progress by construction — grouping them together keeps a loop of unnamed spawns inside the same ceiling instead of escaping it for lack of an id.</summary>
+    private const string UnnamedUnit = "(a staging verb that named no unit)";
 
     /// <summary>
     /// What each agent-staging verb ACTUALLY DID, appended to a non-terminating verdict. The verb sequence alone says
@@ -555,11 +569,39 @@ public static class SupervisorTrajectoryScore
         if (planCount - 1 > MaxReplans)
             return (false, $"re-planned {planCount - 1} times (> {MaxReplans}) — not converging. Trajectory: {trail}");
 
-        var workUnits = t.Kinds.Count(SupervisorDecisionKinds.StagesAgents);
-        if (workUnits > MaxWorkUnits)
-            return (false, $"staged work {workUnits} times (> {MaxWorkUnits}) — churning, not converging. Trajectory: {trail}");
+        var restaged = RestagedUnits(t.Ledger);
+        if (restaged.Count > 0)
+            return (false, $"re-staged the SAME unit(s) more than {MaxAttemptsPerUnit} times ({string.Join(", ", restaged)}) — churning, not converging. Trajectory: {trail}");
 
         return (true, $"drove to completion: {trail}");
+    }
+
+    /// <summary>
+    /// Every unit staged more times than <see cref="MaxAttemptsPerUnit"/> allows, rendered "id ×N" — the churn
+    /// evidence, so the verdict names WHICH unit the brain kept re-attempting instead of only that it staged a lot.
+    /// </summary>
+    private static IReadOnlyList<string> RestagedUnits(IReadOnlyList<SupervisorPriorDecision> ledger) =>
+        ledger
+            .Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind))
+            .SelectMany(StagedUnitsOf)
+            .GroupBy(id => id)
+            .Where(g => g.Count() > MaxAttemptsPerUnit)
+            .OrderBy(g => g.Key, StringComparer.Ordinal)
+            .Select(g => $"{g.Key} ×{g.Count()}")
+            .ToList();
+
+    /// <summary>
+    /// The unit ids one staging verb handed to agents, read by the SAME production readers the dependency gate joins
+    /// on (<c>ReadSpawnSubtaskIds</c> for a fan-out, <c>ReadRetrySubtaskId</c> for the single-unit verbs) — so the
+    /// scorer can never disagree with what the engine considers that decision to have attempted.
+    /// </summary>
+    private static IReadOnlyList<string> StagedUnitsOf(SupervisorPriorDecision d)
+    {
+        var ids = d.DecisionKind == SupervisorDecisionKinds.Spawn
+            ? SupervisorOutcome.ReadSpawnSubtaskIds(d.PayloadJson)
+            : SupervisorOutcome.ReadRetrySubtaskId(d.PayloadJson) is { } id ? new[] { id } : Array.Empty<string>();
+
+        return ids.Count == 0 ? new[] { UnnamedUnit } : ids;
     }
 
     /// <summary>The index of the first kind matching the predicate, or -1.</summary>
