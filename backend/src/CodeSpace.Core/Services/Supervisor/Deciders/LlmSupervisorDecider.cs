@@ -405,7 +405,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             // LIVE-prompt concern only. Evidence tails are the OPPOSITE: the foldable head excludes the newest
             // CompactTailKeep decisions, so any tail here is stale by construction (P5-2) — never bake one into the
             // persisted rolling digest; the one-line verdicts alone carry the state the digest needs.
-            AppendPriorDecision(builder, foldable[i], isLatestSpawn: i == latestSpawnIndex, isSupersededPlan: false, includeEvidenceTails: false, resolveExhausted: false);
+            AppendPriorDecision(builder, foldable[i], new PriorRenderOptions { IsLatestSpawn = i == latestSpawnIndex });
 
         try
         {
@@ -628,7 +628,14 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 
             builder.AppendLine("Prior decisions (in order, with their recorded outcomes):");
             for (var i = 0; i < rendered.Count; i++)
-                AppendPriorDecision(builder, rendered[i], isLatestSpawn: i == latestSpawnIndex, isSupersededPlan: rendered[i].DecisionKind == SupervisorDecisionKinds.Plan && i != latestPlanIndex, includeEvidenceTails: true, resolveExhausted: SupervisorActionMask.IsResolveCapSpent(context));
+                AppendPriorDecision(builder, rendered[i], new PriorRenderOptions
+                {
+                    IsLatestSpawn = i == latestSpawnIndex,
+                    IsSupersededPlan = rendered[i].DecisionKind == SupervisorDecisionKinds.Plan && i != latestPlanIndex,
+                    IncludeEvidenceTails = true,
+                    ResolveExhausted = SupervisorActionMask.IsResolveCapSpent(context),
+                    LivePriors = context.PriorDecisions,
+                });
 
             AppendDependencyFrontier(builder, context);
             AppendOutstandingAmendments(builder, context);
@@ -654,7 +661,8 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 
         // P3.5 — the BUDGET recitation, the same prompt-tail position: the model sees its own realized spend vs. the
         // cap + a per-lane breakdown, so it can self-moderate BEFORE the server ever has to force-stop it. Null when
-        // no cost cap is set ⇒ byte-identical prompt for the common uncapped run.
+        // the run is BOTH uncapped and has spent nothing ⇒ byte-identical prompt for a fresh run. D6: an uncapped
+        // run that HAS spent now renders the cap-less spend block — it was previously blind to its own spend.
         if (SupervisorBudgetRecitation.Render(context.MaxCostUsd, context.AgentExecutionSpendUsd, context.BrainPlaneSpendUsd, context.BrainPlaneSpendByKind) is { } budget)
         {
             builder.AppendLine();
@@ -772,8 +780,35 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         builder.AppendLine($"      produced — {string.Join("; ", parts)}");
     }
 
-    private static void AppendPriorDecision(StringBuilder builder, SupervisorPriorDecision prior, bool isLatestSpawn, bool isSupersededPlan, bool includeEvidenceTails, bool resolveExhausted)
+    /// <summary>
+    /// How ONE prior decision renders. A record rather than five positional flags (Rule 1's parameter cap) — and
+    /// <see cref="LivePriors"/> is the seam between the two callers: the LIVE prompt passes the full tape so the
+    /// plan's items can recite their current state, while the SUMMARIZER path leaves it null and keeps the plan's
+    /// verbatim payload (the digest distils "what was planned", so it must not be pre-projected).
+    /// </summary>
+    private readonly record struct PriorRenderOptions
     {
+        /// <summary>Whether this is the most recent agent-staging decision — the one whose results the next action targets.</summary>
+        public bool IsLatestSpawn { get; init; }
+
+        /// <summary>Whether a later re-plan replaced this plan (it collapses to a one-line digest).</summary>
+        public bool IsSupersededPlan { get; init; }
+
+        /// <summary>Whether an acceptance verdict may carry its full evidence tail (live prompt only — an older round's tail is stale by construction).</summary>
+        public bool IncludeEvidenceTails { get; init; }
+
+        /// <summary>Whether the run's resolve cap is spent (the resolution verdict's guidance is cap-aware).</summary>
+        public bool ResolveExhausted { get; init; }
+
+        /// <summary>The COMPLETE tape the plan's per-item state joins off, or null on the summarizer path (keep the plan payload verbatim).</summary>
+        public IReadOnlyList<SupervisorPriorDecision>? LivePriors { get; init; }
+    }
+
+    private static void AppendPriorDecision(StringBuilder builder, SupervisorPriorDecision prior, PriorRenderOptions options)
+    {
+        var (isLatestSpawn, isSupersededPlan, includeEvidenceTails, resolveExhausted) =
+            (options.IsLatestSpawn, options.IsSupersededPlan, options.IncludeEvidenceTails, options.ResolveExhausted);
+
         // P1e ladder: a plan REPLACED by a later re-plan collapses to a one-line digest — its full subtask payload is
         // dead weight (the live plan is recited at the tail; its frontier is shown). Keep the subtask ids so the model
         // still sees the re-plan history + how the shape changed, without paying for N full payloads. Pure over the
@@ -843,6 +878,15 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             return;
         }
 
+        // D6 — a wave the BUDGET admission refused. Well-formed, affordable per unit, but the run has no money for
+        // the wave: every reservation was released and ZERO agents staged. It reached the model only as raw jsonb,
+        // undifferentiated from a no-op spawn — so nothing stopped it from re-spawning into the same refusal.
+        if (SupervisorOutcome.ReadBudgetBlock(prior.OutcomeJson) is { } budgetBlock)
+        {
+            AppendBudgetBlockedWave(builder, prior, budgetBlock);
+            return;
+        }
+
         // STAYS gated on Merge. A staging-time conflict reaches the model through the blocked-spawn branch above,
         // which renders the same block: BuildBlockedSpawnOutcome only ever writes `integration` alongside a non-empty
         // `blockedSubtasks`, so a conflicted integration on a spawn can never arrive here. Un-gating this was tried
@@ -880,7 +924,126 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             return;
         }
 
+        // D6 — an ask_human turn. The raw fallback handed the model the whole outcome jsonb, INCLUDING the internal
+        // askHumanToken (server plumbing the brain can only be confused by), and buried the one fact the next
+        // decision hinges on: whether a human actually answered, and what they said. An amend card renders as the
+        // AMENDMENT it is, with its co-sign state, so an unapproved proposal is never mistaken for a live oracle.
+        if (prior.DecisionKind == SupervisorDecisionKinds.AskHuman && AppendAskHumanDecision(builder, prior)) return;
+
+        // D6 — the LIVE plan. Superseded plans already collapse above; the live one still dumped its full payload
+        // json. Rendered as one line per item with the SAME state renderer the plan recitation uses (never a second
+        // wording that could disagree with it), keeping the instruction + authored check the brain writes a
+        // revisedInstruction or an amendment against. Only on the live-prompt path — the summarizer keeps the payload.
+        if (prior.DecisionKind == SupervisorDecisionKinds.Plan && options.LivePriors is { } livePriors && AppendPlanDecision(builder, prior, livePriors)) return;
+
         builder.AppendLine($"- {prior.DecisionKind}: payload={prior.PayloadJson} outcome={prior.OutcomeJson ?? "(none)"}");
+    }
+
+    /// <summary>
+    /// Render an <c>ask_human</c> turn as the exchange it is — the question the brain asked, and either the human's
+    /// answer, or the honest reason there is none: PARKED (a card is posted, nobody has replied) versus DEGRADED (no
+    /// human surface existed, so the question was never delivered and never will be answered). Those two look
+    /// identical in the raw jsonb and imply opposite next moves. An amend card additionally names its target subtask
+    /// and whether the co-sign landed. The wait TOKEN is deliberately never rendered — it is a server correlation
+    /// key, not a decision fact. Returns false when the row carries no question, answer or park at all (the
+    /// compaction tape's generic rows), so the caller keeps the raw line rather than printing an empty exchange.
+    /// </summary>
+    private static bool AppendAskHumanDecision(StringBuilder builder, SupervisorPriorDecision prior)
+    {
+        const int maxChars = 400;
+
+        var question = SupervisorOutcome.ReadAskHumanQuestion(prior.PayloadJson) ?? SupervisorOutcome.ReadAskHumanQuestion(prior.OutcomeJson);
+        var answer = SupervisorOutcome.ReadAskHumanAnswer(prior.OutcomeJson);
+        var parked = SupervisorOutcome.ReadHumanWaitToken(prior.OutcomeJson) is not null;
+
+        if (question is null && answer is null && !parked) return false;
+
+        builder.AppendLine($"- ask_human{AmendCardHeader(prior)}: you asked — \"{BoundOneLine(question ?? "(the recorded question is missing)", maxChars)}\"");
+
+        if (answer is not null)
+        {
+            builder.AppendLine($"    the human answered: \"{BoundOneLine(answer, maxChars)}\"{AmendCoSignNote(prior)}");
+            return true;
+        }
+
+        builder.AppendLine(parked
+            ? "    the human has NOT answered yet — the run is parked on this question; do NOT act as though it were answered."
+            : "    no human surface was bound to this run, so the question was never delivered and never will be answered — decide without it.");
+
+        if (SupervisorAmendAcceptance.IsAmendCard(prior)) builder.AppendLine("    the amendment is NOT co-signed, so the subtask's ORIGINAL acceptance check is still the one in force.");
+
+        return true;
+    }
+
+    /// <summary>The parenthetical that turns a bare "ask_human" into "this is YOUR amendment proposal" — the target subtask and whether it proposes a replacement check or a waive. Empty for an ordinary question.</summary>
+    private static string AmendCardHeader(SupervisorPriorDecision prior)
+    {
+        if (!SupervisorAmendAcceptance.IsAmendCard(prior) || SupervisorAmendAcceptance.ReadAmend(prior.PayloadJson) is not { } amend) return "";
+
+        return $" (your acceptance amendment for subtask '{amend.SubtaskId}' — {(amend.Waive ? "proposing to WAIVE its verification" : "proposing a replacement check")})";
+    }
+
+    /// <summary>Whether an ANSWERED amend card was actually approved — a human may answer an amendment card with anything, and only an approval changes the oracle.</summary>
+    private static string AmendCoSignNote(SupervisorPriorDecision prior)
+    {
+        if (!SupervisorAmendAcceptance.IsAmendCard(prior)) return "";
+
+        return SupervisorAmendAcceptance.IsApprovedAmendCard(prior)
+            ? " — APPROVED: the co-signed check is now the one in force for that subtask."
+            : " — the amendment was NOT co-signed, so the subtask's ORIGINAL acceptance check still stands.";
+    }
+
+    /// <summary>
+    /// Render the live plan as its items rather than its payload json: each item's id, title and LIVE state (through
+    /// <see cref="SupervisorRecitation.StateFor"/> — the one state renderer, so this line can never contradict the
+    /// recitation block at the prompt tail), its authored DAG edge, its instruction, and its authored acceptance
+    /// check. The instruction and the check are kept deliberately: they are the text the brain writes a
+    /// <c>revisedInstruction</c> or an <c>amend_acceptance</c> proposal against, and the recitation carries neither.
+    /// Returns false for a plan whose payload declares no subtasks (nothing to project — keep the raw line).
+    /// </summary>
+    private static bool AppendPlanDecision(StringBuilder builder, SupervisorPriorDecision prior, IReadOnlyList<SupervisorPriorDecision> livePriors)
+    {
+        const int maxChars = 400;
+
+        var subtasks = SupervisorOutcome.ReadPlanSubtasks(prior.PayloadJson);
+
+        if (subtasks.Count == 0) return false;
+
+        builder.AppendLine($"- plan: {subtasks.Count} subtask(s), each with its live state:");
+
+        foreach (var subtask in subtasks)
+        {
+            var dependsOn = subtask.DependsOn is { Count: > 0 } deps ? $" (depends on {string.Join(", ", deps)})" : "";
+
+            builder.AppendLine($"    [{subtask.Id}] {subtask.Title}: {SupervisorRecitation.StateFor(subtask.Id, livePriors)}{dependsOn}");
+
+            if (!string.IsNullOrWhiteSpace(subtask.Instruction))
+                builder.AppendLine($"        instruction: {BoundOneLine(subtask.Instruction, maxChars)}");
+
+            if (subtask.Acceptance is { } acceptance)
+                builder.AppendLine($"        acceptance check ({acceptance.Kind?.ToString() ?? "TestsPass"}): {BoundOneLine(string.Join(" ", acceptance.Command), maxChars)}");
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Render a spawn wave the budget admission refused: what was withheld, why, and where the run's spend stands —
+    /// then the load-bearing line, that the wave staged nothing and re-authoring the same one will be refused again.
+    /// The same shape (and the same last line) as <see cref="AppendRejectedDecision"/>, for the same reason: a
+    /// refusal read as commentary gets re-sent.
+    /// </summary>
+    private static void AppendBudgetBlockedWave(StringBuilder builder, SupervisorPriorDecision prior, SupervisorBudgetBlock block)
+    {
+        const int maxChars = 240;
+
+        builder.AppendLine($"- {prior.DecisionKind}: BLOCKED by the run's budget — {BoundOneLine(block.Reason ?? "the wave could not be admitted against the run's cost cap", maxChars)}");
+
+        if (block.SubtaskIds.Count > 0) builder.AppendLine($"    withheld subtask(s): {string.Join(", ", block.SubtaskIds)}");
+
+        if (block is { CommittedUsd: { } committed, CapUsd: { } cap }) builder.AppendLine($"    spend at refusal: ${committed:0.00} committed of ${cap:0.00}");
+
+        builder.AppendLine("    it staged NOTHING and made no progress. The SAME wave will be refused again — spawn fewer subtasks, or wrap up ('merge' what is accepted, then 'stop').");
     }
 
     /// <summary>

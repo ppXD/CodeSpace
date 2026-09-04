@@ -213,6 +213,39 @@ public static class SupervisorOutcome
     }
 
     /// <summary>
+    /// The spawn wave the BUDGET admission refused — read off a spawn outcome's
+    /// <c>{budgetBlocked: [...], reason, committedUsd, capUsd}</c> shape. Null for every admitted wave.
+    ///
+    /// <para>D6: this outcome reached the decider only through the raw-jsonb fallback (it is neither a
+    /// <see cref="ReadRejectionReason"/> rejection nor a <see cref="ReadBlockedSubtasks"/> dependency withhold),
+    /// so the brain could not tell a refused wave from a no-op and re-spawned straight back into it.</para>
+    /// </summary>
+    public static SupervisorBudgetBlock? ReadBudgetBlock(string? outcomeJson)
+    {
+        if (string.IsNullOrWhiteSpace(outcomeJson)) return null;
+
+        try
+        {
+            var root = JsonDocument.Parse(outcomeJson).RootElement;
+
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("budgetBlocked", out var arr) || arr.ValueKind != JsonValueKind.Array)
+                return null;
+
+            return new SupervisorBudgetBlock
+            {
+                SubtaskIds = arr.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String).Select(e => e.GetString()!).ToList(),
+                Reason = root.TryGetProperty("reason", out var reason) && reason.ValueKind == JsonValueKind.String ? reason.GetString() : null,
+                CommittedUsd = root.TryGetProperty("committedUsd", out var committed) && committed.ValueKind == JsonValueKind.Number ? committed.GetDecimal() : null,
+                CapUsd = root.TryGetProperty("capUsd", out var cap) && cap.ValueKind == JsonValueKind.Number ? cap.GetDecimal() : null,
+            };
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Whether the dependency clamp WITHHELD units from this spawn payload. The executor's only way to tell a spawn
     /// the SERVER emptied from one the MODEL named nothing in — byte-identical at <c>subtaskIds: []</c>, opposite
     /// responses. The clamp writes the key only when it actually deferred something.
