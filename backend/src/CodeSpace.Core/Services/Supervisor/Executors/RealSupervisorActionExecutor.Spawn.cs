@@ -583,6 +583,12 @@ public sealed partial class RealSupervisorActionExecutor
         // never a truncated mid-wave stage), and the reason NAMES the model + the remedy. An unnamed model is the
         // harness default, which this layer never knew — it is not an unpriced pool pick and is not blocked here; the
         // tape fold catches whatever it turns out to have been (SupervisorBounds.PostDecision).
+        //
+        // The outcome records `unpricedModel` DURABLY, because blocking the wave alone would dead-end: the run's
+        // unpriced signal is otherwise folded from REALIZED spend, and a wave that never ran realized none — so the
+        // bound never fired and the run just re-decided until the no-progress cap, reporting a stall instead of the
+        // missing price. The fold re-reads this name and re-prices it, so pricing the model while the run is parked
+        // clears the block on the next wake rather than pinning it forever.
         if (context.MaxCostUsd is { } cap && tasks.Select(t => t.Task.Model).FirstOrDefault(m => UnpricedModelUnderCap.Blocks(m, cap, context.ModelPrices)) is { } unpriced)
         {
             _logger.LogWarning("Budget admission blocked a {Count}-agent wave on run {RunId}: model {Model} has no price under the ${Cap} cost cap", tasks.Count, context.SupervisorRunId, unpriced, cap);

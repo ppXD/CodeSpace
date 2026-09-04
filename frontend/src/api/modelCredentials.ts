@@ -83,6 +83,10 @@ export interface ModelPriceInput {
   outputUsdPerMillion: number | null;
 }
 
+/** Mirrors backend `ModelPrice.MaxPerMillionUsd`. Above it the backend rejects the edit, so validate here first
+ *  and tell the operator, rather than letting the save fail with a raw 400. */
+export const MAX_PRICE_PER_MILLION_USD = 100_000;
+
 /** Body for adding a model to a credential (mirror of backend AddCredentialedModelCommand). */
 export interface AddCredentialedModelInput {
   modelId: string;

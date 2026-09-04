@@ -20,6 +20,8 @@ vi.mock("@/hooks/use-model-credentials", async () => {
 
   return {
     parsePrice: actual.parsePrice,
+    priceFieldIssue: actual.priceFieldIssue,
+    completePrice: actual.completePrice,
     useModelCredentials: () => ({ data: mocks.rows, isLoading: false, error: null }),
     useAddModelCredential: () => ({ mutate: mocks.addMutate, isPending: false }),
     useUpdateModelCredential: () => ({ mutate: vi.fn(), isPending: false }),

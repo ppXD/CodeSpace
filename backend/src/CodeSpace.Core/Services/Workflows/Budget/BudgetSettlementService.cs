@@ -136,6 +136,11 @@ public sealed class BudgetSettlementService : IBudgetSettlementService, IScopedD
             .Select(r => r.Status == WorkflowRunStatus.Success || r.Status == WorkflowRunStatus.Failure || r.Status == WorkflowRunStatus.Cancelled)
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
+        // D1: the team's own per-model prices, loaded ONCE per run. Without them a model priced only on its pool row
+        // settles null → pessimistically AT the reservation, so a run's committed spend permanently over-counts what
+        // it actually cost and the cap trips early. The sweep must price exactly the way the fold does.
+        var modelPrices = await Agents.Cost.ModelPriceResolver.LoadAsync(_db, teamId, cancellationToken).ConfigureAwait(false);
+
         var settled = 0;
         var matchedKeys = new HashSet<string>(StringComparer.Ordinal);
 
@@ -153,7 +158,7 @@ public sealed class BudgetSettlementService : IBudgetSettlementService, IScopedD
                 if (key is null) continue;
 
                 // The fold is the durable actual; a null price (unknown model) settles PESSIMISTICALLY at reserved.
-                var actual = Agents.Cost.AgentCostPricing.CostUsd(results[k].Model, results[k].InputTokens, results[k].OutputTokens);
+                var actual = Agents.Cost.AgentCostPricing.CostUsd(results[k].Model, results[k].InputTokens, results[k].OutputTokens, modelPrices);
 
                 await _ledger.SettleAsync(runId, teamId, "agent-attempt", key, actual, cancellationToken).ConfigureAwait(false);
                 matchedKeys.Add(key);

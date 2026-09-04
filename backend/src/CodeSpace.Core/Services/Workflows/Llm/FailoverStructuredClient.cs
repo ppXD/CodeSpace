@@ -11,6 +11,10 @@ namespace CodeSpace.Core.Services.Workflows.Llm;
 /// credential, and hopping providers on it would hide an operator problem behind a lucky alternate. The LAST
 /// candidate's transient fault propagates verbatim (typed) — when the whole pool is down the honest answer is the
 /// typed failure the callers already park on, never a silent retry loop.
+///
+/// <para>D1: a candidate the run's cost cap cannot price (<see cref="Agents.Cost.UnpricedModelUnderCapException"/>) is skipped the
+/// same way. The refusal happens BEFORE the call, so nothing was spent and a priced alternate is still a good
+/// answer; only when EVERY candidate is unpriced does the last one's refusal propagate and the run fail closed.</para>
 /// </summary>
 public sealed class FailoverStructuredClient : IStructuredLLMClient
 {
@@ -48,6 +52,15 @@ public sealed class FailoverStructuredClient : IStructuredLLMClient
             catch (LlmApiException ex) when (IsFailoverWorthy(ex.Category) && i < _candidates.Count - 1)
             {
                 trail.Add($"{client.Provider}:{pick.ModelId} — {ex.Category}{(ex.StatusCode is { } status ? $" {status}" : "")}");
+            }
+            catch (Agents.Cost.UnpricedModelUnderCapException) when (i < _candidates.Count - 1)
+            {
+                // D1: this candidate has no price and the run declares a cost cap, so the budget guard refused it
+                // BEFORE any call — nothing was spent, and a PRICED alternate is still a perfectly good answer. Skip
+                // it exactly like a transient fault rather than letting the refusal escape the loop, which would
+                // regress the pool failover (#1737/#1738) into "the first candidate's missing price kills the run".
+                // The LAST candidate's refusal still propagates, so a pool where NOTHING is priced fails closed.
+                trail.Add($"{client.Provider}:{pick.ModelId} — unpriced under the run's cost cap");
             }
         }
 

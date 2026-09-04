@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Core.Services.Agents.Cost;
 using CodeSpace.Core.Services.Workflows.Llm;
 using Shouldly;
 
@@ -98,6 +99,66 @@ public class FailoverStructuredClientTests
 
     // ─── Plumbing ────────────────────────────────────────────────────────────────
 
+    // -- D1: an UNPRICED candidate under a cost cap is a skip, not a run-killer --
+
+    [Fact]
+    public async Task An_unpriced_first_candidate_is_SKIPPED_so_a_priced_alternate_still_answers()
+    {
+        // Drives the REAL guard inside the REAL failover loop - the exact composition production uses (the recording
+        // decorator wraps each candidate's call in LlmBudgetGuard). Testing the guard alone with two sequential calls
+        // cannot see this bug: the refusal has to ESCAPE the loop to kill the run, and only the loop can catch it.
+        var anthropic = new ScriptedStructured("Anthropic", Answer);
+        var openai = new ScriptedStructured("OpenAI", Answer);
+
+        // Only the OpenAI candidate is priced, so the Anthropic one is refused before it is ever called.
+        var prices = Priced("OpenAI-model");
+        var client = new FailoverStructuredClient(new[] { (Guarded(anthropic, prices), Pick("Anthropic")), (Guarded(openai, prices), Pick("OpenAI")) });
+
+        var completion = await client.CompleteStructuredAsync(Request("Anthropic-model"), CancellationToken.None);
+
+        completion.Model.ShouldBe("OpenAI-model", "the priced alternate answered - an unpriced first pick must not kill the run (#1737/#1738)");
+        anthropic.Requests.ShouldBeEmpty("the refusal precedes the call, so no money was spent on the unpriced candidate");
+        completion.FailedOver.ShouldHaveSingleItem().ShouldContain("unpriced under the run's cost cap");
+    }
+
+    [Fact]
+    public async Task A_pool_where_EVERY_candidate_is_unpriced_still_fails_closed()
+    {
+        // The skip is not a licence to spend blind: when nothing in the pool can be priced, the last candidate's
+        // refusal propagates and the caller parks the run instead of running it past an unenforceable cap.
+        var anthropic = new ScriptedStructured("Anthropic", Answer);
+        var openai = new ScriptedStructured("OpenAI", Answer);
+        var prices = Priced("something-else-entirely");
+        var client = new FailoverStructuredClient(new[] { (Guarded(anthropic, prices), Pick("Anthropic")), (Guarded(openai, prices), Pick("OpenAI")) });
+
+        var refusal = await Should.ThrowAsync<UnpricedModelUnderCapException>(() => client.CompleteStructuredAsync(Request("Anthropic-model"), CancellationToken.None));
+
+        refusal.Model.ShouldBe("OpenAI-model", "the LAST candidate's refusal is the one that propagates");
+        anthropic.Requests.ShouldBeEmpty();
+        openai.Requests.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task An_unpriced_candidate_under_NO_cap_is_never_skipped()
+    {
+        // The whole rule is scoped to a declared cap; without one the guard passes everything through, so the first
+        // candidate answers exactly as it did before D1.
+        var anthropic = new ScriptedStructured("Anthropic", Answer);
+        var openai = new ScriptedStructured("OpenAI", Answer);
+        var client = new FailoverStructuredClient(new[] { (Guarded(anthropic, ModelPriceResolver.Empty, cap: null), Pick("Anthropic")), (Guarded(openai, ModelPriceResolver.Empty, cap: null), Pick("OpenAI")) });
+
+        (await client.CompleteStructuredAsync(Request("Anthropic-model"), CancellationToken.None)).Model.ShouldBe("Anthropic-model");
+
+        anthropic.Requests.ShouldHaveSingleItem();
+    }
+
+    /// <summary>One candidate wrapped the way <c>RecordingStructuredLLMClientDecorator</c> wraps it in production: its call rides <see cref="LlmBudgetGuard"/> under a scope carrying the run's cap + the team's row prices.</summary>
+    private static IStructuredLLMClient Guarded(IStructuredLLMClient inner, IReadOnlyDictionary<string, ModelPrice> prices, decimal? cap = 5m) =>
+        new GuardedStructured(inner, prices, cap);
+
+    private static IReadOnlyDictionary<string, ModelPrice> Priced(params string[] models) =>
+        models.ToDictionary(m => m, _ => new ModelPrice { InputPerMillionUsd = 1m, OutputPerMillionUsd = 1m }, StringComparer.OrdinalIgnoreCase);
+
     private static Task<StructuredLLMCompletion> Answer(StructuredLLMCompletionRequest request) =>
         Task.FromResult(new StructuredLLMCompletion { Json = JsonSerializer.SerializeToElement(new { ok = true }), Model = request.Model });
 
@@ -117,6 +178,25 @@ public class FailoverStructuredClientTests
             Requests.Add(request);
             return _behavior(request);
         }
+    }
+
+    /// <summary>Mirrors the production decorator's one load-bearing line: every candidate call rides the budget guard, so an unpriced model is refused BEFORE the inner client is touched.</summary>
+    private sealed class GuardedStructured : IStructuredLLMClient
+    {
+        private readonly IStructuredLLMClient _inner;
+        private readonly LlmCallScope _scope;
+
+        public GuardedStructured(IStructuredLLMClient inner, IReadOnlyDictionary<string, ModelPrice> prices, decimal? cap)
+        {
+            _inner = inner;
+            _scope = new LlmCallScope(Guid.NewGuid(), Guid.NewGuid(), "sup", "k", "supervisor.decision", null!, null!, new CodeSpace.Tests.Fakes.AdmitAllBudgetLedger(), cap, prices);
+        }
+
+        public string Provider => _inner.Provider;
+
+        public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken ct) =>
+            LlmBudgetGuard.GuardedAsync(_scope, request.Model, request.SystemPrompt, request.UserPrompt, request.MaxOutputTokens,
+                inner => _inner.CompleteStructuredAsync(request, inner), _ => 0.01m, ct);
     }
 
     private sealed class FakeRegistry : ILLMClientRegistry

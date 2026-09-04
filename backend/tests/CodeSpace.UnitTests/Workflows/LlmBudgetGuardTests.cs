@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Agents.Cost;
 using CodeSpace.Core.Services.Workflows.Budget;
 using CodeSpace.Core.Services.Workflows.Llm;
 using Shouldly;
@@ -77,7 +78,7 @@ public class LlmBudgetGuardTests
         var ledger = new RecordingLedger(admit: true);
         var called = false;
 
-        var refusal = await Should.ThrowAsync<LlmUnpricedModelException>(() =>
+        var refusal = await Should.ThrowAsync<UnpricedModelUnderCapException>(() =>
             LlmBudgetGuard.GuardedAsync(Scope(ledger, 5m), "totally-unknown-model", "s", "u", 100, _ => { called = true; return Task.FromResult(1); }, _ => 0m, CancellationToken.None));
 
         called.ShouldBeFalse("the money is never spent — the refusal precedes the call");
@@ -134,7 +135,7 @@ public class LlmBudgetGuardTests
         (await LlmBudgetGuard.GuardedAsync(scope, "priced-primary", "s", "u", 100, _ => Task.FromResult(1), _ => 0.01m, CancellationToken.None)).ShouldBe(1);
 
         // Attempt 2 (the failover): the successor carries NO price → refused on its own merits.
-        var refusal = await Should.ThrowAsync<LlmUnpricedModelException>(() =>
+        var refusal = await Should.ThrowAsync<UnpricedModelUnderCapException>(() =>
             LlmBudgetGuard.GuardedAsync(scope, "unpriced-successor", "s", "u", 100, _ => Task.FromResult(1), _ => 0.01m, CancellationToken.None));
 
         refusal.Model.ShouldBe("unpriced-successor", "the stop names the model that actually could not be priced");

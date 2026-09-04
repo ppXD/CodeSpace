@@ -20,6 +20,8 @@ vi.mock("@/hooks/use-model-credentials", async () => {
 
   return {
     parsePrice: actual.parsePrice,
+    priceFieldIssue: actual.priceFieldIssue,
+    completePrice: actual.completePrice,
     useCredentialedModelList: () => ({ data: mocks.models, isLoading: false, error: null }),
     useRefreshCredentialedModels: () => ({ mutate: mocks.refreshMutate, isPending: false }),
     useSaveCredentialedModels: () => ({ mutate: mocks.saveMutate, isPending: false }),
@@ -175,6 +177,54 @@ describe("ModelCredentialModelsModal", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     const [arg] = mocks.saveMutate.mock.calls[0];
     expect(arg.rows[1]).toEqual({ modelId: "gpt-5.4-codex", displayName: "", inputUsdPerMillion: "2" });
+  });
+
+  it("says what is wrong with an unparseable price instead of silently dropping it", () => {
+    mocks.models = [{ id: "m1", modelId: "gpt-5.4-codex", enabled: true }];
+    renderModal();
+
+    fireEvent.change(screen.getByPlaceholderText("$/M in"), { target: { value: "two dollars" } });
+    fireEvent.blur(screen.getByPlaceholderText("$/M in"));
+
+    expect(screen.getByText(/must be a number/i)).toBeInTheDocument();
+    expect(mocks.setPriceMutate).not.toHaveBeenCalled();
+  });
+
+  it("rejects a negative price", () => {
+    mocks.models = [{ id: "m1", modelId: "gpt-5.4-codex", enabled: true }];
+    renderModal();
+
+    fireEvent.change(screen.getByPlaceholderText("$/M in"), { target: { value: "-3" } });
+    fireEvent.blur(screen.getByPlaceholderText("$/M in"));
+
+    expect(screen.getByText(/cannot be negative/i)).toBeInTheDocument();
+  });
+
+  it("rejects a fat-fingered price the engine could not compute with", () => {
+    // The backend rejects it too. Accepting it here would show a price in the UI that every capped run still
+    // treats as unpriced — the worst of both answers.
+    mocks.models = [{ id: "m1", modelId: "gpt-5.4-codex", enabled: true }];
+    renderModal();
+
+    fireEvent.change(screen.getByPlaceholderText("$/M in"), { target: { value: "1e20" } });
+    fireEvent.blur(screen.getByPlaceholderText("$/M in"));
+
+    expect(screen.getByText(/too large/i)).toBeInTheDocument();
+    expect(mocks.setPriceMutate).not.toHaveBeenCalled();
+  });
+
+  it("renaming a row with only HALF a price keeps the model instead of destroying it", () => {
+    // remove+add go out in one Promise.all, and the backend rejects a one-sided price — so sending it would delete
+    // the row and then fail the add, losing a model the operator only meant to rename.
+    mocks.models = [{ id: "m1", modelId: "gpt-5.4-codex", enabled: true }];
+    renderModal();
+
+    fireEvent.change(screen.getByPlaceholderText("$/M in"), { target: { value: "2" } });   // output left blank
+    fireEvent.change(screen.getByPlaceholderText("model-id"), { target: { value: "gpt-5.4-codex-mini" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    const [arg] = mocks.saveMutate.mock.calls[0];
+    expect(arg.rows[0]).toMatchObject({ modelId: "gpt-5.4-codex-mini", inputUsdPerMillion: "2", outputUsdPerMillion: "" });
   });
 
   it("refreshes the model list from the provider", () => {

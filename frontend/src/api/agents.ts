@@ -361,7 +361,12 @@ export interface ScorecardFilters {
 export interface TeamCostRollup {
   totalInputTokens: number;
   totalOutputTokens: number;
+  /** The AGENT-EXECUTION lane only. Kept at its original meaning; read `totalUsd` for what the team actually paid. */
   estimatedCostUsd: number | null;
+  /** Supervisor decisions, critic reviews and acceptance graders — the in-process model calls. Null when none was priceable. */
+  brainPlaneUsd?: number | null;
+  /** `estimatedCostUsd` + `brainPlaneUsd`. Null only when NEITHER lane could be priced. */
+  totalUsd?: number | null;
   runCount: number;
   unknownCostRuns: number;
   windowRunCount: number;

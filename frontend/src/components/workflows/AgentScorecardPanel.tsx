@@ -58,7 +58,10 @@ export function AgentScorecardView({ card, cost }: { card: AgentRunScorecard | u
         <Stat label="P50 latency" value={formatDuration(overall.p50DurationSeconds)} />
         <Stat label="P95 latency" value={formatDuration(overall.p95DurationSeconds)} />
         <Stat label="Runs scored" value={`${overall.succeeded}/${overall.total}`} />
-        {cost && <Stat label="Est. cost" value={formatUsd(cost.estimatedCostUsd)} />}
+        {/* The BILL is both lanes. Showing the agent-execution figure alone under-reported every supervised run by
+            whatever its brain spent deliberating. `totalUsd` is absent on a pre-D1 payload — fall back so an older
+            server still renders the number it used to. */}
+        {cost && <Stat label="Est. cost" value={formatUsd(cost.totalUsd ?? cost.estimatedCostUsd)} hint={costHint(cost)} />}
       </div>
 
       <table className="tbl sc-table">
@@ -84,9 +87,9 @@ function ScorecardHead() {
 }
 
 /** One headline metric. `accent` lifts the lead stat (success rate) in the warm Claude tone. */
-function Stat({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
+function Stat({ label, value, accent, hint }: { label: string; value: string; accent?: boolean; hint?: string }) {
   return (
-    <div className="sc-stat" data-accent={accent ? "true" : undefined}>
+    <div className="sc-stat" data-accent={accent ? "true" : undefined} title={hint}>
       <div className="sc-stat-value">{value}</div>
       <div className="sc-stat-label">{label}</div>
     </div>
@@ -112,9 +115,16 @@ function formatRate(rate: number): string {
 }
 
 /** Estimated spend → "$12.40"; an em-dash when nothing in the window could be priced (null, distinct from $0.00). */
-function formatUsd(usd: number | null): string {
-  if (usd === null) return "—";
+function formatUsd(usd: number | null | undefined): string {
+  if (usd === null || usd === undefined) return "—";
   return `$${usd.toFixed(2)}`;
+}
+
+/** The two-lane split behind the headline figure, so "why is this more than my agents cost" is answerable on hover. */
+function costHint(cost: TeamCostRollup): string | undefined {
+  if (cost.brainPlaneUsd === null || cost.brainPlaneUsd === undefined) return undefined;
+
+  return `Agents ${formatUsd(cost.estimatedCostUsd)} + supervisor/critic/grader ${formatUsd(cost.brainPlaneUsd)}`;
 }
 
 /** Seconds → a compact human duration ("8s", "1m 30s", "2h 5m"); an em-dash when there's no latency to show. */

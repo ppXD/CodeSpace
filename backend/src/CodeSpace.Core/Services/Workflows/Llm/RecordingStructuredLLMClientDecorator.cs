@@ -39,7 +39,7 @@ public class RecordingStructuredLLMClientDecorator : RecordingLLMClientDecorator
             // brain-plane spend the cap must bound atomically.
             completion = await LlmBudgetGuard.GuardedAsync(scope, request.Model, request.SystemPrompt, request.UserPrompt, request.MaxOutputTokens,
                 ct => _structuredInner.CompleteStructuredAsync(request, ct),
-                c => Agents.Cost.AgentCostPricing.CostUsd(c.Model, c.Usage.InputTokens ?? 0, c.Usage.OutputTokens ?? 0),
+                c => Agents.Cost.AgentCostPricing.CostUsd(c.Model, c.Usage.InputTokens ?? 0, c.Usage.OutputTokens ?? 0, scope?.ModelPrices),
                 cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)

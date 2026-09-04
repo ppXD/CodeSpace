@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { modelCredentialsApi, type AddCredentialedModelInput, type AddModelCredentialInput, type CredentialedModelSummary, type ModelPriceInput, type UpdateModelCredentialInput } from "@/api/modelCredentials";
+import { MAX_PRICE_PER_MILLION_USD, modelCredentialsApi, type AddCredentialedModelInput, type AddModelCredentialInput, type CredentialedModelSummary, type ModelPriceInput, type UpdateModelCredentialInput } from "@/api/modelCredentials";
 
 const MODEL_CREDENTIALS_KEY = ["model-credentials"] as const;
 
@@ -137,7 +137,12 @@ export function useSaveCredentialedModels(credentialId: string) {
 
         // The row's price rides along on every add: a rename is a remove-then-add, and dropping the price there
         // would silently un-enforce the cost cap the operator had just made enforceable.
-        const price = { inputUsdPerMillion: parsePrice(r.inputUsdPerMillion), outputUsdPerMillion: parsePrice(r.outputUsdPerMillion) };
+        //
+        // A HALF price is dropped rather than sent. The backend rejects one-sided prices (ModelPrice.FromNullable),
+        // and remove+add go out in ONE Promise.all — so sending it would delete the row and then 500 on the add,
+        // destroying a model the operator only meant to rename. Renaming with a half-filled price now keeps the
+        // model and simply carries no price, which is the state it was already in.
+        const price = completePrice(r);
 
         const orig = r.id ? original.find(o => o.id === r.id) : undefined;
         if (!orig) { toAdd.push({ modelId, displayName: r.displayName.trim() || null, ...price }); continue; }
@@ -156,13 +161,48 @@ export function useSaveCredentialedModels(credentialId: string) {
   });
 }
 
+/**
+ * The row's price as the API accepts it: BOTH sides set, or NEITHER. Half a price prices nothing and the backend
+ * rejects it outright, so a one-sided row carries no price rather than failing the whole save.
+ */
+export function completePrice(row: { inputUsdPerMillion?: string; outputUsdPerMillion?: string }): ModelPriceInput {
+  const input = parsePrice(row.inputUsdPerMillion);
+  const output = parsePrice(row.outputUsdPerMillion);
+
+  return input === null || output === null
+    ? { inputUsdPerMillion: null, outputUsdPerMillion: null }
+    : { inputUsdPerMillion: input, outputUsdPerMillion: output };
+}
+
+/**
+ * What is wrong with either typed price field, or null when both are acceptable (blank included). Blank is not an
+ * error — it means unpriced. Anything typed must be a non-negative number the engine can actually price a call
+ * with, so the operator learns at the edit rather than from a run that refuses to start.
+ */
+export function priceFieldIssue(row: { inputUsdPerMillion?: string; outputUsdPerMillion?: string }): string | null {
+  return fieldIssue(row.inputUsdPerMillion, "$/M in") ?? fieldIssue(row.outputUsdPerMillion, "$/M out");
+}
+
+function fieldIssue(raw: string | undefined, label: string): string | null {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return null;
+
+  const value = Number(trimmed);
+
+  if (!Number.isFinite(value)) return `${label} must be a number.`;
+  if (value < 0) return `${label} cannot be negative.`;
+  if (value > MAX_PRICE_PER_MILLION_USD) return `${label} is too large — the most a model can cost is $${MAX_PRICE_PER_MILLION_USD.toLocaleString()} per million tokens.`;
+
+  return null;
+}
+
 /** A blank / unparseable price field is "unpriced" (null), never 0 — a $0 model would read as free and defeat the cap. */
 export function parsePrice(raw: string | undefined): number | null {
   const trimmed = (raw ?? "").trim();
   if (!trimmed) return null;
 
   const value = Number(trimmed);
-  return Number.isFinite(value) && value >= 0 ? value : null;
+  return Number.isFinite(value) && value >= 0 && value <= MAX_PRICE_PER_MILLION_USD ? value : null;
 }
 
 /** Add input plus an optional set of models to seed onto the new credential in one user action. */

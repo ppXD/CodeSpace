@@ -33,8 +33,8 @@ public static class AgentCostPricing
     /// </summary>
     public const string PriceTableEnvVar = "CODESPACE_AGENT_MODEL_PRICES";
 
-    /// <summary>An absurd upper bound on a per-million price (USD). No real model is within four orders of magnitude of this; an env entry above it is a fat-finger and is SKIPPED (lenient). Bounding the price keeps <see cref="CostUsd"/> arithmetic far below <c>decimal.MaxValue</c> even at <c>int.MaxValue</c> tokens — so a malformed override can never overflow the pricing math into a throw (the "pricing never throws" contract).</summary>
-    internal const decimal MaxPricePerMillionUsd = 100_000m;
+    /// <summary>The shared per-million price ceiling (<see cref="ModelPrice.MaxPerMillionUsd"/>) — an env entry or stored row above it is a fat-finger and is SKIPPED (lenient), so a malformed price can never overflow the pricing math into a throw (the "pricing never throws" contract). Aliased here so this file reads self-contained; the VALUE lives in Messages so the API edit rejects exactly what the pricer would skip.</summary>
+    internal const decimal MaxPricePerMillionUsd = ModelPrice.MaxPerMillionUsd;
 
     /// <summary>The seeded default prices (USD per 1,000,000 tokens, input/output), cache-dated to the claude-api skill (2026-05-26). Codex/OpenAI models are intentionally ABSENT → UNKNOWN until an operator adds them via the env override. Prices drift — the env override is the correction path.</summary>
     private static readonly IReadOnlyDictionary<string, ModelPrice> DefaultPrices = new Dictionary<string, ModelPrice>(StringComparer.OrdinalIgnoreCase)

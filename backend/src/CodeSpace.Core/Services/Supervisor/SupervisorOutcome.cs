@@ -239,6 +239,9 @@ public static class SupervisorOutcome
     /// <summary>P3.5 — the OPTIONAL <c>detail</c> a server-forced stop stamped alongside its <c>reason</c> (<c>{ reason, detail }</c>) — a dynamic elaboration (e.g. the cost cap's realized-spend breakdown) for the bounds that carry one. Null when absent (every reason without a per-run figure to cite, and every non-forced stop).</summary>
     public static string? ReadStopDetail(string? payloadJson) => ReadStringField(payloadJson, "detail");
 
+    /// <summary>D1 — the model a wave was BLOCKED on for having no price (<c>unpricedModel</c> on a staging decision's outcome). Null on every other outcome. The caller re-PRICES the name rather than trusting it, so pricing the model clears the block.</summary>
+    public static string? ReadBlockedUnpricedModel(string? outcomeJson) => ReadStringField(outcomeJson, "unpricedModel");
+
     /// <summary>
     /// Classify a <c>stop</c> decision's terminal shape from its PAYLOAD (<c>{reason}</c> for a server-forced stop) plus
     /// its OUTCOME (<c>{outcome, summary}</c> for a model-authored stop) — the single success/degraded verdict both the

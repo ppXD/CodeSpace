@@ -169,6 +169,15 @@ public sealed class AgentSupervisorNode : INodeRuntime
         {
             result = await RunTurnAsync(supervisorRunId, teamId, context.NodeId, goal, conversationId, goalConfig, cancellationToken).ConfigureAwait(false);
         }
+        catch (Agents.Cost.UnpricedModelUnderCapException unpriced)
+        {
+            // D1 — the run declares a cost cap and a model it would spend on has no price, so the cap is
+            // unenforceable. Unlike a spent budget (which only the run's own config can heal) the remedy here is a
+            // STORED FACT the operator changes elsewhere: price the model. So the run WAITS on the same wake ladder
+            // instead of terminalizing hours of work — each wake re-prices, and a run whose model got priced simply
+            // carries on. Only past the whole window does it end honestly, with the reason that names the model.
+            return await ParkUnpricedOrStopAsync(context, supervisorRunId, teamId, goal, goalConfig, repositoryId, unpriced, cancellationToken).ConfigureAwait(false);
+        }
         catch (LlmApiException fault) when (SupervisorInfraPark.IsParkable(fault.Category))
         {
             // P1.1 — park, don't die: the model plane is transiently down (the in-call retry already rode out the
@@ -225,6 +234,41 @@ public sealed class AgentSupervisorNode : INodeRuntime
         {
             Kind = WorkflowWaitKinds.SupervisorInfraPark,
             IterationKey = $"{context.NodeId}#infra{state.Parks}",
+            Payload = marker,
+            DeadlineAt = DateTimeOffset.UtcNow + delay,
+            TimeoutPayload = marker,
+        });
+    }
+
+    /// <summary>
+    /// D1's unpriced-model park: the SAME wake ladder + honest 24h ceiling the model-plane outage path uses, because
+    /// the shape of the problem is identical — something outside this run must change before it can continue, and
+    /// terminalizing meanwhile would throw away work already paid for. What differs is only what heals it (an
+    /// operator pricing the model, not a provider recovering), so the marker carries the actionable sentence and the
+    /// window-exhausted ending stamps <c>UnpricedModelUnderCap</c> rather than <c>ModelPlaneUnavailable</c>.
+    /// </summary>
+    private async Task<NodeResult> ParkUnpricedOrStopAsync(NodeRunContext context, Guid supervisorRunId, Guid teamId, string goal, SupervisorGoalConfig? goalConfig, Guid? repositoryId, Agents.Cost.UnpricedModelUnderCapException unpriced, CancellationToken cancellationToken)
+    {
+        var state = SupervisorInfraPark.Next(context.ResumePayload, DateTimeOffset.UtcNow);
+
+        if (state.WindowExhausted)
+        {
+            context.Logger.LogWarning("agent.supervisor run {RunId}: model {Model} stayed unpriced past the whole {Window} park window — stopping honestly", supervisorRunId, unpriced.Model, SupervisorInfraPark.MaxParkWindow);
+
+            var stopped = await ForceStopAsync(supervisorRunId, teamId, context.NodeId, goal, goalConfig, SupervisorStopReasons.UnpricedModelUnderCap, cancellationToken).ConfigureAwait(false);
+
+            return Finish(context.Logger, stopped, repositoryId);
+        }
+
+        var delay = SupervisorInfraPark.DelayFor(state.Parks);
+        var marker = SupervisorInfraPark.Marker(state, unpriced.Detail);
+
+        context.Logger.LogWarning("agent.supervisor run {RunId}: {Where} refused — model {Model} has no price under the ${Cap} cap; parking {Delay} (park {Parks}) so it can be priced", supervisorRunId, unpriced.Where, unpriced.Model, unpriced.CapUsd, delay, state.Parks);
+
+        return NodeResult.Suspend(new SuspensionToken
+        {
+            Kind = WorkflowWaitKinds.SupervisorInfraPark,
+            IterationKey = $"{context.NodeId}#unpriced{state.Parks}",
             Payload = marker,
             DeadlineAt = DateTimeOffset.UtcNow + delay,
             TimeoutPayload = marker,
