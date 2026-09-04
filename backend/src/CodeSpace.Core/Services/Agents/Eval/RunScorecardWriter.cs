@@ -117,7 +117,7 @@ public sealed class RunScorecardWriter : IRunScorecardWriter, IScopedDependency
 
         if (records.Count == 0) return new BrainPlaneFacts(null, null);
 
-        var priced = records.Select(InteractionSpend.From).ToList();
+        var priced = records.Select(r => InteractionSpend.From(r)).ToList();
         var summary = BrainPlaneSpendSummary.From(priced);
         var brainModel = priced.FirstOrDefault(r => r.Kind == SupervisorDecisionCallKind && !string.IsNullOrWhiteSpace(r.Model))?.Model;
 
