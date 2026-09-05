@@ -68,7 +68,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         // rows on a transient / rate-limit gateway fault; an operator-PINNED brain never does (an explicit pin resolves
         // verbatim — its existing law). The candidates are the selector's own brain order, this row first.
         if (!context.SupervisorModelPinned)
-            structured = BuildBrainClient(structured, pick, await ResolveBrainAlternatesAsync(context, brainModelId, cancellationToken).ConfigureAwait(false));
+            structured = BuildBrainClient(structured, pick, await ResolveBrainAlternatesAsync(context, brainModelId, cancellationToken).ConfigureAwait(false), _logger);
 
         // P1 — render the capability catalog (available harnesses + their drivable providers, and this run's
         // credentialed model pool + each model's provider) so the brain authors a provider-compatible (harness, model)
@@ -108,6 +108,11 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             return NonConformantStop();
         }
 
+        // The wire-health fault (if any) that made this call LEAVE the run's own brain — read before the repair
+        // round-trips below can replace the completion that carries it. It is what tells a reply this decider cannot
+        // bind apart from a throttle: see the fail-closed floor below.
+        var hopCause = completion.FailedOverCause;
+
         // A completion CUT OFF mid-generation (Anthropic max_tokens / OpenAI length — see ModelCallFinish, the SAME
         // classifier the journal legibility axis uses) is not a shape the model chose: it ran out of room, most
         // often authoring a large multi-subtask plan. Buy ONE bounded retry with a RAISED output budget before this
@@ -126,6 +131,21 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         // precise path in the stop summary so the journal names the drift instead of a bare "did not conform".
         if (model is null || string.IsNullOrWhiteSpace(model.Kind))
         {
+            // BEFORE the repair, the throttle floor. Both the repair and the fail-closed stop below assume the reply
+            // came from the run's OWN brain: the repair re-asks it, and the stop says "the supervisor model returned a
+            // response that did not conform". Neither is true of a reply the pool failover fetched from a SUBSTITUTE
+            // after that brain was throttled or down — the substitute may not be a decision model at all, re-asking a
+            // pool that just threw the call off its own model only buys the same shrug, and stopping ends the run on a
+            // verdict nothing measured (real-model run 33930904059: two 429s, then a clean turn-0 stop the whole-loop
+            // gate scored a capability miss). Surface the fault the hop was FORCED by, so the bounded retry backs off
+            // on it and the node's infra park rides the outage out — exactly as an exhausted failover already does.
+            if (hopCause is { } throttled)
+            {
+                _logger.LogWarning("Supervisor brain failed over on a {Category} fault and the substitute {Model} returned no bindable decision — surfacing the fault rather than stopping the run", throttled.Category, completion.Model);
+
+                throw throttled;
+            }
+
             completion = await TryRepairAsync(structured, pick, completion, bindError, cancellationToken).ConfigureAwait(false) ?? completion;
             model = TryDeserialize(completion.Json, out bindError);
         }
@@ -1426,13 +1446,13 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         return alternates;
     }
 
-    /// <summary>The pure fold (unit-pinned): no alternates ⇒ the raw client, byte-identical; otherwise a <see cref="FailoverStructuredClient"/> over [current, alternates…] — the current brain always tries first.</summary>
-    internal static IStructuredLLMClient BuildBrainClient(IStructuredLLMClient current, ModelPoolPick currentPick, IReadOnlyList<(IStructuredLLMClient Client, ModelPoolPick Pick)> alternates)
+    /// <summary>The pure fold (unit-pinned): no alternates ⇒ the raw client, byte-identical; otherwise a <see cref="FailoverStructuredClient"/> over [current, alternates…] — the current brain always tries first. The logger is what makes a hop AUDIBLE (Warning per skipped candidate); a test that only pins the fold passes none.</summary>
+    internal static IStructuredLLMClient BuildBrainClient(IStructuredLLMClient current, ModelPoolPick currentPick, IReadOnlyList<(IStructuredLLMClient Client, ModelPoolPick Pick)> alternates, ILogger? logger = null)
     {
         if (alternates.Count == 0) return current;
 
         var candidates = new List<(IStructuredLLMClient, ModelPoolPick)> { (current, currentPick) };
         candidates.AddRange(alternates);
-        return new FailoverStructuredClient(candidates);
+        return new FailoverStructuredClient(candidates, logger);
     }
 }

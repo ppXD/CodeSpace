@@ -70,4 +70,18 @@ public sealed record StructuredLLMCompletion
 
     /// <summary>L4 pool failover provenance: the candidates the call skipped past on a transient / rate-limit fault before <see cref="Model"/> answered ("provider:model — category status"), in order. Empty when the first candidate answered. A caller that stamps provenance MUST read <see cref="Model"/>, never the resolved pick — after a failover they differ.</summary>
     public IReadOnlyList<string> FailedOver { get; init; } = Array.Empty<string>();
+
+    /// <summary>
+    /// The WIRE-HEALTH fault that made this call leave the caller's selected model — the first
+    /// <see cref="LlmErrorCategory.Transient"/> / <see cref="LlmErrorCategory.RateLimited"/> skip on the
+    /// <see cref="FailedOver"/> trail, or null when nothing was skipped for one.
+    ///
+    /// <para>It exists so a caller that finds the SUBSTITUTE's answer unusable can tell the two readings apart: the
+    /// answer is not evidence about the selected model's capability, it is a throttle wearing a substitute's reply.
+    /// Such a caller re-throws THIS (carrying the category + status + Retry-After the bounded retry and the node's
+    /// infra park both act on) instead of failing closed to a clean stop. Transient + <c>[JsonIgnore]</c>, like
+    /// <see cref="StructuredLLMCompletionRequest.Credential"/> — an exception is never a ledger field.</para>
+    /// </summary>
+    [JsonIgnore]
+    public LlmApiException? FailedOverCause { get; init; }
 }

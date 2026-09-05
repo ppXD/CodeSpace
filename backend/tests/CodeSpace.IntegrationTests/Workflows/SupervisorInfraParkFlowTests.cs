@@ -3,6 +3,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Engine;
+using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -35,8 +36,10 @@ public class SupervisorInfraParkFlowTests
 
     public SupervisorInfraParkFlowTests(PostgresFixture fixture) { _fixture = fixture; }
 
-    [Fact]
-    public async Task A_model_plane_outage_parks_the_run_and_the_deadline_wake_recovers_it()
+    [Theory]
+    [InlineData(LlmErrorCategory.Transient)]     // a 5xx — the gateway was reachable but unhealthy
+    [InlineData(LlmErrorCategory.RateLimited)]   // a 429 — the throttle, which must park exactly the same way, never end the run
+    public async Task A_model_plane_outage_parks_the_run_and_the_deadline_wake_recovers_it(LlmErrorCategory category)
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var workflowId = await CreateWorkflowAsync(teamId, userId, """{"goal":"ship it"}""");
@@ -47,7 +50,7 @@ public class SupervisorInfraParkFlowTests
         jobClient.AutoExecute = false;
 
         // 5 faults = the whole in-call budget: the decorator exhausts, the fault ESCAPES, the node must park.
-        Script(s => { s.PlanThenStop(); s.TransientFaultRetryAfter = TimeSpan.FromMilliseconds(1); s.FailTransientlyOnTurn(0, 5); });
+        Script(s => { s.PlanThenStop(); s.TransientFaultCategory = category; s.TransientFaultRetryAfter = TimeSpan.FromMilliseconds(1); s.FailTransientlyOnTurn(0, 5); });
 
         try
         {
@@ -64,7 +67,7 @@ public class SupervisorInfraParkFlowTests
                 var runRow = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
                 var diag = $"runError={runRow.Error} nodes=[" + string.Join(" | ", nodeRows.Select(n => $"{n.NodeId}:{n.Status}:{n.Error}")) + "] waits=[" + string.Join(" | ", waitRows.Select(w => $"{w.WaitKind}:{w.Status}:{w.IterationKey}")) + "]";
 
-                runRow.Status.ShouldBe(WorkflowRunStatus.Suspended, $"an exhausted transient parks the run — it must NEVER terminalize it ({diag})");
+                runRow.Status.ShouldBe(WorkflowRunStatus.Suspended, $"an exhausted {category} fault parks the run — it must NEVER terminalize it ({diag})");
 
                 var wait = await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending);
                 wait.WaitKind.ShouldBe(WorkflowWaitKinds.SupervisorInfraPark);
@@ -73,6 +76,8 @@ public class SupervisorInfraParkFlowTests
 
                 var marker = JsonDocument.Parse(wait.PayloadJson!).RootElement;
                 marker.GetProperty("parks").GetInt32().ShouldBe(1);
+                marker.GetProperty("error").GetString().ShouldContain(category.ToString(), Case.Sensitive,
+                    "the park's own reason must NAME the fault that caused it — an operator reading the run detail has to see a throttle as a throttle");
 
                 waitId = wait.Id;
                 markerJson = wait.PayloadJson!;

@@ -33,7 +33,7 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
         // A test injects a TRANSIENT (retryable) infra fault on a specific turn — thrown BEFORE any decision is produced,
         // so the production RetryingSupervisorDeciderDecorator that wraps this scripted decider must retry + recover it.
         if (_script.TryConsumeTransientFault(context.TurnNumber))
-            throw new LlmApiException("test-gateway", 503, LlmErrorCategory.Transient, $"injected transient brain fault on turn {context.TurnNumber}", _script.TransientFaultRetryAfter);
+            throw new LlmApiException("test-gateway", _script.TransientFaultCategory == LlmErrorCategory.RateLimited ? 429 : 503, _script.TransientFaultCategory, $"injected {_script.TransientFaultCategory} brain fault on turn {context.TurnNumber}", _script.TransientFaultRetryAfter);
 
         var decision = _script.Mode switch
         {
@@ -333,6 +333,9 @@ public sealed class SupervisorDecisionScript
     /// <summary>The Retry-After each injected fault carries. Tests exercising EXHAUSTION set a tiny value so the decorator's in-call backoff honors it and a whole 5-attempt cycle runs in milliseconds instead of the exponential schedule's ~30s. Null (default) keeps the exponential-backoff path the recovery tests exercise.</summary>
     public TimeSpan? TransientFaultRetryAfter { get; set; }
 
+    /// <summary>Which retryable category the injected faults carry. Both park, but they arrive by different routes — a 5xx has no provider backoff hint while a 429 does — so the park arc is proven for the THROTTLE, not just the outage.</summary>
+    public LlmErrorCategory TransientFaultCategory { get; set; } = LlmErrorCategory.Transient;
+
     /// <summary>How many injected transient faults REMAIN for a turn (0 once they've all been thrown) — a test asserts this reached 0 to prove the decider actually faulted that many times.</summary>
     public int RemainingTransientFaults(int turn) => _transientFaults.TryGetValue(turn, out var n) ? n : 0;
 
@@ -341,6 +344,7 @@ public sealed class SupervisorDecisionScript
     {
         _transientFaults.Clear();
         TransientFaultRetryAfter = null;
+        TransientFaultCategory = LlmErrorCategory.Transient;
     }
 
     /// <summary>Consume one injected transient fault for the turn if any remain (called by the scripted decider on each decide).</summary>

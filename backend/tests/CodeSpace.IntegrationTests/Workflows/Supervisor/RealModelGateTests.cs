@@ -1,4 +1,5 @@
 using Shouldly;
+using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Enums;
 
@@ -464,9 +465,36 @@ public sealed class RealModelGateTests
             .ShouldBeFalse("body prose containing the token but no leading API-error slot is a real fault — it gates");
     }
 
+    [Fact]
+    public void The_model_plane_parks_own_honest_ending_is_infra_and_no_model_authored_stop_can_impersonate_it()
+    {
+        // An outage that outlives the whole 24h park window ends the run through the ledger as a clean `stop` on a
+        // Success walk. Every whole-loop evaluator scores a clean stop a CapabilityMiss — a red for a run whose model
+        // was never able to answer at all — so the reason has to be readable, and this is what reads it.
+        RealModelGate.IsModelPlaneUnavailableStop(ForcedStopPayload(SupervisorStopReasons.ModelPlaneUnavailable))
+            .ShouldBeTrue("the park's honest ending is the outage wearing the product's graceful exit — it routes to the non-gating skip, never a capability red");
+
+        // Every OTHER forced stop is a real verdict about the run and must keep gating exactly as before.
+        RealModelGate.IsModelPlaneUnavailableStop(ForcedStopPayload(SupervisorStopReasons.NoProgress)).ShouldBeFalse("a stalled run IS a capability outcome");
+        RealModelGate.IsModelPlaneUnavailableStop(ForcedStopPayload(SupervisorStopReasons.CostCapReached)).ShouldBeFalse("a spent budget is the operator's bound, not an outage");
+
+        // A MODEL-authored stop cannot impersonate it: the projector emits outcome + summary, never a `reason` field —
+        // which is why reading `reason` can never launder a genuine miss into a skip, even if a model echoes the words.
+        RealModelGate.IsModelPlaneUnavailableStop(System.Text.Json.JsonSerializer.Serialize(new { outcome = "failed", summary = $"I gave up: {SupervisorStopReasons.ModelPlaneUnavailable}" }))
+            .ShouldBeFalse("a model writing the phrase into its own summary is still a model-authored stop — it gates");
+
+        RealModelGate.IsModelPlaneUnavailableStop(null).ShouldBeFalse();
+        RealModelGate.IsModelPlaneUnavailableStop("").ShouldBeFalse();
+        RealModelGate.IsModelPlaneUnavailableStop("not json at all").ShouldBeFalse();
+    }
+
     /// <summary>The shape the engine actually persists for a node failure: <c>{"error":"…","outputs":{},"duration_ms":…}</c> — so the gate is exercised against the REAL record shape (its `error` field), not a bare string.</summary>
     private static string NodeFailedPayload(string error) =>
         System.Text.Json.JsonSerializer.Serialize(new { error, outputs = new { }, duration_ms = 12 });
+
+    /// <summary>The shape <c>SupervisorTurnService.ForcedStop</c> persists for an engine-forced terminal: <c>{"reason":"…","detail":null}</c>.</summary>
+    private static string ForcedStopPayload(string reason) =>
+        System.Text.Json.JsonSerializer.Serialize(new { reason, detail = (string?)null });
 
     [Theory]
     [InlineData(RealModelOutcome.Drove, "DROVE")]
