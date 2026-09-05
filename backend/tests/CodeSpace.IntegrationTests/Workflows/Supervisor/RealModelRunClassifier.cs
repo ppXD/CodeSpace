@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
@@ -19,6 +20,11 @@ namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 /// errors these lanes actually surface) counts as infra; an <c>executor-error</c>, or an UNRECOGNISED CLI failure,
 /// DEFAULTS to a code fault so a regression can never hide as a skip. A one-off misclassification of a novel gateway
 /// error as a "miss" is absorbed by the gate's best-of-N floor; a persistent one is worth surfacing anyway.</para>
+///
+/// <para><b>One vocabulary, two readers.</b> Gateway shapes that PRODUCTION already names — today the mangled
+/// Anthropic wire format of <see cref="AgentRetryCauses.GatewayFormatFault"/> — are read from there rather than
+/// copied here, so the retry path and the real-model gates can never disagree about whether the same agent exit was
+/// the gateway or a regression.</para>
 /// </summary>
 public static class RealModelRunClassifier
 {
@@ -45,6 +51,12 @@ public static class RealModelRunClassifier
         // OUR code faulted building/attaching the run (the operating-contract threw, the harness invocation broke) — a
         // real MISS, NOT infra. Reserved even if the message happens to contain a gateway-looking token.
         if (ExitReasonOf(run) is "executor-error" or "reattach-error") return false;
+
+        // The gateway mangled the Anthropic wire FORMAT (thinking-block continuation). Production ALREADY owns this
+        // vocabulary — it is the cause the retry path degrades against — so the gates read it from there instead of
+        // keeping a second copy. One definition of "the gateway broke the wire" means a marker pinned for the retry
+        // path can never leave a real-model gate reading the same exit as a code regression.
+        if (AgentRetryCauses.Classify(run.Error) == AgentRetryCauses.GatewayFormatFault) return true;
 
         var error = (run.Error ?? "").ToLowerInvariant();
         return GatewaySignatures.Any(s => error.Contains(s, StringComparison.Ordinal));
