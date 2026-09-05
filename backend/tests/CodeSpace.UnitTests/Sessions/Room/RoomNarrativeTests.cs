@@ -260,6 +260,28 @@ public class RoomNarrativeTests
     }
 
     [Fact]
+    public void C1_the_result_card_carries_the_unverified_marker_verbatim()
+    {
+        var facts = new RoomTurnFacts { FinalAnswer = new RoomFinalAnswer { Text = "Rust is the safer choice.", Verified = false, VerificationNote = "Unverified — no check ran on this result" } };
+
+        var card = Build(new[] { Structural("agent", "Run", 1) }, WorkflowRunStatus.Success, facts: facts).Blocks.OfType<FinalAnswerBlock>().ShouldHaveSingleItem();
+
+        card.Verified.ShouldBe(false);
+        card.VerificationNote.ShouldBe("Unverified — no check ran on this result", "the backend owns the room's words — the block carries the copy, not a flag the FE interprets");
+    }
+
+    [Fact]
+    public void C1_a_verified_result_card_carries_no_marker()
+    {
+        var facts = new RoomTurnFacts { FinalAnswer = new RoomFinalAnswer { Text = "Shipped.", Verified = true } };
+
+        var card = Build(new[] { Structural("agent", "Run", 1) }, WorkflowRunStatus.Success, facts: facts).Blocks.OfType<FinalAnswerBlock>().ShouldHaveSingleItem();
+
+        card.Verified.ShouldBe(true);
+        card.VerificationNote.ShouldBeNull("a checked result renders exactly as before");
+    }
+
+    [Fact]
     public void A1_a_FAILED_acceptance_grade_makes_Review_read_failed_not_the_vaguer_stopped()
     {
         // The card degrades on a failed grade, and the map reads from that same degraded flag — but Review must still

@@ -321,6 +321,8 @@ public static class RoomNarrative
         Attachments = fa.Attachments.Select(a => Attach(a, producers, agentById)).ToList(),
         Degraded = fa.Degraded,
         DegradedReason = fa.DegradedReason,
+        Verified = fa.Verified,
+        VerificationNote = fa.VerificationNote,
     };
 
     /// <summary>Map a fact attachment to the DTO, attributing a FILE to its producing agent (so the RESULT never presents an intermediate agent's file as the final deliverable without saying whose it is).</summary>

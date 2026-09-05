@@ -895,6 +895,144 @@ public sealed class SupervisorAcceptanceFoldFlowTests
 
     // ─── Helpers ───
 
+    // ─── C1: a BRANCHLESS stop with a deliverable oracle is graded, not skipped ───────────────────────────
+
+    /// <summary>
+    /// 🟢 High fidelity — the real grader, the real artifact store, real Postgres. The defect C1 closes: a terminal
+    /// stop with NO reviewable head skipped its acceptance grade entirely, so an analysis-only run terminalized
+    /// "Completed" with its model-authored oracle never run. Here the run publishes no branch at all and its ONE unit
+    /// captured a real DELIVERABLE.md; the deliverable-kind gate now materializes that world and grades it for real.
+    /// </summary>
+    [Fact]
+    public async Task A_branchless_stop_with_a_deliverable_oracle_grades_the_captured_deliverables()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var agentRunId = Guid.NewGuid();
+
+        // No published branch anywhere ⇒ the branch resolver finds NOTHING: the branchless world an analysis run leaves.
+        await SeedAnalysisSpawnDecisionAsync(runId, teamId, agentRunId);
+        await SeedBranchlessMergeDecisionAsync(runId, teamId);
+        await SeedCapturedDeliverableAsync(teamId, runId, agentRunId, "DELIVERABLE.md", "# Findings\nThe two runtimes differ in their memory model.");
+
+        var result = await RunRealGraderStopTurnAsync(runId, teamId, new[] { "DELIVERABLE.md" }, BenchmarkGradingKind.ArtifactPresent);
+        SupervisorOutcome.ReadAcceptanceGradePassed(await StopLedgerOutcomeAsync(runId, teamId))
+            .ShouldBe(true, "the stop's own oracle RAN against the world the run actually produced — an ungraded 'Completed' is what C1 removes");
+        AgentSupervisorNode.Finish(Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, result).Outputs["status"].GetString().ShouldBe("Completed");
+    }
+
+    /// <summary>The same path's failing half: the oracle names a deliverable the run never captured, so the branchless stop is NOT accepted. Without C1 this stop recorded no grade at all and read as a clean success.</summary>
+    [Fact]
+    public async Task A_branchless_stop_whose_deliverable_is_absent_is_not_accepted()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var agentRunId = Guid.NewGuid();
+
+        await SeedAnalysisSpawnDecisionAsync(runId, teamId, agentRunId);
+        await SeedBranchlessMergeDecisionAsync(runId, teamId);
+        await SeedCapturedDeliverableAsync(teamId, runId, agentRunId, "NOTES.md", "scratch");
+
+        var result = await RunRealGraderStopTurnAsync(runId, teamId, new[] { "DELIVERABLE.md" }, BenchmarkGradingKind.ArtifactPresent);
+
+        var outcome = await StopLedgerOutcomeAsync(runId, teamId);
+        SupervisorOutcome.ReadAcceptanceGradePassed(outcome).ShouldBe(false, "the declared deliverable is not in the captured world — that is a real failure, not an absent question");
+        outcome.ShouldContain("model-check", customMessage: "the durable detail names the gate that failed");
+        AgentSupervisorNode.Finish(Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, result).Outputs["status"].GetString().ShouldBe("AcceptanceFailed");
+    }
+
+    /// <summary>The category error stays skipped: a TestsPass argv has no code world to run in without a head, so the branchless path never consults the captured deliverables and records no verdict — byte-identical to before C1.</summary>
+    [Fact]
+    public async Task A_branchless_stop_with_a_tests_pass_oracle_still_skips()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var agentRunId = Guid.NewGuid();
+
+        await SeedAnalysisSpawnDecisionAsync(runId, teamId, agentRunId);
+        await SeedBranchlessMergeDecisionAsync(runId, teamId);
+        await SeedCapturedDeliverableAsync(teamId, runId, agentRunId, "DELIVERABLE.md", "# Findings");
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = false, Detail = "should-not-run" });
+        await RunStopTurnWithGraderAsync(runId, teamId, BranchlessGoalConfig(), new[] { "dotnet", "test" }, grader);
+
+        grader.CallCount.ShouldBe(0, "there is no head to clone");
+        SupervisorOutcome.ReadAcceptanceGradePassed(await StopLedgerOutcomeAsync(runId, teamId))
+            .ShouldBeNull("running a test argv over a directory of captured documents is a CATEGORY error — the skip is the honest answer");
+    }
+
+    /// <summary>A spawn whose unit did ANALYSIS: it changed no file, published no branch and carries no per-unit grade — the shape whose terminal stop C1 used to leave ungraded.</summary>
+    private async Task SeedAnalysisSpawnDecisionAsync(Guid runId, Guid teamId, Guid agentRunId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var result = new SupervisorAgentResult { AgentRunId = agentRunId, Status = "Succeeded", Summary = "wrote the findings" };
+        var outcome = JsonSerializer.Serialize(new { agentRunIds = new[] { agentRunId }, agentCount = 1, agentResults = new[] { result } }, AgentJson.Options);
+
+        db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId, Sequence = await NextDecisionSequenceAsync(db, runId),
+            DecisionKind = SupervisorDecisionKinds.Spawn, IdempotencyKey = $"spawn-{Guid.NewGuid():N}", InputHash = "test",
+            Status = SupervisorDecisionStatus.Succeeded, PayloadJson = """{"subtaskIds":["s1"]}""", OutcomeJson = outcome, FenceEpoch = 1,
+            CreatedDate = now, CreatedBy = Guid.Empty, LastModifiedDate = now, LastModifiedBy = Guid.Empty,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>A merge that integrated NOTHING onto a reviewable head — the branchless world an analysis-only run leaves behind (the units worked, nothing was published).</summary>
+    private async Task SeedBranchlessMergeDecisionAsync(Guid runId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+
+        db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId, Sequence = await NextDecisionSequenceAsync(db, runId),
+            DecisionKind = SupervisorDecisionKinds.Merge, IdempotencyKey = $"merge-{Guid.NewGuid():N}", InputHash = "test",
+            Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}",
+            OutcomeJson = JsonSerializer.Serialize(new { integration = new { status = "Clean" } }, AgentJson.Options),
+            FenceEpoch = 1, CreatedDate = now, CreatedBy = Guid.Empty, LastModifiedDate = now, LastModifiedBy = Guid.Empty,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>Run a terminal stop turn against the REAL acceptance grader (real artifact store, real materialization) with a model-authored deliverable oracle, on a run bound to no repository.</summary>
+    private async Task<SupervisorTurnResult> RunRealGraderStopTurnAsync(Guid runId, Guid teamId, string[] command, BenchmarkGradingKind kind)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await RunStopTurnWithGraderAsync(runId, teamId, BranchlessGoalConfig(), command, scope.Resolve<ISupervisorAcceptanceGrader>(), kind);
+    }
+
+    /// <summary>A run with no repository and no operator floor — every stop gate it has is the model's own.</summary>
+    private static SupervisorGoalConfig BranchlessGoalConfig() => new() { Goal = Goal, AcceptanceChecks = null, AgentProfile = new SupervisorAgentProfile() };
+
+    /// <summary>Capture one real deliverable for <paramref name="agentRunId"/>: CAS bytes plus the typed manifest row the branchless grade rebuilds its world from.</summary>
+    private async Task SeedCapturedDeliverableAsync(Guid teamId, Guid runId, Guid agentRunId, string path, string content)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var payload = System.Text.Encoding.UTF8.GetBytes(content);
+        var sha = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(payload));
+        var artifactId = Guid.NewGuid();
+
+        db.WorkflowArtifact.Add(new WorkflowArtifact
+        {
+            Id = artifactId, TeamId = teamId, Sha256 = sha, ContentType = "text/markdown", SizeBytes = payload.Length, InlineBytes = payload, CreatedAt = now,
+        });
+        db.ArtifactManifest.Add(new ArtifactManifest
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, AgentRunId = agentRunId, WorkflowRunId = runId, FenceEpoch = 1,
+            Kind = ArtifactManifestKind.Document, LogicalPath = path, ContentArtifactId = artifactId,
+            Sha256 = sha, SizeBytes = payload.Length, ContentType = "text/markdown",
+            CreatedDate = now, LastModifiedDate = now,
+        });
+        await db.SaveChangesAsync();
+    }
+
     private async Task<Guid> SeedBoundRepositoryAsync(Guid teamId, string cloneUrlHttps)
     {
         using var scope = _fixture.BeginScope();

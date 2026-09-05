@@ -123,4 +123,29 @@ public class RoomResultVerdictTests
 
     private static SupervisorStopClassification Stop(SupervisorStopKind kind, string? summary = null, string? reason = null) =>
         new() { Kind = kind, Summary = summary, Reason = reason };
+
+    // ── C1: the UNVERIFIED marker ──
+
+    [Fact]
+    public void A_success_that_nothing_checked_is_marked_unverified()
+    {
+        // The most expensive silence in the room: a run with no operator floor, no model-authored oracle and no output
+        // critic terminalizes a green "Result" that reads exactly like a fully-verified one.
+        var verification = RoomProjector.Verification(graded: false, criticReviewed: false);
+
+        verification.Verified.ShouldBe(false);
+        verification.Note.ShouldBe("Unverified — no check ran on this result", "the copy is BACKEND-authored — the FE never maps a flag to words");
+    }
+
+    [Theory]
+    [InlineData(true, false)]    // an acceptance grade (the stop's, or any unit's)
+    [InlineData(false, true)]    // an output-critic verdict, including a silent approval
+    [InlineData(true, true)]
+    public void A_success_something_checked_carries_no_marker(bool graded, bool criticReviewed)
+    {
+        var verification = RoomProjector.Verification(graded, criticReviewed);
+
+        verification.Verified.ShouldBe(true);
+        verification.Note.ShouldBeNull("a verified card is byte-identical to before — the chip exists only for the unexamined one");
+    }
 }

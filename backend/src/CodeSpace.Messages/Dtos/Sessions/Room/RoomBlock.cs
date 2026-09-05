@@ -408,6 +408,17 @@ public sealed record FinalAnswerBlock : RoomBlock
 
     /// <summary>Backend-authored account of WHY the card is degraded, for the case <see cref="Text"/> does not already carry it — a failed acceptance grade leaves the model's own success-sounding closing line intact, so the verdict ("Checks failed") is stated on its own line. Null when the text already is the reason (a give-up / forced stop) and on every clean success. The FE renders this string; it never maps an outcome kind to copy.</summary>
     public string? DegradedReason { get; init; }
+
+    /// <summary>
+    /// C1 — whether ANYTHING checked this result: an acceptance grade (the stop's or any unit's) or an output-critic
+    /// verdict. <c>false</c> on a Success that carries neither, so the card can say so; <c>true</c> when something did
+    /// verify it. Null on a card where the question does not arise (a degraded / non-success stop, which already
+    /// renders its own account). A green "Result" behind an unexamined answer is the failure mode this exists to end.
+    /// </summary>
+    public bool? Verified { get; init; }
+
+    /// <summary>Backend-authored copy for the unverified chip ("Unverified — no check ran"). Null whenever <see cref="Verified"/> is not <c>false</c>. The FE renders this string; it never maps a flag to copy.</summary>
+    public string? VerificationNote { get; init; }
 }
 
 /// <summary>One typed attachment of a <see cref="FinalAnswerBlock"/> — the frontend renders each <see cref="Kind"/> distinctly.</summary>

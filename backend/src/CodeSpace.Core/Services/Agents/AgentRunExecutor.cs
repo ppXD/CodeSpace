@@ -2191,12 +2191,18 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// consumes it; the captured work is preserved, and the critique rides <see cref="AgentRunResult.ReviewFeedback"/>.
     /// FAILS OPEN — a failed review keeps the original result. Under <see cref="ReviewMode.Improve"/> the S6 revise loop
     /// reads the flag + feedback and buys the agent a bounded re-run before the flag stands (Gate never re-runs).
+    ///
+    /// <para>C1: a TEXT-ONLY result is reviewed too. Until this fix the gate demanded a diff, so the one shape whose
+    /// whole output IS its text — a question answered in the summary, a report written into a captured deliverable —
+    /// was the single shape that shipped past a configured Gate/Improve review untouched, exactly where an answer is
+    /// least falsifiable. Such a result is rendered as an ANSWER and judged against the goal PLUS the task's
+    /// acceptance criteria. A diff-bearing result is rendered byte-identically to before.</para>
     /// </summary>
     internal async Task<AgentRunResult> ReviewOutputIfEnabledAsync(AgentTask task, AgentRunResult result, AgentRun run, CancellationToken cancellationToken)
     {
         if (task.OutputReviewMode == ReviewMode.None) return result;
         if (result.Status != AgentRunStatus.Succeeded) return result;
-        if (result.ChangedFiles.Count == 0 && string.IsNullOrEmpty(result.Patch)) return result;
+        if (!HasReviewableOutput(result)) return result;
 
         var runId = run.Id;
 
@@ -2220,10 +2226,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         var agentReviewed = !verdict.Failed;
 
+        // Built ONCE — the ladder rung and the co-sign judge the SAME artifact, and a text-only render costs one
+        // bounded read of the captured deliverables that must not be paid twice.
+        var request = await BuildReviewRequestAsync(task, result, run, cancellationToken).ConfigureAwait(false);
+
         if (verdict.Failed)
-            verdict = await ReviewRecordedAsync(
-                new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "agent change", Artifact = RenderChange(result), Goal = task.Goal },
-                run, task.ReviewerModelId, cancellationToken).ConfigureAwait(false);
+            verdict = await ReviewRecordedAsync(request, run, task.ReviewerModelId, cancellationToken).ConfigureAwait(false);
 
         // D② approve co-sign: an AGENT reviewer's APPROVAL gets a cheap independent MODEL co-check before it counts.
         // The reviewer agent READS the produced tree — hostile committed content could try to instruct it to approve
@@ -2233,9 +2241,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // DISAPPROVING agent verdict needs no co-sign (the worst case of a wrong block is one wasted revise round).
         if (agentReviewed && verdict.Approved)
         {
-            var coSign = await ReviewRecordedAsync(
-                new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "agent change", Artifact = RenderChange(result), Goal = task.Goal },
-                run, task.ReviewerModelId, cancellationToken).ConfigureAwait(false);
+            var coSign = await ReviewRecordedAsync(request, run, task.ReviewerModelId, cancellationToken).ConfigureAwait(false);
 
             if (!coSign.Failed && !coSign.Approved)
                 verdict = coSign with { Rationale = $"The reviewer agent approved, but the independent model co-check disagreed: {coSign.Rationale}" };
@@ -2314,6 +2320,102 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         builder.AppendLine("Diff:").AppendLine(string.IsNullOrEmpty(result.Patch) ? "(no unified diff captured)" : result.Patch);
 
         return builder.ToString();
+    }
+
+    /// <summary>C1 — the total captured-deliverable bytes a text-only review reads. Bounded so a large report cannot balloon the critic prompt; the overflow is stated in the render rather than silently dropped.</summary>
+    internal const int MaxReviewedDeliverableChars = 64 * 1024;
+
+    /// <summary>Whether <paramref name="result"/> carries a recorded diff — the pre-C1 review trigger, and still the one that selects the byte-identical change render.</summary>
+    private static bool HasDiff(AgentRunResult result) => result.ChangedFiles.Count > 0 || !string.IsNullOrEmpty(result.Patch);
+
+    /// <summary>C1 — whether there is anything for the critic to READ: a diff, an answer in the agent's summary, or a captured deliverable. All three absent ⇒ a genuine no-op / re-attach run, which still self-skips exactly as before.</summary>
+    private static bool HasReviewableOutput(AgentRunResult result) =>
+        HasDiff(result) || !string.IsNullOrWhiteSpace(result.Summary) || result.CapturedArtifactCount + result.UndeclaredArtifactCount > 0;
+
+    /// <summary>C1 — the critic's request for THIS result: the unchanged change render for a diff-bearing run, else the answer render judged against the goal plus the task's own acceptance criteria (an answer's "done" is its contract, not its file list).</summary>
+    private async Task<CriticRequest> BuildReviewRequestAsync(AgentTask task, AgentRunResult result, AgentRun run, CancellationToken cancellationToken)
+    {
+        if (HasDiff(result))
+            return new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "agent change", Artifact = RenderChange(result), Goal = task.Goal };
+
+        var deliverables = await ReadCapturedDeliverablesAsync(result, run, cancellationToken).ConfigureAwait(false);
+
+        return new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "agent answer", Artifact = RenderAnswer(result, deliverables), Goal = ReviewGoal(task) };
+    }
+
+    /// <summary>The goal the critic judges an ANSWER against — the task goal plus the acceptance criteria the operator/planner authored, so "is this done?" is asked against the stated contract rather than against the prose alone. No contract ⇒ the goal verbatim.</summary>
+    internal static string? ReviewGoal(AgentTask task)
+    {
+        if (task.Acceptance?.Command is not { Count: > 0 } criteria) return task.Goal;
+
+        var described = string.IsNullOrWhiteSpace(task.Acceptance.Description) ? "" : $" ({task.Acceptance.Description})";
+
+        return $"{task.Goal}\n\nAcceptance criteria{described}: {string.Join(", ", criteria)}";
+    }
+
+    /// <summary>C1 — the answer the critic reads: the agent's own closing summary plus every captured deliverable's text, each under its own path header. Internal + static so the bounding + the no-deliverable wording are unit-pinned.</summary>
+    internal static string RenderAnswer(AgentRunResult result, IReadOnlyList<(string Path, string Text)> deliverables)
+    {
+        var builder = new StringBuilder();
+
+        builder.AppendLine("This run produced no code change — its output IS the answer below.").AppendLine();
+        builder.AppendLine($"Agent summary: {(string.IsNullOrWhiteSpace(result.Summary) ? "(none)" : result.Summary)}").AppendLine();
+
+        if (deliverables.Count == 0)
+        {
+            builder.AppendLine("Captured deliverables: (none)");
+            return builder.ToString();
+        }
+
+        foreach (var (path, text) in deliverables)
+            builder.AppendLine($"=== {path} ===").AppendLine(text).AppendLine();
+
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// Read this attempt's captured deliverables back out of the artifact store, bounded by
+    /// <see cref="MaxReviewedDeliverableChars"/> across the whole set. BEST-EFFORT: an unresolvable row, or any
+    /// store fault, degrades to the summary-only review rather than failing the run — the critic is advisory and
+    /// fails open, so a storage hiccup must never manufacture a flag OR block completion.
+    /// </summary>
+    private async Task<IReadOnlyList<(string Path, string Text)>> ReadCapturedDeliverablesAsync(AgentRunResult result, AgentRun run, CancellationToken cancellationToken)
+    {
+        if (result.CapturedArtifactCount + result.UndeclaredArtifactCount == 0) return Array.Empty<(string, string)>();
+
+        try
+        {
+            var rows = await _artifactManifests.ListForAgentRunAsync(run.Id, run.TeamId, cancellationToken).ConfigureAwait(false);
+            var current = rows.Where(r => r.SupersededByManifestId is null).ToList();
+
+            if (current.Count == 0) return Array.Empty<(string, string)>();
+
+            var latest = current.Max(r => r.FenceEpoch);
+            var read = new List<(string, string)>();
+            var budget = MaxReviewedDeliverableChars;
+
+            foreach (var row in current.Where(r => r.FenceEpoch == latest).OrderBy(r => r.LogicalPath, StringComparer.Ordinal))
+            {
+                if (budget <= 0) break;
+
+                var bytes = await _artifacts.GetBytesAsync(run.TeamId, row.ContentArtifactId, cancellationToken).ConfigureAwait(false);
+
+                if (bytes is null) continue;
+
+                var text = System.Text.Encoding.UTF8.GetString(bytes.Bytes);
+                var kept = text.Length <= budget ? text : text[..budget] + "\n… (truncated for review) …";
+
+                budget -= Math.Min(text.Length, budget);
+                read.Add((row.LogicalPath, kept));
+            }
+
+            return read;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Agent run {RunId}: could not read the captured deliverables for the output review; reviewing the summary alone", run.Id);
+            return Array.Empty<(string, string)>();
+        }
     }
 
     /// <summary>Append a Warning event so the operator sees on the timeline WHY the run was flagged for review. Best-effort: a failure to record it never masks the run's terminal write.</summary>

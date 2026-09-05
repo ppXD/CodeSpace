@@ -53,14 +53,14 @@ public sealed class AgentRunExecutorOutputReviewTests
     }
 
     [Fact]
-    public async Task An_empty_diff_skips_the_review()
+    public async Task A_run_with_no_diff_no_answer_and_no_deliverable_skips_the_review()
     {
         var (runId, executor, _, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = false });
 
-        var noChanges = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed" };   // no ChangedFiles, no Patch
+        var noChanges = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed" };   // no ChangedFiles, no Patch, no Summary
         var result = await executor.ReviewOutputIfEnabledAsync(GatedTask, noChanges, Run(runId), CancellationToken.None);
 
-        critic.Called.ShouldBeFalse("a no-op / re-attach run with no captured diff has nothing to gate");
+        critic.Called.ShouldBeFalse("a no-op / re-attach run that produced nothing at all has nothing to gate");
         result.Status.ShouldBe(AgentRunStatus.Succeeded);
     }
 
@@ -263,6 +263,106 @@ public sealed class AgentRunExecutorOutputReviewTests
         critic.CallCount.ShouldBe(1, "the model call is the LADDER — a laddered model approval never co-signs itself");
     }
 
+    // ── C1: a TEXT-ONLY answer is graded like a deliverable ──
+
+    [Fact]
+    public async Task A_text_only_answer_is_reviewed_as_an_answer_against_the_acceptance_criteria()
+    {
+        // The defect: a run whose whole output is its text (a question answered, a report written) produced no diff, so
+        // the gate skipped it entirely — the one shape where an ungated claim is least falsifiable shipped ungated.
+        var (runId, executor, _, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true });
+
+        var result = await executor.ReviewOutputIfEnabledAsync(AnswerTask, SucceededWithAnswer(), Run(runId), CancellationToken.None);
+
+        critic.Called.ShouldBeTrue("a text-only answer under a configured Gate IS reviewed");
+        critic.ObservedRequest!.ArtifactKind.ShouldBe("agent answer", customMessage: "the critic is told it is reading an answer, not a diff");
+        critic.ObservedRequest.Artifact.ShouldContain("Rust is memory-safe without a GC", customMessage: "the agent's own answer text IS the reviewed artifact");
+        critic.ObservedRequest.Goal.ShouldContain("compare the two languages");
+        critic.ObservedRequest.Goal.ShouldContain("DELIVERABLE.md", customMessage: "the task's acceptance criteria ride the goal — 'done' is judged against the contract");
+        result.Status.ShouldBe(AgentRunStatus.Succeeded, "an approved answer stays a clean success");
+    }
+
+    [Fact]
+    public async Task A_diff_bearing_result_is_still_reviewed_as_a_change()
+    {
+        var (runId, executor, _, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true });
+
+        await executor.ReviewOutputIfEnabledAsync(AnswerTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
+
+        critic.ObservedRequest!.ArtifactKind.ShouldBe("agent change", customMessage: "byte-identity for the diff-bearing lane — C1 changed only the diff-less one");
+        critic.ObservedRequest.Artifact.ShouldContain("Diff:");
+        critic.ObservedRequest.Goal.ShouldBe("compare the two languages", customMessage: "a change is judged against the bare goal, exactly as before");
+    }
+
+    [Fact]
+    public async Task A_disapproved_text_only_answer_is_flagged_for_review()
+    {
+        var (runId, executor, runs, _) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = false, Rationale = "the answer cites no source" });
+
+        var result = await executor.ReviewOutputIfEnabledAsync(AnswerTask, SucceededWithAnswer(), Run(runId), CancellationToken.None);
+
+        result.Status.ShouldBe(AgentRunStatus.NeedsReview, "an answer the critic rejects blocks the clean-success path exactly as a rejected diff does");
+        result.ExitReason.ShouldBe("output-flagged");
+        result.ReviewFeedback.ShouldBe("the answer cites no source");
+        runs.AppendedEvents.Count.ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task A_failed_review_of_a_text_only_answer_still_falls_open()
+    {
+        var (runId, executor, _, _) = NewExecutor(CriticVerdict.ReviewFailed(ReviewMode.Gate, "no reviewer model"));
+
+        var result = await executor.ReviewOutputIfEnabledAsync(AnswerTask, SucceededWithAnswer(), Run(runId), CancellationToken.None);
+
+        result.Status.ShouldBe(AgentRunStatus.Succeeded, "the answer lane fails open like the diff lane — a review that could not run never manufactures a flag");
+        result.ExitReason.ShouldNotBe("output-flagged");
+    }
+
+    [Fact]
+    public async Task A_captured_deliverable_is_read_into_the_reviewed_answer()
+    {
+        var deliverable = new FakeDeliverable("DELIVERABLE.md", "# Comparison\nRust wins on safety; Go wins on build speed.");
+        var (runId, executor, _, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true }, deliverables: new[] { deliverable });
+
+        var captured = SucceededWithAnswer() with { Summary = "wrote the comparison", CapturedArtifactCount = 1 };
+        await executor.ReviewOutputIfEnabledAsync(AnswerTask, captured, Run(runId), CancellationToken.None);
+
+        critic.ObservedRequest!.Artifact.ShouldContain("=== DELIVERABLE.md ===", customMessage: "the deliverable is named so the critic can attribute its reading");
+        critic.ObservedRequest.Artifact.ShouldContain("Rust wins on safety", customMessage: "the report the agent actually wrote is what gets judged — not just its self-summary");
+    }
+
+    [Fact]
+    public async Task A_deliverable_read_failure_degrades_to_the_summary_alone()
+    {
+        var (runId, executor, _, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true }, deliverables: Array.Empty<FakeDeliverable>(), deliverableReadThrows: true);
+
+        var captured = SucceededWithAnswer() with { CapturedArtifactCount = 2 };
+        var result = await executor.ReviewOutputIfEnabledAsync(AnswerTask, captured, Run(runId), CancellationToken.None);
+
+        critic.Called.ShouldBeTrue("a storage fault must not cancel the review — the summary is still an answer");
+        critic.ObservedRequest!.Artifact.ShouldContain("Rust is memory-safe without a GC");
+        result.Status.ShouldBe(AgentRunStatus.Succeeded);
+    }
+
+    [Fact]
+    public void An_answer_review_goal_without_a_contract_is_the_bare_goal()
+    {
+        AgentRunExecutor.ReviewGoal(new AgentTask { Goal = "g", Harness = "codex-cli" })
+            .ShouldBe("g", customMessage: "no acceptance contract ⇒ the goal rides verbatim, never a synthesized one");
+    }
+
+    [Fact]
+    public void An_answer_render_names_an_absent_deliverable_rather_than_implying_one()
+    {
+        var rendered = AgentRunExecutor.RenderAnswer(SucceededWithAnswer(), Array.Empty<(string, string)>());
+
+        rendered.ShouldContain("produced no code change", customMessage: "the critic is told WHY there is no diff, so it does not read the absence as the failure");
+        rendered.ShouldContain("Captured deliverables: (none)");
+    }
+
+    private static AgentRunResult SucceededWithAnswer() =>
+        new() { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = "Rust is memory-safe without a GC; Go trades that for a simpler runtime." };
+
     private static AgentRun Run(Guid id, Guid? workflowRunId = null, string? nodeId = null, string iterationKey = "") =>
         new() { Id = id, TeamId = Guid.NewGuid(), WorkflowRunId = workflowRunId, NodeId = nodeId, IterationKey = iterationKey };
 
@@ -270,14 +370,67 @@ public sealed class AgentRunExecutorOutputReviewTests
     private static AgentTask GatedTask => new() { Goal = "g", Harness = "codex-cli", OutputReviewMode = ReviewMode.Gate };
     private static AgentTask AgentReviewedTask => new() { Goal = "g", Harness = "codex-cli", OutputReviewMode = ReviewMode.Gate, ReviewerAgent = true };
 
-    private static (Guid RunId, AgentRunExecutor Executor, StubRuns Runs, RecordingCritic Critic) NewExecutor(CriticVerdict verdict, Guid? pendingDecision = null, CriticVerdict? agentVerdict = null)
+    /// <summary>C1's shape: a Gate-reviewed task whose "done" is a DELIVERABLE contract, not a test argv — the answer/report shape that produces no diff.</summary>
+    private static AgentTask AnswerTask => new()
+    {
+        Goal = "compare the two languages",
+        Harness = "codex-cli",
+        OutputReviewMode = ReviewMode.Gate,
+        Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "DELIVERABLE.md" }, Kind = CodeSpace.Messages.Agents.Benchmark.BenchmarkGradingKind.ArtifactPresent },
+    };
+
+    private static (Guid RunId, AgentRunExecutor Executor, StubRuns Runs, RecordingCritic Critic) NewExecutor(CriticVerdict verdict, Guid? pendingDecision = null, CriticVerdict? agentVerdict = null, IReadOnlyList<FakeDeliverable>? deliverables = null, bool deliverableReadThrows = false)
     {
         var runId = Guid.NewGuid();
         var runs = new StubRuns(runId);
         var critic = new RecordingCritic { Verdict = verdict };
         var scopeFactory = new FakeScopeFactory(new FakeLedger(pendingDecision), agentVerdict is null ? null : new FakeAgentReviewer(agentVerdict));
-        var executor = new AgentRunExecutor(runs, null!, null!, null!, null!, null!, null!, null!, scopeFactory, null!, critic, null!, null!, null!, null!, new FakeCaptureIntentService(), null!, NullLogger<AgentRunExecutor>.Instance);
+        var captured = new FakeArtifactManifestStore(deliverables ?? Array.Empty<FakeDeliverable>(), deliverableReadThrows);
+        var executor = new AgentRunExecutor(runs, null!, null!, null!, null!, null!, null!, null!, scopeFactory, null!, critic, null!, captured, null!, captured, new FakeCaptureIntentService(), null!, NullLogger<AgentRunExecutor>.Instance);
         return (runId, executor, runs, critic);
+    }
+
+    /// <summary>One captured deliverable the answer review reads back — its logical path plus the bytes the store resolves for it.</summary>
+    private sealed record FakeDeliverable(string Path, string Text);
+
+    /// <summary>
+    /// Serves BOTH artifact seams the C1 answer render touches: the manifest rows for this attempt and the CAS bytes
+    /// behind each. <paramref name="throws"/> stages the storage-fault path (the review must degrade to the summary,
+    /// never fail the run). Every other member throws — the review step calls none of them.
+    /// </summary>
+    private sealed class FakeArtifactManifestStore : CodeSpace.Core.Services.Agents.Publish.IArtifactManifestStore, IArtifactStore
+    {
+        private readonly Dictionary<Guid, string> _bytesById = new();
+        private readonly List<ArtifactManifest> _rows = new();
+        private readonly bool _throws;
+
+        public FakeArtifactManifestStore(IReadOnlyList<FakeDeliverable> deliverables, bool throws)
+        {
+            _throws = throws;
+
+            foreach (var deliverable in deliverables)
+            {
+                var artifactId = Guid.NewGuid();
+                _bytesById[artifactId] = deliverable.Text;
+                _rows.Add(new ArtifactManifest { Id = Guid.NewGuid(), LogicalPath = deliverable.Path, ContentArtifactId = artifactId, FenceEpoch = 1 });
+            }
+        }
+
+        public Task<IReadOnlyList<ArtifactManifest>> ListForAgentRunAsync(Guid agentRunId, Guid teamId, CancellationToken cancellationToken) =>
+            _throws ? throw new InvalidOperationException("the artifact store is unreachable") : Task.FromResult<IReadOnlyList<ArtifactManifest>>(_rows);
+
+        public Task<ArtifactBytes?> GetBytesAsync(Guid teamId, Guid artifactId, CancellationToken cancellationToken) =>
+            Task.FromResult(_bytesById.TryGetValue(artifactId, out var text)
+                ? new ArtifactBytes { Id = artifactId, Sha256 = "", ContentType = "text/markdown", Bytes = System.Text.Encoding.UTF8.GetBytes(text) }
+                : null);
+
+        public Task<int> CaptureDeclaredAsync(AgentTask task, string workspaceDirectory, Guid agentRunId, Guid? workflowRunId, Guid teamId, long fenceEpoch, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<UndeclaredCaptureOutcome> CaptureUndeclaredAsync(AgentTask task, string workspaceDirectory, Guid agentRunId, Guid? workflowRunId, Guid teamId, long fenceEpoch, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<ArtifactManifest>> ListForWorkflowRunAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<Guid> PutAsync(Guid teamId, ReadOnlyMemory<byte> bytes, string contentType, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<ArtifactMetadata?> GetMetadataAsync(Guid teamId, Guid artifactId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<ArtifactRangeReadResult> ReadRangeAsync(Guid teamId, Guid artifactId, long offset, int length, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyDictionary<Guid, ArtifactRangeReadResult>> ReadRangesAsync(ArtifactRangesReadRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
     }
 
     /// <summary>A minimal IServiceScopeFactory whose fresh scope resolves the ledger (the A1-defer guard), the record logger + offloader the recording scope pulls, and (when configured) the S8/D② agent reviewer.</summary>
@@ -376,10 +529,14 @@ public sealed class AgentRunExecutorOutputReviewTests
         /// <summary>The ambient LlmCallScope in flight when the critic was invoked — the executor's recording push, or null when none.</summary>
         public LlmCallScope? ObservedScope { get; private set; }
 
+        /// <summary>The request the critic was handed — C1 asserts the ARTIFACT KIND, the rendered artifact and the goal, which is where a text-only answer differs from a diff.</summary>
+        public CriticRequest? ObservedRequest { get; private set; }
+
         public Task<CriticVerdict> ReviewAsync(CriticRequest request, Guid teamId, Guid? reviewerModelId, CancellationToken cancellationToken)
         {
             Called = true;
             CallCount++;
+            ObservedRequest = request;
             ObservedScope = LlmCallContext.Current;
             return Task.FromResult(Verdict);
         }

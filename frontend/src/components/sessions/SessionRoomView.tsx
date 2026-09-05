@@ -1413,7 +1413,10 @@ function FinalAnswer({ answer }: { answer: FinalAnswerBlock }) {
 
   return (
     <div className={`room-final${degraded ? " room-final-degraded" : ""}`}>
-      <div className="room-final-head"><Sym n={degraded ? "alert" : "check"} s={13} cls="room-final-ic" /> {heading}</div>
+      <div className="room-final-head">
+        <Sym n={degraded ? "alert" : "check"} s={13} cls="room-final-ic" /> {heading}
+        {answer.verified === false && answer.verificationNote && <span className="room-final-unverified">{answer.verificationNote}</span>}
+      </div>
       {answer.text && <p className="room-final-text"><Inline text={answer.text} /></p>}
       {images.length > 0 && (
         <div className="room-final-gallery">

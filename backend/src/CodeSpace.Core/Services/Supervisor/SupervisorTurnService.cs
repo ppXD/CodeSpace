@@ -39,9 +39,13 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     private readonly IPublishManifestStore _manifests;
     private readonly ISupervisorPublishedBranchResolver _publishedBranches;
     private readonly Completion.ICompletionAssessmentComposer _completion;
+
+    /// <summary>C1 — the rubric judge a BRANCHLESS <c>LlmJudge</c> stop reads its summary with. OPTIONAL so the many hand-built test doubles keep compiling; DI always supplies it, and a null one fails the gate CLOSED rather than passing it silently.</summary>
+    private readonly Review.IRubricJudge? _rubricJudge;
+
     private readonly ILogger<SupervisorTurnService> _logger;
 
-    public SupervisorTurnService(ISupervisorDecisionLog ledger, ISupervisorDecider decider, ISupervisorActionExecutor executor, CodeSpaceDbContext db, ISupervisorAcceptanceGrader acceptanceGrader, IDecisionQueueService decisionQueue, IDecisionArbiter arbiter, IDecisionAnswerService decisionAnswer, Plans.IWorkPlanService workPlans, Workflows.Lifecycle.IRunRecordLogger recordLogger, Workflows.Artifacts.IArtifactOffloader offloader, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, Completion.ICompletionAssessmentComposer completion, Workflows.Budget.IBudgetLedger budget, Learning.ILessonReader lessons, ILogger<SupervisorTurnService> logger)
+    public SupervisorTurnService(ISupervisorDecisionLog ledger, ISupervisorDecider decider, ISupervisorActionExecutor executor, CodeSpaceDbContext db, ISupervisorAcceptanceGrader acceptanceGrader, IDecisionQueueService decisionQueue, IDecisionArbiter arbiter, IDecisionAnswerService decisionAnswer, Plans.IWorkPlanService workPlans, Workflows.Lifecycle.IRunRecordLogger recordLogger, Workflows.Artifacts.IArtifactOffloader offloader, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, Completion.ICompletionAssessmentComposer completion, Workflows.Budget.IBudgetLedger budget, Learning.ILessonReader lessons, ILogger<SupervisorTurnService> logger, Review.IRubricJudge? rubricJudge = null)
     {
         _ledger = ledger;
         _decider = decider;
@@ -59,6 +63,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         _manifests = manifests;
         _publishedBranches = publishedBranches;
         _completion = completion;
+        _rubricJudge = rubricJudge;
         _logger = logger;
     }
 

@@ -198,9 +198,11 @@ public static class SupervisorDecisionSchema
                       "type": "array",
                       "minItems": 1,
                       "items": { "type": "string" },
-                      "description": "For kind=TestsPass (default): an argv the server runs against the produced workspace (non-zero exit = not accepted). For kind=ArtifactPresent: the repo-relative deliverable file paths that must exist. Authoring it makes 'done' a server-verified fact, not a self-report."
+                      "description": "For kind=TestsPass (default): an argv the server runs to OBJECTIVELY verify this subtask is done. For every other kind: the repo-relative DELIVERABLE file paths the oracle reads. Authoring it makes 'done' a server-verified fact, not a self-report."
                     },
-                    "kind": { "type": "string", "enum": ["TestsPass", "ArtifactPresent"], "description": "Which objective oracle verifies the result — TestsPass (run the command argv) for code, or ArtifactPresent (the command lists deliverable files that must exist) for research/analysis output. Omit for TestsPass. This tightening gate is AND-ed under the operator's own acceptance floor, which is always graded as TestsPass." },
+                    "kind": { "type": "string", "enum": ["TestsPass", "ArtifactPresent", "LlmJudge", "CitationsResolve", "ArtifactSchema"], "description": "Which objective oracle verifies this. Omit for TestsPass. This tightening gate is AND-ed under the operator's own acceptance floor, which is always graded as TestsPass." },
+                    "rubric": { "type": "object", "additionalProperties": false, "properties": { "criteria": { "type": "array", "minItems": 1, "items": { "type": "object", "additionalProperties": false, "properties": { "id": { "type": "string" }, "requirement": { "type": "string" }, "weight": { "type": "number" } }, "required": ["id", "requirement"] } }, "threshold": { "type": "number" } }, "required": ["criteria"], "description": "REQUIRED for kind=LlmJudge." },
+                    "schema": { "type": "object", "additionalProperties": true, "description": "REQUIRED for kind=ArtifactSchema." },
                     "description": { "type": "string", "description": "Optional human-readable description of what the acceptance check proves." }
                   },
                   "required": ["command"],

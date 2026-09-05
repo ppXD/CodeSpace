@@ -366,6 +366,11 @@ export interface FinalAnswerBlock extends RoomBlockBase {
   /// Backend-authored account of WHY the card is degraded, when `text` doesn't already carry it (a failed acceptance
   /// check leaves the model's own success-sounding line intact). Rendered verbatim as the card's heading.
   degradedReason?: string | null;
+  /// C1: whether ANY check examined this result (an acceptance grade, or an output-critic verdict). `false` on a clean
+  /// Success that nothing verified; null when the question doesn't arise (a degraded / non-success card).
+  verified?: boolean | null;
+  /// Backend-authored copy for the unverified chip. Rendered verbatim; null unless `verified === false`.
+  verificationNote?: string | null;
 }
 /// A live "working…" line pinned at the bottom of an active turn (latest public activity, never raw CoT).
 export interface LiveActivityBlock extends RoomBlockBase {
