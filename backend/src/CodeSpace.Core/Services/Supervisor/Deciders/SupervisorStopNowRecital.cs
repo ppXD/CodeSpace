@@ -21,10 +21,15 @@ namespace CodeSpace.Core.Services.Supervisor.Deciders;
 /// disagree with the gate it is mirroring.</para>
 ///
 /// <para>That line is MODE-AWARE for the same reason. <c>CompletionTerminalAuthority</c> refuses nothing outside
-/// <see cref="CompletionEnforcementMode.Enforced"/> (its first line passes a Legacy/Shadow run through verbatim),
-/// and <c>CompletionPolicy.CurrentMode</c> is Shadow — so the default supervisor cohort would have been threatened
-/// with a refusal that cannot happen to it, steering it away from a stop the engine would have honoured. Enforced
-/// says REFUSED; every other mode states the SAME facts as an advisory. The verb never renders outside Enforced.</para>
+/// <see cref="CompletionEnforcementMode.Enforced"/> (its first line passes a Legacy/Shadow run through verbatim).
+/// Since #1774 (C5), <see cref="Completion.CompletionPolicy.DefaultModeFor"/> stamps the supervisor profile — the
+/// only <see cref="ProtocolReadiness.Enforceable"/> one — <see cref="CompletionEnforcementMode.Enforced"/> BY
+/// DEFAULT; <c>CompletionPolicy.CurrentMode</c> (Shadow) is now only the fallback constant <c>DefaultModeFor</c>
+/// returns for the below-the-bar cohorts (plan-map, single-agent, an unregistered generic graph). A supervisor run
+/// can still carry a non-Enforced stamp — an explicit 'shadow' opt-in, or tape stamped before the lane graduated —
+/// and that run would NOT be refused by the terminal authority, so a recital that hard-coded REFUSED would steer
+/// it away from a stop the engine would have honoured. Enforced says REFUSED; every other mode states the SAME
+/// facts as an advisory. The verb never renders outside Enforced.</para>
 /// </summary>
 public static class SupervisorStopNowRecital
 {
