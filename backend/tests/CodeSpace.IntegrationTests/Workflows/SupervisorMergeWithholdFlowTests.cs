@@ -152,11 +152,15 @@ public sealed class SupervisorMergeWithholdFlowTests
         outcome.TryGetProperty("carriedOverFromEarlierGenerations", out _).ShouldBeFalse("nothing was conserved — claiming a carry-over here would be the prompt's revoked promise all over again");
     }
 
-    [Fact]
-    public async Task An_abandoning_plan_records_how_much_finished_work_it_discarded()
+    [Theory]
+    [InlineData(false, 2)]   // nothing folded yet — both finished results were still on the floor
+    [InlineData(true, 1)]    // one already consolidated onto a head — only the other was there to take
+    public async Task An_abandoning_plan_records_how_much_finished_work_it_discarded(bool alreadyConsolidated, int expectedAbandoned)
     {
         // The discard's own receipt, through the REAL plan executor: a discard nobody can read back off the ledger is
-        // indistinguishable from the silent loss the whole carry-over ladder exists to end.
+        // indistinguishable from the silent loss the whole carry-over ladder exists to end. It counts the floor a
+        // merge would ACTUALLY have folded — a result an earlier merge already consolidated was never on that floor,
+        // so counting it credits the plan with taking work away from nobody.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var runId = await SeedSupervisorRunAsync(teamId, userId);
 
@@ -168,9 +172,11 @@ public sealed class SupervisorMergeWithholdFlowTests
         await SeedAgentRunAsync(a, teamId, runId, "codespace/agent/a");
         await SeedAgentRunAsync(b, teamId, runId, "codespace/agent/b");
 
+        if (alreadyConsolidated) await SeedEarlierMergeAsync(runId, teamId, sequence: 3, a);
+
         var plan = JsonDocument.Parse((await RunAbandoningPlanTurnAsync(runId, teamId))!).RootElement;
 
-        plan.GetProperty("abandonedEarlierResults").GetInt32().ShouldBe(2, "the plan's own ledger row states how many finished results it took off the merge/publish floor");
+        plan.GetProperty("abandonedEarlierResults").GetInt32().ShouldBe(expectedAbandoned, "the plan's own ledger row states how many still-mergeable results it took off the merge/publish floor");
         plan.GetProperty("count").GetInt32().ShouldBe(1, "the receipt is layered onto the ordinary plan outcome, never in place of it");
     }
 

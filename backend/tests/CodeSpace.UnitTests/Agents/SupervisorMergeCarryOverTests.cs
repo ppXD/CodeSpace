@@ -275,6 +275,25 @@ public class SupervisorMergeCarryOverTests
     }
 
     [Fact]
+    public void The_discards_receipt_counts_only_what_a_merge_could_still_have_folded()
+    {
+        // The plan executor records this over the tape as it stood BEFORE the plan, and the recitation reads the same
+        // floor afterwards — so the ledger row and the prompt line state the SAME number about the SAME tape. Counting
+        // the raw settled set instead credited the plan with discarding a result an earlier merge had already
+        // consolidated onto a head: work that was never on the floor, taken from nobody.
+        var consolidated = Unit();
+        var stranded = Unit();
+
+        var beforeThePlan = new[] { Plan("s1"), Staging(SupervisorDecisionKinds.Spawn, consolidated, stranded), IntegratedMerge(consolidated.AgentRunId) };
+
+        SupervisorMergeContributors.StrandedByAReplan(beforeThePlan)
+            .ShouldBe(new[] { stranded.AgentRunId }, "the receipt's floor is what a merge would still fold, never what a merge already landed");
+
+        SupervisorMergeContributors.Resolve(beforeThePlan.Append(Plan("s2", abandonEarlierResults: true)).ToArray())
+            .AbandonedFromEarlierGenerations.ShouldBe(1, "the recitation must tell the brain the same number the plan's own ledger row recorded");
+    }
+
+    [Fact]
     public void A_plan_that_abandons_nothing_projects_byte_identical_to_before_the_field()
     {
         var decision = SupervisorDecisionProjector.Project(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = FlatPlan() });
