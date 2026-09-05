@@ -184,6 +184,36 @@ public sealed class SupervisorTrajectoryEvalTests
             "once a spawn has staked its units the reducer has a verdict, and production recites it every turn from then on");
     }
 
+    /// <summary>
+    /// MIRROR FIDELITY for the FIFTH gate. The trajectory harness builds its own turn context, so every block it
+    /// forgets is a block the live gate scores the brain without — the same defect that once deleted RUN BOUNDS and
+    /// then failed the model for looping. The harness rendered the recital from the tape's ASSESSMENT alone: no
+    /// stage trace, no mode profile, so the stage line could not render at any turn of any arc. That is precisely
+    /// the arc it mattered on — <c>ConflictThenResolve</c>, where the conflicted merge integrates nothing and the
+    /// brain's next choice is exactly the one the live headline got wrong.
+    /// </summary>
+    [Fact]
+    public async Task A_conflicted_integration_shows_the_brain_the_stage_it_has_not_evidenced()
+    {
+        var spy = new PromptCapturingDecider { PlanWithSubtaskId = "s1", MergeAfterSpawn = true };
+
+        await SupervisorTrajectory.RunAsync(spy, SupervisorTrajectoryEnvironments.ConflictThenResolve, maxTurns: 5, CancellationToken.None);
+
+        spy.Prompts.Count.ShouldBeGreaterThan(3, "the spy must reach the turn AFTER the conflicted merge, or this proves nothing");
+
+        var afterConflictedMerge = spy.Prompts[3];
+
+        afterConflictedMerge.ShouldContain(SupervisorStopNowRecital.AdvisoryLead, Case.Sensitive,
+            "the harness stamps CompletionPolicy.CurrentMode like production does, so the DEFAULT cohort's advisory is the wording the live gate must score against — not a refusal, and not silence");
+        afterConflictedMerge.ShouldContain("requires 1 stage(s) with no evidence — Integrate.", Case.Sensitive,
+            "a conflicted merge integrates no branch, so Integrate is unevidenced and the brain has to be told which stage that is before it chooses a stop");
+        afterConflictedMerge.ShouldNotContain(SupervisorStopNowRecital.RefusalLead, Case.Sensitive,
+            "nothing here is Enforced — the harness must not train the brain against a threat production would not make");
+
+        spy.Prompts[1].ShouldNotContain(SupervisorStopNowRecital.AdvisoryLead, Case.Sensitive,
+            "a plan alone stakes nothing, so there is no contract to judge a stage against yet");
+    }
+
     [Fact]
     public async Task The_stopped_now_verdict_tracks_what_the_tape_actually_owes()
     {
@@ -706,6 +736,9 @@ public sealed class SupervisorTrajectoryEvalTests
         /// <summary>Plan → spawn → retry s2, the recovery path the 'failure' arc requires.</summary>
         public bool RetryAfterSpawn { get; init; }
 
+        /// <summary>Plan → spawn → merge → stop, so the captured prompts include the turn that follows an integration attempt.</summary>
+        public bool MergeAfterSpawn { get; init; }
+
         /// <summary>Author a real subtask under this id, so the plan echo can be checked against what the model wrote.</summary>
         public string? PlanWithSubtaskId { get; init; }
 
@@ -723,11 +756,14 @@ public sealed class SupervisorTrajectoryEvalTests
                 : !kinds.Contains(SupervisorDecisionKinds.Plan) ? SupervisorDecisionKinds.Plan
                 : RetryAfterSpawn && kinds.Contains(SupervisorDecisionKinds.Retry) ? SupervisorDecisionKinds.Stop
                 : RetryAfterSpawn && kinds.Contains(SupervisorDecisionKinds.Spawn) ? SupervisorDecisionKinds.Retry
+                : MergeAfterSpawn && kinds.Contains(SupervisorDecisionKinds.Merge) ? SupervisorDecisionKinds.Stop
+                : MergeAfterSpawn && kinds.Contains(SupervisorDecisionKinds.Spawn) ? SupervisorDecisionKinds.Merge
                 : SupervisorDecisionKinds.Spawn;
 
             var payload =
                 kind == SupervisorDecisionKinds.Stop ? """{"summary":"retried and shipped"}"""
                 : kind == SupervisorDecisionKinds.Retry ? """{"subtaskId":"s2"}"""
+                : kind == SupervisorDecisionKinds.Merge ? ScriptedPayload(kind)
                 : PlanWithSubtaskId is not { } id ? ScriptedPayload(kind)   // an unnamed spawn would now stage nothing, exactly as production refuses it
                 : kind == SupervisorDecisionKinds.Plan ? $$"""{"subtasks":[{"id":"{{id}}","title":"t","instruction":"i"}]}"""
                 : $$"""{"subtaskIds":["{{id}}"]}""";   // a spawn names the units it dispatches, as a real one does

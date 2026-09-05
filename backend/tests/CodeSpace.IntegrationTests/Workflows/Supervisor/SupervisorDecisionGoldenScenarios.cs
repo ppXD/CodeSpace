@@ -434,7 +434,10 @@ public static class SupervisorDecisionGoldenScenarios
             SupervisorModelId = BrainModelRowId,
             // The stopped-now recital, through the SAME projection production's composer reduces to. Null before any
             // wave has staked an obligation, so a plan-only tape stays silent exactly as production is silent.
-            CompletionRecital = SupervisorStopNowRecital.Render(SupervisorTapeCompletion.ProjectIfStoppedNow(priors)),
+            // DIMENSIONS ONLY, deliberately: no mode profile is supplied, so no scenario can reach the stage line
+            // and the pinned golden-prompt digest stays put. These are SINGLE-DECISION fixtures graded on one
+            // judgement each; the multi-turn trajectory harness is where the stage line has an arc to steer.
+            CompletionRecital = SupervisorStopNowRecital.Render(SupervisorTapeCompletion.ProjectIfStoppedNow(priors)?.Assessment),
         };
 
     /// <summary>
