@@ -75,6 +75,9 @@ public sealed record SessionTurn
     public DateTimeOffset? CompletedAt { get; init; }
     public string? Error { get; init; }
 
+    /// <summary>The newest attempt's stamped completion-enforcement mode, verbatim from its row — <c>"Enforced"</c> (the completion authority owns this run's terminal) or <c>"Shadow"</c>. Null on a pre-protocol row; read it through <c>CompletionPolicy.ModeFor</c> so an unreadable value stays fail-closed Legacy.</summary>
+    public string? CompletionEnforcementMode { get; init; }
+
     /// <summary>How many runs make up this turn (1 = never reran).</summary>
     public required int AttemptCount { get; init; }
 

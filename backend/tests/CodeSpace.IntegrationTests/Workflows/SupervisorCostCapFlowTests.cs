@@ -348,6 +348,8 @@ public class SupervisorCostCapFlowTests : IDisposable
     private static WorkflowDefinition SupervisorDefinition(string supervisorConfigJson) => new()
     {
         SchemaVersion = 1,
+        // Mechanics suite — declares Shadow so C5's default Enforced stamp doesn't park its contract-less stops.
+        CompletionMode = WorkflowDefinition.CompletionModeShadow,
         Nodes = new List<NodeDefinition>
         {
             new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },

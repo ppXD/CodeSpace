@@ -2217,11 +2217,12 @@ function pillLabel(status: WorkflowRunStatus, live: boolean): string {
   return statusWord(status);
 }
 
-/** The turn's meta line after "Turn N" — the start time (when it ran) then the duration: " · Jun 29, 13:47 · 28m" (or " · running 38s" live). */
+/** The turn's meta line after "Turn N" — the start time (when it ran), the duration, then which completion authority owned the terminal: " · Jun 29, 13:47 · 28m · Completion: Enforced". */
 function turnMeta(turn: AssistantTurnBlock, nowMs: number, live: boolean): string {
   const parts: string[] = [];
   if (turn.at) parts.push(formatStartTime(turn.at, nowMs));
   if (turn.durationMs != null) parts.push(live ? `running ${formatDurationMs(turn.durationMs)}` : formatDurationMs(turn.durationMs));
+  if (turn.completionNote) parts.push(turn.completionNote);   // backend-authored, rendered verbatim
   return parts.length ? ` · ${parts.join(" · ")}` : "";
 }
 

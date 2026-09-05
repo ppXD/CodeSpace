@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Publish;
+using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Decisions;
 using CodeSpace.Core.Services.Plans;
 using CodeSpace.Core.Services.Supervisor;
@@ -166,8 +167,25 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             Actions = _actions.ResolveTurnActions(runId, focus.Status, publish),
             At = focus.CreatedDate,
             DurationMs = DurationOf(focus.CreatedDate, focus.StartedAt, focus.CompletedAt),
+            CompletionNote = CompletionNoteOf(turn, focus),
             Attempts = AttemptsOf(turn, runId),
         };
+    }
+
+    /// <summary>
+    /// C5: name the authority that owned this attempt's terminal, so an operator reading a parked supervisor run can
+    /// tell enforcement from observation without opening the row. Read through <c>CompletionPolicy.ModeFor</c> — the
+    /// SAME fail-closed parse the terminal authority uses — and silent (null) for Legacy. A focused PRIOR attempt
+    /// also stays silent: the turn skeleton carries the LATEST attempt's stamp, and every rerun is stamped
+    /// independently, so attributing it here would be a confident lie (same discipline as the Summary fallback).
+    /// </summary>
+    private static string? CompletionNoteOf(SessionTurn turn, FocusRun focus)
+    {
+        if (!focus.IsLatest) return null;
+
+        var mode = CompletionPolicy.ModeFor(turn.CompletionEnforcementMode);
+
+        return mode == Messages.Contracts.CompletionEnforcementMode.Legacy ? null : $"Completion: {mode}";
     }
 
     /// <summary>

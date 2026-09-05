@@ -42,6 +42,7 @@ internal sealed class SessionSkeletonReader : ISessionSkeletonReader, IScopedDep
         r.started_at AS started_at,
         r.completed_at AS completed_at,
         r.error AS error,
+        r.completion_enforcement_mode AS completion_enforcement_mode,
         CASE WHEN jsonb_typeof(q.normalized_payload_json -> 'goal') = 'string' THEN q.normalized_payload_json ->> 'goal' END AS goal_camel,
         left(CASE WHEN jsonb_typeof(r.outputs_jsonb -> 'summary') = 'string' THEN r.outputs_jsonb ->> 'summary' END, @result_take) AS summary_camel,
         left(CASE WHEN jsonb_typeof(r.outputs_jsonb -> 'combined') = 'string' THEN r.outputs_jsonb ->> 'combined' END, @result_take) AS combined_camel,
@@ -126,6 +127,7 @@ internal sealed class SessionSkeletonReader : ISessionSkeletonReader, IScopedDep
     private static SessionSkeletonProjection.RunRow ToRunRow(DbRow row) => new(
         row.RunId!.Value, row.RootRunId, row.SessionTurnIndex, Enum.Parse<WorkflowRunStatus>(row.RunStatus!), row.ProjectionKind,
         row.SourceType!, row.RerunFromNodeId, row.CreatedDate!.Value, row.StartedAt, row.CompletedAt, row.Error,
+        row.CompletionEnforcementMode,
         NonBlank(row.GoalCamel),
         NonBlank(row.SummaryCamel) ?? NonBlank(row.CombinedCamel) ?? NonBlank(row.ReasonCamel),
         row.HasPendingDecision);
@@ -160,6 +162,7 @@ internal sealed class SessionSkeletonReader : ISessionSkeletonReader, IScopedDep
         public DateTimeOffset? StartedAt { get; set; }
         public DateTimeOffset? CompletedAt { get; set; }
         public string? Error { get; set; }
+        public string? CompletionEnforcementMode { get; set; }
         public string? GoalCamel { get; set; }
         public string? SummaryCamel { get; set; }
         public string? CombinedCamel { get; set; }

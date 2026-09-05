@@ -147,6 +147,8 @@ public sealed class RunOutcomeHonestyFlowTests : IDisposable
             Definition = new WorkflowDefinition
             {
                 SchemaVersion = 1,
+                // Mechanics suite — declares Shadow so C5's default Enforced stamp doesn't park its contract-less stops.
+                CompletionMode = WorkflowDefinition.CompletionModeShadow,
                 Nodes = new List<NodeDefinition>
                 {
                     new() { Id = "start", TypeKey = "trigger.manual", Label = "Start", Config = Empty(), Inputs = Empty() },

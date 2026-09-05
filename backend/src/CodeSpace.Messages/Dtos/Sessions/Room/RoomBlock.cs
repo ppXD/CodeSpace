@@ -64,6 +64,9 @@ public sealed record AssistantTurnBlock : RoomBlock
     /// <summary>The turn's wall-clock so far — final once terminal, else live elapsed at projection time. Null before it starts.</summary>
     public long? DurationMs { get; init; }
 
+    /// <summary>Backend-authored: WHICH completion authority owned this attempt's terminal — "Completion: Enforced" (an unverified 'completed' stop parks instead of stamping Success) or "Completion: Shadow" (observed only). Null when there is nothing honest to say (a pre-protocol stamp, or a focused prior attempt whose own stamp this projection didn't read).</summary>
+    public string? CompletionNote { get; init; }
+
     /// <summary>The turn's rerun / replay ATTEMPTS, oldest → newest — the header's "N attempts" timeline, each openable to view that attempt's run. EMPTY for a never-rerun turn (a lone attempt needs no history).</summary>
     public IReadOnlyList<RoomTurnAttempt> Attempts { get; init; } = Array.Empty<RoomTurnAttempt>();
 }

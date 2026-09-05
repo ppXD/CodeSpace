@@ -14,6 +14,7 @@ using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Tasks;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
@@ -26,8 +27,10 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// <see cref="WorkflowDefinition.CompletionMode"/> opt-in, the real <c>RunStarter</c>/<c>RunFromSnapshotStarter</c>
 /// stamp, the real engine terminal, the real completion authority + composer over real Postgres. The fail-close
 /// proof is the point: an Enforced run whose clean engine Success stakes NOTHING parks for a human instead of
-/// terminalizing — the exact protocol the isolated canary cohort exists to exercise — while a definition without
-/// the opt-in behaves byte-identically to before (Shadow pass-through), and an unreadable opt-in never stores.
+/// terminalizing — the exact protocol the isolated canary cohort exists to exercise. C5 made that cohort the
+/// DEFAULT wherever it is safe: a supervisor run opting into nothing resolves Enforced from its own mode profile,
+/// while a mode below the Enforceable bar (plan-map, single-agent, a generic graph) keeps the Shadow fallback and
+/// behaves byte-identically to before. An unreadable opt-in still never stores.
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -65,18 +68,23 @@ public class CompletionEnforcedCohortFlowTests
         using var scope = _fixture.BeginScope();
         var run = await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
 
-        run.CompletionEnforcementMode.ShouldBe("Shadow", "no opt-in inherits the platform default");
+        run.CompletionEnforcementMode.ShouldBe("Shadow", "a generic graph has no conformance story — no opt-in keeps the Shadow fallback");
         run.Status.ShouldBe(WorkflowRunStatus.Success, "outside the cohort, behavior is byte-identical to before the flip existed");
     }
 
-    [Fact]
-    public async Task A_snapshot_run_of_an_enforced_supervisor_definition_stamps_and_its_unbacked_success_parks()
+    [Theory]
+    [InlineData(WorkflowDefinition.CompletionModeEnforced)]   // the explicit opt-in
+    [InlineData(null)]                                        // C5: NO opt-in — the supervisor default IS Enforced
+    public async Task A_snapshot_run_of_a_supervisor_definition_stamps_enforced_and_its_unbacked_success_parks(string? completionMode)
     {
         // The ADMITTED half of the gate: the tasks lane's supervisor projection holds Enforceable standing, so
         // the snapshot starter stamps Enforced through the real admission — and the park safety net still holds:
         // this run's clean engine Success stakes nothing, so the authority parks it instead of terminalizing.
+        // C5 folded the DEFAULT cohort into the same law: a supervisor run that opts into nothing (what every
+        // Launch produces — the FE sends no completionMode) resolves Enforced from its own mode profile, so an
+        // unverified "completed" stop parks honestly instead of ending the run as Success.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var runId = await StartEnforcedSupervisorSnapshotAsync(teamId, userId);
+        var runId = await StartSupervisorSnapshotAsync(teamId, userId, completionMode);
 
         await ForceEnqueuedAsync(runId);
         await RunEngineAsync(runId);
@@ -84,7 +92,7 @@ public class CompletionEnforcedCohortFlowTests
         using var verify = _fixture.BeginScope();
         var run = await verify.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
 
-        run.CompletionEnforcementMode.ShouldBe("Enforced", "the snapshot lane admits the opt-in — supervisor is the Enforceable cohort");
+        run.CompletionEnforcementMode.ShouldBe("Enforced", "supervisor is the Enforceable cohort — by opt-in AND by default");
         run.Status.ShouldBe(WorkflowRunStatus.Suspended, "an Enforced claim nothing staked must still park, never terminalize");
         run.Error.ShouldNotBeNull();
         run.Error.ShouldContain("completion-authority", customMessage: "the park must name its arbiter — check workflow_run.error for the decision detail");
@@ -93,6 +101,42 @@ public class CompletionEnforcedCohortFlowTests
             .Where(r => r.RunId == runId && new[] { WorkflowRunRecordTypes.RunCompleted, WorkflowRunRecordTypes.RunFailed, WorkflowRunRecordTypes.RunCancelled }.Contains(r.RecordType))
             .ToListAsync();
         terminalRecords.ShouldBeEmpty("a parked run is resumable, so its append-only ledger must not announce a contradictory terminal state");
+    }
+
+    [Fact]
+    public async Task A_default_supervisor_run_with_an_integrated_head_still_terminalizes_success()
+    {
+        // The other half of C5's bargain — enforcement by default must not cost an EARNED Success. The same
+        // opt-in-less supervisor run, this time with its contract world answered (staked acceptance/delivery/output,
+        // a graded merged tape carrying an integrated head, a pushed manifest), terminalizes CleanSuccess on the
+        // first pass with no park in between. Without this the default flip would be indistinguishable from
+        // "supervisor runs never succeed any more".
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await RunToCleanSuccessAsync(teamId, userId, completionMode: null);
+
+        var run = await ReadRunAsync(runId);
+
+        run.CompletionEnforcementMode.ShouldBe("Enforced", "the default resolved Enforced — this is the arbitrated path, not a Shadow pass-through");
+        run.Status.ShouldBe(WorkflowRunStatus.Success, "a fully evidenced completion must still terminalize under the DEFAULT cohort — check workflow_run.error for the park reason if it did not");
+        run.CompletionParkedAt.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task A_default_plan_map_run_is_untouched_by_the_flip()
+    {
+        // The cohort line is the mode PROFILE's, not a global switch: plan-map holds ProtocolReadiness.Open, so an
+        // opt-in-less plan-map run keeps the Shadow fallback and its terminal is byte-identical to before C5 — the
+        // authority never even composes. Flipping the default globally would have parked this run instead.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await StartSupervisorSnapshotAsync(teamId, userId, completionMode: null, projectionKind: TaskProjectionKinds.PlanMapSynth);
+
+        await ForceEnqueuedAsync(runId);
+        await RunEngineAsync(runId);
+
+        var run = await ReadRunAsync(runId);
+
+        run.CompletionEnforcementMode.ShouldBe("Shadow", "plan-map has not graduated — the default must read its profile, never a blanket Enforced");
+        run.Status.ShouldBe(WorkflowRunStatus.Success, "a below-the-bar mode's terminal stays exactly as it was; C5 must not park a cohort that never qualified");
     }
 
     [Fact]
@@ -132,7 +176,7 @@ public class CompletionEnforcedCohortFlowTests
         // SAME declared outputs — a divergence here is silent data loss for every reader of workflow_run.outputs_jsonb.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
 
-        var enforcedRunId = await RunEnforcedToCleanSuccessAsync(teamId, userId);
+        var enforcedRunId = await RunToCleanSuccessAsync(teamId, userId);
 
         // Re-drive the enforced side through a compose that mints NOTHING, so the arbitrated stamp is the only
         // writer that could carry the outputs. Without this the first pass's receipt mint incidentally flushes the
@@ -169,7 +213,7 @@ public class CompletionEnforcedCohortFlowTests
         // the shape a crash between compose and stamp leaves behind (re-drivable, no terminal, no outputs), so
         // the re-driven walk's compose re-mints nothing and the CAS is the only writer left that could carry them.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var runId = await RunEnforcedToCleanSuccessAsync(teamId, userId);
+        var runId = await RunToCleanSuccessAsync(teamId, userId);
         (await ReadRunAsync(runId)).Status.ShouldBe(WorkflowRunStatus.Success, "pass one must terminalize, or the re-compose runway proves nothing");
 
         await ResetToCrashedBeforeTerminalAsync(runId);
@@ -195,7 +239,7 @@ public class CompletionEnforcedCohortFlowTests
             await setup.Resolve<IVariableService>().SetAsync(VariableScope.Team, teamId, teamId, "API_KEY", VariableValueType.Secret,
                 WorkflowsTestSeed.Json(JsonSerializer.Serialize(Sentinel)), null, userId, CancellationToken.None);
 
-        var runId = await StartEnforcedSupervisorSnapshotAsync(teamId, userId, """{"answer":"{{team.API_KEY}}"}""");
+        var runId = await StartSupervisorSnapshotAsync(teamId, userId, terminalInputsJson: """{"answer":"{{team.API_KEY}}"}""");
 
         await ForceEnqueuedAsync(runId);
         await RunEngineAsync(runId);
@@ -216,7 +260,7 @@ public class CompletionEnforcedCohortFlowTests
         // window) — without the park stamp the reconciler would re-dispatch it into a re-walk → re-arbitrate →
         // re-park churn loop forever, each cycle paying a full compose plus a live handoff probe.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var runId = await StartEnforcedSupervisorSnapshotAsync(teamId, userId);
+        var runId = await StartSupervisorSnapshotAsync(teamId, userId);
 
         await ForceEnqueuedAsync(runId);
         await RunEngineAsync(runId);
@@ -240,7 +284,7 @@ public class CompletionEnforcedCohortFlowTests
         // full contract and lands the graded merged tape + a pushed manifest; Continue clears the stamp and the
         // re-driven engine stamps Success.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var runId = await StartEnforcedSupervisorSnapshotAsync(teamId, userId, DeclaredOutputs);
+        var runId = await StartSupervisorSnapshotAsync(teamId, userId, terminalInputsJson: DeclaredOutputs);
 
         await ForceEnqueuedAsync(runId);
         await RunEngineAsync(runId);
@@ -285,11 +329,12 @@ public class CompletionEnforcedCohortFlowTests
     /// An Enforced run whose contract world is answered BEFORE its first walk — staked acceptance/delivery/output,
     /// a graded merged supervisor tape, a pushed manifest on a live repository — so the engine's clean Success is
     /// arbitrated CleanSuccess and terminalizes through the arbitrated compare-and-swap on the FIRST pass, with no
-    /// park in between. Returns the run id.
+    /// park in between. Returns the run id. <paramref name="completionMode"/> null runs the same arc through C5's
+    /// DEFAULT resolution instead of the explicit opt-in.
     /// </summary>
-    private async Task<Guid> RunEnforcedToCleanSuccessAsync(Guid teamId, Guid userId)
+    private async Task<Guid> RunToCleanSuccessAsync(Guid teamId, Guid userId, string? completionMode = WorkflowDefinition.CompletionModeEnforced)
     {
-        var runId = await StartEnforcedSupervisorSnapshotAsync(teamId, userId, DeclaredOutputs);
+        var runId = await StartSupervisorSnapshotAsync(teamId, userId, completionMode, DeclaredOutputs);
 
         var attemptId = await SeedGradedMergedTapeAsync(runId, teamId);
         var repositoryId = await SeedRepositoryAsync(teamId);
@@ -436,14 +481,14 @@ public class CompletionEnforcedCohortFlowTests
         }, CancellationToken.None);
     }
 
-    /// <summary>The tasks lane's admitted shape: an Enforced opt-in launched with the SUPERVISOR projection kind — the Enforceable cohort — through the real snapshot starter, optionally declaring terminal outputs.</summary>
-    private async Task<Guid> StartEnforcedSupervisorSnapshotAsync(Guid teamId, Guid userId, string? terminalInputsJson = null)
+    /// <summary>The tasks lane's admitted shape: launched with the SUPERVISOR projection kind — the Enforceable cohort — through the real snapshot starter, optionally declaring terminal outputs. A null <paramref name="completionMode"/> is the LAUNCH-REALISTIC shape (the FE sends none), which C5 resolves to Enforced from the mode profile; <paramref name="projectionKind"/> picks the cohort under test.</summary>
+    private async Task<Guid> StartSupervisorSnapshotAsync(Guid teamId, Guid userId, string? completionMode = WorkflowDefinition.CompletionModeEnforced, string? terminalInputsJson = null, string projectionKind = TaskProjectionKinds.Supervisor)
     {
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(
-            Definition(WorkflowDefinition.CompletionModeEnforced, terminalInputsJson), teamId, userId,
+            Definition(completionMode, terminalInputsJson), teamId, userId,
             launchPayloadJson: null, scopeRepositoryIds: null,
-            projectionKind: CodeSpace.Messages.Tasks.TaskProjectionKinds.Supervisor, session: null, CancellationToken.None);
+            projectionKind: projectionKind, session: null, CancellationToken.None);
     }
 
     /// <summary>Tests run the engine inline (no Hangfire worker), so the dispatcher's Pending→Enqueued CAS is mirrored directly — same discipline as <c>ErrorRoutingFlowTests.ReEnqueueAsync</c>.</summary>

@@ -125,8 +125,10 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var (brainModelId, _) = await SeedBrainModelAsync(teamId, BaseUrlFor(baseUrl), apiKey, model);
 
         // P2b canary (live-brain leg): the headline arc runs ENFORCED — a Drove verdict now implies the terminal
-        // authority arbitrated the live model's own contract ledger to CleanSuccess.
-        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, conversationId: conversationId, completionMode: WorkflowDefinition.CompletionModeEnforced);
+        // authority arbitrated the live model's own contract ledger to CleanSuccess. C5: the opt-in is deliberately
+        // NOT stamped here any more — a supervisor definition resolves Enforced BY DEFAULT, so this arm measures the
+        // DEFAULT cohort (what a real operator's run actually gets), not a mode only this test ever asked for.
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, conversationId: conversationId);
 
         // STRICT real-model-DROVE-to-completion gate (the real-model whole-loop CONNECTIVITY criterion). The blessed wire
         // passes ONLY when the live model drove the whole arc to the real integrated+accepted head (Drove). A CAPABILITY
@@ -1783,12 +1785,12 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             })
             .ToListAsync();
 
-    /// <summary>The Enforced stamp must have HELD before the engine runs — a silent drift back to Shadow would keep the arm green while proving nothing about arbitration.</summary>
+    /// <summary>The Enforced stamp must have HELD before the engine runs — a silent drift back to Shadow would keep the arm green while proving nothing about arbitration. C5: this arm stamps NO opt-in, so what is pinned here is the DEFAULT resolution itself.</summary>
     private async Task AssertRanEnforcedAsync(Guid runId)
     {
         using var verify = _fixture.BeginScope();
         var run = await verify.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
-        run.CompletionEnforcementMode.ShouldBe("Enforced", customMessage: "the definition opted in — check the workflow_version definition snapshot carries completionMode and the seed's resolution");
+        run.CompletionEnforcementMode.ShouldBe("Enforced", customMessage: "this definition opts into NOTHING — a supervisor run must resolve Enforced by DEFAULT (CompletionPolicy.DefaultModeFor over the supervisor profile's Enforceable standing); Shadow here means the default cohort regressed");
     }
 
     private async Task<Guid> CreateWholeLoopWorkflowAsync(Guid teamId, Guid userId, Guid repoId, Guid brainModelId, string? goal = null, Guid? conversationId = null, Guid? agentCredId = null, string? agentModel = null, (Guid RepoId, string Alias)? relatedRepo = null, string? completionMode = null)

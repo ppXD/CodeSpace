@@ -396,6 +396,10 @@ export interface AssistantTurnBlock extends RoomBlockBase {
   at?: string | null;
   /// Wall-clock so far — final once terminal, else live elapsed. Null before it starts.
   durationMs?: number | null;
+  /// Backend-authored: which completion authority owned this attempt's terminal — "Completion: Enforced" (an
+  /// unverified "completed" stop parks instead of stamping Success) or "Completion: Shadow". Null when there is
+  /// nothing honest to say; rendered verbatim in the turn meta line.
+  completionNote?: string | null;
   /// The turn's rerun/replay attempts (oldest → newest) — the header's "N attempts" timeline. Empty for a never-rerun turn.
   attempts?: RoomTurnAttempt[];
 }

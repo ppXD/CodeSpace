@@ -79,6 +79,10 @@ public class SupervisorProjectionFlowTests : IDisposable
             Seed = request.Seed,
             Route = plan,
             AgentProfile = new ResolvedAgentProfile { Harness = "codex-cli", RunnerKind = "local", AutonomyLevel = "Standard" },
+            // The projection lane under test is routing → snapshot run, not completion arbitration; its scripted stop
+            // stakes no contract, which C5's default Enforced stamp would park. Declares Shadow through the SAME seam
+            // a Launch request uses (TaskLaunchRequest.CompletionMode → TaskBuildContext.CompletionMode).
+            CompletionMode = CodeSpace.Messages.Dtos.Workflows.WorkflowDefinition.CompletionModeShadow,
         };
 
         var handle = await CreateAndRunAsync(context, teamId, userId);
