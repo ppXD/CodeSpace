@@ -72,17 +72,28 @@ public static class BubblewrapSandbox
     /// the real-model stamp all read instead of hedging. PURE (the probe's results are passed in, never read here) so
     /// every branch is unit-testable on a host that cannot confine, which is exactly the host whose branch matters.
     ///
-    /// <para><paramref name="shareNetwork"/> is what the launch passed to <see cref="BwrapPlan.ShareNetwork"/>, so
-    /// <see cref="SandboxConfinement.NetworkSevered"/> is derived from the SAME input <see cref="BuildArgs"/> turns
-    /// into <c>--unshare-net</c> and cannot claim a severance the argv did not request.</para>
+    /// <para><paramref name="shareNetwork"/> and <paramref name="egressAllowlist"/> are what the launch passed to
+    /// <see cref="BwrapPlan.ShareNetwork"/> / <see cref="BwrapPlan.EgressAllowlist"/>, and both go through the SAME
+    /// <see cref="EgressFor"/> derivation <see cref="BuildArgs"/> turns into <c>--unshare-net</c> — so the record can
+    /// neither claim a severance the argv did not request NOR miss one it did (an unenforceable allowlist fails
+    /// closed to severed even while the launch asked to share the network).</para>
     /// </summary>
-    public static SandboxConfinement DeriveConfinement(string? available, string? unavailableReason, bool shareNetwork)
+    public static SandboxConfinement DeriveConfinement(string? available, string? unavailableReason, bool shareNetwork, IReadOnlyList<string>? egressAllowlist)
     {
         if (available is null)
             return new SandboxConfinement { Outcome = SandboxConfinementOutcome.Unconfined, Reason = unavailableReason ?? SandboxConfinement.ReasonNoBubblewrap };
 
-        return new SandboxConfinement { Outcome = SandboxConfinementOutcome.Confined, NetworkSevered = !shareNetwork };
+        return new SandboxConfinement { Outcome = SandboxConfinementOutcome.Confined, NetworkSevered = EgressFor(shareNetwork, egressAllowlist).Mode != SandboxEgressMode.Full };
     }
+
+    /// <summary>
+    /// The ONE egress derivation for a launch's network intent — read by both the argv (<see cref="BuildArgs"/>) and
+    /// the record (<see cref="DeriveConfinement"/>), so a severance can never appear in one and not the other.
+    /// <c>canEnforceAllowlist: false</c> until the privileged host-filtering slice lands here: a requested allowlist
+    /// this sandbox cannot enforce FAILS CLOSED to no egress, never widens to Full.
+    /// </summary>
+    private static SandboxEgressPolicy EgressFor(bool shareNetwork, IReadOnlyList<string>? egressAllowlist) =>
+        SandboxEgressPolicy.Derive(shareNetwork, egressAllowlist, canEnforceAllowlist: false);
 
     /// <summary>
     /// Build the bwrap argument vector that confines <paramref name="plan"/>'s command: a read-only minimal root,
@@ -110,8 +121,7 @@ public static class BubblewrapSandbox
         // FAIL CLOSED to --unshare-net (a fresh net namespace, loopback only — no cloud-metadata / LAN / internet).
         // Only Full shares the host network (the agent reaches its model API). Byte-identical for a run with no
         // allowlist: ShareNetwork true → Full → shared; false → None → severed.
-        var egress = SandboxEgressPolicy.Derive(plan.ShareNetwork, plan.EgressAllowlist, canEnforceAllowlist: false);
-        if (egress.Mode != SandboxEgressMode.Full) args.Add("--unshare-net");
+        if (EgressFor(plan.ShareNetwork, plan.EgressAllowlist).Mode != SandboxEgressMode.Full) args.Add("--unshare-net");
 
         // Read-only minimal root: the runtime + harness binary are reachable, the rest of the host FS is invisible.
         foreach (var dir in ReadOnlyRootDirs)

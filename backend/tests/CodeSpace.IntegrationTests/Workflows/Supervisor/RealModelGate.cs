@@ -167,7 +167,7 @@ public static class RealModelGate
     /// <summary>Testable core of <see cref="ConfinementStamp()"/> — explicit probe results, so the word is pinnable on any host.</summary>
     internal static string ConfinementStamp(string? available, string? unavailableReason)
     {
-        var confinement = BubblewrapSandbox.DeriveConfinement(available, unavailableReason, shareNetwork: false);
+        var confinement = BubblewrapSandbox.DeriveConfinement(available, unavailableReason, shareNetwork: false, egressAllowlist: null);
 
         return confinement.Outcome == SandboxConfinementOutcome.Confined
             ? " [runner=confined]"

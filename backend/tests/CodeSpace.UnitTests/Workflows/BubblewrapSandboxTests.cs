@@ -36,7 +36,7 @@ public sealed class BubblewrapSandboxTests
     [InlineData("/usr/bin/bwrap", null, true, SandboxConfinementOutcome.Confined, null, false)]
     public void DeriveConfinement_records_what_the_launch_actually_did(string? available, string? reason, bool shareNetwork, SandboxConfinementOutcome expectedOutcome, string? expectedReason, bool expectedSevered)
     {
-        var confinement = BubblewrapSandbox.DeriveConfinement(available, reason, shareNetwork);
+        var confinement = BubblewrapSandbox.DeriveConfinement(available, reason, shareNetwork, egressAllowlist: null);
 
         confinement.Outcome.ShouldBe(expectedOutcome);
         confinement.Reason.ShouldBe(expectedReason);
@@ -44,18 +44,24 @@ public sealed class BubblewrapSandboxTests
             customMessage: "NetworkSevered must mirror the SAME ShareNetwork input BuildArgs turns into --unshare-net — a record that can outrun the argv is worse than no record");
     }
 
-    [Fact]
-    public void DeriveConfinement_severance_agrees_with_the_argv_the_same_input_builds()
+    [Theory]
+    // No allowlist — the two plain arms: shared host network, and the tier's Off.
+    [InlineData(true, null)]
+    [InlineData(false, null)]
+    // WITH an allowlist, which this runner cannot yet enforce: the argv FAILS CLOSED to --unshare-net even though the
+    // launch asked to share the network. A record derived from ShareNetwork alone misses exactly this arm.
+    [InlineData(true, "h")]
+    [InlineData(false, "h")]
+    public void DeriveConfinement_severance_agrees_with_the_argv_the_same_input_builds(bool shareNetwork, string? allowlistHost)
     {
-        // The drift guard between the RECORD and the COMMAND LINE: both are derived from ShareNetwork, so pin that
+        // The drift guard between the RECORD and the COMMAND LINE: both read the SAME egress derivation, so pin that
         // they answer the same question. A future edit that severs in one and not the other reds here.
-        foreach (var shareNetwork in new[] { true, false })
-        {
-            var severedInArgv = BubblewrapSandbox.BuildArgs(Plan() with { ShareNetwork = shareNetwork }).Contains("--unshare-net");
+        var allowlist = allowlistHost is null ? null : new[] { allowlistHost };
 
-            BubblewrapSandbox.DeriveConfinement("/usr/bin/bwrap", null, shareNetwork).NetworkSevered.ShouldBe(severedInArgv,
-                customMessage: $"the record and the argv disagree about severance for ShareNetwork={shareNetwork}");
-        }
+        var severedInArgv = BubblewrapSandbox.BuildArgs(Plan() with { ShareNetwork = shareNetwork, EgressAllowlist = allowlist }).Contains("--unshare-net");
+
+        BubblewrapSandbox.DeriveConfinement("/usr/bin/bwrap", null, shareNetwork, allowlist).NetworkSevered.ShouldBe(severedInArgv,
+            customMessage: $"the record and the argv disagree about severance for ShareNetwork={shareNetwork}, allowlist={allowlistHost ?? "none"}");
     }
 
     [Fact]

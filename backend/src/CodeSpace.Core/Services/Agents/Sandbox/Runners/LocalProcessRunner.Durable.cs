@@ -194,11 +194,11 @@ public sealed partial class LocalProcessRunner
                     Deadline = spec.TimeoutSeconds is { } secs && secs > 0 ? DateTimeOffset.UtcNow.AddSeconds(secs) : DateTimeOffset.MaxValue,
                     EgressNetnsKey = egress.Key,
                     CgroupRunKey = cgroup.Key,
-                    // What this launch ACTUALLY did about confinement, from the same probe + the same ShareNetwork
-                    // input AppendChildCommand builds the argv from — so the record can never claim a severance the
-                    // command line did not request. Persisted by the executor; read back by everything that would
-                    // otherwise have to hedge about whether "network off" was enforced.
-                    Confinement = BubblewrapSandbox.DeriveConfinement(BubblewrapSandbox.Available, BubblewrapSandbox.UnavailableReason, ShareNetwork(spec, egress.ExecPrefix)),
+                    // What this launch ACTUALLY did about confinement, from the same probe + the same network inputs
+                    // AppendChildCommand builds the argv from — so the record can neither claim a severance the
+                    // command line did not request nor miss one it did. Persisted by the executor; read back by
+                    // everything that would otherwise have to hedge about whether "network off" was enforced.
+                    Confinement = BubblewrapSandbox.DeriveConfinement(BubblewrapSandbox.Available, BubblewrapSandbox.UnavailableReason, ShareNetwork(spec, egress.ExecPrefix), EgressAllowlist(spec, egress.ExecPrefix)),
                 };
             }
             catch
@@ -891,6 +891,15 @@ public sealed partial class LocalProcessRunner
     private static bool ShareNetwork(SandboxSpec spec, IReadOnlyList<string> egressExecPrefix) => egressExecPrefix.Count > 0 || spec.AllowNetwork;
 
     /// <summary>
+    /// The allowlist bwrap's OWN egress policy sees. Inside a filtered netns the namespace IS the enforcement, so the
+    /// allowlist is withheld (bwrap must inherit that network, not re-derive its own and unshare it away). Like
+    /// <see cref="ShareNetwork"/>, the single source of truth for the argv AND for the launch's recorded
+    /// <see cref="SandboxConfinement.NetworkSevered"/> — an allowlist bwrap cannot enforce severs egress, and the
+    /// record has to say so.
+    /// </summary>
+    private static IReadOnlyList<string>? EgressAllowlist(SandboxSpec spec, IReadOnlyList<string> egressExecPrefix) => egressExecPrefix.Count > 0 ? null : spec.EgressAllowlist;
+
+    /// <summary>
     /// Append the agent command as the supervisor's <c>"$@"</c>: rewritten as a bubblewrap invocation
     /// (filesystem + namespace confinement, the ONLY writable host paths being the workspace + config-home) when
     /// <see cref="BubblewrapSandbox.Available"/>, else the bare command — the unconfined fallback on macOS dev, a
@@ -900,12 +909,6 @@ public sealed partial class LocalProcessRunner
     {
         // Fail-closed: a deployment that mandates isolation (Sandbox:RequireConfinement) must never run unconfined.
         BubblewrapSandbox.EnsureSatisfiable(BubblewrapSandbox.Available, BubblewrapSandbox.IsRequired);
-
-        // A non-empty prefix means the durable launch already set up a filtered-egress netns (B3.2b): the process runs
-        // INSIDE it, so bwrap must INHERIT that (already-filtered) namespace — share its network and NOT re-derive its
-        // own egress (which would --unshare-net the netns we just placed it in). The netns is the enforcement; bwrap's
-        // own allowlist derivation is bypassed for this run.
-        var inFilteredNetns = egressExecPrefix.Count > 0;
 
         var command = spec.Command;
         IReadOnlyList<string> args = spec.Args;
@@ -941,9 +944,10 @@ public sealed partial class LocalProcessRunner
                 WritablePaths = writable,
                 ReadOnlyExtraPaths = readOnlyExtra,
                 // In a filtered netns: share it (don't --unshare-net) so the agent inherits the allowlist-filtered
-                // egress; pass no allowlist (the netns enforces it). Otherwise: today's behaviour exactly.
+                // egress; pass no allowlist (the netns enforces it). Otherwise: today's behaviour exactly. Both read
+                // the same helpers the launch stamps its confinement record from, so the two cannot disagree.
                 ShareNetwork = ShareNetwork(spec, egressExecPrefix),
-                EgressAllowlist = inFilteredNetns ? null : spec.EgressAllowlist,
+                EgressAllowlist = EgressAllowlist(spec, egressExecPrefix),
             });
             command = bwrap;
         }
