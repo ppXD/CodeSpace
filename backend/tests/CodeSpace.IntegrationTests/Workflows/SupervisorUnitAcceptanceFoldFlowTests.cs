@@ -298,16 +298,23 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
     /// the run. The refusal is knowable a full turn earlier, and this drives the real rehydrate over that exact tape
     /// to pin that the NEXT turn's rendered prompt says so. That the line agrees with the authority's own verdict is
     /// pinned over the full CleanSuccess predicate in <c>CompletionTerminalAuthorityFlowTests</c>.
+    ///
+    /// <para>The COHORT is a parameter, because the refusal verb is one. The authority arbitrates only an Enforced
+    /// run (<c>CompletionTerminalAuthority.cs:59</c>) and <c>CompletionPolicy.CurrentMode</c> is Shadow — so the
+    /// stamped mode decides whether the same un-reconciled tape is told its stop WILL be refused or merely that a
+    /// 'completed' claim would be recorded against evidence the profile declares owed. The facts do not move.</para>
     /// </summary>
     [Theory]
-    [InlineData(false)]   // conflicted merge + unverified resolve → nothing integrated → the stop would be refused
-    [InlineData(true)]    // the same run, merged clean → Integrate evidenced → no refusal line, no stage park
-    public async Task A_run_whose_branches_are_unreconciled_recites_the_authoritys_stage_refusal(bool mergesClean)
+    [InlineData(false, "Enforced")]   // conflicted merge + unverified resolve, Enforced → nothing integrated → the stop really would be refused
+    [InlineData(true, "Enforced")]    // the same run, merged clean → Integrate evidenced → no stage line at all
+    [InlineData(false, "Shadow")]     // CompletionPolicy.CurrentMode — the DEFAULT cohort gets the facts, never the false threat
+    [InlineData(true, "Shadow")]
+    public async Task A_run_whose_branches_are_unreconciled_is_told_which_stage_it_has_not_evidenced(bool mergesClean, string enforcementMode)
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var runId = await SeedSupervisorRunAsync(teamId, userId);
 
-        await StampContractAsync(runId, teamId);
+        await StampContractAsync(runId, teamId, enforcementMode);
 
         // No authored acceptance command on either unit — nothing for the fold to grade, so this run can go through
         // the CONTAINER-resolved turn service instead of a hand-built one. That is deliberate: the stage line only
@@ -335,12 +342,15 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
 
         prompt.ShouldContain(CodeSpace.Core.Services.Supervisor.Deciders.SupervisorStopNowRecital.Header, Case.Sensitive, "the run is contract-bearing, so the block renders either way");
 
-        prompt.Contains(CodeSpace.Core.Services.Supervisor.Deciders.SupervisorStopNowRecital.RefusalLead, StringComparison.Ordinal).ShouldBe(!mergesClean,
-            "the decider's prompt must warn about the refusal EXACTLY while the branches are un-reconciled — a prompt that promises a stop the authority refuses is the defect this slice fixes");
+        prompt.Contains(CodeSpace.Core.Services.Supervisor.Deciders.SupervisorStopNowRecital.RefusalLead, StringComparison.Ordinal).ShouldBe(!mergesClean && enforcementMode == "Enforced",
+            "the decider's prompt must warn about the refusal EXACTLY while an ENFORCED run's branches are un-reconciled — promising a stop the authority refuses and threatening a Shadow run with a refusal it can never receive are the same defect in opposite directions");
+
+        prompt.Contains(CodeSpace.Core.Services.Supervisor.Deciders.SupervisorStopNowRecital.AdvisoryLead, StringComparison.Ordinal).ShouldBe(!mergesClean && enforcementMode != "Enforced",
+            "the run's ENFORCEMENT MODE has to reach the renderer through the container too — a rehydrate that dropped it would fall back to the advisory everywhere, or to the threat everywhere");
 
         if (!mergesClean)
             prompt.ShouldContain("requires 1 stage(s) with no evidence — Integrate.", Case.Sensitive,
-                "the un-reconciled branches are the missing evidence, and the line has to name the stage the park names");
+                "the un-reconciled branches are the missing evidence, and the line has to name the stage the park names — in both cohorts");
     }
 
     /// <summary>A CONFLICTED integration: nothing was combined, so no reviewable head exists and the Integrate cell stays unevidenced.</summary>
@@ -349,14 +359,14 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
     /// <summary>A CLEAN integration whose combined head is named — the Integrate cell's first ledger.</summary>
     private const string CleanMergeOutcome = """{"integration":{"status":"Clean","integratedBranch":"codespace/integration/head"}}""";
 
-    /// <summary>Stamp the run post-F0 and stake the obligations a spawned wave would have staked — the shape the recital and the authority both read.</summary>
-    private async Task StampContractAsync(Guid runId, Guid teamId)
+    /// <summary>Stamp the run post-F0 and stake the obligations a spawned wave would have staked — the shape the recital and the authority both read. <paramref name="enforcementMode"/> defaults to what production stamps a run that does not opt in (<c>CompletionPolicy.CurrentMode</c> — Shadow).</summary>
+    private async Task StampContractAsync(Guid runId, Guid teamId, string? enforcementMode = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         var run = await db.WorkflowRun.SingleAsync(r => r.Id == runId);
         run.CompletionPolicyVersion = Core.Services.Completion.CompletionPolicy.CurrentVersion;
-        run.CompletionEnforcementMode = Core.Services.Completion.CompletionPolicy.CurrentMode.ToString();
+        run.CompletionEnforcementMode = enforcementMode ?? Core.Services.Completion.CompletionPolicy.CurrentMode.ToString();
         await db.SaveChangesAsync();
 
         await scope.Resolve<Core.Services.Completion.ICompletionContractStore>().UpsertRequirementsAsync(runId, teamId, new[]

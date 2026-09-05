@@ -108,7 +108,7 @@ public class SupervisorStopNowRecitalTests
         // The live gap (real-model runs 33930904059 / 33943475246): a conflicted merge and an unverified resolve
         // left Integrate unevidenced, the decider stopped 'completed', and the authority parked the run. The block
         // it read said every dimension was SETTLED and nothing else — the refusal was invisible until afterwards.
-        var block = SupervisorStopNowRecital.Render(Assessment(), AllButIntegrate, Supervisor);
+        var block = SupervisorStopNowRecital.Render(Assessment(), AllButIntegrate, Supervisor, CompletionEnforcementMode.Enforced);
 
         block.ShouldNotBeNull();
         block!.ShouldContain(SupervisorStopNowRecital.RefusalLead, Case.Sensitive);
@@ -117,13 +117,66 @@ public class SupervisorStopNowRecitalTests
         block.ShouldContain("every contract dimension reads SETTLED", Case.Sensitive, "the settled arm is exactly where the gap bit — the stage line must render BESIDE it, not instead of it");
     }
 
-    [Fact]
-    public void A_never_derived_stage_trace_names_every_required_upstream_stage()
+    [Theory]
+    [InlineData(CompletionEnforcementMode.Enforced)]
+    [InlineData(CompletionEnforcementMode.Shadow)]
+    [InlineData(CompletionEnforcementMode.Legacy)]
+    public void A_never_derived_stage_trace_names_every_required_upstream_stage(CompletionEnforcementMode mode)
     {
         // The authority reads a null trace fail-CLOSED (a legacy compose evidences nothing). The recital mirrors
-        // that reading rather than going quiet, or it would promise a stop the gate refuses.
-        SupervisorStopNowRecital.Render(Assessment(), exercisedUpstreamStages: null, Supervisor)!
+        // that reading rather than going quiet, or it would promise a stop the gate refuses. The FACTS are the same
+        // in every mode — only the lead-in above them moves.
+        SupervisorStopNowRecital.Render(Assessment(), exercisedUpstreamStages: null, Supervisor, mode)!
             .ShouldContain("requires 4 stage(s) with no evidence — Contract, Plan, Execute, Integrate.", Case.Sensitive);
+    }
+
+    // ── The MODE gate: the authority refuses only an Enforced run, so only an Enforced prompt may say REFUSED ──
+
+    /// <summary>
+    /// The false threat this pins out. <c>CompletionTerminalAuthority.ArbitrateAsync</c> passes a run through
+    /// verbatim unless <c>CompletionPolicy.ModeFor(...) == Enforced</c> (its first line), and
+    /// <c>CompletionPolicy.CurrentMode</c> is <c>Shadow</c> — so EVERY default supervisor run was being told its
+    /// stop "will be REFUSED" by a gate that was never going to run against it, steering the whole default cohort
+    /// off a stop the engine would have honoured and toward <c>ask_human</c>.
+    /// </summary>
+    [Theory]
+    [InlineData(CompletionEnforcementMode.Enforced, true)]
+    [InlineData(CompletionEnforcementMode.Shadow, false)]    // CompletionPolicy.CurrentMode — the default cohort
+    [InlineData(CompletionEnforcementMode.Legacy, false)]    // ModeFor's fail-closed read of an unstamped column
+    public void Only_an_enforced_run_is_told_its_stop_will_be_refused(CompletionEnforcementMode mode, bool refuses)
+    {
+        var block = SupervisorStopNowRecital.Render(Assessment(), AllButIntegrate, Supervisor, mode)!;
+
+        block.Contains(SupervisorStopNowRecital.RefusalLead, StringComparison.Ordinal).ShouldBe(refuses,
+            $"the authority refuses nothing under {mode}; promising a refusal that cannot happen is a false threat, and withholding one that will is the defect this block exists to fix");
+        block.Contains(SupervisorStopNowRecital.AdvisoryLead, StringComparison.Ordinal).ShouldBe(!refuses,
+            "the non-Enforced arm still has to state the gap — going silent would put the stage back out of the decider's sight");
+    }
+
+    [Fact]
+    public void The_default_enforcement_mode_never_threatens_a_refusal()
+    {
+        SupervisorStopNowRecital.Render(Assessment(), AllButIntegrate, Supervisor)
+            .ShouldNotContain(SupervisorStopNowRecital.RefusalLead, Case.Sensitive,
+                "a call site that has not said which cohort the run is in must not speak for the strictest one");
+    }
+
+    /// <summary>
+    /// Both lines, spelled out — the wording IS the behaviour here, and the honest exit in the steer is the point.
+    /// Past <c>SupervisorLane.DefaultMaxResolveAttempts</c> (one) a further <c>resolve</c> force-stops the run, so
+    /// "land that work or ask_human" was a dead end for exactly the tape this line renders over. A <c>stop</c>
+    /// carrying <c>gave_up</c> reduces to Unsolved → <c>TerminalDecider</c> HonestFailure, which never reaches the
+    /// stage gate (only a CleanSuccess does) — so naming it costs nothing and unblocks the run.
+    /// </summary>
+    [Theory]
+    [InlineData(CompletionEnforcementMode.Enforced, "A stop now will be REFUSED by the completion authority:")]
+    [InlineData(CompletionEnforcementMode.Shadow, "A 'completed' stop now would be recorded against missing evidence:")]
+    public void The_stage_line_is_pinned_verbatim_in_both_modes(CompletionEnforcementMode mode, string lead)
+    {
+        SupervisorStopNowRecital.Render(Assessment(), AllButIntegrate, Supervisor, mode)
+            .ShouldBe("IF YOU STOPPED NOW (the completion reducer's verdict on the facts so far):"
+                + "\n- every contract dimension reads SETTLED — a clean stop now reads Solved. If the goal is met, stop rather than spending further turns on a contract that is already satisfied."
+                + $"\n- {lead} mode 'supervisor' requires 1 stage(s) with no evidence — Integrate. Land that work, stop with outcome 'gave_up', or ask_human; do not claim completed.");
     }
 
     [Theory]
@@ -145,22 +198,31 @@ public class SupervisorStopNowRecitalTests
     }
 
     /// <summary>
-    /// The BOND: the line renders exactly when <c>CompletionTerminalAuthority</c> would refuse the stop, because it
-    /// asks the same reader the same question — <c>UpstreamStageTrace.MissingRequired(profile, trace)</c>, the gate
-    /// at <c>CompletionTerminalAuthority.cs:121</c>. A second derivation here could drift into promising a stop the
-    /// gate refuses (the defect this slice fixes) or nagging about a stop it would allow. Swept over EVERY subset
-    /// of the trace's jurisdiction, so no cell of the mapping is left unmeasured.
+    /// The BOND: the line renders exactly when <c>CompletionTerminalAuthority</c> would object to the stop, because
+    /// it asks the same reader the same question — <c>UpstreamStageTrace.MissingRequired(profile, trace)</c>, the
+    /// gate at <c>CompletionTerminalAuthority.cs:121</c>. A second derivation here could drift into promising a stop
+    /// the gate refuses (the defect this slice fixes) or nagging about a stop it would allow. Swept over EVERY
+    /// subset of the trace's jurisdiction, so no cell of the mapping is left unmeasured — and over both cohorts,
+    /// because the REFUSAL verb belongs only to the one the gate at <c>CompletionTerminalAuthority.cs:59</c> lets
+    /// through: under Shadow the authority does not refuse at all, so the advisory renders in its place.
     /// </summary>
-    [Fact]
-    public void The_line_renders_exactly_when_the_authoritys_own_stage_gate_would_refuse()
+    [Theory]
+    [InlineData(CompletionEnforcementMode.Enforced)]
+    [InlineData(CompletionEnforcementMode.Shadow)]
+    public void The_line_renders_exactly_when_the_authoritys_own_stage_gate_would_refuse(CompletionEnforcementMode mode)
     {
+        var refuses = mode == CompletionEnforcementMode.Enforced;
+
         foreach (var exercised in Subsets(UpstreamStageTrace.Stages.ToArray()))
         {
             var missing = UpstreamStageTrace.MissingRequired(Supervisor, exercised);
-            var block = SupervisorStopNowRecital.Render(Assessment(), exercised, Supervisor)!;
+            var block = SupervisorStopNowRecital.Render(Assessment(), exercised, Supervisor, mode)!;
 
-            block.Contains(SupervisorStopNowRecital.RefusalLead, StringComparison.Ordinal)
-                .ShouldBe(missing.Count > 0, $"the recital and the authority disagree over the trace [{string.Join(",", exercised)}]");
+            block.Contains(refuses ? SupervisorStopNowRecital.RefusalLead : SupervisorStopNowRecital.AdvisoryLead, StringComparison.Ordinal)
+                .ShouldBe(missing.Count > 0, $"the recital and the authority disagree over the trace [{string.Join(",", exercised)}] under {mode}");
+
+            block.ShouldNotContain(refuses ? SupervisorStopNowRecital.AdvisoryLead : SupervisorStopNowRecital.RefusalLead, Case.Sensitive,
+                $"{mode} must never borrow the other cohort's lead-in");
 
             if (missing.Count > 0)
                 block.ShouldContain($"{missing.Count} stage(s) with no evidence — {string.Join(", ", missing)}.", Case.Sensitive,

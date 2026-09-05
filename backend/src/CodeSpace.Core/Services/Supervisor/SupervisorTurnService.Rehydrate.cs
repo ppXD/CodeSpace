@@ -312,7 +312,10 @@ public sealed partial class SupervisorTurnService
     /// <para>The compose's STAGE TRACE rides along with its assessment, under the mode profile the terminal
     /// authority resolves the same way (RunModeReader + the profile registry) — without it the block recited four
     /// contract dimensions while the authority's fifth gate, the one that actually parked the run over an
-    /// un-reconciled Integrate, stayed invisible to the decider.</para>
+    /// un-reconciled Integrate, stayed invisible to the decider. Its ENFORCEMENT MODE rides along too
+    /// (<c>ComposedAssessment.Mode</c> — the composer's <c>CompletionPolicy.ModeFor</c> reading of the run's own
+    /// column, the very reading the authority gates on), so the block threatens a refusal only where one can
+    /// happen and states the same facts advisorily everywhere else.</para>
     /// </summary>
     private async Task<string?> BuildCompletionRecitalAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken)
     {
@@ -324,7 +327,7 @@ public sealed partial class SupervisorTurnService
 
             var mode = await Completion.RunModeReader.DeriveAsync(_db, supervisorRunId, teamId, cancellationToken).ConfigureAwait(false);
 
-            return Deciders.SupervisorStopNowRecital.Render(composed.Assessment, composed.ExercisedUpstreamStages, _modes?.Resolve(mode));
+            return Deciders.SupervisorStopNowRecital.Render(composed.Assessment, composed.ExercisedUpstreamStages, _modes?.Resolve(mode), composed.Mode);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
