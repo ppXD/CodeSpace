@@ -12,6 +12,16 @@ namespace CodeSpace.Messages.Agents;
 /// <para>These are server-side projections of the model's <c>SupervisorModelDecision</c> — the model never
 /// addresses graph topology (no node id / type key / run id); the server turns a verb + bounded payload into a
 /// side effect.</para>
+///
+/// <para>ACCEPTED LIMITATION — a plan cannot DISCARD its predecessor's work. A re-plan says only "here is the
+/// current instruction"; it carries no supersedes/abandon signal, and the server does not infer one. So when a
+/// model re-plans because the previous generation went the WRONG DIRECTION and then emits <c>merge</c> before
+/// spawning anything, <c>SupervisorMergeContributors</c> conserves that abandoned work and folds it into the
+/// reviewable head. Conservation is the deliberate default: the alternative — treating a boundary as an implicit
+/// discard — silently destroyed three finished, pushed agent branches on a live run, and losing finished work is
+/// the strictly worse failure. The brain is told which way it will go (the plan recitation states the pending
+/// carry-over verbatim) and can steer it by spawning the replacement first, so the fold takes the new generation's
+/// own work instead. A future explicit discard signal would live HERE, as a field on this payload.</para>
 /// </summary>
 public sealed record SupervisorPlanPayload
 {

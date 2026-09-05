@@ -79,9 +79,145 @@ public class SupervisorPublishedBranchCarryOverTests
         branches.ShouldBeEmpty("a raw push happens before the grade folds — the carry-over uses the SAME withhold door every other entrance to the head does, and only ever conserves FINISHED work");
     }
 
+    [Fact]
+    public async Task A_generation_whose_only_staged_unit_was_rejected_still_resolves_the_earlier_branch()
+    {
+        // The unified trigger: "staged nothing" and "staged only withheld work" are the SAME state to a door to the
+        // head. This rung used to fire only on the first, so a re-plan that spawned once and got rejected published
+        // nothing while the merge rung happily carried the earlier branch over — two rungs, two answers, one tape.
+        var stale = Guid.NewGuid();
+        var current = Guid.NewGuid();
+        var done = Unit();
+        var rejected = Unit(acceptancePassed: false);
+
+        var branches = await ResolveAsync(
+            new[] { Plan("s1"), Staging(SupervisorDecisionKinds.Spawn, done), Plan("s2"), Staging(SupervisorDecisionKinds.Spawn, rejected) },
+            new[] { Repo(stale), Repo(current) },
+            Pushed(done.AgentRunId, stale, "web", "codespace/agent/done"), Pushed(rejected.AgentRunId, current, "api", "codespace/agent/rejected"));
+
+        branches.Select(x => x.SourceBranch).ShouldBe(new[] { "codespace/agent/done" },
+            "a rejected unit is no result at all — the generation has nothing of its own, and the rejected branch never reaches the head either way");
+    }
+
+    [Fact]
+    public async Task An_earlier_generations_integrated_head_outranks_its_own_contributor_branches()
+    {
+        // The carry-over must not REORDER the ladder it reads. A gen-1 merge that integrated cleanly is the run's
+        // reviewable head; publishing gen-1's individual contributor branches instead would open a PR on ONE agent's
+        // partial work (newest-per-alias picks a single contributor) while a combined head sat one rung above.
+        var repositoryId = Guid.NewGuid();
+        var a = Unit();
+        var b = Unit();
+
+        var branches = await ResolveAsync(
+            new[] { Plan("s1"), Staging(SupervisorDecisionKinds.Spawn, a, b), IntegratedMerge("codespace/integration/turn1"), Plan("s2") },
+            new[] { Repo(repositoryId) },
+            primaryRepositoryId: repositoryId,
+            Pushed(a.AgentRunId, repositoryId, "primary", "codespace/agent/a"), Pushed(b.AgentRunId, repositoryId, "primary", "codespace/agent/b"));
+
+        var branch = branches.ShouldHaveSingleItem();
+        branch.SourceBranch.ShouldBe("codespace/integration/turn1", "the head an earlier generation actually integrated is what a re-plan strands — not the contributors it already combined");
+        branch.TargetBranch.ShouldBe("main");
+    }
+
+    [Fact]
+    public async Task A_contributor_branch_is_never_published_past_a_run_that_already_integrated()
+    {
+        // The same hazard where the walk CANNOT surface the older head: gen 2 staged fresh work (rejected), which is
+        // the walk's own barrier — an earlier branch must not be surfaced past un-integrated work. With no head to
+        // fall back to, the carry-over must stay shut rather than ship a partial contributor branch.
+        var repositoryId = Guid.NewGuid();
+        var a = Unit();
+        var rejected = Unit(acceptancePassed: false);
+
+        var branches = await ResolveAsync(
+            new[]
+            {
+                Plan("s1"), Staging(SupervisorDecisionKinds.Spawn, a), IntegratedMerge("codespace/integration/turn1"),
+                Plan("s2"), Staging(SupervisorDecisionKinds.Spawn, rejected), Plan("s3"),
+            },
+            new[] { Repo(repositoryId) },
+            primaryRepositoryId: repositoryId,
+            Pushed(a.AgentRunId, repositoryId, "primary", "codespace/agent/a"));
+
+        branches.ShouldBeEmpty("silence beats a partial head — a run that integrated once must never deliver one agent's own branch instead");
+    }
+
+    [Fact]
+    public async Task An_integrity_failed_resolve_still_bars_the_carry_over_after_a_replan()
+    {
+        // The barrier reads the ACTIVE generation's staging frontier, so a re-plan moved the failed resolve out of
+        // view and the carry-over published exactly the older contributor branch the barrier exists to forbid — the
+        // conflicted, incomplete head the reconciliation was meant to replace.
+        var repositoryId = Guid.NewGuid();
+        var a = Unit();
+        var resolver = Unit();
+
+        var branches = await ResolveAsync(
+            new[]
+            {
+                Plan("s1"), Staging(SupervisorDecisionKinds.Spawn, a), ConflictedMerge(),
+                IntegrityFailedResolve(resolver), Plan("s2"),
+            },
+            new[] { Repo(repositoryId) },
+            Pushed(a.AgentRunId, repositoryId, "primary", "codespace/agent/a"));
+
+        branches.ShouldBeEmpty("a plan-generation boundary must not clear a barrier — the resolver's own contributors could not be materialized, so nothing here is publishable");
+    }
+
+    [Fact]
+    public async Task An_integrity_failed_resolve_bars_a_generation_whose_only_unit_was_rejected()
+    {
+        // The barrier has to widen with the trigger it guards: the unified predicate lets a generation whose staged
+        // work is ALL withheld carry earlier work over, so a rejected spawn must not count as a frontier either — it
+        // takes nothing to the head, and so supersedes nothing behind it. Read the other way, widening the carry-over
+        // would itself have re-opened the exact hole this barrier exists to close.
+        var repositoryId = Guid.NewGuid();
+        var a = Unit();
+        var resolver = Unit();
+        var rejected = Unit(acceptancePassed: false);
+
+        var branches = await ResolveAsync(
+            new[]
+            {
+                Plan("s1"), Staging(SupervisorDecisionKinds.Spawn, a), ConflictedMerge(),
+                IntegrityFailedResolve(resolver), Plan("s2"), Staging(SupervisorDecisionKinds.Spawn, rejected),
+            },
+            new[] { Repo(repositoryId) },
+            Pushed(a.AgentRunId, repositoryId, "primary", "codespace/agent/a"));
+
+        branches.ShouldBeEmpty("a rejected unit cannot clear a barrier any more than a re-plan can — the incomplete head the resolve was meant to replace stays unpublishable");
+    }
+
+    [Fact]
+    public async Task A_resolvers_own_branch_is_carried_over_instead_of_the_contributor_it_reconciled()
+    {
+        // The carry-over floor has to span every agent-STAGING verb. Filtering it to spawn/retry conserved the stale
+        // half a resolver had already reconciled and silently dropped the reconciliation itself.
+        var repositoryId = Guid.NewGuid();
+        var a = Unit();
+        var resolver = Unit();
+
+        var branches = await ResolveAsync(
+            new[]
+            {
+                Plan("s1"), Staging(SupervisorDecisionKinds.Spawn, a), ConflictedMerge(),
+                Staging(SupervisorDecisionKinds.Resolve, resolver), Plan("s2"),
+            },
+            new[] { Repo(repositoryId) },
+            Pushed(a.AgentRunId, repositoryId, "primary", "codespace/agent/a", DateTimeOffset.UtcNow.AddMinutes(-5)),
+            Pushed(resolver.AgentRunId, repositoryId, "primary", "codespace/resolve/r", DateTimeOffset.UtcNow));
+
+        branches.Select(x => x.SourceBranch).ShouldBe(new[] { "codespace/resolve/r" },
+            "the newest manifest per alias wins — and the resolver's branch has to be IN the carried-over set for it to win at all");
+    }
+
     // ─── Harness ────────────────────────────────────────────────────────────────
 
-    private static async Task<IReadOnlyList<SupervisorRepositoryBranch>> ResolveAsync(SupervisorPriorDecision[] priorDecisions, Repository[] repositories, params PublishManifest[] manifests)
+    private static Task<IReadOnlyList<SupervisorRepositoryBranch>> ResolveAsync(SupervisorPriorDecision[] priorDecisions, Repository[] repositories, params PublishManifest[] manifests) =>
+        ResolveAsync(priorDecisions, repositories, primaryRepositoryId: null, manifests);
+
+    private static async Task<IReadOnlyList<SupervisorRepositoryBranch>> ResolveAsync(SupervisorPriorDecision[] priorDecisions, Repository[] repositories, Guid? primaryRepositoryId, params PublishManifest[] manifests)
     {
         var workflowRunId = Guid.NewGuid();
 
@@ -91,7 +227,7 @@ public class SupervisorPublishedBranchCarryOverTests
 
         var resolver = new SupervisorPublishedBranchResolver(db, new StubManifestStore(manifests), NullLogger<SupervisorPublishedBranchResolver>.Instance);
 
-        return await resolver.ResolveAsync(workflowRunId, TeamId, priorDecisions, primaryRepositoryId: null, CancellationToken.None);
+        return await resolver.ResolveAsync(workflowRunId, TeamId, priorDecisions, primaryRepositoryId, CancellationToken.None);
     }
 
     private static CodeSpaceDbContext BuildDb(Repository[] repositories)
@@ -110,11 +246,35 @@ public class SupervisorPublishedBranchCarryOverTests
         FullPath = "acme/app", DefaultBranch = "main", WebUrl = "https://example.test/acme/app",
     };
 
-    private static PublishManifest Pushed(Guid agentRunId, Guid repositoryId, string alias, string branch) => new()
+    private static PublishManifest Pushed(Guid agentRunId, Guid repositoryId, string alias, string branch, DateTimeOffset? createdDate = null) => new()
     {
         Id = Guid.NewGuid(), TeamId = TeamId, Kind = PublishManifestKind.Agent, AgentRunId = agentRunId, RepositoryId = repositoryId,
-        RepositoryAlias = alias, Branch = branch, PublishStateValue = PublishState.Pushed, CreatedDate = DateTimeOffset.UtcNow,
+        RepositoryAlias = alias, Branch = branch, PublishStateValue = PublishState.Pushed, CreatedDate = createdDate ?? DateTimeOffset.UtcNow,
     };
+
+    /// <summary>A merge that landed one reviewable head — what makes the run's earlier work an INTEGRATED branch rather than a set of contributor branches.</summary>
+    private static SupervisorPriorDecision IntegratedMerge(string integratedBranch) =>
+        Merge(new { status = "Clean", integratedBranch });
+
+    /// <summary>A merge whose integration CONFLICTED — it landed nothing, so the contributors it names are still the run's only published artifacts.</summary>
+    private static SupervisorPriorDecision ConflictedMerge() =>
+        Merge(new { status = "Conflicted", reason = "overlapping edits" });
+
+    private static SupervisorPriorDecision Merge(object integration) => new()
+    {
+        Id = Guid.NewGuid(), Sequence = 3, DecisionKind = SupervisorDecisionKinds.Merge, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}",
+        OutcomeJson = JsonSerializer.Serialize(new { merged = Array.Empty<object>(), count = 0, integration }, AgentJson.Options),
+    };
+
+    /// <summary>A <c>resolve</c> whose contributor branches could not be materialized — the shape <c>HasResolveContributorIntegrity</c> reads, which bars publishing an older contributor in its place.</summary>
+    private static SupervisorPriorDecision IntegrityFailedResolve(SupervisorAgentResult resolver)
+    {
+        var outcome = SupervisorOutcome.FoldAgentResults(
+            JsonSerializer.Serialize(new { agentRunIds = new[] { resolver.AgentRunId }, agentCount = 1, resolveContributorIntegrity = new { issues = new[] { new { kind = "MissingRow" } } } }, AgentJson.Options),
+            new[] { resolver });
+
+        return new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = 1, DecisionKind = SupervisorDecisionKinds.Resolve, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = outcome };
+    }
 
     private static SupervisorAgentResult Unit(string status = "Succeeded", bool? acceptancePassed = null) =>
         new() { AgentRunId = Guid.NewGuid(), Status = status, ProducedBranch = "codespace/agent/x", AcceptancePassed = acceptancePassed };
