@@ -99,25 +99,31 @@ public class SupervisorPublishedBranchCarryOverTests
             "a rejected unit is no result at all — the generation has nothing of its own, and the rejected branch never reaches the head either way");
     }
 
-    [Fact]
-    public async Task An_earlier_generations_integrated_head_outranks_its_own_contributor_branches()
+    [Theory]
+    [InlineData(false, "codespace/integration/turn1")]   // an ordinary re-plan STRANDS that head — conserve it
+    [InlineData(true, null)]                             // the plan called that direction wrong — publish nothing of it
+    public async Task An_earlier_generations_integrated_head_outranks_its_contributors_unless_the_plan_abandoned_it(bool abandoned, string? expected)
     {
-        // The carry-over must not REORDER the ladder it reads. A gen-1 merge that integrated cleanly is the run's
-        // reviewable head; publishing gen-1's individual contributor branches instead would open a PR on ONE agent's
-        // partial work (newest-per-alias picks a single contributor) while a combined head sat one rung above.
+        // Arm 1 — the carry-over must not REORDER the ladder it reads. A gen-1 merge that integrated cleanly is the
+        // run's reviewable head; publishing gen-1's individual contributor branches instead would open a PR on ONE
+        // agent's partial work (newest-per-alias picks a single contributor) while a combined head sat one rung above.
+        //
+        // Arm 2 — and the abandonment has to reach that SAME rung. The exclusion lived only on the ledger-direct floor,
+        // so the integrated-branch rung above it still read the whole tape and published exactly the head the flag had
+        // declared unpublishable: the merge folded none of the abandoned work, and the run shipped it anyway.
         var repositoryId = Guid.NewGuid();
         var a = Unit();
         var b = Unit();
 
         var branches = await ResolveAsync(
-            new[] { Plan("s1"), Staging(SupervisorDecisionKinds.Spawn, a, b), IntegratedMerge("codespace/integration/turn1"), Plan("s2") },
+            new[] { Plan("s1"), Staging(SupervisorDecisionKinds.Spawn, a, b), IntegratedMerge("codespace/integration/turn1"), Plan("s2", abandonEarlierResults: abandoned) },
             new[] { Repo(repositoryId) },
             primaryRepositoryId: repositoryId,
             Pushed(a.AgentRunId, repositoryId, "primary", "codespace/agent/a"), Pushed(b.AgentRunId, repositoryId, "primary", "codespace/agent/b"));
 
-        var branch = branches.ShouldHaveSingleItem();
-        branch.SourceBranch.ShouldBe("codespace/integration/turn1", "the head an earlier generation actually integrated is what a re-plan strands — not the contributors it already combined");
-        branch.TargetBranch.ShouldBe("main");
+        branches.Select(x => x.SourceBranch).ShouldBe(expected is null ? Array.Empty<string>() : new[] { expected },
+            "the head an earlier generation actually integrated is what a re-plan strands — unless that plan abandoned the direction that produced it");
+        branches.Select(x => x.TargetBranch).ShouldAllBe(t => t == "main");
     }
 
     [Fact]
@@ -288,10 +294,10 @@ public class SupervisorPublishedBranchCarryOverTests
         return new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = 1, DecisionKind = kind, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = outcome };
     }
 
-    private static SupervisorPriorDecision Plan(string subtaskId) => new()
+    private static SupervisorPriorDecision Plan(string subtaskId, bool abandonEarlierResults = false) => new()
     {
         Id = Guid.NewGuid(), Sequence = 2, DecisionKind = SupervisorDecisionKinds.Plan, Status = SupervisorDecisionStatus.Succeeded,
-        PayloadJson = $$"""{"goal":"ship it","subtasks":[{"id":"{{subtaskId}}","title":"{{subtaskId}}","instruction":"do it"}]}""", OutcomeJson = "{}",
+        PayloadJson = $$"""{"goal":"ship it","subtasks":[{"id":"{{subtaskId}}","title":"{{subtaskId}}","instruction":"do it"}]{{(abandonEarlierResults ? ""","abandonEarlierResults":true""" : "")}}}""", OutcomeJson = "{}",
     };
 
     /// <summary>Only <see cref="IPublishManifestStore.ListForWorkflowRunAsync"/> is a ledger-direct read — every other member is out of this resolver's reach and must stay unreachable, never quietly stubbed.</summary>

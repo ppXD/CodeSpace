@@ -108,12 +108,11 @@ public static class SupervisorMergeContributors
     /// a resolver's own succeeded branch is the reconciliation of the contributors it replaced, so conserving those
     /// contributors while dropping the resolver would carry over precisely the stale halves.
     ///
-    /// <para>The floor's ONE exclusion beyond that: everything staged before the newest plan that declared
-    /// <see cref="SupervisorPlanPayload.AbandonEarlierResults"/> (<see cref="AbandonBoundary"/>). Conservation
-    /// answers "the model re-planned AFTER the work landed"; it must not also answer "the model re-planned BECAUSE
-    /// the work was the wrong direction", and only the model can tell those apart — so the discard is its explicit
-    /// declaration, never an inference from the boundary. Applied HERE, on the shared floor, so the merge rung and
-    /// the publish rung drop the abandoned work together.</para>
+    /// <para>The floor's ONE exclusion beyond that: everything staged before <see cref="SinceLatestAbandonment"/>'s
+    /// line. Conservation answers "the model re-planned AFTER the work landed"; it must not also answer "the model
+    /// re-planned BECAUSE the work was the wrong direction", and only the model can tell those apart — so the discard
+    /// is its explicit declaration, never an inference from the boundary. Read off that ONE function, which every
+    /// other reader of abandoned work reads too, so no rung can be left crediting what another rung dropped.</para>
     ///
     /// <para>Says nothing about what a prior <c>merge</c> already folded — that exclusion belongs to the merge rung
     /// alone (<see cref="StrandedByAReplan"/>). DC-3's ledger-direct publish rung must NOT inherit it: that rung only
@@ -122,11 +121,30 @@ public static class SupervisorMergeContributors
     /// still the only genuinely published artifact — which is also how that resolver treats merged contributors
     /// today, since it reads the manifest ledger and never consults a merge outcome.</para>
     /// </summary>
-    public static IReadOnlyList<Guid> SettledAcrossGenerations(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
+    public static IReadOnlyList<Guid> SettledAcrossGenerations(IReadOnlyList<SupervisorPriorDecision> priorDecisions) =>
+        Settled(SinceLatestAbandonment(priorDecisions));
+
+    /// <summary>
+    /// THE abandonment boundary, as a tape: everything from the newest plan that declared
+    /// <see cref="SupervisorPlanPayload.AbandonEarlierResults"/> onward, or the WHOLE tape verbatim (same instance,
+    /// allocation-free) when no plan abandoned anything — which is every run that never emits the signal.
+    ///
+    /// <para>ONE function, because the discard has to hold on every reader that can put earlier work in front of a
+    /// human, not just on the settled-work floor below. The floor alone left the ladder's upper rungs
+    /// (<see cref="SupervisorPublishedBranchResolver.ResolveAsync"/>'s integrated-head reads) and the completion
+    /// authority's Integrate cell (<c>UpstreamStageTrace</c>) reading the whole tape, so an abandoned generation's
+    /// cleanly-merged head was still published and still credited as integration work — the flag revoked the merge
+    /// and nothing else. Those readers have no barrier that a <c>plan</c> trips
+    /// (<see cref="SupervisorOutcome.ReadFinalIntegratedBranchWithin"/> stops only at agent-STAGING work), so they
+    /// cannot notice the line on their own; they have to be handed a tape that already ends at it.</para>
+    /// </summary>
+    public static IReadOnlyList<SupervisorPriorDecision> SinceLatestAbandonment(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
     {
         ArgumentNullException.ThrowIfNull(priorDecisions);
 
-        return Settled(priorDecisions, AbandonBoundary(priorDecisions) + 1, priorDecisions.Count);
+        var boundary = AbandonBoundary(priorDecisions);
+
+        return boundary <= 0 ? priorDecisions : priorDecisions.Skip(boundary).ToArray();
     }
 
     /// <summary>
@@ -140,7 +158,7 @@ public static class SupervisorMergeContributors
 
         var boundary = AbandonBoundary(priorDecisions);
 
-        return boundary < 0 ? 0 : Settled(priorDecisions, 0, boundary).Count;
+        return boundary < 0 ? 0 : Settled(priorDecisions.Take(boundary).ToArray()).Count;
     }
 
     /// <summary>
@@ -160,11 +178,9 @@ public static class SupervisorMergeContributors
         return -1;
     }
 
-    /// <summary>The settled, unwithheld agent-run ids staged by the decisions in [<paramref name="from"/>, <paramref name="to"/>), in the order they were produced.</summary>
-    private static IReadOnlyList<Guid> Settled(IReadOnlyList<SupervisorPriorDecision> priorDecisions, int from, int to) =>
-        priorDecisions
-            .Take(to)
-            .Skip(from)
+    /// <summary>The settled, unwithheld agent-run ids the given slice of the tape staged, in the order they were produced.</summary>
+    private static IReadOnlyList<Guid> Settled(IReadOnlyList<SupervisorPriorDecision> decisions) =>
+        decisions
             .Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind))
             .SelectMany(d => SupervisorOutcome.ReadAgentResults(d.OutcomeJson))
             .Where(r => r.Status == nameof(AgentRunStatus.Succeeded) && !SupervisorOutcome.IsWithheldFromHead(r))
