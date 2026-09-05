@@ -75,9 +75,11 @@ public class SupervisorPreClaimCrashRecoveryFlowTests
         // ── RECOVER via the REAL reconciler. ──
         var summary = await ReconcileAsync();
 
-        summary.RecoveredAbandonedSupervisorRun.ShouldBe(1, "a pre-claim crash on a genuine agent.supervisor node must be recovered, not failed");
-        summary.MarkedAbandonedFromRunning.ShouldBe(0, "recovered BEFORE the abandoned-Running sweep sees it");
-        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Enqueued, "re-dispatched, waiting for a worker");
+        // >= not == : StuckRunReconcileSummary counters are deployment-wide, so rows left stuck by the other classes
+        // sharing this database land in the same pass. The row assertions below are what prove THIS run was recovered.
+        summary.RecoveredAbandonedSupervisorRun.ShouldBeGreaterThanOrEqualTo(1, "a pre-claim crash on a genuine agent.supervisor node must be recovered, not failed");
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Enqueued,
+            "re-dispatched, waiting for a worker — Enqueued rather than Failure also proves the abandoned-Running sweep did NOT get this row");
         (await CountRecoveryMarkersAsync(runId)).ShouldBe(1);
 
         // The re-walk re-enters "sup" fresh: rehydrate finds an EMPTY ledger (nothing to replay), the real
@@ -108,12 +110,13 @@ public class SupervisorPreClaimCrashRecoveryFlowTests
 
         await StampWorkerDeathSignatureAsync(runId);
 
-        var summary = await ReconcileAsync();
+        await ReconcileAsync();
 
-        summary.RecoveredAbandonedSupervisorRun.ShouldBe(0, "a non-supervisor node's crash must never be blindly redispatched — no positive proof it's safe to re-run");
-        summary.MarkedAbandonedFromRunning.ShouldBe(1, "it falls through to the conservative default: fail cleanly");
-
-        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Failure);
+        // Both claims are settled by this run's own row: the supervisor recovery writes Enqueued, the conservative
+        // default writes Failure. Failure is therefore "not redispatched, and cleanly failed" — and unlike the
+        // deployment-wide counters, it stays true whatever else the shared database had stuck at the same moment.
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Failure,
+            "a non-supervisor node's crash is never blindly redispatched — it falls through to the conservative default: fail cleanly");
     }
 
     [Fact]
@@ -137,11 +140,12 @@ public class SupervisorPreClaimCrashRecoveryFlowTests
         // 90s throughout the grade, well after whatever ledger activity preceded it).
         await SeedFreshHeartbeatRecordAsync(runId, "sup");
 
-        var summary = await ReconcileAsync();
+        await ReconcileAsync();
 
-        summary.RecoveredAbandonedSupervisorRun.ShouldBe(0, "nothing crashed — a live grading run must never be redispatched out from under its own worker");
-        summary.MarkedAbandonedFromRunning.ShouldBe(0, "the fresh heartbeat proves the run is alive — it must not be failed");
-        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Running, "untouched by either sweep");
+        // Still Running is complete proof both sweeps skipped it: recovery writes Enqueued, abandonment writes Failure.
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Running,
+            "untouched by either sweep — nothing crashed, so a live grading run is never redispatched out from under its own worker, " +
+            "and the fresh heartbeat proves it is alive, so it is never failed");
     }
 
     // ─── Helpers (mirrors SupervisorSpawnFlowTests' established crash-recovery pattern) ─────────────────

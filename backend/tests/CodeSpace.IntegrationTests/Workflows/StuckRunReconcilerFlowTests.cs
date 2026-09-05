@@ -26,6 +26,16 @@ namespace CodeSpace.IntegrationTests.Workflows;
 ///
 /// <para>We exercise the reconciler via the MediatR command (the same path the recurring
 /// job uses) so the handler delegation is also tested end-to-end.</para>
+///
+/// <para><b>Never assert a sweep tally with equality.</b> Every counter on
+/// <see cref="StuckRunReconcileSummary"/> is DEPLOYMENT-WIDE: one pass sweeps every matching row in the
+/// database this whole collection shares, including rows left stuck by the other classes in it — and which
+/// of them has already run when this one fires varies between runs. An equality assert therefore reddens on
+/// whatever else happened to be stuck at that moment ("expected 1 but was 2"),
+/// which teaches a reader to re-run red instead of reading it. Each test asserts on the rows it OWNS — the
+/// run's status, its wait's status — and keeps a tally only as a <c>ShouldBeGreaterThanOrEqualTo</c> floor
+/// proving the sweep ran at all. A "nothing was swept" claim has no floor to assert, so it is expressed
+/// purely as the owned row being untouched.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -51,9 +61,8 @@ public class StuckRunReconcilerFlowTests
 
         var summary = await ReconcileAsync();
 
-        summary.RedispatchedFromPending.ShouldBe(1, "the stuck Pending row must be re-dispatched");
-        summary.RevertedFromEnqueued.ShouldBe(0);
-        summary.MarkedAbandonedFromRunning.ShouldBe(0);
+        // >= not == : the tally is deployment-wide (see the class note); the row assertions below are the proof.
+        summary.RedispatchedFromPending.ShouldBeGreaterThanOrEqualTo(1, "the stuck Pending row must be re-dispatched");
 
         (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Enqueued,
             "after the dispatcher's CAS lifts the row, it sits in Enqueued waiting for the Hangfire worker (in-memory in tests)");
@@ -108,7 +117,8 @@ public class StuckRunReconcilerFlowTests
 
         var summary = await ReconcileAsync();
 
-        summary.RevertedFromEnqueued.ShouldBe(1, "the stuck Enqueued row must walk back to Pending");
+        // >= not == : the tally is deployment-wide (see the class note); the row assertions below are the proof.
+        summary.RevertedFromEnqueued.ShouldBeGreaterThanOrEqualTo(1, "the stuck Enqueued row must walk back to Pending");
         (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Pending,
             "post-revert, the row is Pending and the NEXT reconciler tick (or a new dispatcher call) re-claims it");
     }
@@ -130,7 +140,8 @@ public class StuckRunReconcilerFlowTests
 
         var summary = await ReconcileAsync();
 
-        summary.MarkedAbandonedFromRunning.ShouldBe(1,
+        // >= not == : the tally is deployment-wide (see the class note); the row assertions below are the proof.
+        summary.MarkedAbandonedFromRunning.ShouldBeGreaterThanOrEqualTo(1,
             "the Running row with no ledger activity past the threshold must be marked Failure");
 
         using var verify = _fixture.BeginScope();
@@ -168,11 +179,13 @@ public class StuckRunReconcilerFlowTests
         // Emit a fresh ledger record so the liveness check sees recent activity.
         await SeedLedgerRecordAsync(runId, WorkflowRunRecordTypes.NodeStarted, DateTimeOffset.UtcNow.AddSeconds(-30));
 
-        var summary = await ReconcileAsync();
+        await ReconcileAsync();
 
-        summary.MarkedAbandonedFromRunning.ShouldBe(0,
+        // "Nothing was swept" is asserted on THIS run's row: the abandoned sweep's only effect is Running → Failure,
+        // so a row still Running is complete proof it was skipped — and it stays true however many OTHER rows the
+        // deployment-wide pass legitimately failed.
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Running,
             "Running rows with recent ledger activity are alive — must NOT be marked Failure");
-        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Running);
     }
 
     [Fact]
@@ -232,16 +245,17 @@ public class StuckRunReconcilerFlowTests
         // The parked signature: an outstanding Pending wait this run is genuinely waiting on.
         await SeedWaitAsync(runId, "start", WorkflowWaitStatuses.Pending);
 
-        var summary = await ReconcileAsync();
+        await ReconcileAsync();
 
-        summary.MarkedAbandonedFromRunning.ShouldBe(0,
-            "a Suspended run must NOT be counted as an abandoned Running run, however old it is");
-        summary.RedispatchedFromStrandedSuspended.ShouldBe(0,
-            "a Suspended run that still HAS a Pending wait is parked, not stranded — the stranded sweep must skip it");
-
+        // Both claims — "not counted as abandoned Running" and "the stranded sweep skipped it" — are claims about
+        // THIS run, and both are settled by its own row: the abandoned sweep would have written Failure and the
+        // stranded sweep would have written Pending/Enqueued. Still Suspended means neither touched it, whatever the
+        // deployment-wide counters read after another class's rows were swept in the same pass.
         (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Suspended,
             "a parked Suspended run must survive every reconciler sweep — the status-scoped sweeps don't match it " +
             "and the stranded-Suspended sweep is excluded by its outstanding Pending wait");
+        (await ReadWaitStatusAsync(runId, WorkflowWaitKinds.Approval)).ShouldBe(WorkflowWaitStatuses.Pending,
+            "and its outstanding wait is still Pending — nothing resolved the signal it is parked on");
     }
 
     [Fact]
@@ -271,7 +285,8 @@ public class StuckRunReconcilerFlowTests
 
         var summary = await ReconcileAsync();
 
-        summary.RedispatchedFromStrandedSuspended.ShouldBe(1,
+        // >= not == : the tally is deployment-wide (see the class note); the row assertions below are the proof.
+        summary.RedispatchedFromStrandedSuspended.ShouldBeGreaterThanOrEqualTo(1,
             "a Suspended run past the grace window with zero pending waits is stranded — the 4th sweep must re-dispatch it");
 
         (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Enqueued,
@@ -437,7 +452,8 @@ public class StuckRunReconcilerFlowTests
 
         var summary = await ReconcileAsync();
 
-        summary.RedispatchedFromStrandedSuspended.ShouldBe(1,
+        // >= not == : the tally is deployment-wide (see the class note); the row assertions below are the proof.
+        summary.RedispatchedFromStrandedSuspended.ShouldBeGreaterThanOrEqualTo(1,
             "the stranded Suspended run (zero pending waits, past the grace window) must be re-dispatched by the 4th sweep");
         (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Enqueued,
             "after the CAS Suspended→Pending + the dispatcher's Pending→Enqueued, the row waits in Enqueued for the worker");
@@ -496,8 +512,9 @@ public class StuckRunReconcilerFlowTests
 
         var summary = await ReconcileAsync();
 
-        summary.RedispatchedFromStrandedSuspended.ShouldBe(1,
-            "a multi-branch Suspended run with zero pending waits past the grace window is stranded — the sweep re-dispatches it once");
+        // >= not == : the tally is deployment-wide (see the class note); the row assertions below are the proof.
+        summary.RedispatchedFromStrandedSuspended.ShouldBeGreaterThanOrEqualTo(1,
+            "a multi-branch Suspended run with zero pending waits past the grace window is stranded — the sweep re-dispatches it");
         (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Enqueued, "after the CAS Suspended→Pending + dispatcher Pending→Enqueued");
 
         // Drive the engine the way the worker would: BOTH branches must resume from their rehydrated payloads (not
@@ -538,12 +555,11 @@ public class StuckRunReconcilerFlowTests
         // One PENDING wait — the legitimately-parked signature (approval / timer / map branch).
         await SeedWaitAsync(runId, "start", WorkflowWaitStatuses.Pending);
 
-        var summary = await ReconcileAsync();
+        await ReconcileAsync();
 
-        summary.RedispatchedFromStrandedSuspended.ShouldBe(0,
-            "a Suspended run with a Pending wait is parked, not stranded — it must NOT be swept, however old it is");
+        // Asserted on the owned row: the stranded sweep's only effect is Suspended → Pending → Enqueued.
         (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Suspended,
-            "a run waiting on a Pending wait stays Suspended until its real signal arrives");
+            "a Suspended run with a Pending wait is parked, not stranded — it must NOT be swept, however old it is");
     }
 
     [Fact]
@@ -564,13 +580,12 @@ public class StuckRunReconcilerFlowTests
 
         await SeedWaitAsync(runId, "start", WorkflowWaitStatuses.Resolved);   // zero pending, but young
 
-        var summary = await ReconcileAsync();
+        await ReconcileAsync();
 
-        summary.RedispatchedFromStrandedSuspended.ShouldBe(0,
+        // Asserted on the owned row: the stranded sweep's only effect is Suspended → Pending → Enqueued.
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Suspended,
             "a Suspended run with zero pending waits but a FRESH LastModifiedDate is mid-resume — the grace " +
             "window must protect it so we don't race the concurrent Suspended→Pending flip");
-        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Suspended,
-            "within the grace window the run stays Suspended — the resume's own flip will drive it momentarily");
     }
 
     // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -622,7 +637,8 @@ public class StuckRunReconcilerFlowTests
 
         var summary = await ReconcileAsync();
 
-        summary.RecoveredStrandedTimerWait.ShouldBe(1, "a Timer wake overdue past the grace on a Suspended run is re-fired — the automated backstop for a dropped Hangfire schedule");
+        // >= not == : the tally is deployment-wide (see the class note); the row assertions below are the proof.
+        summary.RecoveredStrandedTimerWait.ShouldBeGreaterThanOrEqualTo(1, "a Timer wake overdue past the grace on a Suspended run is re-fired — the automated backstop for a dropped Hangfire schedule");
         (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Enqueued, "the re-fire resolved the wait + flipped Suspended → Pending → Enqueued, exactly as the scheduled job would");
     }
 
@@ -637,9 +653,10 @@ public class StuckRunReconcilerFlowTests
 
         await SeedTimerWaitAsync(runId, wakeAt: DateTimeOffset.UtcNow.AddMinutes(30));
 
-        var summary = await ReconcileAsync();
+        await ReconcileAsync();
 
-        summary.RecoveredStrandedTimerWait.ShouldBe(0, "a Timer whose wake hasn't come due is healthy — never re-fired early");
+        // Asserted on the owned rows: a re-fire resolves the wait AND flips the run Suspended → Pending → Enqueued.
+        (await ReadWaitStatusAsync(runId, WorkflowWaitKinds.Timer)).ShouldBe(WorkflowWaitStatuses.Pending, "a Timer whose wake hasn't come due is healthy — never re-fired early");
         (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Suspended, "the healthy timer's run stays parked until its real wake");
     }
 
@@ -657,7 +674,8 @@ public class StuckRunReconcilerFlowTests
 
         var summary = await ReconcileAsync();
 
-        summary.RecoveredStrandedSupervisorInfraParkWait.ShouldBe(1, "a SupervisorInfraPark deadline overdue past the grace on a Suspended run is re-fired — closing the last un-backstopped bounded wait");
+        // >= not == : the tally is deployment-wide (see the class note); the row assertions below are the proof.
+        summary.RecoveredStrandedSupervisorInfraParkWait.ShouldBeGreaterThanOrEqualTo(1, "a SupervisorInfraPark deadline overdue past the grace on a Suspended run is re-fired — closing the last un-backstopped bounded wait");
         (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Enqueued, "the re-fire resolved the wait + flipped Suspended → Pending → Enqueued, exactly as the scheduled deadline job would");
 
         using var scope = _fixture.BeginScope();
@@ -681,9 +699,10 @@ public class StuckRunReconcilerFlowTests
 
         await SeedSupervisorInfraParkWaitAsync(runId, wakeAt: DateTimeOffset.UtcNow.AddMinutes(30), parks: 1);
 
-        var summary = await ReconcileAsync();
+        await ReconcileAsync();
 
-        summary.RecoveredStrandedSupervisorInfraParkWait.ShouldBe(0, "a park deadline that hasn't come due is healthy — never re-fired early");
+        // Asserted on the owned rows: a re-fire resolves the wait AND flips the run Suspended → Pending → Enqueued.
+        (await ReadWaitStatusAsync(runId, WorkflowWaitKinds.SupervisorInfraPark)).ShouldBe(WorkflowWaitStatuses.Pending, "a park deadline that hasn't come due is healthy — never re-fired early");
         (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Suspended, "the healthy park's run stays parked until its real deadline");
     }
 
@@ -699,9 +718,10 @@ public class StuckRunReconcilerFlowTests
 
         await SeedSupervisorInfraParkWaitAsync(runId, wakeAt: DateTimeOffset.UtcNow - StuckRunReconcilerService.SupervisorInfraParkWakeLostAfter - TimeSpan.FromMinutes(1), parks: 1, payloadJson: null);
 
-        var summary = await ReconcileAsync();
+        await ReconcileAsync();
 
-        summary.RecoveredStrandedSupervisorInfraParkWait.ShouldBe(0, "a payload-less infra-park wait is never re-fired — there is no marker to resume with, so fabricating one would corrupt the ladder position");
+        // Asserted on the owned rows: a re-fire resolves the wait AND flips the run Suspended → Pending → Enqueued.
+        (await ReadWaitStatusAsync(runId, WorkflowWaitKinds.SupervisorInfraPark)).ShouldBe(WorkflowWaitStatuses.Pending, "a payload-less infra-park wait is never re-fired — there is no marker to resume with, so fabricating one would corrupt the ladder position");
         (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Suspended, "left parked rather than guessed at");
     }
 
@@ -720,7 +740,8 @@ public class StuckRunReconcilerFlowTests
 
         var summary = await ReconcileAsync();
 
-        summary.RecoveredStrandedSupervisorInfraParkWait.ShouldBe(1, "the reconciler re-fires regardless of how old the outage is — the force-stop decision belongs to the node's own re-entry logic, not this sweep");
+        // >= not == : the tally is deployment-wide (see the class note); the row assertions below are the proof.
+        summary.RecoveredStrandedSupervisorInfraParkWait.ShouldBeGreaterThanOrEqualTo(1, "the reconciler re-fires regardless of how old the outage is — the force-stop decision belongs to the node's own re-entry logic, not this sweep");
         (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Enqueued, "dispatched so the node can re-enter and force-stop honestly on its own");
     }
 
@@ -735,9 +756,11 @@ public class StuckRunReconcilerFlowTests
 
         await SeedSupervisorInfraParkWaitAsync(runId, wakeAt: DateTimeOffset.UtcNow - StuckRunReconcilerService.SupervisorInfraParkWakeLostAfter - TimeSpan.FromMinutes(1), parks: 1);
 
-        var summary = await ReconcileAsync();
+        await ReconcileAsync();
 
-        summary.RecoveredStrandedSupervisorInfraParkWait.ShouldBe(0, "the wait's run is no longer Suspended — a concurrent resume already moved it, so re-firing would double-dispatch");
+        // Asserted on the owned rows: a re-fire resolves the wait AND re-dispatches the run.
+        (await ReadWaitStatusAsync(runId, WorkflowWaitKinds.SupervisorInfraPark)).ShouldBe(WorkflowWaitStatuses.Pending, "the wait's run is no longer Suspended — a concurrent resume already moved it, so re-firing would double-dispatch");
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Running, "the already-advanced run is left exactly where the concurrent resume put it");
     }
 
     [Fact]
@@ -757,7 +780,8 @@ public class StuckRunReconcilerFlowTests
 
         var summary = await ReconcileAsync();
 
-        summary.RecoveredStrandedSupervisorInfraParkWait.ShouldBe(2, "both independently-parked runs are recovered in the same tick");
+        // >= not == : the tally is deployment-wide (see the class note); the row assertions below are the proof.
+        summary.RecoveredStrandedSupervisorInfraParkWait.ShouldBeGreaterThanOrEqualTo(2, "both independently-parked runs are recovered in the same tick");
         (await ReadStatusAsync(runA)).ShouldBe(WorkflowRunStatus.Enqueued);
         (await ReadStatusAsync(runB)).ShouldBe(WorkflowRunStatus.Enqueued);
     }
@@ -776,7 +800,8 @@ public class StuckRunReconcilerFlowTests
 
         var summary = await ReconcileAsync();
 
-        summary.RecoveredStrandedSubworkflowParent.ShouldBe(1, "a parent parked on a terminal child's Subworkflow wait is re-fired — the symmetric twin of the AgentRun backstop");
+        // >= not == : the tally is deployment-wide (see the class note); the row assertions below are the proof.
+        summary.RecoveredStrandedSubworkflowParent.ShouldBeGreaterThanOrEqualTo(1, "a parent parked on a terminal child's Subworkflow wait is re-fired — the symmetric twin of the AgentRun backstop");
         (await ReadStatusAsync(parentRunId)).ShouldBe(WorkflowRunStatus.Enqueued, "the re-fire resolved the wait + flipped Suspended → Pending → Enqueued");
 
         using var scope = _fixture.BeginScope();
@@ -800,9 +825,10 @@ public class StuckRunReconcilerFlowTests
         var childRunId = await SeedChildRunAsync(teamId, parentRunId, WorkflowRunStatus.Running, outputsJson: "{}");
         await SeedSubworkflowWaitAsync(parentRunId, childRunId);
 
-        var summary = await ReconcileAsync();
+        await ReconcileAsync();
 
-        summary.RecoveredStrandedSubworkflowParent.ShouldBe(0, "a still-running child is not stranded — it will resume its own parent when it finishes");
+        // Asserted on the owned rows: a re-fire resolves the wait AND flips the parent Suspended → Pending → Enqueued.
+        (await ReadWaitStatusAsync(parentRunId, WorkflowWaitKinds.Subworkflow)).ShouldBe(WorkflowWaitStatuses.Pending, "a still-running child is not stranded — it will resume its own parent when it finishes");
         (await ReadStatusAsync(parentRunId)).ShouldBe(WorkflowRunStatus.Suspended, "the parent stays parked while its child runs");
     }
 
@@ -1097,6 +1123,16 @@ public class StuckRunReconcilerFlowTests
         return await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking()
             .Where(r => r.Id == runId)
             .Select(r => r.Xmin)
+            .SingleAsync();
+    }
+
+    /// <summary>The status of the run's sole wait of the given kind. Answers "was MY wait re-fired" — the owned-row twin of a sweep tally.</summary>
+    private async Task<string> ReadWaitStatusAsync(Guid runId, string waitKind)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().WorkflowRunWait.AsNoTracking()
+            .Where(w => w.RunId == runId && w.WaitKind == waitKind)
+            .Select(w => w.Status)
             .SingleAsync();
     }
 
