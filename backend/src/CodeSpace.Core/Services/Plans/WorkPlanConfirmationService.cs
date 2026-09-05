@@ -41,7 +41,7 @@ public sealed class WorkPlanConfirmationService : IWorkPlanConfirmationService, 
 
         var comment = ComposeAnswer(approve, feedback);
 
-        var resumed = await _resume.ResumeByActionTokenAsync(token, RealSupervisorActionExecutor.AnswerActionKey, actorUserId, comment, values: null, teamId, cancellationToken).ConfigureAwait(false);
+        var resumed = await _resume.ResumeByActionTokenAsync(token, RealSupervisorActionExecutor.AnswerActionKey, actorUserId, comment, StructuredVerdict(approve), teamId, cancellationToken).ConfigureAwait(false);
 
         return new WorkPlanConfirmationOutcome { Resumed = resumed == ActionResumeResult.Resumed, Approved = approve };
     }
@@ -99,6 +99,18 @@ public sealed class WorkPlanConfirmationService : IWorkPlanConfirmationService, 
             return false;
         }
     }
+
+    /// <summary>
+    /// The STRUCTURED verdict this click carries (C4) — the operator pressed Approve or Request changes, and that
+    /// choice rides the wait's <c>values</c> submission rather than being re-derived from the words they typed. Every
+    /// gate card reads it first, so a note that happens to begin with (or entirely lack) an English approve word can
+    /// no longer flip the gate either way. The composed comment is still sent, unchanged, as the operator's own text.
+    /// </summary>
+    private static IReadOnlyDictionary<string, JsonElement> StructuredVerdict(bool approve) =>
+        new Dictionary<string, JsonElement>
+        {
+            [SupervisorAnswerDecision.Field] = JsonSerializer.SerializeToElement(approve ? SupervisorAnswerDecision.Approve : SupervisorAnswerDecision.Revise),
+        };
 
     /// <summary>
     /// Compose the folded answer: an approval LEADS with the approve word (the gate's release predicate),

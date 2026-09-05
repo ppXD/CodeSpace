@@ -1479,9 +1479,34 @@ public class SupervisorDeciderTests
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
         StopField(decision, "summary").ShouldContain("The baseline build is broken", customMessage: "the summary is recovered from the reply's own rationale");
-        StopField(decision, "outcome").ShouldBe("failed", "the terminal label the model authored survives — the floor restores words, never a verdict");
-        StopField(decision, "outcomeAssumed").ShouldBeEmpty("nothing was assumed here, so the note must not appear");
+        // C4: 'failed' is outside the closed stop.outcome enum, so it is repaired onto it. The MEANING is preserved
+        // exactly (a non-success stop stays a non-success stop) and the model's own label is kept in the payload, so
+        // the floor still restores words and still never manufactures a verdict.
+        StopField(decision, "outcome").ShouldBe(SupervisorStopPayload.GaveUpOutcome, "a terminal label outside the enum is repaired onto it, never terminalized as free text");
+        StopField(decision, "outcomeRepairedFrom").ShouldBe("failed", "…and the journal still shows what the model actually wrote");
+        StopField(decision, "outcomeAssumed").ShouldBeEmpty("nothing was assumed here — the model DID author a label, it was just not a conformant one");
         client.Requests.Count.ShouldBe(1, "recovering words the first reply already carried never costs a round-trip");
+    }
+
+    /// <summary>
+    /// C4: a LIVE model answering with a legacy success word is REPAIRED onto the closed enum, not accepted as
+    /// authored — the words <c>IsSuccessOutcome</c> still honours for old tapes never enter a fresh decision. The
+    /// terminal MEANING is unchanged (this really was a success), so the repair costs no round-trip and no verdict.
+    /// </summary>
+    [Fact]
+    public async Task A_live_stop_authoring_a_legacy_success_word_is_repaired_onto_the_enum()
+    {
+        var legacy = JsonDocument.Parse("""{"kind":"stop","stop":{"outcome":"done","summary":"Both units merged and the suite is green."}}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(legacy);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        StopField(decision, "outcome").ShouldBe(SupervisorStopPayload.CompletedOutcome, "'done' is not a member of the closed enum — a new decision may not terminalize with it");
+        StopField(decision, "outcomeRepairedFrom").ShouldBe("done");
+        StopField(decision, "summary").ShouldBe("Both units merged and the suite is green.", "the repair rewrites the LABEL only");
+        SupervisorStopPayload.IsSuccessOutcome(StopField(decision, "outcome")).ShouldBeTrue("the model really did claim success — the repair preserves that, it only makes it sayable in one way");
+        client.Requests.Count.ShouldBe(1, "a deterministic label repair never costs a round-trip");
     }
 
     /// <summary>One field of a projected stop's canonical payload — read explicitly, because the projector ALSO injects the decision-level rationale at the payload root, so a substring probe over the whole payload passes whether or not the summary was ever filled.</summary>

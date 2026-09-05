@@ -116,6 +116,21 @@ public class SupervisorAmendAcceptanceTests
         SupervisorAmendAcceptance.IsAmendCard(Prior("""{"question":"which db?"}""", outcome: "{}")).ShouldBeFalse();
     }
 
+    /// <summary>C4: the co-sign binds on the STRUCTURED verdict, with the approve word kept only as the legacy fallback — and an UNANSWERED card still binds nothing, so no amendment is ever applied without a human ruling.</summary>
+    [Theory]
+    [InlineData("""{"question":"q","answer":"批准","decision":"approve"}""", true)]        // the reported 繁中 case — the co-sign now binds
+    [InlineData("""{"question":"q","answer":"approve — go","decision":"revise"}""", false)] // the FIELD wins over text that reads like an approval
+    [InlineData("""{"question":"q","answer":"approve — go"}""", true)]                      // LEGACY fallback for a client that sends no field
+    [InlineData("""{"question":"q","answer":"批准"}""", false)]                             // DOCUMENTED gap of that fallback
+    [InlineData("""{"question":"q","decision":"approve"}""", false)]                        // a verdict with no answer NEVER binds — the co-sign is never automatic
+    [InlineData("""{"question":"q"}""", false)]
+    public void An_approved_amend_card_is_decided_by_the_structured_verdict(string outcomeJson, bool approved)
+    {
+        var card = SupervisorAmendAcceptance.IntoAskHuman(Amend());
+
+        SupervisorAmendAcceptance.IsApprovedAmendCard(Prior(card.PayloadJson!, outcomeJson)).ShouldBe(approved);
+    }
+
     [Fact]
     public void The_other_gate_cards_never_read_as_amend_cards_and_vice_versa()
     {

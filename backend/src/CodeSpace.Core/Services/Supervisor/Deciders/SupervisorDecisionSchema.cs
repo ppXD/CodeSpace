@@ -188,7 +188,7 @@ public static class SupervisorDecisionSchema
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "outcome": { "type": "string", "description": "Terminal outcome label (e.g. 'completed', 'failed', 'abandoned'). Use 'needs_clarification' when ONLY THE USER can unblock you (an ambiguous goal, a missing credential/decision) — state the exact question in summary. An honest ask is never punished as a failure; a guessed attempt that fails IS. Never use it to dodge work you could verify yourself." },
+                "outcome": { "type": "string", "enum": ["completed", "gave_up", "needs_clarification"], "description": "REQUIRED. The terminal verdict, as one of exactly these three values — never a synonym, a translation, or free text. 'completed' = the goal was achieved. 'gave_up' = you are stopping WITHOUT achieving it (a failure, an abandonment, an exhausted budget) — say why in summary. 'needs_clarification' = ONLY THE USER can unblock you (an ambiguous goal, a missing credential/decision); state the exact question in summary. An honest ask is never punished as a failure; a guessed attempt that fails IS. Never use it to dodge work you could verify yourself." },
                 "summary": { "type": "string", "description": "Short summary of what the supervisor accomplished." },
                 "acceptance": {
                   "type": "object",

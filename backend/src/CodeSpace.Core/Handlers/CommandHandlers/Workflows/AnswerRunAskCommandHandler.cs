@@ -21,5 +21,5 @@ public sealed class AnswerRunAskCommandHandler : IRequestHandler<AnswerRunAskCom
     }
 
     public async Task<SupervisorAskAnswerOutcome?> Handle(AnswerRunAskCommand request, CancellationToken cancellationToken) =>
-        await _asks.AnswerAsync(request.RunId, _currentTeam.Id!.Value, _currentUser.Id!.Value, request.Answer, cancellationToken).ConfigureAwait(false);
+        await _asks.AnswerAsync(request.RunId, _currentTeam.Id!.Value, _currentUser.Id!.Value, request.Answer, request.Decision, cancellationToken).ConfigureAwait(false);
 }

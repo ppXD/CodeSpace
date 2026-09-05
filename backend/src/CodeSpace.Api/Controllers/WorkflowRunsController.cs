@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Api.Http;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Core.Services.Tasks.Trace;
 using CodeSpace.Messages.Commands.Tasks;
 using CodeSpace.Messages.Commands.Workflows;
@@ -265,6 +266,9 @@ public class WorkflowRunsController : ControllerBase
     public async Task<IActionResult> AnswerAsk([FromRoute] Guid runId, [FromBody] AnswerRunAskCommand command, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(command.Answer)) return BadRequest(new { error = "An answer is required." });
+
+        if (command.Decision != null && !SupervisorAnswerDecision.IsKnown(command.Decision))
+            return BadRequest(new { error = $"Unknown decision '{command.Decision}' — expected one of: {string.Join(", ", SupervisorAnswerDecision.All)}." });
 
         var result = await _mediator.Send(command with { RunId = runId }, cancellationToken).ConfigureAwait(false);
         return result == null ? NotFound() : Ok(result);

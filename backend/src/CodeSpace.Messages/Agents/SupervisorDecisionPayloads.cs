@@ -227,7 +227,43 @@ public sealed record SupervisorStopPayload
     /// A blank / unknown label is NOT success. Generic: never special-case the known degraded strings.
     /// </summary>
     public static bool IsSuccessOutcome(string? outcome) =>
-        outcome?.Trim().ToLowerInvariant() is "completed" or "complete" or "success" or "succeeded" or "done" or "ok";
+        outcome?.Trim().ToLowerInvariant() is CompletedOutcome or "complete" or "success" or "succeeded" or "done" or "ok";
+
+    /// <summary>The ONE genuine-success terminal label a NEW decision may author — the <c>completed</c> member of the closed <c>stop.outcome</c> enum the schema now requires.</summary>
+    public const string CompletedOutcome = "completed";
+
+    /// <summary>The graceful-failure / abandoned terminal label — the fail-closed member every unrecognized or repaired outcome lands on. Shared with the payload lift's assumed fill so producer + consumer cannot drift.</summary>
+    public const string GaveUpOutcome = "gave_up";
+
+    /// <summary>The honest ABSTENTION label — the run stopped with a question only the user can answer.</summary>
+    public const string NeedsClarificationOutcome = "needs_clarification";
+
+    /// <summary>The CLOSED set a NEW model-authored stop may use — exactly the <c>stop.outcome</c> enum the schema declares. Order is the schema's order; pinned by a unit test against the schema's own enum so the two can never drift.</summary>
+    public static readonly IReadOnlyList<string> ConformantOutcomes = new[] { CompletedOutcome, GaveUpOutcome, NeedsClarificationOutcome };
+
+    /// <summary>
+    /// Whether an outcome is an EXACT member of the closed enum — the predicate a NEW decision is held to. Deliberately
+    /// NOT case- or synonym-tolerant: the legacy words <see cref="IsSuccessOutcome"/> still honours exist ONLY to read
+    /// old tapes and replays, never to admit a fresh decision. A live model that writes <c>done</c> (or 完成, or any
+    /// synonym) is NON-conformant here and gets repaired by <c>SupervisorDecisionPayloadLift.NormalizeStopOutcome</c>.
+    /// </summary>
+    public static bool IsConformantOutcome(string? outcome) => outcome is not null && ConformantOutcomes.Contains(outcome);
+
+    /// <summary>
+    /// Map a model-authored outcome onto the closed enum, or null when it is already conformant (nothing to repair).
+    /// A legacy SUCCESS word repairs to <see cref="CompletedOutcome"/> and a legacy clarification spelling to
+    /// <see cref="NeedsClarificationOutcome"/> — those recover WORDS THE MODEL WROTE. Everything else (a synonym in any
+    /// language, an honest <c>failed</c>/<c>abandoned</c>, a blank) fail-closes to <see cref="GaveUpOutcome"/>: a label
+    /// the server cannot read as a success claim is never promoted into one.
+    /// </summary>
+    public static string? NormalizeOutcome(string? outcome)
+    {
+        if (IsConformantOutcome(outcome)) return null;
+
+        if (IsClarificationOutcome(outcome)) return NeedsClarificationOutcome;
+
+        return IsSuccessOutcome(outcome) ? CompletedOutcome : GaveUpOutcome;
+    }
 
     /// <summary>P5-1: the model's honest ABSTENTION label — it stopped with a question only the user can answer. Recognized exactly (never fuzzy) so an unknown label still fail-closes to give-up.</summary>
     public static bool IsClarificationOutcome(string? outcome) =>
@@ -246,6 +282,15 @@ public sealed record SupervisorStopPayload
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? OutcomeAssumed { get; init; }
+
+    /// <summary>
+    /// Set ONLY when the model authored an <see cref="Outcome"/> OUTSIDE the closed enum and the server repaired it —
+    /// it holds the model's ORIGINAL label, so the journal shows what was actually written rather than silently
+    /// rewriting history. Distinct from <see cref="OutcomeAssumed"/>: there the model said nothing, here it said
+    /// something the enum does not admit. Null-omitted, so a conformant stop serializes byte-identical to before.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? OutcomeRepairedFrom { get; init; }
 
     /// <summary>
     /// Optional model-authored OBJECTIVE acceptance for the terminal result — the L3→L4 "definition of done": a

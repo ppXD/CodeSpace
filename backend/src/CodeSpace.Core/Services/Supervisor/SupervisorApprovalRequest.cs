@@ -47,7 +47,27 @@ public static class SupervisorApprovalRequest
 
         if (!IsApprovalCard(last.PayloadJson)) return false;
 
-        return Approves(SupervisorOutcome.ReadAskHumanAnswer(last.OutcomeJson));
+        return OutcomeApproves(last.OutcomeJson);
+    }
+
+    /// <summary>
+    /// THE approval predicate all four human-in-the-loop cards share (C4) — the plan confirmation, this gate, the
+    /// review-gate escalation, and the amend co-sign. Reads the STRUCTURED verdict the answering surface folded
+    /// (<c>decision == approve</c>, exact) and consults the answer TEXT only when the outcome carries no decision
+    /// field at all.
+    ///
+    /// <para>The text read is a LEGACY FALLBACK, kept for answers minted before this field existed — an old Room
+    /// client, a chat card resolved through the generic Action surface, an unattended test responder typing the
+    /// reply word. It is why a 繁中「批准」still reads as revision feedback when it arrives with no decision field:
+    /// the fix for that operator is a surface that SENDS the field, not a wider word list here.</para>
+    /// </summary>
+    public static bool OutcomeApproves(string? outcomeJson)
+    {
+        var decision = SupervisorOutcome.ReadAskHumanDecision(outcomeJson);
+
+        if (decision != null) return SupervisorAnswerDecision.IsApprove(decision);
+
+        return Approves(SupervisorOutcome.ReadAskHumanAnswer(outcomeJson));
     }
 
     /// <summary>An ask_human is one of THIS gate's approval cards iff its question carries the approval marker — a content ask_human (the decider's own question) never does, so it never grants a spurious pass.</summary>

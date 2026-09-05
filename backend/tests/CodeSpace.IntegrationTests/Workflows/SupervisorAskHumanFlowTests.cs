@@ -323,19 +323,19 @@ public class SupervisorAskHumanFlowTests : IDisposable
         ResolveJobClient().Clear();
 
         using (var scope = _fixture.BeginScope())
-            (await scope.Resolve<ISupervisorAskAnswerService>().AnswerAsync(runId, teamId, userId, "too early", CancellationToken.None))
+            (await scope.Resolve<ISupervisorAskAnswerService>().AnswerAsync(runId, teamId, userId, "too early", decision: null, CancellationToken.None))
                 .ShouldBeNull("nothing is parked yet — no ask on the tape");
 
         // Drive to the ask park: turn 0 ask_human posts a card + parks on the Action wait.
         await RunEngineAsync(runId);
 
         using (var scope = _fixture.BeginScope())
-            (await scope.Resolve<ISupervisorAskAnswerService>().AnswerAsync(runId, Guid.NewGuid(), userId, "wrong team", CancellationToken.None))
+            (await scope.Resolve<ISupervisorAskAnswerService>().AnswerAsync(runId, Guid.NewGuid(), userId, "wrong team", decision: null, CancellationToken.None))
                 .ShouldBeNull("a foreign team sees no ask — the tape read is team-scoped");
 
         using (var scope = _fixture.BeginScope())
         {
-            var outcome = await scope.Resolve<ISupervisorAskAnswerService>().AnswerAsync(runId, teamId, userId, "patch it", CancellationToken.None);
+            var outcome = await scope.Resolve<ISupervisorAskAnswerService>().AnswerAsync(runId, teamId, userId, "patch it", decision: null, CancellationToken.None);
 
             outcome.ShouldNotBeNull();
             outcome.Resumed.ShouldBeTrue("the run-scoped answer resolved the park and re-dispatched the run");
@@ -355,7 +355,7 @@ public class SupervisorAskHumanFlowTests : IDisposable
         }
 
         using (var scope = _fixture.BeginScope())
-            (await scope.Resolve<ISupervisorAskAnswerService>().AnswerAsync(runId, teamId, userId, "second answer", CancellationToken.None))
+            (await scope.Resolve<ISupervisorAskAnswerService>().AnswerAsync(runId, teamId, userId, "second answer", decision: null, CancellationToken.None))
                 .ShouldBeNull("the ask is already answered — first answer wins across every surface");
     }
 

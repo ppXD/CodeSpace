@@ -55,7 +55,7 @@ public static class SupervisorGateEscalation
 
         if (answer == null) return false;
 
-        approved = answer.TrimStart().StartsWith(SupervisorApprovalRequest.ApproveReply, StringComparison.OrdinalIgnoreCase);
+        approved = SupervisorApprovalRequest.OutcomeApproves(last.OutcomeJson);
 
         return true;
     }
