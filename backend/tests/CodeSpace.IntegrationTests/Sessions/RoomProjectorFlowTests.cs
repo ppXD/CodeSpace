@@ -377,6 +377,40 @@ public class RoomProjectorFlowTests
     }
 
     [Fact]
+    public async Task An_UNGRADED_success_carries_the_unverified_marker()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Answered, unchecked");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Which runtime should we pick?", resultSummary: null);
+
+        // C1: an orderly, conformant "completed" stop that NOTHING ever checked — no operator floor, no model-authored
+        // oracle, no output critic. The card used to read exactly like a fully-verified one.
+        await SeedStopDecisionAsync(teamId, run, outcome: "completed", summary: "Rust is the safer choice for this workload.");
+
+        var result = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<FinalAnswerBlock>().Single();
+
+        result.Degraded.ShouldBeFalse("nothing failed — absence of a check is not a verdict, so the card is not degraded");
+        result.Verified.ShouldBe(false, "but the reader is told, on the card itself, that no check ran");
+        result.VerificationNote.ShouldBe("Unverified — no check ran on this result", "the copy is backend-authored — the FE renders it, it never maps a flag to words");
+        result.Text.ShouldBe("Rust is the safer choice for this workload.", "the answer is preserved verbatim — the chip qualifies it, it does not replace it");
+    }
+
+    [Fact]
+    public async Task A_GRADED_success_carries_no_unverified_marker()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Answered and checked");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Which runtime should we pick?", resultSummary: null);
+
+        await SeedStopDecisionAsync(teamId, run, outcome: "completed", summary: "Rust is the safer choice.", acceptancePassed: true);
+
+        var result = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<FinalAnswerBlock>().Single();
+
+        result.Verified.ShouldBe(true);
+        result.VerificationNote.ShouldBeNull("a checked result renders byte-identically to before C1");
+    }
+
+    [Fact]
     public async Task A_stop_whose_acceptance_check_PASSED_keeps_the_green_result()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);

@@ -115,6 +115,12 @@ public sealed record RoomFinalAnswer
 
     /// <summary>Why the card is degraded, when <see cref="Text"/> does NOT already say so — a give-up / forced stop's text IS its own account, but a FAILED objective acceptance grade leaves the model's success-sounding closing line untouched, so the ledger's verdict is stated here. Backend-authored copy. Null whenever the text already accounts for the degrade (and always on a clean success).</summary>
     public string? DegradedReason { get; init; }
+
+    /// <summary>C1 — whether ANY check examined this result (an acceptance grade, or an output-critic verdict). False on a clean Success that carries neither; null when the question does not arise (a degraded stop already states its own account).</summary>
+    public bool? Verified { get; init; }
+
+    /// <summary>The unverified chip's backend-authored copy. Null whenever <see cref="Verified"/> is not false.</summary>
+    public string? VerificationNote { get; init; }
 }
 
 /// <summary>One typed final-answer attachment (a file, the PR, or an image).</summary>

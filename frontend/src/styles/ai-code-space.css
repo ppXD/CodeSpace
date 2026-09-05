@@ -6495,6 +6495,8 @@ body.chat-resizing .acs-root .app { transition: none; }
 /* A degraded stop (the supervisor gave up — no work delivered): neutral warn palette, NOT the green success. */
 .room-final-degraded { border-color: var(--rm-warn-line); background: var(--rm-warn-bg); }
 .room-final-degraded .room-final-head, .room-final-degraded .room-final-ic { color: var(--rm-warn); }
+/* C1: the muted "unverified" chip — a green Result that no acceptance grade and no critic verdict ever examined says so. */
+.room-final-unverified { margin-left: 8px; padding: 1px 7px; border: 1px solid var(--rm-line); border-radius: 999px; font-size: 9px; font-weight: 600; letter-spacing: .05em; text-transform: none; color: var(--rm-dim); }
 .room-final-text { margin: 0; font-size: 13.5px; line-height: 1.7; color: var(--ink); white-space: pre-wrap; }
 .room-final-gallery { display: flex; flex-wrap: wrap; gap: 8px; }
 .room-final-img { max-width: 220px; max-height: 160px; border-radius: 8px; border: 1px solid var(--line); display: block; }

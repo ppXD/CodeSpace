@@ -214,7 +214,7 @@ public class SupervisorAcceptanceSpecTests
     }
 
     [Fact]
-    public void The_acceptance_kind_is_an_optional_enum_of_the_two_oracles()
+    public void The_acceptance_kind_is_an_optional_enum_of_every_oracle_the_registry_resolves()
     {
         var acceptance = SupervisorDecisionSchema.ResponseSchema
             .GetProperty("properties").GetProperty("stop").GetProperty("properties").GetProperty("acceptance");
@@ -222,7 +222,37 @@ public class SupervisorAcceptanceSpecTests
         acceptance.GetProperty("required").EnumerateArray().Select(e => e.GetString())
             .ShouldNotContain("kind", "kind stays OPTIONAL — omitting it defaults to TestsPass (the byte-identical legacy path)");
 
+        // C1: the STOP-level enum used to offer only TestsPass|ArtifactPresent while the per-subtask spec offered five.
+        // A run whose whole deliverable is an answer could therefore never author a judged terminal oracle — the exact
+        // shape most in need of one. Both levels now offer the same five.
         acceptance.GetProperty("properties").GetProperty("kind").GetProperty("enum").EnumerateArray().Select(e => e.GetString())
-            .ShouldBe(new[] { "TestsPass", "ArtifactPresent" }, "the model picks one of exactly the two oracles the grader registry resolves");
+            .ShouldBe(new[] { "TestsPass", "ArtifactPresent", "LlmJudge", "CitationsResolve", "ArtifactSchema" },
+                "the stop offers exactly the oracles the grader registry resolves — the same five the per-subtask spec allows");
+    }
+
+    [Fact]
+    public void The_stop_acceptance_carries_the_payloads_its_kinds_require()
+    {
+        // A closed object (additionalProperties: false) that offers LlmJudge / ArtifactSchema but no rubric / schema
+        // slot would REJECT every decision that actually uses them — the widened enum would be unauthorable.
+        var properties = SupervisorDecisionSchema.ResponseSchema
+            .GetProperty("properties").GetProperty("stop").GetProperty("properties").GetProperty("acceptance").GetProperty("properties");
+
+        properties.TryGetProperty("rubric", out _).ShouldBeTrue("LlmJudge requires a rubric");
+        properties.TryGetProperty("schema", out _).ShouldBeTrue("ArtifactSchema requires a schema");
+    }
+
+    [Fact]
+    public void A_model_emitted_stop_with_an_llm_judge_oracle_binds_its_rubric()
+    {
+        const string modelJson = """
+            { "kind": "stop", "stop": { "outcome": "completed", "summary": "answered", "acceptance": { "command": ["ANSWER.md"], "kind": "LlmJudge",
+              "rubric": { "criteria": [ { "id": "sources", "requirement": "names at least one source" } ], "threshold": 1 } } } }
+            """;
+
+        var model = JsonSerializer.Deserialize<SupervisorModelDecision>(modelJson, SupervisorDecisionSchema.Options)!;
+
+        model.Stop!.Acceptance!.Kind.ShouldBe(BenchmarkGradingKind.LlmJudge);
+        model.Stop.Acceptance.Rubric!.Criteria.Single().Id.ShouldBe("sources", "the rubric the terminal judge grades against binds off the same options");
     }
 }

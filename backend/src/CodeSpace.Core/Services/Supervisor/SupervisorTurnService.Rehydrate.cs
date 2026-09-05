@@ -1210,10 +1210,14 @@ public sealed partial class SupervisorTurnService
     /// Both gates run against EVERY reviewable head the run is shipping and ALL must pass (each gate absent ⇒ vacuously
     /// passes; both absent ⇒ a byte-identical no-op, the dominant case). The head set is the run's SINGLE integrated
     /// branch (single-repo) OR every per-repo final head (multi-repo, L4 C2) — a multi-repo change is all-or-nothing, so
-    /// ANY repo failing the floor withholds the WHOLE set. An empty head set (analysis-only / un-integrated work) ⇒ SKIP,
-    /// never a fail-closed mislabel of a legitimately branchless run.
+    /// ANY repo failing the floor withholds the WHOLE set.
+    ///
+    /// <para>An empty head set (analysis-only / un-integrated work) is answered by
+    /// <see cref="GradeBranchlessStopAsync"/> for a DELIVERABLE-kind gate (C1) and skipped only for a TestsPass one —
+    /// never a fail-closed mislabel of a legitimately branchless run, and no longer a silent pass for one whose oracle
+    /// reads files rather than running them.</para>
     /// </summary>
-    private async Task<SupervisorExecution> ApplyStopAcceptanceGradeAsync(SupervisorExecution execution, SupervisorTurnContext context, SupervisorDecision decision, Guid teamId, CancellationToken cancellationToken)
+    internal async Task<SupervisorExecution> ApplyStopAcceptanceGradeAsync(SupervisorExecution execution, SupervisorTurnContext context, SupervisorDecision decision, Guid teamId, CancellationToken cancellationToken)
     {
         if (decision.Kind != SupervisorDecisionKinds.Stop) return execution;
 
@@ -1254,7 +1258,23 @@ public sealed partial class SupervisorTurnService
             return execution with { OutcomeJson = SupervisorOutcome.AppendAcceptanceGrade(execution.OutcomeJson, false, $"grade-error: {ex.Message}") };
         }
 
-        if (targets.Count == 0) return execution;   // nothing to grade against (analysis-only / un-integrated) → skip
+        // C1 — a branchless stop is no longer an unconditional skip. A DELIVERABLE-kind gate does not need a head to
+        // grade: the run's answer lives in the deliverables its units captured, or in the stop summary itself. Only a
+        // TestsPass gate keeps skipping here, and for the same reason C2 gives per-unit — its Command is an argv
+        // presupposing a code world, so running it over a directory of documents is a category error (a bare `exit 0`
+        // would even pass vacuously).
+        if (targets.Count == 0)
+        {
+            var deliverableGates = gates.Where(g => Agents.AgentAcceptanceContract.GradesFromDeliverables(g.Spec)).ToList();
+
+            if (deliverableGates.Count == 0) return execution;   // nothing to grade against (analysis-only / un-integrated) → skip
+
+            BenchmarkGrade branchless;
+            using (Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(context.SupervisorRunId, teamId, context.NodeId, "", GraderAcceptanceCallKind, _recordLogger, _offloader, _budget, context.MaxCostUsd, context.ModelPrices)))
+                branchless = await GradeBranchlessStopAsync(context, decision, deliverableGates, teamId, cancellationToken).ConfigureAwait(false);
+
+            return execution with { OutcomeJson = SupervisorOutcome.AppendAcceptanceGrade(execution.OutcomeJson, branchless.Passed, branchless.Detail) };
+        }
 
         // P3.5 — see the identical rationale on the rehydrate-fold's own grading wrap: labels any LlmJudge model call
         // "grader.acceptance" so its spend is recorded + counts toward the cost cap.
@@ -1263,6 +1283,119 @@ public sealed partial class SupervisorTurnService
             grade = await GradeStopTargetsWithHeartbeatAsync(context.SupervisorRunId, context.NodeId, teamId, targets, gates, oracleBaseShas, cancellationToken).ConfigureAwait(false);
 
         return execution with { OutcomeJson = SupervisorOutcome.AppendAcceptanceGrade(execution.OutcomeJson, grade.Passed, grade.Detail) };
+    }
+
+    /// <summary>
+    /// C1 — grade a BRANCHLESS stop against every deliverable-kind gate. Each gate is answered from the world the run
+    /// actually produced, in this order:
+    /// <list type="number">
+    ///   <item>the CAPTURED deliverables of the run's units (C2's <c>GradeCapturedAsync</c>, one materialized world per
+    ///         unit) — the gate passes as soon as ONE unit's world satisfies it, because a run's deliverable is written
+    ///         by the unit that owned it and demanding every sibling also hold it would fail an honest division of work;</item>
+    ///   <item>failing that, for <c>LlmJudge</c> with a rubric and NO captured file anywhere, the stop SUMMARY judged as
+    ///         the deliverable — an answer that never touched disk is still an answer, and the alternative is the silent
+    ///         "Completed" this fix exists to remove. The detail says out loud that the judge read the summary.</item>
+    /// </list>
+    /// Fail-closed everywhere else: no unit passed and no summary fallback applies ⇒ the first failing detail stands.
+    /// </summary>
+    private async Task<BenchmarkGrade> GradeBranchlessStopAsync(SupervisorTurnContext context, SupervisorDecision decision, IReadOnlyList<(string Label, SupervisorAcceptanceSpec? Spec)> gates, Guid teamId, CancellationToken cancellationToken)
+    {
+        var unitIds = BranchlessUnitIds(context);
+        var oracleNotes = new List<string>();
+
+        foreach (var (label, spec) in gates)
+        {
+            var grade = await GradeBranchlessGateAsync(context, decision, unitIds, spec!, teamId, cancellationToken).ConfigureAwait(false);
+
+            if (!grade.Passed) return grade with { Detail = Annotated($"{label}: {grade.Detail}", grade.OracleNote) };
+
+            // A PASSING gate's note is the load-bearing half here: it is what says the judge read the stop SUMMARY
+            // rather than a captured file. Dropping it (as the repo path once dropped its own) would leave a prose
+            // grade indistinguishable from a deliverable grade on the tape.
+            if (grade.OracleNote is { Length: > 0 } note) oracleNotes.Add($"{label}: {note}");
+        }
+
+        return new BenchmarkGrade { Passed = true, Detail = Annotated("accepted", oracleNotes.Count == 0 ? null : string.Join("; ", oracleNotes)) };
+    }
+
+    /// <summary>One deliverable gate against the branchless run: the captured worlds first, then the summary fallback. Never throws — a grader escape becomes a fail-closed GraderFault so the terminal row is never stranded.</summary>
+    private async Task<BenchmarkGrade> GradeBranchlessGateAsync(SupervisorTurnContext context, SupervisorDecision decision, IReadOnlyList<Guid> unitIds, SupervisorAcceptanceSpec spec, Guid teamId, CancellationToken cancellationToken)
+    {
+        var timeoutSeconds = spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds;
+        BenchmarkGrade? firstFailure = null;
+        var everCaptured = false;
+
+        try
+        {
+            foreach (var unitId in unitIds)
+            {
+                var grade = await _acceptanceGrader.GradeCapturedAsync(unitId, teamId, spec, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+
+                if (grade.Passed) return grade;
+
+                everCaptured |= grade.Detail != ISupervisorAcceptanceGrader.NoDeliverablesCaptured;
+                firstFailure ??= grade;
+            }
+        }
+        catch (Workflows.Llm.LlmBudgetExceededException refused)
+        {
+            _logger.LogWarning("Branchless stop grading refused by the budget ledger (committed ${Committed} against ${Cap}) — leaving the verdict a budget-skip", refused.CommittedUsd, refused.CapUsd);
+            return new BenchmarkGrade { Passed = false, Detail = GradeSkippedBudgetExhausted, Class = Messages.Agents.Benchmark.GradeFailureClass.Environment };
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Branchless stop acceptance grade for run {RunId} failed unexpectedly; recording not-accepted", context.SupervisorRunId);
+            return new BenchmarkGrade { Passed = false, Detail = $"grade-error: {ex.Message}", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault };
+        }
+
+        if (everCaptured) return firstFailure!;
+
+        return await JudgeStopSummaryAsync(context, decision, spec, teamId, cancellationToken).ConfigureAwait(false)
+               ?? firstFailure
+               ?? new BenchmarkGrade { Passed = false, Detail = ISupervisorAcceptanceGrader.NoDeliverablesCaptured, Class = Messages.Agents.Benchmark.GradeFailureClass.Genuine };
+    }
+
+    /// <summary>
+    /// C1's last resort: judge the stop SUMMARY against the gate's rubric. Applies ONLY to <c>LlmJudge</c> with a rubric
+    /// and only when no unit captured anything — every other kind reads files, and inventing one would be a fabricated
+    /// pass. Null ⇒ this fallback does not apply (the caller keeps the captured verdict). A missing judge fails CLOSED:
+    /// a configured oracle we cannot run is never a silent pass.
+    /// </summary>
+    private async Task<BenchmarkGrade?> JudgeStopSummaryAsync(SupervisorTurnContext context, SupervisorDecision decision, SupervisorAcceptanceSpec spec, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (spec.Kind != Messages.Agents.Benchmark.BenchmarkGradingKind.LlmJudge) return null;
+        if (spec.Rubric is not { Criteria.Count: > 0 } rubric) return null;
+
+        var summary = ReadStopSummary(decision.PayloadJson);
+
+        if (string.IsNullOrWhiteSpace(summary)) return null;
+
+        if (_rubricJudge is null)
+            return new BenchmarkGrade { Passed = false, Detail = "grade-error: no rubric judge is registered to read the stop summary", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault };
+
+        var verdict = await _rubricJudge.JudgeAsync(rubric, summary!, context.Goal, teamId, cancellationToken).ConfigureAwait(false);
+
+        if (verdict.Failed) return new BenchmarkGrade { Passed = false, Detail = $"grade-error: {verdict.FailureDetail}", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault };
+
+        var grade = Agents.Eval.Benchmark.Graders.LlmJudgeGrader.Aggregate(rubric, verdict);
+
+        return grade with { OracleNote = "judged the stop summary — no deliverable file was captured" };
+    }
+
+    /// <summary>The agent run ids whose captured worlds a branchless stop grades against — every unit the run's decision tape folded a result for, newest fold per agent, in tape order.</summary>
+    private static IReadOnlyList<Guid> BranchlessUnitIds(SupervisorTurnContext context) =>
+        context.PriorDecisions
+            .Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind))
+            .SelectMany(d => SupervisorOutcome.ReadAgentResults(d.OutcomeJson))
+            .Select(r => r.AgentRunId)
+            .Distinct()
+            .ToList();
+
+    /// <summary>The stop decision's own closing summary (best-effort; null when absent / malformed) — the text a rubric judge reads when the run produced no file.</summary>
+    private static string? ReadStopSummary(string payloadJson)
+    {
+        try { return JsonSerializer.Deserialize<SupervisorStopPayload>(payloadJson, AgentJson.Options)?.Summary; }
+        catch (JsonException) { return null; }
     }
 
     /// <summary>

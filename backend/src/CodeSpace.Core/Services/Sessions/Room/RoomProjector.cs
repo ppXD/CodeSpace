@@ -406,7 +406,8 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         {
             Rounds = rounds,
             Checklist = checklist,
-            FinalAnswer = BuildFinalAnswer(finalAnswerText, changedFileIdentities, delivery, verdict),
+            FinalAnswer = BuildFinalAnswer(finalAnswerText, changedFileIdentities, delivery, verdict,
+                await VerificationOf(runId, status, verdict, acceptance, agentResults, cancellationToken).ConfigureAwait(false)),
             LatestLines = latestLines,
             AgentFiles = agentFiles,
             AgentFileIdentities = agentFileIdentities,
@@ -512,8 +513,47 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// <summary>The card's account of a FAILED objective acceptance grade — the same word the Runs list already uses for the <c>AcceptanceFailed</c> outcome, so the two surfaces read alike.</summary>
     private const string AcceptanceFailedReason = "Checks failed";
 
+    /// <summary>The unverified chip's copy — backend-authored, so the FE never maps a flag to words.</summary>
+    internal const string UnverifiedNote = "Unverified — no check ran on this result";
+
+    /// <summary>The containment probe for an interaction record written by the model critic — <c>payload_json @&gt; '{"kind":"critic.review"}'</c>. Built off the critic's own <c>ReviewCallKind</c> const so a rename cannot silently stop finding its reviews.</summary>
+    private static readonly string CriticReviewProbe = JsonSerializer.Serialize(new Dictionary<string, string> { ["kind"] = Review.LlmStructuredCritic.ReviewCallKind });
+
+    /// <summary>
+    /// C1 — whether ANY check examined this result. A run can terminalize a green Success having been graded by
+    /// nothing at all: no operator floor, no model-authored acceptance, no output critic. That card used to read
+    /// exactly like a fully-verified one, which is the most expensive silence in the room — so it now says so.
+    ///
+    /// <para>Verification is claimed from three independent facts, cheapest first: the STOP's acceptance grade, any
+    /// UNIT's acceptance grade (both already in hand), and — only when neither exists — ONE bounded ledger probe for a
+    /// recorded critic review. The probe is the only way an APPROVED critic leaves a trace (a flag or a skip writes a
+    /// warning; a clean pass writes nothing but its interaction row), and it is paid only on the ungraded-Success path,
+    /// so every verified run and every live turn costs zero extra query.</para>
+    ///
+    /// <para>Null when the question does not arise — a non-Success or an already-degraded card carries its own account
+    /// and must not gain a second, competing one.</para>
+    /// </summary>
+    private async Task<(bool? Verified, string? Note)> VerificationOf(Guid runId, Messages.Enums.WorkflowRunStatus status, (bool Degraded, string? Reason) verdict, bool? acceptance, IReadOnlyList<Messages.Agents.SupervisorAgentResult> agentResults, CancellationToken cancellationToken)
+    {
+        if (status != Messages.Enums.WorkflowRunStatus.Success || verdict.Degraded) return (null, null);
+
+        var graded = acceptance is not null || agentResults.Any(r => r.AcceptancePassed is not null);
+
+        return Verification(graded, graded || await CriticReviewedAsync(runId, cancellationToken).ConfigureAwait(false));
+    }
+
+    /// <summary>The pure half of <see cref="VerificationOf"/> — pinned directly so the claim "something checked this" can never be widened by accident.</summary>
+    internal static (bool? Verified, string? Note) Verification(bool graded, bool criticReviewed) =>
+        graded || criticReviewed ? (true, null) : (false, UnverifiedNote);
+
+    /// <summary>Whether a model critic ever recorded a review for this run — the ONLY durable trace an APPROVED verdict leaves (a flag or a skip writes its own warning; a clean pass writes nothing but this interaction row).</summary>
+    private async Task<bool> CriticReviewedAsync(Guid runId, CancellationToken cancellationToken) =>
+        await _db.WorkflowRunRecord.AsNoTracking()
+            .Where(r => r.RunId == runId && r.RecordType == WorkflowRunRecordTypes.InteractionCompleted)
+            .AnyAsync(r => EF.Functions.JsonContains(r.PayloadJson, CriticReviewProbe), cancellationToken).ConfigureAwait(false);
+
     /// <summary>The rich final answer — the stop summary text + typed attachments (the changed files + the PR). Images are a true gap (no run output exposes them). Null when there's nothing to deliver. <paramref name="verdict"/> marks a stop that did NOT finish well (a give-up / forced stop, or a failed acceptance grade) so the card renders neutral, not a green success.</summary>
-    private static RoomFinalAnswer? BuildFinalAnswer(string? text, IReadOnlyList<RoomFileIdentity> files, RoomDelivery? pr, (bool Degraded, string? Reason) verdict)
+    private static RoomFinalAnswer? BuildFinalAnswer(string? text, IReadOnlyList<RoomFileIdentity> files, RoomDelivery? pr, (bool Degraded, string? Reason) verdict, (bool? Verified, string? Note) verification)
     {
         var attachments = new List<RoomAttachment>();
 
@@ -525,7 +565,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
 
         var body = string.IsNullOrWhiteSpace(text) ? null : text.Trim();
 
-        return body == null && attachments.Count == 0 ? null : new RoomFinalAnswer { Text = body, Attachments = attachments, Degraded = verdict.Degraded, DegradedReason = verdict.Reason };
+        return body == null && attachments.Count == 0 ? null : new RoomFinalAnswer { Text = body, Attachments = attachments, Degraded = verdict.Degraded, DegradedReason = verdict.Reason, Verified = verification.Verified, VerificationNote = verification.Note };
     }
 
     /// <summary>
