@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Sessions.Room;
 using CodeSpace.Core.Services.Workflows.Engine;
+using CodeSpace.Core.Services.Workflows.Reconciliation;
 using CodeSpace.Core.Settings;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
@@ -222,6 +223,167 @@ public class DeploymentAutonomyCeilingFlowTests
         return await scope.Resolve<IMediator>().Send(new CreateWorkflowCommand
         {
             Name = "ceiling-" + Guid.NewGuid().ToString("N")[..6],
+            Description = null,
+            Definition = definition,
+            Activations = new List<WorkflowActivationInput>(),
+            Enabled = true,
+        });
+    }
+
+    private async Task RunEngineAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<IWorkflowEngine>().ExecuteRunAsync(runId, CancellationToken.None);
+    }
+
+    private InMemoryBackgroundJobClient ResolveJobClient()
+    {
+        using var scope = _fixture.BeginScope();
+        return scope.Resolve<InMemoryBackgroundJobClient>();
+    }
+
+    private static RuntimeSettings Read(string? configured) =>
+        RuntimeSettings.Read(new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { [RuntimeSettings.MaxAutonomyKey] = configured })
+            .Build());
+}
+
+/// <summary>
+/// The same deployment ceiling over the WIDEST of the unbounded lanes: an <c>agent.supervisor</c> node whose
+/// profile tier is frozen into its config at authoring, read back VERBATIM on every rehydrate, and then FANNED OUT
+/// to every agent the model decides to plan. One authored tier, N sandboxes, and no <c>RouteCaps</c> anywhere in
+/// the path — so before this clamp a single hand-authored supervisor node (or a replay of any supervisor run)
+/// handed N agents the egress the operator had forbidden.
+///
+/// <para><b>Fidelity (Rule 12) — medium-mock:</b> the real engine + the real supervisor turn service + the real
+/// action executor + real Postgres stage the spawns and PERSIST the real <see cref="AgentTask"/> each agent would
+/// be handed; the scripted decider stands in for the LLM and the harness never spawns
+/// (<c>AutoExecute=false</c> — there is no codex binary in CI), exactly as in <c>SupervisorSpawnFlowTests</c>. The
+/// assertion is on the persisted permission set, which is precisely what the sandbox enforces.</para>
+/// </summary>
+[Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
+public class DeploymentAutonomyCeilingSupervisorFlowTests : IDisposable
+{
+    private readonly PostgresFixture _fixture;
+
+    public DeploymentAutonomyCeilingSupervisorFlowTests(PostgresFixture fixture)
+    {
+        _fixture = fixture;
+
+        using var scope = _fixture.BeginScope();
+        scope.Resolve<SupervisorDecisionScript>().PlanSpawnStop();   // plan(2 subtasks) → spawn[both] → stop
+    }
+
+    public void Dispose()
+    {
+        using var scope = _fixture.BeginScope();
+        scope.Resolve<SupervisorDecisionScript>().PlanThenStop();   // restore the default for sibling tests
+    }
+
+    [Fact]
+    public async Task A_supervisor_profile_tier_reaches_every_spawn_at_the_committed_default()
+    {
+        // The control. The committed ceiling grants the top tier, so the fan-out is byte-identical to before this
+        // setting existed — a ceiling that changed behaviour on arrival could not ship.
+        var tasks = await SpawnedTasksAsync(deploymentCeiling: null);
+
+        tasks.Count.ShouldBe(2, "the scripted plan spawns BOTH subtasks — the fan-out is the whole point of this lane");
+        tasks.ShouldAllBe(t => t.Autonomy == AgentAutonomyLevel.Trusted);
+        tasks.ShouldAllBe(t => t.Permissions.Network == AgentNetworkAccess.On);
+    }
+
+    [Fact]
+    public async Task Every_agent_a_supervisor_fans_out_is_severed_under_a_lowered_deployment_ceiling()
+    {
+        var tasks = await SpawnedTasksAsync(deploymentCeiling: "Standard");
+
+        tasks.Count.ShouldBe(2);
+        tasks.ShouldAllBe(t => t.Autonomy == AgentAutonomyLevel.Standard);
+
+        foreach (var task in tasks)
+            task.Permissions.Network.ShouldBe(AgentNetworkAccess.Off,
+                customMessage: "a Trusted supervisor profile under a Standard deployment ceiling must stage EVERY spawn without egress — the tier is read ONCE and derives every spawned agent's permissions, so a miss here is N sandboxes wide, not one");
+    }
+
+    // ─── Helpers ─────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Drive the supervisor to its spawn park under <paramref name="deploymentCeiling"/> and read back the REAL
+    /// persisted <see cref="AgentTask"/> of every agent it staged. The override is an <c>AsyncLocal</c> scope, so it
+    /// wraps the ENGINE calls themselves — turn 0 (plan) self-advances, turn 1 spawns.
+    /// </summary>
+    private async Task<IReadOnlyList<AgentTask>> SpawnedTasksAsync(string? deploymentCeiling)
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;   // record the executor dispatch; the real (binary-less) harness must not run
+
+        try
+        {
+            using (RuntimeSettings.Override(Read(deploymentCeiling)))
+            {
+                await RunEngineAsync(runId);            // turn 0: plan
+                await ResolveSelfAdvanceAsync(runId);
+                await RunEngineAsync(runId);            // turn 1: spawn[both]
+            }
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+
+        using var verify = _fixture.BeginScope();
+
+        var staged = await verify.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking()
+            .Where(r => r.WorkflowRunId == runId && r.TeamId == teamId)
+            .OrderBy(r => r.CreatedDate)
+            .Select(r => r.TaskJson)
+            .ToListAsync();
+
+        return staged.Select(json => JsonSerializer.Deserialize<AgentTask>(json, AgentJson.Options)!).ToList();
+    }
+
+    /// <summary>Turn 0 parks a self-advance wait; resolving it is the exact entry point the engine enqueues (the post-commit re-dispatch is record-only with AutoExecute off).</summary>
+    private async Task ResolveSelfAdvanceAsync(Guid runId)
+    {
+        Guid waitId;
+        using (var verify = _fixture.BeginScope())
+        {
+            waitId = (await verify.Resolve<CodeSpaceDbContext>().WorkflowRunWait.AsNoTracking()
+                .SingleAsync(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.SupervisorDecision && w.Status == WorkflowWaitStatuses.Pending)).Id;
+        }
+
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<IWorkflowResumeService>().ResumeWaitAsync(runId, waitId, null, CancellationToken.None);
+    }
+
+    /// <summary>manual → sup (agent.supervisor, profile pinned to the egress-granting Trusted tier) → terminal. The tier no route ever sees.</summary>
+    private async Task<Guid> CreateWorkflowAsync(Guid teamId, Guid userId)
+    {
+        var definition = new WorkflowDefinition
+        {
+            SchemaVersion = 1,
+            Nodes = new List<NodeDefinition>
+            {
+                new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+                new() { Id = "sup", TypeKey = "agent.supervisor",
+                        Config = WorkflowsTestSeed.Json("""{"goal":"ship the feature","agentProfile":{"harness":"codex-cli","runnerKind":"local","autonomyLevel":"Trusted"}}"""),
+                        Inputs = WorkflowsTestSeed.EmptyJson() },
+                new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            },
+            Edges = new List<EdgeDefinition> { new() { From = "start", To = "sup" }, new() { From = "sup", To = "end" } },
+        };
+
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+
+        return await scope.Resolve<IMediator>().Send(new CreateWorkflowCommand
+        {
+            Name = "ceiling-sup-" + Guid.NewGuid().ToString("N")[..6],
             Description = null,
             Definition = definition,
             Activations = new List<WorkflowActivationInput>(),

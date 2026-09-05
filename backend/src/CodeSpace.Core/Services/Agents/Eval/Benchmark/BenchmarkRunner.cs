@@ -86,10 +86,15 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
     /// leave Network=Off and a confined live agent could never reach the gateway. The null path stays byte-identical —
     /// <c>Derive(Standard)</c> equals the default <c>AgentPermissions</c> (Network=Off, WriteScope=Workspace). Internal
     /// (not private) so the override + fallback + permission derivation is unit-pinned directly (InternalsVisibleTo).
+    ///
+    /// <para>The resolved tier is CLAMPED to this deployment's ceiling (<c>Sandbox:MaxAutonomy</c>) like every other
+    /// path that stages a live agent: a qualification round is a caller-supplied tier posted straight at a command,
+    /// with no route and no node between it and real agents spending real budget on this host — exactly the traffic
+    /// an operator who lowered the ceiling meant to bound. Inert at the committed default.</para>
     /// </summary>
     internal static AgentTask BuildAgentTask(BenchmarkTask task, BenchmarkMode mode, string workspaceDirectory, BenchmarkAgentSelection? selection)
     {
-        var autonomy = selection?.Autonomy ?? AgentAutonomyLevel.Standard;
+        var autonomy = AgentAutonomyPolicy.Clamp(selection?.Autonomy ?? AgentAutonomyLevel.Standard, AgentAutonomyPolicy.DeploymentCeiling);
 
         return new AgentTask
         {

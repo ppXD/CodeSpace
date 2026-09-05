@@ -1161,9 +1161,21 @@ public sealed partial class RealSupervisorActionExecutor
     private static string HarnessOf(SupervisorAgentProfile? profile) =>
         !string.IsNullOrWhiteSpace(profile?.Harness) ? profile!.Harness! : AgentHarnessDefaults.DefaultHarness;
 
-    /// <summary>The profile's autonomy tier parsed case-insensitively, else the safe <see cref="AgentAutonomyLevel.Standard"/> default (mirrors agent.run's ReadAutonomyLevel). Null/unrecognised → byte-identical to pre-P2-3.</summary>
+    /// <summary>
+    /// The profile's autonomy tier parsed case-insensitively, else the safe <see cref="AgentAutonomyLevel.Standard"/>
+    /// default (mirrors agent.run's ReadAutonomyLevel), CLAMPED to this deployment's ceiling
+    /// (<c>Sandbox:MaxAutonomy</c>). Null/unrecognised → byte-identical to pre-P2-3 at the committed default ceiling.
+    ///
+    /// <para>The clamp lives here because this is the single place a supervisor turn reads the run's tier for a
+    /// spawn, and it is the WIDEST of the unbounded lanes: the profile tier is frozen into the
+    /// <c>agent.supervisor</c> node's config and read back verbatim on every rehydrate, so a hand-authored
+    /// supervisor node — or a REPLAY of any supervisor run — fanned out N agents at that tier with no
+    /// <c>RouteCaps</c> anywhere in the path. One node, many sandboxes. The model's own per-agent request is
+    /// clamped to the value returned here (<see cref="ClampAutonomy"/>), so tightening this tightens every
+    /// spawn.</para>
+    /// </summary>
     private static AgentAutonomyLevel AutonomyOf(SupervisorAgentProfile? profile) =>
-        Enum.TryParse<AgentAutonomyLevel>(profile?.AutonomyLevel, ignoreCase: true, out var level) ? level : AgentAutonomyLevel.Standard;
+        AgentAutonomyPolicy.Clamp(AgentAutonomyPolicy.Parse(profile?.AutonomyLevel, AgentAutonomyLevel.Standard), AgentAutonomyPolicy.DeploymentCeiling);
 
     /// <summary>Clamp a model-authored autonomy REQUEST to the run profile's <paramref name="ceiling"/> (L4 arc B): the request wins only when it is MORE restrictive than the ceiling (the enum is ordered Confined &lt; Standard &lt; Trusted &lt; Unleashed); an absent / unparseable / equal-or-higher request keeps the ceiling — so the model can lower its own autonomy but NEVER raise it past the operator's grant. No request → the ceiling (byte-identical).</summary>
     private static AgentAutonomyLevel ClampAutonomy(string? requested, AgentAutonomyLevel ceiling) =>

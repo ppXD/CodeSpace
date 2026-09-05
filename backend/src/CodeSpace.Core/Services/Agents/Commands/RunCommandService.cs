@@ -44,25 +44,37 @@ public sealed class RunCommandService : IRunCommandService, IScopedDependency
 
         try
         {
-            var spec = new SandboxSpec
-            {
-                Command = request.Command,
-                Args = request.Args,
-                WorkingDirectory = workspace?.Directory,
-                Environment = request.Environment,
-                TimeoutSeconds = request.TimeoutSeconds,
-                AllowNetwork = request.AllowNetwork,
-                MaxProcesses = request.MaxProcesses,
-                MaxFileSizeMb = request.MaxFileSizeMb,
-            };
-
-            return await runner.RunAsync(spec, cancellationToken).ConfigureAwait(false);
+            return await runner.RunAsync(BuildSpec(request, workspace?.Directory), cancellationToken).ConfigureAwait(false);
         }
         finally
         {
             if (workspace != null) await workspace.DisposeAsync().ConfigureAwait(false);
         }
     }
+
+    /// <summary>
+    /// The request → <see cref="SandboxSpec"/> projection, with the deployment autonomy ceiling
+    /// (<c>Sandbox:MaxAutonomy</c>) narrowing the requested egress. This lane has NO autonomy tier anywhere in its
+    /// vocabulary — <c>agent.run_command</c>'s raw <c>"network": true</c> lands straight on
+    /// <see cref="SandboxSpec.AllowNetwork"/> — so the tier clamps that bound the agent lanes cannot reach it, and
+    /// the ceiling's own DERIVED network posture (<see cref="AgentAutonomyPolicy.Derive"/>, the same table the
+    /// sandbox enforces) has the last word instead. NARROW-ONLY: a ceiling that grants network leaves the request
+    /// exactly as asked, so the committed default clamps nothing.
+    ///
+    /// <para>Internal (not private) so the narrowing is unit-pinned directly (InternalsVisibleTo) rather than only
+    /// through a runner that would have to be confining to show it.</para>
+    /// </summary>
+    internal static SandboxSpec BuildSpec(RunCommandRequest request, string? workingDirectory) => new()
+    {
+        Command = request.Command,
+        Args = request.Args,
+        WorkingDirectory = workingDirectory,
+        Environment = request.Environment,
+        TimeoutSeconds = request.TimeoutSeconds,
+        AllowNetwork = request.AllowNetwork && AgentAutonomyPolicy.Derive(AgentAutonomyPolicy.DeploymentCeiling).Network == AgentNetworkAccess.On,
+        MaxProcesses = request.MaxProcesses,
+        MaxFileSizeMb = request.MaxFileSizeMb,
+    };
 
     /// <summary>
     /// Repo → clone request: load the repository (by id, like the git.* node services), resolve a short-lived
