@@ -407,12 +407,15 @@ public sealed class AgentRunLogCaptureRecoveryFlowTests
 
         var summary = await reconcile;
 
-        summary.Superseded.ShouldBe(1);
-        summary.CaptureFailed.ShouldBe(0, "the observation made under fence 7 cannot settle terminal intent state after fence 8 owns the run");
+        // >= not == : Superseded is a system-wide bounded-batch tally (same shape as the other reconcile summaries
+        // in this file, e.g. Claimed above) — another test's due intent can settle in the same wave. The intent's
+        // own State below (Superseded, not CaptureFailed) is what proves THIS row was superseded, not merely tallied.
+        summary.Superseded.ShouldBeGreaterThanOrEqualTo(1);
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         var intent = await db.AgentRunLogCaptureIntent.SingleAsync(value => value.AgentRunId == world.AgentRunId);
-        intent.State.ShouldBe(AgentRunLogCaptureIntentState.Superseded);
+        intent.State.ShouldBe(AgentRunLogCaptureIntentState.Superseded,
+            "the observation made under fence 7 cannot settle terminal intent state after fence 8 owns the run");
         intent.LastErrorCode.ShouldBe("worker-fence-changed-before-settlement");
         (await db.AgentRunLogStream.SingleAsync(value => value.Id == opened.Metadata.StreamId)).State.ShouldBe(AgentRunLogStreamState.CaptureFailed);
         var run = await db.AgentRun.AsNoTracking().SingleAsync(value => value.Id == world.AgentRunId);

@@ -475,7 +475,11 @@ public sealed class AgentRunReattachFlowTests : IDisposable
             using (var scope = _fixture.BeginScope())
                 summary = await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None);
 
-            summary.ReattachedStaleRunning.ShouldBe(1, "the reconciler re-attached the stale-but-alive run");
+            // >= not == : ReattachedStaleRunning is a deployment-wide bounded-batch tally (see
+            // AgentRunReconcileSummary) — another test's stale row sharing this collection can legitimately land
+            // in the same sweep. The FenceEpoch + LeaseExpiresAt + dispatched-call assertions below are what prove
+            // THIS run was reattached.
+            summary.ReattachedStaleRunning.ShouldBeGreaterThanOrEqualTo(1, "the reconciler re-attached the stale-but-alive run");
             jobs.Calls.ShouldContain(c => c.MethodName == nameof(IAgentRunExecutor.ReattachAsync) && c.RunId == runId, "it dispatched the executor's ReattachAsync for this run");
 
             using var verify = _fixture.BeginScope();
@@ -496,8 +500,9 @@ public sealed class AgentRunReattachFlowTests : IDisposable
 
         var teamId = await SeedTeamAsync();
         var runId = await CreateScriptedRunAsync(teamId);
+        long claimedEpoch;
         using (var scope = _fixture.BeginScope())
-            await scope.Resolve<IAgentRunService>().MarkRunningAsync(runId, CancellationToken.None);
+            claimedEpoch = await scope.Resolve<IAgentRunService>().MarkRunningAsync(runId, CancellationToken.None);
 
         await LaunchAliveSupervisorAsync(runId);
 
@@ -516,16 +521,26 @@ public sealed class AgentRunReattachFlowTests : IDisposable
             {
                 await LapseLeaseAsync(runId);
                 using var scope = _fixture.BeginScope();
+
+                // >= not == : ReattachedStaleRunning is a deployment-wide bounded-batch tally (see
+                // AgentRunReconcileSummary) — another test's stale row sharing this collection can legitimately
+                // land in the same sweep. THIS run's own FenceEpoch below (bumped by exactly 1 per reclaim) is
+                // the proof it — not some other row — was reattached on sweep {attempt}.
                 (await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None)).ReattachedStaleRunning
-                    .ShouldBe(1, $"sweep {attempt} re-attaches (still within the attempt budget)");
+                    .ShouldBeGreaterThanOrEqualTo(1, $"sweep {attempt} re-attaches (still within the attempt budget)");
+
+                (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).FenceEpoch
+                    .ShouldBe(claimedEpoch + attempt, $"sweep {attempt}'s reclaim bumped THIS run's fence epoch by one — proof it was reattached, not merely tallied");
             }
 
             // Budget exhausted → the next sweep abandons, so a permanently-unattachable-but-alive run still
             // reaches a terminal state instead of being reclaimed forever.
             await LapseLeaseAsync(runId);
             using (var scope = _fixture.BeginScope())
+                // >= not == : MarkedAbandonedFromRunning is the same deployment-wide tally; THIS run's Status flip
+                // to Failed (asserted below) is what proves it — not just some other row — was abandoned.
                 (await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None)).MarkedAbandonedFromRunning
-                    .ShouldBe(1, "past the re-attach budget the run is abandoned");
+                    .ShouldBeGreaterThanOrEqualTo(1, "past the re-attach budget the run is abandoned");
 
             using (var scope = _fixture.BeginScope())
                 (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Failed);
