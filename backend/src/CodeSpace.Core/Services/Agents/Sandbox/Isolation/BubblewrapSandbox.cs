@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using CodeSpace.Messages.Agents;
 
 namespace CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 
@@ -42,10 +43,13 @@ public static class BubblewrapSandbox
         "/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/etc", "/opt",
     };
 
-    private static readonly Lazy<string?> LazyAvailable = new(Probe);
+    private static readonly Lazy<BwrapProbeResult> LazyProbe = new(Probe);
 
     /// <summary>The resolved <c>bwrap</c> path when this host can confine (Linux + bwrap + working userns), else <c>null</c>.</summary>
-    public static string? Available => LazyAvailable.Value;
+    public static string? Available => LazyProbe.Value.Path;
+
+    /// <summary>WHY this host cannot confine — one of <c>SandboxConfinement</c>'s reason constants — or null when it can. The probe already distinguishes the three cases; keeping the distinction is what lets a run's record say which wall it hit instead of an unactionable "unavailable".</summary>
+    public static string? UnavailableReason => LazyProbe.Value.Reason;
 
     /// <summary>Whether this deployment mandates confinement (<c>Sandbox:RequireConfinement</c>) — read live off the bound settings so it tracks configuration, not a captured copy.</summary>
     public static bool IsRequired => CodeSpace.Core.Settings.RuntimeSettings.Current.RequireSandboxConfinement;
@@ -61,6 +65,23 @@ public static class BubblewrapSandbox
             throw new InvalidOperationException(
                 "Sandbox isolation is required (Sandbox:RequireConfinement) but bubblewrap is unavailable on this host " +
                 "(not Linux, bwrap not installed, or unprivileged user namespaces denied). Refusing to run the agent unconfined.");
+    }
+
+    /// <summary>
+    /// The launch-time record of what confinement this run ACTUALLY got — the honest answer the journal, the Room and
+    /// the real-model stamp all read instead of hedging. PURE (the probe's results are passed in, never read here) so
+    /// every branch is unit-testable on a host that cannot confine, which is exactly the host whose branch matters.
+    ///
+    /// <para><paramref name="shareNetwork"/> is what the launch passed to <see cref="BwrapPlan.ShareNetwork"/>, so
+    /// <see cref="SandboxConfinement.NetworkSevered"/> is derived from the SAME input <see cref="BuildArgs"/> turns
+    /// into <c>--unshare-net</c> and cannot claim a severance the argv did not request.</para>
+    /// </summary>
+    public static SandboxConfinement DeriveConfinement(string? available, string? unavailableReason, bool shareNetwork)
+    {
+        if (available is null)
+            return new SandboxConfinement { Outcome = SandboxConfinementOutcome.Unconfined, Reason = unavailableReason ?? SandboxConfinement.ReasonNoBubblewrap };
+
+        return new SandboxConfinement { Outcome = SandboxConfinementOutcome.Confined, NetworkSevered = !shareNetwork };
     }
 
     /// <summary>
@@ -164,9 +185,9 @@ public static class BubblewrapSandbox
     /// unprivileged user namespaces (restrictive sysctl / seccomp) has bwrap on PATH but cannot confine, so we must
     /// fall back to unconfined rather than fail every run. Result is cached for the process lifetime.
     /// </summary>
-    private static string? Probe()
+    private static BwrapProbeResult Probe()
     {
-        if (!OperatingSystem.IsLinux()) return null;
+        if (!OperatingSystem.IsLinux()) return BwrapProbeResult.Unavailable(SandboxConfinement.ReasonNotLinux);
 
         var path = Environment.GetEnvironmentVariable(CommandEnvVar) is { Length: > 0 } p ? p : DefaultCommand;
 
@@ -181,20 +202,31 @@ public static class BubblewrapSandbox
                 psi.ArgumentList.Add(arg);
 
             using var proc = Process.Start(psi);
-            if (proc is null) return null;
+            if (proc is null) return BwrapProbeResult.Unavailable(SandboxConfinement.ReasonNoBubblewrap);
 
             if (!proc.WaitForExit(ProbeTimeoutMs))
             {
                 try { proc.Kill(entireProcessTree: true); } catch { /* best-effort */ }
-                return null;
+                return BwrapProbeResult.Unavailable(SandboxConfinement.ReasonNoUserNamespaces);
             }
 
-            return proc.ExitCode == 0 ? path : null;
+            // A NON-ZERO exit means bwrap ran and REFUSED to confine — denied unprivileged userns, or flags this
+            // build doesn't know. Distinct from the binary not being there at all, and the distinction is the whole
+            // point of recording a reason: one is "install bwrap", the other "allow user namespaces".
+            return proc.ExitCode == 0 ? BwrapProbeResult.Confining(path) : BwrapProbeResult.Unavailable(SandboxConfinement.ReasonNoUserNamespaces);
         }
         catch
         {
-            return null;   // bwrap absent / not executable / userns denied → unconfined fallback
+            return BwrapProbeResult.Unavailable(SandboxConfinement.ReasonNoBubblewrap);   // bwrap absent / not executable → unconfined fallback
         }
+    }
+
+    /// <summary>The probe's two facts kept together — the resolved path when this host confines, else the reason it does not. Cached once, so the reason costs nothing beyond the probe already run.</summary>
+    private readonly record struct BwrapProbeResult(string? Path, string? Reason)
+    {
+        public static BwrapProbeResult Confining(string path) => new(path, null);
+
+        public static BwrapProbeResult Unavailable(string reason) => new(null, reason);
     }
 }
 

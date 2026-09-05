@@ -101,27 +101,51 @@ public static class AgentAutonomyPolicy
     ///     are different facts.</item>
     /// </list>
     ///
-    /// <para><b>Why "off" is qualified.</b> The tier's <see cref="AgentPermissions.Network"/> becomes a real severed
-    /// namespace only where <c>LocalProcessRunner</c> rewrites the command as a bubblewrap invocation, which needs
-    /// <c>BubblewrapSandbox.Available</c> — absent on macOS development, on a host without <c>bwrap</c>, and on one
-    /// that denies unprivileged user namespaces. <c>Sandbox:RequireConfinement</c> (the setting that turns an
-    /// unconfinable host into a refused run) defaults to FALSE, so an unqualified "off" would be a claim this
-    /// sentence cannot make. The runner records no per-run confinement outcome to read back, so the caveat is stated
-    /// rather than resolved; when it does, this is the one place that changes.</para>
+    /// <para><b>Why "off" is qualified — and when it stops being.</b> The tier's <see cref="AgentPermissions.Network"/>
+    /// becomes a real severed namespace only where <c>LocalProcessRunner</c> rewrites the command as a bubblewrap
+    /// invocation, which needs <c>BubblewrapSandbox.Available</c> — absent on macOS development, on a host without
+    /// <c>bwrap</c>, and on one that denies unprivileged user namespaces. <c>Sandbox:RequireConfinement</c> (the
+    /// setting that turns an unconfinable host into a refused run) is committed off, so with nothing else to go on an
+    /// unqualified "off" would be a claim this sentence cannot make. A run whose launch RECORDED its confinement
+    /// (<paramref name="confinement"/>, from <c>agent_run.sandbox_confinement</c>) has something else to go on: the
+    /// caveat is then replaced by what actually happened — <c>confined: egress severed</c>, or the loud
+    /// <c>OFF REQUESTED BUT UNCONFINED</c> naming the wall the host hit. Passing null (an old run, an un-launched
+    /// composer preview) keeps the hedge, which is the honest answer when nothing was recorded. The "on" sentence
+    /// takes no qualifier either way: it claims network, which the tier alone already settles.</para>
     /// </summary>
-    public static string DescribeNetwork(AgentAutonomyLevel effective, AgentAutonomyLevel ceiling)
+    public static string DescribeNetwork(AgentAutonomyLevel effective, AgentAutonomyLevel ceiling, SandboxConfinement? confinement = null)
     {
+        // "on" needs no record to be honest — it was never the claim this row exists to qualify — so it keeps its
+        // unqualified sentence whether or not a posture was recorded.
         if (Derive(effective).Network == AgentNetworkAccess.On) return $"Network: on ({effective})";
 
-        if (Derive(ceiling).Network != AgentNetworkAccess.On) return $"Network: clamped off by policy (ceiling {ceiling}){ConfinementCaveat}";
+        var qualifier = OffQualifier(confinement);
 
-        return $"Network: off ({effective}){ConfinementCaveat}";
+        if (Derive(ceiling).Network != AgentNetworkAccess.On) return $"Network: clamped off by policy (ceiling {ceiling}){qualifier}";
+
+        return $"Network: off ({effective}){qualifier}";
     }
 
     /// <summary>
-    /// The qualifier every "off" posture carries — the sandbox severs egress only where it actually confines (see
-    /// <see cref="DescribeNetwork"/>). A named constant because the Launch composer states the SAME posture before a
-    /// run exists, and the two wordings are pinned against each other by a committed fixture
+    /// What replaces <see cref="ConfinementCaveat"/> once a run's launch recorded its posture. An unconfined run is
+    /// stated LOUDLY (upper case, naming the reason): "off" there is a permission the OS never enforced, which is a
+    /// materially different fact from a severed namespace and must not read like a milder version of it.
+    /// <see cref="SandboxConfinementOutcome.NotApplicable"/> is such a run too — no confinement was even attempted.
+    /// </summary>
+    private static string OffQualifier(SandboxConfinement? confinement) => confinement switch
+    {
+        null => ConfinementCaveat,
+        { Outcome: SandboxConfinementOutcome.Confined, NetworkSevered: true } => " — confined: egress severed",
+        { Outcome: SandboxConfinementOutcome.Confined } => " — confined, but egress was NOT severed",
+        { Outcome: SandboxConfinementOutcome.Unconfined } c => $" — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress ({c.Reason ?? "unknown"})",
+        _ => " — OFF REQUESTED BUT UNCONFINED: this runner applies no confinement",
+    };
+
+    /// <summary>
+    /// The qualifier an "off" posture carries when NO confinement record exists — the sandbox severs egress only
+    /// where it actually confines (see <see cref="DescribeNetwork"/>). It remains the Launch composer's wording by
+    /// construction: the composer speaks before a run exists, so there is never a record to resolve. A named constant
+    /// because the two wordings are pinned against each other by a committed fixture
     /// (<c>frontend/src/lib/networkPosture.fixture.json</c>) that both stacks assert on.
     /// </summary>
     public const string ConfinementCaveat = " — severed only where the sandbox confines";

@@ -178,6 +178,39 @@ public sealed class BubblewrapConfinementSandboxTests : IDisposable
 
     // ─── Shared real-process harness (GUID-keyed spool dirs, cleaned up — Rule 12.2/12.3) ─────────
 
+    [Theory]
+    // The launch's OWN record of what it did, on a host that really can confine: severed when the run was denied
+    // network, shared when it was granted it. Everything downstream (the Room's Launch row, the real-model stamp)
+    // reads this record, so proving it against a live kernel is what stops those readers from re-inventing a hedge.
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public async Task A_confining_host_records_confinement_and_the_severance_it_applied(bool allowNetwork, bool expectSevered)
+    {
+        if (BubblewrapSandbox.Available is null)
+        {
+            // Same honest skip as the confinement E2E above: where the validation container mandates confinement,
+            // an unavailable sandbox is a hard failure, so this can never silently no-op into a green run.
+            BubblewrapSandbox.IsRequired.ShouldBeFalse("Sandbox:RequireConfinement is set but this host cannot sandbox (bwrap/userns) — the E2E cannot prove a Confined record here");
+            return;
+        }
+
+        var workspace = TempDir();
+
+        var handle = await LaunchAsync(new SandboxSpec
+        {
+            Command = "/bin/sh", Args = new[] { "-c", "true" }, WorkingDirectory = workspace,
+            AllowNetwork = allowNetwork, TimeoutSeconds = 30,
+        });
+
+        var confinement = handle.Confinement.ShouldNotBeNull("a durable launch must stamp what confinement it applied");
+
+        confinement.Outcome.ShouldBe(SandboxConfinementOutcome.Confined,
+            customMessage: "this host resolved a working bwrap, so the launch confined — a record saying otherwise would understate the isolation the run actually had");
+        confinement.Reason.ShouldBeNull("a confined run has no unconfinable reason to name");
+        confinement.NetworkSevered.ShouldBe(expectSevered,
+            customMessage: $"AllowNetwork={allowNetwork} must record NetworkSevered={expectSevered} — the same fact --unshare-net expresses in the argv");
+    }
+
     private async Task<SandboxHandle> LaunchAsync(SandboxSpec spec, CancellationToken ct = default)
     {
         var handle = await _runner.LaunchAsync(spec, Guid.NewGuid().ToString("N"), ct);

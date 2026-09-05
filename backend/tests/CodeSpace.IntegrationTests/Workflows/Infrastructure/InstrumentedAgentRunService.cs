@@ -75,6 +75,8 @@ public sealed class InstrumentedAgentRunService : IAgentRunService
 
     public Task SetRunnerHandleAsync(Guid runId, string handleJson, CancellationToken cancellationToken) => _inner.SetRunnerHandleAsync(runId, handleJson, cancellationToken);
 
+    public Task SetSandboxConfinementAsync(Guid runId, string confinementJson, CancellationToken cancellationToken) => _inner.SetSandboxConfinementAsync(runId, confinementJson, cancellationToken);
+
     public Task CompleteAsync(Guid runId, AgentRunResult result, CancellationToken cancellationToken) => _inner.CompleteAsync(runId, result, cancellationToken);
 
     public Task CompleteAsync(Guid runId, AgentRunResult result, long expectedEpoch, CancellationToken cancellationToken) => _inner.CompleteAsync(runId, result, expectedEpoch, cancellationToken);

@@ -1,6 +1,8 @@
 using Shouldly;
+using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Llm;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
@@ -13,6 +15,29 @@ namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 /// </summary>
 public sealed class RealModelGateTests
 {
+    [Theory]
+    // INFORMATIONAL, never gating: a lane whose runner cannot confine produced its verdict under a materially
+    // different sandbox from the privileged gate's, and the reader of an archived summary has no other way to tell.
+    [InlineData("/usr/bin/bwrap", null, " [runner=confined]")]
+    [InlineData(null, SandboxConfinement.ReasonNotLinux, " [runner=unconfined (not-linux)]")]
+    [InlineData(null, SandboxConfinement.ReasonNoBubblewrap, " [runner=unconfined (no-bwrap)]")]
+    [InlineData(null, SandboxConfinement.ReasonNoUserNamespaces, " [runner=unconfined (no-userns)]")]
+    public void Every_verdict_line_names_the_confinement_its_runner_could_apply(string? available, string? reason, string expected)
+    {
+        RealModelGate.ConfinementStamp(available, reason).ShouldBe(expected,
+            customMessage: "an archived real-model verdict must say which sandbox produced it — 'confined' and 'unconfined' are different experiments");
+    }
+
+    [Fact]
+    public void The_confinement_stamp_reports_THIS_hosts_real_probe()
+    {
+        // The live overload must be the probe, not a constant: a stamp that always said "confined" would be worse
+        // than none. Anchored on the host's own probe so the assertion is honest on a dev Mac and in the gate alike.
+        var expected = BubblewrapSandbox.Available is null ? " [runner=unconfined" : " [runner=confined]";
+
+        RealModelGate.ConfinementStamp().ShouldStartWith(expected);
+    }
+
     [Fact]
     public void Gate_policy_env_var_names_are_pinned()
     {

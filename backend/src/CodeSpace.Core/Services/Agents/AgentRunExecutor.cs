@@ -2991,7 +2991,24 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             return await RunDurableAsync(context, durable, persistFrame, sinks, cancellationToken).ConfigureAwait(false);
 
         // Non-durable fallback (no spool/checkpoint): the writer's size cap + the caller's final flush drain it.
+        // It applies no OS confinement at all, which is a posture in its own right — recorded so a reader is told
+        // "nothing was attempted" rather than being left to assume the sandbox severed something.
+        await RecordConfinementAsync(context.RunId, new SandboxConfinement { Outcome = SandboxConfinementOutcome.NotApplicable }, cancellationToken).ConfigureAwait(false);
+
         return await RunAndStreamAsync(context.Runner, context.Spec, persistLine, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Persist, once per launch, what confinement the run actually got. Written beside the handle rather than inside
+    /// it because the spool reaper nulls the handle 24h after a terminal run, and a run's posture must stay readable
+    /// for as long as its journal is. A runner that stamps nothing (an older handle) records nothing — the readers'
+    /// no-record branch then keeps the hedged wording instead of inventing an enforced one.
+    /// </summary>
+    private async Task RecordConfinementAsync(Guid runId, SandboxConfinement? confinement, CancellationToken cancellationToken)
+    {
+        if (confinement is null) return;
+
+        await _runs.SetSandboxConfinementAsync(runId, JsonSerializer.Serialize(confinement, AgentJson.Options), cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -3024,6 +3041,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         handle = EnsureLogCaptureHandle(handle, durable);
 
         await _runs.SetRunnerHandleAsync(context.RunId, JsonSerializer.Serialize(handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
+        await RecordConfinementAsync(context.RunId, handle.Confinement, cancellationToken).ConfigureAwait(false);
         var capture = await OpenLogCaptureAsync(new LogCaptureContext(context.TeamId, context.RunId, context.ActorId, context.WorkerFenceEpoch, context.Redactor), durable, handle, cancellationToken).ConfigureAwait(false);
         if (capture.Handle != handle)
             await _runs.SetRunnerHandleAsync(context.RunId, JsonSerializer.Serialize(capture.Handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);

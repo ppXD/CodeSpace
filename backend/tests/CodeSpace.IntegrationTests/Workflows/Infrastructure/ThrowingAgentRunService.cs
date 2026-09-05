@@ -38,6 +38,8 @@ public sealed class ThrowingAgentRunService : IAgentRunService
 
     public Task SetRunnerHandleAsync(Guid runId, string handleJson, CancellationToken cancellationToken) => _inner.SetRunnerHandleAsync(runId, handleJson, cancellationToken);
 
+    public Task SetSandboxConfinementAsync(Guid runId, string confinementJson, CancellationToken cancellationToken) => _inner.SetSandboxConfinementAsync(runId, confinementJson, cancellationToken);
+
     public Task<AgentRunEvent> AppendEventAsync(Guid runId, AgentEvent @event, CancellationToken cancellationToken) => _inner.AppendEventAsync(runId, @event, cancellationToken);
 
     public Task AppendEventsAsync(Guid runId, IReadOnlyList<AgentEvent> events, CancellationToken cancellationToken) => _inner.AppendEventsAsync(runId, events, cancellationToken);

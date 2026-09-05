@@ -58,6 +58,9 @@ public interface IAgentRunService
     /// </summary>
     Task SetRunnerHandleAsync(Guid runId, string handleJson, CancellationToken cancellationToken);
 
+    /// <summary>Record, once at launch, what confinement the run actually got (a serialized <c>SandboxConfinement</c>). A SIBLING of the handle write, not a widening of it (Rule 7): the handle is reaped, this record is permanent.</summary>
+    Task SetSandboxConfinementAsync(Guid runId, string confinementJson, CancellationToken cancellationToken);
+
     /// <summary>Append one normalized event to the run's append-only log. Sequence + timestamp are DB-assigned.</summary>
     Task<AgentRunEvent> AppendEventAsync(Guid runId, AgentEvent @event, CancellationToken cancellationToken);
 
@@ -299,6 +302,16 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         await _db.AgentRun
             .Where(r => r.Id == runId)
             .ExecuteUpdateAsync(s => s.SetProperty(r => r.RunnerHandleJson, handleJson), cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async Task SetSandboxConfinementAsync(Guid runId, string confinementJson, CancellationToken cancellationToken)
+    {
+        // Same tracking-free set-based UPDATE as the handle write, and for the same reasons — it must never
+        // participate in the executor's optimistic concurrency or block a completion CAS. A missing row is a no-op.
+        await _db.AgentRun
+            .Where(r => r.Id == runId)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.SandboxConfinementJson, confinementJson), cancellationToken)
             .ConfigureAwait(false);
     }
 

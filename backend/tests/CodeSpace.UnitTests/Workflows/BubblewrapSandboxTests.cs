@@ -1,4 +1,5 @@
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
+using CodeSpace.Messages.Agents;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Workflows;
@@ -19,6 +20,43 @@ public sealed class BubblewrapSandboxTests
         HomeDir = home,
         WritablePaths = new[] { "/work/ws", "/spool/agent-home" },
     };
+
+    [Theory]
+    // Unavailable → Unconfined, carrying the probe's OWN reason verbatim: a run's record has to name the wall the
+    // host hit ("install bwrap" and "allow user namespaces" are different fixes), not a generic "unavailable".
+    [InlineData(null, SandboxConfinement.ReasonNotLinux, false, SandboxConfinementOutcome.Unconfined, SandboxConfinement.ReasonNotLinux, false)]
+    [InlineData(null, SandboxConfinement.ReasonNoBubblewrap, false, SandboxConfinementOutcome.Unconfined, SandboxConfinement.ReasonNoBubblewrap, false)]
+    [InlineData(null, SandboxConfinement.ReasonNoUserNamespaces, true, SandboxConfinementOutcome.Unconfined, SandboxConfinement.ReasonNoUserNamespaces, false)]
+    // An unconfined run NEVER records a severed egress, whatever the tier asked for — that is the entire dishonesty
+    // this record ends, so a network-off request on an unconfinable host must still come back NetworkSevered:false.
+    [InlineData(null, null, false, SandboxConfinementOutcome.Unconfined, SandboxConfinement.ReasonNoBubblewrap, false)]
+    // Available + network NOT shared (the tier's Off) → confinement applied AND --unshare-net set.
+    [InlineData("/usr/bin/bwrap", null, false, SandboxConfinementOutcome.Confined, null, true)]
+    // Available + network shared (an On tier, or an inherited filtered netns) → confined, but nothing severed.
+    [InlineData("/usr/bin/bwrap", null, true, SandboxConfinementOutcome.Confined, null, false)]
+    public void DeriveConfinement_records_what_the_launch_actually_did(string? available, string? reason, bool shareNetwork, SandboxConfinementOutcome expectedOutcome, string? expectedReason, bool expectedSevered)
+    {
+        var confinement = BubblewrapSandbox.DeriveConfinement(available, reason, shareNetwork);
+
+        confinement.Outcome.ShouldBe(expectedOutcome);
+        confinement.Reason.ShouldBe(expectedReason);
+        confinement.NetworkSevered.ShouldBe(expectedSevered,
+            customMessage: "NetworkSevered must mirror the SAME ShareNetwork input BuildArgs turns into --unshare-net — a record that can outrun the argv is worse than no record");
+    }
+
+    [Fact]
+    public void DeriveConfinement_severance_agrees_with_the_argv_the_same_input_builds()
+    {
+        // The drift guard between the RECORD and the COMMAND LINE: both are derived from ShareNetwork, so pin that
+        // they answer the same question. A future edit that severs in one and not the other reds here.
+        foreach (var shareNetwork in new[] { true, false })
+        {
+            var severedInArgv = BubblewrapSandbox.BuildArgs(Plan() with { ShareNetwork = shareNetwork }).Contains("--unshare-net");
+
+            BubblewrapSandbox.DeriveConfinement("/usr/bin/bwrap", null, shareNetwork).NetworkSevered.ShouldBe(severedInArgv,
+                customMessage: $"the record and the argv disagree about severance for ShareNetwork={shareNetwork}");
+        }
+    }
 
     [Fact]
     public void Builds_a_confining_argv_over_a_readonly_root_with_only_the_run_paths_writable()

@@ -502,6 +502,28 @@ describe("network posture wording — the cross-stack drift detector", () => {
     }
   });
 
+  // Once a run's launch RECORDS what the sandbox actually did, the backend REPLACES the hedge with the truth
+  // (AgentAutonomyPolicy.DescribeNetwork's confinement branch). The composer can never produce those lines — it
+  // speaks before a run exists — so the frontend's obligation is the boundary, not the wording: it must keep
+  // hedging, and the resolved sentences must never be the hedge with something bolted on.
+  it("never predicts a resolved posture, and the resolved ones never keep the hedge", () => {
+    for (const c of fixture.confinementCases) {
+      expect(c.line.includes(NETWORK_CONFINEMENT_CAVEAT)).toBe(false);
+
+      // The composer, having no record, still says the hedged (or plain "on") thing for the same tier pair.
+      const predicted = describeNetwork(c.effective, c.ceiling);
+      if (predicted.includes("Network: on (")) continue;
+      expect(predicted.endsWith(NETWORK_CONFINEMENT_CAVEAT)).toBe(true);
+    }
+  });
+
+  it("pins an unconfined run as LOUD — an unenforced 'off' must not read like a severed one", () => {
+    const unconfined = fixture.confinementCases.filter((c) => c.confinement.outcome !== "Confined");
+
+    expect(unconfined.length).toBeGreaterThan(0);
+    for (const c of unconfined) expect(c.line).toContain("UNCONFINED");
+  });
+
   it("resolves the composer's ceiling from BOTH bounds — the preset's and the operator's", () => {
     expect(routeCeiling("deep")).toBe("Trusted");
     expect(routeCeiling("standard")).toBe("Trusted");

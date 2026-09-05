@@ -40,6 +40,15 @@ public sealed record SandboxHandle
     /// <summary>Runner kind that owns this handle (e.g. "local"). Matches <c>ISandboxRunner.Kind</c> so a reader resolves the right runner to interpret it.</summary>
     public required string Kind { get; init; }
 
+    /// <summary>
+    /// What confinement this launch ACTUALLY applied — bubblewrap or not, and whether egress was severed. The runner
+    /// is the only component that knows (it alone reads <c>BubblewrapSandbox.Available</c> while building the argv),
+    /// so the handle it already returns at launch is the transport that carries the fact out to the executor, which
+    /// persists it on its own durable column. Null on a handle written before this stamp existed — a run whose
+    /// posture was never recorded, and which must therefore keep the old hedged wording rather than be guessed at.
+    /// </summary>
+    public SandboxConfinement? Confinement { get; init; }
+
     /// <summary>OS pid of the supervisor process owning the spool redirection. Probing it (e.g. <c>kill -0</c>) distinguishes a live run from a crashed one.</summary>
     public required int ProcessId { get; init; }
 
