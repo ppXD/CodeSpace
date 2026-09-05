@@ -331,12 +331,22 @@ public sealed class AgentCodeNode : INodeRuntime
             // identical second attempt.
             var escalationAvailable = ReadOptionalString(payload, "proposedEscalation", "to") is { Length: > 0 };
 
-            var deterministic = (status is nameof(AgentRunStatus.NeedsReview) or nameof(AgentRunStatus.Cancelled) || acceptanceFailed || resourceExhausted)
+            // A gateway format fault is infra — the wire was mangled, the model never got a turn — so it retries
+            // like any transient death, and the respawn applies the one repair there is (a fresh conversation with
+            // extended thinking disabled, ApplyRespawnResumeHint). That repair is bought EXACTLY ONCE: an attempt
+            // that ALREADY ran mitigated (`thinkingDisabled`, projected from its own dispatched envelope) and died
+            // of the SAME fault has proven the repair does not hold here, so a second identical respawn would only
+            // re-bill a broken gateway and bury the one fact the operator needs.
+            var formatFault = Supervisor.AgentRetryCauses.Classify(error) == Supervisor.AgentRetryCauses.GatewayFormatFault;
+            var mitigationSpent = formatFault && ReadFlag(payload, "thinkingDisabled");
+
+            var deterministic = ((status is nameof(AgentRunStatus.NeedsReview) or nameof(AgentRunStatus.Cancelled) || acceptanceFailed || resourceExhausted)
                                 && !acceptanceInfraFault
                                 && !stalled
-                                && !escalationAvailable;
+                                && !escalationAvailable)
+                                || mitigationSpent;
 
-            return NodeResult.Fail($"Agent run did not succeed: {(string.IsNullOrEmpty(error) ? status : error)}", retryable: !deterministic);
+            return NodeResult.Fail($"Agent run did not succeed: {(string.IsNullOrEmpty(error) ? status : error)}{FailureCauseSuffix(formatFault, mitigationSpent)}", retryable: !deterministic);
         }
 
         var outputs = new Dictionary<string, JsonElement> { ["status"] = JsonSerializer.SerializeToElement(nameof(AgentRunStatus.Succeeded)) };
@@ -354,6 +364,19 @@ public sealed class AgentCodeNode : INodeRuntime
     }
 
     /// <summary>
+    /// Name the CAUSE on a gateway format fault's failure message — the text the engine persists as this attempt's
+    /// <c>attempt.failed</c> / <c>node.failed</c> record, so the run's timeline says the gateway mangled the wire
+    /// instead of only echoing an opaque CLI line. Deliberately states no more than is true at that instant: it
+    /// never promises a respawn (whether one is bought is the node's retry budget, which this node cannot see),
+    /// and on the spent-mitigation arm it says the repair already ran. Empty for every other failure, so every
+    /// existing message stays byte-identical.
+    /// </summary>
+    private static string FailureCauseSuffix(bool formatFault, bool mitigationSpent) =>
+        !formatFault ? ""
+            : mitigationSpent ? $" ({Supervisor.AgentRetryCauses.GatewayFormatFault}: a fresh conversation with extended thinking disabled hit the same fault)"
+                : $" ({Supervisor.AgentRetryCauses.GatewayFormatFault})";
+
+    /// <summary>
     /// P2.3: stamp the retry-resume hint from the RETIRING prior attempt's own resume payload (the same
     /// sessionId/transcript triple <c>RealSupervisorActionExecutor.ApplyRetryResumeHintAsync</c> reads from a DB
     /// query for a supervisor-orchestrated subtask retry) — or return the task unchanged when this isn't a
@@ -366,12 +389,29 @@ public sealed class AgentCodeNode : INodeRuntime
     /// preserved, the goal is told so in the same words the supervisor lane uses
     /// (<see cref="AgentRetryContinuity.HonestNoContinuityHint"/>), and ONLY then — the line asserts a restored
     /// conversation, so it must never fire on a session-less respawn.</para>
+    ///
+    /// <para>ONE cause inverts the resume decision: a gateway FORMAT fault
+    /// (<see cref="Supervisor.AgentRetryCauses.GatewayFormatFault"/>) is the failure whose repair is to DROP the
+    /// conversation rather than continue it, so the respawn takes the shared mitigation instead — see below.</para>
     /// </summary>
     private static AgentTask ApplyRespawnResumeHint(AgentTask task, JsonElement? priorAttemptPayload)
     {
         if (priorAttemptPayload is not { } payload) return task;
 
         var (repinned, honestyOwed) = RepinWorkspaceToPriorAttempt(task, payload);
+
+        // The gateway mangled the wire, not the model: the claude CLI dies in seconds with "Content block is not a
+        // thinking block", before any turn. Warm-resuming that attempt re-sends the very transcript the mangled
+        // block lives in, so every retry re-triggers it and the whole run is lost to a transient gateway fault.
+        // The SHARED mitigation — the same composition the supervisor's `retry` applies — respawns the SAME task on
+        // the SAME model with a FRESH conversation and extended thinking disabled. The repin above still stands
+        // (the broken conversation is dropped, the produced work is not), and the honest-redo line deliberately
+        // does NOT fire: it asserts a restored conversation, and this respawn has none.
+        //
+        // Read off the SAME `error` field the supervisor lane classifies (AgentRunResult.Error ?? run.Error, the
+        // harness's own folded exit text) through the SAME classifier — one marker vocabulary, not two.
+        if (Supervisor.AgentRetryCauses.Classify(ReadOptionalString(payload, "error")) == Supervisor.AgentRetryCauses.GatewayFormatFault)
+            return Supervisor.AgentRetryCauses.ApplyFormatFaultMitigation(repinned);
 
         if (ReadOptionalString(payload, "sessionId") is not { } sessionId) return repinned;
 
@@ -616,6 +656,10 @@ public sealed class AgentCodeNode : INodeRuntime
         Guid.TryParse(ReadOptionalString(bag, key), out var id) ? id : null;
 
     /// <summary>One optional string inside a nested object of the payload (e.g. <c>proposedEscalation.to</c>) — null when either level is absent, null, or not the expected kind. Tolerant by design: this reads an informational hint, and a malformed one must degrade to "no hint", never fail the node.</summary>
+    /// <summary>Read a boolean FACT off the resume payload. Absent / non-boolean → false — the shape every payload written before the key existed has, so an old settled wait re-read after a deploy reads as "not mitigated" rather than throwing.</summary>
+    private static bool ReadFlag(JsonElement bag, string key) =>
+        bag.ValueKind == JsonValueKind.Object && bag.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.True;
+
     private static string? ReadOptionalString(JsonElement bag, string objectKey, string key) =>
         bag.ValueKind == JsonValueKind.Object && bag.TryGetProperty(objectKey, out var nested) && nested.ValueKind == JsonValueKind.Object
             ? ReadOptionalString(nested, key)

@@ -87,6 +87,7 @@ public sealed class WorkflowResumeAgentRunCompletionNotifier : IAgentRunCompleti
     internal static string BuildResumePayload(AgentRun run)
     {
         var result = string.IsNullOrWhiteSpace(run.ResultJson) ? null : JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options);
+        var dispatched = DispatchedTask(run);
 
         return JsonSerializer.Serialize(new
         {
@@ -112,7 +113,12 @@ public sealed class WorkflowResumeAgentRunCompletionNotifier : IAgentRunCompleti
             // task's own envelope (the executor keeps it truthful per round), because a harness that never names
             // its model in-stream would otherwise leave the next attempt blind about what already ran.
             contradiction = result?.Contradiction,
-            model = result?.Model ?? DispatchedModel(run),
+            model = result?.Model ?? dispatched?.Model,
+            // Whether THIS attempt was itself the gateway-format-fault repair (a fresh conversation with extended
+            // thinking disabled). Read off the dispatched envelope because that is where the repair is written, and
+            // it is the bound on the repair: the node buys it once, so an attempt that already carried it and died
+            // of the same fault is terminal instead of being respawned identically into a still-broken gateway.
+            thinkingDisabled = dispatched is not null && Supervisor.AgentRetryCauses.IsFormatFaultMitigated(dispatched),
             // D3: the escalation the finished attempt says the NEXT one should apply — already RESOLVED against the
             // pool (only the executor can read it). The node's retry verdict keys on its `to`: a stronger model
             // means a deterministic acceptance failure is still worth respawning; a null `to` means it is not, and
@@ -129,12 +135,12 @@ public sealed class WorkflowResumeAgentRunCompletionNotifier : IAgentRunCompleti
         }, AgentJson.Options);
     }
 
-    /// <summary>The model this attempt was DISPATCHED on, read off its persisted task envelope (the executor stamps the resolved — and, when it escalated, the escalated — model there at launch). The fallback for a harness whose stream never names a model, and BEST-EFFORT: this is informational metadata for the next attempt's escalation floor, so an unreadable envelope reads as "unknown" rather than failing the resume that carries the run's actual outcome.</summary>
-    private static string? DispatchedModel(AgentRun run)
+    /// <summary>The envelope this attempt was DISPATCHED with — the executor stamps the resolved (and, when it escalated, the escalated) model there at launch, and the format-fault repair writes its degrade into that same envelope's environment. BEST-EFFORT: everything read from it is metadata ABOUT the attempt, not the attempt's outcome, so an unreadable envelope degrades to "unknown" rather than failing the resume that carries the run's actual result.</summary>
+    private static AgentTask? DispatchedTask(AgentRun run)
     {
         if (string.IsNullOrWhiteSpace(run.TaskJson)) return null;
 
-        try { return JsonSerializer.Deserialize<AgentTask>(run.TaskJson, AgentJson.Options)?.Model; }
+        try { return JsonSerializer.Deserialize<AgentTask>(run.TaskJson, AgentJson.Options); }
         catch (JsonException) { return null; }
     }
 }
