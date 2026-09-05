@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 import type { RoutePlan, TaskSpecSuggestion, TaskSurfaceKind } from "@/api/tasks";
-import { buildLaunchInput, buildRoutePreviewInput, DEFAULT_ACCEPTANCE, effectiveAutonomy, tierGrantsNetwork, type LaunchBooleanOverride, type LaunchFormState } from "@/lib/launchInput";
+import { buildLaunchInput, buildRoutePreviewInput, DEFAULT_ACCEPTANCE, describeNetwork, effectiveAutonomy, NETWORK_CONFINEMENT_CAVEAT, routeCeiling, tierGrantsNetwork, type LaunchBooleanOverride, type LaunchFormState } from "@/lib/launchInput";
 import { presetOf, QUALITY_PRESETS, type QualityTier } from "@/lib/qualityPresets";
 import { Combo, type Option } from "@/components/common/Combo";
 import { DecisionLadderDiagram, EvaluationPipelineDiagram, HelpTip, PlanCriticDiagram } from "@/components/tasks/LaunchHelp";
@@ -65,18 +65,23 @@ const PERMS = [
   { v: "Trusted", d: "workspace edits · network" },
   { v: "Unleashed", d: "controlled runner · high trust" },
 ];
-// Which of PERMS a launch on THIS tier can actually reach — the composer never offers a tier the backend would
-// silently reduce (TaskLaunchService.ClampAutonomy clamps every request to the effort preset's AutonomyCeiling).
-// Confined/Standard are reachable everywhere. Trusted — the only tier that grants network — is reachable exactly
-// where its preset admits it (Standard/Deep cap at Trusted; Quick at Standard). Unleashed is reachable nowhere:
-// no preset names it, so it stays an option-shape entry only.
-const reachablePerms = (effort: string) =>
-  PERMS.filter(p => p.v === "Confined" || p.v === "Standard" || (p.v === "Trusted" && tierGrantsNetwork(effort)));
+// Which of PERMS a launch can actually reach — the composer never offers a tier the backend would silently reduce
+// (TaskLaunchService.ClampAutonomy clamps every request to the route ceiling). Defined as "the shared clamp leaves
+// it alone", so it tracks BOTH bounds the ceiling is made of: the effort preset's own (Standard/Deep cap at Trusted,
+// the only tier granting network; Quick/Auto at Standard) and the Coordination tab's tighten-only override. Unleashed
+// is reachable nowhere — no preset names it, so it stays an option-shape entry only.
+const reachablePerms = (effort: string, autonomyCeiling = "") =>
+  PERMS.filter(p => effectiveAutonomy(p.v, effort, autonomyCeiling) === p.v);
 
-/** The Network row's two answers. "On" is stated with its real consequence, not a reassurance. */
+/** The consequence of On, stated plainly — no reassurance, no policy that does not exist. `On` grants the HOST
+ *  network to every agent the run spawns, and the model credential the agents run on is in their environment. */
+const NETWORK_ON_CONSEQUENCE = "Every agent this run spawns reaches the host network — the public internet, your LAN, and cloud metadata endpoints. The model credential is present in the agent's environment.";
+
+/** The Network row's two answers. Off is qualified the same way the run's journal qualifies it: the tier's Off is a
+ *  permission, and it becomes severed egress only where the sandbox actually confines. */
 const NETWORK_OPTIONS: Option[] = [
-  { value: "off", label: "Off", desc: "The sandbox severs egress: no package installs, no pushes, no API calls" },
-  { value: "on", label: "On", desc: "Agents may reach the internet; pushes and package installs work; egress is not sandboxed beyond team policy" },
+  { value: "off", label: "Off", desc: `The agents are granted no network${NETWORK_CONFINEMENT_CAVEAT}` },
+  { value: "on", label: "On", desc: NETWORK_ON_CONSEQUENCE },
 ];
 
 /**
@@ -114,19 +119,6 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   // an off-tier control renders as a muted read-only row instead of an armed switch the wire would silently drop.
   const planCapable = effort !== "quick";   // every tier that authors a plan can park on it + critique it
 
-  // Network is NOT an independent axis: `Trusted` IS "workspace edits + network" (AgentAutonomyPolicy.Derive), so
-  // the Permissions row and the Network row read and write ONE value and can never disagree. Shown EFFECTIVE, never
-  // raw — a Trusted pick made on Deep has to visibly fall back to Standard when the tier changes to Fast, because
-  // that is what the wire does too (buildLaunchInput), and the composer must show what actually launches.
-  const autonomyShown = effectiveAutonomy(autonomy, effort);
-  const networkOn = autonomyShown === "Trusted";
-  // The one honest consequence line — the same posture sentence the run's journal will carry, said BEFORE launching.
-  const networkPosture = !tierGrantsNetwork(effort)
-    ? "Network: off — this tier's ceiling is Standard, which has no network. Switch Effort to Standard or Deep to choose."
-    : networkOn
-      ? "Network: on (Trusted) — agents may reach the internet; pushes and package installs work; egress is not sandboxed beyond team policy."
-      : "Network: off (Standard) — the sandbox severs egress: no package installs, no pushes, no API calls.";
-
   // TIER-AWARE Gate copy: the same "Plan critic = Gate" is a SOFT annotate-for-the-human on Standard (concerns land
   // as risks on the plan / confirm card, the plan is never discarded) but the HARD decision ladder on Deep (a flagged
   // plan does not execute — self-revise → re-review → escalate). Same wire value, different consequence — say so.
@@ -149,6 +141,22 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
     decisionReview: "None", outputReview: "None", reviewerModel: "", reviseRounds: "", reviewerAgent: false,
   });
   const setC = (p: Partial<typeof cfg>) => setCfg(c => ({ ...c, ...p }));
+
+  // Network is NOT an independent axis: `Trusted` IS "workspace edits + network" (AgentAutonomyPolicy.Derive), so
+  // the Permissions row and the Network row read and write ONE value and can never disagree. Shown EFFECTIVE, never
+  // raw — a Trusted pick made on Deep has to visibly fall back to Standard when the tier changes to Fast, AND when
+  // the Coordination tab's own Autonomy ceiling (which rides the same wire and tightens the route) forbids it. That
+  // is what the wire does too (buildLaunchInput), and the composer must show what actually launches.
+  const ceilingShown = routeCeiling(effort, cfg.autonomyCeiling);
+  const autonomyShown = effectiveAutonomy(autonomy, effort, cfg.autonomyCeiling);
+  const networkOn = autonomyShown === "Trusted";
+  // The one honest consequence line: the SAME sentence AgentAutonomyPolicy.DescribeNetwork will write into the run's
+  // journal (shared words, pinned by networkPosture.fixture.json), plus what On actually costs. Off-tier keeps its
+  // own copy — there the resolved ceiling is not known yet, so it names the reason instead of claiming one.
+  const networkPosture = !tierGrantsNetwork(effort)
+    ? `Network: off${NETWORK_CONFINEMENT_CAVEAT} — this tier's ceiling is Standard, which has no network. Switch Effort to Standard or Deep to choose.`
+    : `${describeNetwork(autonomyShown, ceilingShown)}.${networkOn ? ` ${NETWORK_ON_CONSEQUENCE}` : ""}`;
+
   // "Time limit" defaults to 1h everywhere EXCEPT Deep, which defaults to 2h (matching
   // TaskLaunchService.DeepAgentTimeoutSeconds) — untouched, the row shows/sends that tier's OWN default (never
   // touched ⇒ omitted from the wire, byte-identical); once the operator picks a value explicitly, it sticks
@@ -425,7 +433,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
               {menu === "perm" && (
                 <Pop align="left">
                   <div className="lt3-pop-t">Permission</div>
-                  {reachablePerms(effort).map(p => (
+                  {reachablePerms(effort, cfg.autonomyCeiling).map(p => (
                     <button key={p.v} className="lt3-opt" data-on={autonomyShown === p.v} onClick={() => { setAutonomy(p.v); closeMenu(); }}>
                       <span className="lt3-opt-m"><span className="lt3-opt-t">{p.v}</span><span className="lt3-opt-d">{p.d}</span></span>
                       {autonomyShown === p.v && <Ic.Check size={14} />}
@@ -644,10 +652,15 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
 
               {customizeTab === "safety" && <>
                 <div className="lt3-cnote">What agents can do alone, and when they must ask.</div>
-                <Combo label="Permissions" value={autonomyShown} options={reachablePerms(effort).map(p => ({ value: p.v, label: p.v, desc: p.d }))} onChange={setAutonomy} />
-                {tierGrantsNetwork(effort)
-                  ? <Combo label="Network access" value={networkOn ? "on" : "off"} options={NETWORK_OPTIONS} onChange={v => setAutonomy(v === "on" ? "Trusted" : "Standard")} />
-                  : <TierRow label="Network access" tier="Off — only Standard and Deep can grant it" />}
+                <Combo label="Permissions" value={autonomyShown} options={reachablePerms(effort, cfg.autonomyCeiling).map(p => ({ value: p.v, label: p.v, desc: p.d }))} onChange={setAutonomy} />
+                {!tierGrantsNetwork(effort)
+                  ? <TierRow label="Network access" tier="Off — only Standard and Deep can grant it" />
+                  : ceilingShown !== "Trusted"
+                    // The Coordination tab's own ceiling already forbids it. Arming the switch here would let the
+                    // operator pick On and watch it snap back — name what forbids it instead (the same doctrine
+                    // as the off-tier row above).
+                    ? <TierRow label="Network access" tier={`Off — the Coordination tab's ${ceilingShown} ceiling forbids it`} />
+                    : <Combo label="Network access" value={networkOn ? "on" : "off"} options={NETWORK_OPTIONS} onChange={v => setAutonomy(v === "on" ? "Trusted" : "Standard")} />}
                 <div className="lt3-poolhint" data-testid="network-posture">{networkPosture}</div>
                 <SToggleRow label="Ask when uncertain" on locked />
                 <SToggleRow label="Approve irreversible actions" on locked />

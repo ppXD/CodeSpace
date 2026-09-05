@@ -241,6 +241,43 @@ describe("LaunchTaskModal (minimal box)", () => {
     expect(lastInput).toMatchObject({ effort: "quick", autonomy: "Standard" });
   });
 
+  it("the Coordination tab's own Autonomy ceiling withdraws the network choice, and the wire follows", () => {
+    // The SECOND bound the route ceiling is made of. The override rides the same wire and TIGHTENS the route
+    // (EffortRouter.TightenCeiling), so a composer reading only the effort preset showed "on (Trusted)" for a Deep
+    // launch the server then clamped to Standard — a posture the operator saw and the run never had.
+    openPermissions("Deep");
+    pickOption("Network access", "On");
+    expect(screen.getByTitle("Permission")).toHaveTextContent("Trusted");
+
+    fireEvent.click(screen.getByText("Coordination"));
+    pickOption("Autonomy ceiling", "Standard");
+    fireEvent.click(screen.getByText("Permissions"));
+
+    expect(screen.getByTitle("Permission")).toHaveTextContent("Standard");
+    expect(screen.getByTestId("network-posture")).toHaveTextContent("Network: clamped off by policy (ceiling Standard)");
+    // …and the switch is withdrawn rather than left armed for a pick that would snap back.
+    expect(screen.getByText("Off — the Coordination tab's Standard ceiling forbids it")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText("Launch task"));
+    expect(lastInput).toMatchObject({ effort: "deep", autonomy: "Standard", autonomyCeiling: "Standard" });
+  });
+
+  it("states what On actually grants, and never claims an unconditional Off", () => {
+    // No "team policy" (there is none), no unconditional severed egress: Sandbox:RequireConfinement is committed
+    // off, so a host without bubblewrap runs unconfined and the sentence has to say so.
+    openPermissions("Deep");
+
+    expect(screen.getByTestId("network-posture")).toHaveTextContent(/severed only where the sandbox confines/);
+
+    pickOption("Network access", "On");
+
+    const posture = screen.getByTestId("network-posture");
+    expect(posture).toHaveTextContent(/reaches the host network/);
+    expect(posture).toHaveTextContent(/your LAN, and cloud metadata endpoints/);
+    expect(posture).toHaveTextContent(/model credential is present in the agent's environment/);
+    expect(posture.textContent).not.toMatch(/team policy/);
+  });
+
   it("Time limit shows the tier's own untouched default (Deep = 2h) and stays byte-identical on the wire", () => {
     renderBox();
     typeTask("Ship it");

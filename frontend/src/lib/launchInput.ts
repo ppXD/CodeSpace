@@ -129,14 +129,62 @@ const tierExposesBudget = (effort: string) => tierExposesCaps(effort) || effort 
  */
 export const tierGrantsNetwork = (effort: string) => effort === "standard" || effort === "deep";
 
+/** The tiers ASCENDING by privilege — the order `AgentAutonomyLevel` declares, which is what makes the ceiling clamp
+ *  on BOTH sides of the wire a plain "take the lower one" (`AgentAutonomyPolicy.Clamp` is `Math.min` over these). */
+const AUTONOMY_TIERS = ["Confined", "Standard", "Trusted", "Unleashed"];
+
+/** The lower (less privileged) of two tiers; an unrecognised tier yields the other, never an escalation. */
+const lowerTier = (a: string, b: string) => {
+  const [ra, rb] = [AUTONOMY_TIERS.indexOf(a), AUTONOMY_TIERS.indexOf(b)];
+  if (ra < 0) return b;
+  if (rb < 0) return a;
+  return ra <= rb ? a : b;
+};
+
 /**
- * The autonomy tier a launch actually SENDS. `Trusted` — the network-granting tier — falls back to `Standard` on a
- * tier whose ceiling cannot grant it, because `TaskLaunchService.ClampAutonomy` would clamp it there anyway: the
- * wire must carry the posture the operator can SEE, never a request the run silently drops. The composer hides the
- * Network control off-tier, so this is what keeps a choice made on Deep from riding along after a switch to Fast.
+ * The ceiling this launch actually runs under — what its agents are ALLOWED to ask for. Two bounds compose, exactly
+ * as the backend composes them:
+ *
+ * 1. the effort preset's own ceiling (`Trusted` where {@link tierGrantsNetwork}, else `Standard`), and
+ * 2. the Coordination tab's "Autonomy ceiling", TIGHTEN-ONLY (`EffortRouter.TightenCeiling`) — and only on the tiers
+ *    that actually SEND it, since `buildLaunchInput` omits the field elsewhere.
+ *
+ * Ignoring (2) is what let the composer read "Network: on (Trusted)" for a Deep launch whose own ceiling override
+ * said Standard — the wire carried both, the server clamped, and the run got no network.
  */
-export const effectiveAutonomy = (autonomy: string, effort: string) =>
-  autonomy === "Trusted" && !tierGrantsNetwork(effort) ? "Standard" : autonomy;
+export const routeCeiling = (effort: string, autonomyCeiling = "") =>
+  lowerTier(tierGrantsNetwork(effort) ? "Trusted" : "Standard", tierExposesCaps(effort) ? autonomyCeiling : "");
+
+/**
+ * The autonomy tier a launch actually SENDS: the request clamped to {@link routeCeiling}, mirroring
+ * `TaskLaunchService.ClampAutonomy`. The wire must carry the posture the operator can SEE, never a request the run
+ * silently drops — so `Trusted` falls back on a tier whose ceiling cannot grant network (which keeps a choice made
+ * on Deep from riding along after a switch to Fast), and equally when the operator's own ceiling forbids it.
+ */
+export const effectiveAutonomy = (autonomy: string, effort: string, autonomyCeiling = "") =>
+  lowerTier(autonomy, routeCeiling(effort, autonomyCeiling));
+
+/** Mirrors `AgentAutonomyPolicy.Derive`: `Trusted` is the lowest tier granted `AgentNetworkAccess.On`. */
+const tierHasNetwork = (tier: string) => tier === "Trusted" || tier === "Unleashed";
+
+/** The qualifier every "off" posture carries — mirrors `AgentAutonomyPolicy.ConfinementCaveat`. The tier's Network.Off
+ *  becomes a severed namespace only where the runner rewrites the command through bubblewrap, and the setting that
+ *  would refuse an unconfinable host (`Sandbox:RequireConfinement`) is committed OFF. */
+export const NETWORK_CONFINEMENT_CAVEAT = " — severed only where the sandbox confines";
+
+/**
+ * The run's effective network posture in one sentence — a MIRROR of `AgentAutonomyPolicy.DescribeNetwork`, which
+ * authors the same sentence for the run's journal. The composer states it BEFORE a run exists, so it cannot read the
+ * backend's words off the wire and necessarily duplicates them; `networkPosture.fixture.json` is the committed
+ * fixture BOTH stacks assert on, so neither wording can move without the other's test going red.
+ */
+export const describeNetwork = (effective: string, ceiling: string) => {
+  if (tierHasNetwork(effective)) return `Network: on (${effective})`;
+
+  if (!tierHasNetwork(ceiling)) return `Network: clamped off by policy (ceiling ${ceiling})${NETWORK_CONFINEMENT_CAVEAT}`;
+
+  return `Network: off (${effective})${NETWORK_CONFINEMENT_CAVEAT}`;
+};
 
 /**
  * Map the Launch-modal form state to the wire `LaunchTaskInput`. The single source of truth for what the
@@ -153,7 +201,7 @@ export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
     repositoryId: primary?.repositoryId || null,
     baseBranch: primary?.branch || null,
     effort: state.effort,
-    autonomy: effectiveAutonomy(state.autonomy, state.effort),
+    autonomy: effectiveAutonomy(state.autonomy, state.effort, state.autonomyCeiling),
     model: state.model || null,
     harness: state.harness || null,
     agentDefinitionId: state.agentDefinitionId || null,
