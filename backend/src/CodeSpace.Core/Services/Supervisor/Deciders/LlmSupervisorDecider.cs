@@ -108,11 +108,6 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             return NonConformantStop();
         }
 
-        // The wire-health fault (if any) that made this call LEAVE the run's own brain — read before the repair
-        // round-trips below can replace the completion that carries it. It is what tells a reply this decider cannot
-        // bind apart from a throttle: see the fail-closed floor below.
-        var hopCause = completion.FailedOverCause;
-
         // A completion CUT OFF mid-generation (Anthropic max_tokens / OpenAI length — see ModelCallFinish, the SAME
         // classifier the journal legibility axis uses) is not a shape the model chose: it ran out of room, most
         // often authoring a large multi-subtask plan. Buy ONE bounded retry with a RAISED output budget before this
@@ -131,24 +126,24 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         // precise path in the stop summary so the journal names the drift instead of a bare "did not conform".
         if (model is null || string.IsNullOrWhiteSpace(model.Kind))
         {
-            // BEFORE the repair, the throttle floor. Both the repair and the fail-closed stop below assume the reply
-            // came from the run's OWN brain: the repair re-asks it, and the stop says "the supervisor model returned a
-            // response that did not conform". Neither is true of a reply the pool failover fetched from a SUBSTITUTE
-            // after that brain was throttled or down — the substitute may not be a decision model at all, re-asking a
-            // pool that just threw the call off its own model only buys the same shrug, and stopping ends the run on a
-            // verdict nothing measured (real-model run 33930904059: two 429s, then a clean turn-0 stop the whole-loop
-            // gate scored a capability miss). Surface the fault the hop was FORCED by, so the bounded retry backs off
-            // on it and the node's infra park rides the outage out — exactly as an exhausted failover already does.
-            if (hopCause is { } throttled)
-            {
-                _logger.LogWarning("Supervisor brain failed over on a {Category} fault and the substitute {Model} returned no bindable decision — surfacing the fault rather than stopping the run", throttled.Category, completion.Model);
-
-                throw throttled;
-            }
-
             completion = await TryRepairAsync(structured, pick, completion, bindError, cancellationToken).ConfigureAwait(false) ?? completion;
             model = TryDeserialize(completion.Json, out bindError);
         }
+
+        // The throttle floor, applied only once the repair ladder above has HAD its chance. The fail-closed stop below
+        // says "the supervisor model returned a response that did not conform" — untrue of a reply the pool failover
+        // fetched from a SUBSTITUTE after the run's own brain was throttled or down, since the substitute may not be a
+        // decision model at all, and stopping there ends the run on a verdict nothing measured (real-model run
+        // 33930904059: two 429s, then a clean turn-0 stop the whole-loop gate scored a capability miss). But a weaker
+        // alternate's NEAR-MISS is exactly what the repair exists for, so the repair runs first and only a reply that
+        // still cannot bind surfaces the fault the hop was FORCED by — the bounded retry then backs off on it and the
+        // node's infra park rides the outage out, exactly as an exhausted failover already does.
+        //
+        // The cause is read off the CURRENT completion, never a value captured earlier: the truncated-budget retry and
+        // the repair each issue a FRESH pool call with its own hop (or none), so a stale capture would park a run on a
+        // throttle its final reply never suffered — and miss a hop that happened only on the retry.
+        if ((model is null || string.IsNullOrWhiteSpace(model.Kind)) && completion.FailedOverCause is { } throttled)
+            throw ThrottledSubstituteFault(throttled, completion, bindError);
 
         if (model is null || string.IsNullOrWhiteSpace(model.Kind)) return NonConformantStop(bindError);
 
@@ -1337,6 +1332,21 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         for (var i = decisions.Count - 1; i >= 0; i--)
             if (predicate(decisions[i])) return i;
         return -1;
+    }
+
+    /// <summary>
+    /// The parkable fault a hop-then-unbindable reply raises instead of the clean stop. A FRESH exception rather than a
+    /// re-throw of the captured one: re-throwing overwrites the original's stack trace with this line, erasing the
+    /// transport frame that says WHICH call was throttled. Category / status / Retry-After ride verbatim — they are
+    /// what <c>RetryingSupervisorDeciderDecorator</c> backs off on and what <c>SupervisorInfraPark</c> parks on — and
+    /// the throttle stays the inner exception, so the whole chain is still readable in the ledger.
+    /// </summary>
+    private LlmApiException ThrottledSubstituteFault(LlmApiException throttled, StructuredLLMCompletion completion, string? bindError)
+    {
+        _logger.LogWarning("Supervisor brain failed over on a {Category} fault and the substitute {Model} returned no bindable decision ({BindError}) — surfacing the fault rather than stopping the run", throttled.Category, completion.Model, bindError ?? "no kind");
+
+        return new LlmApiException(throttled.Provider, throttled.StatusCode, throttled.Category,
+            $"{throttled.ProviderMessage} — and the pool alternate that answered instead ({completion.Model}) returned no bindable supervisor decision", throttled.RetryAfter, throttled);
     }
 
     /// <summary>Fail-closed terminal stop when the model's response did NOT conform to the decision schema (it did not parse to a decision, or carried no kind) — a model-side miss handled the SAME way as no-model and an unknown kind (the projector already maps an unknown verb to stop): a clean one-turn no-op stop, never an unhandled crash mid-run. Keeps the decider's "fail closed, never crash" contract WHOLE — a degraded/flaky gateway reply stops the run cleanly rather than faulting the durable engine. Deterministic so a replay re-derives it. The binding detail (when known) rides the summary so the journal NAMES the miss — a schema↔type drift is diagnosable from the run page, not just the database.</summary>
