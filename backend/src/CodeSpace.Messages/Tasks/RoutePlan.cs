@@ -36,6 +36,17 @@ public sealed record RoutePlan
     /// <summary>The autonomy tier recommended for the run, as an open tier-name string (e.g. <c>"Standard"</c>).</summary>
     public string RecommendedAutonomy { get; init; } = "";
 
+    /// <summary>
+    /// The tier the run ACTUALLY got — <c>Clamp(requested, Caps.AutonomyCeiling)</c>, as an open tier-name string.
+    /// The router NEVER sets this (it does not see the operator's request): <c>TaskRunSnapshotFactory</c> stamps it
+    /// onto the run's route provenance from the resolved agent profile, so <c>route_plan_jsonb</c> — the run's
+    /// launch-provenance column — records not only what the route ALLOWED but what the launch RESOLVED to. Without it
+    /// a reader can see the ceiling and never say whether network was declined or denied. Blank on a plan that was
+    /// never stamped onto a run (a preview, a hand-built route), and blank on every run staged before this field
+    /// existed — readers must treat blank as "unknown", never as a tier.
+    /// </summary>
+    public string EffectiveAutonomy { get; init; } = "";
+
     /// <summary>Whether the launch flow should show a confirm card before running. Default false.</summary>
     public bool NeedsConfirmCard { get; init; }
 

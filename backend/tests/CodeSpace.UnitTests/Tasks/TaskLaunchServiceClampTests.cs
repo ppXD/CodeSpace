@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Tasks;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Tasks;
@@ -79,6 +80,30 @@ public class TaskLaunchServiceClampTests
         var profile = TaskLaunchService.BuildAgentProfile(Request(null), Seed, Route(ceiling: "", recommended: ""));
 
         profile.AutonomyLevel.ShouldBe("Standard");
+    }
+
+    // ── B5: the launch's NETWORK choice resolved through the same one clamp — request × policy → posture + its line ──
+
+    [Theory]
+    // Policy ALLOWS network (the Standard / Deep presets' Trusted ceiling): the choice is the launcher's.
+    [InlineData("Trusted",  "Trusted",  "Trusted",  AgentNetworkAccess.On,  "Network: on (Trusted)")]
+    [InlineData("Standard", "Trusted",  "Standard", AgentNetworkAccess.Off, "Network: off (Standard)")]
+    // Policy FORBIDS network (the Quick preset's Standard ceiling, or any operator-tightened ceiling): asking
+    // changes nothing, and the run says so in different words than a launcher who simply did not ask.
+    [InlineData("Trusted",  "Standard", "Standard", AgentNetworkAccess.Off, "Network: clamped off by policy (ceiling Standard)")]
+    [InlineData("Standard", "Standard", "Standard", AgentNetworkAccess.Off, "Network: clamped off by policy (ceiling Standard)")]
+    public void BuildAgentProfile_resolves_the_network_choice_against_the_route_ceiling(string requested, string ceiling, string expectedTier, AgentNetworkAccess expectedNetwork, string expectedLine)
+    {
+        var profile = TaskLaunchService.BuildAgentProfile(Request(requested), Seed, Route(ceiling));
+
+        profile.AutonomyLevel.ShouldBe(expectedTier, customMessage: $"a '{requested}' request under a '{ceiling}' ceiling resolves to '{expectedTier}'");
+
+        var effective = AgentAutonomyPolicy.Parse(profile.AutonomyLevel, AgentAutonomyLevel.Standard);
+
+        AgentAutonomyPolicy.Derive(effective).Network.ShouldBe(expectedNetwork,
+            customMessage: "the REAL sandbox permission the runner receives — the posture line below is only honest if it agrees with this");
+
+        AgentAutonomyPolicy.DescribeNetwork(effective, AgentAutonomyPolicy.Parse(ceiling, AgentAutonomyLevel.Unleashed)).ShouldBe(expectedLine);
     }
 
     // ── The tier-aware agent wall-clock default: deep runs get 2h; an operator override always wins ──

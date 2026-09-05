@@ -42,7 +42,7 @@ public sealed class TaskRunSnapshotFactory : ITaskRunSnapshotFactory, IScopedDep
         // the run session-less, byte-identical to pre-session behaviour.
         var runId = await _starter.StartFromSnapshotAsync(definition, teamId, actorUserId, launchPayloadJson, ScopeRepositoryIds(context.AgentProfile), context.Route.ProjectionKind, session, cancellationToken).ConfigureAwait(false);
 
-        await StampRouteProvenanceAsync(runId, context.Route, cancellationToken).ConfigureAwait(false);
+        await StampRouteProvenanceAsync(runId, WithEffectiveAutonomy(context), cancellationToken).ConfigureAwait(false);
 
         return new TaskRunHandle { RunId = runId, ProjectionKind = context.Route.ProjectionKind };
     }
@@ -60,6 +60,16 @@ public sealed class TaskRunSnapshotFactory : ITaskRunSnapshotFactory, IScopedDep
     /// provenance. This column is write-once and no other writer ever touches it, so it can never be in genuine
     /// contention; skipping the concurrency token is correct rather than merely convenient.</para>
     /// </summary>
+    /// <summary>
+    /// Carry the run's RESOLVED tier onto the provenance the stamp persists. The router produced the ceiling; only the
+    /// launch knows what the operator asked for and therefore what <c>ClampAutonomy</c> settled on — so the effective
+    /// tier is stamped HERE, at the one place holding both. Without it <c>route_plan_jsonb</c> records what the run was
+    /// ALLOWED and never what it GOT, and a reader cannot tell a declined network from a denied one. A projection with
+    /// no agent profile (or a blank tier) leaves the field blank — "unknown", exactly as a pre-field run reads.
+    /// </summary>
+    private static RoutePlan WithEffectiveAutonomy(TaskBuildContext context) =>
+        context.AgentProfile?.AutonomyLevel is { Length: > 0 } tier ? context.Route with { EffectiveAutonomy = tier } : context.Route;
+
     private async Task StampRouteProvenanceAsync(Guid runId, RoutePlan route, CancellationToken cancellationToken)
     {
         var json = JsonSerializer.Serialize(route, RouteJson);

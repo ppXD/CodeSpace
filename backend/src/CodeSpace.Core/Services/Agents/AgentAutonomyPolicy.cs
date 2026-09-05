@@ -83,4 +83,28 @@ public static class AgentAutonomyPolicy
         AgentAutonomyLevel.Unleashed => new AgentPermissions { Network = AgentNetworkAccess.On,  WriteScope = AgentWriteScope.Workspace },
         _ => new AgentPermissions(),
     };
+
+    /// <summary>
+    /// The one-line EFFECTIVE network posture of a run, for the reader of its journal — the honest answer to "did
+    /// this run have the internet, and who decided?". Derived from the same table <see cref="Derive"/> enforces, so
+    /// the sentence can never drift from the sandbox: <paramref name="effective"/> is the run's CLAMPED tier (what
+    /// the agents actually got) and <paramref name="ceiling"/> the route's bound (what they were ALLOWED to ask
+    /// for). Three states, all decision-relevant:
+    ///
+    /// <list type="bullet">
+    ///   <item><c>Network: on (Trusted)</c> — the operator asked, and policy allowed it.</item>
+    ///   <item><c>Network: off (Standard)</c> — policy would have allowed network; nobody asked. The default.</item>
+    ///   <item><c>Network: clamped off by policy (ceiling Standard)</c> — the route's ceiling cannot reach a
+    ///     network-granting tier at all, so this run had no network available however it was launched. Naming the
+    ///     ceiling is the point: "off" and "off because you could not have it" are different facts.</item>
+    /// </list>
+    /// </summary>
+    public static string DescribeNetwork(AgentAutonomyLevel effective, AgentAutonomyLevel ceiling)
+    {
+        if (Derive(effective).Network == AgentNetworkAccess.On) return $"Network: on ({effective})";
+
+        if (Derive(ceiling).Network != AgentNetworkAccess.On) return $"Network: clamped off by policy (ceiling {ceiling})";
+
+        return $"Network: off ({effective})";
+    }
 }

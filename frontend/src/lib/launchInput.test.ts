@@ -426,6 +426,41 @@ describe("buildLaunchInput — autonomy ceiling", () => {
   });
 });
 
+describe("buildLaunchInput — network access (B5)", () => {
+  // `Trusted` IS the network choice: it is the only tier AgentAutonomyPolicy.Derive gives Network.On, and the
+  // Standard / Deep bounds presets are the only ones whose AutonomyCeiling admits it.
+
+  it.each([["standard"], ["deep"]])("sends Trusted on %s — the tier's ceiling can grant network", effort => {
+    expect(buildLaunchInput(form({ effort, autonomy: "Trusted" })).autonomy).toBe("Trusted");
+  });
+
+  it.each([["quick"], ["auto"]])("falls Trusted back to Standard on %s — its ceiling cannot grant network", effort => {
+    // The backend would clamp it there anyway (TaskLaunchService.ClampAutonomy). Sending it would put a posture on
+    // the wire the composer never showed and the run never had.
+    expect(buildLaunchInput(form({ effort, autonomy: "Trusted" })).autonomy).toBe("Standard");
+  });
+
+  it("leaves every other tier untouched on every effort — the fallback is Trusted-only", () => {
+    for (const effort of ["quick", "auto", "standard", "deep"]) {
+      expect(buildLaunchInput(form({ effort, autonomy: "Confined" })).autonomy).toBe("Confined");
+      expect(buildLaunchInput(form({ effort, autonomy: "Standard" })).autonomy).toBe("Standard");
+    }
+  });
+
+  it("is off by default — an untouched form still launches without network", () => {
+    expect(buildLaunchInput(form({ effort: "deep" })).autonomy).toBe("Standard");
+  });
+
+  it("never reaches the route preview, which the router routes without the requested tier", () => {
+    // The preview predicts the ROUTE; the requested tier moves no routing decision, so carrying it would imply the
+    // preview says more than it does. The ceiling — which the router DOES merge — still rides.
+    const preview = buildRoutePreviewInput(form({ effort: "deep", autonomy: "Trusted", autonomyCeiling: "Standard" }));
+
+    expect(preview).not.toHaveProperty("autonomy");
+    expect(preview.autonomyCeiling).toBe("Standard");
+  });
+});
+
 describe("triad launch fields (S4)", () => {
   it("sends the confirm gate on every planning tier, the checks floor on cap tiers, nothing on quick", () => {
     const deep = buildLaunchInput(form({ effort: "deep", requirePlanConfirmation: true, acceptanceChecks: ["sh", "check.sh"] }));

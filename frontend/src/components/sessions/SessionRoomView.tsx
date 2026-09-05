@@ -2273,6 +2273,7 @@ function statIcon(kind: string): SymName {
   if (kind === "files") return "file";
   if (kind === "tools") return "terminal";
   if (kind === "reasoning") return "sparkle";
+  if (kind === "launch") return "lock";   // the run's launch posture (network access) — a permission fact, not a metric
   return "list";
 }
 

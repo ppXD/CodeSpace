@@ -119,8 +119,8 @@ describe("LaunchTaskModal (minimal box)", () => {
   });
 
   it("Permission menu offers only the reachable tiers and maps the pick to autonomy", () => {
-    // Every bounds preset's autonomy ceiling clamps a request down to Standard (TaskLaunchService.ClampAutonomy) —
-    // offering Trusted/Unleashed as pickable would silently lie about what the launch actually gets.
+    // The composer never offers a tier the backend would silently reduce (TaskLaunchService.ClampAutonomy). On the
+    // default Auto tier the resolved preset is unknown, so Trusted (the network tier) is not offered here.
     renderBox();
     fireEvent.click(screen.getByTitle("Permission"));
     expect(screen.queryByText("Trusted")).toBeNull();
@@ -131,24 +131,24 @@ describe("LaunchTaskModal (minimal box)", () => {
     expect(lastInput).toMatchObject({ autonomy: "Confined" });
   });
 
-  it("Permissions tab drops the unwired decision-surface/notify/timeout controls and explains the ceiling", () => {
+  it("Permissions tab drops the unwired decision-surface/notify/timeout controls and states the network posture", () => {
     renderBox();
     fireEvent.click(screen.getByText("Advanced"));
     fireEvent.click(screen.getByText("Permissions"));
     expect(screen.queryByText("Decision surface")).toBeNull();
     expect(screen.queryByText("Notify in chat")).toBeNull();
     expect(screen.queryByText("Timeout")).toBeNull();
-    // The picker in this tab is the same reachable-only set as the top pill.
+    // On Auto the tier isn't resolved yet, so the network tier isn't offered and the row says so instead of arming.
     expect(screen.queryByText("Trusted")).toBeNull();
     expect(screen.queryByText("Unleashed")).toBeNull();
-    expect(screen.getByText(/Trusted and Unleashed aren't reachable from Launch yet/)).toBeInTheDocument();
+    expect(screen.getByTestId("network-posture")).toHaveTextContent(/Network: off/);
     // Time limit survives — it is the one control this tab's dead trio pointed back to.
     expect(screen.getByText("Time limit")).toBeInTheDocument();
   });
 
-  it("Coordination's Autonomy ceiling also restricts to the reachable tiers and explains why", () => {
-    // The ceiling can only TIGHTEN a preset's own Standard ceiling (EffortRouter.TightenCeiling), never raise it —
-    // so Trusted/Unleashed are inert picks here too, not just on the request-side Permission picker.
+  it("Coordination's Autonomy ceiling offers the tier's reachable set and says it can only tighten", () => {
+    // The ceiling can only TIGHTEN the preset's own ceiling (EffortRouter.TightenCeiling). On Deep that preset
+    // ceiling is Trusted, so Trusted is a real pick here; Unleashed is reachable on no preset and stays out.
     renderBox();
     fireEvent.click(screen.getByTitle("Model and effort"));
     fireEvent.click(screen.getByText("Effort"));
@@ -157,9 +157,88 @@ describe("LaunchTaskModal (minimal box)", () => {
     fireEvent.click(screen.getByText("Coordination"));
     fireEvent.click(screen.getByText("Autonomy ceiling"));
 
-    expect(screen.queryByText("Trusted")).toBeNull();
+    expect(screen.getAllByText("Trusted").length).toBeGreaterThan(0);
     expect(screen.queryByText("Unleashed")).toBeNull();
-    expect(screen.getByText(/never raise it/)).toBeInTheDocument();
+    expect(screen.getByText(/can only TIGHTEN it/)).toBeInTheDocument();
+  });
+
+  // ── B5: the Network access choice ──────────────────────────────────────────
+
+  /** Pick an effort tier from the flyout — scoped, since "Standard" also names a permission tier. */
+  const pickEffort = (label: string) => {
+    fireEvent.click(screen.getByTitle("Model and effort"));
+    fireEvent.click(screen.getByText("Effort"));
+    fireEvent.click(within(document.querySelector(".lt3-flyout") as HTMLElement).getByText(label));
+  };
+
+  /** Pick a Combo option — scoped to the portalled menu, so a row's own value text can't be clicked by mistake. */
+  const pickOption = (row: string, option: string) => {
+    fireEvent.click(screen.getByText(row));
+    fireEvent.click(within(document.querySelector(".lt3-combo-pop") as HTMLElement).getByText(option));
+  };
+
+  /** The settings row a control label belongs to (label · value · ›). */
+  const settingsRow = (label: string) => screen.getByText(label).closest("button") as HTMLElement;
+
+  /** Type the task FIRST (Deep changes the placeholder), switch tier, then open Advanced → Permissions. */
+  const openPermissions = (effort?: string) => {
+    renderBox();
+    typeTask("Wire the thing");
+    if (effort) pickEffort(effort);
+    fireEvent.click(screen.getByText("Advanced"));
+    fireEvent.click(screen.getByText("Permissions"));
+  };
+
+  it.each([["Standard"], ["Deep"]])("offers the Network access control on the %s tier, defaulting to Off", tier => {
+    openPermissions(tier);
+
+    expect(settingsRow("Network access")).toHaveTextContent("Off");
+    expect(screen.getByTestId("network-posture")).toHaveTextContent("Network: off (Standard)");
+  });
+
+  it.each([["Fast"], [undefined]])("withholds the Network access control on the %s tier — it cannot grant network", tier => {
+    openPermissions(tier);
+
+    // A muted read-only row, never an armed switch the wire would silently drop.
+    expect(screen.getByText("Off — only Standard and Deep can grant it")).toBeInTheDocument();
+    expect(screen.getByTestId("network-posture")).toHaveTextContent(/this tier's ceiling is Standard/);
+  });
+
+  it("turning Network access On sends autonomy=Trusted — the one tier that grants network", () => {
+    openPermissions("Deep");
+
+    pickOption("Network access", "On");
+
+    expect(screen.getByTestId("network-posture")).toHaveTextContent("Network: on (Trusted)");
+    expect(screen.getByTitle("Permission")).toHaveTextContent("Trusted");
+
+    fireEvent.click(screen.getByLabelText("Launch task"));
+    expect(lastInput).toMatchObject({ effort: "deep", autonomy: "Trusted" });
+  });
+
+  it("turning it back Off returns the launch to Standard", () => {
+    openPermissions("Standard");
+
+    pickOption("Network access", "On");
+    pickOption("Network access", "Off");
+
+    expect(screen.getByTestId("network-posture")).toHaveTextContent("Network: off (Standard)");
+    fireEvent.click(screen.getByLabelText("Launch task"));
+    expect(lastInput).toMatchObject({ effort: "standard", autonomy: "Standard" });
+  });
+
+  it("dropping to a tier that cannot grant network visibly withdraws the choice, and the wire follows", () => {
+    // The guard that keeps the composer honest: a Trusted choice made on Deep must not ride along to Fast, where
+    // the preset ceiling would clamp it back to Standard — the operator would have seen a posture the run never had.
+    openPermissions("Deep");
+    pickOption("Network access", "On");
+    expect(screen.getByTitle("Permission")).toHaveTextContent("Trusted");
+
+    pickEffort("Fast");
+
+    expect(screen.getByTitle("Permission")).toHaveTextContent("Standard");
+    fireEvent.click(screen.getByLabelText("Launch task"));
+    expect(lastInput).toMatchObject({ effort: "quick", autonomy: "Standard" });
   });
 
   it("Time limit shows the tier's own untouched default (Deep = 2h) and stays byte-identical on the wire", () => {

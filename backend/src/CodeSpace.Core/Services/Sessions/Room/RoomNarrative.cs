@@ -227,6 +227,7 @@ public static class RoomNarrative
 
         if (FilesStat(idPrefix, seq, facts, fileProducers, agentById) is { } files) blocks.Add(files);
         if (ToolsStat(idPrefix, seq, facts) is { } tools) blocks.Add(tools);
+        if (NetworkStat(idPrefix, seq, facts) is { } network) blocks.Add(network);
 
         if (DeliveryFrom(idPrefix, seq, facts) is { } delivery) blocks.Add(delivery);
         if (DeliverablesFrom(idPrefix, seq, facts) is { } deliverables) blocks.Add(deliverables);
@@ -465,6 +466,16 @@ public static class RoomNarrative
 
         return producers.TryGetValue(file.Path, out var producer) ? $"from {producer.Label}" : null;
     }
+
+    /// <summary>
+    /// The LAUNCH row: this run's effective network posture, in one line the launcher can check against what they
+    /// chose ("Network: on (Trusted)" / "off (Standard)" / "clamped off by policy (ceiling Standard)"). It is the
+    /// only place a reader can learn that these agents ran severed from the internet — package installs and pushes
+    /// silently failing was previously indistinguishable from the work being wrong. Omitted when the run records no
+    /// posture (<see cref="RoomTurnFacts.NetworkPosture"/> null), never rendered as a guess.
+    /// </summary>
+    private static StatBlock? NetworkStat(string idPrefix, long seq, RoomTurnFacts f) =>
+        f.NetworkPosture is not { Length: > 0 } posture ? null : new StatBlock { Id = $"{idPrefix}:stat:network", Seq = seq, Kind = "launch", Label = "Launch", Detail = posture };
 
     /// <summary>The tools row — collapsed to just the total ("129 calls"); expanding reveals the per-tool breakdown (Read · 40, WebSearch · 15, …), one item per real tool NAME. A summary, not the raw per-call stream.</summary>
     private static StatBlock? ToolsStat(string idPrefix, long seq, RoomTurnFacts f) =>
