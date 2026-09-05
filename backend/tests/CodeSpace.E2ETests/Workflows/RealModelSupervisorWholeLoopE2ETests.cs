@@ -215,7 +215,9 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var goal = InjectedArmGoal(teamId);
         LessonArms.Assign(teamId, goal).ShouldBe(LessonArms.Injected, "the case measures the TREATMENT — outside the injected arm it observes nothing");
 
-        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, goal);
+        // Shadow: the subject is whether the lesson reaches the PROMPT. Grading the terminal too would confound an
+        // injection measurement with a completion verdict.
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, goal, completionMode: WorkflowDefinition.CompletionModeShadow);
 
         await RealModelGate.AssessLiveAsync(Provider, async () =>
         {
@@ -391,7 +393,9 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
           + "acceptance amendment (kind amend_acceptance) switching this subtask's check to the fallback, and never retry "
           + "a unit into a check that cannot run.";
 
-        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, reenactGoal, conversationId);
+        // Shadow: the subject is the amend-acceptance REPAIR, graded off the tape's approved amend card and the
+        // stop's own acceptance grade — not the terminal the completion authority arbitrates.
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, reenactGoal, conversationId, completionMode: WorkflowDefinition.CompletionModeShadow);
 
         await RealModelGate.AssessLiveWholeLoopAsync(Provider, async () =>
         {
@@ -558,7 +562,8 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
           + "'backend implementer' that adds the server-side validation, and a separate 'test author' that writes the unit "
           + "tests. When you spawn, author a per-agent agents[] dispatch that gives each agent its own role.";
 
-        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, goal: dispatchGoal);
+        // Shadow: the subject is what the model AUTHORS in its spawn payload, read straight off that payload.
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, goal: dispatchGoal, completionMode: WorkflowDefinition.CompletionModeShadow);
 
         // REPORT-ONLY: ✅ = the live model authored heterogeneous per-agent dispatch (≥2 agents with distinct, role-prefixed
         // goals — the executor renders an authored role as "As the <role>, …"); ⚠️ = it fanned out homogeneous agents
@@ -635,7 +640,8 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
           + "and choose an approach, then IMPLEMENT the limiter, then REVIEW it with tests. When you plan, group the "
           + "subtasks into named phases for these stages.";
 
-        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, goal: phasedGoal);
+        // Shadow: the subject is what the model AUTHORS in its plan payload, read straight off that payload.
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, goal: phasedGoal, completionMode: WorkflowDefinition.CompletionModeShadow);
 
         // REPORT-ONLY: ✅ = the live model authored ≥2 named plan.phases with distinct titles; ⚠️ = a flat plan
         // (reported, never gating — a flat plan is valid and byte-identical). A gateway outage is a non-gating infra skip.
@@ -724,7 +730,9 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
           + "its acceptance check as exactly the command `sh check.sh` (the repository's own seeded gate) — this "
           + "repository has NO other test tooling, so any other acceptance command will fail regardless of the work.";
 
-        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, goal: handoffGoal);
+        // Shadow: the subject is whether the dependent's clone genuinely carried its producer's work — read off the
+        // captured diffs, not off the run's terminal.
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, goal: handoffGoal, completionMode: WorkflowDefinition.CompletionModeShadow);
 
         // REPORT-ONLY on authorship (gating:false) — but the mechanism, when exercised, is asserted hard inside the
         // evaluator (see above), so a real regression still fails this test regardless of the outer gate.
@@ -829,7 +837,9 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
           + "not modify any files. On that subtask, author an 'acceptance' definition-of-done that runs this exact "
           + "command: sh check.sh — so its completion is objectively verified even though it produces no diff.";
 
-        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, goal: readOnlyGoal);
+        // Shadow: the subject is the NOT-APPLICABLE grade on a subtask that changes nothing — the exact vacuous
+        // shape the authority has its own opinion about, so arbitrating here would grade the arbiter, not the grade.
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, goal: readOnlyGoal, completionMode: WorkflowDefinition.CompletionModeShadow);
 
         // REPORT-ONLY on authorship (gating:false) — but the mechanism, when exercised, is asserted hard inside the
         // evaluator (see above), so a real regression still fails this test regardless of the outer gate.
@@ -923,6 +933,10 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
 
         var (brainModelId, _) = await SeedBrainModelAsync(teamId, BaseUrlFor(baseUrl), apiKey, model);
 
+        // C5: NO stamp, deliberately — the second arm measuring the DEFAULT cohort. I3 and the completion
+        // authority are sibling floors at the same seam (may this stop ship?), so they belong under one run.
+        // Safe to gate: this arm's Classify never reds on a park, and its branch-exists check is already
+        // Success-conditional, so the default can only ever ADD signal here.
         var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId);
 
         // GATING best-of-N (uniform with the other strict arms): a FRESH run per attempt; reds only if EVERY
@@ -932,6 +946,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             jobClient.Clear();
             var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
+            await AssertRanEnforcedAsync(runId);
             await DriveUntilSettledAsync(runId);
 
             var (outcome, note) = await EvaluateI3InvariantAsync(runId, teamId, remote, repoId);
@@ -1094,7 +1109,9 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
                           + "(1) add input validation, and (2) add error logging. Spawn one agent per improvement, integrate their branches, "
                           + "and if the integration conflicts, resolve it into one reconciled version before finishing.";
 
-        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, goal, conversationId);
+        // Shadow: the arc ends on a deliberately CONFLICTED integration whose recovery card IS the subject — it
+        // never reaches a clean head for the authority to arbitrate.
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, goal, conversationId, completionMode: WorkflowDefinition.CompletionModeShadow);
 
         // GATING best-of-N (N is the job's CODESPACE_REALMODEL_WHOLE_LOOP_ATTEMPTS, uniform with the headline/solve arms):
         // each attempt is a FRESH run (re-seeded inside) so the gate reds only if EVERY non-infra attempt fails to drive
@@ -1161,7 +1178,9 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         const string goal = "Add server-side email-format validation to the signup endpoint, with unit tests. "
                           + "If a subtask's agent reports it could not complete the work, retry that subtask before finishing.";
 
-        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, goal);
+        // Shadow: every agent FAILS by construction, so the run force-stops on a bound having delivered nothing.
+        // The park the authority would add measures the fixture, not the brain's recovery — this arm's subject.
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, goal, completionMode: WorkflowDefinition.CompletionModeShadow);
 
         // GATING best-of-N (N from the job env, uniform with the other strict arms): a FRESH run per attempt; reds only if
         // EVERY non-infra attempt fails to take an ACTIVE recovery (retry — the instructed action — or escalate) on the
@@ -1222,7 +1241,10 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         // The spawned agent runs the REAL claude-code CLI (agentCredId → its gateway credential) at Trusted autonomy.
         var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId,
             goal: "Edit the file solution.sh so that running `sh solution.sh A B` prints the SUM of the two integer arguments A and B. Keep it a POSIX /bin/sh script. Do not change anything else.",
-            agentCredId: agentCredId, agentModel: model);
+            agentCredId: agentCredId, agentModel: model,
+            // Shadow: this arm gates on model CAPABILITY (did the coder SOLVE it), and its verdict requires
+            // Success. An arbitration park would red the blessed wire as a capability miss that is not the model's.
+            completionMode: WorkflowDefinition.CompletionModeShadow);
         await RealModelGate.AssessLiveWholeLoopAsync(Provider, async () =>
         {
             jobClient.Clear();   // SAFE under [Collection(PostgresCollection)] (serial); a no-op-on-empty between attempts
@@ -1527,7 +1549,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             return (RealModelOutcome.CodeFault, $"{outcomeFault} (status={run.Status}, trajectory={trail})");
 
         var drove = run.Status == WorkflowRunStatus.Success && realPatchCount >= 1 && acceptancePassed && spawnedAndMerged;
-        return (Classify(run.Status, drove), $"status={run.Status}, realPatches={realPatchCount}, {agentSummary}, acceptancePassed={acceptancePassed}, spawnedAndMerged={spawnedAndMerged}, trajectory={trail}");
+        return (Classify(run.Status, drove), $"status={run.Status}, completionMode={run.CompletionEnforcementMode ?? "(unstamped)"}, realPatches={realPatchCount}, {agentSummary}, acceptancePassed={acceptancePassed}, spawnedAndMerged={spawnedAndMerged}, trajectory={trail}");
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────────────
@@ -1662,7 +1684,8 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
           + "corresponding change in EACH repo. Plan the subtasks, spawn agents to implement them, then merge.";
 
         var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, primaryRepoId, brainModelId,
-            goal: multiRepoGoal, relatedRepo: (relatedRepoId, MultiRepoFeatureFakeCli.RelatedAlias));
+            // Shadow: the subject is a per-repo head live on BOTH remotes, read off the resolved branches.
+            goal: multiRepoGoal, relatedRepo: (relatedRepoId, MultiRepoFeatureFakeCli.RelatedAlias), completionMode: WorkflowDefinition.CompletionModeShadow);
 
         await RealModelGate.AssessLiveAsync(Provider, async () =>
         {
@@ -1735,7 +1758,8 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             "Add a small change to the service. When you STOP, author an objective acceptance definition-of-done that "
           + "verifies the result by running this exact check: sh check.sh.";
 
-        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, goal: dodGoal);
+        // Shadow: the subject is whether the model AUTHORS an objective stop acceptance, read off the stop payload.
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, goal: dodGoal, completionMode: WorkflowDefinition.CompletionModeShadow);
 
         await RealModelGate.AssessLiveAsync(Provider, async () =>
         {
@@ -1785,7 +1809,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             })
             .ToListAsync();
 
-    /// <summary>The Enforced stamp must have HELD before the engine runs — a silent drift back to Shadow would keep the arm green while proving nothing about arbitration. C5: this arm stamps NO opt-in, so what is pinned here is the DEFAULT resolution itself.</summary>
+    /// <summary>The Enforced stamp must have HELD before the engine runs — a silent drift back to Shadow would keep the arm green while proving nothing about arbitration. C5: its callers stamp NO opt-in, so what is pinned here is the DEFAULT resolution itself. Every OTHER arm in this suite stamps its mode explicitly, so the lane can never flip a cohort by accident again.</summary>
     private async Task AssertRanEnforcedAsync(Guid runId)
     {
         using var verify = _fixture.BeginScope();
