@@ -36,18 +36,23 @@ public static class SupervisorResolverRecipe
     /// The resolver's STRUCTURED verdict read off its final summary, or null when it emitted no parseable
     /// <c>```resolution</c> block — in which case the caller falls back to the legacy <see cref="TestsPassedMarker"/>
     /// so every transcript recorded before this block existed still grades exactly as it did.
+    ///
+    /// <para>The LAST block wins. The recipe asks the resolver to FINISH with the verdict, so a resolver that restates
+    /// the instruction, drafts a block mid-work, or emits an optimistic one before the tests come back must not have
+    /// that earlier text outrank the verdict it actually settled on — reading the FIRST block let a stale
+    /// <c>true</c> beat the final <c>false</c> and graded a red resolution as verified.</para>
     /// </summary>
     public static bool? ReadVerification(string? summary)
     {
         if (string.IsNullOrWhiteSpace(summary)) return null;
 
-        var match = Regex.Match(summary, $"```{VerificationBlock}\\s*(\\{{.*?\\}})\\s*```", RegexOptions.Singleline);
+        var matches = Regex.Matches(summary, $"```{VerificationBlock}\\s*(\\{{.*?\\}})\\s*```", RegexOptions.Singleline);
 
-        if (!match.Success) return null;
+        if (matches.Count == 0) return null;
 
         try
         {
-            var root = JsonDocument.Parse(match.Groups[1].Value).RootElement;
+            var root = JsonDocument.Parse(matches[^1].Groups[1].Value).RootElement;
 
             return root.ValueKind == JsonValueKind.Object && root.TryGetProperty(VerifiedField, out var verified)
                 && verified.ValueKind is JsonValueKind.True or JsonValueKind.False
