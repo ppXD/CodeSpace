@@ -18,6 +18,7 @@ using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Dtos.Sessions.Room;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Plans;
+using CodeSpace.Messages.Tasks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Shouldly;
@@ -1230,6 +1231,103 @@ public class RoomProjectorFlowTests
     {
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<IRoomProjector>().ProjectByRunAsync(runId, teamId, CancellationToken.None);
+    }
+
+    [Theory]
+    // A run whose agents were provably confined retires the hedge — the operator can finally believe the "off".
+    [InlineData(SandboxConfinementOutcome.Confined, true, null, "Network: off (Standard) — confined: egress severed")]
+    // The honesty gap this row exists to close: the tier said off, the host could not sever, and now it SAYS so.
+    [InlineData(SandboxConfinementOutcome.Unconfined, false, SandboxConfinement.ReasonNoUserNamespaces, "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (no-userns)")]
+    [InlineData(SandboxConfinementOutcome.Unconfined, false, SandboxConfinement.ReasonNotLinux, "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (not-linux)")]
+    public async Task The_room_states_the_posture_the_runs_own_agents_recorded(SandboxConfinementOutcome outcome, bool severed, string? reason, string expected)
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "posture");
+        var runId = await SeedTurnAsync(teamId, sessionId, 1, "goal", "done");
+
+        await SeedRoutePlanAsync(runId, effective: "Standard", ceiling: "Trusted");
+        await SeedAgentConfinementAsync(teamId, runId, new SandboxConfinement { Outcome = outcome, NetworkSevered = severed, Reason = reason });
+
+        using var scope = _fixture.BeginScope();
+        var room = await scope.Resolve<IRoomProjector>().ProjectByRunAsync(runId, teamId, CancellationToken.None);
+
+        PostureOf(room).ShouldBe(expected,
+            customMessage: "the Room must render the posture the run's agents actually ran under, not the pre-launch hedge");
+    }
+
+    [Fact]
+    public async Task The_room_keeps_the_hedge_for_a_run_whose_agents_recorded_no_posture()
+    {
+        // The mutation guard for the whole arc: drop the launch-time record (or read a run from before the column
+        // existed) and the Room must return to "severed only where the sandbox confines" — never to a bare "off".
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "posture-legacy");
+        var runId = await SeedTurnAsync(teamId, sessionId, 1, "goal", "done");
+
+        await SeedRoutePlanAsync(runId, effective: "Standard", ceiling: "Trusted");
+        await SeedAgentConfinementAsync(teamId, runId, confinement: null);
+
+        using var scope = _fixture.BeginScope();
+        var room = await scope.Resolve<IRoomProjector>().ProjectByRunAsync(runId, teamId, CancellationToken.None);
+
+        PostureOf(room).ShouldBe("Network: off (Standard)" + AgentAutonomyPolicy.ConfinementCaveat);
+    }
+
+    [Fact]
+    public async Task One_unconfined_agent_decides_the_whole_turns_posture()
+    {
+        // Agents of one turn can land on different workers. "Some were confined" does not answer "could anything in
+        // this turn reach the network", so the weakest record must win the sentence.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "posture-mixed");
+        var runId = await SeedTurnAsync(teamId, sessionId, 1, "goal", "done");
+
+        await SeedRoutePlanAsync(runId, effective: "Standard", ceiling: "Trusted");
+        await SeedAgentConfinementAsync(teamId, runId, new SandboxConfinement { Outcome = SandboxConfinementOutcome.Confined, NetworkSevered = true });
+        await SeedAgentConfinementAsync(teamId, runId, new SandboxConfinement { Outcome = SandboxConfinementOutcome.Unconfined, Reason = SandboxConfinement.ReasonNoBubblewrap });
+
+        using var scope = _fixture.BeginScope();
+        var room = await scope.Resolve<IRoomProjector>().ProjectByRunAsync(runId, teamId, CancellationToken.None);
+
+        PostureOf(room).ShouldBe("Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (no-bwrap)");
+    }
+
+    /// <summary>The Room's "Launch" stat row — the backend-authored posture sentence the FE renders verbatim.</summary>
+    private static string? PostureOf(RoomView? room) =>
+        room.ShouldNotBeNull().Blocks.OfType<AssistantTurnBlock>()
+            .SelectMany(t => t.Blocks).OfType<StatBlock>()
+            .Single(b => b.Id.EndsWith(":stat:network", StringComparison.Ordinal)).Detail;
+
+    /// <summary>Stamp the launch-time route provenance the posture sentence's tier + ceiling are read from.</summary>
+    private async Task SeedRoutePlanAsync(Guid runId, string effective, string ceiling)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var plan = new RoutePlan
+        {
+            ProjectionKind = "task", EffectiveAutonomy = effective,
+            Caps = new RouteCaps { AutonomyCeiling = ceiling },
+        };
+
+        await db.WorkflowRun.Where(r => r.Id == runId)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.RoutePlanJson, JsonSerializer.Serialize(plan, Json)));
+    }
+
+    /// <summary>Seed one agent run on the turn, carrying (or deliberately NOT carrying) a launch-stamped confinement record.</summary>
+    private async Task SeedAgentConfinementAsync(Guid teamId, Guid runId, SandboxConfinement? confinement)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.AgentRun.Add(new AgentRun
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, WorkflowRunId = runId, Harness = "scripted",
+            Status = AgentRunStatus.Succeeded, CompletedAt = DateTimeOffset.UtcNow,
+            SandboxConfinementJson = confinement is null ? null : JsonSerializer.Serialize(confinement, AgentJson.Options),
+            CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+        await db.SaveChangesAsync();
     }
 
     private async Task<Guid> SeedSessionAsync(Guid teamId, string title)

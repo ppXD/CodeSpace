@@ -126,4 +126,62 @@ public class AgentAutonomyPolicyTests
             }
         }
     }
+
+    [Theory]
+    // Confinement APPLIED and the netns severed: the hedge is retired — this run provably had no egress.
+    [InlineData(SandboxConfinementOutcome.Confined, null, true, "Network: off (Standard) — confined: egress severed")]
+    // Confined but sharing a network (an inherited filtered netns): confined is true, severed is not. Say both.
+    [InlineData(SandboxConfinementOutcome.Confined, null, false, "Network: off (Standard) — confined, but egress was NOT severed")]
+    // The whole point: the host could NOT confine, so the tier's "off" was never enforced. Stated LOUDLY and with
+    // the reason — a reader must not be able to skim this as a milder flavour of "severed".
+    [InlineData(SandboxConfinementOutcome.Unconfined, SandboxConfinement.ReasonNotLinux, false, "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (not-linux)")]
+    [InlineData(SandboxConfinementOutcome.Unconfined, SandboxConfinement.ReasonNoBubblewrap, false, "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (no-bwrap)")]
+    [InlineData(SandboxConfinementOutcome.Unconfined, SandboxConfinement.ReasonNoUserNamespaces, false, "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (no-userns)")]
+    // A runner that attempts no confinement at all is in the same honest bucket as one that could not.
+    [InlineData(SandboxConfinementOutcome.NotApplicable, null, false, "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this runner applies no confinement")]
+    public void DescribeNetwork_resolves_the_hedge_from_the_runs_own_confinement_record(SandboxConfinementOutcome outcome, string? reason, bool severed, string expected)
+    {
+        var confinement = new SandboxConfinement { Outcome = outcome, Reason = reason, NetworkSevered = severed };
+
+        AgentAutonomyPolicy.DescribeNetwork(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Trusted, confinement).ShouldBe(expected,
+            customMessage: "a run that RECORDED its posture must be described by that record, not by the hedge the record exists to retire");
+    }
+
+    [Fact]
+    public void DescribeNetwork_falls_back_to_the_caveat_when_no_posture_was_recorded()
+    {
+        // The mutation guard: drop the record write (or read a pre-0194 run) and every "off" sentence must return to
+        // the hedge — never to an unqualified, un-evidenced "off". Explicit null and the defaulted overload alike.
+        AgentAutonomyPolicy.DescribeNetwork(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Trusted, null)
+            .ShouldBe("Network: off (Standard)" + AgentAutonomyPolicy.ConfinementCaveat);
+
+        AgentAutonomyPolicy.DescribeNetwork(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Trusted)
+            .ShouldBe("Network: off (Standard)" + AgentAutonomyPolicy.ConfinementCaveat);
+    }
+
+    [Fact]
+    public void DescribeNetwork_states_an_unconfined_posture_loudly_enough_to_be_unmissable()
+    {
+        // A resolved sentence must never merely APPEND to the hedge: the two say different things, and a reader who
+        // sees both learns nothing. Assert the replacement, on every off-tier pair and every unconfined shape.
+        foreach (var confinement in new[]
+                 {
+                     new SandboxConfinement { Outcome = SandboxConfinementOutcome.Unconfined, Reason = SandboxConfinement.ReasonNoUserNamespaces },
+                     new SandboxConfinement { Outcome = SandboxConfinementOutcome.NotApplicable },
+                 })
+        {
+            foreach (var effective in Enum.GetValues<AgentAutonomyLevel>())
+            {
+                foreach (var ceiling in Enum.GetValues<AgentAutonomyLevel>())
+                {
+                    if (AgentAutonomyPolicy.Derive(effective).Network == AgentNetworkAccess.On) continue;
+
+                    var line = AgentAutonomyPolicy.DescribeNetwork(effective, ceiling, confinement);
+
+                    line.ShouldContain("UNCONFINED", customMessage: $"'{effective}'/'{ceiling}' hides an unenforced 'off' behind quiet wording");
+                    line.ShouldNotContain(AgentAutonomyPolicy.ConfinementCaveat, customMessage: "the resolved sentence must REPLACE the hedge, not stack on it");
+                }
+            }
+        }
+    }
 }

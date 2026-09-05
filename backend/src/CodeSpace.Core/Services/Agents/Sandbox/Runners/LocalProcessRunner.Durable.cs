@@ -194,6 +194,11 @@ public sealed partial class LocalProcessRunner
                     Deadline = spec.TimeoutSeconds is { } secs && secs > 0 ? DateTimeOffset.UtcNow.AddSeconds(secs) : DateTimeOffset.MaxValue,
                     EgressNetnsKey = egress.Key,
                     CgroupRunKey = cgroup.Key,
+                    // What this launch ACTUALLY did about confinement, from the same probe + the same ShareNetwork
+                    // input AppendChildCommand builds the argv from — so the record can never claim a severance the
+                    // command line did not request. Persisted by the executor; read back by everything that would
+                    // otherwise have to hedge about whether "network off" was enforced.
+                    Confinement = BubblewrapSandbox.DeriveConfinement(BubblewrapSandbox.Available, BubblewrapSandbox.UnavailableReason, ShareNetwork(spec, egress.ExecPrefix)),
                 };
             }
             catch
@@ -878,6 +883,14 @@ public sealed partial class LocalProcessRunner
     }
 
     /// <summary>
+    /// Whether this launch SHARES a network with the host rather than getting a fresh empty one. A non-empty egress
+    /// prefix means the chain already runs inside a filtered netns, which bwrap must inherit (re-unsharing would
+    /// discard the very allowlist that was set up). The single source of truth for the argv AND for the launch's
+    /// recorded <see cref="SandboxConfinement.NetworkSevered"/>, so the record and the command line cannot disagree.
+    /// </summary>
+    private static bool ShareNetwork(SandboxSpec spec, IReadOnlyList<string> egressExecPrefix) => egressExecPrefix.Count > 0 || spec.AllowNetwork;
+
+    /// <summary>
     /// Append the agent command as the supervisor's <c>"$@"</c>: rewritten as a bubblewrap invocation
     /// (filesystem + namespace confinement, the ONLY writable host paths being the workspace + config-home) when
     /// <see cref="BubblewrapSandbox.Available"/>, else the bare command — the unconfined fallback on macOS dev, a
@@ -929,7 +942,7 @@ public sealed partial class LocalProcessRunner
                 ReadOnlyExtraPaths = readOnlyExtra,
                 // In a filtered netns: share it (don't --unshare-net) so the agent inherits the allowlist-filtered
                 // egress; pass no allowlist (the netns enforces it). Otherwise: today's behaviour exactly.
-                ShareNetwork = inFilteredNetns || spec.AllowNetwork,
+                ShareNetwork = ShareNetwork(spec, egressExecPrefix),
                 EgressAllowlist = inFilteredNetns ? null : spec.EgressAllowlist,
             });
             command = bwrap;

@@ -430,11 +430,13 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     }
 
     /// <summary>
-    /// The run's effective network posture, read from the ONE column that records it — the launch-stamped route
-    /// provenance (<c>route_plan_jsonb</c>: the resolved tier plus the ceiling it was clamped to). A single narrow
-    /// column projection, never the frozen definition graph. Null (no row rendered) for a run with no route
-    /// provenance, or one staged before the launch stamped its resolved tier: an unknown posture is left UNSAID
-    /// rather than guessed as "off", since a wrong "off" is exactly the silent claim this row exists to end.
+    /// The run's effective network posture, read from the two columns that record it — the launch-stamped route
+    /// provenance (<c>route_plan_jsonb</c>: the resolved tier plus the ceiling it was clamped to) for what was
+    /// ASKED FOR, and the run's agents' <c>sandbox_confinement</c> for what the host actually DID. Narrow column
+    /// projections, never the frozen definition graph. Null (no row rendered) for a run with no route provenance, or
+    /// one staged before the launch stamped its resolved tier: an unknown posture is left UNSAID rather than guessed
+    /// as "off", since a wrong "off" is exactly the silent claim this row exists to end. A run whose agents recorded
+    /// no confinement (launched before the stamp existed) keeps the hedged wording — the same reason.
     /// </summary>
     private async Task<string?> NetworkPostureAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
     {
@@ -451,7 +453,49 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
 
         return AgentAutonomyPolicy.DescribeNetwork(
             AgentAutonomyPolicy.Parse(route.EffectiveAutonomy, AgentAutonomyLevel.Standard),
-            AgentAutonomyPolicy.Parse(route.Caps.AutonomyCeiling, AgentAutonomyLevel.Unleashed));
+            AgentAutonomyPolicy.Parse(route.Caps.AutonomyCeiling, AgentAutonomyLevel.Unleashed),
+            await ConfinementAsync(runId, teamId, cancellationToken).ConfigureAwait(false));
+    }
+
+    /// <summary>
+    /// The posture this turn's agents actually ran under, folded to ONE record by <see cref="LeastConfined"/>. Null
+    /// when no agent recorded one (an older run, or a turn that spawned no agent) — the caller then keeps the hedge.
+    /// </summary>
+    private async Task<SandboxConfinement?> ConfinementAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var records = await _db.AgentRun.AsNoTracking()
+            .Where(r => r.WorkflowRunId == runId && r.TeamId == teamId && r.SandboxConfinementJson != null)
+            .Select(r => r.SandboxConfinementJson!)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return LeastConfined(records);
+    }
+
+    /// <summary>
+    /// Fold a turn's agent-run confinement records into the ONE the sentence may claim: the LEAST confined of them.
+    /// A turn's agents can land on different workers, so "some were confined" must never be rendered as "this turn
+    /// was confined" — the reader's question is whether ANY of these agents could reach the network, and one
+    /// unconfined agent answers it yes. Unparseable rows are skipped (a malformed column drops the resolution back to
+    /// the hedge, never fails a turn); an all-unparseable set therefore reads as no record at all.
+    /// </summary>
+    internal static SandboxConfinement? LeastConfined(IEnumerable<string> json) =>
+        json.Select(TryReadConfinement).OfType<SandboxConfinement>().MinBy(ConfinementRank);
+
+    /// <summary>Ascending strength: anything not confined is 0 (the reader's "yes, one of them could reach the network"), confinement without a severed netns 1, full severance 2.</summary>
+    private static int ConfinementRank(SandboxConfinement confinement) =>
+        confinement.Outcome != SandboxConfinementOutcome.Confined ? 0 : confinement.NetworkSevered ? 2 : 1;
+
+    /// <summary>Deserialize one confinement record with the SAME options the executor wrote it with; a malformed / legacy column degrades to null.</summary>
+    private static SandboxConfinement? TryReadConfinement(string json)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<SandboxConfinement>(json, AgentJson.Options);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     /// <summary>Deserialize the stamped route provenance with the SAME web options <c>TaskRunSnapshotFactory</c> wrote it with; a malformed / legacy column degrades to null (the room drops one row, never fails a turn).</summary>

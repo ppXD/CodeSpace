@@ -92,6 +92,15 @@ public class AgentRun : IEntity<Guid>, IAuditable
     public string? RunnerHandleJson { get; set; }
 
     /// <summary>
+    /// What confinement the launch ACTUALLY applied (a <c>SandboxConfinement</c> as JSON: outcome, the reason the
+    /// host could not confine, and whether egress was severed), stamped once at launch. Its own column rather than a
+    /// field of <see cref="RunnerHandleJson"/> because the spool reaper nulls that handle 24h after the run goes
+    /// terminal, and the posture a run had must outlive its recovery aid. NULL for a run launched before this
+    /// existed — a reader with no record states the old hedged posture rather than guessing an enforced one.
+    /// </summary>
+    public string? SandboxConfinementJson { get; set; }
+
+    /// <summary>
     /// Monotonic fencing token, bumped on every claim (→ Running). A worker remembers the epoch it claimed
     /// with; completion requires it, so a worker whose run was reclaimed (a lease-expiry reclaim or a restart
     /// re-claim — each bumps the epoch) and then revived loses its terminal write rather than double-completing.

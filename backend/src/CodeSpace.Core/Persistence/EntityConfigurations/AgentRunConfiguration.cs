@@ -26,6 +26,10 @@ public class AgentRunConfiguration : IEntityTypeConfiguration<AgentRun>
         builder.Property(r => r.SessionId).HasColumnName("session_id");
 
         builder.Property(r => r.RunnerHandleJson).HasColumnName("runner_handle").HasColumnType("jsonb");
+
+        // The launch-stamped confinement posture (migration 0194). Nullable: a run from before the stamp, or a
+        // runner that records none.
+        builder.Property(r => r.SandboxConfinementJson).HasColumnName("sandbox_confinement").HasColumnType("jsonb");
         builder.Property(r => r.FenceEpoch).HasColumnName("fence_epoch");
         builder.Property(r => r.LeaseExpiresAt).HasColumnName("lease_expires_at");
         builder.Property(r => r.ReattachAttempts).HasColumnName("reattach_attempts");

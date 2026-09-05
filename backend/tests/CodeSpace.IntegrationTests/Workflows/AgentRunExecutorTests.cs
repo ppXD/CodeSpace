@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.AgentRunLogging;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Agents.Sandbox;
+using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Core.Services.Tasks.Phases;
@@ -60,6 +61,41 @@ public class AgentRunExecutorTests
 
         var events = await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None);
         events.Select(e => e.Text).ShouldBe(new[] { "step one", "step two", "step three" });
+    }
+
+    [Fact]
+    public async Task Records_what_confinement_the_launch_actually_applied_on_the_run_row()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+
+        await ExecuteAsync(runId, new ScriptedHarness("printf 'done\\n'"));
+
+        using var scope = _fixture.BeginScope();
+        var stored = await scope.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking()
+            .Where(r => r.Id == runId).Select(r => r.SandboxConfinementJson).SingleAsync();
+
+        stored.ShouldNotBeNull("the launch must record its confinement posture — without it every reader is back to hedging about whether 'network off' was enforced");
+
+        var confinement = JsonSerializer.Deserialize<SandboxConfinement>(stored!, AgentJson.Options).ShouldNotBeNull();
+
+        // The assertion is anchored on THIS host's real probe, so it is honest wherever it runs: a dev macOS or a CI
+        // container without bwrap records Unconfined + the reason; the privileged sandbox lane records Confined.
+        if (BubblewrapSandbox.Available is null)
+        {
+            confinement.Outcome.ShouldBe(SandboxConfinementOutcome.Unconfined,
+                customMessage: $"this host cannot confine ({BubblewrapSandbox.UnavailableReason}) yet the run recorded confinement — the record must never claim isolation the launch did not apply");
+            confinement.Reason.ShouldBe(BubblewrapSandbox.UnavailableReason,
+                customMessage: "the recorded reason must be the probe's own — 'install bwrap' and 'allow user namespaces' are different fixes, and a generic reason tells the operator neither");
+            confinement.NetworkSevered.ShouldBeFalse("an unconfined run severs nothing, whatever tier the launcher asked for");
+        }
+        else
+        {
+            confinement.Outcome.ShouldBe(SandboxConfinementOutcome.Confined);
+            confinement.Reason.ShouldBeNull();
+        }
     }
 
     [Fact]

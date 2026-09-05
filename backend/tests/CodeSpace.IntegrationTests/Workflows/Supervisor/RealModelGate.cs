@@ -1,6 +1,8 @@
 using System.Runtime.CompilerServices;
 using Shouldly;
+using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Core.Services.Workflows.Llm;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
@@ -136,7 +138,7 @@ public static class RealModelGate
     /// therefore reported as a fingerprint COMPARISON (<c>differs from configured fp=…</c>), which says the one thing
     /// a name was there to say and survives both masking and redaction.</para>
     /// </summary>
-    internal static string ModelStamp() => ModelStamp(Sink.Value?.Name, Environment.GetEnvironmentVariable(ModelIdEnvVar));
+    internal static string ModelStamp() => ModelStamp(Sink.Value?.Name, Environment.GetEnvironmentVariable(ModelIdEnvVar)) + ConfinementStamp();
 
     /// <summary>Testable core of <see cref="ModelStamp()"/> — explicit observed/configured names, so the written stamp is pinnable without mutating process env.</summary>
     internal static string ModelStamp(string? observed, string? configured)
@@ -152,6 +154,24 @@ public static class RealModelGate
         var drift = live is not null && pinned is not null && live != pinned ? $", differs from configured fp={Fingerprint(pinned)}" : "";
 
         return $"[model fp={Fingerprint(name)} ({(live is null ? "configured" : "observed")}{drift})]";
+    }
+
+    /// <summary>
+    /// What confinement THIS lane's runner can apply, appended to every verdict line. INFORMATIONAL — it gates
+    /// nothing — but a lane whose agents ran with no severable egress produced its verdict under a materially
+    /// different sandbox than the privileged gate does, and the reader of an archived summary has no other way to
+    /// tell. Derived from the same probe the runner stamps on each run, so the label cannot claim what the runs did not get.
+    /// </summary>
+    internal static string ConfinementStamp() => ConfinementStamp(BubblewrapSandbox.Available, BubblewrapSandbox.UnavailableReason);
+
+    /// <summary>Testable core of <see cref="ConfinementStamp()"/> — explicit probe results, so the word is pinnable on any host.</summary>
+    internal static string ConfinementStamp(string? available, string? unavailableReason)
+    {
+        var confinement = BubblewrapSandbox.DeriveConfinement(available, unavailableReason, shareNetwork: false);
+
+        return confinement.Outcome == SandboxConfinementOutcome.Confined
+            ? " [runner=confined]"
+            : $" [runner=unconfined ({confinement.Reason})]";
     }
 
     /// <summary>First 8 hex of SHA-256 of <paramref name="value"/> — a stable, masking-proof identity for a secret model id, comparable across runs.</summary>
