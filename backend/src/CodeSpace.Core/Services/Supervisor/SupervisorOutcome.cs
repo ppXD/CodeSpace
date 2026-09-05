@@ -1692,6 +1692,25 @@ public static class SupervisorOutcome
     }
 
     /// <summary>
+    /// Whether a <c>plan</c> decision's PAYLOAD declares that earlier generations' finished results are ABANDONED
+    /// (the model-authored direction change). FALSE when absent/malformed — conservation is the default, so a
+    /// payload nobody can parse never discards work.
+    /// </summary>
+    public static bool ReadPlanAbandonsEarlierResults(string? planPayloadJson)
+    {
+        if (string.IsNullOrWhiteSpace(planPayloadJson)) return false;
+
+        try
+        {
+            return JsonSerializer.Deserialize<SupervisorPlanPayload>(planPayloadJson, AgentJson.Options)?.AbandonEarlierResults ?? false;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// DC-1 — read the EFFECTIVE (already server-clamped, see <see cref="SupervisorDeliveryClamp"/>) delivery
     /// contract off a <c>plan</c> decision's PAYLOAD. Null when absent/malformed — the common pre-DC-1 case, and
     /// any run whose plan never named a delivery preference on either side (model or operator).

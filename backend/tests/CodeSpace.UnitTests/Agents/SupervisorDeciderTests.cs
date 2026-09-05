@@ -766,6 +766,19 @@ public class SupervisorDeciderTests
     }
 
     [Fact]
+    public void The_system_prompt_names_the_plans_abandon_earlier_results_signal()
+    {
+        // A re-plan that changes DIRECTION used to leave the abandoned generation's finished branches mergeable, and
+        // the recitation promised the model they would be folded — so a brain steering away from wrong work shipped it
+        // anyway. The schema description is the primary carrier; the rails only have to tell the model the field is
+        // there, and that saying nothing keeps the old conservation.
+        var system = LlmSupervisorDecider.SystemPromptForTest;
+
+        system.ShouldContain("abandonEarlierResults", Case.Sensitive, "the model cannot use a signal the rails never name");
+        system.ShouldContain("changes direction", Case.Insensitive, "...scoped to the direction-change case, so an ordinary re-plan still conserves finished work");
+    }
+
+    [Fact]
     public void The_system_prompt_guides_recognising_an_already_completed_ask_without_re_planning_redundant_work()
     {
         // Redundant-complete handoff: a session-continue whose follow-up re-requests work the prior context already

@@ -79,6 +79,22 @@ public class SupervisorDecisionSchemaTests
     }
 
     [Fact]
+    public void The_plan_can_declare_that_it_abandons_earlier_generations_results()
+    {
+        // The schema is additionalProperties:false, so a field it does not DECLARE is a field the model can never
+        // emit — however well the payload record and the merge door understand the signal, it stays unreachable.
+        // The description is the primary carrier of what the flag does (the system prompt only points at it).
+        var plan = Schema.GetProperty("properties").GetProperty("plan");
+        var abandon = plan.GetProperty("properties").GetProperty("abandonEarlierResults");
+
+        abandon.GetProperty("type").GetString().ShouldBe("boolean");
+        abandon.GetProperty("description").GetString().ShouldContain("must NOT be merged or published", Case.Sensitive, "the description must state both doors the flag closes, not just the merge");
+
+        plan.GetProperty("required").EnumerateArray().Select(e => e.GetString())
+            .ShouldNotContain("abandonEarlierResults", "conservation stays the DEFAULT — a plan that says nothing keeps earlier work mergeable");
+    }
+
+    [Fact]
     public void A_root_level_rationale_is_declared_for_every_verb()
     {
         // Rationale is a DECISION-level annotation (why + evidence), authored uniformly at the root for every verb —
