@@ -54,7 +54,7 @@ public sealed class SupervisorPullRequestOpener : ISupervisorPullRequestOpener, 
             ? resolved
             : resolved.Select(t => t with { TargetBranch = targetBranchOverride }).ToList();
 
-        if (targets.Count == 0) return await NothingToOpenAsync(primaryRepositoryId, teamId, cancellationToken).ConfigureAwait(false);
+        if (targets.Count == 0) return await NothingToOpenAsync(workflowRunId, primaryRepositoryId, teamId, cancellationToken).ConfigureAwait(false);
 
         var degraded = targets.Where(t => t.RepositoryId is null)
             .Select(t => new RoomPullRequestOpened { Alias = t.Alias, Disposition = RoomPullRequestDisposition.Failed, Error = "no resolvable repository id for this repo" })
@@ -127,16 +127,49 @@ public sealed class SupervisorPullRequestOpener : ISupervisorPullRequestOpener, 
     /// human is told what to change. A repository that PERMITS publishing keeps the empty result (a genuinely
     /// work-free run's honest card), and so does the post-terminal Room caller, which passes no
     /// <paramref name="primaryRepositoryId"/> at all and owns its own "nothing to open" contract.
+    ///
+    /// <para>The mint REQUIRES evidence that the run captured work — at least one Agent-kind
+    /// <see cref="PublishManifest"/> naming that repository. Minting on the publish mode alone would say "policy
+    /// blocked your pull request" over a run that produced nothing to open one from, and the REQUIRED real-model
+    /// gate (<c>RealModelDeliveryGateE2ETests</c>) discriminates a model capability miss from a code fault by
+    /// exactly that card wording: an unconditional mint would make a work-free run under a patch-only repository
+    /// read as a successful drive, blinding the one check that catches a swallowed capture pipeline. A zero-work
+    /// run keeps the empty result, so the gate's honest "no published branch" card still stands.</para>
     /// </summary>
-    private async Task<RoomPullRequestResult> NothingToOpenAsync(Guid? primaryRepositoryId, Guid teamId, CancellationToken cancellationToken)
+    private async Task<RoomPullRequestResult> NothingToOpenAsync(Guid workflowRunId, Guid? primaryRepositoryId, Guid teamId, CancellationToken cancellationToken)
     {
         var empty = new RoomPullRequestResult { PullRequests = Array.Empty<RoomPullRequestOpened>() };
 
         if (primaryRepositoryId is null) return empty;
 
-        var patchOnly = await PatchOnlyRepositoryIdsAsync(new[] { primaryRepositoryId.Value }, teamId, cancellationToken).ConfigureAwait(false);
+        var capturedWork = await CapturedWorkByRepositoryAsync(workflowRunId, primaryRepositoryId.Value, teamId, cancellationToken).ConfigureAwait(false);
 
-        return patchOnly.Count == 0 ? empty : new RoomPullRequestResult { PullRequests = new[] { PatchOnlySkip(primaryRepositoryId, "primary") } };
+        if (capturedWork.Count == 0) return empty;
+
+        var patchOnlyIds = await PatchOnlyRepositoryIdsAsync(capturedWork.Keys, teamId, cancellationToken).ConfigureAwait(false);
+
+        var skipped = capturedWork.Where(r => patchOnlyIds.Contains(r.Key)).Select(r => PatchOnlySkip(r.Key, r.Value)).ToList();
+
+        return skipped.Count == 0 ? empty : new RoomPullRequestResult { PullRequests = skipped };
+    }
+
+    /// <summary>
+    /// Which repositories this run actually captured work for, alias included — the Agent-kind manifest rows, whose
+    /// very existence IS the evidence (<c>AgentRunExecutor.PersistPublishManifestAsync</c> writes NO row for an
+    /// empty-diff run, and <c>RepositoryPolicyPublishGuard</c> still lets a patch-only repo's captured diff record
+    /// one, branchless). A row that never resolved a repository id is attributed to the caller's own primary — the
+    /// only repository a live turn can name for it — so a single-repo run whose alias row is id-less is not silently
+    /// dropped. PER REPOSITORY, never run-wide: a multi-repo run must not have one repo's policy skip claim to
+    /// describe a sibling that publishes fine.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<Guid, string>> CapturedWorkByRepositoryAsync(Guid workflowRunId, Guid primaryRepositoryId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var manifests = await _manifests.ListForWorkflowRunAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false);
+
+        return manifests.Where(m => m.Kind == PublishManifestKind.Agent)
+            .Select(m => (RepositoryId: m.RepositoryId ?? primaryRepositoryId, m.RepositoryAlias))
+            .GroupBy(m => m.RepositoryId)
+            .ToDictionary(g => g.Key, g => g.First().RepositoryAlias);
     }
 
     /// <summary>The ONE patch-only skip entry — minted both for a target the resolver DID surface and for the zero-target case above, so the two can never drift on how the policy skip reads to the gate or to a human.</summary>

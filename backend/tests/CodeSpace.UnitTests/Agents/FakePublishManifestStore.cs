@@ -5,15 +5,20 @@ using CodeSpace.Messages.Agents;
 namespace CodeSpace.UnitTests.Agents;
 
 /// <summary>
-/// Test double for <see cref="IPublishManifestStore"/>: every read returns empty, every write no-ops. Used by pure
-/// turn-loop unit tests that construct <see cref="CodeSpace.Core.Services.Supervisor.SupervisorTurnService"/>
-/// directly and never touch a real ledger — <see cref="RehydrateFromDecisionLogAsync"/>'s P0-5 published-agent
-/// fold reads through this whenever a scenario stages any agent, so it must return a real (empty) result rather
-/// than the <c>null!</c> placeholder these tests used before that fold existed.
+/// Test double for <see cref="IPublishManifestStore"/>: every read returns empty unless a scenario seeded rows, and
+/// every write no-ops. Used by pure turn-loop unit tests that construct
+/// <see cref="CodeSpace.Core.Services.Supervisor.SupervisorTurnService"/> directly and never touch a real ledger —
+/// <see cref="RehydrateFromDecisionLogAsync"/>'s P0-5 published-agent fold reads through this whenever a scenario
+/// stages any agent, so it must return a real (empty) result rather than the <c>null!</c> placeholder these tests
+/// used before that fold existed. <see cref="WorkflowRunRows"/> lets a scenario that must distinguish "the run
+/// captured work" from "the run captured nothing" seed the ledger rows that difference IS.
 /// </summary>
 internal sealed class FakePublishManifestStore : IPublishManifestStore
 {
     public List<long> FencedEpochs { get; } = new();
+
+    /// <summary>The rows <see cref="ListForWorkflowRunAsync"/> returns — empty (the default) means the run captured nothing.</summary>
+    public List<PublishManifest> WorkflowRunRows { get; } = new();
 
     public Task UpsertForAgentRunAsync(Guid agentRunId, PublishManifestUpsert input, long expectedFenceEpoch, CancellationToken cancellationToken)
     {
@@ -34,7 +39,7 @@ internal sealed class FakePublishManifestStore : IPublishManifestStore
         Task.FromResult<IReadOnlyDictionary<Guid, IReadOnlyList<PublishManifest>>>(new Dictionary<Guid, IReadOnlyList<PublishManifest>>());
 
     public Task<IReadOnlyList<PublishManifest>> ListForWorkflowRunAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken) =>
-        Task.FromResult<IReadOnlyList<PublishManifest>>(Array.Empty<PublishManifest>());
+        Task.FromResult<IReadOnlyList<PublishManifest>>(WorkflowRunRows);
 
     public Task<IReadOnlyDictionary<Guid, IReadOnlyList<PublishManifest>>> ListForWorkflowRunsAsync(IReadOnlyCollection<Guid> workflowRunIds, Guid teamId, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyDictionary<Guid, IReadOnlyList<PublishManifest>>>(new Dictionary<Guid, IReadOnlyList<PublishManifest>>());

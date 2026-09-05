@@ -203,9 +203,11 @@ public class SupervisorDeliveryGateTests
     // ── H1 (Skipped-as-satisfied fix): policy-skipped is a HUMAN decision, not satisfaction ──
 
     [Theory]
-    [InlineData(RepositoryPublishMode.PatchOnly, "patch-only")]
-    [InlineData(RepositoryPublishMode.Branch, "no published branch")]
-    public async Task A_stop_after_a_zero_target_publish_parks_on_the_card_the_repositorys_publish_mode_earns(RepositoryPublishMode publishMode, string expectedWording)
+    [InlineData(RepositoryPublishMode.PatchOnly, true, "patch-only")]
+    [InlineData(RepositoryPublishMode.PatchOnly, false, "no published branch")]
+    [InlineData(RepositoryPublishMode.Branch, true, "no published branch")]
+    [InlineData(RepositoryPublishMode.Branch, false, "no published branch")]
+    public async Task A_stop_after_a_zero_target_publish_parks_on_the_card_the_run_earns(RepositoryPublishMode publishMode, bool capturedWork, string expectedWording)
     {
         // PatchOnly repos yield Skipped by deliberate policy — but the operator ALSO required a PR. Two operator
         // intents conflict; the gate must surface the conflict to a human, never silently pick "no PR" and call
@@ -217,12 +219,16 @@ public class SupervisorDeliveryGateTests
         // also skips the agent push and the merge integration, so the branch resolver surfaces ZERO targets — and
         // the opener's empty result parked every such run on the "no published branch" card meant for a work-free
         // run (RealModelDeliveryGateE2ETests caught it live, over 3 captured manifests).
+        //
+        // The publish mode ALONE never earns the policy card: without a captured manifest the run produced nothing
+        // to open a pull request from, and claiming policy blocked it would also blind that same real-model gate,
+        // which reads this exact wording to tell a model capability miss from a swallowed capture pipeline.
         var teamId = Guid.NewGuid();
         var plan = Plan(1, openPullRequest: true);
 
         var context = Context(new DeliverySpec { OpenPullRequest = true },
             plan,
-            Decision(SupervisorDecisionKinds.Publish, 2, await ZeroTargetPublishOutcomeAsync(teamId, publishMode, plan)));
+            Decision(SupervisorDecisionKinds.Publish, 2, await ZeroTargetPublishOutcomeAsync(teamId, plan, (publishMode, capturedWork))));
 
         var substituted = SupervisorDeliveryGate.Validate(context, StopDecision());
 
@@ -230,7 +236,7 @@ public class SupervisorDeliveryGateTests
         substituted!.Kind.ShouldBe(SupervisorDecisionKinds.AskHuman);
 
         var question = JsonSerializer.Deserialize<SupervisorAskHumanPayload>(substituted.PayloadJson, AgentJson.Options)!.Question;
-        question.ShouldContain(expectedWording, Case.Insensitive, $"a {publishMode} repository's zero-target publish must park on the card naming ITS OWN blocker — the human can only fix what the card names");
+        question.ShouldContain(expectedWording, Case.Insensitive, $"a {publishMode} repository whose run captured {(capturedWork ? "work" : "NOTHING")} must park on the card naming ITS OWN blocker — the human can only fix what the card names");
     }
 
     [Fact]
@@ -575,30 +581,46 @@ public class SupervisorDeliveryGateTests
         }, AgentJson.Options);
 
     /// <summary>
-    /// The tape entry a REAL forced publish leaves behind when the branch resolver surfaces NOTHING for a repository
-    /// in <paramref name="publishMode"/>: the production <see cref="SupervisorPullRequestOpener"/> runs against an
-    /// in-memory repository row and its result is serialized exactly as <c>RealSupervisorActionExecutor</c>'s publish
-    /// step persists it. Not a fixture the gate's own reading could drift from — it IS what production writes.
+    /// The tape entry a REAL forced publish leaves behind when the branch resolver surfaces NOTHING for the run's
+    /// <paramref name="repositories"/> (the FIRST is the run's primary): the production
+    /// <see cref="SupervisorPullRequestOpener"/> runs against in-memory repository rows plus each repo's captured
+    /// publish-manifest evidence, and its result is serialized exactly as <c>RealSupervisorActionExecutor</c>'s
+    /// publish step persists it. Not a fixture the gate's own reading could drift from — it IS what production writes.
     /// </summary>
-    private static async Task<string> ZeroTargetPublishOutcomeAsync(Guid teamId, RepositoryPublishMode publishMode, params SupervisorPriorDecision[] prior)
+    private static async Task<string> ZeroTargetPublishOutcomeAsync(Guid teamId, SupervisorPriorDecision plan, params (RepositoryPublishMode PublishMode, bool CapturedWork)[] repositories)
     {
         using var db = Infrastructure.EmptyTestDb.New();
 
-        var repositoryId = Guid.NewGuid();
+        var manifests = new FakePublishManifestStore();
+        var workflowRunId = Guid.NewGuid();
+        var ids = repositories.Select(_ => Guid.NewGuid()).ToList();
 
-        db.Repository.Add(new Repository
+        for (var i = 0; i < repositories.Length; i++)
         {
-            Id = repositoryId, TeamId = teamId, ProviderInstanceId = Guid.NewGuid(), ExternalId = "ext", NamespacePath = "org",
-            Name = "repo", FullPath = "org/repo", DefaultBranch = "main", WebUrl = "https://local/org/repo", PublishMode = publishMode,
-        });
+            db.Repository.Add(new Repository
+            {
+                Id = ids[i], TeamId = teamId, ProviderInstanceId = Guid.NewGuid(), ExternalId = $"ext{i}", NamespacePath = "org",
+                Name = $"repo{i}", FullPath = $"org/repo{i}", DefaultBranch = "main", WebUrl = $"https://local/org/repo{i}", PublishMode = repositories[i].PublishMode,
+            });
+
+            if (repositories[i].CapturedWork) manifests.WorkflowRunRows.Add(CapturedAgentManifest(teamId, workflowRunId, ids[i], $"repo{i}"));
+        }
+
         await db.SaveChangesAsync();
 
-        var opener = new SupervisorPullRequestOpener(db, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new UnreachableChangeSetService());
+        var opener = new SupervisorPullRequestOpener(db, manifests, new FakeSupervisorPublishedBranchResolver(), new UnreachableChangeSetService());
 
-        var result = await opener.OpenAsync(Guid.NewGuid(), teamId, prior, repositoryId, targetBranchOverride: null, currentTurnStopSummary: null, actorUserId: null, CancellationToken.None);
+        var result = await opener.OpenAsync(workflowRunId, teamId, new[] { plan }, ids[0], targetBranchOverride: null, currentTurnStopSummary: null, actorUserId: null, CancellationToken.None);
 
         return JsonSerializer.Serialize(result, AgentJson.Options);
     }
+
+    /// <summary>The ledger row <c>AgentRunExecutor.PersistPublishManifestAsync</c> writes for a captured diff the publish policy kept off a branch — branchless, PatchOnly. An empty-diff run leaves NO row at all, which is exactly the difference the card wording turns on.</summary>
+    private static PublishManifest CapturedAgentManifest(Guid teamId, Guid workflowRunId, Guid repositoryId, string alias) => new()
+    {
+        Id = Guid.NewGuid(), TeamId = teamId, WorkflowRunId = workflowRunId, AgentRunId = Guid.NewGuid(), Kind = PublishManifestKind.Agent,
+        RepositoryId = repositoryId, RepositoryAlias = alias, ChangedFileCount = 1, PatchArtifactId = Guid.NewGuid(), PublishStateValue = PublishState.PatchOnly,
+    };
 
     /// <summary>Zero resolved targets must be decided before any provider work — a call here means the opener tried to open a PR against a branch that does not exist.</summary>
     private sealed class UnreachableChangeSetService : IChangeSetService
