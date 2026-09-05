@@ -107,7 +107,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         jobClient.Clear();
         jobClient.AutoExecute = true;
 
-        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
         // The surface an ask PARKS on. Without it every ask degrades to a self-advancing NULL answer that nobody can
         // ever answer, so nine of them walked the run into the no-progress forced stop with acceptance never run — the
         // gate then measured the absence of a human rather than the model's completion (real-model run 33723910434).
@@ -195,7 +195,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         jobClient.Clear();
         jobClient.AutoExecute = true;
 
-        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
 
         using var remote = new BareRemote();
         await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nif ls agent_*.txt >/dev/null 2>&1; then exit 0; else exit 1; fi\n", ["base.txt"] = "base\n" });
@@ -371,7 +371,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         jobClient.Clear();
         jobClient.AutoExecute = true;
 
-        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
         var conversationId = await SeedConversationAsync(teamId, userId);   // the surface the amend co-sign card parks on
 
         using var remote = new BareRemote();
@@ -542,7 +542,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         jobClient.Clear();
         jobClient.AutoExecute = true;
 
-        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
 
         using var remote = new BareRemote();
         await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nif ls agent_*.txt >/dev/null 2>&1; then exit 0; else exit 1; fi\n", ["base.txt"] = "base\n" });
@@ -619,7 +619,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         jobClient.Clear();
         jobClient.AutoExecute = true;
 
-        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
 
         using var remote = new BareRemote();
         await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nif ls agent_*.txt >/dev/null 2>&1; then exit 0; else exit 1; fi\n", ["base.txt"] = "base\n" });
@@ -699,7 +699,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         jobClient.Clear();
         jobClient.AutoExecute = true;
 
-        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
 
         using var remote = new BareRemote();
         await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nif ls agent_*.txt >/dev/null 2>&1; then exit 0; else exit 1; fi\n", ["base.txt"] = "base\n" });
@@ -810,7 +810,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         jobClient.Clear();
         jobClient.AutoExecute = true;
 
-        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
 
         using var remote = new BareRemote();
         // The RUN-LEVEL operator floor is deliberately UNCONDITIONAL (exit 0) — this arm's subtask makes no changes
@@ -913,7 +913,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         jobClient.Clear();
         jobClient.AutoExecute = true;
 
-        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
 
         using var remote = new BareRemote();
         await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nexit 0\n", ["base.txt"] = "base\n" });
@@ -1078,7 +1078,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         jobClient.Clear();
         jobClient.AutoExecute = true;
 
-        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
         var conversationId = await SeedConversationAsync(teamId, userId);   // the surface the irreversible resolve parks its approval on
 
         // shared.txt is seeded so each agent's edit is a real diff against a common base → a real git conflict when two run.
@@ -1148,7 +1148,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         jobClient.Clear();
         jobClient.AutoExecute = true;
 
-        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
 
         using var remote = new BareRemote();
         await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nexit 0\n", ["base.txt"] = "base\n" });
@@ -1208,7 +1208,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         jobClient.Clear();
         jobClient.AutoExecute = true;
 
-        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
 
         using var remote = new BareRemote();
         // The GOAL-RELEVANCE oracle: the agent must edit solution.sh so `sh solution.sh 7 5` prints 12 — graded by check.sh.
@@ -1418,7 +1418,9 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
     /// Success walk stamped <c>ModelPlaneUnavailable</c>. That is the same outage wearing the product's own graceful
     /// ending, so it routes to the same non-gating skip. It is admitted ONLY when the attempt got no model turn at all
     /// (the tape holds nothing but that forced stop): an attempt whose model DID decide before the plane went down has
-    /// something measured, and keeps today's scoring.</para>
+    /// something measured, and keeps today's scoring. DEFENCE IN DEPTH — this arm's own parks are ridden by
+    /// <c>InfraParkRide</c>, which gives up ~40s in and never lets the engine's 24h window exhaust inside a ride; see
+    /// <c>RealModelGate.IsWholeWindowModelPlaneOutage</c> for the routes that DO reach it.</para>
     /// </summary>
     private async Task ThrowIfGatewayInfraFailureAsync(CodeSpaceDbContext db, Guid runId)
     {
@@ -1433,7 +1435,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             .Where(d => d.SupervisorRunId == runId)
             .OrderBy(d => d.Sequence).Select(d => d.PayloadJson).ToListAsync();
 
-        if (decisions.Count == 1 && RealModelGate.IsModelPlaneUnavailableStop(decisions[0]))
+        if (RealModelGate.IsWholeWindowModelPlaneOutage(decisions))
             throw new TimeoutException($"the supervisor brain's model plane stayed unavailable for the whole park window and the run never took a model turn (NON-GATING infra): {decisions[0]}");
     }
 
@@ -1635,7 +1637,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         jobClient.Clear();
         jobClient.AutoExecute = true;
 
-        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
 
         // Two real bare remotes, each with its OWN non-vacuous acceptance floor (requires an agent_*.txt in the
         // integrated head), so a green per-repo grade proves an agent's work really landed in THAT repo.
@@ -1715,7 +1717,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         jobClient.Clear();
         jobClient.AutoExecute = true;
 
-        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
 
         using var remote = new BareRemote();
         await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nif ls agent_*.txt >/dev/null 2>&1; then exit 0; else exit 1; fi\n", ["base.txt"] = "base\n" });

@@ -606,6 +606,23 @@ public static class RealModelGate
         catch (System.Text.Json.JsonException) { return false; }
     }
 
+    /// <summary>
+    /// Whether a supervisor run's WHOLE decision tape is nothing but the model-plane park's honest ending — the single
+    /// forced stop above and no model turn at all. This is the "nothing was measured" fact
+    /// <see cref="IsModelPlaneUnavailableStop"/> deliberately refuses to guess at, ANDed with it: an attempt whose model
+    /// DID decide before the plane went down has something to score and keeps today's scoring, so only a tape of
+    /// EXACTLY one decision — that stop — routes to the non-gating infra skip.
+    ///
+    /// <para>DEFENCE IN DEPTH, not the live lane's normal exit. A whole-loop arm rides its parks through
+    /// <see cref="InfraParkRide"/>, whose budget (<see cref="InfraParkRide.MaxWakes"/> wakes × <see cref="InfraParkRide.WakePause"/>
+    /// ≈ 40s) gives up long before the engine's own 24h window can exhaust — an outage that outlives the ride surfaces
+    /// as <c>InfraParkUnresolvedException</c> instead. This covers the run that reaches the forced stop by another
+    /// route: a resume fired outside a ride (the stranded-wait reconciler), a rerun of a parked run, or a future arm
+    /// whose ride budget is raised. Cheap to hold, and the alternative is a red that blames the model for an outage.</para>
+    /// </summary>
+    public static bool IsWholeWindowModelPlaneOutage(IReadOnlyList<string> decisionPayloadsInOrder) =>
+        decisionPayloadsInOrder.Count == 1 && IsModelPlaneUnavailableStop(decisionPayloadsInOrder[0]);
+
     /// <summary>The infra categories the decider PROPAGATES (vs the capability ones it fail-closes), ANCHORED to the leading <c>(status, category): </c> slot of the BuildMessage prefix: <c>^…?API error (&lt;status, no ',' or ')'&gt;, &lt;Category&gt;): </c>. Anchoring at <c>^</c> + a comma/paren-free status means only the engine-written leading slot is read; the untrusted providerMessage that follows the first <c>): </c> can never satisfy it.</summary>
     private static readonly System.Text.RegularExpressions.Regex InfraSlotRegex = new(
         @"^[^(]*?API error \([^,)]*, (?:Transient|RateLimited|AuthFailed)\): ",

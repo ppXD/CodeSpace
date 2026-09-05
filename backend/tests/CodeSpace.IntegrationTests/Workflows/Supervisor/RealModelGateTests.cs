@@ -488,6 +488,30 @@ public sealed class RealModelGateTests
         RealModelGate.IsModelPlaneUnavailableStop("not json at all").ShouldBeFalse();
     }
 
+    [Fact]
+    public void Only_a_tape_holding_NOTHING_but_the_forced_stop_routes_to_the_infra_skip()
+    {
+        // The "nothing was measured" half the stop check deliberately refuses to guess at. A tape of exactly ONE
+        // decision — the engine's forced stop — is a run whose model never got a turn, so there is no capability
+        // verdict to score and the outage routes to the non-gating skip.
+        var forcedStop = ForcedStopPayload(SupervisorStopReasons.ModelPlaneUnavailable);
+
+        RealModelGate.IsWholeWindowModelPlaneOutage(new[] { forcedStop })
+            .ShouldBeTrue("one decision, and it is the park's own ending — the attempt took no model turn at all");
+
+        // An attempt whose model DID decide before the plane went down has something measured, and keeps today's
+        // scoring. Skipping it would refund a real capability outcome on the strength of how the run happened to end.
+        RealModelGate.IsWholeWindowModelPlaneOutage(new[] { ModelPlanPayload(), forcedStop })
+            .ShouldBeFalse("a model turn preceded the outage — that turn IS the measurement, so this attempt still gates");
+
+        RealModelGate.IsWholeWindowModelPlaneOutage(Array.Empty<string>()).ShouldBeFalse("no decisions at all is not this shape — it is a run that never reached the brain");
+        RealModelGate.IsWholeWindowModelPlaneOutage(new[] { ModelPlanPayload() }).ShouldBeFalse("one MODEL-authored decision is a measured turn, not an outage");
+    }
+
+    /// <summary>A model-authored decision as the projector persists it — <c>outcome</c>/<c>summary</c>, never a <c>reason</c>.</summary>
+    private static string ModelPlanPayload() =>
+        System.Text.Json.JsonSerializer.Serialize(new { goal = "ship it", subtasks = new[] { new { id = "s1", title = "Audit" } } });
+
     /// <summary>The shape the engine actually persists for a node failure: <c>{"error":"…","outputs":{},"duration_ms":…}</c> — so the gate is exercised against the REAL record shape (its `error` field), not a bare string.</summary>
     private static string NodeFailedPayload(string error) =>
         System.Text.Json.JsonSerializer.Serialize(new { error, outputs = new { }, duration_ms = 12 });
