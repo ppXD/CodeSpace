@@ -300,7 +300,7 @@ public sealed partial class RealSupervisorActionExecutor
     {
         var manifests = await _manifests.ListForWorkflowRunAsync(context.SupervisorRunId, context.TeamId, cancellationToken).ConfigureAwait(false);
 
-        return IntegrationBaseAnchor.OldestRecordedBase(manifests, repositoryId) ?? firstEligibleBase;
+        return IntegrationBaseAnchor.Resolve(manifests, repositoryId, firstEligibleBase)!;
     }
 
     private static IntegrationRequest BuildIntegrationRequest(Guid repoId, SupervisorTurnContext context, WorkspaceRequest workspace, string baseSha, IReadOnlyList<MergedAgent> eligible) => new()
