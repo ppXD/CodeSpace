@@ -133,14 +133,17 @@ public sealed class CompletionAssessmentComposer : ICompletionAssessmentComposer
 
         var metricAt1 = MetricAt1.Project(requirements, receipts, executableSet, attempts, facts, run.CompletionPolicyVersion, currentRevisions);
 
-        // P4 (the Integrate cell's second ledger): the run-level Integration manifest rows a git.integrate_run
-        // step records — the plan-map lane's candidate fact; a supervisor lane evidences the same cell off its
-        // tape and never needs these rows.
-        var integrationManifests = await _db.PublishManifest.AsNoTracking()
-            .Where(m => m.WorkflowRunId == workflowRunId && m.TeamId == teamId && m.Kind == PublishManifestKind.Integration)
+        // P4 (the Integrate cell's row-side ledgers): the run's OWN publish manifests — the run-level Integration
+        // rows a git.integrate_run step records (the plan-map lane's candidate fact), plus this run's per-agent
+        // rows, which are how DC-3's ledger-direct head is evidenced when no merge decision ever ran. Agent rows
+        // are keyed by ATTEMPT, not by run — the same join the delivery bridge above already uses, because an
+        // agent's push records its manifest before the row carries any workflow run of its own.
+        var attemptIds = attempts.Select(a => a.AttemptId).ToList();
+        var manifests = await _db.PublishManifest.AsNoTracking()
+            .Where(m => m.TeamId == teamId && (m.WorkflowRunId == workflowRunId || (m.AgentRunId != null && attemptIds.Contains(m.AgentRunId.Value))))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        return new ComposedAssessment(CompletionReducer.Reduce(requirements, admission.Admitted, facts), mode, admission.Rejections, projection?.ContractErrors ?? Array.Empty<string>(), metricAt1, UpstreamStageTrace.Derive(requirements, decisions, attempts, integrationManifests));
+        return new ComposedAssessment(CompletionReducer.Reduce(requirements, admission.Admitted, facts), mode, admission.Rejections, projection?.ContractErrors ?? Array.Empty<string>(), metricAt1, UpstreamStageTrace.Derive(requirements, decisions, attempts, manifests));
     }
 
     /// <summary>One projected workflow-agents lane: every contract-bearing attempt on its (node, iteration) unit, plus each attempt's result for the receipt bridge.</summary>
