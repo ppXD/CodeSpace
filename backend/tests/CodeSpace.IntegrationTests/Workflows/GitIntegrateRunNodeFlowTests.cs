@@ -83,6 +83,48 @@ public class GitIntegrateRunNodeFlowTests
         candidate.PublishStateValue.ShouldBe(PublishState.Pushed);
     }
 
+    /// <summary>
+    /// The anchor rule: the base the request carries is the ANCESTOR-MOST one the run recorded, not the first
+    /// surviving contribution's. A producer whose definition-of-done rejected it is withheld from the head — it stops
+    /// being a contribution while its manifest row keeps naming the commit the run started from — and its dependent,
+    /// cut from that producer's head, is then the only thing left to anchor on. Anchoring there refuses any sibling
+    /// still rooted at the repository base and checks out the rejected producer's head.
+    ///
+    /// <para>Mutation check: anchor on the first contribution's base again and the request carries "producer-head".</para>
+    /// </summary>
+    [Fact]
+    public async Task Anchors_on_the_run_root_a_withheld_producer_recorded()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId, userId);
+        var repositoryId = Guid.NewGuid();
+
+        var producer = await SeedAgentRunAsync(teamId, runId, new AgentRunSeed("map#0", MinutesAgo: 9));
+        await SeedAgentManifestAsync(teamId, runId, producer, repositoryId, branch: "codespace/agent/producer", baseSha: "run-root", acceptance: PublishAcceptanceState.Failed);
+
+        var dependent = await SeedAgentRunAsync(teamId, runId, new AgentRunSeed("map#1", MinutesAgo: 3));
+        await SeedAgentManifestAsync(teamId, runId, dependent, repositoryId, branch: "codespace/agent/dependent", baseSha: "producer-head");
+
+        using var scope = _fixture.BeginScope();
+        var integrator = new RecordingIntegrator
+        {
+            Result = IntegrationResult.Build(IntegrationStatus.Clean, $"codespace/integration/{runId:N}", new[]
+            {
+                new ContributionOutcome { Label = "agent#map#1", Disposition = ContributionDisposition.Applied },
+            }),
+        };
+        var node = new GitIntegrateRunNode(integrator, new StubResolver(), scope.Resolve<IPublishManifestStore>(), scope.Resolve<CodeSpaceDbContext>());
+
+        var result = await node.RunAsync(Context(repositoryId, teamId, runId), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success);
+        integrator.LastRequest.ShouldNotBeNull();
+        integrator.LastRequest!.Contributions.Select(c => c.Label).ShouldBe(new[] { "agent#map#1" },
+            customMessage: "the withheld producer never reaches the reviewable candidate — that gate is what leaves the anchor unrecoverable from the contributions");
+        integrator.LastRequest.BaseSha.ShouldBe("run-root",
+            customMessage: "the ledger row the withheld producer left behind still names the run's root, and the anchor is read from there");
+    }
+
     [Fact]
     public async Task A_run_that_produced_nothing_integrable_skips_without_touching_git()
     {
@@ -303,13 +345,13 @@ public class GitIntegrateRunNodeFlowTests
         return id;
     }
 
-    private async Task SeedAgentManifestAsync(Guid teamId, Guid runId, Guid agentRunId, Guid repositoryId, string branch)
+    private async Task SeedAgentManifestAsync(Guid teamId, Guid runId, Guid agentRunId, Guid repositoryId, string branch, string baseSha = "b1", PublishAcceptanceState acceptance = PublishAcceptanceState.NotApplicable)
     {
         using var scope = _fixture.BeginScope();
         await scope.Resolve<IPublishManifestStore>().UpsertForAgentRunAsync(agentRunId, new PublishManifestUpsert
         {
             TeamId = teamId, WorkflowRunId = runId, RepositoryId = repositoryId, RepositoryAlias = "primary",
-            BaseSha = "b1", Branch = branch, PublishStateValue = PublishState.Pushed,
+            BaseSha = baseSha, Branch = branch, AcceptanceState = acceptance, PublishStateValue = PublishState.Pushed,
         }, CancellationToken.None);
     }
 

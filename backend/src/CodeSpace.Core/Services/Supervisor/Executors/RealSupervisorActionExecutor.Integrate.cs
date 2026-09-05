@@ -2,6 +2,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Agents.Workspace;
+using CodeSpace.Core.Services.Agents.Workspace.Integrators;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Agents;
@@ -266,7 +267,9 @@ public sealed partial class RealSupervisorActionExecutor
         if (await EvaluatePublishGuardAsync(repoId, cancellationToken).ConfigureAwait(false) is { } guardVerdict)
             return new { status = "Skipped", reason = $"publish policy: {guardVerdict.Reason}", excludedAgents = excluded };
 
-        var request = BuildIntegrationRequest(repoId, context, workspace, eligible[0].BaseSha!, eligible);
+        var anchor = await AnchorBaseShaAsync(repoId, context, eligible[0].BaseSha!, cancellationToken).ConfigureAwait(false);
+
+        var request = BuildIntegrationRequest(repoId, context, workspace, anchor, eligible);
 
         try
         {
@@ -284,6 +287,21 @@ public sealed partial class RealSupervisorActionExecutor
 
     /// <summary>An agent is integrable only if it recorded a base AND captured actual work (a patch or a produced branch). A failed agent that cloned a base but produced nothing is NOT a contribution — its empty patch is Unintegrable and would conflict the whole merge.</summary>
     private static bool IsIntegrable(MergedAgent m) => !string.IsNullOrEmpty(m.BaseSha) && (!string.IsNullOrEmpty(m.Patch) || !string.IsNullOrEmpty(m.ProducedBranch));
+
+    /// <summary>
+    /// The commit this repository's integration checks out and anchors its base-integrity guard on: the ANCESTOR-MOST
+    /// base of the run, read off the run's own publish ledger (<see cref="IntegrationBaseAnchor"/>). The contributions
+    /// alone can no longer name it — a withheld or unintegrable PRODUCER is dropped from them while its dependent, cut
+    /// from that producer's head, survives — so <c>eligible[0]</c> could anchor on a dependent's base and then refuse
+    /// every sibling still rooted at the repository base. Falls back to the first eligible base when the ledger holds
+    /// no base for the repository (nothing recorded it), which is exactly the pre-ledger behaviour.
+    /// </summary>
+    private async Task<string> AnchorBaseShaAsync(Guid repositoryId, SupervisorTurnContext context, string firstEligibleBase, CancellationToken cancellationToken)
+    {
+        var manifests = await _manifests.ListForWorkflowRunAsync(context.SupervisorRunId, context.TeamId, cancellationToken).ConfigureAwait(false);
+
+        return IntegrationBaseAnchor.OldestRecordedBase(manifests, repositoryId) ?? firstEligibleBase;
+    }
 
     private static IntegrationRequest BuildIntegrationRequest(Guid repoId, SupervisorTurnContext context, WorkspaceRequest workspace, string baseSha, IReadOnlyList<MergedAgent> eligible) => new()
     {
@@ -449,7 +467,9 @@ public sealed partial class RealSupervisorActionExecutor
         if (await EvaluatePublishGuardAsync(repo.RepositoryId, cancellationToken).ConfigureAwait(false) is { } guardVerdict)
             return ("Skipped", RepoSkipBlock(repo, "Skipped", $"publish policy: {guardVerdict.Reason}", excluded));
 
-        var request = BuildPerRepoIntegrationRequest(repo.RepositoryId, context, workspace, eligible[0].RepoResult.BaseSha!, eligible);
+        var anchor = await AnchorBaseShaAsync(repo.RepositoryId, context, eligible[0].RepoResult.BaseSha!, cancellationToken).ConfigureAwait(false);
+
+        var request = BuildPerRepoIntegrationRequest(repo.RepositoryId, context, workspace, anchor, eligible);
 
         try
         {

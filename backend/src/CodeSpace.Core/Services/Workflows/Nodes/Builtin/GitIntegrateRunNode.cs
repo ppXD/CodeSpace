@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Agents.Workspace;
+using CodeSpace.Core.Services.Agents.Workspace.Integrators;
 using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
@@ -105,7 +106,11 @@ public sealed class GitIntegrateRunNode : INodeRuntime
         if (contributions.Count == 0)
             return NodeResult.Ok(SkippedOutputs("the run produced no integrable work for this repository"));
 
-        var baseSha = contributions.Select(c => c.BaseSha).FirstOrDefault(sha => !string.IsNullOrEmpty(sha));
+        // The ancestor-most base, not the first contribution's: a withheld producer is dropped from the contributions
+        // while its manifest row survives, so the run's root lives in the ledger even when the surviving contributions
+        // are all dependents cut from a producer's head (see IntegrationBaseAnchor).
+        var baseSha = IntegrationBaseAnchor.OldestRecordedBase(manifests, repoId)
+            ?? contributions.Select(c => c.BaseSha).FirstOrDefault(sha => !string.IsNullOrEmpty(sha));
 
         if (string.IsNullOrEmpty(baseSha))
             return NodeResult.Ok(SkippedOutputs("the produced work recorded no base revision to integrate from"));
