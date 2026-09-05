@@ -1,5 +1,6 @@
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Supervisor;
+using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Enums;
 using Shouldly;
 
@@ -15,13 +16,17 @@ public sealed class RealModelRunClassifierTests
 {
     [Theory]
     // ── GATEWAY / transport / auth / rate → infra skip (must NOT red the gate on the owner's slow/down gateway) ──
-    [InlineData("non-zero-exit", "API error: 401 unauthorized (invalid x-api-key)", true)]
-    [InlineData("non-zero-exit", "Error: 429 Too Many Requests", true)]
-    [InlineData("non-zero-exit", "overloaded_error: the model is overloaded", true)]
-    [InlineData("non-zero-exit", "connection refused (local:443)", true)]
-    [InlineData("non-zero-exit", "request timed out after 150s", true)]
-    [InlineData("non-zero-exit", "503 service unavailable", true)]
-    [InlineData("non-zero-exit", "API Error: Content block is not a thinking block", true)]   // the gateway mangled the Anthropic wire FORMAT — the live 2026-09-05 text, verbatim
+    // Every shape here is one a HARNESS actually emits, pinned where the harness parses it — not prose invented here.
+    [InlineData("non-zero-exit", "API Error: 401 Authentication Error", true)]                              // ClaudeCodeHarnessTests / CodexHarnessTests: the CLI's own auth announcement
+    [InlineData("non-zero-exit", "API Error (429)", true)]                                                  // ClaudeCodeHarnessTests: the `result` line's is_error text
+    [InlineData("non-zero-exit", "API Error: Request rejected (429) AccountQuotaExceeded", true)]           // ClaudeCodeHarnessTests: the owner's gateway out of quota
+    [InlineData("non-zero-exit", "unexpected status 401 Unauthorized", true)]                               // CodexHarnessTests: Codex's `turn.failed` error.message, lifted verbatim
+    [InlineData("non-zero-exit", "API Error: 503 upstream unavailable", true)]                              // a 5xx is Transient in production's own table
+    [InlineData("non-zero-exit", "API Error: 404 the responses wire is not served here", true)]             // Codex on a chat/completions-only gateway — an env/wire mismatch
+    [InlineData("non-zero-exit", "API Error: Content block is not a thinking block", true)]                 // the gateway mangled the Anthropic wire FORMAT — the live 2026-09-05 text, verbatim
+    [InlineData("non-zero-exit", "Anthropic API error (HTTP 429, RateLimited): slow down", true)]           // the ENGINE-written LlmApiException slot, read through RealModelGate
+    [InlineData("non-zero-exit", "claude exited with code 1 — stderr: API Error: 429 rate limited", true)]  // the same announcement folded in from stderr
+    [InlineData("non-zero-exit", "claude exited with code 1 — stderr: Error: read ECONNRESET", true)]       // an ESTABLISHED connection dropped under us
     // ── INJECTION / CODE fault → a real MISS the gate MUST red on (the whole point of the fix) ──
     [InlineData("non-zero-exit", "error: unknown option '--append-system-prompt'", false)]   // a malformed persona arg
     [InlineData("non-zero-exit", "error: unexpected argument 'Say hello.' found", false)]     // arg-ordering swallowed the Goal
@@ -29,6 +34,16 @@ public sealed class RealModelRunClassifierTests
     [InlineData("executor-error", "some failure mentioning a 429 in passing", false)]         // executor-error WINS over a gateway-looking word
     [InlineData("non-zero-exit", "claude exited with code 1", false)]                          // an unknown CLI failure defaults to a code fault (never a silent skip)
     [InlineData("non-zero-exit", "API Error: some shape nobody has classified yet", false)]     // the PINNED format marker is infra — a bare "API Error:" prefix is NOT a blanket skip
+    // ── The measurement-honesty rows: a GENUINE code fault whose text merely CONTAINS a gateway-looking word. Each of
+    //    these skipped the gate under the old substring vocabulary — the exact false-green a stderr fold makes routine.
+    [InlineData("non-zero-exit", "the route returned 404 as asserted, but the body was empty", false)]
+    [InlineData("non-zero-exit", "connection string missing for the test database", false)]
+    [InlineData("non-zero-exit", "refused to overwrite the existing file", false)]
+    [InlineData("non-zero-exit", "assertion failed: expected 503 Service Unavailable, got 200", false)]
+    [InlineData("non-zero-exit", "the API Error handler did not fire", false)]                  // the announcement phrase with NO status announces nothing
+    [InlineData("non-zero-exit", "the api error path returned 500 in the fixture", false)]      // prose ABOUT an announcement is not one — the phrase is matched in the harness's own casing
+    [InlineData("non-zero-exit", "the gateway quota check is unauthorized for this rate limit", false)]   // five old substrings at once, and still just prose
+    [InlineData("non-zero-exit", "claude exited with code 1 — stderr: TimeoutException waiting for the fake CLI", false)]   // a genuinely slow gateway arrives as Status=TimedOut, not as prose
     public void Classifies_gateway_infra_versus_injection_code_fault(string exitReason, string error, bool expectedInfra)
     {
         var run = new AgentRun { Status = AgentRunStatus.Failed, Error = error, ResultJson = $"{{\"exitReason\":\"{exitReason}\"}}" };
@@ -54,6 +69,47 @@ public sealed class RealModelRunClassifierTests
 
         RealModelRunClassifier.IsGatewayInfra(run).ShouldBeTrue(
             customMessage: "the real-model gate must read the gateway's mangled wire as INFRA (non-gating skip), never as a code regression");
+    }
+
+    [Theory]
+    [InlineData(429, LlmErrorCategory.RateLimited, true)]
+    [InlineData(503, LlmErrorCategory.Transient, true)]
+    [InlineData(408, LlmErrorCategory.Transient, true)]
+    [InlineData(401, LlmErrorCategory.AuthFailed, true)]
+    [InlineData(400, LlmErrorCategory.BadRequest, false)]     // a request the gateway understood and rejected is OUR shape to fix — a fault, not weather
+    [InlineData(422, LlmErrorCategory.BadRequest, false)]
+    public void An_announced_status_is_graded_by_productions_own_table(int status, LlmErrorCategory expectedCategory, bool expectedInfra)
+    {
+        // The status is READ from the harness's own announcement slot, then handed to the SAME function the LLM
+        // transport classifies its own failures with. Nothing here re-decides what a status means: a change to
+        // production's table moves this gate with it, and the gate can never bless a status production calls a
+        // request fault. The categories that skip are exactly the ones RealModelGate already propagates as infra.
+        LlmApiException.Classify(status, body: null).ShouldBe(expectedCategory,
+            customMessage: "production owns status → category; if this moved, the gate's arm moves with it rather than growing a second table");
+
+        var run = new AgentRun { Status = AgentRunStatus.Failed, Error = $"API Error: {status} whatever the gateway said", ResultJson = "{\"exitReason\":\"non-zero-exit\"}" };
+
+        RealModelRunClassifier.IsGatewayInfra(run).ShouldBe(expectedInfra,
+            customMessage: $"an announced HTTP {status} is {expectedCategory} → expected {(expectedInfra ? "INFRA (skip)" : "CODE FAULT (red)")}");
+    }
+
+    [Theory]
+    // ESTABLISHED-then-dropped: the connection existed and died under us — weather.
+    [InlineData("Error: read ECONNRESET", true)]
+    [InlineData("Error: write EPIPE", true)]
+    [InlineData("Error: connect ETIMEDOUT 10.0.0.4:443", true)]
+    // CONNECT / DNS: the endpoint was never reachable — a mis-pointed base URL is a WIRING bug the gate must CATCH,
+    // exactly as RealModelGate.WiringSocketErrors refuses the same SocketErrors on the exception path.
+    [InlineData("Error: connect ECONNREFUSED 127.0.0.1:5432", false)]
+    [InlineData("Error: getaddrinfo ENOTFOUND gateway.invalid", false)]
+    // The English words those codes used to be matched by — prose from a genuine code fault, and no longer a skip.
+    [InlineData("the connection was refused by the fixture, as the test expects", false)]
+    public void Only_an_established_connection_that_dropped_is_transport_infra(string error, bool expectedInfra)
+    {
+        var run = new AgentRun { Status = AgentRunStatus.Failed, Error = error, ResultJson = "{\"exitReason\":\"non-zero-exit\"}" };
+
+        RealModelRunClassifier.IsGatewayInfra(run).ShouldBe(expectedInfra,
+            customMessage: $"'{error}' → expected {(expectedInfra ? "INFRA (skip)" : "CODE FAULT (red)")}; the split mirrors RealModelGate.WiringSocketErrors on the exception path");
     }
 
     [Fact]
