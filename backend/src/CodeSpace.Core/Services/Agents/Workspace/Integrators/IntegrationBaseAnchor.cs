@@ -44,22 +44,33 @@ public static class IntegrationBaseAnchor
     /// tie-broken on id so the pick is total and repeats across reads. Null when the ledger recorded no base for the
     /// repository, leaving the caller its own first-contribution fallback.
     ///
-    /// <para><b>The legacy tier.</b> <see cref="PublishManifest.RepositoryId"/> post-dates the manifest table, so a
-    /// row written before it carries null — and every manifest-backed consumer already honours that null row as the
-    /// legacy single-repository carrier (<c>PublishManifestRepositorySelector</c>). Filtering on the concrete id
-    /// alone therefore reads a legacy run's ledger as EMPTY and silently drops it to the caller's fallback, which is
-    /// the very anchor this rule exists to replace. The tier fires only when NOTHING in the list carries a concrete
-    /// repository — the same "a concrete mismatch never inherits the compatibility fallback" bound the selector
-    /// draws, so one repository's root can never be handed to another's integration.</para>
+    /// <para><b>The unresolved-repository tier.</b> <see cref="PublishManifest.RepositoryId"/> is "the catalog
+    /// repository, WHEN RESOLVED" — a pre-column row carries null, and so does a live run whose repository never
+    /// resolved to a catalog id. Every manifest-backed consumer already honours such a row as this repository's
+    /// evidence (<c>PublishManifestRepositorySelector</c>), so filtering on the concrete id alone reads that ledger as
+    /// EMPTY and silently drops it to the caller's fallback — the very anchor this rule exists to replace.</para>
+    ///
+    /// <para><b>And what bounds it.</b> The merge and <c>git.integrate_run</c> lanes hand this rule the run-wide,
+    /// ALL-repository ledger, so "no concrete id anywhere" does NOT mean "one repository": a multi-repository run over
+    /// unresolved repositories writes an all-null ledger, and reading it whole would anchor repository X's integration
+    /// on repository Y's root. The tier therefore fires only when the rooted rows resolve to ONE repository identity —
+    /// a single distinct <see cref="PublishManifest.RepositoryAlias"/> (the per-workspace name that is never null and
+    /// IS the row's idempotency key), none of them naming a DIFFERENT concrete repository. That is the selector's own
+    /// "a concrete mismatch never inherits the compatibility fallback" bound, widened by exactly what the alias adds:
+    /// a null row beside its own repository's concrete row is still that repository's earlier evidence — the shape the
+    /// staging lane's producer set carries when one producer resolved a catalog id and another did not.</para>
     /// </summary>
     public static string? OldestRecordedBase(IReadOnlyList<PublishManifest> manifests, Guid repositoryId)
     {
         var rooted = manifests.Where(m => m.Kind == PublishManifestKind.Agent && !string.IsNullOrWhiteSpace(m.BaseSha)).ToList();
 
-        if (Oldest(rooted.Where(m => m.RepositoryId == repositoryId)) is { } recorded) return recorded;
-
-        return manifests.Any(m => m.RepositoryId is not null) ? null : Oldest(rooted.Where(m => m.RepositoryId is null));
+        return NamesOneRepositoryAndItIsThisOne(rooted, repositoryId) ? Oldest(rooted) : Oldest(rooted.Where(m => m.RepositoryId == repositoryId));
     }
+
+    /// <summary>Whether a null-id row in this ledger is THIS repository's own evidence: every rooted row sits under one workspace alias and none of them names a different repository. False on an empty set — nothing recorded a base, so the caller's fallback stands.</summary>
+    private static bool NamesOneRepositoryAndItIsThisOne(IReadOnlyList<PublishManifest> rooted, Guid repositoryId) =>
+        rooted.All(m => m.RepositoryId is null || m.RepositoryId == repositoryId)
+        && rooted.Select(m => m.RepositoryAlias).Distinct(StringComparer.Ordinal).Count() == 1;
 
     private static string? Oldest(IEnumerable<PublishManifest> rows) =>
         rows.OrderBy(m => m.CreatedDate).ThenBy(m => m.Id).FirstOrDefault()?.BaseSha;
