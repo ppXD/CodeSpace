@@ -144,10 +144,11 @@ public sealed partial class RealSupervisorActionExecutor
     private SupervisorExecution AdvanceWithResolvedAnswer(SupervisorTurnContext context, string question, string token, string? waitPayloadJson)
     {
         var answer = SupervisorOutcome.ReadAnswerComment(waitPayloadJson);
+        var decision = SupervisorOutcome.ReadAnswerDecision(waitPayloadJson);
 
         _logger.LogInformation("Supervisor ask_human wait at turn {Turn} on node {NodeId} was already resolved during a crash-recovery re-entry — folding the human's answer + self-advancing (no re-park on the resolved wait)", context.TurnNumber, context.NodeId);
 
-        return SupervisorExecution.Synchronous(AskOutcome(question, token, answer));
+        return SupervisorExecution.Synchronous(SupervisorOutcome.FoldAnswerOnto(AskOutcome(question, token, answer), answer, decision));
     }
 
     /// <summary>

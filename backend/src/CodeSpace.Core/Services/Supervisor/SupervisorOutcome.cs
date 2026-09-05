@@ -106,7 +106,7 @@ public static class SupervisorOutcome
     /// A null/blank/non-object input degrades to a bare <c>{answer}</c> object (defensive; the fold is only reached
     /// after <see cref="ReadHumanWaitToken"/> parsed the outcome).
     /// </summary>
-    public static string FoldAnswerOnto(string? outcomeJson, string? answer)
+    public static string FoldAnswerOnto(string? outcomeJson, string? answer, string? decision = null)
     {
         var merged = new Dictionary<string, object?>();
 
@@ -125,7 +125,41 @@ public static class SupervisorOutcome
 
         merged["answer"] = answer;
 
+        // C4: the STRUCTURED verdict, written only when the answering surface sent one — an answer with no decision
+        // (an old client, a chat card, a content question) stays byte-identical to the pre-C4 fold, so no existing
+        // tape shifts and the legacy text read still applies to it.
+        if (SupervisorAnswerDecision.Normalize(decision) is { } verdict) merged[SupervisorAnswerDecision.Field] = verdict;
+
         return JsonSerializer.Serialize(merged, AgentJson.Options);
+    }
+
+    /// <summary>
+    /// The human's STRUCTURED verdict folded onto an ask_human outcome (<c>approve</c> / <c>revise</c> / <c>reject</c>),
+    /// or null when the answering surface sent none. Every gate card reads THIS first and only falls back to matching
+    /// the answer text when it is null — so a card the operator ruled on through a modern surface is never re-decided
+    /// by what language they typed in.
+    /// </summary>
+    public static string? ReadAskHumanDecision(string? outcomeJson) => ReadStringField(outcomeJson, SupervisorAnswerDecision.Field);
+
+    /// <summary>The structured verdict a resolved Action wait carries in its <c>values</c> submission (<c>{ action, by, comment, values: { decision } }</c>), or null when the click sent none. The rehydrate fold reads it here and stamps it onto the decision's outcome.</summary>
+    public static string? ReadAnswerDecision(string? payloadJson)
+    {
+        if (string.IsNullOrWhiteSpace(payloadJson)) return null;
+
+        try
+        {
+            var root = JsonDocument.Parse(payloadJson).RootElement;
+
+            return root.ValueKind == JsonValueKind.Object
+                && root.TryGetProperty("values", out var values) && values.ValueKind == JsonValueKind.Object
+                && values.TryGetProperty(SupervisorAnswerDecision.Field, out var decision) && decision.ValueKind == JsonValueKind.String
+                ? SupervisorAnswerDecision.Normalize(decision.GetString())
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     /// <summary>Read the human's recorded answer text from an ask_human outcome (null until the wait resolved + the answer was folded in). The decider sees "you asked X, the human answered Y" on the next turn.</summary>
@@ -1102,8 +1136,13 @@ public static class SupervisorOutcome
 
         var resolver = results[0];
 
-        var markerVerified = string.Equals(resolver.Status, "Succeeded", StringComparison.OrdinalIgnoreCase)
-            && resolver.Summary?.Contains(SupervisorResolverRecipe.TestsPassedMarker, StringComparison.Ordinal) == true;
+        // C4: the resolver's SELF-REPORT is a structured field it set (```resolution {"verified": …}) whenever it
+        // emitted one; the prose marker is the fallback for a transcript recorded before the block existed. Either
+        // way it is still only a self-report — the objective grade below can tighten it, never the reverse.
+        var selfReported = SupervisorResolverRecipe.ReadVerification(resolver.Summary)
+            ?? resolver.Summary?.Contains(SupervisorResolverRecipe.TestsPassedMarker, StringComparison.Ordinal) == true;
+
+        var markerVerified = string.Equals(resolver.Status, "Succeeded", StringComparison.OrdinalIgnoreCase) && selfReported;
 
         // A3: when a server grade was folded (an operator acceptance command ran objectively against the resolver's
         // branch), the verdict is OBJECTIVE — Verified iff the grade passed AND the self-report marker still holds (AND,

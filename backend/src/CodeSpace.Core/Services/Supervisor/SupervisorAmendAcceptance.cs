@@ -81,11 +81,11 @@ public static class SupervisorAmendAcceptance
     public static bool IsAnsweredAmendCard(SupervisorPriorDecision decision) =>
         IsAmendCard(decision) && SupervisorOutcome.ReadAskHumanAnswer(decision.OutcomeJson) != null;
 
-    /// <summary>An APPROVED amend card — the card's OWN resolved answer starts with the family's approve word (FATAL-2's pairwise authority). The ONE predicate both the co-sign overlay and the retry-obligation walk share, so "which amendments bind" can never drift between them.</summary>
+    /// <summary>An APPROVED amend card — the card's OWN resolved answer carries the family's approve VERDICT (C4: the structured <c>decision</c> field, or the legacy approve word when the answering surface sent none). The ONE predicate both the co-sign overlay and the retry-obligation walk share, so "which amendments bind" can never drift between them. Still requires an ANSWER to exist: an unanswered card never binds, so the co-sign is never automatic.</summary>
     public static bool IsApprovedAmendCard(SupervisorPriorDecision decision) =>
         IsAmendCard(decision)
-        && SupervisorOutcome.ReadAskHumanAnswer(decision.OutcomeJson) is { } answer
-        && answer.TrimStart().StartsWith(SupervisorApprovalRequest.ApproveReply, StringComparison.OrdinalIgnoreCase);
+        && SupervisorOutcome.ReadAskHumanAnswer(decision.OutcomeJson) is not null
+        && SupervisorApprovalRequest.OutcomeApproves(decision.OutcomeJson);
 
     /// <summary>Whether an ask_human payload's question carries the amend marker — payload-level, so a content ask or another gate's card never matches.</summary>
     public static bool QuestionCarriesMarker(string? askHumanPayloadJson)

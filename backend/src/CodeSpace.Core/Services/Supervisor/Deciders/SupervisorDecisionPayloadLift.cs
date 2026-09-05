@@ -144,8 +144,39 @@ internal static class SupervisorDecisionPayloadLift
         return JsonDocument.Parse(root.ToJsonString()).RootElement.Clone();
     }
 
+    /// <summary>
+    /// Repair a NEW stop's <c>outcome</c> onto the closed schema enum (<c>completed | gave_up | needs_clarification</c>),
+    /// or null when there is nothing to repair — no stop payload, no authored outcome (the narration lift owns that
+    /// fill), or an already-conformant value. DETERMINISTIC, not a re-ask: the mapping recovers only WORDS THE MODEL
+    /// WROTE — a legacy success word (<c>done</c>, <c>ok</c>, <c>succeeded</c>) becomes <c>completed</c>, a legacy
+    /// clarification spelling becomes <c>needs_clarification</c> — and fail-closes everything else (an honest
+    /// <c>failed</c>/<c>abandoned</c>, a synonym in any language) to <see cref="AssumedGiveUpOutcome"/>, so a label the
+    /// server cannot read is never promoted into a success claim.
+    ///
+    /// <para>Runs on the LIVE reply only. The legacy words <c>SupervisorStopPayload.IsSuccessOutcome</c> still honours
+    /// exist to read OLD tapes and replays — this is the boundary that stops them entering a fresh decision.</para>
+    /// </summary>
+    public static JsonElement? NormalizeStopOutcome(JsonElement decision)
+    {
+        if (decision.ValueKind != JsonValueKind.Object) return null;
+        if (!IsKind(decision, SupervisorDecisionKinds.Stop)) return null;
+
+        var root = JsonNode.Parse(decision.GetRawText())!.AsObject();
+
+        if (root[StopProperty] is not JsonObject stop || StringField(stop, OutcomeField) is not { } authored) return null;
+
+        if (SupervisorStopPayload.NormalizeOutcome(authored) is not { } repaired) return null;
+
+        stop = (JsonObject)stop.DeepClone();
+        stop[OutcomeField] = repaired;
+        stop[OutcomeRepairedField] = authored;
+        root[StopProperty] = stop;
+
+        return JsonDocument.Parse(root.ToJsonString()).RootElement.Clone();
+    }
+
     /// <summary>The NON-success terminal label a narrated stop carries when the model authored none. Fixed, never inferred from the prose. Pinned by a drift test against <c>SupervisorStopPayload</c>'s own classification (Rule 8) — the pin is on the reading, not the spelling.</summary>
-    public const string AssumedGiveUpOutcome = "gave_up";
+    public const string AssumedGiveUpOutcome = SupervisorStopPayload.GaveUpOutcome;
 
     /// <summary>What the payload records alongside an assumed outcome, so a reader can tell a server assumption from a model verdict.</summary>
     public const string AssumedOutcomeNote = "gave_up (no outcome authored)";
@@ -172,6 +203,9 @@ internal static class SupervisorDecisionPayloadLift
     private const string SummaryField = "summary";
     private const string OutcomeField = "outcome";
     private const string OutcomeAssumedField = "outcomeAssumed";
+
+    /// <summary>What a repaired payload records — the model's ORIGINAL non-conformant label, so the journal shows what was written before the enum repair rather than silently rewriting history.</summary>
+    private const string OutcomeRepairedField = "outcomeRepairedFrom";
 
     /// <summary>Every top-level object property the schema declares whose own <c>properties</c> map is non-empty — the payload sub-objects, keyed by name.</summary>
     private static IReadOnlyDictionary<string, IReadOnlySet<string>> BuildPayloadFields()

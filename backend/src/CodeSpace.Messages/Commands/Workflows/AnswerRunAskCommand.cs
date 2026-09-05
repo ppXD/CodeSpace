@@ -19,4 +19,12 @@ public sealed record AnswerRunAskCommand : ICommand<SupervisorAskAnswerOutcome?>
 
     /// <summary>The operator's answer text — required non-blank.</summary>
     public string Answer { get; init; } = "";
+
+    /// <summary>
+    /// The STRUCTURED verdict for a GATE card (C4) — one of <see cref="SupervisorAnswerDecision.All"/>. Null for a
+    /// content question, which has no verdict to give. When present it is what the gate rules on; when absent the
+    /// gate falls back to matching the answer text's leading approve word (the legacy contract, kept for old clients).
+    /// An unrecognized value is refused at the endpoint rather than silently read as a non-approval.
+    /// </summary>
+    public string? Decision { get; init; }
 }

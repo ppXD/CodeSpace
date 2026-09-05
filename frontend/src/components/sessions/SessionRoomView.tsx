@@ -33,6 +33,7 @@ import type {
   RoomView,
   StatBlock,
   StatItem,
+  SupervisorAnswerDecision,
   DeliverablesBlock,
   DeliverableFile,
 } from "@/api/sessions";
@@ -1263,8 +1264,13 @@ function JournalAskQuestion({ text, tone }: { text: string; tone: string }) {
 /** The INLINE answer bar under a PENDING ask beat — the run page's own answer surface, so a parked run is operable
  *  right where the question appears (previously the sole surface was the conversation card, invisible from here).
  *  Posts to the run-scoped ask/answer endpoint, which resolves the SAME durable wait the card's Answer button does
- *  (first answer wins). A review-gate ESCALATION adds the one-shot "Approve anyway" quick action — the 'approve'
- *  reply the gate reads as absolution; any typed text is guidance the supervisor's next decide reads. */
+ *  (first answer wins). A review-gate ESCALATION adds the one-shot "Approve anyway" quick action — the absolution
+ *  the gate honours; any typed text is guidance the supervisor's next decide reads.
+ *
+ *  On an escalation both paths send the STRUCTURED verdict (approve / revise) alongside the text, so the gate rules
+ *  on what the operator CLICKED rather than on the leading word of what they typed — a 繁中 approval no longer reads
+ *  as feedback, and guidance beginning "approve nothing until…" no longer risks releasing the gate. A CONTENT
+ *  question sends no verdict: there is nothing to approve, only an answer. */
 function AskAnswerBar({ escalation }: { escalation: boolean }) {
   const run = useContext(RunActionsContext);
   const queryClient = useQueryClient();
@@ -1277,12 +1283,12 @@ function AskAnswerBar({ escalation }: { escalation: boolean }) {
   const [error, setError] = useState<string | null>(null);
   if (!run || run.isTerminal) return null;
 
-  const send = async (answer: string) => {
+  const send = async (answer: string, decision?: SupervisorAnswerDecision) => {
     if (!answer.trim()) return;
     setBusy(true);
     setError(null);
     try {
-      const result = await sessionsApi.answerRunAsk(run.runId, answer.trim());
+      const result = await sessionsApi.answerRunAsk(run.runId, answer.trim(), decision);
       if (result == null) {
         setError("Nothing to answer here — the question was already settled, or this ask has no answer surface.");
       } else {
@@ -1315,13 +1321,13 @@ function AskAnswerBar({ escalation }: { escalation: boolean }) {
         value={text}
         disabled={busy}
         onChange={(e) => setText(e.target.value)}
-        onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) void send(text); }}
+        onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) void send(text, escalation ? "revise" : undefined); }}
       />
-      <button type="button" className="room-jask-btn room-jask-send" disabled={busy || text.trim().length === 0} onClick={() => void send(text)}>
+      <button type="button" className="room-jask-btn room-jask-send" disabled={busy || text.trim().length === 0} onClick={() => void send(text, escalation ? "revise" : undefined)}>
         Answer
       </button>
       {escalation && (
-        <button type="button" className="room-jask-btn room-jask-approve" disabled={busy} title="Proceed with the blocked decision despite the review (one-shot)" onClick={() => void send("approve")}>
+        <button type="button" className="room-jask-btn room-jask-approve" disabled={busy} title="Proceed with the blocked decision despite the review (one-shot)" onClick={() => void send("approve", "approve")}>
           <Sym n="check" s={11} /> Approve anyway
         </button>
       )}

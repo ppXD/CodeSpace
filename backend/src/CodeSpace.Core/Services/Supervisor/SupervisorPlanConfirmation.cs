@@ -62,7 +62,7 @@ public static class SupervisorPlanConfirmation
 
             var answer = SupervisorOutcome.ReadAskHumanAnswer(decision.OutcomeJson);
 
-            if (answer != null && Approves(answer)) approved = candidate;
+            if (answer != null && SupervisorApprovalRequest.OutcomeApproves(decision.OutcomeJson)) approved = candidate;
         }
 
         return approved;
@@ -119,7 +119,7 @@ public static class SupervisorPlanConfirmation
 
             var answer = SupervisorOutcome.ReadAskHumanAnswer(decision.OutcomeJson);
 
-            return answer != null && !Approves(answer);
+            return answer != null && !SupervisorApprovalRequest.OutcomeApproves(decision.OutcomeJson);
         }
 
         return false;
@@ -151,7 +151,7 @@ public static class SupervisorPlanConfirmation
 
         if (answer == null) return false;
 
-        approved = Approves(answer);
+        approved = SupervisorApprovalRequest.OutcomeApproves(last.OutcomeJson);
 
         return true;
     }
@@ -178,9 +178,6 @@ public static class SupervisorPlanConfirmation
         }
     }
 
-    /// <summary>The human's answer approves iff it begins with the approve reply word (case-insensitive, trimmed) — the same fail-closed predicate as the approval gate (<see cref="SupervisorApprovalRequest.ApproveReply"/>). Anything else is revision feedback.</summary>
-    private static bool Approves(string answer) =>
-        answer.TrimStart().StartsWith(SupervisorApprovalRequest.ApproveReply, StringComparison.OrdinalIgnoreCase);
 
     private static int LastPlanIndex(IReadOnlyList<SupervisorPriorDecision> priors)
     {

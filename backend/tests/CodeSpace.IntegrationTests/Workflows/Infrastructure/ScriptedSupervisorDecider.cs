@@ -284,7 +284,10 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
         var last = context.PriorDecisions.Count > 0 ? context.PriorDecisions[^1] : null;
         var answer = last?.DecisionKind == SupervisorDecisionKinds.AskHuman ? SupervisorOutcome.ReadAskHumanAnswer(last.OutcomeJson) : null;
 
-        if (answer != null && answer.TrimStart().StartsWith("approve", StringComparison.OrdinalIgnoreCase))
+        // C4: read the verdict the way PRODUCTION does — the structured `decision` field the answering surface folded,
+        // falling back to the approve word only when the answer carries none. A twin that kept matching the text alone
+        // would disagree with the gate that already flipped the WorkPlan, and the arc would test two different reads.
+        if (answer != null && SupervisorApprovalRequest.OutcomeApproves(last!.OutcomeJson))
             return Canonical(SupervisorDecisionKinds.Stop, new SupervisorStopPayload { Outcome = "completed", Summary = $"confirmed: {answer}" });
 
         if (answer != null)

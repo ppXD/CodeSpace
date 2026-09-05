@@ -298,6 +298,11 @@ export interface PlanChecklistBlock extends RoomBlockBase {
 /// The outcome of answering a pending plan-confirmation card (S3 gate). `resumed` is false when a concurrent
 /// answer won the wait first (first answer wins).
 export interface WorkPlanConfirmationOutcome { resumed: boolean; approved: boolean; }
+
+/// The structured verdict a human-in-the-loop supervisor card is ruled on — the wire values the backend's
+/// `SupervisorAnswerDecision` declares. Sent explicitly by every gate surface so the verdict is a field, not a
+/// word the server has to find at the front of whatever language the operator typed.
+export type SupervisorAnswerDecision = "approve" | "revise" | "reject";
 /// The delivered change set (PR card).
 export interface DeliveryBlock extends RoomBlockBase {
   type: "delivery";
@@ -733,9 +738,12 @@ export const sessionsApi = {
   /// Answer the run's NEWEST pending supervisor ASK (a content question or a review-gate escalation) straight from
   /// the run page — resolves the SAME durable wait the conversation card's Answer button does (first answer wins).
   /// Null when nothing is pending (already answered / not parked / foreign run — 404).
-  answerRunAsk: async (runId: string, answer: string): Promise<{ resumed: boolean } | null> => {
+  /// `decision` is the STRUCTURED verdict for a GATE card (approve | revise | reject) — the gate rules on it instead
+  /// of matching the leading word of the answer text, so a non-English approval is no longer read as feedback. Omit it
+  /// for a content question, which has no verdict to give.
+  answerRunAsk: async (runId: string, answer: string, decision?: SupervisorAnswerDecision): Promise<{ resumed: boolean } | null> => {
     try {
-      return await fetchJson<{ resumed: boolean }>(`/api/workflows/runs/${runId}/ask/answer`, { method: "POST", body: JSON.stringify({ answer }) });
+      return await fetchJson<{ resumed: boolean }>(`/api/workflows/runs/${runId}/ask/answer`, { method: "POST", body: JSON.stringify(decision ? { answer, decision } : { answer }) });
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) return null;
       throw e;

@@ -184,6 +184,18 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             model = told;
         }
 
+        // C4: the stop's outcome must be a member of the CLOSED schema enum before it terminalizes. A live model that
+        // answered with a legacy word ('done') or any other free-text label is repaired deterministically here —
+        // a success word maps to 'completed', everything else fail-closes to 'gave_up' — so the word-matched read
+        // never admits a fresh non-conformant label, and old tapes keep reading exactly as they did.
+        if (SupervisorDecisionPayloadLift.NormalizeStopOutcome(completion.Json) is { } conformed && TryDeserialize(conformed, out _) is { } enumerated)
+        {
+            _logger.LogInformation("Supervisor stop authored an outcome outside the closed enum — repaired it to a conformant label before terminalizing");
+
+            completion = completion with { Json = conformed };
+            model = enumerated;
+        }
+
         // Capture the authoring model call (the pool-picked model + this reply's token usage) — the turn service folds it
         // into the NON-hashed outcome, never the payload, so it can't drift the idempotency key. It's how the journal shows
         // what authored the decision (e.g. the "via <model> · N tokens" line on a plan beat).

@@ -1,4 +1,6 @@
 using System.Text;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 using CodeSpace.Messages.Agents;
 
 namespace CodeSpace.Core.Services.Supervisor;
@@ -21,8 +23,46 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// </summary>
 public static class SupervisorResolverRecipe
 {
-    /// <summary>The exact token the resolver agent must end its summary with WHEN (and only when) the build + full test suite passed — the instruction-encoded verification verdict S3 reads. Load-bearing: pinned by a unit test so a rename is a visible decision.</summary>
+    /// <summary>The exact token the resolver agent must end its summary with WHEN (and only when) the build + full test suite passed — the instruction-encoded verification verdict S3 reads. Load-bearing: pinned by a unit test so a rename is a visible decision. LEGACY as of C4: still asked for and still read, but the STRUCTURED <see cref="VerificationBlock"/> now decides when the resolver emits one.</summary>
     public const string TestsPassedMarker = "RESOLUTION_VERIFIED";
+
+    /// <summary>The fenced language tag the resolver's STRUCTURED verdict rides in — a <c>```resolution</c> block holding <c>{"verified": true|false}</c>. Replaces reading the prose marker as the verdict: a boolean the resolver SET beats a token that could appear in a sentence about the token.</summary>
+    public const string VerificationBlock = "resolution";
+
+    /// <summary>The JSON field inside the <see cref="VerificationBlock"/> carrying the verdict.</summary>
+    public const string VerifiedField = "verified";
+
+    /// <summary>
+    /// The resolver's STRUCTURED verdict read off its final summary, or null when it emitted no parseable
+    /// <c>```resolution</c> block — in which case the caller falls back to the legacy <see cref="TestsPassedMarker"/>
+    /// so every transcript recorded before this block existed still grades exactly as it did.
+    /// </summary>
+    public static bool? ReadVerification(string? summary)
+    {
+        if (string.IsNullOrWhiteSpace(summary)) return null;
+
+        var match = Regex.Match(summary, $"```{VerificationBlock}\\s*(\\{{.*?\\}})\\s*```", RegexOptions.Singleline);
+
+        if (!match.Success) return null;
+
+        try
+        {
+            var root = JsonDocument.Parse(match.Groups[1].Value).RootElement;
+
+            return root.ValueKind == JsonValueKind.Object && root.TryGetProperty(VerifiedField, out var verified)
+                && verified.ValueKind is JsonValueKind.True or JsonValueKind.False
+                ? verified.GetBoolean()
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>The verdict instruction both recipes end with: the structured block the executor parses, plus the legacy marker the pre-C4 read still honours when a resolver emits no block.</summary>
+    private static string VerdictInstruction(string scope) =>
+        $"Finish your summary with a fenced block stating the verdict as JSON — ```{VerificationBlock} then {{\"{VerifiedField}\": true}} when the build and the full test suite pass {scope}, or {{\"{VerifiedField}\": false}} when they do not — then close the fence. When (and only when) it is true, also end with the exact token: {TestsPassedMarker}";
 
     /// <summary>
     /// The resolver agent's goal text. Names the goal, the conflicted files, and EVERY branch to reconcile (already
@@ -56,7 +96,7 @@ public static class SupervisorResolverRecipe
         sb.AppendLine("  4. Commit the reconciled result ONLY if the build succeeds AND all tests pass. If they do not pass, keep fixing until they do, or stop without committing.");
         sb.AppendLine();
         sb.AppendLine("Do not invent changes beyond reconciling the agents' work. Do not weaken or delete tests to make them pass.");
-        sb.AppendLine($"When (and only when) the build and the full test suite pass on the reconciled result, end your final summary with the exact token: {TestsPassedMarker}");
+        sb.AppendLine(VerdictInstruction("on the reconciled result"));
 
         return sb.ToString();
     }
@@ -100,7 +140,7 @@ public static class SupervisorResolverRecipe
         sb.AppendLine("  4. Commit the reconciled result in each repository ONLY if the build succeeds AND all tests pass. If they do not pass, keep fixing until they do, or stop without committing.");
         sb.AppendLine();
         sb.AppendLine("Do not invent changes beyond reconciling the agents' work. Do not weaken or delete tests to make them pass.");
-        sb.AppendLine($"When (and only when) the build and the full test suite pass on the reconciled result across ALL repositories, end your final summary with the exact token: {TestsPassedMarker}");
+        sb.AppendLine(VerdictInstruction("on the reconciled result across ALL repositories"));
 
         return sb.ToString();
     }

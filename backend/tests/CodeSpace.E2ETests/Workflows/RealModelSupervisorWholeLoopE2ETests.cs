@@ -457,7 +457,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
 
         if (UnattendedAskResponder.MustLeaveForAHuman(newestAsk)) return ParkedAskDisposition.LeftForAHuman;
 
-        var outcome = await scope.Resolve<ISupervisorAskAnswerService>().AnswerAsync(runId, teamId, userId, answer, CancellationToken.None);
+        var outcome = await scope.Resolve<ISupervisorAskAnswerService>().AnswerAsync(runId, teamId, userId, answer, null, CancellationToken.None);
 
         return outcome is { Resumed: true } ? ParkedAskDisposition.Answered : ParkedAskDisposition.NothingParked;
     }
@@ -474,7 +474,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         if (lastAsk is null || SupervisorAmendAcceptance.ReadAmend(lastAsk.PayloadJson) is null) return false;
 
         var outcome = await scope.Resolve<ISupervisorAskAnswerService>()
-            .AnswerAsync(runId, teamId, userId, "approve — the fallback gate is the right check", CancellationToken.None);
+            .AnswerAsync(runId, teamId, userId, "approve — the fallback gate is the right check", SupervisorAnswerDecision.Approve, CancellationToken.None);
 
         return outcome is { Resumed: true };
     }

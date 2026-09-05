@@ -1,3 +1,4 @@
+using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Workflows.Engine;
@@ -10,7 +11,7 @@ namespace CodeSpace.Core.Services.Supervisor;
 public interface ISupervisorAskAnswerService
 {
     /// <summary>Answer the run's NEWEST pending supervisor ask. Null when nothing is parked (no unanswered ask / foreign run / degraded no-surface park) — the caller 404-conflates.</summary>
-    Task<SupervisorAskAnswerOutcome?> AnswerAsync(Guid workflowRunId, Guid teamId, Guid actorUserId, string answer, CancellationToken cancellationToken);
+    Task<SupervisorAskAnswerOutcome?> AnswerAsync(Guid workflowRunId, Guid teamId, Guid actorUserId, string answer, string? decision, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -32,7 +33,7 @@ public sealed class SupervisorAskAnswerService : ISupervisorAskAnswerService, IS
         _resume = resume;
     }
 
-    public async Task<SupervisorAskAnswerOutcome?> AnswerAsync(Guid workflowRunId, Guid teamId, Guid actorUserId, string answer, CancellationToken cancellationToken)
+    public async Task<SupervisorAskAnswerOutcome?> AnswerAsync(Guid workflowRunId, Guid teamId, Guid actorUserId, string answer, string? decision, CancellationToken cancellationToken)
     {
         var last = await _db.SupervisorDecisionRecord.AsNoTracking()
             .Where(d => d.SupervisorRunId == workflowRunId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.AskHuman)
@@ -48,8 +49,19 @@ public sealed class SupervisorAskAnswerService : ISupervisorAskAnswerService, IS
 
         if (token == null) return null;   // a degraded no-surface park carries no token — nothing to resume
 
-        var resumed = await _resume.ResumeByActionTokenAsync(token, Executors.RealSupervisorActionExecutor.AnswerActionKey, actorUserId, answer, values: null, teamId, cancellationToken).ConfigureAwait(false);
+        var resumed = await _resume.ResumeByActionTokenAsync(token, Executors.RealSupervisorActionExecutor.AnswerActionKey, actorUserId, answer, StructuredVerdict(decision), teamId, cancellationToken).ConfigureAwait(false);
 
         return new SupervisorAskAnswerOutcome { Resumed = resumed == ActionResumeResult.Resumed };
     }
+
+    /// <summary>
+    /// The STRUCTURED verdict (C4) a gate-card answer carries, or null for a CONTENT question — which has no verdict
+    /// to give, only prose. Rides the wait's <c>values</c> submission, so the escalation / approval / amend cards rule
+    /// on the field the operator's button set rather than on the leading word of whatever language they typed in.
+    /// An unrecognized value is dropped here (the endpoint already refuses it), never coerced into an approval.
+    /// </summary>
+    private static IReadOnlyDictionary<string, JsonElement>? StructuredVerdict(string? decision) =>
+        SupervisorAnswerDecision.Normalize(decision) is { } verdict
+            ? new Dictionary<string, JsonElement> { [SupervisorAnswerDecision.Field] = JsonSerializer.SerializeToElement(verdict) }
+            : null;
 }

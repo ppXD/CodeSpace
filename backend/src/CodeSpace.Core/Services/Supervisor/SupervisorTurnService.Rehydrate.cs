@@ -415,7 +415,7 @@ public sealed partial class SupervisorTurnService
     /// the next turn. A non-ask_human decision, or an ask_human whose wait isn't yet resolved (no token match),
     /// passes through unchanged. The fold is idempotent — re-running it on an already-folded outcome is a no-op.
     /// </summary>
-    private static SupervisorPriorDecision FoldAskHumanAnswer(SupervisorPriorDecision decision, IReadOnlyDictionary<string, string> answersByToken)
+    private static SupervisorPriorDecision FoldAskHumanAnswer(SupervisorPriorDecision decision, IReadOnlyDictionary<string, HumanAnswer> answersByToken)
     {
         if (decision.DecisionKind != SupervisorDecisionKinds.AskHuman) return decision;
 
@@ -423,9 +423,10 @@ public sealed partial class SupervisorTurnService
 
         if (token == null || !answersByToken.TryGetValue(token, out var answer)) return decision;
 
-        // Key-preserving fold: set ONLY the answer, keeping the question/token AND every enrichment folded after the
-        // park (the escalation's review chain, the authoring usage) — re-emitting the bare shape here erased them.
-        var folded = SupervisorOutcome.FoldAnswerOnto(decision.OutcomeJson, answer);
+        // Key-preserving fold: set ONLY the answer (and, when the surface sent one, the STRUCTURED verdict), keeping
+        // the question/token AND every enrichment folded after the park (the escalation's review chain, the authoring
+        // usage) — re-emitting the bare shape here erased them.
+        var folded = SupervisorOutcome.FoldAnswerOnto(decision.OutcomeJson, answer.Comment, answer.Decision);
 
         return decision with { OutcomeJson = folded };
     }
@@ -437,7 +438,7 @@ public sealed partial class SupervisorTurnService
     /// waits contribute (a still-pending ask hasn't been answered), so the fold writes the answer at most once
     /// it durably exists, and re-reads it identically on every restart.
     /// </summary>
-    private async Task<IReadOnlyDictionary<string, string>> ResolvedAskAnswersByTokenAsync(Guid supervisorRunId, string nodeId, CancellationToken cancellationToken)
+    private async Task<IReadOnlyDictionary<string, HumanAnswer>> ResolvedAskAnswersByTokenAsync(Guid supervisorRunId, string nodeId, CancellationToken cancellationToken)
     {
         var resolved = await _db.WorkflowRunWait.AsNoTracking()
             .Where(w => w.RunId == supervisorRunId && w.NodeId == nodeId
@@ -446,16 +447,19 @@ public sealed partial class SupervisorTurnService
             .Select(w => new { w.Token, w.PayloadJson })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        var answers = new Dictionary<string, string>();
+        var answers = new Dictionary<string, HumanAnswer>();
 
         foreach (var wait in resolved)
-            answers[wait.Token] = SupervisorOutcome.ReadAnswerComment(wait.PayloadJson);
+            answers[wait.Token] = new HumanAnswer(SupervisorOutcome.ReadAnswerComment(wait.PayloadJson), SupervisorOutcome.ReadAnswerDecision(wait.PayloadJson));
 
         return answers;
     }
 
+    /// <summary>One resolved ask's human reply: the free-text <c>Comment</c> and — when the answering surface sent one (C4) — the STRUCTURED <c>Decision</c> (approve / revise / reject). Both fold onto the decision's outcome, so every gate card rules on the FIELD and only falls back to the text when there is none.</summary>
+    private sealed record HumanAnswer(string Comment, string? Decision);
+
     /// <summary>The shared empty answers map for the common no-ask_human rehydrate — keeps that path allocation-light + DB-free.</summary>
-    private static readonly IReadOnlyDictionary<string, string> EmptyAnswers = new Dictionary<string, string>();
+    private static readonly IReadOnlyDictionary<string, HumanAnswer> EmptyAnswers = new Dictionary<string, HumanAnswer>();
 
     /// <summary>The shared empty agent-results map for the common no-spawn rehydrate — keeps that path allocation-light + DB-free (the EmptyAnswers analogue for SOTA #2).</summary>
     private static readonly IReadOnlyDictionary<Guid, SupervisorAgentResult> EmptyAgentResults = new Dictionary<Guid, SupervisorAgentResult>();

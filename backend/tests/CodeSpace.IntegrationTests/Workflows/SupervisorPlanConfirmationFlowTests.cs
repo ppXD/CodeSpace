@@ -341,7 +341,88 @@ public class SupervisorPlanConfirmationFlowTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// C4: the gate rules on the STRUCTURED <c>decision</c> field, not on the words the operator typed. Answered
+    /// through the raw resume path carrying <c>{decision: approve}</c> with a 繁中 comment that begins with NOTHING
+    /// the old prefix read would have matched — the plan still confirms and the run still ships. Under the pre-C4
+    /// contract this exact answer settled the plan as REJECTED and sent the supervisor back to re-plan.
+    /// </summary>
+    [Fact]
+    public async Task A_structured_approve_confirms_the_plan_whatever_language_the_operator_typed_in()
+    {
+        var (teamId, userId, conversationId) = await SeedTeamWithConversationAsync();
+        var runId = await CreateSupervisorRunAsync(teamId, userId, conversationId, requireConfirmation: true);
+
+        await RunEngineAsync(runId);
+        await ResolveSelfAdvanceAsync(runId);
+        await RunEngineAsync(runId);
+
+        await AnswerCardAsync(runId, teamId, userId, comment: "批准，照這個計劃做", decision: SupervisorAnswerDecision.Approve);
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+            .ShouldBe(WorkflowRunStatus.Success, "the structured approve released the gate — the answer's language never entered the decision");
+
+        (await db.WorkPlan.AsNoTracking().Where(p => p.WorkflowRunId == runId).ToListAsync())
+            .ShouldHaveSingleItem().Status.ShouldBe(WorkPlanStatuses.Confirmed, "one version, confirmed — no revision round was triggered by the wording");
+
+        (await Ledger(db, runId, teamId)).Select(d => d.DecisionKind).ShouldBe(
+            new[] { SupervisorDecisionKinds.Plan, SupervisorDecisionKinds.AskHuman, SupervisorDecisionKinds.Stop },
+            customMessage: "plan → card → released stop; the pre-C4 read would have inserted a second plan + card here");
+    }
+
+    /// <summary>
+    /// The mirror: a structured REVISE whose note happens to READ like an approval still re-plans. Pre-C4 this needed
+    /// a defensive "revise: " rewrite to stop the leading word releasing the gate; the field makes the text inert.
+    /// </summary>
+    [Fact]
+    public async Task A_structured_revise_re_plans_even_when_the_note_reads_like_an_approval()
+    {
+        var (teamId, userId, conversationId) = await SeedTeamWithConversationAsync();
+        var runId = await CreateSupervisorRunAsync(teamId, userId, conversationId, requireConfirmation: true);
+
+        await RunEngineAsync(runId);
+        await ResolveSelfAdvanceAsync(runId);
+        await RunEngineAsync(runId);
+
+        await AnswerCardAsync(runId, teamId, userId, comment: "approve nothing until you merge the steps into one", decision: SupervisorAnswerDecision.Revise);
+
+        await RunEngineAsync(runId);
+        await ResolveSelfAdvanceAsync(runId);
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var plans = await db.WorkPlan.AsNoTracking().Where(p => p.WorkflowRunId == runId).OrderBy(p => p.Version).ToListAsync();
+        plans.Select(p => p.Status).ShouldBe(new[] { WorkPlanStatuses.Rejected, WorkPlanStatuses.AwaitingConfirmation },
+            customMessage: "the revise field settled v1 as rejected and re-gated v2 — the note's leading 'approve' never released anything");
+
+        plans[1].ItemsJson.ShouldContain("merge the steps into one", customMessage: "the operator's note still reaches the revised contract verbatim");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────────
+
+    /// <summary>Answer the run's pending card through the RAW Action-wait resume with an explicit structured verdict — the shape every modern surface now sends (comment = the operator's own words, values.decision = what they clicked).</summary>
+    private async Task AnswerCardAsync(Guid runId, Guid teamId, Guid userId, string comment, string decision)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var ask = (await Ledger(db, runId, teamId)).Last(d => d.DecisionKind == SupervisorDecisionKinds.AskHuman);
+        var token = SupervisorOutcome.ReadHumanWaitToken(ask.OutcomeJson)!;
+
+        var values = new Dictionary<string, JsonElement> { [SupervisorAnswerDecision.Field] = JsonSerializer.SerializeToElement(decision) };
+
+        var resumed = await scope.Resolve<IWorkflowResumeService>()
+            .ResumeByActionTokenAsync(token, RealSupervisorActionExecutor.AnswerActionKey, userId, comment, values, teamId, CancellationToken.None);
+
+        resumed.ShouldBe(ActionResumeResult.Resumed);
+    }
 
     private async Task<WorkPlanConfirmationOutcome?> ConfirmAsync(Guid runId, Guid teamId, Guid userId, bool approve, string? feedback)
     {
