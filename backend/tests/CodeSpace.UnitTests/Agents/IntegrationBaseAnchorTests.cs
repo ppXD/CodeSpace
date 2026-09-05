@@ -84,6 +84,47 @@ public class IntegrationBaseAnchorTests
             customMessage: "handing one repository's root to another repository's integration is the graft the anchor exists to prevent — the caller's own fallback stands instead");
     }
 
+    /// <summary>
+    /// The tier's OTHER escape, and the one a live run can still reach: <see cref="PublishManifest.RepositoryId"/> is
+    /// "the catalog repository, WHEN RESOLVED", so a current multi-repository run over unresolved repositories writes
+    /// an all-null ledger — and the merge / <c>git.integrate_run</c> lanes hand this rule the run-wide, ALL-repository
+    /// ledger. "No concrete row anywhere" therefore does not mean "one repository": repository X's integration would
+    /// be anchored on repository Y's root, which the integrator refuses as a base that is not in the clone at all.
+    /// </summary>
+    [Fact]
+    public void A_multi_repository_ledger_of_unresolved_rows_never_inherits_the_compatibility_tier()
+    {
+        var manifests = new[] { Manifest(null, "another-repos-root", minutesAgo: 20, alias: "docs"), Manifest(null, "this-repos-root", minutesAgo: 10, alias: "api") };
+
+        IntegrationBaseAnchor.OldestRecordedBase(manifests, Repo).ShouldBeNull(
+            customMessage: "two workspace aliases are two repositories, resolved id or not — the oldest of them is another repository's root, so the caller's own fallback must stand");
+    }
+
+    /// <summary>A ledger that mixes an unresolved row with a concrete one across two workspace aliases is post-column AND multi-repository: only the repository-scoped rows are this repository's evidence, exactly as when the mismatch is concrete on both sides.</summary>
+    [Fact]
+    public void A_mixed_ledger_spanning_two_repositories_reads_only_the_repository_scoped_rows()
+    {
+        var manifests = new[] { Manifest(null, "another-repos-root", minutesAgo: 20, alias: "docs"), Manifest(Repo, "run-root", minutesAgo: 10, alias: "api") };
+
+        IntegrationBaseAnchor.OldestRecordedBase(manifests, Repo).ShouldBe("run-root",
+            customMessage: "the older row belongs to a different workspace alias, so it is not an ancestor of anything in THIS repository");
+    }
+
+    /// <summary>
+    /// The staging lane's shape: <c>ResolveProducerManifestsAsync</c> selects each producer's row through
+    /// <c>PublishManifestRepositorySelector</c>, which returns a sole null-id row as the legacy carrier — so one
+    /// producer set can carry a null row beside a concrete one for the SAME repository. Reading only the concrete
+    /// rows anchors the handoff on the re-parented producer's downstream base and refuses its own sibling.
+    /// </summary>
+    [Fact]
+    public void One_repositorys_unresolved_row_still_names_the_root_beside_its_concrete_sibling()
+    {
+        var manifests = new[] { Manifest(null, "run-root", minutesAgo: 20), Manifest(Repo, "producer-head", minutesAgo: 10) };
+
+        IntegrationBaseAnchor.OldestRecordedBase(manifests, Repo).ShouldBe("run-root",
+            customMessage: "one alias is one repository, so the unresolved row is this repository's own earlier evidence — anchoring on the concrete downstream base refuses the row that recorded the root");
+    }
+
     /// <summary>The shape all three integrate lanes call: the ledger's root when it has one, else the caller's own first-contribution base — the pre-ledger behaviour, preserved verbatim.</summary>
     [Fact]
     public void The_callers_first_contribution_base_stands_only_when_the_ledger_recorded_none()
@@ -117,22 +158,25 @@ public class IntegrationBaseAnchorTests
     [InlineData("backend/src/CodeSpace.Core/Services/Workflows/Nodes/Builtin/GitIntegrateRunNode.cs")]
     public void Every_integrate_lane_resolves_its_base_through_the_one_anchor(string lane)
     {
-        File.ReadAllText(Path.Combine(FindRepositoryRoot(), lane)).ShouldContain($"{nameof(IntegrationBaseAnchor)}.{nameof(IntegrationBaseAnchor.Resolve)}(",
+        if (FindRepositoryRoot() is not { } root) return;   // the source tree the pin reads is absent (packaged / published test run) — skip rather than fail on a coupling this assertion alone has
+
+        File.ReadAllText(Path.Combine(root, lane)).ShouldContain($"{nameof(IntegrationBaseAnchor)}.{nameof(IntegrationBaseAnchor.Resolve)}(",
             customMessage: $"{lane} anchors an integration, so it must resolve its BaseSha through the shared rule — a private re-derivation drifts silently");
     }
 
-    private static string FindRepositoryRoot()
+    private static string? FindRepositoryRoot()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
         while (directory != null && !Directory.Exists(Path.Combine(directory.FullName, "backend/src"))) directory = directory.Parent;
-        return directory?.FullName ?? throw new DirectoryNotFoundException("Repository root not found.");
+        return directory?.FullName;
     }
 
-    private static PublishManifest Manifest(Guid? repositoryId, string? baseSha, int minutesAgo, PublishManifestKind kind = PublishManifestKind.Agent, PublishAcceptanceState acceptance = PublishAcceptanceState.NotApplicable) => new()
+    private static PublishManifest Manifest(Guid? repositoryId, string? baseSha, int minutesAgo, PublishManifestKind kind = PublishManifestKind.Agent, PublishAcceptanceState acceptance = PublishAcceptanceState.NotApplicable, string alias = "primary") => new()
     {
         Id = Guid.NewGuid(),
         Kind = kind,
         RepositoryId = repositoryId,
+        RepositoryAlias = alias,
         BaseSha = baseSha,
         AcceptanceState = acceptance,
         CreatedDate = DateTimeOffset.UtcNow.AddMinutes(-minutesAgo),
