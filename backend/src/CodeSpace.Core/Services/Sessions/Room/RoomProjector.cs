@@ -470,7 +470,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
 
         return AgentAutonomyPolicy.DescribeNetwork(
             AgentAutonomyPolicy.Parse(route.EffectiveAutonomy, AgentAutonomyLevel.Standard),
-            AgentAutonomyPolicy.Parse(route.Caps.AutonomyCeiling, AgentAutonomyLevel.Unleashed),
+            AgentAutonomyPolicy.Parse(route.Caps.AutonomyCeiling, AgentAutonomyPolicy.UnboundedRouteCeiling),
             AgentAutonomyPolicy.DeploymentCeiling,
             await ConfinementAsync(runId, teamId, cancellationToken).ConfigureAwait(false));
     }

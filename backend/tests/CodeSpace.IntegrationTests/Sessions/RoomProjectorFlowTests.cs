@@ -1310,6 +1310,28 @@ public class RoomProjectorFlowTests
         PostureOf(room).ShouldBe("Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (no-bwrap)");
     }
 
+    [Fact]
+    public async Task The_room_attributes_a_blank_route_ceiling_to_policy_not_to_asking()
+    {
+        // A route that resolved no bounds preset carries a BLANK Caps.AutonomyCeiling. The server folds that blank
+        // fail-closed to Standard (the highest tier that grants no network) before it ever reaches the sandbox, so
+        // a Trusted request against it lands the run on EffectiveAutonomy "Standard" — but the Room used to re-parse
+        // the same blank ceiling with a DIFFERENT fallback (Unleashed) for the posture line alone, so the line read
+        // "Network: off (Standard)" as if the operator simply had not asked. The Room must fold the blank the same
+        // way the launch clamp did, so the line says the run was CAPPED, not merely quiet.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "posture-unbounded");
+        var runId = await SeedTurnAsync(teamId, sessionId, 1, "goal", "done");
+
+        await SeedRoutePlanAsync(runId, effective: "Standard", ceiling: "");
+
+        using var scope = _fixture.BeginScope();
+        var room = await scope.Resolve<IRoomProjector>().ProjectByRunAsync(runId, teamId, CancellationToken.None);
+
+        PostureOf(room).ShouldBe("Network: clamped off by policy (ceiling Standard)" + AgentAutonomyPolicy.ConfinementCaveat,
+            customMessage: "a blank route ceiling must fold to the same Standard the launch clamp uses, not to Unleashed");
+    }
+
     /// <summary>The Room's "Launch" stat row — the backend-authored posture sentence the FE renders verbatim.</summary>
     private static string? PostureOf(RoomView? room) =>
         room.ShouldNotBeNull().Blocks.OfType<AssistantTurnBlock>()
