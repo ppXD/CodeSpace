@@ -844,17 +844,42 @@ public static class SupervisorOutcome
     }
 
     /// <summary>
-    /// Whether the active plan's latest staging frontier is an integrity-failed resolve. This is the shared publication
+    /// Whether the run's latest staging frontier is an integrity-failed resolve. This is the shared publication
     /// barrier that prevents the published-branch resolver from falling through to an older contributor manifest after
     /// the accepted-resolution readers correctly withheld the resolver branch. Plan-less legacy tapes are unchanged.
+    ///
+    /// <para>The frontier is the ACTIVE generation's, and falls back to the whole tape's exactly when that generation
+    /// has none of its own — the SAME condition the rung it guards carries work over on
+    /// (<see cref="SupervisorMergeContributors.ActiveGenerationHasNoMergeableResult"/>), because
+    /// <see cref="LatestStagingFrontier"/> applies the same withhold door per decision. A barrier narrower than the
+    /// rung it guards is no barrier: a re-plan after an integrity-failed resolve (or a generation whose one unit was
+    /// rejected) moved the resolve out of view, the barrier stopped firing, and the carry-over published the very
+    /// older contributor branch the barrier exists to forbid.</para>
     /// </summary>
     public static bool HasActiveResolveContributorIntegrityBarrier(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
     {
         var window = SupervisorPlanWindow.Read(priorDecisions);
         if (!window.IsPlanBounded) return false;
 
-        var frontier = window.Decisions.LastOrDefault(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind));
+        var frontier = LatestStagingFrontier(window.Decisions) ?? LatestStagingFrontier(priorDecisions);
+
         return frontier?.DecisionKind == SupervisorDecisionKinds.Resolve && HasResolveContributorIntegrity(frontier.OutcomeJson);
+    }
+
+    /// <summary>
+    /// The newest staging decision a door to the head could take anything from: one that folded a result no acceptance
+    /// grade <see cref="IsWithheldFromHead"/>, or that has folded no result yet (a wave still in flight is its own
+    /// generation's work). A decision whose every folded result was REJECTED or WAIVED supersedes nothing behind it.
+    /// </summary>
+    private static SupervisorPriorDecision? LatestStagingFrontier(IReadOnlyList<SupervisorPriorDecision> decisions) =>
+        decisions.LastOrDefault(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind) && !StagedOnlyWithheldWork(d));
+
+    /// <summary>Whether this staging decision folded results and EVERY one of them is <see cref="IsWithheldFromHead"/>.</summary>
+    private static bool StagedOnlyWithheldWork(SupervisorPriorDecision decision)
+    {
+        var results = ReadAgentResults(decision.OutcomeJson);
+
+        return results.Count > 0 && results.All(IsWithheldFromHead);
     }
 
     /// <summary>
@@ -1134,9 +1159,34 @@ public static class SupervisorOutcome
     /// <para>Pure + replay-deterministic, over the SAME <c>integration</c> block readers as every other consumer.</para>
     /// </summary>
     public static bool AnyMergeIntegratedABranch(IReadOnlyList<SupervisorPriorDecision> priorDecisions) =>
-        priorDecisions.Any(d => d.DecisionKind == SupervisorDecisionKinds.Merge
-            && d.Status == SupervisorDecisionStatus.Succeeded
-            && (ReadIntegration(d.OutcomeJson) is { IntegratedBranch: { Length: > 0 } } || ReadMergeRepositoryBranches(d.OutcomeJson).Count > 0));
+        priorDecisions.Any(MergeIntegratedABranch);
+
+    /// <summary>
+    /// The per-decision half of <see cref="AnyMergeIntegratedABranch"/>: this ONE decision is an EXECUTED
+    /// (<c>Succeeded</c>) <c>merge</c> that actually landed a branch. Separated because "already consolidated" is a
+    /// per-merge fact, not a run-wide one — see <see cref="MergeConsolidatedContributors"/>, which builds on it.
+    /// </summary>
+    public static bool MergeIntegratedABranch(SupervisorPriorDecision decision) =>
+        decision.DecisionKind == SupervisorDecisionKinds.Merge
+        && decision.Status == SupervisorDecisionStatus.Succeeded
+        && (ReadIntegration(decision.OutcomeJson) is { IntegratedBranch: { Length: > 0 } } || ReadMergeRepositoryBranches(decision.OutcomeJson).Count > 0);
+
+    /// <summary>
+    /// Whether this ONE <c>merge</c> genuinely CONSOLIDATED the contributors it names — the fold a later carry-over
+    /// must not offer a second time (<see cref="SupervisorMergeContributors.SettledAcrossGenerations"/>'s exclusion).
+    /// Two shapes qualify: a merge that LANDED a branch (<see cref="MergeIntegratedABranch"/>), and a merge carrying
+    /// NO <c>integration</c> block at all — the integrate gate is off for that run, so the fold IS the whole product
+    /// (<c>RealSupervisorActionExecutor.Merge.cs</c>'s pre-SOTA-#3 outcome) and nothing was ever left un-landed.
+    ///
+    /// <para>What does NOT qualify is an integration that was ATTEMPTED and did not land — <c>Conflicted</c>, or
+    /// <c>Partial</c> with no branch. Such a merge still records its contributors in <c>merged[]</c> (the fold is
+    /// written BEFORE the integration runs), so reading that array alone treated work no branch ever received as
+    /// permanently consolidated and stranded it forever — the exact failure the carry-over exists to end.</para>
+    /// </summary>
+    public static bool MergeConsolidatedContributors(SupervisorPriorDecision decision) =>
+        decision.DecisionKind == SupervisorDecisionKinds.Merge
+        && decision.Status == SupervisorDecisionStatus.Succeeded
+        && (ReadIntegration(decision.OutcomeJson) is null || MergeIntegratedABranch(decision));
 
     /// <summary>
     /// Fold the run's FINAL reviewable integrated branch off the durable decision tape (resolver loop #379, S5) — the
@@ -1146,13 +1196,23 @@ public static class SupervisorOutcome
     /// reconciled merge IS the resolver's branch — see <c>RealSupervisorActionExecutor.Integrate.cs</c>). Null when
     /// neither exists yet (an analysis-only run, or a conflict that was never resolved). Pure + replay-deterministic.
     /// </summary>
-    public static string? ReadFinalIntegratedBranch(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
-    {
-        priorDecisions = SupervisorPlanWindow.Read(priorDecisions).Decisions;
+    public static string? ReadFinalIntegratedBranch(IReadOnlyList<SupervisorPriorDecision> priorDecisions) =>
+        ReadFinalIntegratedBranchWithin(SupervisorPlanWindow.Read(priorDecisions).Decisions);
 
-        for (var i = priorDecisions.Count - 1; i >= 0; i--)
+    /// <summary>
+    /// <see cref="ReadFinalIntegratedBranch"/>'s reverse walk over an ALREADY-CHOSEN slice, so a caller that has
+    /// decided WHICH tape to read drives the same ranking. The window is the ordinary slice; the WHOLE tape is what
+    /// <see cref="SupervisorPublishedBranchResolver"/> passes once the active generation has nothing shippable of its
+    /// own — an earlier generation's integrated head must still outrank that generation's individual contributors.
+    /// The walk's own staging barrier is what keeps that honest: fresh un-integrated work still stops it.
+    /// </summary>
+    public static string? ReadFinalIntegratedBranchWithin(IReadOnlyList<SupervisorPriorDecision> decisions)
+    {
+        ArgumentNullException.ThrowIfNull(decisions);
+
+        for (var i = decisions.Count - 1; i >= 0; i--)
         {
-            var decision = priorDecisions[i];
+            var decision = decisions[i];
 
             if (decision.DecisionKind == SupervisorDecisionKinds.Merge && ReadIntegration(decision.OutcomeJson) is { IntegratedBranch: { Length: > 0 } cleanBranch })
                 return cleanBranch;
@@ -1179,13 +1239,17 @@ public static class SupervisorOutcome
     /// stale set past un-integrated work). EMPTY for a single-repo run (no <c>repositories[]</c>) — it surfaces the
     /// single <see cref="ReadFinalIntegratedBranch"/> instead. Pure + replay-deterministic.
     /// </summary>
-    public static IReadOnlyList<SupervisorRepositoryBranch> ReadFinalRepositoryBranches(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
-    {
-        priorDecisions = SupervisorPlanWindow.Read(priorDecisions).Decisions;
+    public static IReadOnlyList<SupervisorRepositoryBranch> ReadFinalRepositoryBranches(IReadOnlyList<SupervisorPriorDecision> priorDecisions) =>
+        ReadFinalRepositoryBranchesWithin(SupervisorPlanWindow.Read(priorDecisions).Decisions);
 
-        for (var i = priorDecisions.Count - 1; i >= 0; i--)
+    /// <summary>The multi-repo twin of <see cref="ReadFinalIntegratedBranchWithin"/> — the same reverse walk over an ALREADY-CHOSEN slice, so the two rank identically whichever tape the caller picked.</summary>
+    public static IReadOnlyList<SupervisorRepositoryBranch> ReadFinalRepositoryBranchesWithin(IReadOnlyList<SupervisorPriorDecision> decisions)
+    {
+        ArgumentNullException.ThrowIfNull(decisions);
+
+        for (var i = decisions.Count - 1; i >= 0; i--)
         {
-            var decision = priorDecisions[i];
+            var decision = decisions[i];
 
             if (decision.DecisionKind == SupervisorDecisionKinds.Merge)
             {
