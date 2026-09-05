@@ -97,6 +97,89 @@ public sealed class LocalGitBranchIntegratorFlowTests
         ctx.Outcome(result, "agent-stale").Reason.ShouldContain("base SHA mismatch");
     }
 
+    // ── Crown jewel: dependency-staged work (a base DOWNSTREAM of the request base) integrates ──
+
+    [Fact]
+    public async Task A_contribution_cut_from_another_contributions_head_integrates_with_it()
+    {
+        if (!await GitReadyAsync()) return;
+
+        using var ctx = new IntegratorTestContext();
+        var baseSha = await ctx.SeedBaseAsync(new() { ["producer.txt"] = "p0\n", ["dependent.txt"] = "d0\n" });
+
+        // The dependency-staging shape: the producer pushes its branch and the dependent agent is deliberately
+        // RE-PARENTED onto it, so the dependent's recorded base is the producer's head — a descendant of the request
+        // base, never equal to it. A byte-equality guard called this "base SHA mismatch" and conflicted the whole set.
+        var (producer, producerHead) = await ctx.MakePushedContributionAsync("agent-producer", baseSha, "codespace/agent/producer", d => File.WriteAllText(Path.Combine(d, "producer.txt"), "p1\n"));
+        var dependent = await ctx.MakeContributionAsync("agent-dependent", producerHead, d => File.WriteAllText(Path.Combine(d, "dependent.txt"), "d1\n"));
+
+        var result = await ctx.NewIntegrator().IntegrateAsync(ctx.Request(baseSha, producer, dependent), CancellationToken.None);
+
+        result.Status.ShouldBe(IntegrationStatus.Clean, "a dependent cut from its producer's branch is DOWNSTREAM of the request base, not a stale base");
+        result.AppliedCount.ShouldBe(2);
+        (await ctx.RemoteFileAsync(ctx.IntegrationBranch, "producer.txt")).Trim().ShouldBe("p1");
+        (await ctx.RemoteFileAsync(ctx.IntegrationBranch, "dependent.txt")).Trim().ShouldBe("d1", "both the producer's and the dependent's work land on the ONE integrated branch");
+    }
+
+    [Fact]
+    public async Task A_contribution_whose_base_is_not_downstream_of_the_request_base_is_refused()
+    {
+        if (!await GitReadyAsync()) return;
+
+        using var ctx = new IntegratorTestContext();
+        var staleBase = await ctx.SeedBaseAsync(new() { ["a.txt"] = "a", ["b.txt"] = "b", ["c.txt"] = "c" });
+        var requestBase = await ctx.AdvanceRemoteAsync(d => File.WriteAllText(Path.Combine(d, "a.txt"), "a-upstream"));
+
+        var good = await ctx.MakeContributionAsync("agent-good", requestBase, d => File.WriteAllText(Path.Combine(d, "b.txt"), "b-edited"));
+        var stale = await ctx.MakeContributionAsync("agent-stale", staleBase, d => File.WriteAllText(Path.Combine(d, "c.txt"), "c-edited"));
+
+        var result = await ctx.NewIntegrator().IntegrateAsync(ctx.Request(requestBase, good, stale), CancellationToken.None);
+
+        result.Status.ShouldBe(IntegrationStatus.Conflicted, "a base UPSTREAM of the request base is exactly the stale-base graft the guard exists to stop — accepting descendants never accepts ancestors");
+        ctx.Outcome(result, "agent-stale").Disposition.ShouldNotBe(ContributionDisposition.Applied);
+        ctx.Outcome(result, "agent-stale").Reason.ShouldContain("base SHA mismatch");
+        (await ctx.RemoteHasBranchAsync(ctx.IntegrationBranch)).ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task A_downstream_based_contribution_that_genuinely_conflicts_still_fails_safe()
+    {
+        if (!await GitReadyAsync()) return;
+
+        using var ctx = new IntegratorTestContext();
+        var baseSha = await ctx.SeedBaseAsync(new() { ["f.txt"] = "shared\n" });
+        var downstream = await ctx.AdvanceRemoteAsync(d => File.WriteAllText(Path.Combine(d, "f.txt"), "upstream\n"));
+
+        // Rooted DOWNSTREAM of the request base (so the ancestry guard admits it) but rewriting the SAME line that
+        // downstream commit rewrote — the 3-way apply onto the request base's tree cannot reconcile the two.
+        var late = await ctx.MakeContributionAsync("agent-late", downstream, d => File.WriteAllText(Path.Combine(d, "f.txt"), "late\n"));
+
+        var result = await ctx.NewIntegrator().IntegrateAsync(ctx.Request(baseSha, late), CancellationToken.None);
+
+        result.Status.ShouldBe(IntegrationStatus.Conflicted, "admitting a downstream base NEVER softens a genuine textual conflict — the resolve arc reads exactly this signal");
+        ctx.Outcome(result, "agent-late").ConflictedFiles.ShouldContain("f.txt");
+        (await ctx.RemoteHasBranchAsync(ctx.IntegrationBranch)).ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task Contributions_given_dependent_first_are_applied_producer_first()
+    {
+        if (!await GitReadyAsync()) return;
+
+        using var ctx = new IntegratorTestContext();
+        var baseSha = await ctx.SeedBaseAsync(new() { ["chain.txt"] = "v0\n" });
+
+        var (producer, producerHead) = await ctx.MakePushedContributionAsync("agent-producer", baseSha, "codespace/agent/producer", d => File.WriteAllText(Path.Combine(d, "chain.txt"), "v1\n"));
+        var dependent = await ctx.MakeContributionAsync("agent-dependent", producerHead, d => File.WriteAllText(Path.Combine(d, "chain.txt"), "v2\n"));
+
+        // Handed over DEPENDENT-FIRST: the dependent's v1→v2 patch cannot be applied to the v0 tree, so the integrator
+        // has to derive the apply order from ancestry rather than trusting the order the contributions arrived in.
+        var result = await ctx.NewIntegrator().IntegrateAsync(ctx.Request(baseSha, dependent, producer), CancellationToken.None);
+
+        result.Status.ShouldBe(IntegrationStatus.Clean, "apply order is derived from ancestry, not from the order the contributions arrived in");
+        (await ctx.RemoteFileAsync(ctx.IntegrationBranch, "chain.txt")).Trim().ShouldBe("v2", "the dependent's revision is the final content — its producer applied first");
+    }
+
     // ── Crown jewel: a conflicting set fails SAFE ────────────────────────────────────
 
     [Fact]
@@ -478,8 +561,8 @@ public sealed class LocalGitBranchIntegratorFlowTests
             return (await Git(seed, "rev-parse", "HEAD")).Trim();
         }
 
-        /// <summary>Advance the remote default branch with a further commit (a non-overlapping upstream edit).</summary>
-        public async Task AdvanceRemoteAsync(Action<string> mutate)
+        /// <summary>Advance the remote default branch with a further commit (a non-overlapping upstream edit); returns the new head SHA — a commit strictly DOWNSTREAM of the seeded base.</summary>
+        public async Task<string> AdvanceRemoteAsync(Action<string> mutate)
         {
             var work = Path.Combine(_root, "advance-" + Guid.NewGuid().ToString("N"));
             await Git(_root, "clone", _bare, work);
@@ -488,6 +571,8 @@ public sealed class LocalGitBranchIntegratorFlowTests
             await Git(work, "add", "-A");
             await Git(work, "commit", "-m", "upstream advance");
             await Git(work, "push", "origin", "main");
+
+            return (await Git(work, "rev-parse", "HEAD")).Trim();
         }
 
         /// <summary>Push a DIVERGENT commit to <paramref name="branch"/> on the remote (a reviewer fixup / concurrent rerun).</summary>
@@ -519,6 +604,26 @@ public sealed class LocalGitBranchIntegratorFlowTests
 
         public async Task<BranchContribution> MakeContributionAsync(string label, string baseSha, Action<string> mutate) =>
             new() { Label = label, BaseSha = baseSha, Patch = await MakePatchAsync(baseSha, mutate) };
+
+        /// <summary>Produce a contribution whose work is ALSO pushed to <paramref name="branch"/>, returning its head SHA — the dependency-staging shape, where a dependent agent's recorded base is a producer's branch head rather than the shared request base.</summary>
+        public async Task<(BranchContribution Contribution, string HeadSha)> MakePushedContributionAsync(string label, string baseSha, string branch, Action<string> mutate)
+        {
+            var work = Path.Combine(_root, "produce-" + Guid.NewGuid().ToString("N"));
+            await Git(_root, "clone", _bare, work);
+            await ConfigAsync(work);
+            await Git(work, "checkout", "--detach", baseSha);
+            mutate(work);
+            await Git(work, "add", "-A");
+            await Git(work, "commit", "-m", label);
+
+            var head = (await Git(work, "rev-parse", "HEAD")).Trim();
+            var patch = await Git(work, "diff", "--no-color", baseSha, head);
+
+            await Git(work, "push", "origin", $"HEAD:refs/heads/{branch}");
+            Directory.Delete(work, recursive: true);
+
+            return (new BranchContribution { Label = label, BaseSha = baseSha, Patch = patch, ProducedBranch = branch }, head);
+        }
 
         public ContributionOutcome Outcome(IntegrationResult result, string label) =>
             result.Outcomes.Single(o => o.Label == label);

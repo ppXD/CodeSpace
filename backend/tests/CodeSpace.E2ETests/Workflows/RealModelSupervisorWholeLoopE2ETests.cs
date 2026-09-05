@@ -1312,7 +1312,11 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             .ToListAsync();
 
         var spawned = decisions.Any(d => d.DecisionKind == SupervisorDecisionKinds.Spawn);
-        var conflicted = decisions.Any(d => d.DecisionKind == SupervisorDecisionKinds.Merge && SupervisorOutcome.ReadIntegration(d.OutcomeJson) is { IsConflicted: true });
+        // The PRODUCTION conflict reader (Merge OR Spawn), not a merge-only re-implementation: S1 dependency staging
+        // records its own un-integrable handoff on the SPAWN row, and both the resolve executor and the decider's
+        // action mask route off SupervisorOutcome.FindConflictDecision. A merge-only predicate here scored a genuine
+        // staged conflict as "never produced a real conflict" and RED-ed the arm the run had actually handled.
+        var conflicted = SupervisorOutcome.FindConflictDecision(await ReadPriorDecisionsAsync(db, runId, teamId)) is not null;
         // The brain chose resolve: either it executed (a Resolve row) or — the common path — the irreversible-HITL floor
         // rewrote it into an ask_human approval card carrying the resolve-approval marker. (Reported in the note even
         // though the gate does not require it specifically — see handledConflict.)

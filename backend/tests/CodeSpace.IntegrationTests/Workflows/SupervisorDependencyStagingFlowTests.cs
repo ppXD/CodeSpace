@@ -473,6 +473,51 @@ public sealed class SupervisorDependencyStagingFlowTests
     }
 
     /// <summary>
+    /// The whole-loop headline park (real-model run 33930904059): S1 staging re-parents the dependent onto its
+    /// producer's branch, so the dependent's RECORDED base is the producer's head — not the shared request base the
+    /// merge anchors on. A byte-equality base guard called that "base SHA mismatch" and conflicted the entire merge,
+    /// so EVERY plan carrying a <c>dependsOn</c> edge needed a resolver it could never verify. Drives the real
+    /// producer → real staging → real dependent → real merge chain end to end.
+    ///
+    /// <para>Mutation check: restore the byte-equality base guard in <c>LocalGitBranchIntegrator</c> and this goes RED
+    /// with a Conflicted integration and no integrated branch.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_dependency_staged_dependent_merges_with_its_producer_and_needs_no_resolver()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedRepositoryAsync(teamId, remote.Url, await SeedCredentialAsync(teamId), RepositoryPublishMode.Branch);
+        var runId = await SeedSupervisorRunAsync(teamId);
+
+        var (producerRunId, _) = await RunProducerAsync(teamId, repoId, "printf 'by producer\\n' > producer.txt; echo edited");
+
+        var plan = Plan(("producer", null), ("dependent", new[] { "producer" }));
+        var spawnContext = ContextWith(runId, teamId, repoId, plan, await SucceededSpawn(teamId, ("producer", producerRunId)));
+
+        await ExecuteSpawnAsync(spawnContext, "dependent");
+
+        var stagedRef = (await SingleStagedTaskAsync(runId)).Workspace!.Repositories.Single().Ref!;
+        var (dependentRunId, _) = await RunProducerAsync(teamId, repoId, "printf 'by dependent\\n' > dependent.txt; echo edited", checkoutRef: stagedRef);
+
+        var mergeContext = ContextWith(runId, teamId, repoId, plan, await SucceededSpawn(teamId, ("producer", producerRunId), ("dependent", dependentRunId)));
+        var merge = await ExecuteMergeAsync(mergeContext);
+
+        var integration = SupervisorOutcome.ReadIntegration(merge.OutcomeJson).ShouldNotBeNull();
+        integration.Status.ShouldBe("Clean", customMessage: $"a dependent cut from its producer's branch is DOWNSTREAM of the merge base, not stale work — reason: {integration.Reason}");
+        integration.IntegratedBranch.ShouldNotBeNull("the merge names one reviewable integrated branch, which is the evidence the completion authority looks for");
+
+        SupervisorOutcome.FindConflictDecision(mergeContext.PriorDecisions.Append(merge).ToList())
+            .ShouldBeNull("no resolver is required — the production conflict reader sees nothing to reconcile");
+
+        (await remote.FileOnBranchAsync(integration.IntegratedBranch!, "producer.txt")).Trim().ShouldBe("by producer");
+        (await remote.FileOnBranchAsync(integration.IntegratedBranch!, "dependent.txt")).Trim().ShouldBe("by dependent", "both the producer's and the dependent's work reach the integrated head");
+    }
+
+    /// <summary>
     /// The P1 live-run break, at the only tier that can show it: TWO dependents staged in the SAME turn over
     /// DIFFERENT producer sets. With the handoff branch keyed on run + turn alone both asked for one name, so the
     /// second integration found a remote branch carrying the first's (different) tree,
@@ -730,6 +775,23 @@ public sealed class SupervisorDependencyStagingFlowTests
         };
     }
 
+    /// <summary>Execute a MERGE decision through the real executor. <see cref="SupervisorMergePayload.ForcedByPublishGate"/> (I3) is what turns the on-disk integration on WITHOUT an operator opt-in and skips the model synthesis — so this drives the real <c>IBranchIntegrator</c> against the real remote with no LLM in the loop.</summary>
+    private async Task<SupervisorPriorDecision> ExecuteMergeAsync(SupervisorTurnContext context)
+    {
+        using var scope = _fixture.BeginScope();
+        var executor = scope.Resolve<ISupervisorActionExecutor>();
+
+        var payload = JsonSerializer.Serialize(new SupervisorMergePayload { SynthesisInstruction = "combine", ForcedByPublishGate = true }, AgentJson.Options);
+
+        var execution = await executor.ExecuteAsync(new SupervisorDecision { Kind = SupervisorDecisionKinds.Merge, PayloadJson = payload }, context, CancellationToken.None);
+
+        return new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 4, DecisionKind = SupervisorDecisionKinds.Merge, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = payload, OutcomeJson = execution.OutcomeJson,
+        };
+    }
+
     private async Task ExecuteResolveAsync(SupervisorTurnContext context)
     {
         using var scope = _fixture.BeginScope();
@@ -802,12 +864,17 @@ public sealed class SupervisorDependencyStagingFlowTests
 
     // ─── Real producer execution (real AgentRunExecutor + real git) ───────────────
 
-    /// <summary>Run ONE real producer agent (a scripted /bin/sh harness) through the REAL AgentRunExecutor against the real repo — a genuine PublishManifest row + (PublishMode-dependent) a genuine pushed branch results. Returns its AgentRunId + the terminal ResultJson.</summary>
-    private async Task<(Guid AgentRunId, string ResultJson)> RunProducerAsync(Guid teamId, Guid repositoryId, string script)
+    /// <summary>Run ONE real producer agent (a scripted /bin/sh harness) through the REAL AgentRunExecutor against the real repo — a genuine PublishManifest row + (PublishMode-dependent) a genuine pushed branch results. Returns its AgentRunId + the terminal ResultJson. <paramref name="checkoutRef"/> pins the clone the way dependency staging does at spawn time (null → the repository default), so the run records THAT ref's head as its own base.</summary>
+    private async Task<(Guid AgentRunId, string ResultJson)> RunProducerAsync(Guid teamId, Guid repositoryId, string script, string? checkoutRef = null)
     {
         using var scope = _fixture.BeginScope();
+
+        var workspace = checkoutRef is null
+            ? null
+            : new WorkspaceSpec { Repositories = new[] { new WorkspaceRepositorySpec { Alias = "repo", RepositoryId = repositoryId, Ref = checkoutRef, IsPrimary = true } } };
+
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
-            new AgentTask { Goal = "produce", Harness = "scripted", Model = "test-model", RepositoryId = repositoryId },
+            new AgentTask { Goal = "produce", Harness = "scripted", Model = "test-model", RepositoryId = repositoryId, Workspace = workspace },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
 
         var executor = new AgentRunExecutor(

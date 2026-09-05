@@ -14,12 +14,13 @@ namespace CodeSpace.Core.Services.Agents.Workspace.Integrators;
 /// as the workspace provider). Pairs with <c>LocalGitWorkspaceProvider</c> — both <see cref="Kind"/> "local".
 ///
 /// <para><b>Base-anchored, all-or-nothing, fail-safe.</b> Resolves each contribution's patch (team-scoped offloader),
-/// refuses any whose recorded base disagrees with the request base (the moved-base integrity guard) / is truncated /
-/// spans another repo / has no patch-and-no-branch, then clones full, checks out the shared base SHA (detached), and
-/// <c>git apply --index --3way</c>s each patch IN ORDER. If EVERY contribution applies clean it commits once and
-/// pushes a run-id-derived reviewable branch; on ANY conflict or refusal it resets the clone to base (no half-merge
-/// survives), pushes nothing, and returns a <see cref="IntegrationResult"/> naming what could not be applied — the
-/// original K agent branches/patches remain intact for human review.</para>
+/// refuses any whose recorded base is not the request base OR DOWNSTREAM of it (the moved-base integrity guard) / is
+/// truncated / spans another repo / has no patch-and-no-branch, then clones full, checks out the shared base SHA
+/// (detached), and <c>git apply --index --3way</c>s each patch IN ANCESTRY ORDER (a plain apply first, falling back to
+/// the 3-way merge when the tree is not byte-identical to that contribution's own base). If EVERY contribution
+/// applies clean it commits once and pushes a run-id-derived reviewable branch; on ANY conflict or refusal it
+/// resets the clone to base (no half-merge survives), pushes nothing, and returns a <see cref="IntegrationResult"/>
+/// naming what could not be applied — the original K agent branches/patches remain intact for human review.</para>
 ///
 /// <para><b>Secret hygiene</b> is co-located with the provider: the clone embeds the token in the URL for the clone
 /// command only and every surfaced git output is redacted (<see cref="LocalGitWorkspaceProvider.Redact"/>), and the
@@ -50,7 +51,7 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
 
         var resolved = await ResolveContributionsAsync(request, cancellationToken).ConfigureAwait(false);
 
-        var preflightBlock = Preflight(request, resolved);
+        var preflightBlock = Preflight(resolved);
 
         if (preflightBlock is not null)
             return Aborted(resolved, preflightBlock);
@@ -85,7 +86,7 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
     }
 
     /// <summary>The whole-set + per-contribution pure refusal checks. Returns a set-level abort reason when integration cannot proceed, else null. Records each blocked contribution's own reason on the <see cref="ResolvedContribution"/>.</summary>
-    private static string? Preflight(IntegrationRequest request, IReadOnlyList<ResolvedContribution> resolved)
+    private static string? Preflight(IReadOnlyList<ResolvedContribution> resolved)
     {
         if (SpansMultipleRepositories(resolved))
         {
@@ -103,7 +104,7 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
                 continue;
             }
 
-            var reason = BlockReason(request, r);
+            var reason = BlockReason(r);
 
             if (reason is null) continue;
 
@@ -127,16 +128,13 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
         _ => "offloaded patch could not be resolved (missing or cross-team artifact)",
     };
 
-    /// <summary>The per-contribution refusal cause (null = would apply). The base-SHA equality check is the integrity guard against grafting stale-base work onto a moved tree.</summary>
-    private static string? BlockReason(IntegrationRequest request, ResolvedContribution r)
+    /// <summary>The per-contribution refusal cause (null = would apply). Only the PURE causes — whether the recorded base is downstream of the request base needs the clone's history, so that integrity guard runs in <see cref="BlockStaleBasesAsync"/>.</summary>
+    private static string? BlockReason(ResolvedContribution r)
     {
         var c = r.Contribution;
 
         if (string.IsNullOrEmpty(c.BaseSha))
             return "no recorded base revision (re-attached run — its work was not captured)";
-
-        if (!string.Equals(c.BaseSha, request.BaseSha, StringComparison.Ordinal))
-            return $"base SHA mismatch (expected {Short(request.BaseSha)}, got {Short(c.BaseSha)})";
 
         // An OFFLOADED patch that resolves to nothing is a resolution failure (a missing or cross-team artifact),
         // NEVER a no-op — treating it as an empty diff would silently drop the agent's real work. A genuinely-empty
@@ -174,7 +172,12 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
             if (!await CheckoutBaseAsync(directory, request, cancellationToken).ConfigureAwait(false))
                 return Aborted(resolved, $"base revision {Short(request.BaseSha)} not found in the repository");
 
-            var applyBlock = await ApplyAllAsync(directory, request, resolved, cancellationToken).ConfigureAwait(false);
+            if (await BlockStaleBasesAsync(directory, request, resolved, cancellationToken).ConfigureAwait(false) is { } staleBaseBlock)
+                return Aborted(resolved, staleBaseBlock);
+
+            var ordered = await InAncestryOrderAsync(directory, resolved, cancellationToken).ConfigureAwait(false);
+
+            var applyBlock = await ApplyAllAsync(directory, ordered, cancellationToken).ConfigureAwait(false);
 
             if (applyBlock is not null)
             {
@@ -218,8 +221,66 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
         return result.Status == SandboxStatus.Success;
     }
 
+    /// <summary>
+    /// The moved-base integrity guard, ancestry-aware. A contribution may be rooted at the request base itself OR at
+    /// any commit DOWNSTREAM of it: dependency staging deliberately re-parents a dependent agent onto its producer's
+    /// branch (or onto a handoff branch that already integrated the producers), so a plan with <c>dependsOn</c> edges
+    /// yields contributions whose recorded bases legitimately differ from the request base. A base that is NOT
+    /// downstream — a stale/foreign commit, or one this clone doesn't have — is still refused, in the same wording:
+    /// grafting it onto a moved tree is exactly the silent corruption this guard exists to stop.
+    /// </summary>
+    private async Task<string?> BlockStaleBasesAsync(string directory, IntegrationRequest request, IReadOnlyList<ResolvedContribution> resolved, CancellationToken cancellationToken)
+    {
+        var anyBlocked = false;
+
+        foreach (var r in resolved)
+        {
+            var contributionBase = r.Contribution.BaseSha!;   // Preflight already refused (and aborted on) an empty base
+
+            if (string.Equals(contributionBase, request.BaseSha, StringComparison.Ordinal)) continue;
+
+            if (await IsStrictAncestorAsync(directory, request.BaseSha, contributionBase, cancellationToken).ConfigureAwait(false)) continue;
+
+            r.Block($"base SHA mismatch (expected {Short(request.BaseSha)}, got {Short(contributionBase)})");
+            anyBlocked = true;
+        }
+
+        return anyBlocked ? "a contribution could not be applied" : null;
+    }
+
+    /// <summary>
+    /// Apply order = ancestry order. A contribution rooted DOWNSTREAM of another's base was cut from a tree that
+    /// already contains that other's work (the dependency-staging shape), so the upstream contribution must apply
+    /// FIRST or the dependent's patch meets a pre-image the tree does not have yet. A stable topological sort by
+    /// "how many peers' bases are strict ancestors of mine" — equal / unrelated bases keep the request's spawn order,
+    /// and the overwhelmingly common single-base set short-circuits without touching git.
+    /// </summary>
+    private async Task<IReadOnlyList<ResolvedContribution>> InAncestryOrderAsync(string directory, IReadOnlyList<ResolvedContribution> resolved, CancellationToken cancellationToken)
+    {
+        if (resolved.Select(r => r.Contribution.BaseSha).Distinct(StringComparer.Ordinal).Count() <= 1) return resolved;
+
+        var upstreamCounts = new int[resolved.Count];
+
+        for (var i = 0; i < resolved.Count; i++)
+            for (var j = 0; j < resolved.Count; j++)
+                if (i != j && await IsStrictAncestorAsync(directory, resolved[j].Contribution.BaseSha!, resolved[i].Contribution.BaseSha!, cancellationToken).ConfigureAwait(false))
+                    upstreamCounts[i]++;
+
+        return Enumerable.Range(0, resolved.Count).OrderBy(i => upstreamCounts[i]).Select(i => resolved[i]).ToList();
+    }
+
+    /// <summary>True when <paramref name="ancestor"/> is a STRICT ancestor of <paramref name="descendant"/>. The objects are in the clone because it is full — every agent branch is fetched. A non-zero exit ("not an ancestor", or an object this clone doesn't have) is false: an unknown base is never treated as downstream.</summary>
+    private async Task<bool> IsStrictAncestorAsync(string directory, string ancestor, string descendant, CancellationToken cancellationToken)
+    {
+        if (string.Equals(ancestor, descendant, StringComparison.Ordinal)) return false;
+
+        var result = await RunGitAsync(new[] { "-C", directory, "merge-base", "--is-ancestor", ancestor, descendant }, directory, cancellationToken).ConfigureAwait(false);
+
+        return result.Status == SandboxStatus.Success;
+    }
+
     /// <summary>Apply each clean (preflight-passed) contribution in order. Returns a set-level abort reason on the FIRST textual conflict (marking the rest not-attempted), else null when all applied.</summary>
-    private async Task<string?> ApplyAllAsync(string directory, IntegrationRequest request, IReadOnlyList<ResolvedContribution> resolved, CancellationToken cancellationToken)
+    private async Task<string?> ApplyAllAsync(string directory, IReadOnlyList<ResolvedContribution> resolved, CancellationToken cancellationToken)
     {
         for (var i = 0; i < resolved.Count; i++)
         {
@@ -248,6 +309,10 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
 
         try
         {
+            // --3way is apply-then-fall-back: a straight apply first, and only when the tree is not byte-identical to
+            // this contribution's own base (the normal case once an upstream contribution has already been applied
+            // under it) does git reconstruct the pre-image blobs and 3-way merge. A failure here is a GENUINE textual
+            // conflict — which the caller must keep surfacing as Conflicted, since the resolve arc acts on it.
             var result = await RunGitAsync(new[] { "-C", directory, "apply", "--index", "--3way", patchFile }, directory, cancellationToken).ConfigureAwait(false);
             return result.Status == SandboxStatus.Success;
         }
