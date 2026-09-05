@@ -138,6 +138,33 @@ public sealed class SupervisorLedgerDirectTerminalOutputFlowTests
         result.AcceptancePassed.ShouldBe(false, "before this fix the ledger-direct run had ZERO grading targets and this stayed null (vacuous pass) — it must now be reached and fail closed against the unclonable fake remote");
     }
 
+    [Fact]
+    public async Task A_replan_after_the_wave_finished_still_surfaces_the_branches_it_stranded()
+    {
+        // Run 3a49c716: plan(2) → spawn×2, both Succeeded and PUSHED → plan(1) → stop. The model re-planned instead
+        // of merging, so delivery reaches the LEDGER-DIRECT rung — whose active-generation filter is EMPTY (not
+        // null) after that re-plan, discarding every pushed manifest: the run logged "Supervisor publish … resolved
+        // 0 target(s)" over two accepted, pushed branches. The merge rung's conservation, on this rung.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var webRepoId = await SeedBoundRepositoryAsync(teamId);
+        var apiRepoId = await SeedBoundRepositoryAsync(teamId);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var a = Guid.NewGuid();
+        var b = Guid.NewGuid();
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, "s1", "s2");
+        await SeedWaveAsync(runId, teamId, sequence: 2, a, b);
+        await SeedAgentManifestAsync(runId, teamId, a, webRepoId, "codespace/agent/a", alias: "web");
+        await SeedAgentManifestAsync(runId, teamId, b, apiRepoId, "codespace/agent/b", alias: "api");
+        await SeedPlanAsync(runId, teamId, sequence: 3, "s3");
+
+        var result = await RunTurnAsync(runId, teamId, new AlwaysStopDecider());
+
+        result.RepositoryBranches.Select(x => x.SourceBranch).ShouldBe(new[] { "codespace/agent/a", "codespace/agent/b" }, ignoreOrder: true,
+            "a plan-generation boundary may supersede an INSTRUCTION — it must not make FINISHED, PUSHED work invisible to delivery");
+    }
+
     // ─── Drive a real turn ─────────────────────────────────────────────────────────
 
     private async Task<SupervisorTurnResult> RunTurnAsync(Guid runId, Guid teamId, ISupervisorDecider decider, SupervisorGoalConfig? goalConfig = null)
@@ -236,6 +263,33 @@ public sealed class SupervisorLedgerDirectTerminalOutputFlowTests
         await AddTerminalDecisionAsync(db, runId, teamId, SupervisorDecisionKinds.Spawn, outcome);
     }
 
+    /// <summary>ONE spawn decision staging a WAVE of Succeeded agents — the shape a plan(2) → spawn×2 trajectory records.</summary>
+    private async Task SeedWaveAsync(Guid runId, Guid teamId, int sequence, params Guid[] agentRunIds)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var results = agentRunIds.Select(id => new SupervisorAgentResult { AgentRunId = id, Status = "Succeeded", ChangedFiles = new[] { "a.txt" } }).ToArray();
+        var outcome = JsonSerializer.Serialize(new { agentRunIds, agentCount = agentRunIds.Length, agentResults = results }, AgentJson.Options);
+
+        await AddTerminalDecisionAsync(db, runId, teamId, SupervisorDecisionKinds.Spawn, outcome, sequence: sequence);
+    }
+
+    /// <summary>A structurally-valid, non-empty plan — the boundary <see cref="SupervisorPlanWindow"/> opens a generation on, so a plan seeded AFTER a spawn slices that spawn out of the window.</summary>
+    private async Task SeedPlanAsync(Guid runId, Guid teamId, int sequence, params string[] subtaskIds)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var payload = JsonSerializer.Serialize(new SupervisorPlanPayload
+        {
+            Goal = Goal,
+            Subtasks = subtaskIds.Select(id => new SupervisorPlannedSubtask { Id = id, Title = id, Instruction = $"do {id}" }).ToArray(),
+        }, AgentJson.Options);
+
+        await AddTerminalDecisionAsync(db, runId, teamId, SupervisorDecisionKinds.Plan, "{}", payloadJson: payload, sequence: sequence);
+    }
+
     private async Task SeedAgentManifestAsync(Guid runId, Guid teamId, Guid agentRunId, Guid repositoryId, string branch, string alias = "primary")
     {
         using var scope = _fixture.BeginScope();
@@ -256,14 +310,14 @@ public sealed class SupervisorLedgerDirectTerminalOutputFlowTests
         await AddTerminalDecisionAsync(db, runId, teamId, SupervisorDecisionKinds.Merge, outcome);
     }
 
-    private static async Task AddTerminalDecisionAsync(CodeSpaceDbContext db, Guid runId, Guid teamId, string decisionKind, string outcomeJson)
+    private static async Task AddTerminalDecisionAsync(CodeSpaceDbContext db, Guid runId, Guid teamId, string decisionKind, string outcomeJson, string payloadJson = "{}", int sequence = 0)
     {
         var now = DateTimeOffset.UtcNow;
         db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
         {
-            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId,
+            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId, Sequence = sequence,
             DecisionKind = decisionKind, IdempotencyKey = $"{decisionKind}-{Guid.NewGuid():N}", InputHash = "test",
-            Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = outcomeJson,
+            Status = SupervisorDecisionStatus.Succeeded, PayloadJson = payloadJson, OutcomeJson = outcomeJson,
             FenceEpoch = 1, CreatedDate = now, CreatedBy = Guid.Empty, LastModifiedDate = now, LastModifiedBy = Guid.Empty,
         });
         await db.SaveChangesAsync();

@@ -3,6 +3,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Messages.Agents;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Supervisor;
 
@@ -40,11 +41,13 @@ public sealed class SupervisorPublishedBranchResolver : ISupervisorPublishedBran
 {
     private readonly CodeSpaceDbContext _db;
     private readonly IPublishManifestStore _manifests;
+    private readonly ILogger<SupervisorPublishedBranchResolver> _logger;
 
-    public SupervisorPublishedBranchResolver(CodeSpaceDbContext db, IPublishManifestStore manifests)
+    public SupervisorPublishedBranchResolver(CodeSpaceDbContext db, IPublishManifestStore manifests, ILogger<SupervisorPublishedBranchResolver> logger)
     {
         _db = db;
         _manifests = manifests;
+        _logger = logger;
     }
 
     public async Task<IReadOnlyList<SupervisorRepositoryBranch>> ResolveAsync(Guid workflowRunId, Guid teamId, IReadOnlyList<SupervisorPriorDecision> priorDecisions, Guid? primaryRepositoryId, CancellationToken cancellationToken)
@@ -65,7 +68,7 @@ public sealed class SupervisorPublishedBranchResolver : ISupervisorPublishedBran
         // replace. Only a later authoritative merge/resolve may clear this barrier (and would have returned above).
         if (SupervisorOutcome.HasActiveResolveContributorIntegrityBarrier(window.Decisions)) return Array.Empty<SupervisorRepositoryBranch>();
 
-        return await ResolveLedgerDirectAsync(workflowRunId, teamId, window, cancellationToken).ConfigureAwait(false);
+        return await ResolveLedgerDirectAsync(workflowRunId, teamId, priorDecisions, window, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>The traditional single-repo merge-derived path: the run's ONE configured primary repository, based against ITS OWN default branch. Prefers the caller's LIVE <paramref name="primaryRepositoryId"/> (pre-terminal); falls back to the run's terminal <c>OutputsJson</c> otherwise. Empty when the repository is unresolvable either way — never thrown; the caller decides whether that's an error.</summary>
@@ -88,14 +91,27 @@ public sealed class SupervisorPublishedBranchResolver : ISupervisorPublishedBran
     /// to the head already enforces). The newest manifest row per alias wins when more than one accepted contributor
     /// wrote to the same alias across different rounds. Repository ids come DIRECTLY off each manifest row (populated
     /// at agent-completion time, independent of run terminality) — no OutputsJson dependency at all.
+    ///
+    /// <para>CONSERVATION across a plan-generation boundary (the merge rung's own fix, applied on this rung): a
+    /// re-plan issued AFTER the wave finished slices the window past every spawn, leaving the active staging set
+    /// EMPTY — not null — so the filter below discarded every pushed manifest and publish resolved 0 targets on a run
+    /// with three accepted, pushed branches. An active generation that staged NOTHING therefore falls back to the same
+    /// settled-work floor the merge carries over (<see cref="SupervisorMergeContributors.SettledAcrossGenerations"/>);
+    /// a generation that staged anything is authoritative exactly as before. Unlike the merge rung, an already-merged
+    /// contributor is NOT excluded: this rung only runs when no merge produced an integrated branch at all, so the
+    /// contributor's own pushed branch is still the only genuinely published artifact — the same posture this rung
+    /// already takes toward merged contributors inside the active generation.</para>
     /// </summary>
-    private async Task<IReadOnlyList<SupervisorRepositoryBranch>> ResolveLedgerDirectAsync(Guid workflowRunId, Guid teamId, SupervisorPlanWindowSlice window, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<SupervisorRepositoryBranch>> ResolveLedgerDirectAsync(Guid workflowRunId, Guid teamId, IReadOnlyList<SupervisorPriorDecision> priorDecisions, SupervisorPlanWindowSlice window, CancellationToken cancellationToken)
     {
         var manifests = await _manifests.ListForWorkflowRunAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false);
 
-        var activeAgentRunIds = window.IsPlanBounded
+        var staged = window.IsPlanBounded
             ? window.Decisions.Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind)).SelectMany(d => SupervisorOutcome.ReadStagedAgentRunIds(d.OutcomeJson)).ToHashSet()
             : null;
+
+        var carriedOver = staged is { Count: 0 } ? SupervisorMergeContributors.SettledAcrossGenerations(priorDecisions) : null;
+        var activeAgentRunIds = carriedOver is null ? staged : carriedOver.ToHashSet();
 
         var agentManifests = manifests
             .Where(m => m.Kind == PublishManifestKind.Agent && m.AgentRunId is not null && (activeAgentRunIds is null || activeAgentRunIds.Contains(m.AgentRunId.Value)))
@@ -127,6 +143,9 @@ public sealed class SupervisorPublishedBranchResolver : ISupervisorPublishedBran
 
             branches.Add(new SupervisorRepositoryBranch { RepositoryId = m.RepositoryId, Alias = m.RepositoryAlias, SourceBranch = m.Branch!, TargetBranch = defaultBranch ?? "" });
         }
+
+        if (carriedOver is { Count: > 0 })
+            _logger.LogInformation("Supervisor publish carried over {CarriedOver} succeeded result(s) from earlier plan generation(s) into {Count} target(s) — the active plan generation staged none", carriedOver.Count, branches.Count);
 
         return branches;
     }
