@@ -8,6 +8,7 @@ using CodeSpace.Core.Services.Workflows.Budget;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Decisions;
 using CodeSpace.Core.Services.Supervisor;
+using CodeSpace.Core.Services.Supervisor.Deciders;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
@@ -356,6 +357,47 @@ public class ModelPricingUnderCapFlowTests : IDisposable
         context.BrainPlaneSpendUsd.ShouldBe(5m);
         context.RunSpendUsd.ShouldBe(5m, "the brain's dollars are part of the run's spend whether or not anyone capped it");
         context.BrainPlaneSpendByKind["supervisor.decision"].ShouldBe(5m);
+    }
+
+    [Fact]
+    public async Task An_UNCAPPED_runs_own_prompt_recites_the_brain_lane_the_fold_produced()
+    {
+        // D6's uncapped SPEND SO FAR block was only ever proven by handing a brain figure straight to the pure
+        // renderer — which would have stayed green even while the fold was still cap-gated and production could
+        // never produce that figure at all. This walks the whole path: a real interaction row → the real rehydrate
+        // fold → the real prompt the brain reads.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        await SeedInteractionAsync(runId, "supervisor.decision", "claude-opus-4-8", inputTokens: 250_000, outputTokens: 0);   // $1.25
+
+        var context = await RehydrateAsync(runId, teamId, new SupervisorGoalConfig { Goal = Goal });
+
+        context.MaxCostUsd.ShouldBeNull("this run has no ceiling — the block under test is the CAP-LESS one");
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(context);
+
+        prompt.ShouldContain(SupervisorBudgetRecitation.UncappedHeader, Case.Sensitive, "an uncapped run must still be shown what it has burned");
+        prompt.ShouldContain("$1.25 spent so far — supervisor.decision $1.25", Case.Sensitive, "and the figure has to be the brain lane the fold actually summed");
+        prompt.ShouldNotContain("cap", Case.Insensitive, "no cap was set — inventing one would be a lie the model plans against");
+    }
+
+    [Fact]
+    public async Task An_uncapped_run_that_has_spent_NOTHING_still_carries_no_budget_block_at_all()
+    {
+        // The other half of the pin, and the one a widened block would silently break: a fresh uncapped turn's
+        // prompt stays byte-identical to before D6.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var context = await RehydrateAsync(runId, teamId, new SupervisorGoalConfig { Goal = Goal });
+
+        context.RunSpendUsd.ShouldBe(0m);
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(context);
+
+        prompt.ShouldNotContain(SupervisorBudgetRecitation.UncappedHeader, Case.Sensitive);
+        prompt.ShouldNotContain(SupervisorBudgetRecitation.Header, Case.Sensitive);
     }
 
     // ── The team bill covers both lanes ─────────────────────────────────────────────

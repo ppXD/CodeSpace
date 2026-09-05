@@ -20,6 +20,10 @@ public sealed class SupervisorBudgetRecitationTests
         // D6: the null-when-uncapped rule hid REALIZED spend from every uncapped run's brain — the common case.
         // The cap line is what needs a cap; the spend figure does not, and a brain that cannot see what it has
         // burned cannot moderate itself at all.
+        // COPY pin only. That a brain-lane figure can REACH this renderer on an uncapped run is a property of the
+        // rehydrate fold, not of this pure function — a fixture handing one in directly would stay green even if
+        // the fold were still cap-gated. That half is pinned end to end by
+        // ModelPricingUnderCapFlowTests.An_UNCAPPED_runs_own_prompt_recites_the_brain_lane_the_fold_produced.
         var text = SupervisorBudgetRecitation.Render(null, agentExecutionSpendUsd: 5m, brainPlaneSpendUsd: 1.25m, new Dictionary<string, decimal> { ["supervisor.decision"] = 1.25m });
 
         text.ShouldNotBeNull();
