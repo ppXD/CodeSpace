@@ -19,17 +19,36 @@ namespace CodeSpace.Core.Services.Supervisor.Deciders;
 /// (real-model runs 33930904059 / 33943475246). So the stage line renders too, read through the authority's OWN
 /// reader (<see cref="Completion.UpstreamStageTrace.MissingRequired"/>) — never a second derivation that could
 /// disagree with the gate it is mirroring.</para>
+///
+/// <para>That line is MODE-AWARE for the same reason. <c>CompletionTerminalAuthority</c> refuses nothing outside
+/// <see cref="CompletionEnforcementMode.Enforced"/> (its first line passes a Legacy/Shadow run through verbatim),
+/// and <c>CompletionPolicy.CurrentMode</c> is Shadow — so the default supervisor cohort would have been threatened
+/// with a refusal that cannot happen to it, steering it away from a stop the engine would have honoured. Enforced
+/// says REFUSED; every other mode states the SAME facts as an advisory. The verb never renders outside Enforced.</para>
 /// </summary>
 public static class SupervisorStopNowRecital
 {
     /// <summary>The block's pinned header — a stable prompt landmark, mirroring <see cref="SupervisorBoundsRecitation.Header"/>.</summary>
     public const string Header = "IF YOU STOPPED NOW (the completion reducer's verdict on the facts so far):";
 
-    /// <summary>The stage-refusal line's pinned lead-in — a stable prompt landmark, like <see cref="Header"/>.</summary>
+    /// <summary>The stage line's pinned lead-in under <see cref="CompletionEnforcementMode.Enforced"/>, where the authority really does refuse — a stable prompt landmark, like <see cref="Header"/>.</summary>
     public const string RefusalLead = "A stop now will be REFUSED by the completion authority:";
 
-    /// <summary>Render the recital, or null when there is no assessment to recite (contract-less / pre-F0 run). The stage trace and profile are the terminal authority's own two inputs; omitting them (a tape mirror with no stage trace, an unregistered mode) renders the dimensions alone, byte-identically.</summary>
-    public static string? Render(CompletionAssessment? assessment, IReadOnlySet<CompletionStage>? exercisedUpstreamStages = null, ModeProfile? profile = null)
+    /// <summary>The same line's lead-in under every OTHER mode, where the stop is honoured but recorded against evidence the profile declares owed. Same facts, same steer, no refusal verb.</summary>
+    public const string AdvisoryLead = "A 'completed' stop now would be recorded against missing evidence:";
+
+    /// <summary>
+    /// The stage line's shared steer. It names the HONEST EXIT beside the two work-it-off options, because
+    /// landing the work is not always available: past <c>SupervisorLane.DefaultMaxResolveAttempts</c> (one) a
+    /// further <c>resolve</c> force-stops the run, and a prompt offering only "land it or ask_human" then reads as
+    /// a dead end. A <c>stop</c> carrying outcome <c>gave_up</c> is NOT refused by this gate — it reduces to
+    /// Unsolved, which <c>TerminalDecider</c> maps to HonestFailure long before the stage gate, which only ever
+    /// sees a CleanSuccess. Only the <c>completed</c> claim is what this block is warning about.
+    /// </summary>
+    private const string Steer = "Land that work, stop with outcome 'gave_up', or ask_human; do not claim completed.";
+
+    /// <summary>Render the recital, or null when there is no assessment to recite (contract-less / pre-F0 run). The stage trace, profile and enforcement mode are the terminal authority's own three inputs; omitting them (a tape mirror with no stage trace, an unregistered mode) renders the dimensions alone, byte-identically.</summary>
+    public static string? Render(CompletionAssessment? assessment, IReadOnlySet<CompletionStage>? exercisedUpstreamStages = null, ModeProfile? profile = null, CompletionEnforcementMode enforcementMode = CompletionEnforcementMode.Legacy)
     {
         if (assessment is null) return null;
 
@@ -44,25 +63,31 @@ public static class SupervisorStopNowRecital
             ? "- every contract dimension reads SETTLED — a clean stop now reads Solved. If the goal is met, stop rather than spending further turns on a contract that is already satisfied."
             : $"- UNRESOLVED: {string.Join(", ", unresolved)} — a stop right now cannot read Solved. Settle what is owed (make the failing checks pass, land the owed delivery/output), or stop honestly / ask a human — never stop as if done.";
 
-        return $"{Header}\n{verdict}{StageRefusal(exercisedUpstreamStages, profile)}";
+        return $"{Header}\n{verdict}{StageRefusal(exercisedUpstreamStages, profile, enforcementMode)}";
     }
 
     /// <summary>
-    /// The mode profile's Required upstream stages this run's evidence does NOT show — the refusal
-    /// <c>CompletionTerminalAuthority</c> would raise against a stop taken right now, rendered BEFORE the stop is
-    /// chosen. Deliberately renders in BOTH arms above: the settled arm is exactly where the gap bit, since a
-    /// contract can read wholly settled while an un-reconciled branch leaves Integrate unevidenced. Empty (no
-    /// missing stage, or a mode with no registered profile — the authority parks such a run Unsupported on its own
-    /// gate, which this block has nothing to add to) renders nothing at all.
+    /// The mode profile's Required upstream stages this run's evidence does NOT show — the objection
+    /// <c>CompletionTerminalAuthority</c> would raise against a <c>completed</c> stop taken right now, rendered
+    /// BEFORE the stop is chosen. Deliberately renders in BOTH arms above: the settled arm is exactly where the gap
+    /// bit, since a contract can read wholly settled while an un-reconciled branch leaves Integrate unevidenced.
+    /// Empty (no missing stage, or a mode with no registered profile — the authority parks such a run Unsupported
+    /// on its own gate, which this block has nothing to add to) renders nothing at all.
+    ///
+    /// <para>The FACTS are identical in both modes — the same profile, count and stage list, from the same reader.
+    /// Only the lead-in moves, because only an Enforced run can actually be refused
+    /// (<c>CompletionTerminalAuthority.cs:59</c>).</para>
     /// </summary>
-    private static string StageRefusal(IReadOnlySet<CompletionStage>? exercisedUpstreamStages, ModeProfile? profile)
+    private static string StageRefusal(IReadOnlySet<CompletionStage>? exercisedUpstreamStages, ModeProfile? profile, CompletionEnforcementMode enforcementMode)
     {
         if (profile is null) return string.Empty;
 
         var missing = Completion.UpstreamStageTrace.MissingRequired(profile, exercisedUpstreamStages);
 
-        return missing.Count == 0
-            ? string.Empty
-            : $"\n- {RefusalLead} mode '{profile.Mode}' requires {missing.Count} stage(s) with no evidence — {string.Join(", ", missing)}. Land that work or ask_human; do not claim completed.";
+        if (missing.Count == 0) return string.Empty;
+
+        var lead = enforcementMode == CompletionEnforcementMode.Enforced ? RefusalLead : AdvisoryLead;
+
+        return $"\n- {lead} mode '{profile.Mode}' requires {missing.Count} stage(s) with no evidence — {string.Join(", ", missing)}. {Steer}";
     }
 }
