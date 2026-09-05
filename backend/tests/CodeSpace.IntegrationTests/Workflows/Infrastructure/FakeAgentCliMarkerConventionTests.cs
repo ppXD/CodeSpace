@@ -1,5 +1,4 @@
-using CodeSpace.Core.Services.Agents.Harnesses.Claude;
-using CodeSpace.Core.Services.Agents.Harnesses.Codex;
+using CodeSpace.IntegrationTests.Agents;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -27,9 +26,14 @@ public sealed class FakeAgentCliMarkerConventionTests
     /// <summary>The two file-naming shapes a fake CLI is known by: the common <c>...FakeCli.cs</c> suffix, and the older <c>Fake...Cli.cs</c> prefix (e.g. <c>FakeCodexCli</c>).</summary>
     private static readonly string[] FakeCliFileGlobs = { "*FakeCli.cs", "Fake*Cli.cs" };
 
-    [Fact]
+    /// <summary>The only fake CLI exempt from the marker rules below: <see cref="DecisionRaisingFakeCli"/> is driven through a "scripted" <c>IAgentHarness</c> with a hardcoded <c>/bin/sh</c> invocation and never touches either harness's <c>CommandEnvVar</c>, so no real-CLI gate can ever resolve it as a fake binary. Named here by type rather than left to a text-content filter, so a fake that arms the var by indirection cannot slip out of the check unnoticed.</summary>
+    private static readonly string[] MarkerExemptTypeNames = { nameof(DecisionRaisingFakeCli) };
+
+    [SkippableFact]
     public void Every_fake_cli_carries_the_markers_the_real_cli_gates_skip_on()
     {
+        Skip.If(!FakeCliSourceLocator.RepoRootFound(), "the backend source tree is not alongside the test binaries (e.g. a published/copied test run) — this convention can only police what it can read");
+
         var typeNames = FakeCliTypeNames();
 
         var sources = typeNames.ToDictionary(name => name, FakeCliSourceLocator.SourceFor, StringComparer.Ordinal);
@@ -40,17 +44,20 @@ public sealed class FakeAgentCliMarkerConventionTests
             "a fake named by the *FakeCli.cs / Fake*Cli.cs convention must have a locatable source file under backend/tests — "
           + "this convention can only police what it can read, and an unlocatable fake would pass by being invisible rather than by being correct");
 
-        sources.Count.ShouldBeGreaterThanOrEqualTo(18,
-            "the census of known fakes must not shrink — a scan that regresses to a narrower folder list would silently drop coverage instead of reding");
+        // Exact, not a floor: a hardcoded ">= 18" still passes if the census silently shrinks by one (e.g. losing
+        // DecisionRaisingFakeCli) — tying it to the scan's own count catches that instead of masking it.
+        sources.Count.ShouldBe(typeNames.Count,
+            "every fake-CLI type the naming convention enumerates must resolve to exactly one located source — the census comes from the scan itself, not a hardcoded floor that can go stale");
 
-        // Only a fake that ARMS one of the two harness command env vars can ever be resolved by a real-CLI gate in
-        // the first place — the hazard this file exists to close is specifically "the gate reads
-        // CodexHarness/ClaudeCodeHarness.CommandEnvVar and finds a fake's path". DecisionRaisingFakeCli is driven a
-        // different way (a "scripted" IAgentHarness with a hardcoded /bin/sh invocation, never touching either var),
-        // so it cannot be mistaken for a real binary by any such gate and does not need these markers.
+        sources.ShouldContainKey(nameof(DecisionRaisingFakeCli),
+            "DecisionRaisingFakeCli is the one named exemption from the marker rules below — if the scan ever stops finding it, the exemption list must be revisited rather than silently drifting");
+
+        // Every located fake except the named exemptions above must carry the markers, unconditionally — narrowing
+        // to sources whose TEXT literally contains "CodexHarness.CommandEnvVar" would let a fake that arms the var
+        // by indirection (a shared helper, a renamed local, a base-class field) skip enforcement invisibly instead
+        // of being checked and found exempt.
         var offenders = sources
-            .Where(kv => kv.Value!.Contains(nameof(CodexHarness) + "." + nameof(CodexHarness.CommandEnvVar), StringComparison.Ordinal)
-                      || kv.Value!.Contains(nameof(ClaudeCodeHarness) + "." + nameof(ClaudeCodeHarness.CommandEnvVar), StringComparison.Ordinal))
+            .Where(kv => !MarkerExemptTypeNames.Contains(kv.Key, StringComparer.Ordinal))
             .Where(kv => !kv.Value!.Contains($"\"{FakeAgentCliMarker.ScriptNamePrefix}", StringComparison.Ordinal)
                       || !kv.Value!.Contains(FakeAgentCliMarker.DirectoryMarker, StringComparison.Ordinal))
             .Select(kv => kv.Key)
@@ -58,7 +65,7 @@ public sealed class FakeAgentCliMarkerConventionTests
             .ToList();
 
         offenders.ShouldBeEmpty(
-            $"every fake that arms CodexHarness/ClaudeCodeHarness.CommandEnvVar must write a script named '{FakeAgentCliMarker.ScriptNamePrefix}…' inside a temp dir carrying '{FakeAgentCliMarker.DirectoryMarker}', "
+            $"every fake CLI other than the named exemptions must write a script named '{FakeAgentCliMarker.ScriptNamePrefix}…' inside a temp dir carrying '{FakeAgentCliMarker.DirectoryMarker}', "
           + "or the real-CLI gates cannot tell it from a real binary and will run it while asserting real-binary semantics");
     }
 
