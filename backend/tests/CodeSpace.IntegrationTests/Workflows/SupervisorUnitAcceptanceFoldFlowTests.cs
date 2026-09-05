@@ -375,6 +375,78 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
         }, CancellationToken.None);
     }
 
+    /// <summary>
+    /// The bond between the GOLDEN CORPUS's mirror and production, over the tape the mirror is least able to fake:
+    /// a conflicted merge whose reconciliation came back unverified, where the run's Success claim rests on an
+    /// Integrate stage nothing evidences.
+    ///
+    /// <para>It exists because that bond silently broke once already. When the stopped-now block learned to name the
+    /// unevidenced stage, the trajectory harness was taught to carry the trace and the single-decision corpus was
+    /// not — so the corpus went on rendering four contract dimensions where production renders five lines, and every
+    /// real-model score it reported was measured against a prompt production does not ship. Nothing failed: the
+    /// pinned prompt digest can only detect a change in bytes the corpus is ABLE to render, and no corpus scenario
+    /// could reach that line at all.</para>
+    ///
+    /// <para>So the two are compared directly, on one tape, as whole strings: the mirror the corpus renders through,
+    /// and the recital a real <c>RehydrateFromDecisionLogAsync</c> puts in front of the decider over Postgres. The
+    /// requirements are staked through the PRODUCTION helper over the same planned specs and the same plan ref the
+    /// tape carries, so a divergence here is a divergence in the RENDERING — never two people inventing different
+    /// obligations.</para>
+    /// </summary>
+    [Fact]
+    public async Task The_golden_corpus_mirror_recites_exactly_what_a_real_rehydrate_recites()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var planRef = (WorkPlanId: Guid.NewGuid(), Version: 1);
+        var planPayload = PlanPayload(("s1", null), ("s2", null));
+
+        // Post-F0 and stamped with what production stamps a run that does not opt in — the DEFAULT cohort, whose
+        // wording is the advisory rather than the refusal. Deliberately not StampContractAsync: that helper stakes a
+        // hand-written single requirement for its own siblings, and this test's whole point is that BOTH sides read
+        // the same production-shaped contract.
+        using (var stamp = _fixture.BeginScope())
+        {
+            var db = stamp.Resolve<CodeSpaceDbContext>();
+            var run = await db.WorkflowRun.SingleAsync(r => r.Id == runId);
+            run.CompletionPolicyVersion = Core.Services.Completion.CompletionPolicy.CurrentVersion;
+            run.CompletionEnforcementMode = Core.Services.Completion.CompletionPolicy.CurrentMode.ToString();
+            await db.SaveChangesAsync();
+        }
+
+        await SeedDecisionAsync(runId, teamId, 1, SupervisorDecisionKinds.Plan, planPayload,
+            $$"""{"planned":[],"count":2,"workPlanId":"{{planRef.WorkPlanId}}","workPlanVersion":{{planRef.Version}}}""");
+        await SeedSpawnAsync(runId, teamId, 2, """{"subtaskIds":["s1","s2"]}""",
+            SpawnOutcome(Unit(Guid.NewGuid(), "codespace/agent/s1"), Unit(Guid.NewGuid(), "codespace/agent/s2")));
+        await SeedDecisionAsync(runId, teamId, 3, SupervisorDecisionKinds.Merge, "{}", ConflictedMergeOutcome);
+        await SeedDecisionAsync(runId, teamId, 4, SupervisorDecisionKinds.Resolve, "{}", SpawnOutcome(Unit(Guid.NewGuid(), "codespace/resolve/head")));
+
+        using (var stake = _fixture.BeginScope())
+        {
+            var planned = SupervisorOutcome.ReadPlanSubtasks(planPayload);
+            await stake.Resolve<Core.Services.Completion.ICompletionContractStore>().UpsertRequirementsAsync(runId, teamId,
+                SupervisorUnitContract.BuildStakedRequirements(planned.Select(s => (s.Id, SupervisorUnitContract.Hash(s, null, null), SupervisorUnitContract.OwesAcceptance(s), SupervisorUnitContract.OwesDelivery(s))), Messages.Contracts.ContractAuthority.ModelProposal, planRef),
+                CancellationToken.None);
+        }
+
+        using var scope = _fixture.BeginScope();
+        var tape = await scope.Resolve<ISupervisorDecisionLog>().GetTerminalDecisionsAsync(runId, teamId, CancellationToken.None);
+        var production = (await scope.Resolve<ISupervisorTurnService>().RehydrateFromDecisionLogAsync(runId, teamId, NodeId, Goal, GoalConfig(Guid.NewGuid()), CancellationToken.None)).CompletionRecital;
+        var mirror = CodeSpace.IntegrationTests.Workflows.Supervisor.SupervisorDecisionGoldenScenarios.RenderStoppedNowRecital(tape);
+
+        production.ShouldNotBeNull("the seeded run is contract-bearing, so production has a verdict to recite");
+
+        // Pin that this tape actually EXERCISES the line before pinning that both sides agree about it — two paths
+        // that both render nothing agree perfectly and prove nothing, which is exactly how the gap survived.
+        production!.ShouldContain(Core.Services.Supervisor.Deciders.SupervisorStopNowRecital.AdvisoryLead, Case.Sensitive,
+            "an un-reconciled Shadow run must be told a 'completed' claim would be recorded against missing evidence");
+        production.ShouldContain("requires 1 stage(s) with no evidence — Integrate.", Case.Sensitive,
+            "the un-reconciled branches leave Integrate unevidenced, and production names the stage the park would name");
+
+        mirror.ShouldBe(production,
+            "the golden corpus renders the decider's stopped-now block from this mirror, so every byte production shows the model it must show too — a divergence here is the corpus grading the model on a prompt production does not ship");
+    }
+
     [Fact]
     public async Task A_run_without_a_stamped_policy_rehydrates_without_a_recital()
     {

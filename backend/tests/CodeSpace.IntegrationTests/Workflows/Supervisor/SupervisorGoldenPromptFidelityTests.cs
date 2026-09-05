@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Deciders;
 using CodeSpace.Messages.Agents;
@@ -238,6 +239,68 @@ public class SupervisorGoldenPromptFidelityTests
     }
 
     /// <summary>
+    /// The scenarios whose tape leaves a Required upstream stage unevidenced, and therefore the ONLY scenarios whose
+    /// prompt moved when the corpus started rendering through the full tape mirror. Pinned as data so the re-pin
+    /// below has a named receipt a reviewer can check against the diff, rather than a digest nobody can attribute.
+    /// </summary>
+    private static readonly HashSet<string> MissingARequiredStage = new(StringComparer.Ordinal)
+    {
+        "agent-reported-conflict-no-integration", "all-failed", "all-succeeded", "five-subtask-middle-failed",
+        "four-subtask-all-succeeded", "four-subtask-two-failed", "merge-conflict", "mixed-results",
+        "multi-file-conflict", "resolve-cap-spent", "retried-failure-succeeded", "retried-still-failed",
+        "subset-conflict-across-three", "three-subtask-all-succeeded", "three-subtask-partial-failure",
+        "unverified-resolution",
+    };
+
+    /// <summary>
+    /// The re-pin's receipt, and the reason the corpus's numbers stay comparable across it. The corpus used to
+    /// render the stopped-now block from the ASSESSMENT ALONE while the trajectory harness rendered it from the
+    /// assessment PLUS the tape's upstream stage trace, so a conflicted-then-unverified fixture read LESS unresolved
+    /// here than the same tape reads in production — and the pinned digest could not detect a regression in a line
+    /// no scenario was able to reach.
+    ///
+    /// <para>This pins the delta EXACTLY: every scenario's prompt is rendered both ways, and the new one must equal
+    /// the old one with the renderer's own stage line removed — so a scenario with nothing missing is byte-identical,
+    /// and a scenario that is missing a stage differs by that single line and nothing else. The line is taken FROM
+    /// the renderer rather than restated (this file pins arms and presence, never copy — the wording is the decider's
+    /// own unit tests' job), which is also what makes the assertion survive a future rewording.</para>
+    /// </summary>
+    [Fact]
+    public void Only_a_scenario_missing_a_required_stage_renders_a_different_prompt_than_before()
+    {
+        var profile = new ModeProfileRegistry().Resolve(RunModeKeys.Supervisor)!;
+        var moved = new List<string>();
+
+        foreach (var scenario in SupervisorDecisionGoldenScenarios.All)
+        {
+            var projected = SupervisorTapeCompletion.ProjectIfStoppedNow(scenario.Context.PriorDecisions);
+
+            // The rendering this corpus shipped BEFORE the mirror carried the trace: dimensions only, no profile.
+            var dimensionsOnly = SupervisorStopNowRecital.Render(projected?.Assessment);
+            var withTrace = scenario.Context.CompletionRecital;
+
+            var before = LlmSupervisorDecider.BuildUserPromptForTest(scenario.Context with { CompletionRecital = dimensionsOnly });
+            var after = LlmSupervisorDecider.BuildUserPromptForTest(scenario.Context);
+
+            // Render appends the stage line to the dimensions-only block, so the suffix past that block's length IS
+            // the added line — derived, never retyped, so a reworded steer does not make this a two-file chore.
+            var stageLine = withTrace is null ? string.Empty : withTrace[dimensionsOnly!.Length..];
+            var missing = projected is null ? [] : UpstreamStageTrace.MissingRequired(profile, projected.ExercisedUpstreamStages);
+
+            (stageLine.Length > 0).ShouldBe(missing.Count > 0,
+                $"'{scenario.Name}': the stage line must render exactly when the supervisor profile declares a stage this tape cannot evidence — a corpus that renders it nowhere is the dimensions-only corpus under a new digest");
+
+            (stageLine.Length == 0 ? after : after.Replace(stageLine, string.Empty, StringComparison.Ordinal)).ShouldBe(before,
+                $"'{scenario.Name}': the ONLY byte that may move in this re-pin is the missing-stage line. Anything else means an unrelated block drifted into the same commit, and the corpus's scores stop being comparable across it");
+
+            if (stageLine.Length > 0) moved.Add(scenario.Name);
+        }
+
+        moved.ShouldBe(MissingARequiredStage.ToList(), ignoreOrder: true,
+            "the set of scenarios whose prompt moved must match the named receipt above — an unlisted mover is a re-pin nobody attributed");
+    }
+
+    /// <summary>
     /// The corpus's rendered-prompt digest. Every real-model score this repository reports is a measurement of THESE
     /// bytes, so a block edit anywhere in the decider silently changes what the gate measured — the assertions above
     /// pin arms and presence, which a reworded (or newly added, or quietly dropped) block slips straight past.
@@ -246,7 +309,7 @@ public class SupervisorGoldenPromptFidelityTests
     /// in the commit body WHICH block changed and why the corpus's numbers are still comparable across the change.
     /// A re-pin with no such sentence is the failure mode this exists to make visible, not a chore to be rubber-stamped.</para>
     /// </summary>
-    private const string GoldenPromptDigest = "40e8c14c75e6f90d017a4780aa9479fc782379f7851f950a04a1962c9ddee4f8";
+    private const string GoldenPromptDigest = "3b1e2df4419951a363433b79e411f0ad9e005a119c104538d704e1be3a13ed9a";
 
     [Fact]
     public void The_rendered_corpus_matches_its_pinned_digest()

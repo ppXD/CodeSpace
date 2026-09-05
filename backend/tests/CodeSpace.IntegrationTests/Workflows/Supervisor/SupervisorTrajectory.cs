@@ -1,6 +1,5 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
-using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Executors;
 using CodeSpace.Core.Services.Supervisor.Deciders;
@@ -83,24 +82,16 @@ public static class SupervisorTrajectory
         return new SupervisorTrajectoryResult { Kinds = kinds, ReachedStop = false, HitTurnCap = !cancellationToken.IsCancellationRequested, Ledger = priors };
     }
 
-    /// <summary>The mode profile the trajectory's runs answer to — the harness drives the SUPERVISOR lane, so it is the supervisor lane's committed profile, resolved from the production registry rather than a fixture that could declare a stage story production never enforces.</summary>
-    private static readonly Messages.Contracts.ModeProfile SupervisorProfile = new ModeProfileRegistry().Resolve(RunModeKeys.Supervisor)!;
-
     /// <summary>
     /// The stopped-now recital, through the SAME projection production's composer reduces to — null until an
     /// authorized wave has staked an obligation, exactly as production omits the block until then.
     ///
-    /// <para>All THREE of the block's inputs are supplied, or the harness would score the model on a prompt
-    /// production does not ship: the assessment, the tape's own upstream STAGE TRACE, and the lane's mode profile
-    /// — without the last two the ConflictThenResolve arc's brain never saw the stage line at all, the very line
-    /// that tells it an un-reconciled merge leaves Integrate unevidenced. The enforcement mode is
-    /// <c>CompletionPolicy.CurrentMode</c>, what production stamps a run that does not opt in, so the harness reads
-    /// the same wording the default cohort reads.</para>
+    /// <para>Delegated to the golden corpus's renderer rather than repeated here. Both harnesses drive the
+    /// supervisor lane and must show their brain the identical block; while each owned its own copy, the corpus's
+    /// went on rendering dimensions-only for a release after this one started carrying the stage trace, and no test
+    /// could see the gap. One function is the only version of that guarantee which cannot rot.</para>
     /// </summary>
-    private static string? RenderRecital(IReadOnlyList<SupervisorPriorDecision> priors) =>
-        SupervisorTapeCompletion.ProjectIfStoppedNow(priors) is not { } stoppedNow
-            ? null
-            : SupervisorStopNowRecital.Render(stoppedNow.Assessment, stoppedNow.ExercisedUpstreamStages, SupervisorProfile, CompletionPolicy.CurrentMode);
+    private static string? RenderRecital(IReadOnlyList<SupervisorPriorDecision> priors) => SupervisorDecisionGoldenScenarios.RenderStoppedNowRecital(priors);
 }
 
 /// <summary>An environment the trajectory harness drives the decider over: it folds the decided action into the durable-shape outcome the NEXT turn reads, given the ledger so far — the SAME <c>SupervisorOutcome</c> shapes the engine writes, so the decider reads exactly what it would in production.</summary>
