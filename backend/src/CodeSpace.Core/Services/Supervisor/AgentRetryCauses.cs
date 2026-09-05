@@ -53,7 +53,17 @@ public static class AgentRetryCauses
     public static AgentTask ApplyFormatFaultMitigation(AgentTask task) =>
         task with { ResumeFromSessionId = null, RestoredTranscript = null, RestoredTranscriptArtifactId = null, Environment = WithThinkingDisabled(task.Environment) };
 
-    /// <summary>Whether a dispatched task IS the one mitigated attempt — the fact the dispatcher announces on the timeline, and the bound the next retry verdict keys on (a mitigated attempt that hits the SAME fault has proven the repair does not hold, so it is terminal rather than respawned identically).</summary>
+    /// <summary>
+    /// Whether a dispatched task IS a mitigated attempt — the fact the dispatcher announces on the timeline, and the
+    /// bound the next retry verdict keys on (a mitigated attempt that hits the SAME fault has proven the repair does
+    /// not hold, so it is terminal rather than respawned identically).
+    ///
+    /// <para>The environment is null-guarded because every caller reads an envelope DESERIALIZED from durable JSON —
+    /// <c>task_jsonb</c> on each claim, the engine's own suspend payload on each stage — and an explicit
+    /// <c>"environment": null</c> lands straight on the property, bypassing the record's default initializer. An
+    /// unguarded dereference would kill the dispatch with an NRE before the harness ever starts. No environment
+    /// carries no degrade, so the answer is "not mitigated".</para>
+    /// </summary>
     public static bool IsFormatFaultMitigated(AgentTask task) =>
-        task.Environment.TryGetValue(MaxThinkingTokensEnvVar, out var budget) && budget == "0";
+        task.Environment is not null && task.Environment.TryGetValue(MaxThinkingTokensEnvVar, out var budget) && budget == "0";
 }
