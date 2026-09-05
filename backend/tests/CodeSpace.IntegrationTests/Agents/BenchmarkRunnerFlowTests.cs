@@ -212,7 +212,7 @@ public sealed class BenchmarkRunnerFlowTests
 
         public FakeBenchmarkCli()
         {
-            _dir = Path.Combine(Path.GetTempPath(), "cs-bench-cli-" + Guid.NewGuid().ToString("N"));
+            _dir = Path.Combine(Path.GetTempPath(), "cs-bench-fakecli-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(_dir);
 
             var script = Path.Combine(_dir, "fake-codex.sh");
