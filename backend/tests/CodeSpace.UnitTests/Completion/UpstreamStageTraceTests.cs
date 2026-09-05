@@ -189,11 +189,53 @@ public class UpstreamStageTraceTests
     }
 
     [Fact]
-    public void An_agent_kind_manifest_never_evidences_integrate()
+    public void An_agent_kind_manifest_alone_never_evidences_integrate()
     {
-        // Per-agent pushes are fragments, not the candidate — only the run-level Integration row speaks for the cell.
+        // A per-agent push is not the run-level candidate. It can only ever speak for the cell through the
+        // ledger-direct head below, which needs the run's OWN tape to say whose contribution it is — a manifest
+        // with no accepted contributor behind it is a fragment of nothing.
         UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), Array.Empty<SupervisorPriorDecision>(), Array.Empty<AttemptProjection>(),
                 new[] { IntegrationManifest(PublishState.Pushed, "codespace/agent/a", PublishManifestKind.Agent) })
+            .ShouldNotContain(CompletionStage.Integrate);
+    }
+
+    [Fact]
+    public void The_one_accepted_contributors_own_published_branch_evidences_integrate()
+    {
+        // DC-3's ledger-direct head: no merge decision ever runs, because with a single accepted contributor there
+        // is nothing to combine — its branch IS the run's head, and it is what the publish gate terminalizes on and
+        // what the branch resolver's ledger-direct rung publishes. Without this cell the by-design no-merge run
+        // parks under the Enforced default for skipping work it never had.
+        var contributor = Guid.NewGuid();
+        var tape = new[] { Decision(1, SupervisorDecisionKinds.Spawn, outcomeJson: Results((contributor, true))), Decision(2, SupervisorDecisionKinds.Stop) };
+
+        UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), tape, Array.Empty<AttemptProjection>(), new[] { AgentManifest(contributor) })
+            .ShouldContain(CompletionStage.Integrate);
+    }
+
+    [Fact]
+    public void Two_accepted_contributors_with_nothing_merging_them_evidence_nothing()
+    {
+        // The #1762 line, and the reason this cell counts contributors instead of asking "is any Agent row Pushed".
+        // Two accepted contributors and no merge means whichever branch got published OMITS the other's work — a
+        // PARTIAL head. The run must park rather than claim an integration it never performed.
+        var first = Guid.NewGuid();
+        var second = Guid.NewGuid();
+        var tape = new[] { Decision(1, SupervisorDecisionKinds.Spawn, outcomeJson: Results((first, true), (second, true))), Decision(2, SupervisorDecisionKinds.Stop) };
+
+        UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), tape, Array.Empty<AttemptProjection>(), new[] { AgentManifest(first), AgentManifest(second) })
+            .ShouldNotContain(CompletionStage.Integrate);
+    }
+
+    [Fact]
+    public void A_rejected_contributors_published_branch_evidences_nothing()
+    {
+        // A raw push happens BEFORE the per-unit grade folds, so a REJECTED unit still shows up Pushed in the
+        // ledger — the same 局部綠≠整合綠 bar every other door to the head enforces must apply to this cell too.
+        var contributor = Guid.NewGuid();
+        var tape = new[] { Decision(1, SupervisorDecisionKinds.Spawn, outcomeJson: Results((contributor, false))), Decision(2, SupervisorDecisionKinds.Stop) };
+
+        UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), tape, Array.Empty<AttemptProjection>(), new[] { AgentManifest(contributor) })
             .ShouldNotContain(CompletionStage.Integrate);
     }
 
@@ -256,4 +298,15 @@ public class UpstreamStageTraceTests
         Id = Guid.NewGuid(), TeamId = Guid.NewGuid(), Kind = kind, WorkflowRunId = Guid.NewGuid(),
         RepositoryAlias = "primary", Branch = branch, PublishStateValue = state,
     };
+
+    /// <summary>One contributor's own PUSHED branch row — the ledger-direct cell's evidence, keyed to the agent run the tape folded a result for.</summary>
+    private static PublishManifest AgentManifest(Guid agentRunId) => new()
+    {
+        Id = Guid.NewGuid(), TeamId = Guid.NewGuid(), Kind = PublishManifestKind.Agent, AgentRunId = agentRunId,
+        RepositoryAlias = "primary", Branch = "codespace/agent/s1", PublishStateValue = PublishState.Pushed,
+    };
+
+    /// <summary>A staging decision's folded agent results — the tape side of "who contributed, and did their own grade accept it".</summary>
+    private static string Results(params (Guid AgentRunId, bool AcceptancePassed)[] results) =>
+        $$"""{"agentResults":[{{string.Join(",", results.Select(r => $$"""{"agentRunId":"{{r.AgentRunId}}","status":"Succeeded","acceptancePassed":{{(r.AcceptancePassed ? "true" : "false")}},"producedBranch":"codespace/agent/s1"}"""))}}]}""";
 }
