@@ -2744,6 +2744,17 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     internal const int MinimumNeedleLength = 8;
 
     /// <summary>
+    /// The most needles one run's redactor will carry. <see cref="AgentTask.Environment"/> is author-supplied and
+    /// uncapped, so without this a task naming a thousand secret-marked variables would make every redaction pass a
+    /// thousand-pattern scan over every event line and every spooled byte — and the byte-stream redactor holds a carry
+    /// suffix as long as its longest pattern. A run legitimately injects a handful; 64 is far above any real launch and
+    /// far below the point where the scan costs anything. The overflow is dropped SILENTLY: naming the dropped
+    /// variables would put author-chosen secret names into the log, which is the sort of thing this file exists to
+    /// prevent.
+    /// </summary>
+    internal const int MaximumNeedles = 64;
+
+    /// <summary>
     /// Name fragments that mark an injected value a SECRET — applied to an <see cref="AgentTask.Environment"/> entry's
     /// variable name and to a base URL's query-parameter name alike. Both are opaque name/value string pairs with no
     /// per-entry secret flag for the executor to read, so the name is the only signal available — and it is the signal
@@ -2751,8 +2762,17 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// tier pins, an <c>api-version</c> stamp. Those are what an operator reads the error FOR, and masking a low-entropy
     /// one would shred every unrelated line that happens to carry it (an <c>api-version</c> date also matches every
     /// timestamp of that day).
+    ///
+    /// <para>Substring matching over a deliberately WIDE list: a marker earns its place by naming a carrier that
+    /// authenticates something (<c>PASSPHRASE</c> on a signing key, <c>PWD</c> on <c>MYSQL_PWD</c>, <c>DSN</c> and
+    /// <c>CONNECTION_STRING</c> on a database URL with its password inline, <c>COOKIE</c> on a session, <c>WEBHOOK</c>
+    /// on a URL whose path IS the capability). The known cost is a false-positive class — <c>KEY_ID</c>,
+    /// <c>TOKEN_LIMIT</c>, an injected <c>PWD</c> — whose values are masked though they are not secret. That is the
+    /// side to err on: a masked path is a garbled line an operator can work around, an unmasked token is a leak that
+    /// the append-only log can never take back.</para>
     /// </summary>
-    private static readonly string[] SecretNameMarkers = ["KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "AUTH"];
+    private static readonly string[] SecretNameMarkers =
+        ["KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "PASSPHRASE", "PWD", "CREDENTIAL", "AUTH", "COOKIE", "DSN", "CONNECTION_STRING", "CONNSTR", "PRIVATE", "WEBHOOK"];
 
     /// <summary>Whether a name — an env variable's or a URL query parameter's — marks its value a secret.</summary>
     private static bool MarksASecret(string name) => SecretNameMarkers.Any(marker => name.Contains(marker, StringComparison.OrdinalIgnoreCase));
@@ -2766,9 +2786,17 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// this run PERSISTS: <c>AgentRun.Error</c> (journal card, Room, supervisor prompt), the append-only event log,
     /// and the diagnostic records.
     ///
-    /// <para>De-duplicated and ordinal-sorted so <see cref="SecretRedactor.Fingerprint"/> is a function of the SET
-    /// and never of dictionary enumeration order: the launch stamps that fingerprint onto the durable handle, and a
-    /// re-attach may re-tail the spool only if it rebuilds exactly the same one.</para>
+    /// <para>De-duplicated, with the env-derived needles ordinal-sorted, so WHICH needles survive
+    /// <see cref="MaximumNeedles"/> is a function of the SET and never of dictionary enumeration order — and so the
+    /// credential's own needles, added first, can never be the ones evicted. <see cref="SecretRedactor.Fingerprint"/>
+    /// imposes its own total order, so the digest does not depend on this one.</para>
+    ///
+    /// <para>DEPLOY-WINDOW DRIFT (accepted, fail-safe): the fingerprint is a function of the needle RULE as well as of
+    /// the secrets. A run launched by a worker on the previous build stamped a narrower set on its handle (the api key
+    /// alone); a worker on this build re-attaching to it rebuilds the wider set and reads a MISMATCH, so it completes
+    /// that run from the exit marker with a recorded capture gap instead of re-tailing the spool. That is the safe
+    /// direction — never a leak, only a lost native log — and it is bounded to the runs in flight across one deploy.
+    /// Any future change to the needle rule (a new marker, a different cap) has the same one-deploy cost.</para>
     ///
     /// <para>The needles are never logged — they only ever reach the redactor.</para>
     /// </summary>
@@ -2780,12 +2808,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         needles.AddRange(UrlEmbeddedSecrets(credential?.BaseUrl));
 
-        foreach (var (name, value) in injectedEnv)
-        {
-            if (MarksASecret(name)) needles.Add(value);
-        }
+        needles.AddRange(injectedEnv.Where(entry => MarksASecret(entry.Key)).Select(entry => entry.Value).OrderBy(value => value, StringComparer.Ordinal));
 
-        var usable = needles.Where(needle => needle.Length >= MinimumNeedleLength).Distinct(StringComparer.Ordinal).OrderBy(needle => needle, StringComparer.Ordinal).ToList();
+        var usable = needles.Where(needle => needle.Length >= MinimumNeedleLength).Distinct(StringComparer.Ordinal).Take(MaximumNeedles).ToList();
 
         return usable.Count == 0 ? SecretRedactor.None : new SecretRedactor(usable);
     }
@@ -2796,6 +2821,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// since a CLI may echo either. Userinfo is credential material by construction, so all of it is a needle; a
     /// query string is not, so it is filtered by name. The URL itself is never a needle: its host is the fact that
     /// says WHICH endpoint answered, which is the point of surfacing the error at all.
+    ///
+    /// <para>ACCEPTED RESIDUAL: a gateway that carries its key in the URL PATH (<c>https://gw.example/v1/&lt;key&gt;/chat</c>)
+    /// is not covered. A path segment has no name to read, so the only rules available are "mask every segment" —
+    /// which strikes the route an operator reads the error for, and every <c>/v1/</c> beside it — or a shape guess,
+    /// which is a fresh leak the moment a gateway picks a shape it doesn't match. Userinfo and a marked query
+    /// parameter are self-declaring; a path segment is not, so it stays out until a credential can say so itself.</para>
     /// </summary>
     private static IEnumerable<string> UrlEmbeddedSecrets(string? baseUrl)
     {
