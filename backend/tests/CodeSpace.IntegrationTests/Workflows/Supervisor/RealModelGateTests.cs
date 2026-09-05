@@ -904,13 +904,18 @@ public sealed class RealModelGateTests
     }
 
     [Theory]
-    [InlineData(true)]    // the blessed wire: a bust must NOT red it — there is no best-of-N floor here to absorb a slow gateway
+    [InlineData(true)]    // the BLESSED wire: a bust measured nothing → a non-gating SKIP (NotExecuted), never a red AND never a green Passed
     [InlineData(false)]   // a report-only arm: informational as always
-    public async Task A_single_attempt_arm_that_exceeds_the_deadline_is_bounded_and_reported_never_red(bool gating)
+    public async Task A_single_attempt_arm_that_exceeds_the_deadline_is_bounded_and_never_a_silent_pass(bool gating)
     {
         // Run 33972713055: a wedged claude CLI session inside a REPORT-ONLY arm awaited UNBOUNDED here, burned the
         // agent's full 1h default, and the supervisor-arcs job hit its 120-min cap for the first time — killing an
         // innocent sibling arm mid-attempt. Only AssessLiveWholeLoopAsync was bounded; this overload was not.
+        //
+        // The `gating` split is the second half, and the sharper one: the bound's FIRST cut reported a bust as a clean
+        // informational line on BOTH wires, so a blessed arm (the decision-eval, the capability tier, every `gating:
+        // true` default) recorded a one-second green `Passed` for an attempt that produced no verdict at all. A bust is
+        // never a pass — on the gating wire it routes exactly like a gateway timeout (DriveWithinDeadlineAsync's doctrine).
         Func<Task<(bool Ok, string Verdict)>> hangs = async () =>
         {
             await Task.Delay(TimeSpan.FromSeconds(30));   // a stuck drive that never returns on its own
@@ -918,7 +923,13 @@ public sealed class RealModelGateTests
         };
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        await Should.NotThrowAsync(() => RealModelGate.AssessLiveAsync("Anthropic", hangs, gating, stepSummaryPath: null, attemptDeadline: TimeSpan.FromMilliseconds(50)));
+        var act = () => RealModelGate.AssessLiveAsync("Anthropic", hangs, gating, stepSummaryPath: null, attemptDeadline: TimeSpan.FromMilliseconds(50));
+
+        if (gating)
+            (await Should.ThrowAsync<SkipException>(act)).Message.ShouldContain("did NOT converge", Case.Insensitive);
+        else
+            await Should.NotThrowAsync(act);
+
         sw.Stop();
 
         sw.Elapsed.ShouldBeLessThan(TimeSpan.FromSeconds(10), "the deadline aborted the hung drive — the gate did NOT wait 30s, proving the job-cap hang is bounded away");
@@ -983,11 +994,13 @@ public sealed class RealModelGateTests
     public void The_did_not_converge_note_names_the_signal_and_how_to_diagnose_it()
     {
         // Rule 12.10: a bounded wait's failure message must name the watched signal AND how to diagnose it manually,
-        // and this one must also say plainly that it is NOT a red — the arms it fires on have no best-of-N floor.
+        // and this one must also say plainly that it is NEITHER a red (the arms it fires on have no best-of-N floor)
+        // NOR a pass (the attempt produced no verdict) — the reader of an archived summary has nothing else to go on.
         var note = RealModelGate.DidNotConvergeNote("Anthropic", TimeSpan.FromSeconds(1200));
 
         note.ShouldContain("1200s");
         note.ShouldContain("NOT red");
+        note.ShouldContain("NOT a pass");
         note.ShouldContain(RealModelGate.AttemptDeadlineEnvVar, Case.Sensitive);
     }
 
