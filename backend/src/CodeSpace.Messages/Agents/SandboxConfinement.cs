@@ -42,6 +42,6 @@ public sealed record SandboxConfinement
     /// <summary>Why the host could not confine — one of the <c>Reason*</c> constants. Null for every outcome but <see cref="SandboxConfinementOutcome.Unconfined"/>.</summary>
     public string? Reason { get; init; }
 
-    /// <summary>Whether the launch put the agent in a fresh EMPTY net namespace (<c>--unshare-net</c>) — true only when confinement applied AND the run was not sharing the host network. False for a shared-network run and for every unconfined one.</summary>
+    /// <summary>Whether the launch put the agent in a fresh EMPTY net namespace (<c>--unshare-net</c>) — true when confinement applied AND its egress policy came out anything but full: the run's network was off, OR it asked for an allowlist the sandbox cannot yet enforce and so failed closed. False for a plain shared-network run and for every unconfined one.</summary>
     public bool NetworkSevered { get; init; }
 }
