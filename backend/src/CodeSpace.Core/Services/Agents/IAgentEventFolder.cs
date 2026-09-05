@@ -37,6 +37,13 @@ public interface IAgentEventFolder
     /// branches, where no folder runs at all. Making them a folder's own reduction would let a harness silently drop
     /// them from every timed-out run — and would reduce each event twice on the streaming hot path, once per
     /// accumulator. They belong to every implementation identically, which is what makes the parameter Rule-7 sound.</para>
+    ///
+    /// <para><paramref name="diagnostics"/> is the process's stderr as the runner returned it, already redacted, and
+    /// is a parameter for exactly the same reason: it never appears on the event stream a folder accumulates (it is
+    /// the OTHER opening of the same process), the executor is its only driver, and it means the same thing to every
+    /// harness. A folder that has no protocol-derived failure text to report is the whole reason it is here — see
+    /// <see cref="AgentDiagnosticExcerpt"/>; one that does may ignore it entirely. Empty when the process wrote
+    /// nothing, and empty on every path that has no <c>SandboxResult</c> to read it from.</para>
     /// </summary>
-    AgentRunResult BuildResult(AgentRunFacts facts, int exitCode);
+    AgentRunResult BuildResult(AgentRunFacts facts, int exitCode, string diagnostics);
 }

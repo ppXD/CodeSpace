@@ -25,6 +25,9 @@ internal sealed class TestEventFolder : IAgentEventFolder
     /// <summary>The text of the most recent event, whatever its kind; null before any event. The reduction a double uses when its stream's final line IS the summary.</summary>
     public string? LastText { get; private set; }
 
+    /// <summary>The run's stderr as the executor handed it in at <see cref="BuildResult"/> — the process's OTHER opening, which never reaches a folder through its events. Empty before the terminal.</summary>
+    public string Diagnostics { get; private set; } = "";
+
     /// <summary>The LAST recognizable token usage the stream carried — the executor's own facts, handed in at <see cref="BuildResult"/>. Null before the terminal, because the double never accumulates them itself: they are the executor's to drive.</summary>
     public AgentTokenUsage? TokenUsage => _facts?.TokenUsage;
 
@@ -34,8 +37,10 @@ internal sealed class TestEventFolder : IAgentEventFolder
         _fold.Add(normalized);
     }
 
-    public AgentRunResult BuildResult(AgentRunFacts facts, int exitCode)
+    public AgentRunResult BuildResult(AgentRunFacts facts, int exitCode, string diagnostics)
     {
+        Diagnostics = diagnostics;
+
         _facts = facts;
 
         return _build(this, exitCode);

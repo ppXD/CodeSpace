@@ -4,10 +4,12 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.AgentRunLogging;
+using CodeSpace.Core.Services.Agents.Harnesses.Claude;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Workspace;
+using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Tasks.Phases;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -682,6 +684,38 @@ public class AgentRunExecutorTests
         // operator sees WHY it failed. (The real harnesses fold the CLI's final message into this; the
         // stub carries the exit code, which is what we assert reaches AgentRun.error here.)
         (run.Error ?? "").ShouldContain("7", customMessage: "the run's failure reason must be persisted to AgentRun.error, not swallowed");
+    }
+
+    [Fact]
+    public async Task A_stderr_only_fatal_reaches_the_persisted_run_error_instead_of_a_bare_exit_code()
+    {
+        // 🟢 High fidelity: the REAL Claude parse + fold (only the invocation is the test's), a real /bin/sh process
+        // and the real LocalProcessRunner. The CLI dies the way it does when it never gets a turn out — a plain-text
+        // fatal on stderr, nothing at all on the JSON protocol stream — so the parser sees no line it keeps and the
+        // fold reaches its bare-exit rung. Without the stderr fold this run lands as "claude exited with code 1":
+        // AgentRetryCauses.Classify matches nothing, and the operator gets a number instead of a reason.
+        if (OperatingSystem.IsWindows()) return;
+
+        const string fatal = "API Error: Content block is not a thinking block";
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+
+        await ExecuteAsync(runId, new StderrOnlyFatalHarness($"printf '{fatal}\n' >&2; exit 1"));
+
+        using var verify = _fixture.BeginScope();
+        var run = await verify.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+
+        run.Status.ShouldBe(AgentRunStatus.Failed);
+        (run.Error ?? "").ShouldContain(fatal, customMessage: "the process said why on stderr and nowhere else — that text must reach AgentRun.error, which is what a cause-aware retry classifies");
+        (run.Error ?? "").ShouldStartWith("claude exited with code 1", customMessage: "the exit text still leads; the diagnostics are folded on AFTER it");
+
+        AgentRetryCauses.Classify(run.Error).ShouldBe(AgentRetryCauses.GatewayFormatFault, "a fault whose only witness was stderr must still classify — otherwise the mitigated respawn cannot fire for this shape");
+
+        // …and it has to survive the read every operator-facing surface projects from, not just the column: the
+        // journal's agent card is AgentMetricsReader.Error, which flattens the excerpt's lines and caps it at 400.
+        var metrics = await verify.Resolve<AgentMetricsReader>().ReadAsync(teamId, new[] { runId }, DateTimeOffset.UtcNow, CancellationToken.None);
+        (metrics[runId].Error ?? "").ShouldContain(fatal, customMessage: "the folded reason must reach the card whole — a longer excerpt would be cut by the card's own front-truncation");
     }
 
     [Fact]
@@ -1719,6 +1753,29 @@ public class AgentRunExecutorTests
             exitCode == 0
                 ? new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = fold.LastText }
                 : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" });
+    }
+
+    /// <summary>
+    /// A scripted harness (kind "scripted") that delegates BOTH halves under test — the stream parse and the result
+    /// fold — to the REAL Claude adapter, and owns only the invocation: the test needs a process it can make die a
+    /// particular way, not a different reduction. Its Kind stays "scripted" so the seeded run row resolves it.
+    /// </summary>
+    private sealed class StderrOnlyFatalHarness : IAgentHarness
+    {
+        private readonly ClaudeCodeHarness _real = new();
+        private readonly string _script;
+
+        public StderrOnlyFatalHarness(string script) => _script = script;
+
+        public string Kind => "scripted";
+        public string Version => _real.Version;
+        public IReadOnlyList<string> Models => _real.Models;
+
+        public SandboxSpec BuildInvocation(AgentTask task) => new() { Command = "/bin/sh", Args = new[] { "-c", _script }, WorkingDirectory = task.WorkspaceDirectory, TimeoutSeconds = task.TimeoutSeconds };
+
+        public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) => _real.ParseEvents(rawLine);
+
+        public IAgentEventFolder CreateFolder() => _real.CreateFolder();
     }
 
     /// <summary>A scripted harness (kind "scripted") whose ParseEvent attaches the raw JSON as Data and whose folder reads token usage off its fold — exactly as the real Codex/Claude adapters do — so the executor→persist path for AgentRunResult.TokenUsage is exercised end-to-end.</summary>
