@@ -573,6 +573,42 @@ public class AgentNodeFlowTests
             .Where(r => r.WorkflowRunId == runId).OrderByDescending(r => r.CreatedDate).FirstAsync()).Id;
     }
 
+    /// <summary>The durable task envelope one staged agent run was provisioned from — the row the executor reads, never a log line.</summary>
+    private async Task<AgentTask> TaskOfAsync(Guid agentRunId)
+    {
+        using var scope = _fixture.BeginScope();
+        var row = await scope.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(r => r.Id == agentRunId);
+
+        return JsonSerializer.Deserialize<AgentTask>(row.TaskJson, AgentJson.Options)!;
+    }
+
+    /// <summary>
+    /// Give <paramref name="runId"/> the lineage a from-node rerun / map-branch fork has: a parent run whose agent at
+    /// the SAME cell ("agent", top-level) captured a resumable session, so every stage on this run resolves a CONTINUE
+    /// hint. Seeded directly at the shape <c>AgentRunService.FindResumableSessionAsync</c> actually reads — the
+    /// session-id column plus a transcript in result_jsonb — because what is under test here is the ENGINE's staging
+    /// decision; the real fork machinery that produces this lineage is proven in RerunFromNodeAgentFlowTests.
+    /// </summary>
+    private async Task SeedLineagePriorSessionAsync(Guid teamId, Guid workflowId, Guid runId, string sessionId, string transcript)
+    {
+        var ancestorRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.AgentRun.Add(new AgentRun
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, WorkflowRunId = ancestorRunId, NodeId = "agent", IterationKey = "",
+            Harness = "codex-cli", Status = AgentRunStatus.Succeeded, TaskJson = "{}", SessionId = sessionId,
+            ResultJson = JsonSerializer.Serialize(
+                new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", SessionId = sessionId, SessionTranscript = transcript }, AgentJson.Options),
+        });
+
+        (await db.WorkflowRun.SingleAsync(r => r.Id == runId)).ParentRunId = ancestorRunId;
+
+        await db.SaveChangesAsync();
+    }
+
     private async Task<Guid> GetAgentRunIdAsync(Guid runId)
     {
         using var scope = _fixture.BeginScope();
@@ -786,6 +822,61 @@ public class AgentNodeFlowTests
             using var verify = _fixture.BeginScope();
             (await verify.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
                 .ShouldBe(WorkflowRunStatus.Success, "the mitigated respawn succeeded — the transient gateway fault no longer costs the run");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task A_format_fault_respawn_stays_cold_even_when_the_lineage_offers_a_prior_session()
+    {
+        // The staging path can hand back exactly what the respawn dropped. A from-node rerun / map-branch fork carries a
+        // ParentRunId, so EVERY stage at this cell — the respawn's included — asks the lineage for a resumable prior
+        // session (3.2c CONTINUE) and stamps it onto the task. On a format-fault respawn that silently undoes half the
+        // repair: the attempt runs warm again on a conversation the mangled block lives in, while the degrade still
+        // reads as spent — so the node will not buy a second respawn either, and the fork loses the run to the very
+        // fault the repair exists for. The mitigated envelope IS the decision; the lineage lookup must not overrule it.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, RetryingAgentNodeDefinition(maxAttempts: 3));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await SeedLineagePriorSessionAsync(teamId, workflowId, runId, "sess-lineage", "{\"role\":\"assistant\"}\n");
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            var firstAgent = await GetAgentRunIdAsync(runId);
+
+            // The lineage lookup DOES fire on this run — the discriminator that makes the guard load-bearing rather
+            // than dead code, and the exact value a guardless respawn would carry forward.
+            (await TaskOfAsync(firstAgent)).ResumeFromSessionId
+                .ShouldBe("sess-lineage", "attempt 1 is an ordinary fork stage: it resumes the lineage-prior conversation, unchanged");
+
+            await SimulateAgentExecutorAsync(firstAgent, new AgentRunResult
+            {
+                Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = LiveGatewayFormatFault,
+                SessionId = "sess-poisoned", SessionTranscript = "{\"role\":\"user\"}",
+            });
+
+            await RunEngineAsync(runId);   // resume → attempt 1 fails → the respawn stages a FRESH, mitigated agent
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            var secondAgent = (await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).ToListAsync()).Single(a => a.Id != firstAgent);
+            var task = JsonSerializer.Deserialize<AgentTask>(secondAgent.TaskJson, AgentJson.Options)!;
+
+            AgentRetryCauses.IsFormatFaultMitigated(task).ShouldBeTrue("the respawn still carries the shared degrade");
+            task.ResumeFromSessionId.ShouldBeNull(
+                "an ANCESTOR's conversation poisons this retry exactly like the attempt's own — the staging path must not re-stamp what the repair dropped");
+            task.RestoredTranscript.ShouldBeNull();
+            task.RestoredTranscriptArtifactId.ShouldBeNull();
         }
         finally
         {
