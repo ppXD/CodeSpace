@@ -432,13 +432,39 @@ public static class SupervisorDecisionGoldenScenarios
             TurnNumber = turn,
             PriorDecisions = priors,
             SupervisorModelId = BrainModelRowId,
-            // The stopped-now recital, through the SAME projection production's composer reduces to. Null before any
-            // wave has staked an obligation, so a plan-only tape stays silent exactly as production is silent.
-            // DIMENSIONS ONLY, deliberately: no mode profile is supplied, so no scenario can reach the stage line
-            // and the pinned golden-prompt digest stays put. These are SINGLE-DECISION fixtures graded on one
-            // judgement each; the multi-turn trajectory harness is where the stage line has an arc to steer.
-            CompletionRecital = SupervisorStopNowRecital.Render(SupervisorTapeCompletion.ProjectIfStoppedNow(priors)?.Assessment),
+            CompletionRecital = RenderStoppedNowRecital(priors),
         };
+
+    /// <summary>
+    /// The mode profile these fixtures answer to — the corpus grades the SUPERVISOR lane, so it is that lane's
+    /// committed profile, resolved from the production registry rather than a fixture that could declare a stage
+    /// story production never enforces.
+    ///
+    /// <para>A PROPERTY, not a static readonly field, and that is load-bearing. <see cref="All"/> is a static
+    /// initializer that calls <see cref="Context(int, IReadOnlyList{SupervisorPriorDecision})"/> for every scenario,
+    /// and static field initializers run in TEXTUAL order — a field declared here, below <see cref="All"/>, is
+    /// still null while every scenario is being built. The renderer treats a null profile as "this mode declares no
+    /// stages" and silently emits no stage line, which is byte-for-byte the dimensions-only rendering this change
+    /// exists to remove: the corpus would have looked re-pinned while measuring exactly what it measured before.</para>
+    /// </summary>
+    private static Messages.Contracts.ModeProfile SupervisorProfile => new Core.Services.Completion.ModeProfileRegistry().Resolve(Core.Services.Completion.RunModeKeys.Supervisor)!;
+
+    /// <summary>
+    /// The stopped-now recital, through the SAME projection production's composer reduces to — null until an
+    /// authorized wave has staked an obligation, exactly as production omits the block until then. Shared with the
+    /// multi-turn trajectory harness, which renders the identical block from the identical inputs.
+    ///
+    /// <para>All THREE of the block's inputs are supplied, or the corpus grades the model on a prompt production
+    /// does not ship: the assessment, the tape's own upstream STAGE TRACE, and the lane's mode profile. Withholding
+    /// the last two kept the corpus a dimensions-only rendering, so a conflicted-then-unverified fixture read LESS
+    /// unresolved than the same tape does in production — the pinned digest could not have detected a regression in
+    /// a line no scenario was able to reach. The enforcement mode is <c>CompletionPolicy.CurrentMode</c>, what
+    /// production stamps a run that does not opt in, so the corpus reads the same wording the default cohort reads.</para>
+    /// </summary>
+    public static string? RenderStoppedNowRecital(IReadOnlyList<SupervisorPriorDecision> priors) =>
+        SupervisorTapeCompletion.ProjectIfStoppedNow(priors) is not { } stoppedNow
+            ? null
+            : SupervisorStopNowRecital.Render(stoppedNow.Assessment, stoppedNow.ExercisedUpstreamStages, SupervisorProfile, Core.Services.Completion.CompletionPolicy.CurrentMode);
 
     /// <summary>
     /// A context whose resolve budget is EXPLICIT. A scenario that intends another resolve to be available must say
