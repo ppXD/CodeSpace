@@ -43,7 +43,7 @@ public class TaskRoutePreviewServiceTests
         new AllRepositoriesInTeam(),
         router);
 
-    private static TaskLaunchRequest Request(string goal, string? effort = null, string? recipe = null, RouteCaps? caps = null) => new()
+    private static TaskLaunchRequest Request(string goal, string? effort = null, string? recipe = null, RouteCaps? caps = null, string? shape = null) => new()
     {
         TeamId = Guid.NewGuid(),
         ActorUserId = Guid.NewGuid(),
@@ -52,6 +52,7 @@ public class TaskRoutePreviewServiceTests
         RequestedEffort = effort,
         RequestedRecipe = recipe,
         CapsOverride = caps,
+        DeliverableShape = shape,
     };
 
     [Fact]
@@ -59,7 +60,7 @@ public class TaskRoutePreviewServiceTests
     {
         // Every operator override the router consumes is set, so a preview that hand-rolled its own
         // EffortRouteRequest (and dropped one) diverges here rather than silently predicting a different run.
-        var request = Request("Refactor the auth module across several files", effort: TaskEffortModes.Auto, recipe: TaskRecipeKinds.MapFanout, caps: new RouteCaps { MaxParallelism = 7, MaxCostUsd = 12.5m, AutonomyCeiling = "Confined" });
+        var request = Request("Refactor the auth module across several files", effort: TaskEffortModes.Auto, recipe: TaskRecipeKinds.MapFanout, caps: new RouteCaps { MaxParallelism = 7, MaxCostUsd = 12.5m, AutonomyCeiling = "Confined" }, shape: DeliverableShapes.Document);
 
         var router = Router();
 
@@ -72,6 +73,17 @@ public class TaskRoutePreviewServiceTests
         // structurally identical plans are never Equals. The JSON is what crosses the wire anyway.
         JsonSerializer.Serialize(previewed, Json).ShouldBe(JsonSerializer.Serialize(expected, Json),
             customMessage: "the preview must route through TaskLaunchService.BuildRouteRequest — a divergence here means the composer is showing a route the launch would not take");
+    }
+
+    [Fact]
+    public async Task An_explicit_tier_previews_the_shape_the_caller_carried_back()
+    {
+        // The composer echoes the shape a prior preview classified. On the explicit-tier path (a confirm-card answer)
+        // the classifier never runs, so this carry is the ONLY thing that keeps the previewed route — and the launch it
+        // predicts — from reverting an answer-shaped task to the coding projection.
+        var previewed = (await Preview(Router()).PreviewAsync(Request("Explain how the retry loop works", effort: TaskEffortModes.Quick, shape: DeliverableShapes.Answer), CancellationToken.None)).Route;
+
+        previewed.DeliverableShape.ShouldBe(DeliverableShapes.Answer);
     }
 
     [Fact]

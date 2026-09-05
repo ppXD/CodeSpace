@@ -282,6 +282,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         RequestedEffort = request.RequestedEffort,
         RequestedRecipe = request.RequestedRecipe,
         CapsOverride = request.CapsOverride,
+        DeliverableShape = request.DeliverableShape,
     };
 
     /// <summary>Pure mapping: the request overrides + (seed repo ?? request repo) + each related repo + the CLAMPED autonomy → the agent envelope the projection stamps. Every field optional, folding to agent.run's own defaults. Related repos require a primary (fail-loud, mirroring the agent.run node — a workspace has nowhere to anchor without one). Internal (not private) so the clamp + related-repo choke point is unit-pinned directly (InternalsVisibleTo), not only through integration coverage.</summary>

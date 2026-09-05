@@ -53,6 +53,15 @@ public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTea
     /// <summary>An operator-chosen effort tier (open string). Null / <c>"auto"</c> ⇒ the router classifies + rides a confirm card back.</summary>
     public string? Effort { get; init; }
 
+    /// <summary>
+    /// The deliverable SHAPE (an open <c>DeliverableShapes</c> string — <c>answer</c> / <c>document</c> / <c>code</c> /
+    /// <c>research</c>) a route PREVIEW already classified for this same task, echoed back by the caller. It is read
+    /// ONLY when <see cref="Effort"/> is an explicit tier — the path that skips the classifier — so a confirm-card
+    /// answer keeps the shape the card was raised about instead of silently reverting to the coding projection. Null /
+    /// blank ⇒ omitted ⇒ the classifier's own reading (auto) or the <c>code</c> default (explicit), byte-identical.
+    /// </summary>
+    public string? DeliverableShape { get; init; }
+
     /// <summary>The autonomy tier the agent runs at (open string). Null / unrecognised → the safe <c>Standard</c> default.</summary>
     public string? Autonomy { get; init; }
 

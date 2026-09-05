@@ -186,7 +186,7 @@ public sealed class AgentCodeNode : INodeRuntime
             Autonomy = autonomy,
             Permissions = ResolvePermissions(context.Config, autonomy, mode),
             ApprovalConversationId = ReadOptionalGuid(context.Config, "approvalConversationId"),
-            PushProducedBranch = acceptance != null ? true : ResolvePushBranch(context.Config, mode),
+            PushProducedBranch = acceptance != null && mode != AgentMode.Research ? true : ResolvePushBranch(context.Config, mode),
             EnableMcpEndpoint = ReadOptionalBool(context.Config, "enableMcp"),
             // The output-review mode + its reviewer model — the executor runs an independent critic over the produced
             // change at completion. Absent ⇒ None ⇒ no review ⇒ byte-identical. Read as the enum int
@@ -203,6 +203,11 @@ public sealed class AgentCodeNode : INodeRuntime
             // acceptance is bound (the resolve verb's forcePushBranch precedent; the pushBranch key is an OR-gate,
             // so this can only widen). Without it, a stock deployment (push flag off) would fail every contract
             // "no-branch-or-repo" even when the work and the check are both perfect.
+            //
+            // EXCEPT under mode=research, whose whole boundary is that it PUBLISHES NOTHING. A research contract is a
+            // DELIVERABLE-FILE contract graded in the agent's own workspace — it needs no branch — so forcing a push
+            // there would publish a branch whose only content is the deliverable the agent was told to write. The
+            // force widens the code / document lanes it was written for and leaves research's base intact.
             Acceptance = acceptance,
             AcceptanceAuthority = ReadAcceptanceAuthority(context.Config),
         };

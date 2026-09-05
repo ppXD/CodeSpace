@@ -110,6 +110,33 @@ public class HeuristicEffortClassifierTests
         (await ClassifyAsync(goal)).Signals.DeliverableShape.ShouldBe(expected);
     }
 
+    [Theory]
+    // The refutation: an answer word inside a CODING request used to win outright, so a bug report phrased as a
+    // question projected as read-only research with a judged DELIVERABLE.md and never touched the bug.
+    [InlineData("Fix the login 500 — why does it hang?")]
+    [InlineData("Explain the retry loop and then add a backoff")]
+    [InlineData("Investigate the flaky test and fix it")]
+    [InlineData("What is wrong with the parser? Update it.")]
+    public async Task A_goal_that_asks_for_a_code_change_stays_code_shaped_however_it_is_phrased(string goal)
+    {
+        var signals = (await ClassifyAsync(goal)).Signals;
+
+        signals.NeedsCodeChange.ShouldBeTrue("the code-change signal is what makes this a coding request, whatever question rides along");
+        signals.DeliverableShape.ShouldBe(DeliverableShapes.Code,
+            customMessage: "a task that must change code is CODE-shaped — the answer / research shapes disarm the coding projection and grade a report instead");
+    }
+
+    [Fact]
+    public async Task An_explicit_written_artefact_outranks_the_code_change_signal()
+    {
+        // "Write a design doc" trips the code-change verb "write" — the document shape must still win, or the one
+        // phrasing that unambiguously names a written deliverable would be the one that never gets it.
+        var signals = (await ClassifyAsync("Write a design doc for the new scheduler")).Signals;
+
+        signals.NeedsCodeChange.ShouldBeTrue("'write' is a code-change verb — that is exactly what makes this case load-bearing");
+        signals.DeliverableShape.ShouldBe(DeliverableShapes.Document);
+    }
+
     [Fact]
     public async Task The_inferred_shape_never_moves_the_suggested_effort()
     {

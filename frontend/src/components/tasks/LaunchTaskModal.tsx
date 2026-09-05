@@ -96,6 +96,8 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   const [expanded, setExpanded] = useState(false);
   const [menu, setMenu] = useState<null | "perm" | "repos" | "mr">(null);
   const [effortOpen, setEffortOpen] = useState(false);
+  /** The deliverable shape carried over from the confirm card the operator answered, pinned to the text it was classified for. */
+  const [confirmedShape, setConfirmedShape] = useState<{ text: string; shape: string } | null>(null);
   const [repoSearch, setRepoSearch] = useState("");
   const [customizeTab, setCustomizeTab] = useState<"execution" | "planning" | "supervisor" | "safety" | "evaluation">("execution");
   const [acceptDraft, setAcceptDraft] = useState("");
@@ -223,6 +225,9 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   // predict a launch that differs from the one the button sends — the whole point of previewing.
   const formState: LaunchFormState = {
     taskText, surface, sessionId, workspace, effort, autonomy, model, modelCredentialId, modelCredentialModelId, harness, agentDefinitionId, runnerKind,
+    // Only while the confirmed shape still belongs to the text on screen — editing the task after confirming makes
+    // the echo stale, and a stale shape is worse than none (it would project the OLD task's shape onto a new one).
+    deliverableShape: confirmedShape?.text === taskText.trim() ? confirmedShape.shape : undefined,
     cwdMode: cfg.cwdMode, enableMcp: cfg.enableMcp, tools: cfg.tools, pushBranch: cfg.pushBranch,
     maxParallel: cfg.maxParallel, budget: cfg.budget,
     agentModels: cfg.agentModels, agentPool: cfg.agentPool, autonomyCeiling: cfg.autonomyCeiling, timeLimit: effectiveTimeLimit,
@@ -246,7 +251,15 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   // the in-flight request, so a risky goal typed and sent inside ~1-3s would start unconfirmed — the card would
   // arrive after the run did. A settled failure counts as answered, so an outage never wedges the button.
   const routeUnanswered = !routePreview.answered;
-  const confirmEffort = (mode: string) => { setEffort(mode); closeMenu(); };
+  // Answering the card picks a TIER, which rides the wire as an explicit effort and short-circuits the classifier —
+  // so the shape the card was raised about has to ride along too, or every confirmed launch silently reverts to the
+  // coding projection. Stored with the text it was classified for; see formState for the staleness guard.
+  const confirmEffort = (mode: string) => {
+    const shape = routeCard?.deliverableShape;
+    setConfirmedShape(shape ? { text: taskText.trim(), shape } : null);
+    setEffort(mode);
+    closeMenu();
+  };
 
   const effLabel = EFFORT_OPTS.find(e => e.v === effort)?.l ?? "Auto";
   const modelLabel = model || "Auto";

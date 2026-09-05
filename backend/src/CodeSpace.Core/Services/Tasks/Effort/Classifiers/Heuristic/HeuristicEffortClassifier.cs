@@ -47,26 +47,39 @@ public sealed class HeuristicEffortClassifier : IEffortClassifier, ISingletonDep
     }
 
     /// <summary>Derive the generic, task-type-agnostic signals from transparent keyword groups in the goal — no "is this a refactor?" branch, just observable properties of the work.</summary>
-    private static EffortSignals DeriveSignals(string goal) => new()
+    private static EffortSignals DeriveSignals(string goal)
     {
-        NeedsCodeChange = ContainsAny(goal, CodeChangeVerbs),
-        CrossFile = ContainsAny(goal, CrossFileWords),
-        NeedsTestsOrCi = ContainsAny(goal, TestWords),
-        RiskySideEffects = ContainsAny(goal, RiskyWords),
-        Ambiguous = goal.Trim().Length < AmbiguousLengthThreshold,
-        EstimatedCostTier = EstimateCostTier(goal),
-        DeliverableShape = InferShape(goal),
-    };
+        var needsCodeChange = ContainsAny(goal, CodeChangeVerbs);
+
+        return new EffortSignals
+        {
+            NeedsCodeChange = needsCodeChange,
+            CrossFile = ContainsAny(goal, CrossFileWords),
+            NeedsTestsOrCi = ContainsAny(goal, TestWords),
+            RiskySideEffects = ContainsAny(goal, RiskyWords),
+            Ambiguous = goal.Trim().Length < AmbiguousLengthThreshold,
+            EstimatedCostTier = EstimateCostTier(goal),
+            DeliverableShape = InferShape(goal, needsCodeChange),
+        };
+    }
 
     /// <summary>
     /// A COARSE deliverable shape from the same transparent keyword groups, first match wins in escalating
-    /// specificity: an explicit written artefact (design doc / RFC / report) ⇒ <c>document</c>; an investigation verb
-    /// ⇒ <c>research</c>; a question / explanation verb ⇒ <c>answer</c>; everything else ⇒ <c>code</c>. Deliberately
-    /// CONSERVATIVE — the fall-through is the status quo, so an unrecognised goal keeps today's coding projection and
-    /// only an unmistakable non-code phrasing moves it. The heuristic still always asks the operator to confirm.
+    /// specificity: an explicit written artefact (design doc / RFC / report) ⇒ <c>document</c>; a goal that must
+    /// CHANGE CODE ⇒ <c>code</c>; an investigation verb ⇒ <c>research</c>; a question / explanation verb ⇒
+    /// <c>answer</c>; everything else ⇒ <c>code</c>. Deliberately CONSERVATIVE — the fall-through is the status quo,
+    /// so an unrecognised goal keeps today's coding projection and only an unmistakable non-code phrasing moves it.
+    /// The heuristic still always asks the operator to confirm.
+    ///
+    /// <para>The <paramref name="needsCodeChange"/> gate is what makes the non-code shapes safe: the answer / research
+    /// words are ordinary English that a bug report carries too ("Fix the login 500 — why does it hang?"), and without
+    /// the gate that single "why" disarmed the coding projection and had the run graded on a written report instead of
+    /// the fix. A written artefact still outranks it, because "write a design doc" trips a code-change verb by
+    /// wording alone.</para>
     /// </summary>
-    private static string InferShape(string goal) =>
+    private static string InferShape(string goal, bool needsCodeChange) =>
         ContainsAny(goal, DocumentWords) ? DeliverableShapes.Document
+        : needsCodeChange ? DeliverableShapes.Code
         : ContainsAny(goal, ResearchWords) ? DeliverableShapes.Research
         : ContainsAny(goal, AnswerWords) ? DeliverableShapes.Answer
         : DeliverableShapes.Code;

@@ -46,6 +46,9 @@ public sealed record PreviewTaskRouteCommand : ICommand<TaskRoutePreviewResult>,
     /// <summary>An operator-pinned recipe (open string). Null ⇒ the classifier's suggestion / the default recipe.</summary>
     public string? Recipe { get; init; }
 
+    /// <summary>The deliverable SHAPE a prior preview classified for this same task, echoed back — the SAME field the launch carries, so a preview under an explicit tier predicts the shape the launch would actually run. Null / blank ⇒ nothing carried.</summary>
+    public string? DeliverableShape { get; init; }
+
     /// <summary>The operator's safety-budget caps, merged onto the resolved preset's caps exactly as a launch would merge them — so the previewed bounds are the bounds the run would get.</summary>
     public TaskCapsOverride? Caps { get; init; }
 

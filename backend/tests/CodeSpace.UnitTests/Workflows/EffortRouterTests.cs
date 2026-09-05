@@ -33,14 +33,58 @@ public class EffortRouterTests
         new BoundsPresetRegistry(new IBoundsPreset[] { new QuickBoundsPreset(), new StandardBoundsPreset(), new DeepBoundsPreset() }),
         new CapabilityProbeRegistry(Array.Empty<ICapabilityProbe>()));
 
-    private static EffortRouteRequest Request(string goal, string? requestedEffort = null, string? requestedRecipe = null, string? requestedProjection = null, RouteCaps? capsOverride = null) => new()
+    private static EffortRouteRequest Request(string goal, string? requestedEffort = null, string? requestedRecipe = null, string? requestedProjection = null, RouteCaps? capsOverride = null, string? deliverableShape = null) => new()
     {
         Seed = new TaskLaunchSeed { Goal = goal, SurfaceKind = "test", TeamId = Guid.NewGuid() },
         RequestedEffort = requestedEffort,
         RequestedRecipe = requestedRecipe,
         RequestedProjection = requestedProjection,
         CapsOverride = capsOverride,
+        DeliverableShape = deliverableShape,
     };
+
+    [Theory]
+    [InlineData(DeliverableShapes.Answer)]
+    [InlineData(DeliverableShapes.Document)]
+    [InlineData(DeliverableShapes.Research)]
+    public async Task An_explicit_tier_keeps_the_shape_the_caller_carried_back(string shape)
+    {
+        // The refutation: the heuristic lane ALWAYS raises a confirm card, and the operator's answer re-enters as an
+        // explicit tier — the path that skips the classifier. Without the carry, every confirmed launch reverted to
+        // the coding projection, so the shape axis could never reach a run on the lane that needs it most.
+        var plan = await Router().RouteAsync(Request("Explain how the retry loop works", requestedEffort: TaskEffortModes.Quick, deliverableShape: shape), CancellationToken.None);
+
+        plan.WasAutoClassified.ShouldBeFalse("an explicit tier still short-circuits the classifier — only the shape rides along");
+        plan.DeliverableShape.ShouldBe(shape,
+            customMessage: "the operator confirmed a TIER, not a change of shape — the shape the card was raised about must survive the round trip");
+        plan.Decision!.Signals.DeliverableShape.ShouldBe(shape, "the decision's own signals carry it too, so anything reading the decision sees the same shape");
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("a-shape-nobody-has-heard-of")]
+    public async Task An_explicit_tier_with_no_usable_carried_shape_stays_code(string? carried)
+    {
+        // Byte-identical fall-back: nothing carried (an older client, a surface with no preview) and an unknown value
+        // both read as the historical coding assumption rather than disarming the projection.
+        var plan = await Router().RouteAsync(Request("Fix the failing login test", requestedEffort: TaskEffortModes.Quick, deliverableShape: carried), CancellationToken.None);
+
+        plan.DeliverableShape.ShouldBe(DeliverableShapes.Code);
+        plan.Decision!.Signals.ShouldBe(carried is null or "" or "   " ? new EffortSignals() : new EffortSignals { DeliverableShape = DeliverableShapes.Code });
+    }
+
+    [Fact]
+    public async Task A_carried_shape_never_overrides_the_classifier_on_the_auto_path()
+    {
+        // The carry exists for the classifier-LESS path only. On auto the classifier reads the task itself, and a
+        // stale echo from an earlier goal must not be able to overrule what it just read.
+        var plan = await Router().RouteAsync(Request("Fix the failing login test", requestedEffort: TaskEffortModes.Auto, deliverableShape: DeliverableShapes.Answer), CancellationToken.None);
+
+        plan.WasAutoClassified.ShouldBeTrue();
+        plan.DeliverableShape.ShouldBe(DeliverableShapes.Code, "the classifier read a coding task — a carried shape is an echo, never an override");
+    }
 
     [Fact]
     public async Task Non_auto_request_honours_the_tier_with_no_classifier_and_no_confirm_card()
