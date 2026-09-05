@@ -30,16 +30,17 @@ namespace CodeSpace.E2ETests.Workflows;
 /// the in-run revise loop, end to end through the REAL engine: the standard tier's planner authors ONE research
 /// item whose acceptance is an <c>LlmJudge</c> contract (deliverable path + one-criterion rubric + pinned judge
 /// row), the map fans out a real agent whose FIRST attempt writes a report that flunks the rubric (no
-/// <c>MEETS[healed]</c> marker), the executor's oracle gate runs the REAL <c>LlmRubricJudge</c> against the pushed
-/// branch's committed file, the failure detail — naming the unmet criterion — feeds the S6 revise round, the
-/// revision writes the satisfying content, the re-pushed branch RE-JUDGES to a pass, and the run lands Success
-/// with the checklist verdict stamped.
+/// <c>MEETS[healed]</c> marker), the executor's oracle gate runs the REAL <c>LlmRubricJudge</c> against the run's
+/// RECORDED PATCH, the failure detail — naming the unmet criterion — feeds the S6 revise round, the revision writes
+/// the satisfying content, the re-recorded patch RE-JUDGES to a pass, and the run lands Success with the checklist
+/// verdict stamped — all while PUBLISHING NOTHING, because a research item's boundary is that it produces no branch
+/// (an acceptance contract grades it; it does not buy it a publish).
 ///
 /// <para>This is the triad's whole thesis on one run: plan authors the contract (sprint-contract), the agent
 /// generates, the evaluator (a rubric judge — subjective step contained in binary evidence-backed criteria)
 /// verifies, and the generator↔evaluator loop closes WITHOUT a human. Fidelity (Rule 12) — HIGH: real engine +
 /// real Postgres + real <c>plan.author</c> + real fan-out + real <c>AgentRunExecutor</c>/<c>LocalProcessRunner</c>
-/// + real git push/clone + real judge resolution through the pool; deterministic fakes only at the planner LLM,
+/// + real git clone / patch capture + real judge resolution through the pool; deterministic fakes only at the planner LLM,
 /// the judge's network call (content-keyed — the verdict flips only when the file really changes), and the CLI's
 /// intelligence. POSIX-only; skips when git is absent.</para>
 /// </summary>
@@ -99,13 +100,18 @@ public sealed class RubricReviseFanoutE2ETests
 
             var result = JsonSerializer.Deserialize<AgentRunResult>(agentRun.ResultJson!, AgentJson.Options)!;
             result.ReviseRounds.ShouldBe(1, "the rubric failure bought exactly one revise round");
-            result.AcceptancePassed.ShouldBe(true, "the revised deliverable passed the REAL judge on the re-pushed branch");
+            result.AcceptancePassed.ShouldBe(true, "the revised deliverable passed the REAL judge on the re-recorded patch");
             result.AcceptanceDetail!.ShouldContain("1/1 criteria met");
-            result.ProducedBranch.ShouldNotBeNull();
 
-            (await remote.BranchFileContentAsync(result.ProducedBranch!, ReviseHealingFakeCli.FileName))
+            // The research boundary, end to end: a research item PUBLISHES NOTHING, whatever grades it. Its deliverable
+            // is graded where it was written — the run's recorded patch — so withholding the branch never disarms the
+            // oracle, and the withheld publish is RECORDED rather than silent.
+            result.ProducedBranch.ShouldBeNull("a research item publishes no branch — a bound acceptance contract does not buy one");
+            result.PublishSkipReason.ShouldNotBeNullOrWhiteSpace("a withheld publish says why — an unexplained missing branch is indistinguishable from a failed push");
+
+            result.Patch.ShouldNotBeNull("the deliverable is captured as the run's patch — that is the world the judge read")
                 .ShouldContain(DeterministicJudgeLlmClient.MeetsMarker(DeterministicWorkPlanLlmClient.RubricCriterionId),
-                    customMessage: "the remote branch tip carries the content that actually satisfies the rubric");
+                    customMessage: "the recorded patch carries the content that actually satisfies the rubric");
 
             var events = await verify.Resolve<IAgentRunService>().GetEventsAsync(agentRun.Id, agentRun.TeamId, afterSequence: 0, CancellationToken.None);
             var revise = events.Single(e => e.Text.Contains("revising (round 1 of 1)"));
@@ -235,9 +241,6 @@ public sealed class RubricReviseFanoutE2ETests
             await Git(seed, "commit", "-m", "seed");
             await Git(seed, "push", "origin", "main");
         }
-
-        public async Task<string> BranchFileContentAsync(string branch, string file) =>
-            await Git(_root, "--git-dir", _bare, "show", $"{branch}:{file}");
 
         private static async Task<string> Git(string workdir, params string[] args)
         {
