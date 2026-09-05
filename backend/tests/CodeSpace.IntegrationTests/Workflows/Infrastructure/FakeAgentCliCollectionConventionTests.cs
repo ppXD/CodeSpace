@@ -29,11 +29,13 @@ public sealed class FakeAgentCliCollectionConventionTests
     /// <summary>Matches a construction of any fake CLI — the family <see cref="FakeAgentCliMarkerConventionTests"/> pins by filename (<c>*FakeCli.cs</c>), plus the E2E assembly's own <c>FakeCodexCli</c>.</summary>
     private static readonly Regex ArmsAFakeCli = new(@"\bnew\s+[A-Za-z0-9_]*Fake[A-Za-z0-9_]*Cli\s*\(", RegexOptions.Compiled);
 
-    [Theory]
+    [SkippableTheory]
     [InlineData("backend/tests/CodeSpace.E2ETests")]
     [InlineData("backend/tests/CodeSpace.IntegrationTests")]
     public void Every_fake_arming_test_class_shares_one_collection(string assemblyDir)
     {
+        Skip.If(!FakeCliSourceLocator.RepoRootFound(), "the backend source tree is not alongside the test binaries (e.g. a published/copied test run) — this convention can only police what it can read");
+
         var armers = FakeArmingSources(assemblyDir);
 
         armers.Count.ShouldBeGreaterThan(5, $"the scan must actually find the fake-arming classes under {assemblyDir}, or this test passes by finding nothing");
@@ -51,19 +53,12 @@ public sealed class FakeAgentCliCollectionConventionTests
 
     private static IReadOnlyList<FileInfo> FakeArmingSources(string assemblyDir)
     {
-        var dir = new DirectoryInfo(Path.Combine(FindRepoRoot(), assemblyDir));
+        var dir = new DirectoryInfo(Path.Combine(FakeCliSourceLocator.FindRepoRoot(), assemblyDir));
 
         return dir.GetFiles("*.cs", SearchOption.AllDirectories)
             .Where(f => !f.FullName.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
             .Where(f => !f.FullName.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
             .Where(f => ArmsAFakeCli.IsMatch(File.ReadAllText(f.FullName)))
             .ToList();
-    }
-
-    private static string FindRepoRoot()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null && !Directory.Exists(Path.Combine(dir.FullName, "backend"))) dir = dir.Parent;
-        return dir?.FullName ?? throw new InvalidOperationException("repo root not found");
     }
 }

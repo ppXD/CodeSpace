@@ -27,10 +27,18 @@ public static class FakeCliSourceLocator
             .Select(f => File.ReadAllText(f.FullName))
             .FirstOrDefault();
 
-    private static string FindRepoRoot()
+    /// <summary>True when the repo's <c>backend</c> dir can be found upward from <see cref="AppContext.BaseDirectory"/> — false when the source tree isn't alongside the test binaries (e.g. a published/copied test run), which callers SKIP on honestly instead of hitting the throw in <see cref="FindRepoRoot"/>.</summary>
+    public static bool RepoRootFound() => TryFindRepoRoot(out _);
+
+    /// <summary>The repo root, walked upward from <see cref="AppContext.BaseDirectory"/> by the presence of a <c>backend</c> dir. Throws when it cannot be found — callers that need an honest skip instead of a red must check <see cref="RepoRootFound"/> first.</summary>
+    public static string FindRepoRoot() =>
+        TryFindRepoRoot(out var root) ? root! : throw new InvalidOperationException("repo root not found");
+
+    private static bool TryFindRepoRoot(out string? root)
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
         while (dir is not null && !Directory.Exists(Path.Combine(dir.FullName, "backend"))) dir = dir.Parent;
-        return dir?.FullName ?? throw new InvalidOperationException("repo root not found");
+        root = dir?.FullName;
+        return root is not null;
     }
 }
