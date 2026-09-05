@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Agents.Harnesses.Claude;
 using CodeSpace.Core.Services.Agents.Harnesses.Codex;
 
 namespace CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -15,7 +16,11 @@ namespace CodeSpace.IntegrationTests.Workflows.Infrastructure;
 /// </summary>
 public sealed class InvestigateOnlyFakeCli : IDisposable
 {
+    /// <summary>The findings message every invocation reports — the summary BOTH dialects must fold, so an assertion on it is not harness-lottery-dependent.</summary>
+    public const string FindingsFormat = "Findings for: %s — no code changes were necessary.";
+
     private readonly string _originalCommand;
+    private readonly string _originalClaudeCommand;
     private readonly string _dir;
 
     public InvestigateOnlyFakeCli()
@@ -28,23 +33,28 @@ public sealed class InvestigateOnlyFakeCli : IDisposable
         File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
 
         _originalCommand = Environment.GetEnvironmentVariable(CodexHarness.CommandEnvVar) ?? "";
+        _originalClaudeCommand = Environment.GetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar) ?? "";
         Environment.SetEnvironmentVariable(CodexHarness.CommandEnvVar, script);
+        Environment.SetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar, script);
     }
 
     public void Dispose()
     {
         Environment.SetEnvironmentVariable(CodexHarness.CommandEnvVar, _originalCommand.Length == 0 ? null : _originalCommand);
+        Environment.SetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar, _originalClaudeCommand.Length == 0 ? null : _originalClaudeCommand);
         try { Directory.Delete(_dir, recursive: true); } catch { /* best-effort */ }
     }
 
     /// <summary>EVERY invocation succeeds without writing anything: emit a findings-flavoured message + exit 0 (a real <c>Succeeded</c> run, no file/patch/branch), regardless of the goal.</summary>
-    private static string ScriptBody =>
+    internal static string ScriptBody =>
         "#!/bin/sh\n" +
         "goal=\"\"\n" +
         "for goal in \"$@\"; do :; done\n" +
         "esc=$(printf '%s' \"$goal\" | sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g')\n" +
-        "printf '{\"type\":\"agent_reasoning\",\"message\":\"Investigating: %s\"}\\n' \"$esc\"\n" +
-        "printf '{\"type\":\"agent_message\",\"message\":\"Findings for: %s — no code changes were necessary.\"}\\n' \"$esc\"\n" +
-        "printf '{\"type\":\"task_complete\",\"message\":\"completed\"}\\n'\n" +
+        FakeAgentCliDialect.Dialects(
+            "printf '{\"type\":\"agent_reasoning\",\"message\":\"Investigating: %s\"}\\n' \"$esc\"\n" +
+            "printf '{\"type\":\"agent_message\",\"message\":\"" + FindingsFormat + "\"}\\n' \"$esc\"\n" +
+            "printf '{\"type\":\"task_complete\",\"message\":\"completed\"}\\n'\n",
+            FindingsFormat) +
         "exit 0\n";
 }

@@ -1,6 +1,7 @@
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Harnesses.Claude;
 using CodeSpace.Core.Services.Agents.Harnesses.Codex;
+using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
@@ -188,7 +189,100 @@ public class SubtaskAwareFakeCliDriftTests
         }
     }
 
-    private static string[] RunScript(string cwd, string script, params string[] args)
+    [Theory]
+    // Every LIVE-BRAIN fake that now arms BOTH command env vars. A codex-only stub used to leave the reconciler's
+    // rewritten claude-code agents running the REAL binary; arming the claude var only helps if the script SERVES that
+    // dialect too — a stream claude cannot parse folds a different summary (or none), which is a silent, harness-lottery
+    // regression rather than a loud one. Each case runs the MATERIALIZED script through /bin/sh once per dialect.
+    [InlineData(nameof(SubtaskAwareFakeCli), 0)]
+    [InlineData(nameof(InvestigateOnlyFakeCli), 0)]
+    [InlineData(nameof(MultiRepoFeatureFakeCli), 0)]
+    [InlineData(nameof(LiveBrainConflictFakeCli), 0)]
+    [InlineData(nameof(LiveBrainFailingFakeCli), 1)]
+    public void A_live_brain_fake_serves_the_dialect_of_whichever_harness_the_reconciler_pointed_at_it(string fake, int expectedExit)
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        const string goal = "do alpha";
+        var (body, expectedSummary) = LiveBrainFake(fake, goal);
+
+        var dir = Path.Combine(Path.GetTempPath(), "cs-dialect-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        Directory.CreateDirectory(Path.Combine(dir, MultiRepoFeatureFakeCli.PrimaryAlias));   // the multi-repo fake writes per-repo subdirs; harmless for the rest
+        Directory.CreateDirectory(Path.Combine(dir, MultiRepoFeatureFakeCli.RelatedAlias));
+
+        try
+        {
+            var script = Path.Combine(dir, "fake-agent.sh");
+            File.WriteAllText(script, body);
+            File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
+            var codex = new CodexHarness();
+            var claude = new ClaudeCodeHarness();
+
+            var codexStdout = RunScript(dir, script, expectedExit, "exec", "--json", goal);
+            var claudeStdout = RunScript(dir, script, expectedExit, "--print", "--output-format", "stream-json", goal);
+
+            var codexResult = codex.BuildResult(codexStdout.SelectMany(codex.ParseEvents).ToList(), expectedExit, "");
+            var claudeResult = claude.BuildResult(claudeStdout.SelectMany(claude.ParseEvents).ToList(), expectedExit, "");
+
+            codexResult.Summary.ShouldBe(expectedSummary, $"{fake}'s codex dialect must be UNCHANGED — every existing codex consumer reads this summary");
+            claudeResult.Summary.ShouldBe(expectedSummary, $"{fake}: one script, two dialects, ONE summary — otherwise which harness the reconciler picked silently changes what the arm measured");
+            claudeResult.Status.ShouldBe(codexResult.Status, $"{fake}: both dialects must land the SAME AgentRunStatus — a fake standing in for a FAILING agent has to fail on either harness");
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
+    /// <summary>The script + the summary BOTH dialects must fold, per live-brain fake. Reads the fakes' OWN <c>ScriptBody</c> (never a copy), so a script edit is measured rather than mirrored.</summary>
+    private static (string Body, string Summary) LiveBrainFake(string fake, string goal) => fake switch
+    {
+        nameof(SubtaskAwareFakeCli) => (SubtaskAwareFakeCli.ScriptBody, SubtaskAwareFakeCli.ExpectedSummaryFor(goal)),
+        nameof(InvestigateOnlyFakeCli) => (InvestigateOnlyFakeCli.ScriptBody, InvestigateOnlyFakeCli.FindingsFormat.Replace("%s", goal, StringComparison.Ordinal)),
+        nameof(MultiRepoFeatureFakeCli) => (MultiRepoFeatureFakeCli.ScriptBody, MultiRepoFeatureFakeCli.SummaryPrefix + goal),
+        nameof(LiveBrainConflictFakeCli) => (LiveBrainConflictFakeCli.ScriptBody, LiveBrainConflictFakeCli.SummaryPrefix + goal),
+        nameof(LiveBrainFailingFakeCli) => (LiveBrainFailingFakeCli.ScriptBody, LiveBrainFailingFakeCli.FailureMessageFormat.Replace("%s", goal, StringComparison.Ordinal)),
+        _ => throw new ArgumentOutOfRangeException(nameof(fake), fake, "add the new live-brain fake here — an unlisted fake is one this pin does not cover"),
+    };
+
+    [Fact]
+    public void The_conflict_fakes_resolver_arm_keeps_its_verified_marker_in_both_dialects()
+    {
+        // The resolver's summary carries NO printf conversion, and POSIX leaves a conversion-free format handed
+        // arguments UNSPECIFIED — so the claude tail must pass no args or the verified marker could be mangled/dropped
+        // and the resolution would silently stop grading Verified.
+        if (OperatingSystem.IsWindows()) return;
+
+        var dir = Path.Combine(Path.GetTempPath(), "cs-dialect-resolver-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+
+        try
+        {
+            var script = Path.Combine(dir, "fake-agent.sh");
+            File.WriteAllText(script, LiveBrainConflictFakeCli.ScriptBody);
+            File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
+            var resolverGoal = $"{LiveBrainConflictFakeCli.ResolverMarker} for the shared file";
+
+            var codex = new CodexHarness();
+            var claude = new ClaudeCodeHarness();
+            var codexResult = codex.BuildResult(RunScript(dir, script, 0, "exec", "--json", resolverGoal).SelectMany(codex.ParseEvents).ToList(), 0, "");
+            var claudeResult = claude.BuildResult(RunScript(dir, script, 0, "--print", "--output-format", "stream-json", resolverGoal).SelectMany(claude.ParseEvents).ToList(), 0, "");
+
+            codexResult.Summary.ShouldContain(SupervisorResolverRecipe.TestsPassedMarker);
+            claudeResult.Summary.ShouldBe(codexResult.Summary, "the resolver's verified marker must survive verbatim in BOTH dialects, or the resolution stops grading Verified on a reconciled harness");
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
+    private static string[] RunScript(string cwd, string script, params string[] args) => RunScript(cwd, script, 0, args);
+
+    private static string[] RunScript(string cwd, string script, int expectedExit, params string[] args)
     {
         var psi = new System.Diagnostics.ProcessStartInfo("/bin/sh") { WorkingDirectory = cwd, RedirectStandardOutput = true, RedirectStandardError = true };
         psi.ArgumentList.Add(script);
@@ -197,7 +291,7 @@ public class SubtaskAwareFakeCliDriftTests
         using var process = System.Diagnostics.Process.Start(psi)!;
         var stdout = process.StandardOutput.ReadToEnd();
         process.WaitForExit(10_000).ShouldBeTrue("the fake script must exit promptly");
-        process.ExitCode.ShouldBe(0);
+        process.ExitCode.ShouldBe(expectedExit);
 
         return stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries);
     }

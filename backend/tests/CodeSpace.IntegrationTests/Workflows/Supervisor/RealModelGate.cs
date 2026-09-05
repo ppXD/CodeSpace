@@ -201,16 +201,23 @@ public static class RealModelGate
     /// a persistently-slow gateway is visible in the job summary rather than a silent green.
     /// </summary>
     public static Task AssessLiveAsync(string provider, Func<Task<(bool Ok, string Verdict)>> drive, bool gating = true, [CallerMemberName] string? test = null) =>
-        AssessLiveAsync(provider, drive, gating, Environment.GetEnvironmentVariable(StepSummaryEnvVar), test);
+        AssessLiveAsync(provider, drive, gating, Environment.GetEnvironmentVariable(StepSummaryEnvVar), test: test);
 
     /// <summary>Testable core of <see cref="AssessLiveAsync(string, Func{Task{ValueTuple{bool, string}}}, bool)"/> — takes the step-summary path explicitly so a test pins the behaviour without mutating process env. When <paramref name="gating"/> is false the clean verdict is REPORTED (informational), never asserted — for a lane whose live result is observed but must not block main (e.g. a precondition the blessed decision-eval already measures); an infra failure is non-gating regardless.</summary>
-    internal static async Task AssessLiveAsync(string provider, Func<Task<(bool Ok, string Verdict)>> drive, bool gating, string? stepSummaryPath, [CallerMemberName] string? test = null)
+    internal static async Task AssessLiveAsync(string provider, Func<Task<(bool Ok, string Verdict)>> drive, bool gating, string? stepSummaryPath, TimeSpan? attemptDeadline = null, [CallerMemberName] string? test = null)
     {
         ArmModelSink();
 
         try
         {
-            var (ok, verdict) = await drive().ConfigureAwait(false);
+            // BOUNDED (Rule 12.10): an unbounded await here let one hung agent ride to the CI job's wall-clock cap.
+            if (await DriveWithinDeadlineAsync(drive, attemptDeadline).ConfigureAwait(false) is not { } outcome)
+            {
+                ReportInformational(provider, false, DidNotConvergeNote(provider, attemptDeadline), stepSummaryPath, test);
+                return;
+            }
+
+            var (ok, verdict) = outcome;
 
             if (gating) Assess(provider, ok, verdict, test);
             else ReportInformational(provider, ok, verdict, stepSummaryPath, test);
@@ -248,16 +255,24 @@ public static class RealModelGate
     /// seam that lets the real-brain WHOLE-LOOP lanes be gating without a model-capability miss ever reddening main.
     /// </summary>
     public static Task AssessLiveAsync(string provider, Func<Task<(RealModelOutcome Outcome, string Note)>> drive, [CallerMemberName] string? test = null) =>
-        AssessLiveAsync(provider, drive, Environment.GetEnvironmentVariable(StepSummaryEnvVar), test);
+        AssessLiveAsync(provider, drive, Environment.GetEnvironmentVariable(StepSummaryEnvVar), test: test);
 
     /// <summary>Testable core of the three-way <see cref="AssessLiveAsync(string, Func{Task{ValueTuple{RealModelOutcome, string}}})"/> — takes the step-summary path explicitly so a test pins the behaviour without mutating process env. The outcome is ALWAYS reported; the blessed wire asserts only that it is NOT a <see cref="RealModelOutcome.CodeFault"/>; an informational wire never asserts; a gateway infra failure is a non-gating skip.</summary>
-    internal static async Task AssessLiveAsync(string provider, Func<Task<(RealModelOutcome Outcome, string Note)>> drive, string? stepSummaryPath, [CallerMemberName] string? test = null)
+    internal static async Task AssessLiveAsync(string provider, Func<Task<(RealModelOutcome Outcome, string Note)>> drive, string? stepSummaryPath, TimeSpan? attemptDeadline = null, [CallerMemberName] string? test = null)
     {
         ArmModelSink();
 
         try
         {
-            var (outcome, note) = await drive().ConfigureAwait(false);
+            // BOUNDED (Rule 12.10) — same reason as the boolean overload. A bust reports as a CapabilityMiss, which this
+            // policy never gates on: the arm produced no verdict, and a hang is not evidence of a CODE regression.
+            if (await DriveWithinDeadlineAsync(drive, attemptDeadline).ConfigureAwait(false) is not { } verdict)
+            {
+                ReportThreeWay(RealModelOutcome.CapabilityMiss, DidNotConvergeNote(provider, attemptDeadline), stepSummaryPath, test);
+                return;
+            }
+
+            var (outcome, note) = verdict;
 
             ReportThreeWay(outcome, note, stepSummaryPath, test);
 
@@ -315,6 +330,52 @@ public static class RealModelGate
         return int.TryParse(raw, out var n) && n > 0 ? n : DefaultEvalAttempts;
     }
 
+    /// <summary>The env var that overrides the per-attempt DEADLINE for the SINGLE-attempt arms — <see cref="AssessLiveAsync(string, Func{Task{ValueTuple{bool, string}}}, bool)"/>, its three-way sibling, and each <see cref="AssessLiveBestOfNAsync(string, Func{Task{ValueTuple{bool, string}}}, int?)"/> attempt (Rule 8 escape hatch: an operator raises it for an arm that legitimately runs long). Pinned by test.</summary>
+    public const string AttemptDeadlineEnvVar = "CODESPACE_REALMODEL_ATTEMPT_DEADLINE_SECONDS";
+
+    /// <summary>
+    /// The default per-attempt deadline (seconds) for the single-attempt arms. Only the STRICT whole-loop gate was
+    /// bounded (<see cref="DefaultWholeLoopAttemptDeadlineSeconds"/>); every other arm awaited its drive closure
+    /// UNBOUNDED, so one hung agent rode to the CI job's wall-clock cap and killed the whole job — run 33972713055,
+    /// where a wedged CLI session inside the report-only multi-repo arm burned the agent's full 1h default and took
+    /// an innocent sibling arm down with it at 120:00. 1200s (20m) sits well clear of the ~15m a HEALTHY multi-repo
+    /// drive takes (the slowest arm on the lane) while bounding a hang to a sixth of the job cap.
+    /// </summary>
+    public const int DefaultAttemptDeadlineSeconds = 1200;
+
+    /// <summary>The effective per-attempt deadline for the single-attempt arms: the env override when positive + parseable, else <see cref="DefaultAttemptDeadlineSeconds"/> (Rule 8 — read only here).</summary>
+    public static TimeSpan AttemptDeadline()
+    {
+        var raw = Environment.GetEnvironmentVariable(AttemptDeadlineEnvVar)?.Trim();
+
+        return int.TryParse(raw, out var n) && n > 0 ? TimeSpan.FromSeconds(n) : TimeSpan.FromSeconds(DefaultAttemptDeadlineSeconds);
+    }
+
+    /// <summary>
+    /// Await <paramref name="drive"/> bounded by <see cref="AttemptDeadline"/> (Rule 12.10 — every long wait carries an
+    /// explicit timeout). Returns the arm's verdict, or <c>null</c> when the attempt BUSTS the deadline: a hung agent or
+    /// a gateway call that never returned. Mirrors the bound <see cref="AssessLiveWholeLoopAsync(string, Func{Task{ValueTuple{RealModelOutcome, string}}}, int?)"/>
+    /// already has; the CALLER decides how to report the bust, because their verdict vocabularies differ.
+    /// </summary>
+    private static async Task<T?> DriveWithinDeadlineAsync<T>(Func<Task<T>> drive, TimeSpan? attemptDeadline) where T : struct
+    {
+        using var cts = new CancellationTokenSource(attemptDeadline ?? AttemptDeadline());
+
+        try { return await drive().WaitAsync(cts.Token).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (cts.IsCancellationRequested) { return null; }
+    }
+
+    /// <summary>
+    /// The verdict line a deadline BUST reports — Rule 12.10's "name the watched signal AND how to diagnose it". A bust is
+    /// LOUD but NEVER gating on these arms: unlike the strict whole-loop gate they have no best-of-N floor to absorb a slow
+    /// gateway, so redding on one over-long attempt would block main on the owner's gateway being slow — the exact failure
+    /// the gate's infra-is-non-gating rule exists to prevent. It is bounded and surfaced instead of silently killing the job.
+    /// </summary>
+    internal static string DidNotConvergeNote(string provider, TimeSpan? attemptDeadline = null) =>
+        $"{provider} arm did NOT converge within {(attemptDeadline ?? AttemptDeadline()).TotalSeconds:0}s — likely a hung agent CLI or a gateway call that never returned (per-attempt deadline). "
+      + "Reported, ⚠️ NOT red: a single-attempt arm has no best-of-N floor to absorb a slow gateway, so a bust is bounded + surfaced rather than gating. "
+      + $"To diagnose: re-run this arm alone and watch its agent runs' Status/Harness; raise {AttemptDeadlineEnvVar} on the lane if the arm legitimately needs longer.";
+
     /// <summary>
     /// Drive a BOOLEAN live eval (trajectory / arbiter) with the SAME best-of-N capability-floor as the whole-loop gate:
     /// the BLESSED wire passes when ANY of <paramref name="attempts"/> independent attempts is Ok (flake ~p^N), gating only
@@ -324,10 +385,10 @@ public static class RealModelGate
     /// self-contained per call (a fresh run / fresh deadline), since it is invoked up to N times.
     /// </summary>
     public static Task AssessLiveBestOfNAsync(string provider, Func<Task<(bool Ok, string Verdict)>> driveOnce, int? attempts = null, [CallerMemberName] string? test = null) =>
-        AssessLiveBestOfNAsync(provider, driveOnce, attempts ?? EvalAttempts(), Environment.GetEnvironmentVariable(StepSummaryEnvVar), test);
+        AssessLiveBestOfNAsync(provider, driveOnce, attempts ?? EvalAttempts(), Environment.GetEnvironmentVariable(StepSummaryEnvVar), test: test);
 
     /// <summary>Testable core of the boolean best-of-N eval — explicit budget + step-summary path so a test pins the logic with no live call. Informational wire → one reported attempt; blessed wire → any Ok passes, all-fail gates (with the per-attempt verdicts), infra is a non-gating skip that does not consume a slot.</summary>
-    internal static async Task AssessLiveBestOfNAsync(string provider, Func<Task<(bool Ok, string Verdict)>> driveOnce, int attempts, string? stepSummaryPath, [CallerMemberName] string? test = null)
+    internal static async Task AssessLiveBestOfNAsync(string provider, Func<Task<(bool Ok, string Verdict)>> driveOnce, int attempts, string? stepSummaryPath, TimeSpan? attemptDeadline = null, [CallerMemberName] string? test = null)
     {
         ArmModelSink();
 
@@ -335,7 +396,13 @@ public static class RealModelGate
         {
             try
             {
-                var (ok, verdict) = await driveOnce().ConfigureAwait(false);
+                if (await DriveWithinDeadlineAsync(driveOnce, attemptDeadline).ConfigureAwait(false) is not { } attempt)   // BOUNDED (Rule 12.10)
+                {
+                    ReportInformational(provider, false, DidNotConvergeNote(provider, attemptDeadline), stepSummaryPath, test);
+                    return;
+                }
+
+                var (ok, verdict) = attempt;
                 ReportInformational(provider, ok, verdict, stepSummaryPath, test);
             }
             catch (Exception ex) when (IsGatewayInfraFailure(ex))
@@ -355,7 +422,16 @@ public static class RealModelGate
         {
             try
             {
-                var (ok, verdict) = await driveOnce().ConfigureAwait(false);
+                // BOUNDED (Rule 12.10). A bust does NOT consume a capability slot — an attempt that never returned
+                // produced no verdict, so counting it as a model failure would gate the blessed wire on a hang. Same
+                // routing as gateway infra: still bounded by maxAttempts, and a SKIP if nothing else was ever measured.
+                if (await DriveWithinDeadlineAsync(driveOnce, attemptDeadline).ConfigureAwait(false) is not { } attempt)
+                {
+                    infraSkip = ReportInfraSkip(provider, new TimeoutException(DidNotConvergeNote(provider, attemptDeadline)), stepSummaryPath);
+                    continue;
+                }
+
+                var (ok, verdict) = attempt;
 
                 ReportInformational(provider, ok, verdict, stepSummaryPath, test, informational: false);   // every attempt's verdict surfaced — a persistent miss is visible. NOT "informational": this is the gating wire's attempt N.
 

@@ -64,6 +64,23 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
     private const string NodeId = "sup";
     private const string Provider = "Anthropic";   // the blessed brain wire (RealModelGate gates it)
 
+    /// <summary>
+    /// This lane's wall-clock cap for a spawned agent whose CLI is one of this suite's FAKES — a FIXTURE value, NOT the
+    /// production default. <c>AgentTask.TimeoutSeconds</c> defaults to 3600 (1h), the right production floor but LONGER
+    /// THAN THE WHOLE GATE ATTEMPT it runs inside: in run 33972713055 one wedged CLI session sat on that full hour and
+    /// the supervisor-arcs job hit its 120-min cap for the first time, killing an innocent sibling arm at the cut. A fake
+    /// agent is a <c>/bin/sh</c> script that exits in milliseconds, so 300s leaves orders of magnitude of headroom while
+    /// keeping a wedge inside a single gate attempt (<c>RealModelGate.DefaultWholeLoopAttemptDeadlineSeconds</c> = 600).
+    /// </summary>
+    internal const int FakeAgentTimeoutSeconds = 300;
+
+    /// <summary>The same cap for the ONE arm whose spawned agent is a REAL claude CLI solving a real task (<see cref="The_real_coding_agent_solves_a_goal_relevance_task_authored_by_the_live_model"/>). Larger than the fake cap because real coding legitimately takes minutes — but that arm gates through the STRICT whole-loop deadline (600s), so this must fit inside THAT, not merely inside the 3600s production default. Its task (make <c>sh solution.sh 7 5</c> print 12) takes a real agent well under a minute, so 480s is many multiples of headroom.</summary>
+    internal const int RealAgentTimeoutSeconds = 480;
+
+    /// <summary>The <c>agentProfile</c> object this lane's supervisor config carries. Internal + static so the lane-timeout pin asserts the REAL fragment rather than a copy of it — a mirror that can drift is not a pin (Rule 12.5's spirit).</summary>
+    internal static string AgentProfileJson(Guid repoId, int timeoutSeconds, string realAgentFields, string relatedLine) =>
+        $$"""{ "repositoryId": "{{repoId}}", "pushBranch": true, "integrateBranches": true, "timeoutSeconds": {{timeoutSeconds}}{{realAgentFields}}{{relatedLine}} }""";
+
     private readonly PostgresFixture _fixture;
 
     public RealModelSupervisorWholeLoopE2ETests(PostgresFixture fixture)
@@ -1607,6 +1624,40 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
     {
         await RunEngineAsync(runId);
         await DrainUntilSettledAsync(runId);
+        await AssertSpawnedAgentsRanTheArmedFakeAsync(runId);
+    }
+
+    /// <summary>
+    /// The fixture-level drift detector for the lane's "the spawned agent is a TRUSTED test fake" premise, asserted on
+    /// EVERY arm because it rides <see cref="DriveUntilSettledAsync"/> rather than each arm's own evaluator.
+    ///
+    /// <para>The premise was FALSE and nothing said so. The brain credential is Anthropic, the live model authors
+    /// <c>harness: codex-cli</c>, and <c>HarnessModelReconciler</c> rewrites that to <c>claude-code</c> so the agent can
+    /// authenticate — so a codex-only fake left every spawned agent running the REAL <c>claude</c> binary on the gateway.
+    /// Run 33972713055 did exactly that (41 reconcile warnings) and one of those real sessions wedged for the agent's
+    /// full 1h default, taking the 120-min job down with it. Arming both env vars fixes it TODAY; this is what stops the
+    /// next reconciler change from silently un-fixing it.</para>
+    ///
+    /// <para>Derived from the LIVE process env (<c>FakeAgentCliDialect.ArmedFakeHarnessKinds</c>), not from a fake's own
+    /// declaration, so it measures what the runner would actually spawn. No fake armed → EMPTY → no assertion: that is
+    /// the real-coding arm, which legitimately expects the real binary. Asserted HARD (a lost premise is a defect in the
+    /// ARM, not model variance) — report-only arms deliberately let a Shouldly throw through for exactly this reason.</para>
+    /// </summary>
+    private async Task AssertSpawnedAgentsRanTheArmedFakeAsync(Guid runId)
+    {
+        var stubbedKinds = FakeAgentCliDialect.ArmedFakeHarnessKinds();
+        if (stubbedKinds.Count == 0) return;   // no fake armed → the REAL-CLI arm; nothing to lose control of
+
+        using var verify = _fixture.BeginScope();
+        var harnesses = await verify.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking()
+            .Where(r => r.WorkflowRunId == runId).Select(r => r.Harness).ToListAsync();
+
+        var (lostControl, census) = RealModelGate.ClassifyHarnessControl(harnesses, stubbedKinds);
+
+        lostControl.ShouldBeFalse(
+            $"this arm armed a fake CLI on [{string.Join(", ", stubbedKinds)}] but the run dispatched {census} — an agent on an unarmed harness ran a REAL CLI. "
+          + "Every deterministic-fake premise this arm rests on is void, and its verdict would be about something the test never controlled. "
+          + "To diagnose: check the run's supervisor decisions for the authored harness and the HarnessModelReconciler warnings that rewrote it, then arm that harness's command env var in the fake.");
     }
 
     /// <summary>Drain a resume's re-dispatch, then ride out any park it hit — the human-resume counterpart of <see cref="DriveUntilSettledAsync"/> (the resume drives the engine itself, so this must not re-enter it).</summary>
@@ -1849,7 +1900,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             {
               "goal": "{{effectiveGoal}}",
               "supervisorModelId": "{{brainModelId}}",
-              "agentProfile": { "repositoryId": "{{repoId}}", "pushBranch": true, "integrateBranches": true{{realAgentFields}}{{relatedLine}} },
+              "agentProfile": {{AgentProfileJson(repoId, agentCredId is null ? FakeAgentTimeoutSeconds : RealAgentTimeoutSeconds, realAgentFields, relatedLine)}},
               "acceptanceChecks": ["sh", "check.sh"]{{conversationLine}}
             }
             """;
