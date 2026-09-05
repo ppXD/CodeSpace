@@ -138,8 +138,8 @@ public class SubtaskAwareFakeCliDriftTests
             File.WriteAllText(script, FileWritingFakeCli.ScriptBody);
             File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
 
-            var codexStdout = RunScript(dir, script, "exec", "--json", goal);
-            var claudeStdout = RunScript(dir, script, "--print", "--output-format", "stream-json", goal);
+            var codexStdout = RunScript(dir, script, CodexArgv(goal));
+            var claudeStdout = RunScript(dir, script, ClaudeArgv(goal));
 
             var codex = new CodexHarness();
             var codexResult = codex.BuildResult(codexStdout.SelectMany(codex.ParseEvents).ToList(), exitCode: 0, "");
@@ -177,7 +177,7 @@ public class SubtaskAwareFakeCliDriftTests
             File.WriteAllText(script, FileWritingFakeCli.ScriptBody);
             File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
 
-            RunScript(dir, script, "exec", "--json", goal);   // asserts exit 0 internally — a failed write now exits 90 and fails HERE
+            RunScript(dir, script, CodexArgv(goal));   // asserts exit 0 internally — a failed write now exits 90 and fails HERE
 
             var written = Directory.GetFiles(dir, FileWritingFakeCli.FilePrefix + "*.txt");
             written.ShouldHaveSingleItem("the truncated slug keeps a model-length goal writable — the whole point of the fix");
@@ -220,8 +220,8 @@ public class SubtaskAwareFakeCliDriftTests
             var codex = new CodexHarness();
             var claude = new ClaudeCodeHarness();
 
-            var codexStdout = RunScript(dir, script, expectedExit, "exec", "--json", goal);
-            var claudeStdout = RunScript(dir, script, expectedExit, "--print", "--output-format", "stream-json", goal);
+            var codexStdout = RunScript(dir, script, expectedExit, CodexArgv(goal));
+            var claudeStdout = RunScript(dir, script, expectedExit, ClaudeArgv(goal));
 
             var codexResult = codex.BuildResult(codexStdout.SelectMany(codex.ParseEvents).ToList(), expectedExit, "");
             var claudeResult = claude.BuildResult(claudeStdout.SelectMany(claude.ParseEvents).ToList(), expectedExit, "");
@@ -268,8 +268,8 @@ public class SubtaskAwareFakeCliDriftTests
 
             var codex = new CodexHarness();
             var claude = new ClaudeCodeHarness();
-            var codexResult = codex.BuildResult(RunScript(dir, script, 0, "exec", "--json", resolverGoal).SelectMany(codex.ParseEvents).ToList(), 0, "");
-            var claudeResult = claude.BuildResult(RunScript(dir, script, 0, "--print", "--output-format", "stream-json", resolverGoal).SelectMany(claude.ParseEvents).ToList(), 0, "");
+            var codexResult = codex.BuildResult(RunScript(dir, script, 0, CodexArgv(resolverGoal)).SelectMany(codex.ParseEvents).ToList(), 0, "");
+            var claudeResult = claude.BuildResult(RunScript(dir, script, 0, ClaudeArgv(resolverGoal)).SelectMany(claude.ParseEvents).ToList(), 0, "");
 
             codexResult.Summary.ShouldContain(SupervisorResolverRecipe.TestsPassedMarker);
             claudeResult.Summary.ShouldBe(codexResult.Summary, "the resolver's verified marker must survive verbatim in BOTH dialects, or the resolution stops grading Verified on a reconciled harness");
@@ -279,6 +279,24 @@ public class SubtaskAwareFakeCliDriftTests
             try { Directory.Delete(dir, recursive: true); } catch { /* best-effort */ }
         }
     }
+
+    /// <summary>The EXACT argv Codex would hand the fake for <paramref name="goal"/>.</summary>
+    private static string[] CodexArgv(string goal) => Argv(new CodexHarness(), CodexHarness.HarnessKind, goal);
+
+    /// <summary>The EXACT argv Claude Code would hand the fake for <paramref name="goal"/>.</summary>
+    private static string[] ClaudeArgv(string goal) => Argv(new ClaudeCodeHarness(), ClaudeCodeHarness.HarnessKind, goal);
+
+    /// <summary>
+    /// Derive a dialect's argv from the harness's OWN <c>BuildInvocation</c> rather than hand-writing it (Rule 12.5: a
+    /// mirror that can drift is not a pin). The two things every fake script decides are decided FROM this argv — the
+    /// <c>$1</c> dialect discriminator and the last-positional goal extraction — so a hand-written short form tests the
+    /// script against a shape production never sends: the real claude argv carries <c>--verbose</c> and an
+    /// <c>--append-system-prompt</c> payload between the seed and the trailing prompt, and the real codex argv carries
+    /// its <c>-c</c> overrides. A harness that ever stopped putting the prompt last would red HERE instead of silently
+    /// feeding every fake a flag as its goal.
+    /// </summary>
+    private static string[] Argv(IAgentHarness harness, string kind, string goal) =>
+        harness.BuildInvocation(new AgentTask { Goal = goal, Harness = kind }).Args.ToArray();
 
     private static string[] RunScript(string cwd, string script, params string[] args) => RunScript(cwd, script, 0, args);
 
