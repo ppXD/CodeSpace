@@ -961,6 +961,34 @@ public sealed class SupervisorAcceptanceFoldFlowTests
             .ShouldBeNull("running a test argv over a directory of captured documents is a CATEGORY error — the skip is the honest answer");
     }
 
+    /// <summary>
+    /// The operator's floor is ALWAYS a bare TestsPass argv, so a branchless run cannot run it — and a MANDATORY gate
+    /// that never ran may not be discharged by the model gate's pass. Recording "accepted" there would be strictly
+    /// worse than the pre-C1 skip: the operator's own check would read as satisfied by a check it is not. The skip
+    /// stands, annotated with which gate went unanswered.
+    /// </summary>
+    [Fact]
+    public async Task A_branchless_stop_with_an_operator_floor_records_no_pass_at_all()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var agentRunId = Guid.NewGuid();
+
+        await SeedAnalysisSpawnDecisionAsync(runId, teamId, agentRunId);
+        await SeedBranchlessMergeDecisionAsync(runId, teamId);
+        await SeedCapturedDeliverableAsync(teamId, runId, agentRunId, "DELIVERABLE.md", "# Findings\nThe two runtimes differ in their memory model.");
+
+        using var scope = _fixture.BeginScope();
+        await RunStopTurnWithGraderAsync(runId, teamId, BranchlessGoalConfig(acceptanceChecks: new[] { "dotnet", "test" }), new[] { "DELIVERABLE.md" },
+            scope.Resolve<ISupervisorAcceptanceGrader>(), BenchmarkGradingKind.ArtifactPresent);
+
+        var outcome = await StopLedgerOutcomeAsync(runId, teamId);
+
+        SupervisorOutcome.ReadAcceptanceGradePassed(outcome)
+            .ShouldBeNull("the model gate really passed against the captured world — but the operator's mandatory floor never ran, so this stop is UNGRADED, not accepted");
+        outcome.ShouldContain(SupervisorTurnService.OperatorFloorNotGraded, customMessage: "the tape names the gate that was left unanswered, which the bare skip would have lost");
+    }
+
     /// <summary>A spawn whose unit did ANALYSIS: it changed no file, published no branch and carries no per-unit grade — the shape whose terminal stop C1 used to leave ungraded.</summary>
     private async Task SeedAnalysisSpawnDecisionAsync(Guid runId, Guid teamId, Guid agentRunId)
     {
@@ -1006,8 +1034,8 @@ public sealed class SupervisorAcceptanceFoldFlowTests
         return await RunStopTurnWithGraderAsync(runId, teamId, BranchlessGoalConfig(), command, scope.Resolve<ISupervisorAcceptanceGrader>(), kind);
     }
 
-    /// <summary>A run with no repository and no operator floor — every stop gate it has is the model's own.</summary>
-    private static SupervisorGoalConfig BranchlessGoalConfig() => new() { Goal = Goal, AcceptanceChecks = null, AgentProfile = new SupervisorAgentProfile() };
+    /// <summary>A run with no repository. With no <paramref name="acceptanceChecks"/> (the default) every stop gate it has is the model's own; with them, the operator's mandatory floor rides too — and a branchless run cannot run it.</summary>
+    private static SupervisorGoalConfig BranchlessGoalConfig(IReadOnlyList<string>? acceptanceChecks = null) => new() { Goal = Goal, AcceptanceChecks = acceptanceChecks, AgentProfile = new SupervisorAgentProfile() };
 
     /// <summary>Capture one real deliverable for <paramref name="agentRunId"/>: CAS bytes plus the typed manifest row the branchless grade rebuilds its world from.</summary>
     private async Task SeedCapturedDeliverableAsync(Guid teamId, Guid runId, Guid agentRunId, string path, string content)

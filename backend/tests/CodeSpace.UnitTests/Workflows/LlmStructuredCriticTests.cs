@@ -159,6 +159,25 @@ public class LlmStructuredCriticTests
         LlmStructuredCritic.ReviewCallKind.ShouldBe("critic.review");
     }
 
+    [Fact]
+    public async Task A_request_that_names_its_own_call_kind_records_under_THAT_kind()
+    {
+        // The OUTPUT review is the only rung that examines a RESULT; the plan critic and the decision critic examine
+        // an intention. Collapsing all three onto "critic.review" made a decision-only run indistinguishable from a
+        // reviewed result — so a caller may name its own kind, and the critic honours it instead of its own default.
+        var captured = new List<string?>();
+        var critic = new LlmStructuredCritic(new SingleClientRegistry(new KindCapturingClient(captured)), new PickByRowSelector(), new CapturingLogger<LlmStructuredCritic>());
+
+        var scope = new Core.Services.Workflows.Llm.LlmCallScope(Guid.NewGuid(), Guid.NewGuid(), "agent", "", "agent.critic", Logger: null!, Offloader: null!);
+
+        using (Core.Services.Workflows.Llm.LlmCallContext.Push(scope))
+            await critic.ReviewAsync(new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "agent answer", Artifact = "a", Goal = "g", CallKind = LlmStructuredCritic.OutputReviewCallKind }, Guid.NewGuid(), reviewerModelId: Guid.NewGuid(), CancellationToken.None);
+
+        string.Join("|", captured).ShouldBe(LlmStructuredCritic.OutputReviewCallKind, "the request's own kind wins over the critic's default");
+        LlmStructuredCritic.OutputReviewCallKind.ShouldBe("critic.output");
+        LlmStructuredCritic.OutputReviewCallKind.ShouldNotBe(LlmStructuredCritic.ReviewCallKind, "a probe for a reviewed RESULT must not be satisfied by a reviewed plan or decision");
+    }
+
     // ── D5: a review that did NOT run says so — durably, where a user can see it ──
 
     [Fact]

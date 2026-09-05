@@ -142,7 +142,7 @@ public static class AgentAcceptanceContract
 
     public static bool IsInfraFailure(string? detail, bool workPresent)
     {
-        var effective = StripRepoTag(detail);
+        var effective = StripGateLabel(StripRepoTag(detail));
 
         return effective is not null
                && (effective.StartsWith("grade-error:", StringComparison.Ordinal)
@@ -181,6 +181,27 @@ public static class AgentAcceptanceContract
 
         return detail;
     }
+
+    /// <summary>
+    /// The stop-grade gate labels a combined verdict's detail is prefixed with — the SAME reason
+    /// <see cref="StripRepoTag"/> exists, one tag further out. A stop's gates compose their detail as
+    /// <c>[repo 'alias': ]&lt;gate&gt;: &lt;detail&gt;</c>, so a missing rubric judge reaches classification as
+    /// <c>model-check: grade-error: …</c> and read as GENUINE — buying agent retries for an instrument that cannot
+    /// run. Pinned HERE (Rule 8) because the producer (the stop grade) and this consumer must never drift apart.
+    /// </summary>
+    public const string OperatorFloorGateLabel = "operator-floor";
+
+    /// <inheritdoc cref="OperatorFloorGateLabel"/>
+    public const string ModelCheckGateLabel = "model-check";
+
+    /// <summary>Strip at most ONE leading gate label (<see cref="OperatorFloorGateLabel"/> / <see cref="ModelCheckGateLabel"/>); every other prefix stays significant. Applied AFTER the repo tag, which is the outer one.</summary>
+    private static string? StripGateLabel(string? detail) => detail switch
+    {
+        null => null,
+        _ when detail.StartsWith($"{OperatorFloorGateLabel}: ", StringComparison.Ordinal) => detail[(OperatorFloorGateLabel.Length + 2)..],
+        _ when detail.StartsWith($"{ModelCheckGateLabel}: ", StringComparison.Ordinal) => detail[(ModelCheckGateLabel.Length + 2)..],
+        _ => detail,
+    };
 
     /// <summary>
     /// Validate an AUTHORED spec's kind-specific completeness (triad S7) — the single rule the plan-map node applies

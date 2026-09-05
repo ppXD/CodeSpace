@@ -31,8 +31,16 @@ public sealed class LlmStructuredCritic : IStructuredCritic, IScopedDependency
         _logger = logger;
     }
 
-    /// <summary>The interaction kind every critic review call records under (the journal's intent label) — pinned by a unit test.</summary>
+    /// <summary>The interaction kind a critic review call records under by default (the journal's intent label) — pinned by a unit test.</summary>
     public const string ReviewCallKind = "critic.review";
+
+    /// <summary>
+    /// The kind the OUTPUT review names via <see cref="CriticRequest.CallKind"/> — the one rung that examines a
+    /// produced RESULT rather than an intention (a plan, a decision). Distinct from <see cref="ReviewCallKind"/> so a
+    /// consumer asking "did anything check what this run produced?" cannot be answered yes by a decision review.
+    /// Pinned by a unit test (Rule 8) — the Room's ledger probe is built off this const.
+    /// </summary>
+    public const string OutputReviewCallKind = "critic.output";
 
     /// <summary>The payload <c>kind</c> a <see cref="WorkflowRunRecordTypes.ReviewSkipped"/> record carries — the sibling of <see cref="ReviewCallKind"/> for the review that did NOT happen. Pinned by a unit test (Rule 8).</summary>
     public const string SkippedCallKind = "critic.skipped";
@@ -44,9 +52,10 @@ public sealed class LlmStructuredCritic : IStructuredCritic, IScopedDependency
     {
         // Re-label the ambient recording scope for the duration of the review — the critic's model call records as
         // "critic.review" instead of inheriting its caller's kind ("supervisor.decision", a planner node's type key),
-        // so the run journal can say WHAT the call was doing. One nesting here covers EVERY critic caller. No ambient
-        // scope (a call outside any run) ⇒ nothing to re-label.
-        using var relabel = LlmCallContext.Current is { } ambient ? LlmCallContext.Push(ambient with { Kind = ReviewCallKind }) : null;
+        // so the run journal can say WHAT the call was doing. One nesting here covers EVERY critic caller. A request
+        // that names its OWN kind keeps it (the output review's "critic.output" — the one rung judging a RESULT). No
+        // ambient scope (a call outside any run) ⇒ nothing to re-label.
+        using var relabel = LlmCallContext.Current is { } ambient ? LlmCallContext.Push(ambient with { Kind = request.CallKind ?? ReviewCallKind }) : null;
 
         // NEVER throws (cancellation aside) — the caller relies on always getting a verdict (a failed review = fall back
         // to the original output). Any failure of resolution / the brain call / the parse returns a Failed verdict.

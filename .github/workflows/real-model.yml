@@ -418,6 +418,10 @@ jobs:
         #   ~RealModelDeliveryGate → H1's adjudication arc (RealModelDeliveryGateE2ETests): a live brain under a
         #     patch-only repo × required-PR contract must park on the gate's card, buy ONE re-attempt with the human's
         #     answer, and terminalize honestly — vacuous Success / re-park-after-adjudication red as CodeFault.
+        #   ~RealModelAnswerReview → C1's live gate (RealModelAnswerReviewE2ETests): a real `claude` answers a QUESTION
+        #     task with no repository, so it produces no diff — the shape whose output review the gate used to skip
+        #     outright — and the critic's verdict must land on the run's ledger. [Surface=Engine], needs Postgres and
+        #     the real coding CLI, so it belongs on this job rather than the credential-only sibling.
         # GATING on the real-model-DROVE-to-completion criterion: the HEADLINE drive→accept arc HARD-fails main unless the
         # live model drove the whole arc to the real integrated+accepted head (Drove). A CAPABILITY MISS (the model RAN but
         # parked short) now REDs — made flake-safe by a bounded best-of-N capability-floor (a fresh run per attempt; gates
@@ -430,7 +434,7 @@ jobs:
         run: >
           dotnet test backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
           --no-restore
-          --filter "FullyQualifiedName~RealModelSession|FullyQualifiedName~RealModelPlanner|FullyQualifiedName~RealModelDeliveryGate|FullyQualifiedName~RealModelSpecPreview"
+          --filter "FullyQualifiedName~RealModelSession|FullyQualifiedName~RealModelPlanner|FullyQualifiedName~RealModelDeliveryGate|FullyQualifiedName~RealModelSpecPreview|FullyQualifiedName~RealModelAnswerReview"
           --logger "console;verbosity=normal"
           --logger "trx;LogFileName=real-model-wholeloop-aux.trx"
           --results-directory backend/TestResults
@@ -444,6 +448,7 @@ jobs:
         run: |
           bash .github/scripts/assert-every-filter-clause-ran.sh \
             backend/TestResults/real-model-wholeloop-aux.trx \
+            RealModelAnswerReview \
             RealModelDeliveryGate \
             RealModelPlanner \
             RealModelSession \

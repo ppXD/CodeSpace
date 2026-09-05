@@ -148,4 +148,24 @@ public class RoomResultVerdictTests
         verification.Verified.ShouldBe(true);
         verification.Note.ShouldBeNull("a verified card is byte-identical to before — the chip exists only for the unexamined one");
     }
+
+    [Fact]
+    public void A_success_whose_only_grade_read_the_stop_summary_is_marked_unverified_with_its_own_copy()
+    {
+        // A prose-judged pass IS a verdict — it decides Solved exactly as before — but the model's account of its own
+        // work is not evidence about the work. Presenting it as "verified" would launder the weakest grade the system
+        // can produce into the strongest claim the card can make.
+        var verification = RoomProjector.Verification(graded: false, criticReviewed: false, judgedSummary: true);
+
+        verification.Verified.ShouldBe(false);
+        verification.Note.ShouldBe("Unverified — judged from the stop summary", "the card says WHICH silence it is, not just that there is one");
+    }
+
+    [Fact]
+    public void A_summary_judged_stop_alongside_a_real_check_is_verified()
+    {
+        // A unit grade or an output critic examined a real result; the prose grade riding alongside takes nothing away.
+        RoomProjector.Verification(graded: true, criticReviewed: false, judgedSummary: true).Verified.ShouldBe(true);
+        RoomProjector.Verification(graded: false, criticReviewed: true, judgedSummary: true).Verified.ShouldBe(true);
+    }
 }

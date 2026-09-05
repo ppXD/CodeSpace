@@ -2226,12 +2226,15 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         var agentReviewed = !verdict.Failed;
 
-        // Built ONCE — the ladder rung and the co-sign judge the SAME artifact, and a text-only render costs one
-        // bounded read of the captured deliverables that must not be paid twice.
-        var request = await BuildReviewRequestAsync(task, result, run, cancellationToken).ConfigureAwait(false);
+        // Built LAZILY, and at most ONCE. The two consumers below are mutually exclusive (the model rung runs only
+        // when the agent rung failed; the co-sign only when it succeeded AND approved), so an agent DISAPPROVAL needs
+        // no request at all — and building one eagerly charged that path a manifest listing plus a blob read per
+        // captured deliverable for a render nobody would look at. Memoized so a future second consumer still pays once.
+        CriticRequest? built = null;
+        async Task<CriticRequest> RequestAsync() => built ??= await BuildReviewRequestAsync(task, result, run, cancellationToken).ConfigureAwait(false);
 
         if (verdict.Failed)
-            verdict = await ReviewRecordedAsync(request, run, task.ReviewerModelId, cancellationToken).ConfigureAwait(false);
+            verdict = await ReviewRecordedAsync(await RequestAsync().ConfigureAwait(false), run, task.ReviewerModelId, cancellationToken).ConfigureAwait(false);
 
         // D② approve co-sign: an AGENT reviewer's APPROVAL gets a cheap independent MODEL co-check before it counts.
         // The reviewer agent READS the produced tree — hostile committed content could try to instruct it to approve
@@ -2241,7 +2244,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // DISAPPROVING agent verdict needs no co-sign (the worst case of a wrong block is one wasted revise round).
         if (agentReviewed && verdict.Approved)
         {
-            var coSign = await ReviewRecordedAsync(request, run, task.ReviewerModelId, cancellationToken).ConfigureAwait(false);
+            var coSign = await ReviewRecordedAsync(await RequestAsync().ConfigureAwait(false), run, task.ReviewerModelId, cancellationToken).ConfigureAwait(false);
 
             if (!coSign.Failed && !coSign.Approved)
                 verdict = coSign with { Rationale = $"The reviewer agent approved, but the independent model co-check disagreed: {coSign.Rationale}" };
@@ -2332,15 +2335,20 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private static bool HasReviewableOutput(AgentRunResult result) =>
         HasDiff(result) || !string.IsNullOrWhiteSpace(result.Summary) || result.CapturedArtifactCount + result.UndeclaredArtifactCount > 0;
 
-    /// <summary>C1 — the critic's request for THIS result: the unchanged change render for a diff-bearing run, else the answer render judged against the goal plus the task's own acceptance criteria (an answer's "done" is its contract, not its file list).</summary>
+    /// <summary>
+    /// C1 — the critic's request for THIS result: the unchanged change render for a diff-bearing run, else the answer
+    /// render judged against the goal plus the task's own acceptance criteria (an answer's "done" is its contract, not
+    /// its file list). BOTH shapes name <see cref="LlmStructuredCritic.OutputReviewCallKind"/>: this is the one review
+    /// rung that examines a produced RESULT, and the Room's "did anything check this?" probe reads exactly that kind.
+    /// </summary>
     private async Task<CriticRequest> BuildReviewRequestAsync(AgentTask task, AgentRunResult result, AgentRun run, CancellationToken cancellationToken)
     {
         if (HasDiff(result))
-            return new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "agent change", Artifact = RenderChange(result), Goal = task.Goal };
+            return new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "agent change", Artifact = RenderChange(result), Goal = task.Goal, CallKind = LlmStructuredCritic.OutputReviewCallKind };
 
         var deliverables = await ReadCapturedDeliverablesAsync(result, run, cancellationToken).ConfigureAwait(false);
 
-        return new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "agent answer", Artifact = RenderAnswer(result, deliverables), Goal = ReviewGoal(task) };
+        return new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "agent answer", Artifact = RenderAnswer(result, deliverables), Goal = ReviewGoal(task), CallKind = LlmStructuredCritic.OutputReviewCallKind };
     }
 
     /// <summary>The goal the critic judges an ANSWER against — the task goal plus the acceptance criteria the operator/planner authored, so "is this done?" is asked against the stated contract rather than against the prose alone. No contract ⇒ the goal verbatim.</summary>

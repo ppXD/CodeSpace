@@ -913,6 +913,39 @@ public class SupervisorAcceptanceGraderTests
         AgentAcceptanceContract.IsInfraFailure("repo 'web': no-branch-or-repo", workPresent: false).ShouldBeFalse();
     }
 
+    [Theory]
+    // A stop's combined verdict prefixes its detail with the GATE that failed, and the multi-repo path prefixes the
+    // repo on top of that. Both are machine-authored DISPLAY tags, so classification has to see through both — or a
+    // missing rubric judge arrives as "model-check: grade-error: …", reads GENUINE, and buys agent retries for an
+    // instrument that cannot run no matter how many times the agent tries again.
+    [InlineData("model-check: grade-error: no rubric judge is registered to read the stop summary")]
+    [InlineData("operator-floor: grade-error: boom")]
+    [InlineData("repo 'web': model-check: grade-error: boom")]
+    [InlineData("repo 'web': operator-floor: clone-failed: refused")]
+    [InlineData("model-check: tests-timed-out")]
+    public void A_gate_labelled_infra_detail_classifies_as_infra(string detail)
+    {
+        AgentAcceptanceContract.IsInfraFailure(detail, workPresent: false).ShouldBeTrue("the gate label is display, not a verdict");
+    }
+
+    [Theory]
+    // ...and only the two real gate labels are stripped. Every other prefix stays significant, or the strip becomes a
+    // way to launder a genuine failure into an infra skip.
+    [InlineData("model-check: tests-failed-exit-1")]
+    [InlineData("operator-floor: rubric 0.33 < 1.00 — not met: [sources]")]
+    [InlineData("some-other-label: grade-error: boom")]
+    public void A_gate_labelled_genuine_detail_stays_genuine(string detail)
+    {
+        AgentAcceptanceContract.IsInfraFailure(detail, workPresent: false).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void The_gate_labels_are_pinned_to_the_strings_the_stop_grade_actually_writes()
+    {
+        AgentAcceptanceContract.OperatorFloorGateLabel.ShouldBe("operator-floor");
+        AgentAcceptanceContract.ModelCheckGateLabel.ShouldBe("model-check");
+    }
+
     [Fact]
     public void A_repo_tagged_infra_detail_classifies_InfraUnknown_in_the_typed_layer()
     {

@@ -99,7 +99,7 @@ public sealed class RealModelAnswerReviewE2ETests
             var reviewed = await read.Resolve<CodeSpaceDbContext>().WorkflowRunRecord.AsNoTracking()
                 .CountAsync(r => r.RunId == workflowRunId
                                  && r.RecordType == WorkflowRunRecordTypes.InteractionCompleted
-                                 && EF.Functions.JsonContains(r.PayloadJson, $$"""{"kind":"{{LlmStructuredCritic.ReviewCallKind}}"}"""), CancellationToken.None);
+                                 && EF.Functions.JsonContains(r.PayloadJson, $$"""{"kind":"{{LlmStructuredCritic.OutputReviewCallKind}}"}"""), CancellationToken.None);
 
             var verdict = reviewed > 0
                 ? $"{Provider} '{model}': the text-only answer WAS reviewed — {reviewed} recorded critic verdict(s) on the run's ledger"

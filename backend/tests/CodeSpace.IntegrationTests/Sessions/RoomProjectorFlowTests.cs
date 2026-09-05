@@ -6,6 +6,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Plans;
+using CodeSpace.Core.Services.Review;
 using CodeSpace.Core.Services.Sessions.Room;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Artifacts;
@@ -408,6 +409,59 @@ public class RoomProjectorFlowTests
 
         result.Verified.ShouldBe(true);
         result.VerificationNote.ShouldBeNull("a checked result renders byte-identically to before C1");
+    }
+
+    [Fact]
+    public async Task A_run_whose_only_critic_review_examined_a_DECISION_is_still_unverified()
+    {
+        // Every critic caller used to record under one label, so a supervisor run whose plan critic or decision critic
+        // ran — reviewing an INTENTION, before the work existed — satisfied the "did anything check this?" probe and
+        // claimed a verified RESULT with nothing having read one. The probe now reads the output critic's own kind.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Reviewed the decision, not the answer");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Which runtime should we pick?", resultSummary: null);
+
+        await SeedStopDecisionAsync(teamId, run, outcome: "completed", summary: "Rust is the safer choice.");
+        await SeedCriticInteractionAsync(run, LlmStructuredCritic.ReviewCallKind);
+
+        var result = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<FinalAnswerBlock>().Single();
+
+        result.Verified.ShouldBe(false, "reviewing the plan or the decision is not reviewing the result");
+        result.VerificationNote.ShouldBe("Unverified — no check ran on this result");
+    }
+
+    [Fact]
+    public async Task A_run_whose_OUTPUT_critic_reviewed_the_result_is_verified()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Reviewed the answer");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Which runtime should we pick?", resultSummary: null);
+
+        await SeedStopDecisionAsync(teamId, run, outcome: "completed", summary: "Rust is the safer choice.");
+        await SeedCriticInteractionAsync(run, LlmStructuredCritic.OutputReviewCallKind);
+
+        var result = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<FinalAnswerBlock>().Single();
+
+        result.Verified.ShouldBe(true, "an approved output review leaves only this interaction row — finding it IS the verification");
+        result.VerificationNote.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task A_stop_graded_only_from_its_own_summary_is_marked_unverified_with_its_own_copy()
+    {
+        // The prose grade is a real verdict — the card stays green and Solved is the grade's — but nothing examined a
+        // produced result, so the strongest claim the card can make is not the one it gets to make.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Judged from its own summary");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Which runtime should we pick?", resultSummary: null);
+
+        await SeedStopDecisionAsync(teamId, run, outcome: "completed", summary: "Rust is the safer choice.", acceptancePassed: true, judgedSummary: true);
+
+        var result = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<FinalAnswerBlock>().Single();
+
+        result.Degraded.ShouldBeFalse("the grade PASSED — this is a qualification of the evidence, not a failed check");
+        result.Verified.ShouldBe(false);
+        result.VerificationNote.ShouldBe("Unverified — judged from the stop summary");
     }
 
     [Fact]
@@ -1099,7 +1153,21 @@ public class RoomProjectorFlowTests
     }
 
     /// <summary>Stamp a supervisor STOP decision with its { stopped, outcome, summary } outcome — the terminal verb that drives the RESULT card. A non-success outcome (no-decision / no-model) marks a degraded give-up stop. <paramref name="acceptancePassed"/> folds the objective acceptance grade onto the SAME outcome bytes the terminal writer does (<c>SupervisorOutcome.AppendAcceptanceGrade</c>); null leaves the stop ungraded.</summary>
-    private async Task SeedStopDecisionAsync(Guid teamId, Guid runId, string outcome, string summary, bool? acceptancePassed = null)
+    /// <summary>One recorded critic model call on the run's ledger under <paramref name="callKind"/> — the shape the Room's "did anything check this?" probe reads (an APPROVED review leaves nothing else behind).</summary>
+    private async Task SeedCriticInteractionAsync(Guid runId, string callKind)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.WorkflowRunRecord.Add(new WorkflowRunRecord
+        {
+            Id = Guid.NewGuid(), RunId = runId, RecordType = WorkflowRunRecordTypes.InteractionCompleted, NodeId = "sup", IterationKey = "", OccurredAt = DateTimeOffset.UtcNow,
+            PayloadJson = JsonSerializer.Serialize(new { kind = callKind, provider = "Anthropic", model = "reviewer-model" }),
+        });
+        await db.SaveChangesAsync();
+    }
+
+    private async Task SeedStopDecisionAsync(Guid teamId, Guid runId, string outcome, string summary, bool? acceptancePassed = null, bool judgedSummary = false)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -1107,7 +1175,7 @@ public class RoomProjectorFlowTests
         var outcomeJson = JsonSerializer.Serialize(new { stopped = true, outcome, summary });
 
         if (acceptancePassed is { } passed)
-            outcomeJson = SupervisorOutcome.AppendAcceptanceGrade(outcomeJson, passed, detail: "2 of 7 tests failed");
+            outcomeJson = SupervisorOutcome.AppendAcceptanceGrade(outcomeJson, passed, detail: "2 of 7 tests failed", judgedSummary);
 
         db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
         {

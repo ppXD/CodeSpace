@@ -161,7 +161,8 @@ public sealed class AgentRunExecutorOutputReviewTests
         // to the run's (WorkflowRunId, NodeId, IterationKey) cell — so the recording decorator lands its interaction.*
         // on the SAME workflow_run_record ledger as the rest of the run. The executor's base kind is "agent.critic"
         // (asserted here at the executor seam — the fake critic sees it verbatim); the REAL critic re-labels the
-        // RECORDED kind to critic.review (K/L2, pinned at the integration tier) while keeping this identity cell.
+        // RECORDED kind to the request's own critic.output (K/L2, pinned at the integration tier) while keeping this
+        // identity cell.
         var (runId, executor, _, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true });
 
         var workflowRunId = Guid.NewGuid();
@@ -174,7 +175,21 @@ public sealed class AgentRunExecutorOutputReviewTests
         critic.ObservedScope!.RunId.ShouldBe(workflowRunId, "the interaction is bound to the OWNING workflow run, not the agent run id");
         critic.ObservedScope.NodeId.ShouldBe("agent-node");
         critic.ObservedScope.IterationKey.ShouldBe("agent-node#2", "the full cell key rides so a map-branch agent's critic is distinguishable");
-        critic.ObservedScope.Kind.ShouldBe("agent.critic", "the executor's base kind — the real critic re-labels the recorded kind to critic.review on top of this cell");
+        critic.ObservedScope.Kind.ShouldBe("agent.critic", "the executor's base kind — the real critic re-labels the recorded kind to the request's own on top of this cell");
+        critic.ObservedRequest!.CallKind.ShouldBe(LlmStructuredCritic.OutputReviewCallKind,
+            customMessage: "the OUTPUT review names its own kind at THIS call site — the Room's 'did anything check the result?' probe reads critic.output, and the plan/decision critics' generic critic.review must never satisfy it");
+    }
+
+    [Theory]
+    [InlineData(true)]     // a diff-bearing change
+    [InlineData(false)]    // a text-only answer
+    public async Task Both_output_review_shapes_name_the_output_call_kind(bool withDiff)
+    {
+        var (runId, executor, _, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true });
+
+        await executor.ReviewOutputIfEnabledAsync(AnswerTask, withDiff ? SucceededWithChanges() : SucceededWithAnswer(), Run(runId), CancellationToken.None);
+
+        critic.ObservedRequest!.CallKind.ShouldBe(LlmStructuredCritic.OutputReviewCallKind, "a change and an answer are both RESULTS — one probe has to find either");
     }
 
     [Fact]
@@ -345,6 +360,37 @@ public sealed class AgentRunExecutorOutputReviewTests
     }
 
     [Fact]
+    public async Task An_agent_disapproval_of_a_text_only_answer_reads_no_deliverables_at_all()
+    {
+        // The request is built for the two MODEL rungs only (the ladder and the co-sign), and an agent DISAPPROVAL
+        // reaches neither — so the answer render's manifest listing plus one blob read per captured deliverable would
+        // be paid for a string nobody looks at. Building it lazily is the whole point; this is the probe that says so.
+        var (runId, executor, _, critic, store) = NewExecutorWithStore(
+            new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "would have passed" },
+            agentVerdict: new CriticVerdict { Mode = ReviewMode.Gate, Approved = false, Rationale = "the report answers a different question" },
+            deliverables: new[] { new FakeDeliverable("DELIVERABLE.md", "# Comparison") });
+
+        var captured = SucceededWithAnswer() with { CapturedArtifactCount = 1 };
+        var result = await executor.ReviewOutputIfEnabledAsync(AgentReviewedTask, captured, Run(runId), CancellationToken.None);
+
+        result.Status.ShouldBe(AgentRunStatus.NeedsReview, "the agent's verdict still stands — laziness changes cost, never the outcome");
+        critic.Called.ShouldBeFalse("a disapproving agent needs no co-sign, so no model rung consumes a request");
+        store.ListCalls.ShouldBe(0, "and no request was built, so the answer render's artifact reads were never paid");
+    }
+
+    [Fact]
+    public async Task A_model_rung_that_DOES_run_still_reads_the_deliverables_once()
+    {
+        var (runId, executor, _, critic, store) = NewExecutorWithStore(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true }, deliverables: new[] { new FakeDeliverable("DELIVERABLE.md", "# Comparison") });
+
+        var captured = SucceededWithAnswer() with { CapturedArtifactCount = 1 };
+        await executor.ReviewOutputIfEnabledAsync(AnswerTask, captured, Run(runId), CancellationToken.None);
+
+        critic.ObservedRequest!.Artifact.ShouldContain("=== DELIVERABLE.md ===");
+        store.ListCalls.ShouldBe(1, "the lazy build is memoized — a consumed request costs exactly the one read it always did");
+    }
+
+    [Fact]
     public void An_answer_review_goal_without_a_contract_is_the_bare_goal()
     {
         AgentRunExecutor.ReviewGoal(new AgentTask { Goal = "g", Harness = "codex-cli" })
@@ -379,7 +425,13 @@ public sealed class AgentRunExecutorOutputReviewTests
         Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "DELIVERABLE.md" }, Kind = CodeSpace.Messages.Agents.Benchmark.BenchmarkGradingKind.ArtifactPresent },
     };
 
-    private static (Guid RunId, AgentRunExecutor Executor, StubRuns Runs, RecordingCritic Critic) NewExecutor(CriticVerdict verdict, Guid? pendingDecision = null, CriticVerdict? agentVerdict = null, IReadOnlyList<FakeDeliverable>? deliverables = null, bool deliverableReadThrows = false)
+    private static (Guid RunId, AgentRunExecutor Executor, StubRuns Runs, RecordingCritic Critic) NewExecutor(CriticVerdict verdict, Guid? pendingDecision = null, CriticVerdict? agentVerdict = null, IReadOnlyList<FakeDeliverable>? deliverables = null, bool deliverableReadThrows = false) =>
+        NewExecutorWithStore(verdict, pendingDecision, agentVerdict, deliverables, deliverableReadThrows) switch
+        {
+            var (runId, executor, runs, critic, _) => (runId, executor, runs, critic),
+        };
+
+    private static (Guid RunId, AgentRunExecutor Executor, StubRuns Runs, RecordingCritic Critic, FakeArtifactManifestStore Store) NewExecutorWithStore(CriticVerdict verdict, Guid? pendingDecision = null, CriticVerdict? agentVerdict = null, IReadOnlyList<FakeDeliverable>? deliverables = null, bool deliverableReadThrows = false)
     {
         var runId = Guid.NewGuid();
         var runs = new StubRuns(runId);
@@ -387,7 +439,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         var scopeFactory = new FakeScopeFactory(new FakeLedger(pendingDecision), agentVerdict is null ? null : new FakeAgentReviewer(agentVerdict));
         var captured = new FakeArtifactManifestStore(deliverables ?? Array.Empty<FakeDeliverable>(), deliverableReadThrows);
         var executor = new AgentRunExecutor(runs, null!, null!, null!, null!, null!, null!, null!, scopeFactory, null!, critic, null!, captured, null!, captured, new FakeCaptureIntentService(), null!, NullLogger<AgentRunExecutor>.Instance);
-        return (runId, executor, runs, critic);
+        return (runId, executor, runs, critic, captured);
     }
 
     /// <summary>One captured deliverable the answer review reads back — its logical path plus the bytes the store resolves for it.</summary>
@@ -416,8 +468,14 @@ public sealed class AgentRunExecutorOutputReviewTests
             }
         }
 
-        public Task<IReadOnlyList<ArtifactManifest>> ListForAgentRunAsync(Guid agentRunId, Guid teamId, CancellationToken cancellationToken) =>
-            _throws ? throw new InvalidOperationException("the artifact store is unreachable") : Task.FromResult<IReadOnlyList<ArtifactManifest>>(_rows);
+        /// <summary>How many times the answer render listed this run's manifests — 0 proves a path that never built a review request paid nothing for one.</summary>
+        public int ListCalls { get; private set; }
+
+        public Task<IReadOnlyList<ArtifactManifest>> ListForAgentRunAsync(Guid agentRunId, Guid teamId, CancellationToken cancellationToken)
+        {
+            ListCalls++;
+            return _throws ? throw new InvalidOperationException("the artifact store is unreachable") : Task.FromResult<IReadOnlyList<ArtifactManifest>>(_rows);
+        }
 
         public Task<ArtifactBytes?> GetBytesAsync(Guid teamId, Guid artifactId, CancellationToken cancellationToken) =>
             Task.FromResult(_bytesById.TryGetValue(artifactId, out var text)
