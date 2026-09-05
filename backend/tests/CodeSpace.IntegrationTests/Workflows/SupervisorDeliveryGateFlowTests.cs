@@ -281,22 +281,30 @@ public sealed class SupervisorDeliveryGateFlowTests
     }
 
     [Theory]
-    [InlineData(RepositoryPublishMode.PatchOnly, "patch-only")]
-    [InlineData(RepositoryPublishMode.Branch, "no published branch")]
-    public async Task A_zero_target_publish_parks_on_the_card_the_repositorys_publish_mode_earns_then_completes_after_a_human_adjudicates(RepositoryPublishMode publishMode, string expectedWording)
+    [InlineData(RepositoryPublishMode.PatchOnly, true, "patch-only")]
+    [InlineData(RepositoryPublishMode.PatchOnly, false, "no published branch")]
+    [InlineData(RepositoryPublishMode.Branch, true, "no published branch")]
+    public async Task A_zero_target_publish_parks_on_the_card_the_run_earns_then_completes_after_a_human_adjudicates(RepositoryPublishMode publishMode, bool capturedWork, string expectedWording)
     {
         // The defect a REQUIRED real-model gate caught (RealModelDeliveryGateE2ETests): an ORDINARY patch-only run
         // can never resolve a publish target at all — the same policy skips the agent push (no manifest reaches
         // Pushed) and the merge integration (no integratedBranch) — so the forced publish came back EMPTY and the
         // run parked on the "no published branch" card written for a WORK-FREE run, never naming the policy the
-        // human actually has to change. Nothing is seeded to publish here on purpose: the publish mode ALONE has to
-        // decide which card the human gets, and the Branch arm proves the work-free wording still stands for a
-        // repository that permits publishing.
+        // human actually has to change.
+        //
+        // Nothing is ever seeded to PUBLISH here (that is the zero-target premise); what varies is whether the run
+        // captured work at all — a branchless PatchOnly manifest, the row AgentRunExecutor writes when the policy
+        // guard keeps a real diff off a branch. Without one the run produced nothing to open a pull request from,
+        // so the policy card would be a lie AND would blind that same real-model gate, which reads this exact
+        // wording to tell a model capability miss from a swallowed capture pipeline. No staging decision is seeded:
+        // I3 runs first and owns an unpublished frontier, so DC-2b's own rung is what this measures.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var conversationId = await SeedConversationAsync(teamId, userId);
         var repoId = await SeedBoundRepositoryAsync(teamId);
         await SetPublishModeAsync(repoId, publishMode);
         var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        if (capturedWork) await SeedCapturedPatchOnlyManifestAsync(runId, teamId, Guid.NewGuid(), repoId);
 
         var goalConfig = GoalConfig(repoId, new DeliverySpec { OpenPullRequest = true });
         var decider = new AlwaysStopDecider();
@@ -306,15 +314,15 @@ public sealed class SupervisorDeliveryGateFlowTests
 
         var result = JsonSerializer.Deserialize<RoomPullRequestResult>(publish.OutcomeJson!, AgentJson.Options)!;
 
-        if (publishMode == RepositoryPublishMode.PatchOnly)
-            result.PullRequests.Single().Disposition.ShouldBe(RoomPullRequestDisposition.Skipped, "the policy is why nothing resolved — that is a deliberate skip the outcome must record, not a silent empty result");
+        if (publishMode == RepositoryPublishMode.PatchOnly && capturedWork)
+            result.PullRequests.Single().Disposition.ShouldBe(RoomPullRequestDisposition.Skipped, "the policy is why the captured work resolved nothing — that is a deliberate skip the outcome must record, not a silent empty result");
         else
-            result.PullRequests.ShouldBeEmpty("a repository that PERMITS publishing genuinely had nothing to open a pull request from");
+            result.PullRequests.ShouldBeEmpty("with no captured work (or a repository that PERMITS publishing) the run genuinely had nothing to open a pull request from");
 
         var parked = await RunTurnAsync(runId, teamId, decider, goalConfig, conversationId: conversationId);
         parked.DecisionKind.ShouldBe(SupervisorDecisionKinds.AskHuman, "zero resolved targets satisfies nothing — the contract goes to a human either way");
         JsonSerializer.Deserialize<SupervisorAskHumanPayload>(parked.PayloadJson, AgentJson.Options)!
-            .Question.ShouldContain(expectedWording, Case.Insensitive, $"a {publishMode} repository must park on the card naming ITS OWN blocker — a human can only fix what the card names");
+            .Question.ShouldContain(expectedWording, Case.Insensitive, $"a {publishMode} repository whose run captured {(capturedWork ? "work" : "NOTHING")} must park on the card naming ITS OWN blocker — a human can only fix what the card names");
 
         await AnswerPendingAskAsync(runId, teamId, userId, "understood — finish without the pull request");
 
@@ -628,6 +636,17 @@ public sealed class SupervisorDeliveryGateFlowTests
         {
             TeamId = teamId, WorkflowRunId = runId, RepositoryAlias = "primary", RepositoryId = repositoryId,
             Branch = branch, ChangedFileCount = 1, PublishStateValue = PublishState.Pushed,
+        }, CancellationToken.None);
+    }
+
+    /// <summary>The ledger row <c>AgentRunExecutor.PersistPublishManifestAsync</c> writes when a real diff was captured but <c>RepositoryPolicyPublishGuard</c> kept it off a branch: branchless, PatchOnly. An empty-diff run leaves NO row at all — that absence is exactly what the delivery card's wording turns on.</summary>
+    private async Task SeedCapturedPatchOnlyManifestAsync(Guid runId, Guid teamId, Guid agentRunId, Guid repositoryId)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<IPublishManifestStore>().UpsertForAgentRunAsync(agentRunId, new PublishManifestUpsert
+        {
+            TeamId = teamId, WorkflowRunId = runId, RepositoryAlias = "primary", RepositoryId = repositoryId,
+            ChangedFileCount = 1, PatchArtifactId = Guid.NewGuid(), PublishStateValue = PublishState.PatchOnly,
         }, CancellationToken.None);
     }
 
