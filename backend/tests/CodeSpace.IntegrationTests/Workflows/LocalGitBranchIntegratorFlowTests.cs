@@ -180,6 +180,60 @@ public sealed class LocalGitBranchIntegratorFlowTests
         (await ctx.RemoteFileAsync(ctx.IntegrationBranch, "chain.txt")).Trim().ShouldBe("v2", "the dependent's revision is the final content — its producer applied first");
     }
 
+    [Fact]
+    public async Task A_dependent_first_set_still_integrates_the_sibling_rooted_at_the_anchor()
+    {
+        if (!await GitReadyAsync()) return;
+
+        using var ctx = new IntegratorTestContext();
+        var baseSha = await ctx.SeedBaseAsync(new() { ["p.txt"] = "p0\n" });
+
+        var (producer, producerHead) = await ctx.MakePushedContributionAsync("agent-producer", baseSha, "codespace/agent/producer", d => File.WriteAllText(Path.Combine(d, "p.txt"), "p1\n"));
+        var dependent = await ctx.MakeContributionAsync("agent-dependent", producerHead, d => File.WriteAllText(Path.Combine(d, "d.txt"), "d1\n"));
+        var sibling = await ctx.MakeContributionAsync("agent-sibling", baseSha, d => File.WriteAllText(Path.Combine(d, "s.txt"), "s1\n"));
+
+        // The shape the ANCHOR rule exists for, handed over in the worst possible order: a dependent first, and a
+        // sibling still rooted at the request base. Anchoring on the first element's base would make the sibling
+        // UPSTREAM of the anchor and refuse it; anchored on the ancestor-most base, hand-in order changes nothing.
+        var result = await ctx.NewIntegrator().IntegrateAsync(ctx.Request(baseSha, dependent, sibling, producer), CancellationToken.None);
+
+        result.Status.ShouldBe(IntegrationStatus.Clean, "every base is the anchor or downstream of it, whatever order they arrive in");
+        result.AppliedCount.ShouldBe(3, "the applied count accounts for everything the integrated head carries above the anchor");
+        (await ctx.RemoteFileAsync(ctx.IntegrationBranch, "p.txt")).Trim().ShouldBe("p1");
+        (await ctx.RemoteFileAsync(ctx.IntegrationBranch, "d.txt")).Trim().ShouldBe("d1");
+        (await ctx.RemoteFileAsync(ctx.IntegrationBranch, "s.txt")).Trim().ShouldBe("s1", "the sibling rooted at the anchor lands beside the producer→dependent chain");
+    }
+
+    /// <summary>
+    /// The ordering contract as the PROPERTY that matters: the integrated head does not depend on the order the
+    /// contributions arrive in. Both runs publish to the SAME integration branch, so PRODUCTION is the oracle — a
+    /// second run whose tree differs by so much as a byte is refused as "advanced", never silently accepted — and
+    /// <c>Clean</c> here IS the same-head assertion. The chain makes order load-bearing: the dependent's p1→p2 patch
+    /// meets a p0 tree unless its producer applied first.
+    /// </summary>
+    [Fact]
+    public async Task A_shuffled_contribution_set_integrates_to_the_same_head()
+    {
+        if (!await GitReadyAsync()) return;
+
+        using var ctx = new IntegratorTestContext();
+        var baseSha = await ctx.SeedBaseAsync(new() { ["p.txt"] = "p0\n" });
+
+        var (producer, producerHead) = await ctx.MakePushedContributionAsync("agent-producer", baseSha, "codespace/agent/producer", d => File.WriteAllText(Path.Combine(d, "p.txt"), "p1\n"));
+        var dependent = await ctx.MakeContributionAsync("agent-dependent", producerHead, d => File.WriteAllText(Path.Combine(d, "p.txt"), "p2\n"));
+        var sibling = await ctx.MakeContributionAsync("agent-sibling", baseSha, d => File.WriteAllText(Path.Combine(d, "s.txt"), "s1\n"));
+
+        (await ctx.NewIntegrator().IntegrateAsync(ctx.Request(baseSha, producer, dependent, sibling), CancellationToken.None))
+            .Status.ShouldBe(IntegrationStatus.Clean, "the ancestry-ordered set integrates — this is the head the shuffle has to reproduce");
+
+        var shuffled = await ctx.NewIntegrator().IntegrateAsync(ctx.Request(baseSha, dependent, sibling, producer), CancellationToken.None);
+
+        shuffled.Status.ShouldBe(IntegrationStatus.Clean,
+            customMessage: $"a re-ordered hand-in reproduced a DIFFERENT tree (or failed to apply at all) — reason: {shuffled.Reason}");
+        (await ctx.CountRemoteBranchesAsync(ctx.IntegrationBranch)).ShouldBe(1, "the one reviewable branch never forks on a re-order");
+        (await ctx.RemoteFileAsync(ctx.IntegrationBranch, "p.txt")).Trim().ShouldBe("p2", "the dependent's revision is the final content whichever order it arrived in");
+    }
+
     // ── Crown jewel: a conflicting set fails SAFE ────────────────────────────────────
 
     [Fact]

@@ -518,6 +518,56 @@ public sealed class SupervisorDependencyStagingFlowTests
     }
 
     /// <summary>
+    /// The anchor rule, at the tier that can show why it cannot be read off the contributions: the PRODUCER's own
+    /// grade rejected it, so it is withheld from the head and never becomes a contribution — while its DEPENDENT (cut
+    /// from the producer's branch) and an independent SIBLING (still rooted at the repository base) both do. The
+    /// eligible list is then DEPENDENT-FIRST, and its base is the producer's head.
+    ///
+    /// <para>Anchoring on that first eligible base puts the sibling UPSTREAM of the anchor — refused as a stale-base
+    /// graft, conflicting a merge that has nothing to reconcile — and checks out the producer's head, so the commits
+    /// its own oracle rejected ride onto the reviewable branch while the applied count names only the dependent. The
+    /// anchor is the ANCESTOR-MOST base instead, read off the run's ledger where the withheld producer's row still
+    /// records the run's root.</para>
+    ///
+    /// <para>Mutation check: anchor on <c>eligible[0].BaseSha</c> again and this goes RED — Conflicted, no integrated
+    /// branch.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_withheld_producers_dependent_still_anchors_the_merge_on_the_repository_base()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedRepositoryAsync(teamId, remote.Url, await SeedCredentialAsync(teamId), RepositoryPublishMode.Branch);
+        var runId = await SeedSupervisorRunAsync(teamId);
+
+        var (producerRunId, _) = await RunProducerAsync(teamId, repoId, "printf 'by producer\\n' > producer.txt; echo edited", workflowRunId: runId);
+
+        var plan = Plan(("producer", null), ("dependent", new[] { "producer" }), ("sibling", null));
+        await ExecuteSpawnAsync(ContextWith(runId, teamId, repoId, plan, await SucceededSpawn(teamId, ("producer", producerRunId))), "dependent");
+
+        var stagedRef = (await SingleStagedTaskAsync(runId)).Workspace!.Repositories.Single().Ref!;
+        var (dependentRunId, _) = await RunProducerAsync(teamId, repoId, "printf 'by dependent\\n' > dependent.txt; echo edited", checkoutRef: stagedRef, workflowRunId: runId);
+        var (siblingRunId, _) = await RunProducerAsync(teamId, repoId, "printf 'by sibling\\n' > sibling.txt; echo edited", workflowRunId: runId);
+
+        var spawn = await GradedSpawn(teamId, ("producer", producerRunId, false), ("dependent", dependentRunId, true), ("sibling", siblingRunId, true));
+        var merge = await ExecuteMergeAsync(ContextWith(runId, teamId, repoId, plan, spawn));
+
+        var integration = SupervisorOutcome.ReadIntegration(merge.OutcomeJson).ShouldNotBeNull();
+        integration.Status.ShouldBe("Clean", customMessage: $"the sibling is rooted at the repository base, which is the ANCESTOR-MOST base of the set — anchoring on the dependent's base refuses it — reason: {integration.Reason}");
+        integration.IntegratedBranch.ShouldNotBeNull("a merge with nothing to reconcile must produce the one reviewable branch");
+        JsonDocument.Parse(merge.OutcomeJson!).RootElement.GetProperty("integration").GetProperty("appliedCount").GetInt32()
+            .ShouldBe(2, "both contributions applied, and the applied count accounts for everything the branch carries above the anchor");
+
+        (await remote.FileOnBranchAsync(integration.IntegratedBranch!, "dependent.txt")).Trim().ShouldBe("by dependent");
+        (await remote.FileOnBranchAsync(integration.IntegratedBranch!, "sibling.txt")).Trim().ShouldBe("by sibling");
+        (await remote.BranchContainsFileAsync(integration.IntegratedBranch!, "producer.txt")).ShouldBeFalse(
+            "the DEPENDENT's patch alone is what lands — anchoring on its base would have checked out the producer's head and smuggled the work its own oracle rejected onto the reviewable branch, unlisted");
+    }
+
+    /// <summary>
     /// The P1 live-run break, at the only tier that can show it: TWO dependents staged in the SAME turn over
     /// DIFFERENT producer sets. With the handoff branch keyed on run + turn alone both asked for one name, so the
     /// second integration found a remote branch carrying the first's (different) tree,
@@ -846,14 +896,18 @@ public sealed class SupervisorDependencyStagingFlowTests
     /// resolver's OWN branch-collection (<c>CollectAgentBranches</c>) reads this same field, so a decision built
     /// without it would make <c>resolve</c> see no branches to reconcile even after a genuine conflict.
     /// </summary>
-    private async Task<SupervisorPriorDecision> SucceededSpawn(Guid teamId, params (string SubtaskId, Guid AgentRunId)[] producers)
+    private Task<SupervisorPriorDecision> SucceededSpawn(Guid teamId, params (string SubtaskId, Guid AgentRunId)[] producers) =>
+        GradedSpawn(teamId, producers.Select(p => (p.SubtaskId, p.AgentRunId, (bool?)null)).ToArray());
+
+    /// <summary>The graded shape of <see cref="SucceededSpawn"/>: each unit also carries the per-unit acceptance verdict the fold stamps. A FALSE verdict is what withholds a unit from the head (<c>SupervisorOutcome.IsWithheldFromHead</c>) — the merge then never reads it as a contributor at all, which is the only way to stage a run whose eligible contributions are all dependents of a producer that is gone.</summary>
+    private async Task<SupervisorPriorDecision> GradedSpawn(Guid teamId, params (string SubtaskId, Guid AgentRunId, bool? AcceptancePassed)[] producers)
     {
         var results = new List<SupervisorAgentResult>();
         foreach (var p in producers)
         {
             using var scope = _fixture.BeginScope();
             var manifests = await scope.Resolve<IPublishManifestStore>().ListForAgentRunAsync(p.AgentRunId, teamId, CancellationToken.None);
-            results.Add(new SupervisorAgentResult { AgentRunId = p.AgentRunId, Status = "Succeeded", ProducedBranch = manifests.FirstOrDefault()?.Branch });
+            results.Add(new SupervisorAgentResult { AgentRunId = p.AgentRunId, Status = "Succeeded", ProducedBranch = manifests.FirstOrDefault()?.Branch, AcceptancePassed = p.AcceptancePassed });
         }
 
         var payload = JsonSerializer.Serialize(new SupervisorSpawnPayload { SubtaskIds = producers.Select(p => p.SubtaskId).ToList() }, AgentJson.Options);
@@ -864,8 +918,8 @@ public sealed class SupervisorDependencyStagingFlowTests
 
     // ─── Real producer execution (real AgentRunExecutor + real git) ───────────────
 
-    /// <summary>Run ONE real producer agent (a scripted /bin/sh harness) through the REAL AgentRunExecutor against the real repo — a genuine PublishManifest row + (PublishMode-dependent) a genuine pushed branch results. Returns its AgentRunId + the terminal ResultJson. <paramref name="checkoutRef"/> pins the clone the way dependency staging does at spawn time (null → the repository default), so the run records THAT ref's head as its own base.</summary>
-    private async Task<(Guid AgentRunId, string ResultJson)> RunProducerAsync(Guid teamId, Guid repositoryId, string script, string? checkoutRef = null)
+    /// <summary>Run ONE real producer agent (a scripted /bin/sh harness) through the REAL AgentRunExecutor against the real repo — a genuine PublishManifest row + (PublishMode-dependent) a genuine pushed branch results. Returns its AgentRunId + the terminal ResultJson. <paramref name="checkoutRef"/> pins the clone the way dependency staging does at spawn time (null → the repository default), so the run records THAT ref's head as its own base. <paramref name="workflowRunId"/> binds the manifest to the supervisor run the way a real spawn does — the run-scoped ledger the integration anchor is read from.</summary>
+    private async Task<(Guid AgentRunId, string ResultJson)> RunProducerAsync(Guid teamId, Guid repositoryId, string script, string? checkoutRef = null, Guid? workflowRunId = null)
     {
         using var scope = _fixture.BeginScope();
 
@@ -875,7 +929,7 @@ public sealed class SupervisorDependencyStagingFlowTests
 
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
             new AgentTask { Goal = "produce", Harness = "scripted", Model = "test-model", RepositoryId = repositoryId, Workspace = workspace },
-            teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
+            teamId, workflowRunId, null, iterationKey: "", cancellationToken: CancellationToken.None);
 
         var executor = new AgentRunExecutor(
             scope.Resolve<IAgentRunService>(),
@@ -1120,6 +1174,10 @@ public sealed class SupervisorDependencyStagingFlowTests
         }
 
         public Task<string> FileOnBranchAsync(string branch, string file) => RunGitAsync(_root, "--git-dir", _bare, "show", $"{branch}:{file}");
+
+        /// <summary>Whether <paramref name="branch"/>'s tree carries <paramref name="file"/> at all — the ground truth for "did work that was never a contribution ride onto the integrated head". <c>ls-tree</c> exits 0 with empty output for an absent path, so it answers without throwing.</summary>
+        public async Task<bool> BranchContainsFileAsync(string branch, string file) =>
+            !string.IsNullOrWhiteSpace(await RunGitAsync(_root, "--git-dir", _bare, "ls-tree", "--name-only", branch, file));
 
         /// <summary>Every branch the remote actually carries — real-git ground truth for "how many handoff branches did this turn create".</summary>
         public async Task<IReadOnlyList<string>> BranchesAsync() =>
