@@ -89,4 +89,28 @@ public class SupervisorOutcomeFoldTests
         SupervisorOutcome.ReadAcceptanceGradePassed(folded).ShouldBe(true);
         SupervisorOutcome.ReadEscalation(folded).ShouldNotBeNull("the resolve fold re-emitted a fixed four-key shape too — same defect, same fix");
     }
+
+    [Fact]
+    public void The_payload_re_ask_fold_round_trips_and_preserves_the_keys_it_does_not_own()
+    {
+        var folded = SupervisorOutcome.WritePayloadReask(SpawnOutcomeWithEscalation(Guid.Parse("33333333-3333-3333-3333-333333333333")), SupervisorDecisionKinds.Plan);
+
+        SupervisorOutcome.ReadPayloadReaskedFromKind(folded).ShouldBe(SupervisorDecisionKinds.Plan);
+        folded.ShouldContain("\"payloadReasked\":true", customMessage: "the flag a reader scans for is written explicitly, not inferred from the kind's presence");
+        SupervisorOutcome.ReadEscalation(folded).ShouldNotBeNull("every fold here runs post-barrier over an outcome someone else authored");
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void A_decision_that_needed_no_re_ask_is_left_byte_identical(string? noReask)
+    {
+        const string outcome = """{"agentCount":1}""";
+
+        SupervisorOutcome.WritePayloadReask(outcome, noReask).ShouldBe(outcome, "the overwhelmingly common path must not touch the outcome at all");
+        SupervisorOutcome.ReadPayloadReaskedFromKind(outcome).ShouldBeNull();
+        SupervisorOutcome.ReadPayloadReaskedFromKind("not json").ShouldBeNull();
+        SupervisorOutcome.ReadPayloadReaskedFromKind(null).ShouldBeNull();
+    }
 }

@@ -12,6 +12,11 @@ namespace CodeSpace.Core.Services.Supervisor.Deciders;
 /// point the executor rejects a payload the model never wrote, the rendered correction quotes that substitute,
 /// and the model re-authors the same defective shape (live-observed: 140 rejected spawns in one eval run).
 ///
+/// <para>An object that is PRESENT but EMPTY is the same defect wearing braces — a <c>plan</c> declaring no subtask
+/// and a <c>spawn</c> naming no id are both unexecutable authorship, and neither is visible to the validators
+/// downstream (<see cref="SupervisorPlanValidator"/> checks <c>dependsOn</c> EDGES, of which a subtask-less plan has
+/// none), so both are named here.</para>
+///
 /// <para>Kinds whose schema sub-object declares no required field (<c>merge</c> — an empty merge is a legitimate
 /// "merge everything mergeable") or carries no sub-object at all (<c>resolve</c>) are exempt. A unit
 /// drift-detector derives the demanded set from <see cref="SupervisorDecisionSchema.ResponseSchema"/> itself so
@@ -25,6 +30,7 @@ internal static class SupervisorDecisionCoherence
     public static string? MissingPayload(SupervisorModelDecision model) => model.Kind switch
     {
         SupervisorDecisionKinds.Plan when model.Plan is null => Missing(model.Kind, "plan", "'goal' and 'subtasks'"),
+        SupervisorDecisionKinds.Plan when model.Plan is { Subtasks.Count: 0 } => "the 'plan' object's 'subtasks' array is EMPTY — a plan must declare at least one subtask inside 'plan.subtasks' (a subtask-less plan can never be spawned, retried or graded)",
         SupervisorDecisionKinds.Spawn when model.Spawn is null => Missing(model.Kind, "spawn", "a non-empty 'subtaskIds' array"),
         SupervisorDecisionKinds.Spawn when model.Spawn is { SubtaskIds.Count: 0 } => "the 'spawn' object's 'subtaskIds' array is EMPTY — a spawn must name at least one plan-declared subtask id inside 'spawn.subtaskIds'",
         SupervisorDecisionKinds.Retry when model.Retry is null => Missing(model.Kind, "retry", "a 'subtaskId'"),

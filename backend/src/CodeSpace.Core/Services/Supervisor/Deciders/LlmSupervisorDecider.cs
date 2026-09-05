@@ -147,6 +147,10 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 
         if (model is null || string.IsNullOrWhiteSpace(model.Kind)) return NonConformantStop(bindError);
 
+        // Set only when a re-ask actually RECOVERED the decision — the marker the turn service folds onto the ledger
+        // row, so a reader can tell a decision the brain authored outright from one that cost a second round-trip.
+        string? reaskedFromKind = null;
+
         // The schema-inexpressible invariant — the chosen kind's payload sub-object must be PRESENT — is enforced
         // here on the RAW bound decision, because projection SUBSTITUTES an empty payload for a missing sub-object:
         // past that line the executor rejects a payload the model never wrote, the rendered correction quotes that
@@ -174,12 +178,18 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             }
             else
             {
-                var repaired = await TryRepairMissingPayloadAsync(structured, pick, completion, defect, cancellationToken).ConfigureAwait(false);
+                var namedKind = model.Kind;
+                var repaired = await TryRepairMissingPayloadAsync(structured, pick, completion, namedKind, defect, cancellationToken).ConfigureAwait(false);
 
                 if (repaired is not null && TryDeserialize(repaired.Json, out _) is { } coherent && !string.IsNullOrWhiteSpace(coherent.Kind) && SupervisorDecisionCoherence.MissingPayload(coherent) is null)
                 {
+                    // The re-ask reply DECIDES. It may re-author the verb it first named, or choose a different one
+                    // entirely (the live miss chose 'plan' on a turn whose plan was already authored) — the server
+                    // never fabricates a payload for the abandoned verb, so whatever comes back is the decision, and
+                    // the kind it started from rides along as evidence rather than being quietly overwritten.
                     completion = repaired;
                     model = coherent;
+                    reaskedFromKind = namedKind;
                 }
                 else
                     _logger.LogWarning("Supervisor decision payload repair missed for kind '{Kind}' — proceeding with the original decision; the executor will refuse it", model.Kind);
@@ -227,7 +237,9 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         if (SupervisorPlanValidator.Validate(decision) is { } planError)
             decision = await TryRepairInvalidPlanAsync(structured, pick, context, catalog, decision, planError, cancellationToken).ConfigureAwait(false) ?? decision;
 
-        return decision;
+        // Stamped LAST so the marker survives the re-plan above (which projects a fresh decision), and only when a
+        // re-ask actually recovered something — a decision that never needed one is returned untouched.
+        return reaskedFromKind is null ? decision : decision with { PayloadReaskedFromKind = reaskedFromKind };
     }
 
     /// <summary>
@@ -307,8 +319,19 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     /// alone (live-probed 2026-08-07 — the raw echo alone recovered 6/6 where the substituted-payload correction
     /// produced the only repeat). Returns null on a model-side miss (fail toward the original decision — the
     /// executor's rejection path); a genuine INFRA fault propagates, exactly like the primary call.
+    ///
+    /// <para>The echo says what the model WROTE; it never says what the missing object must LOOK like, and the first
+    /// reply already proved the model could not recall that shape from the whole-schema constraint alone (live: run
+    /// 33943475246 answered a spawn-ready turn with a bare <c>{"kind":"plan"}</c>, then re-planned twice — a wasted
+    /// turn). So the correction also QUOTES that one kind's own schema fragment and spells out the complete envelope
+    /// the reply must have. The fragment is read off <see cref="SupervisorDecisionSchema"/> per kind, so a new verb or
+    /// a renamed payload field reaches this prompt with no edit here.</para>
+    ///
+    /// <para>It asks and never assumes: the reply DECIDES. A model that named a verb the run cannot execute (a spawn
+    /// with nothing left unspawned) is free to answer with a different one — inventing the payload it omitted would
+    /// put words in its mouth on exactly the turn it proved it was confused.</para>
     /// </summary>
-    private static async Task<StructuredLLMCompletion?> TryRepairMissingPayloadAsync(IStructuredLLMClient structured, ModelPoolPick pick, StructuredLLMCompletion broken, string defect, CancellationToken cancellationToken)
+    private static async Task<StructuredLLMCompletion?> TryRepairMissingPayloadAsync(IStructuredLLMClient structured, ModelPoolPick pick, StructuredLLMCompletion broken, string kind, string defect, CancellationToken cancellationToken)
     {
         try
         {
@@ -316,7 +339,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             {
                 Model = pick.ModelId,
                 SystemPrompt = "You repair one malformed supervisor decision. Reply with ONLY the corrected decision JSON object — same intent, no commentary, no new decisions.",
-                UserPrompt = $"Your previous reply chose a decision kind but did not carry that kind's payload where the contract reads it.\n\nDefect: {defect}\n\nYour previous reply:\n{broken.Json.GetRawText()}\n\nRe-emit the SAME decision with the payload carried inside its kind's own object.",
+                UserPrompt = MissingPayloadRepairPrompt(kind, defect, broken.Json.GetRawText()),
                 JsonSchema = SupervisorDecisionSchema.ResponseSchema,
                 MaxOutputTokens = 4096,
                 Temperature = 0,
@@ -327,6 +350,25 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         {
             return null;
         }
+    }
+
+    /// <summary>The correction a payload-less reply earns: the named defect, the model's OWN reply echoed back, that kind's payload schema, and the complete envelope to re-emit. Pure + unit-pinned per kind.</summary>
+    internal static string MissingPayloadRepairPrompt(string kind, string defect, string rawReply)
+    {
+        // A kind the schema gives no sub-object (resolve) never reaches the coherence gate, so the fallback is
+        // defensive only — it keeps the sentence readable rather than quoting an empty property name at the model.
+        var property = SupervisorDecisionPayloadLift.PayloadPropertyFor(kind) ?? kind;
+        var fragment = SupervisorDecisionSchema.PayloadSchemaFor(property);
+
+        var shape = fragment is null
+            ? "the object your kind names"
+            : $"an object matching this schema:\n{fragment}";
+
+        return $"You chose kind '{kind}' but your reply omitted the '{property}' object that carries its payload.\n\n"
+             + $"Defect: {defect}\n\n"
+             + $"Your previous reply:\n{rawReply}\n\n"
+             + $"Reply with the COMPLETE decision — the same intent, re-emitted as {{ \"kind\": \"{kind}\", \"rationale\": {{ \"why\": …, \"evidence\": … }}, \"{property}\": … }}, where '{property}' is {shape}\n\n"
+             + "If a different action now fits the situation better, choose it instead — but whatever kind you choose, carry that kind's own payload object.";
     }
 
     /// <summary>The raised output budget ONE truncated-completion retry gets — double the normal <see cref="MaxOutputTokens"/> (4096) so a large multi-subtask plan gets genuine room to finish. Pinned (Rule 8): shrinking it re-narrows the exact window this exists to widen.</summary>
