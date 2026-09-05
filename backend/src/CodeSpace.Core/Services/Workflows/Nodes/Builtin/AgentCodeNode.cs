@@ -688,9 +688,20 @@ public sealed class AgentCodeNode : INodeRuntime
         return null;
     }
 
-    /// <summary>Reads the autonomy tier (case-insensitive); absent / unrecognized → the safe <see cref="AgentAutonomyLevel.Standard"/> default.</summary>
+    /// <summary>
+    /// Reads the authored autonomy tier (case-insensitive; absent / unrecognized → the safe
+    /// <see cref="AgentAutonomyLevel.Standard"/> default) and CLAMPS it to this deployment's ceiling
+    /// (<c>Sandbox:MaxAutonomy</c>).
+    ///
+    /// <para>The clamp lives here because this node is the one dispatch point the LAUNCH ROUTE never reaches: an
+    /// authored workflow's <c>agent.run</c> carries its own tier with no <c>RouteCaps</c> to bound it, and a replay /
+    /// rerun re-executes the FROZEN definition snapshot — the route that clamped the original launch is not consulted
+    /// again, so a run staged before an operator lowered the ceiling would otherwise re-execute above it forever.</para>
+    /// </summary>
     private static AgentAutonomyLevel ReadAutonomyLevel(IReadOnlyDictionary<string, JsonElement> bag) =>
-        Enum.TryParse<AgentAutonomyLevel>(ReadString(bag, "autonomyLevel"), ignoreCase: true, out var level) ? level : AgentAutonomyLevel.Standard;
+        AgentAutonomyPolicy.Clamp(
+            Enum.TryParse<AgentAutonomyLevel>(ReadString(bag, "autonomyLevel"), ignoreCase: true, out var level) ? level : AgentAutonomyLevel.Standard,
+            AgentAutonomyPolicy.DeploymentCeiling);
 
     /// <summary>Reads the model-authored <c>mode</c> (case-insensitive); absent / unrecognized → <see cref="AgentMode.Unset"/> (today's behaviour, never a throw — mirrors <see cref="ReadAutonomyLevel"/>).</summary>
     private static AgentMode ReadMode(IReadOnlyDictionary<string, JsonElement> bag) =>
@@ -727,7 +738,26 @@ public sealed class AgentCodeNode : INodeRuntime
         if (ReadOptionalBool(bag, "readOnly") is { } readOnly)
             permissions = permissions with { WriteScope = readOnly ? AgentWriteScope.ReadOnly : AgentWriteScope.Workspace };
 
-        return permissions;
+        return NarrowToDeploymentCeiling(permissions, AgentAutonomyPolicy.DeploymentCeiling);
+    }
+
+    /// <summary>
+    /// The deployment ceiling has the LAST word over the raw per-field overrides. Clamping the TIER
+    /// (<see cref="ReadAutonomyLevel"/>) is not enough on its own: <c>network</c> and <c>readOnly</c> are written
+    /// straight onto the resolved permissions AFTER the tier baseline, so an authored <c>"network": true</c> would
+    /// hand a run the internet the host's ceiling denies every tier under it — the exact bypass the tier clamp
+    /// exists to close. Narrow-only, per field, from the SAME <see cref="AgentAutonomyPolicy.Derive"/> table the
+    /// sandbox enforces: what the ceiling's own tier does not grant, no override may add.
+    /// </summary>
+    private static AgentPermissions NarrowToDeploymentCeiling(AgentPermissions permissions, AgentAutonomyLevel ceiling)
+    {
+        var bound = AgentAutonomyPolicy.Derive(ceiling);
+
+        return permissions with
+        {
+            Network = bound.Network == AgentNetworkAccess.On ? permissions.Network : AgentNetworkAccess.Off,
+            WriteScope = bound.WriteScope == AgentWriteScope.Workspace ? permissions.WriteScope : AgentWriteScope.ReadOnly,
+        };
     }
 
     /// <summary>

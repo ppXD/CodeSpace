@@ -77,22 +77,37 @@ public class AgentAutonomyPolicyTests
 
     [Theory]
     // Policy ALLOWED network and the launcher asked for it.
-    [InlineData(AgentAutonomyLevel.Trusted, AgentAutonomyLevel.Trusted, "Network: on (Trusted)")]
-    [InlineData(AgentAutonomyLevel.Unleashed, AgentAutonomyLevel.Unleashed, "Network: on (Unleashed)")]
+    [InlineData(AgentAutonomyLevel.Trusted, AgentAutonomyLevel.Trusted, Unbounded, "Network: on (Trusted)")]
+    [InlineData(AgentAutonomyLevel.Unleashed, AgentAutonomyLevel.Unleashed, Unbounded, "Network: on (Unleashed)")]
     // Policy allowed it; nobody asked. The DEFAULT — an ordinary launch, stated rather than assumed. Every "off"
     // is QUALIFIED: the tier's Network.Off becomes a severed namespace only where bubblewrap actually confines,
     // and Sandbox:RequireConfinement (which would refuse an unconfinable host) defaults to false.
-    [InlineData(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Trusted, "Network: off (Standard)" + AgentAutonomyPolicy.ConfinementCaveat)]
-    [InlineData(AgentAutonomyLevel.Confined, AgentAutonomyLevel.Trusted, "Network: off (Confined)" + AgentAutonomyPolicy.ConfinementCaveat)]
+    [InlineData(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Trusted, Unbounded, "Network: off (Standard)" + AgentAutonomyPolicy.ConfinementCaveat)]
+    [InlineData(AgentAutonomyLevel.Confined, AgentAutonomyLevel.Trusted, Unbounded, "Network: off (Confined)" + AgentAutonomyPolicy.ConfinementCaveat)]
     // The ceiling cannot reach a network-granting tier: this run could NOT have had network however it was
     // launched. Distinct wording from "off" on purpose — declined and denied are different facts.
-    [InlineData(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Standard, "Network: clamped off by policy (ceiling Standard)" + AgentAutonomyPolicy.ConfinementCaveat)]
-    [InlineData(AgentAutonomyLevel.Confined, AgentAutonomyLevel.Confined, "Network: clamped off by policy (ceiling Confined)" + AgentAutonomyPolicy.ConfinementCaveat)]
-    public void DescribeNetwork_states_the_effective_posture_and_who_decided(AgentAutonomyLevel effective, AgentAutonomyLevel ceiling, string expected)
+    [InlineData(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Standard, Unbounded, "Network: clamped off by policy (ceiling Standard)" + AgentAutonomyPolicy.ConfinementCaveat)]
+    [InlineData(AgentAutonomyLevel.Confined, AgentAutonomyLevel.Confined, Unbounded, "Network: clamped off by policy (ceiling Confined)" + AgentAutonomyPolicy.ConfinementCaveat)]
+    // B6: the DEPLOYMENT's own ceiling denied it. Named ahead of the route's, because it is the one bound the
+    // operator cannot lift by relaunching at a different effort tier — the route ceiling below is Trusted, which
+    // would have granted network, and the run still had none.
+    [InlineData(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Trusted, AgentAutonomyLevel.Standard, "Network: clamped off by deployment ceiling (Standard)" + AgentAutonomyPolicy.ConfinementCaveat)]
+    [InlineData(AgentAutonomyLevel.Confined, AgentAutonomyLevel.Trusted, AgentAutonomyLevel.Confined, "Network: clamped off by deployment ceiling (Confined)" + AgentAutonomyPolicy.ConfinementCaveat)]
+    // Both bind: the deployment ceiling wins the sentence, since switching effort tier would not have helped.
+    [InlineData(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Standard, AgentAutonomyLevel.Standard, "Network: clamped off by deployment ceiling (Standard)" + AgentAutonomyPolicy.ConfinementCaveat)]
+    // A deployment ceiling that DOES grant network changes nothing — it is not the binding bound.
+    [InlineData(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Trusted, AgentAutonomyLevel.Trusted, "Network: off (Standard)" + AgentAutonomyPolicy.ConfinementCaveat)]
+    // A run that predates a lowered ceiling and really DID have network still reads "on" — the effective tier is
+    // the run's own record, never re-derived from today's setting.
+    [InlineData(AgentAutonomyLevel.Trusted, AgentAutonomyLevel.Trusted, AgentAutonomyLevel.Standard, "Network: on (Trusted)")]
+    public void DescribeNetwork_states_the_effective_posture_and_who_decided(AgentAutonomyLevel effective, AgentAutonomyLevel ceiling, AgentAutonomyLevel deploymentCeiling, string expected)
     {
-        AgentAutonomyPolicy.DescribeNetwork(effective, ceiling).ShouldBe(expected,
+        AgentAutonomyPolicy.DescribeNetwork(effective, ceiling, deploymentCeiling).ShouldBe(expected,
             customMessage: "the journal sentence is derived from the SAME Derive table the sandbox enforces — it must never claim a posture the runner does not have");
     }
+
+    /// <summary>The committed deployment ceiling, spelled out at every call site that is NOT exercising the deployment bound — an attribute argument cannot call <c>AgentAutonomyPolicy.DefaultDeploymentCeiling</c>'s name through another const without this alias.</summary>
+    private const AgentAutonomyLevel Unbounded = AgentAutonomyPolicy.DefaultDeploymentCeiling;
 
     [Fact]
     public void DescribeNetwork_never_says_on_for_a_tier_Derive_leaves_severed()
@@ -101,7 +116,7 @@ public class AgentAutonomyPolicyTests
         // Derive grants network to are exactly the tiers that may read "on" — so adding a tier cannot desync them.
         foreach (var tier in Enum.GetValues<AgentAutonomyLevel>())
         {
-            var saysOn = AgentAutonomyPolicy.DescribeNetwork(tier, AgentAutonomyLevel.Unleashed).Contains("on (");
+            var saysOn = AgentAutonomyPolicy.DescribeNetwork(tier, AgentAutonomyLevel.Unleashed, AgentAutonomyLevel.Unleashed).Contains("on (");
 
             saysOn.ShouldBe(AgentAutonomyPolicy.Derive(tier).Network == AgentNetworkAccess.On, $"the '{tier}' sentence must agree with Derive('{tier}')");
         }
@@ -121,8 +136,9 @@ public class AgentAutonomyPolicyTests
             {
                 if (AgentAutonomyPolicy.Derive(effective).Network == AgentNetworkAccess.On) continue;
 
-                AgentAutonomyPolicy.DescribeNetwork(effective, ceiling).ShouldEndWith(AgentAutonomyPolicy.ConfinementCaveat,
-                    customMessage: $"'{effective}' under ceiling '{ceiling}' claims a severed network the sandbox is not guaranteed to have applied");
+                foreach (var deployment in Enum.GetValues<AgentAutonomyLevel>())
+                    AgentAutonomyPolicy.DescribeNetwork(effective, ceiling, deployment).ShouldEndWith(AgentAutonomyPolicy.ConfinementCaveat,
+                        customMessage: $"'{effective}' under ceiling '{ceiling}' / deployment ceiling '{deployment}' claims a severed network the sandbox is not guaranteed to have applied");
             }
         }
     }
@@ -143,7 +159,7 @@ public class AgentAutonomyPolicyTests
     {
         var confinement = new SandboxConfinement { Outcome = outcome, Reason = reason, NetworkSevered = severed };
 
-        AgentAutonomyPolicy.DescribeNetwork(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Trusted, confinement).ShouldBe(expected,
+        AgentAutonomyPolicy.DescribeNetwork(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Trusted, AgentAutonomyPolicy.DefaultDeploymentCeiling, confinement).ShouldBe(expected,
             customMessage: "a run that RECORDED its posture must be described by that record, not by the hedge the record exists to retire");
     }
 
@@ -152,10 +168,10 @@ public class AgentAutonomyPolicyTests
     {
         // The mutation guard: drop the record write (or read a pre-0194 run) and every "off" sentence must return to
         // the hedge — never to an unqualified, un-evidenced "off". Explicit null and the defaulted overload alike.
-        AgentAutonomyPolicy.DescribeNetwork(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Trusted, null)
+        AgentAutonomyPolicy.DescribeNetwork(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Trusted, AgentAutonomyPolicy.DefaultDeploymentCeiling, null)
             .ShouldBe("Network: off (Standard)" + AgentAutonomyPolicy.ConfinementCaveat);
 
-        AgentAutonomyPolicy.DescribeNetwork(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Trusted)
+        AgentAutonomyPolicy.DescribeNetwork(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Trusted, AgentAutonomyPolicy.DefaultDeploymentCeiling)
             .ShouldBe("Network: off (Standard)" + AgentAutonomyPolicy.ConfinementCaveat);
     }
 
@@ -176,7 +192,7 @@ public class AgentAutonomyPolicyTests
                 {
                     if (AgentAutonomyPolicy.Derive(effective).Network == AgentNetworkAccess.On) continue;
 
-                    var line = AgentAutonomyPolicy.DescribeNetwork(effective, ceiling, confinement);
+                    var line = AgentAutonomyPolicy.DescribeNetwork(effective, ceiling, AgentAutonomyPolicy.DefaultDeploymentCeiling, confinement);
 
                     line.ShouldContain("UNCONFINED", customMessage: $"'{effective}'/'{ceiling}' hides an unenforced 'off' behind quiet wording");
                     line.ShouldNotContain(AgentAutonomyPolicy.ConfinementCaveat, customMessage: "the resolved sentence must REPLACE the hedge, not stack on it");

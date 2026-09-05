@@ -15,4 +15,12 @@ public sealed record TaskRoutePreviewResult
 {
     /// <summary>The route this request would take — effort / recipe / projection / bounds plus the classifier decision, the confirm card and any degrade reason. Never null: the router always decides something (its classifier degrades to the deterministic baseline rather than failing).</summary>
     public required RoutePlan Route { get; init; }
+
+    /// <summary>
+    /// This deployment's own autonomy ceiling (<c>Sandbox:MaxAutonomy</c>) — the tier no run on this host may exceed,
+    /// whatever the composer sends. It is already folded into <see cref="RoutePlan.Caps"/>'s ceiling, and is repeated
+    /// here NAMED because the composer's network-posture line has to say WHICH bound denied the network: a route
+    /// ceiling the operator can lift by picking a different effort tier, or this one, which they cannot.
+    /// </summary>
+    public required string DeploymentAutonomyCeiling { get; init; }
 }

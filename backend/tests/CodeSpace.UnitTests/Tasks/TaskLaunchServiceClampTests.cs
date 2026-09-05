@@ -108,7 +108,7 @@ public class TaskLaunchServiceClampTests
         AgentAutonomyPolicy.Derive(effective).Network.ShouldBe(expectedNetwork,
             customMessage: "the REAL sandbox permission the runner receives — the posture line below is only honest if it agrees with this");
 
-        AgentAutonomyPolicy.DescribeNetwork(effective, AgentAutonomyPolicy.Parse(ceiling, AgentAutonomyLevel.Unleashed)).ShouldBe(expectedLine);
+        AgentAutonomyPolicy.DescribeNetwork(effective, AgentAutonomyPolicy.Parse(ceiling, AgentAutonomyLevel.Unleashed), AgentAutonomyPolicy.DefaultDeploymentCeiling).ShouldBe(expectedLine);
     }
 
     // ── The tier-aware agent wall-clock default: deep runs get 2h; an operator override always wins ──

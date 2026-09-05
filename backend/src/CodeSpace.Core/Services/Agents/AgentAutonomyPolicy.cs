@@ -1,3 +1,4 @@
+using CodeSpace.Core.Settings;
 using CodeSpace.Messages.Agents;
 
 namespace CodeSpace.Core.Services.Agents;
@@ -30,6 +31,29 @@ public static class AgentAutonomyPolicy
     /// <summary>Parse an autonomy tier string case-insensitively (mirrors agent.run's ReadAutonomyLevel); null / blank / unrecognised → the supplied fallback. The single tier parser, reused by the launch clamp and the caps-override merge.</summary>
     public static AgentAutonomyLevel Parse(string? value, AgentAutonomyLevel fallback) =>
         Enum.TryParse<AgentAutonomyLevel>(value, ignoreCase: true, out var level) ? level : fallback;
+
+    /// <summary>
+    /// The ceiling a deployment that has NOT configured one gets: the TOP tier, i.e. no deployment bound beyond the
+    /// per-route ones that already exist. It is deliberately the highest tier rather than a safer-looking
+    /// <see cref="AgentAutonomyLevel.Trusted"/>: Trusted and Unleashed grant identical sandbox knobs
+    /// (<see cref="Derive"/>, <see cref="Ceilings"/>) but NOT identical governance — <c>AgentToolGate</c> lets only
+    /// Unleashed run a destructive tool unattended — so a Trusted default would silently re-gate every authored
+    /// <c>agent.run</c> node pinned to Unleashed. Lowering the ceiling is an operator DECISION, committed as
+    /// <c>Sandbox:MaxAutonomy</c> and reviewed as a PR, never a default that arrives with an upgrade.
+    /// </summary>
+    public const AgentAutonomyLevel DefaultDeploymentCeiling = AgentAutonomyLevel.Unleashed;
+
+    /// <summary>
+    /// This DEPLOYMENT's autonomy ceiling (<c>RuntimeSettings.MaxAutonomy</c>) — the tier no run on this host may
+    /// exceed, whatever asked for it. The one accessor here that reads configuration rather than taking it as a
+    /// parameter, for the same reason <c>BubblewrapSandbox.IsRequired</c> does: its consumers are the router's static
+    /// caps merge and the agent.run node's static config read, neither of which has a container to inject into.
+    ///
+    /// <para>It is a CEILING, so it composes with the others by <see cref="Clamp"/> and can only ever narrow. At its
+    /// default (<see cref="DefaultDeploymentCeiling"/>) every clamp is an identity, which is what makes the setting
+    /// inert until an operator commits a lower value.</para>
+    /// </summary>
+    public static AgentAutonomyLevel DeploymentCeiling => Parse(RuntimeSettings.Current.MaxAutonomy, DefaultDeploymentCeiling);
 
     /// <summary>
     /// The tier's per-run resource ceilings — the memory + cpu caps the durable launch turns into this run's cgroup-v2
@@ -89,7 +113,7 @@ public static class AgentAutonomyPolicy
     /// this run have the internet, and who decided?". Derived from the same table <see cref="Derive"/> enforces, so
     /// the sentence can never drift from the sandbox: <paramref name="effective"/> is the run's CLAMPED tier (what
     /// the agents actually got) and <paramref name="ceiling"/> the route's bound (what they were ALLOWED to ask
-    /// for). Three states, all decision-relevant:
+    /// for). Four states, all decision-relevant:
     ///
     /// <list type="bullet">
     ///   <item><c>Network: on (Trusted)</c> — the operator asked, and policy allowed it.</item>
@@ -99,6 +123,11 @@ public static class AgentAutonomyPolicy
     ///     the route's ceiling cannot reach a network-granting tier at all, so this run had no network available
     ///     however it was launched. Naming the ceiling is the point: "off" and "off because you could not have it"
     ///     are different facts.</item>
+    ///   <item><c>Network: clamped off by deployment ceiling (Standard) — severed only where the sandbox
+    ///     confines</c> — the same fact one level up: this HOST's committed <c>Sandbox:MaxAutonomy</c> denies
+    ///     network to every tier under it, so no effort tier, no caps override and no authored node could have
+    ///     obtained it. Named FIRST when both bind, because it is the only one of the two an operator cannot change
+    ///     by relaunching differently.</item>
     /// </list>
     ///
     /// <para><b>Why "off" is qualified — and when it stops being.</b> The tier's <see cref="AgentPermissions.Network"/>
@@ -113,13 +142,15 @@ public static class AgentAutonomyPolicy
     /// composer preview) keeps the hedge, which is the honest answer when nothing was recorded. The "on" sentence
     /// takes no qualifier either way: it claims network, which the tier alone already settles.</para>
     /// </summary>
-    public static string DescribeNetwork(AgentAutonomyLevel effective, AgentAutonomyLevel ceiling, SandboxConfinement? confinement = null)
+    public static string DescribeNetwork(AgentAutonomyLevel effective, AgentAutonomyLevel ceiling, AgentAutonomyLevel deploymentCeiling, SandboxConfinement? confinement = null)
     {
         // "on" needs no record to be honest — it was never the claim this row exists to qualify — so it keeps its
         // unqualified sentence whether or not a posture was recorded.
         if (Derive(effective).Network == AgentNetworkAccess.On) return $"Network: on ({effective})";
 
         var qualifier = OffQualifier(confinement);
+
+        if (Derive(deploymentCeiling).Network != AgentNetworkAccess.On) return $"Network: clamped off by deployment ceiling ({deploymentCeiling}){qualifier}";
 
         if (Derive(ceiling).Network != AgentNetworkAccess.On) return $"Network: clamped off by policy (ceiling {ceiling}){qualifier}";
 

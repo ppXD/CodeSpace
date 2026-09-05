@@ -488,8 +488,19 @@ describe("network posture wording — the cross-stack drift detector", () => {
   // describeNetwork MIRRORS AgentAutonomyPolicy.DescribeNetwork: the composer states the posture before a run
   // exists, so it cannot read the backend's sentence off the wire. Both stacks assert on this one committed
   // fixture (backend: NetworkPostureWordingDriftTests), so neither wording can move without the other going red.
-  it.each(fixture.cases)("says $line for $effective under ceiling $ceiling", ({ effective, ceiling, line }) => {
-    expect(describeNetwork(effective, ceiling)).toBe(line);
+  it.each(fixture.cases)("says $line for $effective under ceiling $ceiling / deployment $deployment", ({ effective, ceiling, deployment, line }) => {
+    expect(describeNetwork(effective, ceiling, deployment)).toBe(line);
+  });
+
+  it("covers the deployment-ceiling state — a fixture that skipped it would let that wording drift alone", () => {
+    expect(fixture.cases.some(c => c.line.startsWith("Network: clamped off by deployment ceiling ("))).toBe(true);
+  });
+
+  it("says nothing about a deployment ceiling it has not been told — the composer never guesses a bound", () => {
+    // "" is what the composer holds until a route preview has reported the ceiling (an explicitly-tiered launch asks
+    // for no preview). The sentence then states only what the route accounts for; the SERVER clamps either way.
+    expect(describeNetwork("Standard", "Trusted", "")).toBe(`Network: off (Standard)${NETWORK_CONFINEMENT_CAVEAT}`);
+    expect(describeNetwork("Standard", "Trusted")).toBe(`Network: off (Standard)${NETWORK_CONFINEMENT_CAVEAT}`);
   });
 
   it("qualifies EVERY off posture — the tier's Off is a permission, not a proven severed namespace", () => {
@@ -497,7 +508,8 @@ describe("network posture wording — the cross-stack drift detector", () => {
     // "off" would be a claim this sentence cannot make.
     for (const effective of ["Confined", "Standard"]) {
       for (const ceiling of ["Confined", "Standard", "Trusted", "Unleashed"]) {
-        expect(describeNetwork(effective, ceiling).endsWith(NETWORK_CONFINEMENT_CAVEAT)).toBe(true);
+        for (const deployment of ["", "Confined", "Standard", "Trusted", "Unleashed"])
+          expect(describeNetwork(effective, ceiling, deployment).endsWith(NETWORK_CONFINEMENT_CAVEAT)).toBe(true);
       }
     }
   });

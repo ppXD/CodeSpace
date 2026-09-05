@@ -1,53 +1,57 @@
 {
-  "_doc": "The network-posture sentence, authored by the backend (AgentAutonomyPolicy.DescribeNetwork) and asserted by BOTH stacks so the Launch composer's pre-launch prediction can never drift from the sentence the run's journal carries. Backend drift detector: backend/tests/CodeSpace.UnitTests/Agents/NetworkPostureWordingDriftTests.cs. Frontend drift detector: frontend/src/lib/launchInput.test.ts ('network posture wording'). Changing a word means changing this file, and both tests must go green on the new words.",
+  "_doc": "The network-posture sentence, authored by the backend (AgentAutonomyPolicy.DescribeNetwork) and asserted by BOTH stacks so the Launch composer's pre-launch prediction can never drift from the sentence the run's journal carries. Each case names all THREE inputs: the run's effective tier, the route's ceiling, and the deployment's own ceiling (Sandbox:MaxAutonomy — 'Unleashed' is the committed default, i.e. no deployment bound). Backend drift detector: backend/tests/CodeSpace.UnitTests/Agents/NetworkPostureWordingDriftTests.cs. Frontend drift detector: frontend/src/lib/launchInput.test.ts ('network posture wording'). Changing a word means changing this file, and both tests must go green on the new words.",
   "_confinementDoc": "confinementCases are the sentences a run gets once its launch RECORDED what the sandbox actually did (agent_run.sandbox_confinement). The composer can never produce these — it speaks before a run exists, so it has no record and always falls back to a 'cases' line. Both stacks still pin them: the backend asserts DescribeNetwork produces each line for its confinement record, and the frontend asserts each one drops the caveat the composer must keep, so a change that made the resolved sentence merely APPEND to the hedge would go red.",
   "cases": [
-    { "effective": "Trusted", "ceiling": "Trusted", "line": "Network: on (Trusted)" },
-    { "effective": "Unleashed", "ceiling": "Unleashed", "line": "Network: on (Unleashed)" },
-    { "effective": "Standard", "ceiling": "Trusted", "line": "Network: off (Standard) — severed only where the sandbox confines" },
-    { "effective": "Confined", "ceiling": "Trusted", "line": "Network: off (Confined) — severed only where the sandbox confines" },
-    { "effective": "Standard", "ceiling": "Standard", "line": "Network: clamped off by policy (ceiling Standard) — severed only where the sandbox confines" },
-    { "effective": "Confined", "ceiling": "Standard", "line": "Network: clamped off by policy (ceiling Standard) — severed only where the sandbox confines" },
-    { "effective": "Confined", "ceiling": "Confined", "line": "Network: clamped off by policy (ceiling Confined) — severed only where the sandbox confines" }
+    { "effective": "Trusted", "ceiling": "Trusted", "deployment": "Unleashed", "line": "Network: on (Trusted)" },
+    { "effective": "Unleashed", "ceiling": "Unleashed", "deployment": "Unleashed", "line": "Network: on (Unleashed)" },
+    { "effective": "Standard", "ceiling": "Trusted", "deployment": "Unleashed", "line": "Network: off (Standard) — severed only where the sandbox confines" },
+    { "effective": "Confined", "ceiling": "Trusted", "deployment": "Unleashed", "line": "Network: off (Confined) — severed only where the sandbox confines" },
+    { "effective": "Standard", "ceiling": "Standard", "deployment": "Unleashed", "line": "Network: clamped off by policy (ceiling Standard) — severed only where the sandbox confines" },
+    { "effective": "Confined", "ceiling": "Standard", "deployment": "Unleashed", "line": "Network: clamped off by policy (ceiling Standard) — severed only where the sandbox confines" },
+    { "effective": "Confined", "ceiling": "Confined", "deployment": "Unleashed", "line": "Network: clamped off by policy (ceiling Confined) — severed only where the sandbox confines" },
+    { "effective": "Standard", "ceiling": "Trusted", "deployment": "Standard", "line": "Network: clamped off by deployment ceiling (Standard) — severed only where the sandbox confines" },
+    { "effective": "Confined", "ceiling": "Trusted", "deployment": "Confined", "line": "Network: clamped off by deployment ceiling (Confined) — severed only where the sandbox confines" },
+    { "effective": "Standard", "ceiling": "Standard", "deployment": "Standard", "line": "Network: clamped off by deployment ceiling (Standard) — severed only where the sandbox confines" },
+    { "effective": "Trusted", "ceiling": "Trusted", "deployment": "Standard", "line": "Network: on (Trusted)" }
   ],
   "confinementCases": [
     {
-      "effective": "Standard", "ceiling": "Trusted",
+      "effective": "Standard", "ceiling": "Trusted", "deployment": "Unleashed",
       "confinement": { "outcome": "Confined", "networkSevered": true },
       "line": "Network: off (Standard) — confined: egress severed"
     },
     {
-      "effective": "Standard", "ceiling": "Trusted",
+      "effective": "Standard", "ceiling": "Trusted", "deployment": "Unleashed",
       "confinement": { "outcome": "Confined", "networkSevered": false },
       "line": "Network: off (Standard) — confined, but egress was NOT severed"
     },
     {
-      "effective": "Standard", "ceiling": "Trusted",
+      "effective": "Standard", "ceiling": "Trusted", "deployment": "Unleashed",
       "confinement": { "outcome": "Unconfined", "reason": "not-linux", "networkSevered": false },
       "line": "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (not-linux)"
     },
     {
-      "effective": "Confined", "ceiling": "Trusted",
+      "effective": "Confined", "ceiling": "Trusted", "deployment": "Unleashed",
       "confinement": { "outcome": "Unconfined", "reason": "no-bwrap", "networkSevered": false },
       "line": "Network: off (Confined) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (no-bwrap)"
     },
     {
-      "effective": "Standard", "ceiling": "Standard",
+      "effective": "Standard", "ceiling": "Standard", "deployment": "Unleashed",
       "confinement": { "outcome": "Unconfined", "reason": "no-userns", "networkSevered": false },
       "line": "Network: clamped off by policy (ceiling Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (no-userns)"
     },
     {
-      "effective": "Standard", "ceiling": "Standard",
+      "effective": "Standard", "ceiling": "Standard", "deployment": "Unleashed",
       "confinement": { "outcome": "Confined", "networkSevered": true },
       "line": "Network: clamped off by policy (ceiling Standard) — confined: egress severed"
     },
     {
-      "effective": "Standard", "ceiling": "Trusted",
+      "effective": "Standard", "ceiling": "Trusted", "deployment": "Unleashed",
       "confinement": { "outcome": "NotApplicable", "networkSevered": false },
       "line": "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this runner applies no confinement"
     },
     {
-      "effective": "Trusted", "ceiling": "Trusted",
+      "effective": "Trusted", "ceiling": "Trusted", "deployment": "Unleashed",
       "confinement": { "outcome": "Confined", "networkSevered": false },
       "line": "Network: on (Trusted)"
     }

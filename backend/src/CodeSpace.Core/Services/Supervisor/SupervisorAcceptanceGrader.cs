@@ -313,7 +313,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         var url = LocalGitWorkspaceProvider.BuildAuthenticatedUrl(clone.RepositoryUrl, clone.TokenUsername, clone.Token);
 
         var cloneResult = await _runners.Resolve(GradingRunnerKind).RunAsync(
-            new SandboxSpec { Command = "git", Args = new[] { "clone", url, directory }, TimeoutSeconds = CloneTimeoutSeconds }, cancellationToken).ConfigureAwait(false);
+            new SandboxSpec { Command = "git", Args = new[] { "clone", url, directory }, TimeoutSeconds = CloneTimeoutSeconds, AllowNetwork = true }, cancellationToken).ConfigureAwait(false);
 
         if (cloneResult.Status != SandboxStatus.Success)
             throw new WorkspaceException($"git clone failed (exit {cloneResult.ExitCode}): {LocalGitWorkspaceProvider.Redact(Summarize(cloneResult.Stderr), clone.Token)}");
@@ -328,7 +328,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
             await LocalGitWorkspaceProvider.StripTokenFromRemoteAsync(_runners.Resolve(GradingRunnerKind), CloneTimeoutSeconds, _logger, clone.RepositoryUrl, directory, cancellationToken).ConfigureAwait(false);
 
         var checkoutResult = await _runners.Resolve(GradingRunnerKind).RunAsync(
-            new SandboxSpec { Command = "git", Args = new[] { "-C", directory, "checkout", "--detach", baseSha }, WorkingDirectory = directory, TimeoutSeconds = CloneTimeoutSeconds }, cancellationToken).ConfigureAwait(false);
+            new SandboxSpec { Command = "git", Args = new[] { "-C", directory, "checkout", "--detach", baseSha }, WorkingDirectory = directory, TimeoutSeconds = CloneTimeoutSeconds, AllowNetwork = true }, cancellationToken).ConfigureAwait(false);
 
         if (checkoutResult.Status != SandboxStatus.Success)
             throw new WorkspaceException($"base revision {baseSha} not found in the repository: {LocalGitWorkspaceProvider.Redact(Summarize(checkoutResult.Stderr), clone.Token)}");
@@ -343,7 +343,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         try
         {
             var result = await _runners.Resolve(GradingRunnerKind).RunAsync(
-                new SandboxSpec { Command = "git", Args = new[] { "-C", directory, "apply", "--3way", patchFile }, WorkingDirectory = directory, TimeoutSeconds = 60 }, cancellationToken).ConfigureAwait(false);
+                new SandboxSpec { Command = "git", Args = new[] { "-C", directory, "apply", "--3way", patchFile }, WorkingDirectory = directory, TimeoutSeconds = 60, AllowNetwork = true }, cancellationToken).ConfigureAwait(false);
 
             return result.Status == SandboxStatus.Success ? null : result.Stderr;
         }
@@ -615,6 +615,10 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
             Args = setupCommand.Skip(1).ToList(),
             WorkingDirectory = directory,
             TimeoutSeconds = timeoutSeconds,
+            // A contract's setup step is what INSTALLS what the check needs (a package restore, a toolchain fetch),
+            // so it keeps the egress it has always had — stated here rather than inherited, now that a spec that
+            // says nothing is severed.
+            AllowNetwork = true,
         };
 
         var result = await _runners.Resolve(GradingRunnerKind).RunAsync(spec, cancellationToken).ConfigureAwait(false);

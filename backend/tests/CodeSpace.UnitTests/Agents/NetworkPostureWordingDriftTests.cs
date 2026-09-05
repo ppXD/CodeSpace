@@ -21,9 +21,9 @@ public class NetworkPostureWordingDriftTests
 {
     private const string FixturePath = "frontend/src/lib/networkPosture.fixture.json";
 
-    private sealed record PostureCase(string Effective, string Ceiling, string Line);
+    private sealed record PostureCase(string Effective, string Ceiling, string Deployment, string Line);
 
-    private sealed record ConfinedPostureCase(string Effective, string Ceiling, SandboxConfinement Confinement, string Line);
+    private sealed record ConfinedPostureCase(string Effective, string Ceiling, string Deployment, SandboxConfinement Confinement, string Line);
 
     /// <summary>The fixture's confinement blocks are read with the SAME options the executor persists the column with, so a fixture that parses here parses off a real row too.</summary>
     private static readonly JsonSerializerOptions FixtureJson = CodeSpace.Core.Services.Agents.AgentJson.Options;
@@ -33,16 +33,17 @@ public class NetworkPostureWordingDriftTests
     {
         var cases = ReadFixture();
 
-        cases.Count.ShouldBeGreaterThan(2, $"{FixturePath} must cover all three posture states (on / off / clamped off), or it pins nothing worth pinning");
+        cases.Count.ShouldBeGreaterThan(3, $"{FixturePath} must cover all four posture states (on / off / clamped off by policy / clamped off by deployment ceiling), or it pins nothing worth pinning");
 
-        foreach (var (effective, ceiling, line) in cases)
+        foreach (var (effective, ceiling, deployment, line) in cases)
         {
             var actual = AgentAutonomyPolicy.DescribeNetwork(
                 AgentAutonomyPolicy.Parse(effective, AgentAutonomyLevel.Standard),
-                AgentAutonomyPolicy.Parse(ceiling, AgentAutonomyLevel.Standard));
+                AgentAutonomyPolicy.Parse(ceiling, AgentAutonomyLevel.Standard),
+                AgentAutonomyPolicy.Parse(deployment, AgentAutonomyLevel.Standard));
 
             actual.ShouldBe(line,
-                customMessage: $"the backend's '{effective}' under ceiling '{ceiling}' sentence no longer matches {FixturePath} — update the fixture AND the frontend mirror in the same change, so the composer never predicts a posture the journal contradicts");
+                customMessage: $"the backend's '{effective}' under ceiling '{ceiling}' / deployment ceiling '{deployment}' sentence no longer matches {FixturePath} — update the fixture AND the frontend mirror in the same change, so the composer never predicts a posture the journal contradicts");
         }
     }
 
@@ -56,11 +57,12 @@ public class NetworkPostureWordingDriftTests
 
         cases.Count.ShouldBeGreaterThan(3, $"{FixturePath} confinementCases must cover confined/severed, confined/shared, unconfined and not-applicable, or it pins nothing worth pinning");
 
-        foreach (var (effective, ceiling, confinement, line) in cases)
+        foreach (var (effective, ceiling, deployment, confinement, line) in cases)
         {
             var actual = AgentAutonomyPolicy.DescribeNetwork(
                 AgentAutonomyPolicy.Parse(effective, AgentAutonomyLevel.Standard),
                 AgentAutonomyPolicy.Parse(ceiling, AgentAutonomyLevel.Standard),
+                AgentAutonomyPolicy.Parse(deployment, AgentAutonomyLevel.Standard),
                 confinement);
 
             actual.ShouldBe(line,
@@ -89,6 +91,7 @@ public class NetworkPostureWordingDriftTests
         lines.ShouldContain(l => l.StartsWith("Network: on ("), "no 'on' case");
         lines.ShouldContain(l => l.StartsWith("Network: off ("), "no 'off' case");
         lines.ShouldContain(l => l.StartsWith("Network: clamped off by policy ("), "no 'clamped off by policy' case");
+        lines.ShouldContain(l => l.StartsWith("Network: clamped off by deployment ceiling ("), "no 'clamped off by deployment ceiling' case");
     }
 
     private static IReadOnlyList<ConfinedPostureCase> ReadConfinementFixture()
@@ -99,6 +102,7 @@ public class NetworkPostureWordingDriftTests
             .Select(c => new ConfinedPostureCase(
                 c.GetProperty("effective").GetString()!,
                 c.GetProperty("ceiling").GetString()!,
+                c.GetProperty("deployment").GetString()!,
                 c.GetProperty("confinement").Deserialize<SandboxConfinement>(FixtureJson)!,
                 c.GetProperty("line").GetString()!))
             .ToList();
@@ -111,7 +115,7 @@ public class NetworkPostureWordingDriftTests
         using var document = JsonDocument.Parse(File.ReadAllText(path));
 
         return document.RootElement.GetProperty("cases").EnumerateArray()
-            .Select(c => new PostureCase(c.GetProperty("effective").GetString()!, c.GetProperty("ceiling").GetString()!, c.GetProperty("line").GetString()!))
+            .Select(c => new PostureCase(c.GetProperty("effective").GetString()!, c.GetProperty("ceiling").GetString()!, c.GetProperty("deployment").GetString()!, c.GetProperty("line").GetString()!))
             .ToList();
     }
 

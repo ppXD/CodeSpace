@@ -177,9 +177,16 @@ export const NETWORK_CONFINEMENT_CAVEAT = " — severed only where the sandbox c
  * authors the same sentence for the run's journal. The composer states it BEFORE a run exists, so it cannot read the
  * backend's words off the wire and necessarily duplicates them; `networkPosture.fixture.json` is the committed
  * fixture BOTH stacks assert on, so neither wording can move without the other's test going red.
+ *
+ * `deploymentCeiling` is this host's own bound (`Sandbox:MaxAutonomy`), reported by the route preview. It is named
+ * FIRST when it binds, because it is the one bound the operator cannot lift by choosing a different effort tier.
+ * Blank means "not reported yet" — the sentence then says only what the route can account for, never a guess.
  */
-export const describeNetwork = (effective: string, ceiling: string) => {
+export const describeNetwork = (effective: string, ceiling: string, deploymentCeiling = "") => {
   if (tierHasNetwork(effective)) return `Network: on (${effective})`;
+
+  if (deploymentCeiling && !tierHasNetwork(deploymentCeiling))
+    return `Network: clamped off by deployment ceiling (${deploymentCeiling})${NETWORK_CONFINEMENT_CAVEAT}`;
 
   if (!tierHasNetwork(ceiling)) return `Network: clamped off by policy (ceiling ${ceiling})${NETWORK_CONFINEMENT_CAVEAT}`;
 

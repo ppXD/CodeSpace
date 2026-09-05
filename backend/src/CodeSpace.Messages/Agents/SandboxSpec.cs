@@ -47,13 +47,19 @@ public sealed record SandboxSpec
     public IReadOnlyList<string> ConfigHomeEnvVars { get; init; } = Array.Empty<string>();
 
     /// <summary>
-    /// Whether the command may reach the network. <c>false</c> → the sandbox runner severs egress entirely (a fresh
-    /// network namespace with only loopback), so a confined agent cannot reach cloud-metadata, the LAN, or exfiltrate
-    /// over the internet. <c>true</c> (default — non-breaking) → the host network is shared, UNLESS
+    /// Whether the command may reach the network. <c>false</c> (the DEFAULT) → the sandbox runner severs egress
+    /// entirely (a fresh network namespace with only loopback), so a confined agent cannot reach cloud-metadata, the
+    /// LAN, or exfiltrate over the internet. <c>true</c> → the host network is shared, UNLESS
     /// <see cref="EgressAllowlist"/> narrows it. Enforced only by a sandboxing runner; a bare-process runner cannot
     /// honour it.
+    ///
+    /// <para>The default is FAIL-CLOSED and that is the point: a spec builder is the one place that knows whether its
+    /// command needs a remote, and the answer for a new one is far more often "no" than "yes". While the default was
+    /// <c>true</c>, forgetting the field granted full egress silently — the failure mode had no symptom to notice.
+    /// Every builder that DOES need a remote (a clone, a fetch, an ls-remote, an agent at a network-granting tier)
+    /// now says so at its own call site, so the grant is always readable next to the command it is for.</para>
     /// </summary>
-    public bool AllowNetwork { get; init; } = true;
+    public bool AllowNetwork { get; init; }
 
     /// <summary>
     /// A DENY-BY-DEFAULT egress allowlist (host names) the run may reach — the narrowing of <see cref="AllowNetwork"/>

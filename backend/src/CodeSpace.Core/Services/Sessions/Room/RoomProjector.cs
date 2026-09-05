@@ -433,8 +433,8 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// The run's effective network posture, read from the two columns that record it — the launch-stamped route
     /// provenance (<c>route_plan_jsonb</c>: the resolved tier plus the ceiling it was clamped to) for what was
     /// ASKED FOR, and the run's agents' <c>sandbox_confinement</c> for what the host actually DID. Narrow column
-    /// projections, never the frozen definition graph. Null (no row rendered) for a run with no route provenance, or
-    /// one staged before the launch stamped its resolved tier: an unknown posture is left UNSAID rather than guessed
+    /// projections, never the frozen definition graph. A run with no route provenance falls through to
+    /// <see cref="DeploymentNetworkPostureAsync"/>; where neither can say, the row is left UNSAID rather than guessed
     /// as "off", since a wrong "off" is exactly the silent claim this row exists to end. A run whose agents recorded
     /// no confinement (launched before the stamp existed) keeps the hedged wording — the same reason.
     /// </summary>
@@ -445,15 +445,15 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             .Select(r => r.RoutePlanJson)
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
-        if (string.IsNullOrWhiteSpace(json)) return null;
+        var route = string.IsNullOrWhiteSpace(json) ? null : TryReadRoute(json);
 
-        var route = TryReadRoute(json);
-
-        if (route is null || route.EffectiveAutonomy.Length == 0) return null;
+        if (route is null || route.EffectiveAutonomy.Length == 0)
+            return await DeploymentNetworkPostureAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
 
         return AgentAutonomyPolicy.DescribeNetwork(
             AgentAutonomyPolicy.Parse(route.EffectiveAutonomy, AgentAutonomyLevel.Standard),
             AgentAutonomyPolicy.Parse(route.Caps.AutonomyCeiling, AgentAutonomyLevel.Unleashed),
+            AgentAutonomyPolicy.DeploymentCeiling,
             await ConfinementAsync(runId, teamId, cancellationToken).ConfigureAwait(false));
     }
 
@@ -498,6 +498,55 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         try
         {
             return JsonSerializer.Deserialize<SandboxConfinement>(json, AgentJson.Options);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The posture for a run with NO route provenance — an authored workflow, or a replay of one. There is no route
+    /// to name a ceiling from, but there is always the DEPLOYMENT's own (<c>Sandbox:MaxAutonomy</c>), and when that
+    /// ceiling denies network no agent in the run could have had it however the node was authored. The effective tier
+    /// comes from the run's OWN record (the staged <c>AgentTask</c>'s clamped <c>autonomy</c>), never from the
+    /// deployment: a run that predates a lowered ceiling and really did have network must still read "on".
+    ///
+    /// <para>Silent — exactly as before — whenever the deployment ceiling grants network, which is its committed
+    /// default: with no clamp to report, an authored run's Launch row stays absent rather than stating a posture
+    /// nobody bounded.</para>
+    /// </summary>
+    private async Task<string?> DeploymentNetworkPostureAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var ceiling = AgentAutonomyPolicy.DeploymentCeiling;
+
+        if (AgentAutonomyPolicy.Derive(ceiling).Network == AgentNetworkAccess.On) return null;
+
+        var taskJson = await _db.AgentRun.AsNoTracking()
+            .Where(r => r.WorkflowRunId == runId && r.TeamId == teamId)
+            .OrderBy(r => r.CreatedDate)
+            .Select(r => r.TaskJson)
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        var effective = TryReadAutonomy(taskJson);
+
+        return effective is null
+            ? null
+            : AgentAutonomyPolicy.DescribeNetwork(effective.Value, ceiling, ceiling, await ConfinementAsync(runId, teamId, cancellationToken).ConfigureAwait(false));
+    }
+
+    /// <summary>Read just the <c>autonomy</c> tier out of a staged <c>AgentTask</c> payload — one property, not the whole envelope. Null for an absent / malformed / tier-less payload (the room drops one row, never fails a turn).</summary>
+    private static AgentAutonomyLevel? TryReadAutonomy(string? taskJson)
+    {
+        if (string.IsNullOrWhiteSpace(taskJson)) return null;
+
+        try
+        {
+            using var document = JsonDocument.Parse(taskJson);
+
+            return document.RootElement.ValueKind == JsonValueKind.Object && document.RootElement.TryGetProperty("autonomy", out var tier) && tier.ValueKind == JsonValueKind.String
+                ? AgentAutonomyPolicy.Parse(tier.GetString(), AgentAutonomyLevel.Standard)
+                : null;
         }
         catch (JsonException)
         {

@@ -143,7 +143,28 @@ public sealed class EffortRouter : IEffortRouter, IScopedDependency
 
         var caps = MergeCaps(preset?.ToCaps() ?? new RouteCaps(), request.CapsOverride);
 
-        return (preset, caps);
+        return (preset, TightenToDeploymentCeiling(caps));
+    }
+
+    /// <summary>
+    /// The LAST tighten of the route's autonomy ceiling: this deployment's own committed bound
+    /// (<c>Sandbox:MaxAutonomy</c>). Applied here rather than at the launch clamp so it is part of the ROUTE — the
+    /// preview shows it, the stamped route provenance records it, and every consumer of
+    /// <see cref="RouteCaps.AutonomyCeiling"/> (the launch's <c>ClampAutonomy</c>, the Room's posture line) reads one
+    /// already-bounded value instead of each re-applying it.
+    ///
+    /// <para>A deployment that has not lowered its ceiling returns the caps UNTOUCHED — including a BLANK
+    /// <see cref="RouteCaps.AutonomyCeiling"/>, which must stay blank: the launch clamp reads a blank ceiling as the
+    /// fail-closed <c>Standard</c>, so rewriting it to a concrete top-tier string would hand the one route nobody
+    /// bounded exactly the network it was denied.</para>
+    /// </summary>
+    private static RouteCaps TightenToDeploymentCeiling(RouteCaps caps)
+    {
+        var deployment = AgentAutonomyPolicy.DeploymentCeiling;
+
+        if (deployment == AgentAutonomyPolicy.DefaultDeploymentCeiling) return caps;
+
+        return caps with { AutonomyCeiling = TightenCeiling(caps.AutonomyCeiling, deployment.ToString()) };
     }
 
     /// <summary>Merge the operator's override onto the preset's caps — a SET numeric override replaces the preset's value; the AutonomyCeiling is TIGHTEN-ONLY (an override may lower it, never raise it — the privilege bound stays un-bypassable); an unset override field keeps the preset's value.</summary>

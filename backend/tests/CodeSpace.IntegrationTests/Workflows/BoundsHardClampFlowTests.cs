@@ -238,7 +238,8 @@ public class BoundsHardClampFlowTests
 
         return AgentAutonomyPolicy.DescribeNetwork(
             AgentAutonomyPolicy.Parse(route.EffectiveAutonomy, AgentAutonomyLevel.Standard),
-            AgentAutonomyPolicy.Parse(route.Caps.AutonomyCeiling, AgentAutonomyLevel.Unleashed));
+            AgentAutonomyPolicy.Parse(route.Caps.AutonomyCeiling, AgentAutonomyLevel.Unleashed),
+            AgentAutonomyPolicy.DeploymentCeiling);
     }
 
     private async Task<LaunchTaskResult> LaunchAsync(TaskLaunchRequest request)
