@@ -1,15 +1,20 @@
 using System.Text.Json;
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.PullRequests;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Sessions.Room;
+using CodeSpace.Messages.Enums;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents;
 
 /// <summary>
-/// 🟢 Unit: DC-2b (deliver-at-stop enforcement) — <see cref="SupervisorDeliveryGate.Validate"/>, pinned WITHOUT a
-/// DB. Proves the owner-locked authorization ladder: nothing wants a PR ⇒ untouched; wants one but UNAUTHORIZED
+/// 🟢 Unit: DC-2b (deliver-at-stop enforcement) — <see cref="SupervisorDeliveryGate.Validate"/>, pinned WITHOUT
+/// Postgres (the one case whose tape entry production mints off a repository row runs the REAL
+/// <see cref="SupervisorPullRequestOpener"/> against an in-memory context instead of hand-writing it).
+/// Proves the owner-locked authorization ladder: nothing wants a PR ⇒ untouched; wants one but UNAUTHORIZED
 /// (a pure model proposal, never confirmed and never operator-declared) ⇒ ask_human, park; wants one AND
 /// authorized (① a confirmed plan, or ② the operator's own declaration) with no prior attempt ⇒ a
 /// server-authored <c>publish</c>; a prior attempt that fully succeeded ⇒ untouched; a prior attempt with ANY
@@ -197,24 +202,35 @@ public class SupervisorDeliveryGateTests
 
     // ── H1 (Skipped-as-satisfied fix): policy-skipped is a HUMAN decision, not satisfaction ──
 
-    [Fact]
-    public void A_stop_after_an_all_skipped_publish_attempt_parks_naming_the_patch_only_policy()
+    [Theory]
+    [InlineData(RepositoryPublishMode.PatchOnly, "patch-only")]
+    [InlineData(RepositoryPublishMode.Branch, "no published branch")]
+    public async Task A_stop_after_a_zero_target_publish_parks_on_the_card_the_repositorys_publish_mode_earns(RepositoryPublishMode publishMode, string expectedWording)
     {
         // PatchOnly repos yield Skipped by deliberate policy — but the operator ALSO required a PR. Two operator
         // intents conflict; the gate must surface the conflict to a human, never silently pick "no PR" and call
         // the contract satisfied. (The full WaivedByPolicy state with recorded authority lands in Phase T — the
         // interim waiver is the human's answer to THIS card.)
+        //
+        // The publish outcome is MINTED BY THE REAL OPENER rather than hand-written, because the hand-written
+        // all-Skipped tape this used to assert on is not what an ORDINARY patch-only run produces: the SAME policy
+        // also skips the agent push and the merge integration, so the branch resolver surfaces ZERO targets — and
+        // the opener's empty result parked every such run on the "no published branch" card meant for a work-free
+        // run (RealModelDeliveryGateE2ETests caught it live, over 3 captured manifests).
+        var teamId = Guid.NewGuid();
+        var plan = Plan(1, openPullRequest: true);
+
         var context = Context(new DeliverySpec { OpenPullRequest = true },
-            Plan(1, openPullRequest: true),
-            Decision(SupervisorDecisionKinds.Publish, 2, PublishOutcome(RoomPullRequestDisposition.Skipped)));
+            plan,
+            Decision(SupervisorDecisionKinds.Publish, 2, await ZeroTargetPublishOutcomeAsync(teamId, publishMode, plan)));
 
         var substituted = SupervisorDeliveryGate.Validate(context, StopDecision());
 
-        substituted.ShouldNotBeNull();
+        substituted.ShouldNotBeNull("zero resolved targets satisfies nothing, whatever the publish mode");
         substituted!.Kind.ShouldBe(SupervisorDecisionKinds.AskHuman);
 
         var question = JsonSerializer.Deserialize<SupervisorAskHumanPayload>(substituted.PayloadJson, AgentJson.Options)!.Question;
-        question.ShouldContain("patch-only", Case.Insensitive);
+        question.ShouldContain(expectedWording, Case.Insensitive, $"a {publishMode} repository's zero-target publish must park on the card naming ITS OWN blocker — the human can only fix what the card names");
     }
 
     [Fact]
@@ -557,4 +573,37 @@ public class SupervisorDeliveryGateTests
         {
             PullRequests = new[] { new RoomPullRequestOpened { Alias = "primary", Disposition = disposition, Error = error } },
         }, AgentJson.Options);
+
+    /// <summary>
+    /// The tape entry a REAL forced publish leaves behind when the branch resolver surfaces NOTHING for a repository
+    /// in <paramref name="publishMode"/>: the production <see cref="SupervisorPullRequestOpener"/> runs against an
+    /// in-memory repository row and its result is serialized exactly as <c>RealSupervisorActionExecutor</c>'s publish
+    /// step persists it. Not a fixture the gate's own reading could drift from — it IS what production writes.
+    /// </summary>
+    private static async Task<string> ZeroTargetPublishOutcomeAsync(Guid teamId, RepositoryPublishMode publishMode, params SupervisorPriorDecision[] prior)
+    {
+        using var db = Infrastructure.EmptyTestDb.New();
+
+        var repositoryId = Guid.NewGuid();
+
+        db.Repository.Add(new Repository
+        {
+            Id = repositoryId, TeamId = teamId, ProviderInstanceId = Guid.NewGuid(), ExternalId = "ext", NamespacePath = "org",
+            Name = "repo", FullPath = "org/repo", DefaultBranch = "main", WebUrl = "https://local/org/repo", PublishMode = publishMode,
+        });
+        await db.SaveChangesAsync();
+
+        var opener = new SupervisorPullRequestOpener(db, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new UnreachableChangeSetService());
+
+        var result = await opener.OpenAsync(Guid.NewGuid(), teamId, prior, repositoryId, targetBranchOverride: null, currentTurnStopSummary: null, actorUserId: null, CancellationToken.None);
+
+        return JsonSerializer.Serialize(result, AgentJson.Options);
+    }
+
+    /// <summary>Zero resolved targets must be decided before any provider work — a call here means the opener tried to open a PR against a branch that does not exist.</summary>
+    private sealed class UnreachableChangeSetService : IChangeSetService
+    {
+        public Task<ChangeSetResult> OpenPullRequestsAsync(Guid teamId, ChangeSetPullRequestSpec spec, Guid? actorUserId, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("the opener must never reach the provider with zero resolved targets");
+    }
 }
