@@ -196,7 +196,10 @@ public class SupervisorWorkPlanFlowTests : IDisposable
             Definition = new WorkflowDefinition
             {
                 SchemaVersion = 1,
-                // Mechanics suite — declares Shadow so C5's default Enforced stamp doesn't park its contract-less stops.
+                // Mechanics suite — declares Shadow. Its spawned units DO stake delivery/output obligations; what is
+                // missing is the EVIDENCE: the simulated agent completion mints no publish manifest, so those rows stay
+                // honestly unanswered and C5's default Enforced stamp would park every arc here. The park would be
+                // correct — completion arbitration is just not this suite's subject; CompletionEnforcedCohortFlowTests owns it.
                 CompletionMode = WorkflowDefinition.CompletionModeShadow,
                 Nodes = new List<NodeDefinition>
                 {
