@@ -1229,8 +1229,8 @@ public sealed partial class SupervisorTurnService
 
         var gates = new (string Label, SupervisorAcceptanceSpec? Spec)[]
         {
-            ("operator-floor", floorCommand is null ? null : new SupervisorAcceptanceSpec { Command = floorCommand }),
-            ("model-check", modelCommand is null || modelAcceptance is null ? null : modelAcceptance with { Command = modelCommand }),
+            (Agents.AgentAcceptanceContract.OperatorFloorGateLabel, floorCommand is null ? null : new SupervisorAcceptanceSpec { Command = floorCommand }),
+            (Agents.AgentAcceptanceContract.ModelCheckGateLabel, modelCommand is null || modelAcceptance is null ? null : modelAcceptance with { Command = modelCommand }),
         };
 
         if (gates.All(g => g.Spec is null)) return execution;   // no operator floor + no model criterion → byte-identical no-op (the dominant case)
@@ -1266,10 +1266,23 @@ public sealed partial class SupervisorTurnService
             if (deliverableGates.Count == 0) return execution;   // nothing to grade against (analysis-only / un-integrated) → skip
 
             BenchmarkGrade branchless;
+            bool judgedSummary;
             using (Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(context.SupervisorRunId, teamId, context.NodeId, "", GraderAcceptanceCallKind, _recordLogger, _offloader, _budget, context.MaxCostUsd, context.ModelPrices)))
-                branchless = await GradeBranchlessStopAsync(context, decision, deliverableGates, teamId, cancellationToken).ConfigureAwait(false);
+                (branchless, judgedSummary) = await GradeBranchlessStopAsync(context, decision, deliverableGates, teamId, cancellationToken).ConfigureAwait(false);
 
-            return execution with { OutcomeJson = SupervisorOutcome.AppendAcceptanceGrade(execution.OutcomeJson, branchless.Passed, branchless.Detail) };
+            // The operator floor is ALWAYS a bare TestsPass argv (the operator never authors a kind), so it is exactly
+            // the gate the deliverable filter above just dropped — and a MANDATORY gate that could not run may never be
+            // discharged by a sibling gate's pass. Recording one here would turn the un-run floor into "accepted", which
+            // is strictly worse than the pre-C1 skip it replaced. So the skip stands, annotated with WHICH gate went
+            // unanswered; a FAILING model gate still records its real failure.
+            if (branchless.Passed && gates.Any(g => g.Label == Agents.AgentAcceptanceContract.OperatorFloorGateLabel && g.Spec is not null))
+            {
+                _logger.LogWarning("Run {RunId} stopped with no reviewable head, so the operator's acceptance floor could not run; recording the stop as UNGRADED rather than accepting it on the model gate alone", context.SupervisorRunId);
+
+                return execution with { OutcomeJson = SupervisorOutcome.AppendAcceptanceSkipped(execution.OutcomeJson, OperatorFloorNotGraded) };
+            }
+
+            return execution with { OutcomeJson = SupervisorOutcome.AppendAcceptanceGrade(execution.OutcomeJson, branchless.Passed, branchless.Detail, judgedSummary) };
         }
 
         // P3.5 — see the identical rationale on the rehydrate-fold's own grading wrap: labels any LlmJudge model call
@@ -1280,6 +1293,9 @@ public sealed partial class SupervisorTurnService
 
         return execution with { OutcomeJson = SupervisorOutcome.AppendAcceptanceGrade(execution.OutcomeJson, grade.Passed, grade.Detail) };
     }
+
+    /// <summary>The durable detail a branchless stop records when the operator's mandatory floor had no head to run against — the tape says WHICH gate went unanswered, while the verdict itself stays null (ungraded). Pinned (Rule 8): the wording is read by humans and asserted by tests.</summary>
+    internal const string OperatorFloorNotGraded = "operator-floor not graded (no head)";
 
     /// <summary>
     /// C1 — grade a BRANCHLESS stop against every deliverable-kind gate. Each gate is answered from the world the run
@@ -1293,17 +1309,23 @@ public sealed partial class SupervisorTurnService
     ///         "Completed" this fix exists to remove. The detail says out loud that the judge read the summary.</item>
     /// </list>
     /// Fail-closed everywhere else: no unit passed and no summary fallback applies ⇒ the first failing detail stands.
+    ///
+    /// <para>Returns whether ANY gate reached its verdict from PROSE — the summary fallback below. The detail already
+    /// says so in words, but words are not a key: the Room's verification marker has to branch on it, and a prose
+    /// grade found by substring-matching a human sentence is exactly the drift Rule 8 exists to prevent.</para>
     /// </summary>
-    private async Task<BenchmarkGrade> GradeBranchlessStopAsync(SupervisorTurnContext context, SupervisorDecision decision, IReadOnlyList<(string Label, SupervisorAcceptanceSpec? Spec)> gates, Guid teamId, CancellationToken cancellationToken)
+    private async Task<(BenchmarkGrade Grade, bool JudgedSummary)> GradeBranchlessStopAsync(SupervisorTurnContext context, SupervisorDecision decision, IReadOnlyList<(string Label, SupervisorAcceptanceSpec? Spec)> gates, Guid teamId, CancellationToken cancellationToken)
     {
         var unitIds = BranchlessUnitIds(context);
         var oracleNotes = new List<string>();
+        var judgedSummary = false;
 
         foreach (var (label, spec) in gates)
         {
-            var grade = await GradeBranchlessGateAsync(context, decision, unitIds, spec!, teamId, cancellationToken).ConfigureAwait(false);
+            var (grade, fromSummary) = await GradeBranchlessGateAsync(context, decision, unitIds, spec!, teamId, cancellationToken).ConfigureAwait(false);
+            judgedSummary |= fromSummary;
 
-            if (!grade.Passed) return grade with { Detail = Annotated($"{label}: {grade.Detail}", grade.OracleNote) };
+            if (!grade.Passed) return (grade with { Detail = Annotated($"{label}: {grade.Detail}", grade.OracleNote) }, judgedSummary);
 
             // A PASSING gate's note is the load-bearing half here: it is what says the judge read the stop SUMMARY
             // rather than a captured file. Dropping it (as the repo path once dropped its own) would leave a prose
@@ -1311,11 +1333,11 @@ public sealed partial class SupervisorTurnService
             if (grade.OracleNote is { Length: > 0 } note) oracleNotes.Add($"{label}: {note}");
         }
 
-        return new BenchmarkGrade { Passed = true, Detail = Annotated("accepted", oracleNotes.Count == 0 ? null : string.Join("; ", oracleNotes)) };
+        return (new BenchmarkGrade { Passed = true, Detail = Annotated("accepted", oracleNotes.Count == 0 ? null : string.Join("; ", oracleNotes)) }, judgedSummary);
     }
 
-    /// <summary>One deliverable gate against the branchless run: the captured worlds first, then the summary fallback. Never throws — a grader escape becomes a fail-closed GraderFault so the terminal row is never stranded.</summary>
-    private async Task<BenchmarkGrade> GradeBranchlessGateAsync(SupervisorTurnContext context, SupervisorDecision decision, IReadOnlyList<Guid> unitIds, SupervisorAcceptanceSpec spec, Guid teamId, CancellationToken cancellationToken)
+    /// <summary>One deliverable gate against the branchless run: the captured worlds first, then the summary fallback (whose use is reported back as <c>JudgedSummary</c>). Never throws — a grader escape becomes a fail-closed GraderFault so the terminal row is never stranded.</summary>
+    private async Task<(BenchmarkGrade Grade, bool JudgedSummary)> GradeBranchlessGateAsync(SupervisorTurnContext context, SupervisorDecision decision, IReadOnlyList<Guid> unitIds, SupervisorAcceptanceSpec spec, Guid teamId, CancellationToken cancellationToken)
     {
         var timeoutSeconds = spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds;
         BenchmarkGrade? firstFailure = null;
@@ -1327,7 +1349,7 @@ public sealed partial class SupervisorTurnService
             {
                 var grade = await _acceptanceGrader.GradeCapturedAsync(unitId, teamId, spec, timeoutSeconds, cancellationToken).ConfigureAwait(false);
 
-                if (grade.Passed) return grade;
+                if (grade.Passed) return (grade, false);
 
                 everCaptured |= grade.Detail != ISupervisorAcceptanceGrader.NoDeliverablesCaptured;
                 firstFailure ??= grade;
@@ -1336,19 +1358,19 @@ public sealed partial class SupervisorTurnService
         catch (Workflows.Llm.LlmBudgetExceededException refused)
         {
             _logger.LogWarning("Branchless stop grading refused by the budget ledger (committed ${Committed} against ${Cap}) — leaving the verdict a budget-skip", refused.CommittedUsd, refused.CapUsd);
-            return new BenchmarkGrade { Passed = false, Detail = GradeSkippedBudgetExhausted, Class = Messages.Agents.Benchmark.GradeFailureClass.Environment };
+            return (new BenchmarkGrade { Passed = false, Detail = GradeSkippedBudgetExhausted, Class = Messages.Agents.Benchmark.GradeFailureClass.Environment }, false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Branchless stop acceptance grade for run {RunId} failed unexpectedly; recording not-accepted", context.SupervisorRunId);
-            return new BenchmarkGrade { Passed = false, Detail = $"grade-error: {ex.Message}", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault };
+            return (new BenchmarkGrade { Passed = false, Detail = $"grade-error: {ex.Message}", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault }, false);
         }
 
-        if (everCaptured) return firstFailure!;
+        if (everCaptured) return (firstFailure!, false);
 
-        return await JudgeStopSummaryAsync(context, decision, spec, teamId, cancellationToken).ConfigureAwait(false)
-               ?? firstFailure
-               ?? new BenchmarkGrade { Passed = false, Detail = ISupervisorAcceptanceGrader.NoDeliverablesCaptured, Class = Messages.Agents.Benchmark.GradeFailureClass.Genuine };
+        if (await JudgeStopSummaryAsync(context, decision, spec, teamId, cancellationToken).ConfigureAwait(false) is { } judged) return judged;
+
+        return (firstFailure ?? new BenchmarkGrade { Passed = false, Detail = ISupervisorAcceptanceGrader.NoDeliverablesCaptured, Class = Messages.Agents.Benchmark.GradeFailureClass.Genuine }, false);
     }
 
     /// <summary>
@@ -1356,8 +1378,12 @@ public sealed partial class SupervisorTurnService
     /// and only when no unit captured anything — every other kind reads files, and inventing one would be a fabricated
     /// pass. Null ⇒ this fallback does not apply (the caller keeps the captured verdict). A missing judge fails CLOSED:
     /// a configured oracle we cannot run is never a silent pass.
+    ///
+    /// <para><c>JudgedSummary</c> is true ONLY when the judge really read the prose and returned a verdict — a grader
+    /// fault produced no reading at all, and marking the tape "judged from prose" for it would be a second false claim
+    /// on top of the first.</para>
     /// </summary>
-    private async Task<BenchmarkGrade?> JudgeStopSummaryAsync(SupervisorTurnContext context, SupervisorDecision decision, SupervisorAcceptanceSpec spec, Guid teamId, CancellationToken cancellationToken)
+    private async Task<(BenchmarkGrade Grade, bool JudgedSummary)?> JudgeStopSummaryAsync(SupervisorTurnContext context, SupervisorDecision decision, SupervisorAcceptanceSpec spec, Guid teamId, CancellationToken cancellationToken)
     {
         if (spec.Kind != Messages.Agents.Benchmark.BenchmarkGradingKind.LlmJudge) return null;
         if (spec.Rubric is not { Criteria.Count: > 0 } rubric) return null;
@@ -1367,15 +1393,15 @@ public sealed partial class SupervisorTurnService
         if (string.IsNullOrWhiteSpace(summary)) return null;
 
         if (_rubricJudge is null)
-            return new BenchmarkGrade { Passed = false, Detail = "grade-error: no rubric judge is registered to read the stop summary", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault };
+            return (new BenchmarkGrade { Passed = false, Detail = "grade-error: no rubric judge is registered to read the stop summary", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault }, false);
 
         var verdict = await _rubricJudge.JudgeAsync(rubric, summary!, context.Goal, teamId, cancellationToken).ConfigureAwait(false);
 
-        if (verdict.Failed) return new BenchmarkGrade { Passed = false, Detail = $"grade-error: {verdict.FailureDetail}", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault };
+        if (verdict.Failed) return (new BenchmarkGrade { Passed = false, Detail = $"grade-error: {verdict.FailureDetail}", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault }, false);
 
         var grade = Agents.Eval.Benchmark.Graders.LlmJudgeGrader.Aggregate(rubric, verdict);
 
-        return grade with { OracleNote = "judged the stop summary — no deliverable file was captured" };
+        return (grade with { OracleNote = "judged the stop summary — no deliverable file was captured" }, true);
     }
 
     /// <summary>The agent run ids whose captured worlds a branchless stop grades against — every unit the run's decision tape folded a result for, newest fold per agent, in tape order.</summary>

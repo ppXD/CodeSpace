@@ -121,12 +121,88 @@ public sealed class SupervisorBranchlessStopGradeTests
         outcome.ShouldContain("grade-error");
     }
 
+    // ── the operator floor a branchless run cannot discharge ──
+
+    [Fact]
+    public async Task An_operator_floor_a_branchless_run_cannot_run_is_never_discharged_by_the_model_gate()
+    {
+        // The floor is ALWAYS a bare TestsPass argv, so the deliverable filter drops it — and a run with BOTH a floor
+        // and a passing model gate then recorded passed:true / "accepted" with the MANDATORY gate never run. That is
+        // strictly worse than the skip it replaced: the operator's own check reads as satisfied by a check it is not.
+        var grader = new CapturingGrader(new BenchmarkGrade { Passed = true, Detail = "artifact-present" });
+
+        var outcome = await GradeAsync(grader, StopWith(BenchmarkGradingKind.ArtifactPresent), acceptanceChecks: new[] { "dotnet", "test" });
+
+        SupervisorOutcome.ReadAcceptanceGradePassed(outcome).ShouldBeNull("a floor that could not run leaves the stop UNGRADED — never accepted on a sibling gate's pass");
+        outcome.ShouldContain(SupervisorTurnService.OperatorFloorNotGraded, customMessage: "the tape says WHICH gate went unanswered; the skip alone would lose the fact");
+    }
+
+    [Fact]
+    public async Task A_failing_model_gate_still_records_its_failure_even_with_an_ungradeable_floor()
+    {
+        // Only the PASS is withheld. An authored oracle that really failed is a real verdict, and suppressing it would
+        // trade one silence for another.
+        var grader = new CapturingGrader(new BenchmarkGrade { Passed = false, Detail = "missing: REPORT.md" });
+
+        var outcome = await GradeAsync(grader, StopWith(BenchmarkGradingKind.ArtifactPresent), acceptanceChecks: new[] { "dotnet", "test" });
+
+        SupervisorOutcome.ReadAcceptanceGradePassed(outcome).ShouldBe(false);
+        outcome.ShouldContain("missing: REPORT.md");
+    }
+
+    [Fact]
+    public async Task With_no_operator_floor_a_passing_model_gate_is_recorded_as_accepted()
+    {
+        var grader = new CapturingGrader(new BenchmarkGrade { Passed = true, Detail = "artifact-present" });
+
+        var outcome = await GradeAsync(grader, StopWith(BenchmarkGradingKind.ArtifactPresent), acceptanceChecks: null);
+
+        SupervisorOutcome.ReadAcceptanceGradePassed(outcome).ShouldBe(true, "no floor ⇒ nothing was left unanswered ⇒ the model gate's pass stands");
+    }
+
+    // ── C1 follow-up: a PROSE-judged verdict is marked as such on the tape ──
+
+    [Fact]
+    public async Task A_summary_judged_pass_is_marked_judgedSummary_on_the_tape()
+    {
+        // {passed, detail} alone made a prose-judged pass indistinguishable from a file-graded one to every machine
+        // reader — the detail says so in words, but words are not a key.
+        var grader = new CapturingGrader(new BenchmarkGrade { Passed = false, Detail = ISupervisorAcceptanceGrader.NoDeliverablesCaptured });
+
+        var outcome = await GradeAsync(grader, StopWith(BenchmarkGradingKind.LlmJudge, WithRubric), new StubRubricJudge(met: true));
+
+        SupervisorOutcome.ReadAcceptanceGradePassed(outcome).ShouldBe(true);
+        SupervisorOutcome.ReadAcceptanceGradeJudgedSummary(outcome).ShouldBeTrue("a reader can now TELL a prose grade from a file grade without parsing the sentence");
+    }
+
+    [Fact]
+    public async Task A_file_graded_pass_is_not_marked_judgedSummary()
+    {
+        var grader = new CapturingGrader(new BenchmarkGrade { Passed = true, Detail = "artifact-present" });
+
+        var outcome = await GradeAsync(grader, StopWith(BenchmarkGradingKind.ArtifactPresent));
+
+        SupervisorOutcome.ReadAcceptanceGradeJudgedSummary(outcome).ShouldBeFalse("the key is absent on every file-graded and every pre-C1 verdict — byte-identical to before");
+    }
+
+    [Fact]
+    public async Task A_missing_rubric_judge_is_not_marked_judgedSummary()
+    {
+        // The fault produced NO reading of the prose at all; marking the tape "judged from prose" would be a second
+        // false claim on top of the first.
+        var grader = new CapturingGrader(new BenchmarkGrade { Passed = false, Detail = ISupervisorAcceptanceGrader.NoDeliverablesCaptured });
+
+        var outcome = await GradeAsync(grader, StopWith(BenchmarkGradingKind.LlmJudge, WithRubric), rubricJudge: null);
+
+        SupervisorOutcome.ReadAcceptanceGradeJudgedSummary(outcome).ShouldBeFalse();
+    }
+
     // ── fixture ──
 
     private static readonly AcceptanceRubric WithRubric = new() { Criteria = new[] { new AcceptanceRubricCriterion { Id = "sources", Requirement = "names at least one source" } } };
 
     /// <summary>Drive the stop grade directly with a branchless context (the fake resolver finds no published branch when the tape carries none).</summary>
-    private static async Task<string> GradeAsync(CapturingGrader grader, string stopPayloadJson, StubRubricJudge? rubricJudge = null)
+    private static async Task<string> GradeAsync(CapturingGrader grader, string stopPayloadJson, StubRubricJudge? rubricJudge = null, IReadOnlyList<string>? acceptanceChecks = null)
     {
         // Only the stop-grade path's own collaborators are real here: the grader under test, the branch resolver (the
         // source of the branchless world), the manifest store the oracle anchor reads, and the budget ledger the call
@@ -141,6 +217,7 @@ public sealed class SupervisorBranchlessStopGradeTests
             TeamId = TeamId,
             NodeId = "sup",
             Goal = "compare the two languages",
+            AcceptanceChecks = acceptanceChecks,
             PriorDecisions = new[] { SpawnDecisionWithUnit() },
         };
 

@@ -32,6 +32,14 @@ public sealed record CriticRequest
 
     /// <summary>The PRODUCER's credentialed-model row (when the caller knows it) — the auto reviewer pick prefers a DIFFERENT model for a real second opinion, falling back to this same model on a one-model pool. Null ⇒ no preference (today's pick).</summary>
     public Guid? ProducerModelRowId { get; init; }
+
+    /// <summary>
+    /// The journal intent label this review's model call records under — null ⇒ the critic's own default
+    /// (<c>critic.review</c>). The OUTPUT review names its own (<c>critic.output</c>) because it is the only rung that
+    /// examines a RESULT: a plan critic and a decision critic examine an INTENTION, and a consumer asking "did anything
+    /// check what this run produced?" must not be answered yes by either. Every kind is a const on the critic (Rule 8).
+    /// </summary>
+    public string? CallKind { get; init; }
 }
 
 /// <summary>

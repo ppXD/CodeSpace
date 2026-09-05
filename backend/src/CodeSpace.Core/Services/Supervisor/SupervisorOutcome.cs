@@ -865,9 +865,53 @@ public static class SupervisorOutcome
     /// once-guard + verdict reader the resolve path uses). A null/blank/non-object input starts from an empty object.
     /// Pure + deterministic (keys preserved in source order, grade appended last).
     /// </summary>
-    public static string AppendAcceptanceGrade(string? outcomeJson, bool passed, string detail)
+    public static string AppendAcceptanceGrade(string? outcomeJson, bool passed, string detail, bool judgedSummary = false)
     {
-        return MergeKeys(outcomeJson, new Dictionary<string, object?> { ["acceptanceGrade"] = new { passed, detail } });
+        var grade = new Dictionary<string, object?> { ["passed"] = passed, ["detail"] = detail };
+
+        if (judgedSummary) grade[JudgedSummaryKey] = true;
+
+        return MergeKeys(outcomeJson, new Dictionary<string, object?> { ["acceptanceGrade"] = grade });
+    }
+
+    /// <summary>
+    /// Record that the grade did NOT happen: the <c>acceptanceGrade</c> object rides with a null verdict, so every
+    /// reader (<see cref="ReadAcceptanceGradePassed"/>, the fold's own once-guard, the Room, the scorecard) still sees
+    /// "ungraded" exactly as it did before there was a key at all — while the tape now says WHICH gate was left
+    /// unanswered and why, instead of losing the fact entirely.
+    /// </summary>
+    public static string AppendAcceptanceSkipped(string? outcomeJson, string detail)
+    {
+        return MergeKeys(outcomeJson, new Dictionary<string, object?> { ["acceptanceGrade"] = new Dictionary<string, object?> { ["passed"] = null, ["detail"] = detail } });
+    }
+
+    /// <summary>The <c>acceptanceGrade</c> key marking a verdict a model reached by reading PROSE (the stop summary) rather than a produced file. Pinned (Rule 8) — the Room's verification marker reads it.</summary>
+    public const string JudgedSummaryKey = "judgedSummary";
+
+    /// <summary>
+    /// Whether the folded acceptance verdict was reached by judging the stop SUMMARY rather than a produced file —
+    /// C1's prose fallback. A pass so reached is a real verdict (it does not change <c>Solved</c> or the run's
+    /// outcome), but nothing examined a RESULT, so the Room must not present it as a verified one. Absent key ⇒
+    /// <c>false</c> (every file-graded and every pre-C1 verdict). Best-effort + pure.
+    /// </summary>
+    public static bool ReadAcceptanceGradeJudgedSummary(string? outcomeJson)
+    {
+        if (string.IsNullOrWhiteSpace(outcomeJson)) return false;
+
+        try
+        {
+            var root = JsonDocument.Parse(outcomeJson).RootElement;
+
+            return root.ValueKind == JsonValueKind.Object
+                   && root.TryGetProperty("acceptanceGrade", out var grade)
+                   && grade.ValueKind == JsonValueKind.Object
+                   && grade.TryGetProperty(JudgedSummaryKey, out var judged)
+                   && judged.ValueKind == JsonValueKind.True;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 
     /// <summary>
