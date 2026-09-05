@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Agents.Harnesses.Claude;
 using CodeSpace.Core.Services.Agents.Harnesses.Codex;
 using CodeSpace.Core.Services.Supervisor;
 
@@ -31,7 +32,11 @@ public sealed class LiveBrainConflictFakeCli : IDisposable
     /// <summary>The substring the SINGLE-repo resolver recipe (<see cref="SupervisorResolverRecipe.BuildInstruction"/>) emits — engine-authored, so the CLI recognises the resolver no matter what the model wrote for the spawn subtasks.</summary>
     public const string ResolverMarker = "Reconcile these branches";
 
+    /// <summary>The summary prefix a SPAWN agent's stream folds to — the same in both dialects.</summary>
+    public const string SummaryPrefix = "DONE: ";
+
     private readonly string _originalCommand;
+    private readonly string _originalClaudeCommand;
     private readonly string _dir;
 
     public LiveBrainConflictFakeCli()
@@ -44,12 +49,15 @@ public sealed class LiveBrainConflictFakeCli : IDisposable
         File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
 
         _originalCommand = Environment.GetEnvironmentVariable(CodexHarness.CommandEnvVar) ?? "";
+        _originalClaudeCommand = Environment.GetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar) ?? "";
         Environment.SetEnvironmentVariable(CodexHarness.CommandEnvVar, script);
+        Environment.SetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar, script);
     }
 
     public void Dispose()
     {
         Environment.SetEnvironmentVariable(CodexHarness.CommandEnvVar, _originalCommand.Length == 0 ? null : _originalCommand);
+        Environment.SetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar, _originalClaudeCommand.Length == 0 ? null : _originalClaudeCommand);
         try { Directory.Delete(_dir, recursive: true); } catch { /* best-effort */ }
     }
 
@@ -58,7 +66,7 @@ public sealed class LiveBrainConflictFakeCli : IDisposable
     /// reconciled <see cref="SharedFile"/> + ends with the verified token. EVERY other (spawn) agent writes its OWN goal
     /// text into <see cref="SharedFile"/> — two distinct brain-authored subtasks therefore conflict against the base.
     /// </summary>
-    private static string ScriptBody =>
+    internal static string ScriptBody =>
         "#!/bin/sh\n" +
         "goal=\"\"\n" +
         "for goal in \"$@\"; do :; done\n" +
@@ -66,14 +74,23 @@ public sealed class LiveBrainConflictFakeCli : IDisposable
         "case \"$goal\" in\n" +
         "  *\"" + ResolverMarker + "\"*)\n" +
         "    printf 'reconciled by the resolver\\n' > " + SharedFile + "\n" +
-        "    printf '{\"type\":\"agent_reasoning\",\"message\":\"reconciling the two branches\"}\\n'\n" +
-        "    printf '{\"type\":\"agent_message\",\"message\":\"build + full test suite pass " + SupervisorResolverRecipe.TestsPassedMarker + "\"}\\n'\n" +
-        "    printf '{\"type\":\"task_complete\",\"message\":\"completed\"}\\n'\n" +
+        // No conversion specification in the resolver's summary → NO printf args (POSIX leaves a conversion-free
+        // format handed arguments UNSPECIFIED), so the verified marker survives verbatim in both dialects.
+        FakeAgentCliDialect.Dialects(
+            "    printf '{\"type\":\"agent_reasoning\",\"message\":\"reconciling the two branches\"}\\n'\n" +
+            "    printf '{\"type\":\"agent_message\",\"message\":\"" + ResolvedSummary + "\"}\\n'\n" +
+            "    printf '{\"type\":\"task_complete\",\"message\":\"completed\"}\\n'\n",
+            ResolvedSummary, printfArgs: "") +
         "    exit 0\n" +
         "    ;;\n" +
         "esac\n" +
         "printf '%s\\n' \"$goal\" > " + SharedFile + "\n" +
-        "printf '{\"type\":\"agent_message\",\"message\":\"DONE: %s\"}\\n' \"$esc\"\n" +
-        "printf '{\"type\":\"task_complete\",\"message\":\"completed\"}\\n'\n" +
+        FakeAgentCliDialect.Dialects(
+            "printf '{\"type\":\"agent_message\",\"message\":\"" + SummaryPrefix + "%s\"}\\n' \"$esc\"\n" +
+            "printf '{\"type\":\"task_complete\",\"message\":\"completed\"}\\n'\n",
+            SummaryPrefix + "%s") +
         "exit 0\n";
+
+    /// <summary>The RESOLVER's summary — it must carry <see cref="SupervisorResolverRecipe.TestsPassedMarker"/> verbatim, or the resolution never grades Verified.</summary>
+    private static string ResolvedSummary => "build + full test suite pass " + SupervisorResolverRecipe.TestsPassedMarker;
 }

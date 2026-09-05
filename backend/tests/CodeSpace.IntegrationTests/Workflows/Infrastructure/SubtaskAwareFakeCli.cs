@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Agents.Harnesses.Claude;
 using CodeSpace.Core.Services.Agents.Harnesses.Codex;
 
 namespace CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -32,6 +33,7 @@ public sealed class SubtaskAwareFakeCli : IDisposable
     public const string SummaryPrefix = "DONE: ";
 
     private readonly string _originalCommand;
+    private readonly string _originalClaudeCommand;
     private readonly string _dir;
 
     public SubtaskAwareFakeCli()
@@ -44,7 +46,9 @@ public sealed class SubtaskAwareFakeCli : IDisposable
         File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
 
         _originalCommand = Environment.GetEnvironmentVariable(CodexHarness.CommandEnvVar) ?? "";
+        _originalClaudeCommand = Environment.GetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar) ?? "";
         Environment.SetEnvironmentVariable(CodexHarness.CommandEnvVar, script);
+        Environment.SetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar, script);
     }
 
     /// <summary>The deterministic summary the executor's BuildResult folds for a given branch goal — the value the synthesizer composes per element.</summary>
@@ -53,6 +57,7 @@ public sealed class SubtaskAwareFakeCli : IDisposable
     public void Dispose()
     {
         Environment.SetEnvironmentVariable(CodexHarness.CommandEnvVar, _originalCommand.Length == 0 ? null : _originalCommand);
+        Environment.SetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar, _originalClaudeCommand.Length == 0 ? null : _originalClaudeCommand);
         try { Directory.Delete(_dir, recursive: true); } catch { /* best-effort */ }
     }
 
@@ -63,13 +68,15 @@ public sealed class SubtaskAwareFakeCli : IDisposable
     /// whose final assistant message is <c>"DONE: &lt;goal&gt;"</c>. No env, no network, no codex binary — just
     /// /bin/sh + printf.
     /// </summary>
-    private static string ScriptBody =>
+    internal static string ScriptBody =>
         "#!/bin/sh\n" +
         "goal=\"\"\n" +
         "for goal in \"$@\"; do :; done\n" +
         "esc=$(printf '%s' \"$goal\" | sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g')\n" +
-        "printf '{\"type\":\"agent_reasoning\",\"message\":\"Planning work for: %s\"}\\n' \"$esc\"\n" +
-        "printf '{\"type\":\"agent_message\",\"message\":\"" + SummaryPrefix + "%s\"}\\n' \"$esc\"\n" +
-        "printf '{\"type\":\"task_complete\",\"message\":\"completed\"}\\n'\n" +
+        FakeAgentCliDialect.Dialects(
+            "printf '{\"type\":\"agent_reasoning\",\"message\":\"Planning work for: %s\"}\\n' \"$esc\"\n" +
+            "printf '{\"type\":\"agent_message\",\"message\":\"" + SummaryPrefix + "%s\"}\\n' \"$esc\"\n" +
+            "printf '{\"type\":\"task_complete\",\"message\":\"completed\"}\\n'\n",
+            SummaryPrefix + "%s") +
         "exit 0\n";
 }

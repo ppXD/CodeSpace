@@ -156,12 +156,25 @@ jobs:
     timeout-minutes: 120
 
     # A plain host runner (NOT a privileged bwrap container). This lane's gate is the LIVE BRAIN driving the real
-    # durable loop — NOT sandbox confinement (which is proven, fail-closed, in the dedicated sandbox lane). The spawned
-    # agent here is a TRUSTED test fake (FileWritingFakeCli), so it needs no confinement; and bwrap on a plain runner is
-    # FLAKY (its trivial probe can pass while the real agent's bind-mounted git/file IO fails under the same userns on
-    # some runner instances — observed red-ing the brain gate on an execution fault, never a brain miss). So we force the
-    # already-supported UNCONFINED path deterministically (CODESPACE_BWRAP_PATH below → probe unavailable → unconfined;
-    # REQUIRE_SANDBOX is unset, so no fail-closed throw). git is pre-installed on ubuntu-latest (the test self-skips if not).
+    # durable loop — NOT sandbox confinement (which is proven, fail-closed, in the dedicated sandbox lane). bwrap on a
+    # plain runner is FLAKY (its trivial probe can pass while the real agent's bind-mounted git/file IO fails under the
+    # same userns on some runner instances — observed red-ing the brain gate on an execution fault, never a brain miss),
+    # so we force the already-supported UNCONFINED path deterministically (CODESPACE_BWRAP_PATH below → probe
+    # unavailable → unconfined; REQUIRE_SANDBOX is unset, so no fail-closed throw). git is pre-installed on
+    # ubuntu-latest (the test self-skips if not).
+    #
+    # WHICH ARMS RUN A FAKE, WHICH RUN THE REAL CLI (the premise this comment used to state too broadly):
+    #   FAKE-backed (12 of 13) — FileWritingFakeCli ×7 (headline drive→accept, injected-lesson, oracle-repair cosign,
+    #     heterogeneous dispatch, semantic phases, no-terminal-stop-with-unpublished-work, stop-acceptance DoD),
+    #     DependencyHandoffFakeCli (dependent-subtask handoff), InvestigateOnlyFakeCli (read-only acceptance),
+    #     LiveBrainConflictFakeCli (conflict→resolve), LiveBrainFailingFakeCli (failure→retry),
+    #     MultiRepoFeatureFakeCli (multi-repo per-repo heads).
+    #   REAL claude CLI (1 of 13) — the_real_coding_agent_solves_a_goal_relevance_task: it is the arm ABOUT a real
+    #     coding agent, so it deliberately arms no fake (hence the CLI install step below is NOT optional here).
+    # A fake-backed arm is only trusted while its fake actually runs: HarnessModelReconciler rewrites the authored
+    # codex-cli to claude-code on this Anthropic-credentialed lane, so every fake above arms BOTH command env vars and
+    # each run's harness census is checked against what was armed (RealModelGate.ClassifyHarnessControl). Run
+    # 33972713055 is what that check exists to catch — 41 reconcile warnings, real CLI sessions behind a "fake" premise.
     services:
       postgres:
         image: postgres:18-alpine
@@ -189,8 +202,9 @@ jobs:
       CODESPACE_REALMODEL_WHOLE_LOOP_ATTEMPTS: '3'
       # Force the fake agent UNCONFINED on this brain-gate lane: a non-existent bwrap binary makes BubblewrapSandbox's
       # probe degrade to "unavailable" → the agent runs unconfined (deterministic), bypassing plain-host bwrap flakiness.
-      # Safe: REQUIRE_SANDBOX is unset (no fail-closed throw), the agent is a trusted test fake, and confinement is gated
-      # for real in the sandbox lane. A best-of-N attempt's agent failure here was an EXECUTION fault, not a brain miss.
+      # Safe: REQUIRE_SANDBOX is unset (no fail-closed throw), the fake-backed arms' agents are trusted test fakes, the
+      # one real-CLI arm edits only its own throwaway clone, and confinement is gated for real in the sandbox lane. A
+      # best-of-N attempt's agent failure here was an EXECUTION fault, not a brain miss.
       CODESPACE_BWRAP_PATH: /nonexistent/bwrap-disabled-on-the-brain-gate-lane
       # ALSO disable the prlimit resource caps (caps=0 → ProcessRlimits.Wrap returns the command UNCHANGED → no prlimit
       # wrapper). Disabling bwrap left prlimit ARMED, and RLIMIT_NPROC is a PER-UID cap: on a plain unprivileged shared
@@ -198,8 +212,9 @@ jobs:
       # wrapped fake's fork()s over the cap → the kernel SIGNAL-KILLS it → the durable spool's $? marker records
       # 128+signal → AgentRun Status=Failed → realPatches=0 (the false-red observed from ~02:00 UTC 2026-06-24). The
       # green prlimit lanes run as ROOT in --privileged containers, where NPROC headroom is unlimited + the process
-      # table is near-empty, so the cap never bites. The agent here is a trusted fake that needs no fork-bomb/file-size
-      # cap; real resource confinement stays gated, fail-closed, in the dedicated sandbox-isolation lane.
+      # table is near-empty, so the cap never bites. The agents here need no fork-bomb/file-size cap — the fake-backed
+      # arms run /bin/sh stubs, the real-CLI arm runs a pinned first-party binary on a throwaway clone; real resource
+      # confinement stays gated, fail-closed, in the dedicated sandbox-isolation lane.
       CODESPACE_AGENT_MAX_PROCESSES: '0'
       CODESPACE_AGENT_MAX_FILE_MB: '0'
 
@@ -314,12 +329,21 @@ jobs:
     timeout-minutes: 120
 
     # A plain host runner (NOT a privileged bwrap container). This lane's gate is the LIVE BRAIN driving the real
-    # durable loop — NOT sandbox confinement (which is proven, fail-closed, in the dedicated sandbox lane). The spawned
-    # agent here is a TRUSTED test fake (FileWritingFakeCli), so it needs no confinement; and bwrap on a plain runner is
-    # FLAKY (its trivial probe can pass while the real agent's bind-mounted git/file IO fails under the same userns on
-    # some runner instances — observed red-ing the brain gate on an execution fault, never a brain miss). So we force the
-    # already-supported UNCONFINED path deterministically (CODESPACE_BWRAP_PATH below → probe unavailable → unconfined;
-    # REQUIRE_SANDBOX is unset, so no fail-closed throw). git is pre-installed on ubuntu-latest (the test self-skips if not).
+    # durable loop — NOT sandbox confinement (which is proven, fail-closed, in the dedicated sandbox lane). bwrap on a
+    # plain runner is FLAKY (its trivial probe can pass while the real agent's bind-mounted git/file IO fails under the
+    # same userns on some runner instances — observed red-ing the brain gate on an execution fault, never a brain miss),
+    # so we force the already-supported UNCONFINED path deterministically (CODESPACE_BWRAP_PATH below → probe
+    # unavailable → unconfined; REQUIRE_SANDBOX is unset, so no fail-closed throw). git is pre-installed on
+    # ubuntu-latest (the test self-skips if not).
+    #
+    # WHICH ARMS RUN A FAKE, WHICH RUN THE REAL CLI:
+    #   FAKE-backed — RealModelPlannerWholeLoop + RealModelSessionWholeLoop (SubtaskAwareFakeCli),
+    #     RealModelDeliveryGate (FileWritingFakeCli).
+    #   REAL claude CLI — RealModelSessionConvergenceWholeLoop (its subject IS a real agent building on turn 1's real
+    #     code), RealModelSessionResume (drives the CLI's own --resume) and RealModelAnswerReview; RealModelSpecPreview
+    #     spawns no agent at all (a live-model spec compile only).
+    # Same rule as the supervisor lane: every fake above arms BOTH command env vars, because HarnessModelReconciler
+    # rewrites the authored codex-cli to claude-code whenever the brain credential is Anthropic.
     services:
       postgres:
         image: postgres:18-alpine
@@ -347,8 +371,9 @@ jobs:
       CODESPACE_REALMODEL_WHOLE_LOOP_ATTEMPTS: '3'
       # Force the fake agent UNCONFINED on this brain-gate lane: a non-existent bwrap binary makes BubblewrapSandbox's
       # probe degrade to "unavailable" → the agent runs unconfined (deterministic), bypassing plain-host bwrap flakiness.
-      # Safe: REQUIRE_SANDBOX is unset (no fail-closed throw), the agent is a trusted test fake, and confinement is gated
-      # for real in the sandbox lane. A best-of-N attempt's agent failure here was an EXECUTION fault, not a brain miss.
+      # Safe: REQUIRE_SANDBOX is unset (no fail-closed throw), the fake-backed arms' agents are trusted test fakes, the
+      # one real-CLI arm edits only its own throwaway clone, and confinement is gated for real in the sandbox lane. A
+      # best-of-N attempt's agent failure here was an EXECUTION fault, not a brain miss.
       CODESPACE_BWRAP_PATH: /nonexistent/bwrap-disabled-on-the-brain-gate-lane
       # ALSO disable the prlimit resource caps (caps=0 → ProcessRlimits.Wrap returns the command UNCHANGED → no prlimit
       # wrapper). Disabling bwrap left prlimit ARMED, and RLIMIT_NPROC is a PER-UID cap: on a plain unprivileged shared
@@ -356,8 +381,9 @@ jobs:
       # wrapped fake's fork()s over the cap → the kernel SIGNAL-KILLS it → the durable spool's $? marker records
       # 128+signal → AgentRun Status=Failed → realPatches=0 (the false-red observed from ~02:00 UTC 2026-06-24). The
       # green prlimit lanes run as ROOT in --privileged containers, where NPROC headroom is unlimited + the process
-      # table is near-empty, so the cap never bites. The agent here is a trusted fake that needs no fork-bomb/file-size
-      # cap; real resource confinement stays gated, fail-closed, in the dedicated sandbox-isolation lane.
+      # table is near-empty, so the cap never bites. The agents here need no fork-bomb/file-size cap — the fake-backed
+      # arms run /bin/sh stubs, the real-CLI arm runs a pinned first-party binary on a throwaway clone; real resource
+      # confinement stays gated, fail-closed, in the dedicated sandbox-isolation lane.
       CODESPACE_AGENT_MAX_PROCESSES: '0'
       CODESPACE_AGENT_MAX_FILE_MB: '0'
 

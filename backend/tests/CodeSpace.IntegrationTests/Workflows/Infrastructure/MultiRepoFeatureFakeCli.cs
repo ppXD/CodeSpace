@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Agents.Harnesses.Claude;
 using CodeSpace.Core.Services.Agents.Harnesses.Codex;
 
 namespace CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -25,7 +26,11 @@ public sealed class MultiRepoFeatureFakeCli : IDisposable
     /// <summary>The filename prefix each agent writes in each repo — the per-repo acceptance check.sh looks for <c>agent_*.txt</c>.</summary>
     public const string FilePrefix = "agent_";
 
+    /// <summary>The summary prefix both dialects fold, so the arm's assertions are not harness-lottery-dependent.</summary>
+    public const string SummaryPrefix = "DONE: ";
+
     private readonly string _originalCommand;
+    private readonly string _originalClaudeCommand;
     private readonly string _dir;
 
     public MultiRepoFeatureFakeCli()
@@ -38,12 +43,15 @@ public sealed class MultiRepoFeatureFakeCli : IDisposable
         File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
 
         _originalCommand = Environment.GetEnvironmentVariable(CodexHarness.CommandEnvVar) ?? "";
+        _originalClaudeCommand = Environment.GetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar) ?? "";
         Environment.SetEnvironmentVariable(CodexHarness.CommandEnvVar, script);
+        Environment.SetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar, script);
     }
 
     public void Dispose()
     {
         Environment.SetEnvironmentVariable(CodexHarness.CommandEnvVar, _originalCommand.Length == 0 ? null : _originalCommand);
+        Environment.SetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar, _originalClaudeCommand.Length == 0 ? null : _originalClaudeCommand);
         try { Directory.Delete(_dir, recursive: true); } catch { /* best-effort */ }
     }
 
@@ -52,7 +60,7 @@ public sealed class MultiRepoFeatureFakeCli : IDisposable
     /// BOTH repo subdirs, then print the three-line codex-shaped JSONL stream the real ParseEvent folds. The per-repo
     /// writes land in each repo's clone → the executor captures a RepositoryRunResult for each → both integrate cleanly.
     /// </summary>
-    private static string ScriptBody =>
+    internal static string ScriptBody =>
         "#!/bin/sh\n" +
         "goal=\"\"\n" +
         "for goal in \"$@\"; do :; done\n" +
@@ -60,8 +68,11 @@ public sealed class MultiRepoFeatureFakeCli : IDisposable
         "fname=$(printf '%s' \"$goal\" | tr -c 'A-Za-z0-9' '_' | cut -c1-100)\n" +
         "printf 'primary work for: %s\\n' \"$goal\" > \"" + PrimaryAlias + "/" + FilePrefix + "${fname}.txt\" || exit 90\n" +
         "printf 'api work for: %s\\n' \"$goal\" > \"" + RelatedAlias + "/" + FilePrefix + "${fname}.txt\" || exit 90\n" +
-        "printf '{\"type\":\"agent_reasoning\",\"message\":\"editing both repos for: %s\"}\\n' \"$esc\"\n" +
-        "printf '{\"type\":\"agent_message\",\"message\":\"DONE: %s\"}\\n' \"$esc\"\n" +
-        "printf '{\"type\":\"task_complete\",\"message\":\"completed\"}\\n'\n" +
+        // The per-repo WORK half above is dialect-free; only the STREAM half branches (see FakeAgentCliDialect).
+        FakeAgentCliDialect.Dialects(
+            "printf '{\"type\":\"agent_reasoning\",\"message\":\"editing both repos for: %s\"}\\n' \"$esc\"\n" +
+            "printf '{\"type\":\"agent_message\",\"message\":\"" + SummaryPrefix + "%s\"}\\n' \"$esc\"\n" +
+            "printf '{\"type\":\"task_complete\",\"message\":\"completed\"}\\n'\n",
+            SummaryPrefix + "%s") +
         "exit 0\n";
 }

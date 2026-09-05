@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Agents.Harnesses.Claude;
 using CodeSpace.Core.Services.Agents.Harnesses.Codex;
 
 namespace CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -20,7 +21,11 @@ namespace CodeSpace.IntegrationTests.Workflows.Infrastructure;
 /// </summary>
 public sealed class LiveBrainFailingFakeCli : IDisposable
 {
+    /// <summary>The message every invocation reports before failing — the summary BOTH dialects must fold, so an assertion on it is not harness-lottery-dependent.</summary>
+    public const string FailureMessageFormat = "could not complete the task — the build is broken for: %s";
+
     private readonly string _originalCommand;
+    private readonly string _originalClaudeCommand;
     private readonly string _dir;
 
     public LiveBrainFailingFakeCli()
@@ -33,22 +38,27 @@ public sealed class LiveBrainFailingFakeCli : IDisposable
         File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
 
         _originalCommand = Environment.GetEnvironmentVariable(CodexHarness.CommandEnvVar) ?? "";
+        _originalClaudeCommand = Environment.GetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar) ?? "";
         Environment.SetEnvironmentVariable(CodexHarness.CommandEnvVar, script);
+        Environment.SetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar, script);
     }
 
     public void Dispose()
     {
         Environment.SetEnvironmentVariable(CodexHarness.CommandEnvVar, _originalCommand.Length == 0 ? null : _originalCommand);
+        Environment.SetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar, _originalClaudeCommand.Length == 0 ? null : _originalClaudeCommand);
         try { Directory.Delete(_dir, recursive: true); } catch { /* best-effort */ }
     }
 
-    /// <summary>EVERY invocation fails: emit an error-flavoured message + exit 1 (a real <c>Failed</c> run, no file/patch), regardless of the goal — so a live brain reliably sees a failed subtask to react to.</summary>
-    private static string ScriptBody =>
+    /// <summary>EVERY invocation fails: emit an error-flavoured message + exit 1 (a real <c>Failed</c> run, no file/patch), regardless of the goal — so a live brain reliably sees a failed subtask to react to. Served in the dialect of whichever harness the reconciler pointed at this script (<see cref="FakeAgentCliDialect"/>); the codex branch is byte-identical to the pre-dual-stub script.</summary>
+    internal static string ScriptBody =>
         "#!/bin/sh\n" +
         "goal=\"\"\n" +
         "for goal in \"$@\"; do :; done\n" +
         "esc=$(printf '%s' \"$goal\" | sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g')\n" +
-        "printf '{\"type\":\"agent_message\",\"message\":\"could not complete the task — the build is broken for: %s\"}\\n' \"$esc\"\n" +
-        "printf '{\"type\":\"task_complete\",\"message\":\"failed\"}\\n'\n" +
+        FakeAgentCliDialect.Dialects(
+            "printf '{\"type\":\"agent_message\",\"message\":\"" + FailureMessageFormat + "\"}\\n' \"$esc\"\n" +
+            "printf '{\"type\":\"task_complete\",\"message\":\"failed\"}\\n'\n",
+            FailureMessageFormat, isError: true) +
         "exit 1\n";
 }
