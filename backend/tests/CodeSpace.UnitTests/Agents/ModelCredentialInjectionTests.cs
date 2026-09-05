@@ -100,4 +100,59 @@ public class ModelCredentialInjectionTests
         fingerprint.ShouldNotBeNull("the env secrets alone key a real redactor — otherwise this pins nothing but two nulls");
         fingerprint.ShouldBe(AgentRunExecutor.BuildRunRedactor(reversed, null).Fingerprint);
     }
+
+    [Theory]
+    // Carriers a name marks secret. Each one authenticates something, and each reaches the child through the same
+    // AgentTask.Environment the git token does.
+    [InlineData("SSH_PASSPHRASE", true)]
+    [InlineData("MYSQL_PWD", true)]
+    [InlineData("SESSION_COOKIE", true)]
+    [InlineData("SENTRY_DSN", true)]
+    [InlineData("DB_CONNECTION_STRING", true)]
+    [InlineData("PGCONNSTR", true)]
+    [InlineData("SSH_PRIVATE", true)]
+    [InlineData("SLACK_WEBHOOK", true)]
+    // The DOCUMENTED false-positive class: substring matching masks these though they are not secret. Pinned as
+    // EXPECTED, not tolerated — a garbled identifier is the price of never shipping a token in the clear, and
+    // "fixing" one of these by narrowing the marker would re-open the carrier beside it.
+    [InlineData("ANTHROPIC_KEY_ID", true)]
+    [InlineData("MAX_TOKEN_LIMIT", true)]
+    // What must stay readable: these are what an operator reads the error FOR.
+    [InlineData("ANTHROPIC_BASE_URL", false)]
+    [InlineData("ANTHROPIC_MODEL", false)]
+    [InlineData("API_VERSION", false)]
+    public void The_variable_name_decides_whether_an_injected_value_is_masked(string variableName, bool masked)
+    {
+        const string value = "value-9f3a7c21";
+
+        var redacted = AgentRunExecutor.BuildRunRedactor(new Dictionary<string, string> { [variableName] = value }, credential: null).Redact($"set {value}");
+
+        redacted.ShouldBe(masked ? $"set {SecretRedactor.Placeholder}" : $"set {value}");
+    }
+
+    [Fact]
+    public void BuildRunRedactor_caps_the_needle_count_deterministically_and_never_evicts_the_model_key()
+    {
+        // AgentTask.Environment is author-supplied and uncapped; every needle costs a pass over every event line and
+        // every spooled byte. WHICH needles survive must be a function of the SET (the two orders below agree), and
+        // the credential's own key — added before any env value — must never be the one dropped.
+        var credential = new ResolvedModelCredential { Provider = "Custom", ApiKey = "sk-live-9f3a7c21" };
+        var pairs = Enumerable.Range(0, AgentRunExecutor.MaximumNeedles * 2)
+            .Select(i => new KeyValuePair<string, string>($"S{i:D3}_TOKEN", $"env-secret-{i:D3}")).ToList();
+
+        var subject = AgentRunExecutor.BuildRunRedactor(new Dictionary<string, string>(pairs), credential);
+
+        var haystack = string.Join(' ', pairs.Select(p => p.Value).Append(credential.ApiKey!));
+        subject.Redact(haystack).Split(SecretRedactor.Placeholder).Length.ShouldBe(AgentRunExecutor.MaximumNeedles + 1,
+            customMessage: $"exactly {AgentRunExecutor.MaximumNeedles} needles must survive the cap (n masked spans split a string into n+1 pieces)");
+        subject.Redact(credential.ApiKey!).ShouldBe(SecretRedactor.Placeholder, customMessage: "the model key is added before any env value, so an env flood can never evict it");
+        subject.Fingerprint.ShouldBe(AgentRunExecutor.BuildRunRedactor(new Dictionary<string, string>(Enumerable.Reverse(pairs)), credential).Fingerprint,
+            customMessage: "which needles survive the cap must not depend on dictionary enumeration order");
+    }
+
+    [Fact]
+    public void MaximumNeedles_is_pinned() =>
+        // Raising it re-prices every redaction pass on an author-supplied list; lowering it starts silently dropping
+        // secrets a real launch injects.
+        AgentRunExecutor.MaximumNeedles.ShouldBe(64);
 }
