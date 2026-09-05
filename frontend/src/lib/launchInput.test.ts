@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { buildLaunchInput, buildRoutePreviewInput, DEFAULT_ACCEPTANCE, type LaunchFormState, type LaunchWorkspaceRepo } from "./launchInput";
+import { buildLaunchInput, buildRoutePreviewInput, DEFAULT_ACCEPTANCE, describeNetwork, NETWORK_CONFINEMENT_CAVEAT, routeCeiling, type LaunchFormState, type LaunchWorkspaceRepo } from "./launchInput";
+import fixture from "./networkPosture.fixture.json";
 
 const repo = (over: Partial<LaunchWorkspaceRepo> = {}): LaunchWorkspaceRepo => ({
   repositoryId: "r1", branch: "", access: "write", alias: "repo", isPrimary: false, ...over,
@@ -458,6 +459,58 @@ describe("buildLaunchInput — network access (B5)", () => {
 
     expect(preview).not.toHaveProperty("autonomy");
     expect(preview.autonomyCeiling).toBe("Standard");
+  });
+
+  // The Coordination tab's Autonomy ceiling rides the SAME wire (autonomyCeiling) and TIGHTENS the route
+  // (EffortRouter.TightenCeiling), so the tier the run gets is the lower of it and the preset's. Ignoring it let the
+  // composer show "on (Trusted)" for a Deep launch the server then clamped to Standard — network off, posture on.
+  it.each([["deep"], ["auto"]])("falls Trusted back on %s when the operator's own ceiling forbids it", effort => {
+    expect(buildLaunchInput(form({ effort, autonomy: "Trusted", autonomyCeiling: "Standard" })).autonomy).toBe("Standard");
+    expect(buildLaunchInput(form({ effort, autonomy: "Trusted", autonomyCeiling: "Confined" })).autonomy).toBe("Confined");
+  });
+
+  it("keeps Trusted when the operator's ceiling admits it — the override only ever tightens", () => {
+    expect(buildLaunchInput(form({ effort: "deep", autonomy: "Trusted", autonomyCeiling: "Trusted" })).autonomy).toBe("Trusted");
+    expect(buildLaunchInput(form({ effort: "deep", autonomy: "Trusted", autonomyCeiling: "" })).autonomy).toBe("Trusted");
+    // Nor may it RAISE one: Unleashed on a Trusted-ceiling preset is still Trusted, exactly as the backend clamps.
+    expect(buildLaunchInput(form({ effort: "deep", autonomy: "Trusted", autonomyCeiling: "Unleashed" })).autonomy).toBe("Trusted");
+  });
+
+  it("ignores the ceiling on tiers that never send it — a field the wire omits cannot tighten the run", () => {
+    // buildLaunchInput omits autonomyCeiling on quick/standard (it is a Coordination knob), so the composer must not
+    // narrow the shown posture by a value the backend will never see.
+    expect(buildLaunchInput(form({ effort: "standard", autonomy: "Trusted", autonomyCeiling: "Confined" })).autonomy).toBe("Trusted");
+    expect(buildLaunchInput(form({ effort: "standard", autonomyCeiling: "Confined" }))).not.toHaveProperty("autonomyCeiling");
+  });
+});
+
+describe("network posture wording — the cross-stack drift detector", () => {
+  // describeNetwork MIRRORS AgentAutonomyPolicy.DescribeNetwork: the composer states the posture before a run
+  // exists, so it cannot read the backend's sentence off the wire. Both stacks assert on this one committed
+  // fixture (backend: NetworkPostureWordingDriftTests), so neither wording can move without the other going red.
+  it.each(fixture.cases)("says $line for $effective under ceiling $ceiling", ({ effective, ceiling, line }) => {
+    expect(describeNetwork(effective, ceiling)).toBe(line);
+  });
+
+  it("qualifies EVERY off posture — the tier's Off is a permission, not a proven severed namespace", () => {
+    // Sandbox:RequireConfinement is committed off, so a host without bubblewrap runs unconfined; an unqualified
+    // "off" would be a claim this sentence cannot make.
+    for (const effective of ["Confined", "Standard"]) {
+      for (const ceiling of ["Confined", "Standard", "Trusted", "Unleashed"]) {
+        expect(describeNetwork(effective, ceiling).endsWith(NETWORK_CONFINEMENT_CAVEAT)).toBe(true);
+      }
+    }
+  });
+
+  it("resolves the composer's ceiling from BOTH bounds — the preset's and the operator's", () => {
+    expect(routeCeiling("deep")).toBe("Trusted");
+    expect(routeCeiling("standard")).toBe("Trusted");
+    expect(routeCeiling("quick")).toBe("Standard");
+    expect(routeCeiling("auto")).toBe("Standard");
+    expect(routeCeiling("deep", "Standard")).toBe("Standard");
+    expect(routeCeiling("deep", "Unleashed")).toBe("Trusted");
+    // quick never sends the override, so it cannot tighten there either.
+    expect(routeCeiling("quick", "Confined")).toBe("Standard");
   });
 });
 
