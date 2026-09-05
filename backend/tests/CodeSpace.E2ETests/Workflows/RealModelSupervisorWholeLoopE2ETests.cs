@@ -1412,6 +1412,13 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
     /// decision-eval lane), instead of the three-way classifier reading the Failure as a code fault. A genuine engine
     /// fault (any other node-failed error) is left untouched, so it gates as a <see cref="RealModelOutcome.CodeFault"/>.
     /// Called by every evaluator BEFORE it classifies, so the routing is uniform across all three live lanes.
+    ///
+    /// <para>The outage does not always reach a run Failure. When the brain-plane fault is a PARKABLE one the node
+    /// rides it (park → wake → park), and only a whole exhausted window ends the run — as a clean <c>stop</c> on a
+    /// Success walk stamped <c>ModelPlaneUnavailable</c>. That is the same outage wearing the product's own graceful
+    /// ending, so it routes to the same non-gating skip. It is admitted ONLY when the attempt got no model turn at all
+    /// (the tape holds nothing but that forced stop): an attempt whose model DID decide before the plane went down has
+    /// something measured, and keeps today's scoring.</para>
     /// </summary>
     private async Task ThrowIfGatewayInfraFailureAsync(CodeSpaceDbContext db, Guid runId)
     {
@@ -1421,6 +1428,13 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
 
         if (RealModelGate.IsGatewayInfraError(nodeFailure))
             throw new TimeoutException($"the supervisor brain's gateway failed mid-run (NON-GATING infra): {nodeFailure}");
+
+        var decisions = await db.SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.SupervisorRunId == runId)
+            .OrderBy(d => d.Sequence).Select(d => d.PayloadJson).ToListAsync();
+
+        if (decisions.Count == 1 && RealModelGate.IsModelPlaneUnavailableStop(decisions[0]))
+            throw new TimeoutException($"the supervisor brain's model plane stayed unavailable for the whole park window and the run never took a model turn (NON-GATING infra): {decisions[0]}");
     }
 
     /// <summary>The live brain drove the whole loop soundly iff the run reached Success, at least one real agent produced a real patch, and the terminal stop's objective acceptance PASSED (a green check.sh against the integrated head). Classified three-way for safe gating + returns a legible note. <paramref name="stubbedHarnessKinds"/> is the set of harness kinds this arm's fake actually arms (the fake's own declaration, e.g. <c>FileWritingFakeCli.StubbedHarnessKinds</c>). It does two things. First it gates control: an agent dispatched onto a harness NOT in that set ran a REAL CLI, so every deterministic-fake premise below is void and the arm returns <see cref="RealModelOutcome.CodeFault"/> rather than a refunded infra skip. Second, being non-empty is what licenses the capture-infra skip — a deterministic fake ALWAYS patches on success, so a spawned+merged-but-zero-captured-patches run is a workspace-capture fault, not a model miss. The real coding-agent arm passes an EMPTY set: it legitimately expects the real claude binary, has no fake to lose control of, and its 0 patches IS a capability outcome that must gate.</summary>

@@ -578,6 +578,34 @@ public static class RealModelGate
         return InfraSlotRegex.IsMatch(ExtractErrorText(payloadOrError));
     }
 
+    /// <summary>
+    /// Whether a supervisor run's TERMINAL STOP payload is the model-plane park's own honest ending — the forced stop
+    /// the node writes (<c>SupervisorStopReasons.ModelPlaneUnavailable</c>) once a brain-call outage has outlived the
+    /// whole 24h park window. It is a clean <c>stop</c> that reaches a Success walk, so every whole-loop evaluator
+    /// scores it a CapabilityMiss — a red for a run whose model was never able to answer at all. Reading the reason is
+    /// the ONE thing that tells the two apart, and only the ENGINE can write it: no model-authored stop carries a
+    /// <c>reason</c> field (the projector emits <c>outcome</c> + <c>summary</c>), so this can never launder a real miss.
+    ///
+    /// <para>Deliberately narrow (Rule 7): it answers about the STOP only. An attempt that DID reach a conformant model
+    /// turn before the plane went down is still scored as it is today — the caller ANDs this with its own "nothing was
+    /// measured" fact rather than this helper guessing at one.</para>
+    /// </summary>
+    public static bool IsModelPlaneUnavailableStop(string? stopPayloadJson)
+    {
+        if (string.IsNullOrEmpty(stopPayloadJson)) return false;
+
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(stopPayloadJson);
+
+            return doc.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("reason", out var reason)
+                && reason.ValueKind == System.Text.Json.JsonValueKind.String
+                && reason.GetString() == CodeSpace.Core.Services.Supervisor.SupervisorStopReasons.ModelPlaneUnavailable;
+        }
+        catch (System.Text.Json.JsonException) { return false; }
+    }
+
     /// <summary>The infra categories the decider PROPAGATES (vs the capability ones it fail-closes), ANCHORED to the leading <c>(status, category): </c> slot of the BuildMessage prefix: <c>^…?API error (&lt;status, no ',' or ')'&gt;, &lt;Category&gt;): </c>. Anchoring at <c>^</c> + a comma/paren-free status means only the engine-written leading slot is read; the untrusted providerMessage that follows the first <c>): </c> can never satisfy it.</summary>
     private static readonly System.Text.RegularExpressions.Regex InfraSlotRegex = new(
         @"^[^(]*?API error \([^,)]*, (?:Transient|RateLimited|AuthFailed)\): ",

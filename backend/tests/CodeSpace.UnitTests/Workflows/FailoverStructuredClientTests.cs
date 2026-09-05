@@ -3,6 +3,7 @@ using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Core.Services.Agents.Cost;
 using CodeSpace.Core.Services.Workflows.Llm;
+using Microsoft.Extensions.Logging;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Workflows;
@@ -82,6 +83,74 @@ public class FailoverStructuredClientTests
         ex.Provider.ShouldBe("OpenAI", "the LAST candidate's fault is the one the caller parks on — the whole pool was tried, once each, no loop");
         anthropic.Requests.Count.ShouldBe(1);
         openai.Requests.Count.ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task A_hop_stamps_the_wire_health_cause_on_the_answer_and_announces_it()
+    {
+        // The trail alone cannot be ACTED on: it is prose. A caller that finds the substitute's answer unusable needs
+        // the typed fault (category + status + Retry-After) to back off and park on, so the hop stamps it — and says so
+        // out loud, because a silent hop is how a throttled pool reads as ordinary model behaviour in a log.
+        var throttled = new LlmApiException("Anthropic", 429, LlmErrorCategory.RateLimited, "slow down", retryAfter: TimeSpan.FromSeconds(9));
+        var anthropic = new ScriptedStructured("Anthropic", _ => throw throttled);
+        var openai = new ScriptedStructured("OpenAI", Answer);
+        var logger = new CapturingLogger();
+        var client = new FailoverStructuredClient(new[] { (anthropic as IStructuredLLMClient, Pick("Anthropic")), (openai, Pick("OpenAI")) }, logger);
+
+        var completion = await client.CompleteStructuredAsync(Request("Anthropic-model"), CancellationToken.None);
+
+        completion.FailedOverCause.ShouldBeSameAs(throttled, "the answer must carry WHY the call left the caller's own model, typed — not just that it did");
+        completion.FailedOverCause!.RetryAfter.ShouldBe(TimeSpan.FromSeconds(9), "the provider's own backoff hint rides along; a caller that re-throws this feeds the cause-aware retry");
+
+        var warning = logger.Entries.ShouldHaveSingleItem();
+        warning.Level.ShouldBe(LogLevel.Warning);
+        warning.Message.ShouldContain("Anthropic:Anthropic-model");
+        warning.Message.ShouldContain("RateLimited 429", customMessage: "the log names candidate → outcome, so an operator sees the hop without reading a completion record");
+    }
+
+    [Fact]
+    public async Task A_first_candidate_that_answers_carries_no_cause()
+    {
+        var completion = await new FailoverStructuredClient(new[] { (new ScriptedStructured("Anthropic", Answer) as IStructuredLLMClient, Pick("Anthropic")), (new ScriptedStructured("OpenAI", Answer), Pick("OpenAI")) })
+            .CompleteStructuredAsync(Request("Anthropic-model"), CancellationToken.None);
+
+        completion.FailedOverCause.ShouldBeNull("nothing was skipped — a caller must not read a throttle into a clean first answer");
+        completion.FailedOver.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task An_exhausted_pool_whose_last_fault_is_model_side_surfaces_the_throttle_that_started_the_hop()
+    {
+        // The shape that ended real-model run 33930904059's arm on a clean stop: the run's own brain was throttled, the
+        // hop landed on a substitute, and the substitute's own MODEL-side fault is a category every caller fails CLOSED
+        // on. Reporting that fault says "the model could not decide" about a model that was never asked — the honest
+        // cause is the 429, and it is also the only one a retry/park can act on.
+        var anthropic = new ScriptedStructured("Anthropic", _ => throw new LlmApiException("Anthropic", 429, LlmErrorCategory.RateLimited, "slow down", retryAfter: TimeSpan.FromSeconds(4)));
+        var openai = new ScriptedStructured("OpenAI", _ => throw new LlmApiException("OpenAI", 400, LlmErrorCategory.BadRequest, "unsupported tool_choice"));
+        var client = new FailoverStructuredClient(new[] { (anthropic as IStructuredLLMClient, Pick("Anthropic")), (openai, Pick("OpenAI")) });
+
+        var ex = await Should.ThrowAsync<LlmApiException>(() => client.CompleteStructuredAsync(Request("Anthropic-model"), CancellationToken.None));
+
+        ex.Category.ShouldBe(LlmErrorCategory.RateLimited, "a throttle that no alternate could cover is still a throttle — never a model-capability verdict");
+        ex.Provider.ShouldBe("Anthropic", "the fault named is the one on the caller's OWN model");
+        ex.RetryAfter.ShouldBe(TimeSpan.FromSeconds(4));
+        ex.Message.ShouldContain("OpenAI:OpenAI-model", customMessage: "the substitute's own fault is not lost — it rides the message (and the inner exception) so the pool's real state is diagnosable");
+        ex.InnerException.ShouldBeOfType<LlmApiException>().Category.ShouldBe(LlmErrorCategory.BadRequest);
+    }
+
+    [Fact]
+    public async Task A_first_candidate_that_fails_model_side_still_propagates_verbatim_without_touching_the_alternate()
+    {
+        // The re-label above is scoped to a pool the call was FORCED off by wire health. With no hop behind it, a
+        // model-side fault on the caller's own model is exactly what it looks like and must stay fail-closed.
+        var anthropic = new ScriptedStructured("Anthropic", _ => throw new LlmApiException("Anthropic", 400, LlmErrorCategory.BadRequest, "bad schema"));
+        var openai = new ScriptedStructured("OpenAI", Answer);
+        var client = new FailoverStructuredClient(new[] { (anthropic as IStructuredLLMClient, Pick("Anthropic")), (openai, Pick("OpenAI")) });
+
+        (await Should.ThrowAsync<LlmApiException>(() => client.CompleteStructuredAsync(Request("Anthropic-model"), CancellationToken.None)))
+            .Category.ShouldBe(LlmErrorCategory.BadRequest);
+
+        openai.Requests.ShouldBeEmpty();
     }
 
     [Theory]
@@ -197,6 +266,18 @@ public class FailoverStructuredClientTests
         public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken ct) =>
             LlmBudgetGuard.GuardedAsync(_scope, request.Model, request.SystemPrompt, request.UserPrompt, request.MaxOutputTokens,
                 inner => _inner.CompleteStructuredAsync(request, inner), _ => 0.01m, ct);
+    }
+
+    private sealed class CapturingLogger : Microsoft.Extensions.Logging.ILogger
+    {
+        public List<(LogLevel Level, string Message)> Entries { get; } = new();
+
+        public IDisposable BeginScope<TState>(TState state) where TState : notnull => NullScope.Instance;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            Entries.Add((logLevel, formatter(state, exception)));
+
+        private sealed class NullScope : IDisposable { public static readonly NullScope Instance = new(); public void Dispose() { } }
     }
 
     private sealed class FakeRegistry : ILLMClientRegistry
