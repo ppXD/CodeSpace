@@ -211,6 +211,17 @@ public class SupervisorStructuredOutcomeTests
     [InlineData("```resolution\n{\"other\": true}\n```", null)]
     [InlineData("", null)]
     [InlineData(null, null)]
+    // The recipe asks the resolver to FINISH with the verdict, so the LAST block is the one it settled on — a restated
+    // instruction or an optimistic draft written before the tests came back must never outrank it.
+    [InlineData("Plan: emit ```resolution\n{\"verified\": true}\n``` when green.\nTests failed.\n```resolution\n{\"verified\": false}\n```", false)]
+    [InlineData("```resolution\n{\"verified\": false}\n```\nFixed it, re-ran green.\n```resolution\n{\"verified\": true}\n```", true)]
+    // A false FINAL verdict beats the legacy marker the resolver also emitted — the field it set wins over the token.
+    [InlineData("```resolution\n{\"verified\": true}\n```\nRESOLUTION_VERIFIED\nOn review the suite is red.\n```resolution\n{\"verified\": false}\n```", false)]
+    // A NESTED object parses: the lazy capture is anchored by the closing fence, so it backtracks past the inner '}'
+    // rather than stopping at the first one. Already true — pinned here so a future rewrite of this pattern cannot
+    // quietly lose it and start grading a detailed verdict as "no block" (which falls back to the prose marker).
+    [InlineData("```resolution\n{\"verified\": true, \"detail\": {\"tests\": {\"passed\": 812}}}\n```", true)]
+    [InlineData("```resolution\n{\"detail\": {\"tests\": 0}, \"verified\": false}\n```", false)]
     public void The_resolvers_verdict_is_a_field_it_set_with_the_marker_as_the_fallback(string? summary, bool? expected) =>
         SupervisorResolverRecipe.ReadVerification(summary).ShouldBe(expected);
 
