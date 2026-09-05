@@ -150,7 +150,7 @@ public sealed partial class RealSupervisorActionExecutor
         if (blocked.Count > 0)
             return SupervisorExecution.Synchronous(JsonSerializer.Serialize(BuildBlockedSpawnOutcome(blocked), AgentJson.Options));
 
-        return await StageAgentsAndParkAsync(tasks, context, cancellationToken, contractHashes: contractHashes, acceptanceUnits: acceptanceUnits, deliveryUnits: deliveryUnits).ConfigureAwait(false);
+        return await StageAgentsAndParkAsync(tasks, context, cancellationToken, stakes: new SupervisorStakeSet { ContractHashes = contractHashes, AcceptanceUnits = acceptanceUnits, DeliveryUnits = deliveryUnits }).ConfigureAwait(false);
     }
 
     /// <summary>A subtask's staging dependency: the model-authored <see cref="SupervisorAgentDispatch.BaseSubtaskId"/> override when present (narrows to ONE producer for this specific spawn), else the plan's own <c>DependsOn</c>. Empty when neither names a producer (byte-identical no-override path). Internal + static so the precedence is unit-pinned directly.</summary>
@@ -416,17 +416,20 @@ public sealed partial class RealSupervisorActionExecutor
         var builtTask = ApplyPriorFailureDiagnosis(BuildAgentTask(subtasks, retry.SubtaskId, retry.RevisedInstruction, context, staging: effectiveStaging), priorResult);
 
         var plannedUnit = subtasks.GetValueOrDefault(retry.SubtaskId);
-        var retryContractHashes = plannedUnit is not null
-            ? new Dictionary<string, string>(StringComparer.Ordinal) { [retry.SubtaskId] = SupervisorUnitContract.Hash(plannedUnit, retry.RevisedInstruction, repositoryOverride: null) }
-            : null;
+
         // A retry re-stakes the SAME obligation shape the spawn staked — read off the unit's own planned spec, kind
         // by kind, exactly as the spawn wave computes it. The two sets are NOT interchangeable: acceptance is owed
         // only where the plan authored an oracle, delivery only where the unit expects its change to arrive. Cross
         // them and a spec-less unit's `acceptance:<id>` becomes a REQUIRED obligation no grader will ever answer
         // (the fold reads Unknown → Completed+Unknown → an Enforced run parks after legitimately recovering) while
-        // the delivery/output evidence the retry actually produced is demoted to authorized-not-applicable.
-        var retryAcceptanceUnits = plannedUnit is not null && SupervisorUnitContract.OwesAcceptance(plannedUnit) ? new HashSet<string>(StringComparer.Ordinal) { retry.SubtaskId } : null;
-        var retryDeliveryUnits = plannedUnit is not null && SupervisorUnitContract.OwesDelivery(plannedUnit) ? new HashSet<string>(StringComparer.Ordinal) { retry.SubtaskId } : null;
+        // the delivery/output evidence the retry actually produced is demoted to authorized-not-applicable — which
+        // is why the three sets travel as one NAMED SupervisorStakeSet and not as three positional arguments.
+        var retryStakes = plannedUnit is null ? null : new SupervisorStakeSet
+        {
+            ContractHashes = new Dictionary<string, string>(StringComparer.Ordinal) { [retry.SubtaskId] = SupervisorUnitContract.Hash(plannedUnit, retry.RevisedInstruction, repositoryOverride: null) },
+            AcceptanceUnits = SupervisorUnitContract.OwesAcceptance(plannedUnit) ? new[] { retry.SubtaskId } : Array.Empty<string>(),
+            DeliveryUnits = SupervisorUnitContract.OwesDelivery(plannedUnit) ? new[] { retry.SubtaskId } : Array.Empty<string>(),
+        };
 
         var (escalatedTask, escalation) = await ApplyRetryEscalationAsync(builtTask, priorResult, context, cancellationToken).ConfigureAwait(false);
 
@@ -435,7 +438,7 @@ public sealed partial class RealSupervisorActionExecutor
         if (AgentRetryCauses.Classify(priorResult?.Error) == AgentRetryCauses.GatewayFormatFault)
             _logger.LogWarning("Supervisor retry of subtask {SubtaskId}: the prior attempt died on a gateway FORMAT fault — retrying FRESH (a conversation replay re-triggers the fault) with extended thinking disabled ({EnvVar}=0)", retry.SubtaskId, AgentRetryCauses.MaxThinkingTokensEnvVar);
 
-        return await StageAgentsAndParkAsync(new List<(AgentTask, SupervisorAgentDispatch?)> { (task, null) }, context, cancellationToken, escalation, contractHashes: retryContractHashes, acceptanceUnits: retryAcceptanceUnits, deliveryUnits: retryDeliveryUnits).ConfigureAwait(false);
+        return await StageAgentsAndParkAsync(new List<(AgentTask, SupervisorAgentDispatch?)> { (task, null) }, context, cancellationToken, escalation, stakes: retryStakes).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -567,7 +570,7 @@ public sealed partial class RealSupervisorActionExecutor
     /// otherwise), so neither an existing turn-wait nor a <c>Queued</c> agent here can be a healthy other-turn
     /// in-flight item — both are necessarily THIS decision's crash residue.</para>
     /// </summary>
-    private async Task<SupervisorExecution> StageAgentsAndParkAsync(IReadOnlyList<(AgentTask Task, SupervisorAgentDispatch? Spec)> tasks, SupervisorTurnContext context, CancellationToken cancellationToken, SupervisorRetryEscalationOutcome? escalation = null, IReadOnlyDictionary<string, string>? contractHashes = null, IReadOnlyCollection<string>? acceptanceUnits = null, IReadOnlyCollection<string>? deliveryUnits = null)
+    private async Task<SupervisorExecution> StageAgentsAndParkAsync(IReadOnlyList<(AgentTask Task, SupervisorAgentDispatch? Spec)> tasks, SupervisorTurnContext context, CancellationToken cancellationToken, SupervisorRetryEscalationOutcome? escalation = null, SupervisorStakeSet? stakes = null)
     {
         if (tasks.Count == 0)
             return SupervisorExecution.Synchronous(JsonSerializer.Serialize(new { agentRunIds = Array.Empty<Guid>(), agentCount = 0, note = "no subtasks to spawn" }, AgentJson.Options));
@@ -662,7 +665,7 @@ public sealed partial class RealSupervisorActionExecutor
                     UnitId = t.Task.SubtaskId,
                     // P1b: the EFFECTIVE contract's canonical hash (dispatch overrides included) — the content
                     // identity receipts and ReceiptAdmission bind to. Null when the unit has no known contract.
-                    ContractHash = contractHashes?.GetValueOrDefault(t.Task.SubtaskId),
+                    ContractHash = stakes?.ContractHashes.GetValueOrDefault(t.Task.SubtaskId),
                 },
             }, t.Spec)).ToList();
 
@@ -677,13 +680,13 @@ public sealed partial class RealSupervisorActionExecutor
         // staging lands on the same (run, kind, ref) rows. Model-authored oracles carry ModelProposal authority
         // honestly (an obligation can only add Unknown/park — authority gates RECEIPTS, not requirements).
         // Best-effort: a ledger fault must never strand the staging itself.
-        if (planRef is not null && contractHashes is { Count: > 0 } && context.SupervisorRunId != Guid.Empty && context.TeamId != Guid.Empty)
+        if (planRef is not null && stakes is { ContractHashes.Count: > 0 } && context.SupervisorRunId != Guid.Empty && context.TeamId != Guid.Empty)
         {
             const string requirementSavepoint = "before_completion_requirements";
             await stagingTransaction.CreateSavepointAsync(requirementSavepoint, cancellationToken).ConfigureAwait(false);
             var requirements = SupervisorUnitContract.BuildStakedRequirements(tasks
-                .Where(t => !string.IsNullOrEmpty(t.Task.SubtaskId) && contractHashes.ContainsKey(t.Task.SubtaskId!))
-                .Select(t => (t.Task.SubtaskId!, contractHashes[t.Task.SubtaskId!], acceptanceUnits?.Contains(t.Task.SubtaskId!) == true, deliveryUnits?.Contains(t.Task.SubtaskId!) == true)),
+                .Where(t => !string.IsNullOrEmpty(t.Task.SubtaskId) && stakes.ContractHashes.ContainsKey(t.Task.SubtaskId!))
+                .Select(t => (t.Task.SubtaskId!, stakes.ContractHashes[t.Task.SubtaskId!], stakes.AcceptanceUnits.Contains(t.Task.SubtaskId!), stakes.DeliveryUnits.Contains(t.Task.SubtaskId!))),
                 Messages.Contracts.ContractAuthority.ModelProposal, planRef);
 
             if (requirements.Count > 0)
