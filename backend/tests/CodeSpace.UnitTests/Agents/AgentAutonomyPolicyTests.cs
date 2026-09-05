@@ -79,13 +79,15 @@ public class AgentAutonomyPolicyTests
     // Policy ALLOWED network and the launcher asked for it.
     [InlineData(AgentAutonomyLevel.Trusted, AgentAutonomyLevel.Trusted, "Network: on (Trusted)")]
     [InlineData(AgentAutonomyLevel.Unleashed, AgentAutonomyLevel.Unleashed, "Network: on (Unleashed)")]
-    // Policy allowed it; nobody asked. The DEFAULT — an ordinary launch, stated rather than assumed.
-    [InlineData(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Trusted, "Network: off (Standard)")]
-    [InlineData(AgentAutonomyLevel.Confined, AgentAutonomyLevel.Trusted, "Network: off (Confined)")]
+    // Policy allowed it; nobody asked. The DEFAULT — an ordinary launch, stated rather than assumed. Every "off"
+    // is QUALIFIED: the tier's Network.Off becomes a severed namespace only where bubblewrap actually confines,
+    // and Sandbox:RequireConfinement (which would refuse an unconfinable host) defaults to false.
+    [InlineData(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Trusted, "Network: off (Standard)" + AgentAutonomyPolicy.ConfinementCaveat)]
+    [InlineData(AgentAutonomyLevel.Confined, AgentAutonomyLevel.Trusted, "Network: off (Confined)" + AgentAutonomyPolicy.ConfinementCaveat)]
     // The ceiling cannot reach a network-granting tier: this run could NOT have had network however it was
     // launched. Distinct wording from "off" on purpose — declined and denied are different facts.
-    [InlineData(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Standard, "Network: clamped off by policy (ceiling Standard)")]
-    [InlineData(AgentAutonomyLevel.Confined, AgentAutonomyLevel.Confined, "Network: clamped off by policy (ceiling Confined)")]
+    [InlineData(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Standard, "Network: clamped off by policy (ceiling Standard)" + AgentAutonomyPolicy.ConfinementCaveat)]
+    [InlineData(AgentAutonomyLevel.Confined, AgentAutonomyLevel.Confined, "Network: clamped off by policy (ceiling Confined)" + AgentAutonomyPolicy.ConfinementCaveat)]
     public void DescribeNetwork_states_the_effective_posture_and_who_decided(AgentAutonomyLevel effective, AgentAutonomyLevel ceiling, string expected)
     {
         AgentAutonomyPolicy.DescribeNetwork(effective, ceiling).ShouldBe(expected,
@@ -102,6 +104,26 @@ public class AgentAutonomyPolicyTests
             var saysOn = AgentAutonomyPolicy.DescribeNetwork(tier, AgentAutonomyLevel.Unleashed).Contains("on (");
 
             saysOn.ShouldBe(AgentAutonomyPolicy.Derive(tier).Network == AgentNetworkAccess.On, $"the '{tier}' sentence must agree with Derive('{tier}')");
+        }
+    }
+
+    [Fact]
+    public void DescribeNetwork_never_claims_an_unqualified_off()
+    {
+        // The claim this qualifier ends: "off" is the TIER'S PERMISSION, and it becomes a severed network namespace
+        // only where LocalProcessRunner rewrites the command through bubblewrap (BubblewrapSandbox.Available — absent
+        // on macOS development, on a host without bwrap, on one denying unprivileged user namespaces), and
+        // Sandbox:RequireConfinement — the setting that would refuse an unconfinable host — defaults to false. So
+        // EVERY sentence saying a run had no network carries the caveat, on every tier pair, not just the sampled ones.
+        foreach (var effective in Enum.GetValues<AgentAutonomyLevel>())
+        {
+            foreach (var ceiling in Enum.GetValues<AgentAutonomyLevel>())
+            {
+                if (AgentAutonomyPolicy.Derive(effective).Network == AgentNetworkAccess.On) continue;
+
+                AgentAutonomyPolicy.DescribeNetwork(effective, ceiling).ShouldEndWith(AgentAutonomyPolicy.ConfinementCaveat,
+                    customMessage: $"'{effective}' under ceiling '{ceiling}' claims a severed network the sandbox is not guaranteed to have applied");
+            }
         }
     }
 }

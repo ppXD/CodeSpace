@@ -1,0 +1,12 @@
+{
+  "_doc": "The network-posture sentence, authored by the backend (AgentAutonomyPolicy.DescribeNetwork) and asserted by BOTH stacks so the Launch composer's pre-launch prediction can never drift from the sentence the run's journal carries. Backend drift detector: backend/tests/CodeSpace.UnitTests/Agents/NetworkPostureWordingDriftTests.cs. Frontend drift detector: frontend/src/lib/launchInput.test.ts ('network posture wording'). Changing a word means changing this file, and both tests must go green on the new words.",
+  "cases": [
+    { "effective": "Trusted", "ceiling": "Trusted", "line": "Network: on (Trusted)" },
+    { "effective": "Unleashed", "ceiling": "Unleashed", "line": "Network: on (Unleashed)" },
+    { "effective": "Standard", "ceiling": "Trusted", "line": "Network: off (Standard) — severed only where the sandbox confines" },
+    { "effective": "Confined", "ceiling": "Trusted", "line": "Network: off (Confined) — severed only where the sandbox confines" },
+    { "effective": "Standard", "ceiling": "Standard", "line": "Network: clamped off by policy (ceiling Standard) — severed only where the sandbox confines" },
+    { "effective": "Confined", "ceiling": "Standard", "line": "Network: clamped off by policy (ceiling Standard) — severed only where the sandbox confines" },
+    { "effective": "Confined", "ceiling": "Confined", "line": "Network: clamped off by policy (ceiling Confined) — severed only where the sandbox confines" }
+  ]
+}
