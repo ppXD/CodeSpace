@@ -54,10 +54,12 @@ public sealed record WorkflowDefinition
     /// P2b (Enforced cohort, definition-grain opt-in): the completion enforcement mode runs of this definition are
     /// stamped with — <see cref="CompletionModeEnforced"/> puts every run of this definition under the completion
     /// terminal authority (an unbackable Success claim parks instead of terminaling), <see cref="CompletionModeShadow"/>
-    /// pins today's record-only behavior explicitly, and null inherits the platform default (Shadow while the
-    /// protocol rolls out). Part of the definition deliberately: the AUTHOR declares the contract's enforcement,
-    /// reruns and replays of the same frozen definition inherit it, and the cohort stays narrow by construction —
-    /// only definitions that opted in. The validator rejects any other value fail-closed.
+    /// pins today's record-only behavior explicitly, and null inherits the platform default — since #1774 (C5) this
+    /// is mode-profile-driven (<c>CompletionPolicy.DefaultModeFor</c>): Enforced for the supervisor lane (today's
+    /// one graduated/Enforceable mode), Shadow for every other cohort. Part of the definition deliberately: the
+    /// AUTHOR declares the contract's enforcement, reruns and replays of the same frozen definition inherit it, and
+    /// the cohort stays narrow by construction — only definitions that opted in. The validator rejects any other
+    /// value fail-closed.
     /// </summary>
     public string? CompletionMode { get; init; }
 
