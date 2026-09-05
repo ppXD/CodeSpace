@@ -13,15 +13,11 @@ namespace CodeSpace.Messages.Agents;
 /// addresses graph topology (no node id / type key / run id); the server turns a verb + bounded payload into a
 /// side effect.</para>
 ///
-/// <para>ACCEPTED LIMITATION — a plan cannot DISCARD its predecessor's work. A re-plan says only "here is the
-/// current instruction"; it carries no supersedes/abandon signal, and the server does not infer one. So when a
-/// model re-plans because the previous generation went the WRONG DIRECTION and then emits <c>merge</c> before
-/// spawning anything, <c>SupervisorMergeContributors</c> conserves that abandoned work and folds it into the
-/// reviewable head. Conservation is the deliberate default: the alternative — treating a boundary as an implicit
-/// discard — silently destroyed three finished, pushed agent branches on a live run, and losing finished work is
-/// the strictly worse failure. The brain is told which way it will go (the plan recitation states the pending
-/// carry-over verbatim) and can steer it by spawning the replacement first, so the fold takes the new generation's
-/// own work instead. A future explicit discard signal would live HERE, as a field on this payload.</para>
+/// <para>A plan-generation boundary is NEVER an implicit discard: inferring one silently destroyed three finished,
+/// pushed agent branches on a live run, and losing finished work is the strictly worse failure. So a bare re-plan
+/// says only "here is the current instruction" and <c>SupervisorMergeContributors</c> conserves what came before.
+/// A model that re-plans because the previous generation went the WRONG DIRECTION says so EXPLICITLY, via
+/// <see cref="AbandonEarlierResults"/> — the one signal that turns the boundary into a discard.</para>
 /// </summary>
 public sealed record SupervisorPlanPayload
 {
@@ -48,6 +44,19 @@ public sealed record SupervisorPlanPayload
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public DeliverySpec? Delivery { get; init; }
+
+    /// <summary>
+    /// TRUE when this plan CHANGES DIRECTION and the finished results of every EARLIER plan generation must not be
+    /// merged or published — the explicit discard the boundary itself never implies. Monotonic per boundary: a later
+    /// plan that says nothing does not un-abandon them, and work produced AFTER this plan is this plan's own
+    /// direction, untouched. Default-omitted (<c>[JsonIgnore(WhenWritingDefault)]</c>) so a plan that says nothing
+    /// serializes byte-identical to before — but it is ordinary plan data, NOT a non-hashed marker: it changes what
+    /// the decision does, so it belongs in the payload the idempotency key hashes. Consumed by
+    /// <c>SupervisorMergeContributors.SettledAcrossGenerations</c> (Core), the one floor both the merge carry-over and
+    /// the ledger-direct publish rung read.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool AbandonEarlierResults { get; init; }
 }
 
 /// <summary>One planned subtask the supervisor can later spawn / retry by <see cref="Id"/>.</summary>

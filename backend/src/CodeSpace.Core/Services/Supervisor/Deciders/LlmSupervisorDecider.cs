@@ -1532,6 +1532,8 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         "Review) — each phase lists the subtask ids it covers and an OPTIONAL objective 'acceptance' check — so the run " +
         "reads as coherent stages; author phases when the work has DISTINCT stages, and omit 'phases' for a flat subtask " +
         "plan (the default). " +
+        "If a re-plan changes direction and the earlier plan's finished results are the WRONG work, set " +
+        "'abandonEarlierResults': true on that plan — otherwise they stay mergeable and a later 'merge' includes them. " +
         "When you 'stop', you MAY optionally author an objective 'acceptance' definition-of-done — an argv 'command' the " +
         "server RUNS against the integrated result to verify the goal is met (it is AND-ed with the operator's own " +
         "acceptance floor, never replaces it) — but author it ONLY when the goal itself names a concrete runnable check " +

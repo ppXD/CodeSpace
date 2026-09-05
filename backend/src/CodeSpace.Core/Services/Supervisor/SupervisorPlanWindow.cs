@@ -27,7 +27,13 @@ public static class SupervisorPlanWindow
         return new SupervisorPlanWindowSlice(priorDecisions, IsPlanBounded: false);
     }
 
-    private static bool IsValidBoundary(SupervisorPriorDecision candidate)
+    /// <summary>
+    /// Whether this decision OPENS a plan generation. Shared so a consumer scanning for a SPECIFIC earlier boundary
+    /// — <see cref="SupervisorMergeContributors.SettledAcrossGenerations"/> looks for the newest plan that abandoned
+    /// its predecessors' work — applies exactly the bar <see cref="Read"/> does. A plan that opened no generation must
+    /// not be able to draw one either, least of all a destructive one.
+    /// </summary>
+    public static bool IsValidBoundary(SupervisorPriorDecision candidate)
     {
         if (candidate.DecisionKind != SupervisorDecisionKinds.Plan || candidate.Status != SupervisorDecisionStatus.Succeeded) return false;
         if (SupervisorOutcome.ReadPlanSubtasks(candidate.PayloadJson).Count == 0) return false;

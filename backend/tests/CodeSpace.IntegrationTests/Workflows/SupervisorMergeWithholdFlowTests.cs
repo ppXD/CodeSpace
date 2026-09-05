@@ -31,6 +31,10 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// <para>The same door's other half is here too: which contributors a merge folds when a RE-PLAN moved the
 /// generation boundary past the wave that produced them (<see cref="SupervisorMergeContributors"/>). The selection
 /// is pinned in isolation by <c>SupervisorMergeCarryOverTests</c>; these prove it through the real executor.</para>
+///
+/// <para>And the ONE thing that overrides that conservation: a plan whose payload declares
+/// <c>abandonEarlierResults</c> — the model saying the earlier generation was the wrong DIRECTION. The merge that
+/// follows folds none of it, and the plan's own ledger row records how much it discarded.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -118,6 +122,56 @@ public sealed class SupervisorMergeWithholdFlowTests
             .ShouldBe(new[] { "codespace/agent/a", "codespace/agent/b" }, "both stranded branches reach the reviewable head, in the order they were produced");
         outcome.GetProperty("carriedOverFromEarlierGenerations").GetInt32().ShouldBe(2, "the outcome states plainly that this merge conserved work an earlier generation produced");
         outcome.TryGetProperty("contributorIntegrity", out _).ShouldBeFalse("the carried-over contributors materialized faithfully — nothing to report");
+    }
+
+    [Fact]
+    public async Task A_replan_that_declares_the_earlier_direction_abandoned_merges_none_of_it()
+    {
+        // The sibling trajectory above with ONE plan-payload field flipped: plan(2) → spawn×2 → plan(1, ABANDON) →
+        // merge. Conservation answers "re-planned AFTER the work landed"; it must not also answer "re-planned BECAUSE
+        // the work was the wrong direction", and only the model can tell those apart — so the discard is its explicit
+        // declaration, and the merge that follows folds none of what it discarded.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var a = Guid.NewGuid();
+        var b = Guid.NewGuid();
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, "s1", "s2");
+        await SeedSpawnAsync(runId, teamId, sequence: 2, Unit(a, "codespace/agent/a", acceptancePassed: true), Unit(b, "codespace/agent/b", acceptancePassed: true));
+        await SeedAgentRunAsync(a, teamId, runId, "codespace/agent/a");
+        await SeedAgentRunAsync(b, teamId, runId, "codespace/agent/b");
+        await SeedPlanAsync(runId, teamId, sequence: 3, subtaskIds: new[] { "s3" }, abandonEarlierResults: true);
+
+        var raw = (await RunMergeTurnAsync(runId, teamId))!;
+        var outcome = JsonDocument.Parse(raw).RootElement;
+
+        outcome.GetProperty("count").GetInt32().ShouldBe(0, "the plan changed direction — its predecessors' branches must not reach the reviewable head");
+        raw.ShouldNotContain("codespace/agent/a", customMessage: "an abandoned contributor must not appear in the merge outcome at all");
+        raw.ShouldNotContain("codespace/agent/b", customMessage: "an abandoned contributor must not appear in the merge outcome at all");
+        outcome.TryGetProperty("carriedOverFromEarlierGenerations", out _).ShouldBeFalse("nothing was conserved — claiming a carry-over here would be the prompt's revoked promise all over again");
+    }
+
+    [Fact]
+    public async Task An_abandoning_plan_records_how_much_finished_work_it_discarded()
+    {
+        // The discard's own receipt, through the REAL plan executor: a discard nobody can read back off the ledger is
+        // indistinguishable from the silent loss the whole carry-over ladder exists to end.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var a = Guid.NewGuid();
+        var b = Guid.NewGuid();
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, "s1", "s2");
+        await SeedSpawnAsync(runId, teamId, sequence: 2, Unit(a, "codespace/agent/a", acceptancePassed: true), Unit(b, "codespace/agent/b", acceptancePassed: true));
+        await SeedAgentRunAsync(a, teamId, runId, "codespace/agent/a");
+        await SeedAgentRunAsync(b, teamId, runId, "codespace/agent/b");
+
+        var plan = JsonDocument.Parse((await RunAbandoningPlanTurnAsync(runId, teamId))!).RootElement;
+
+        plan.GetProperty("abandonedEarlierResults").GetInt32().ShouldBe(2, "the plan's own ledger row states how many finished results it took off the merge/publish floor");
+        plan.GetProperty("count").GetInt32().ShouldBe(1, "the receipt is layered onto the ordinary plan outcome, never in place of it");
     }
 
     [Fact]
@@ -248,13 +302,20 @@ public sealed class SupervisorMergeWithholdFlowTests
     private static SupervisorAgentResult Unit(Guid agentRunId, string producedBranch, bool? acceptancePassed) =>
         new() { AgentRunId = agentRunId, Status = "Succeeded", Summary = "did it", ProducedBranch = producedBranch, AcceptancePassed = acceptancePassed };
 
-    private async Task<string?> RunMergeTurnAsync(Guid runId, Guid teamId, bool forcedByPublishGate = false)
+    private Task<string?> RunMergeTurnAsync(Guid runId, Guid teamId, bool forcedByPublishGate = false) =>
+        RunTurnAsync(runId, teamId, new MergeDecider(forcedByPublishGate), SupervisorDecisionKinds.Merge);
+
+    /// <summary>Drive ONE real plan turn whose payload declares the earlier generations' work abandoned — the model-authored signal, through the real executor.</summary>
+    private Task<string?> RunAbandoningPlanTurnAsync(Guid runId, Guid teamId) =>
+        RunTurnAsync(runId, teamId, new AbandoningPlanDecider(), SupervisorDecisionKinds.Plan);
+
+    private async Task<string?> RunTurnAsync(Guid runId, Guid teamId, ISupervisorDecider decider, string decisionKind)
     {
         using (var scope = _fixture.BeginScope())
         {
             var service = new SupervisorTurnService(
                 scope.Resolve<ISupervisorDecisionLog>(),
-                new MergeDecider(forcedByPublishGate),
+                decider,
                 scope.Resolve<ISupervisorActionExecutor>(),
                 scope.Resolve<CodeSpaceDbContext>(),
                 scope.Resolve<ISupervisorAcceptanceGrader>(),
@@ -271,10 +332,10 @@ public sealed class SupervisorMergeWithholdFlowTests
 
         using var verify = _fixture.BeginScope();
         return await verify.Resolve<CodeSpaceDbContext>().SupervisorDecisionRecord.AsNoTracking()
-            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.Merge)
+            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == decisionKind)
             .OrderByDescending(d => d.Sequence)
             .Select(d => d.OutcomeJson)
-            .FirstAsync();   // the turn this call just ran — a tape that already carried an earlier merge has two
+            .FirstAsync();   // the turn this call just ran — a tape that already carried an earlier one of this kind has two
     }
 
     private async Task SeedSpawnAsync(Guid runId, Guid teamId, int sequence, params SupervisorAgentResult[] units)
@@ -297,12 +358,16 @@ public sealed class SupervisorMergeWithholdFlowTests
     }
 
     /// <summary>A structurally-valid, non-empty plan — the boundary <see cref="SupervisorPlanWindow"/> opens a generation on, so a plan seeded AFTER a spawn slices that spawn out of the window.</summary>
-    private async Task SeedPlanAsync(Guid runId, Guid teamId, int sequence, params string[] subtaskIds)
+    private Task SeedPlanAsync(Guid runId, Guid teamId, int sequence, params string[] subtaskIds) =>
+        SeedPlanAsync(runId, teamId, sequence, subtaskIds, abandonEarlierResults: false);
+
+    private async Task SeedPlanAsync(Guid runId, Guid teamId, int sequence, string[] subtaskIds, bool abandonEarlierResults)
     {
-        var payload = JsonSerializer.Serialize(new
+        var payload = JsonSerializer.Serialize(new SupervisorPlanPayload
         {
-            goal = Goal,
-            subtasks = subtaskIds.Select(id => new { id, title = id, instruction = $"do {id}" }),
+            Goal = Goal,
+            Subtasks = subtaskIds.Select(id => new SupervisorPlannedSubtask { Id = id, Title = id, Instruction = $"do {id}" }).ToArray(),
+            AbandonEarlierResults = abandonEarlierResults,
         }, AgentJson.Options);
 
         await SeedDecisionAsync(runId, teamId, sequence, SupervisorDecisionKinds.Plan, payload, "{}");
@@ -400,6 +465,22 @@ public sealed class SupervisorMergeWithholdFlowTests
             Activations = new List<Messages.Commands.Workflows.WorkflowActivationInput>(),
             Enabled = true,
         });
+    }
+
+    /// <summary>A decider that emits a single PLAN decision declaring every earlier generation's finished work abandoned — the direction-change re-plan.</summary>
+    private sealed class AbandoningPlanDecider : ISupervisorDecider
+    {
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken) =>
+            Task.FromResult(new SupervisorDecision
+            {
+                Kind = SupervisorDecisionKinds.Plan,
+                PayloadJson = JsonSerializer.Serialize(new SupervisorPlanPayload
+                {
+                    Goal = Goal,
+                    Subtasks = new[] { new SupervisorPlannedSubtask { Id = "s3", Title = "s3", Instruction = "start over, the other way" } },
+                    AbandonEarlierResults = true,
+                }, AgentJson.Options),
+            });
     }
 
     /// <summary>A decider that emits a single MERGE decision — drives the real merge executor over the seeded prior spawn.</summary>

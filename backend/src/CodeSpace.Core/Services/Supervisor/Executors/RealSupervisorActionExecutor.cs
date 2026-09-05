@@ -132,13 +132,30 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
         // query, so a crash replay / reconciler re-dispatch / zombie resume can never re-derive a different plan
         // (the exactly-once origin key already lands a replayed persist on the same row; recording it makes the
         // binding hold by construction). A unit-tier context (nothing persisted) records no ref.
-        var outcome = (plan.Phases is { Count: > 0 }, persisted) switch
+        // An ordered dictionary rather than a per-shape anonymous type (mirrors RealSupervisorActionExecutor.Merge.cs):
+        // each optional key is layered in the SAME order the four fixed shapes emitted it, so every pre-existing plan
+        // outcome stays byte-identical while a fifth optional key costs one line instead of four more arms.
+        var outcome = new Dictionary<string, object?>
         {
-            (true, { } row) => JsonSerializer.Serialize(new { planned = plan.Subtasks, count = plan.Subtasks.Count, phases = plan.Phases, workPlanId = row.Id, workPlanVersion = row.Version }, AgentJson.Options),
-            (true, null) => JsonSerializer.Serialize(new { planned = plan.Subtasks, count = plan.Subtasks.Count, phases = plan.Phases }, AgentJson.Options),
-            (false, { } row) => JsonSerializer.Serialize(new { planned = plan.Subtasks, count = plan.Subtasks.Count, workPlanId = row.Id, workPlanVersion = row.Version }, AgentJson.Options),
-            (false, null) => JsonSerializer.Serialize(new { planned = plan.Subtasks, count = plan.Subtasks.Count }, AgentJson.Options),
+            ["planned"] = plan.Subtasks,
+            ["count"] = plan.Subtasks.Count,
         };
+
+        if (plan.Phases is { Count: > 0 }) outcome["phases"] = plan.Phases;
+
+        if (persisted is { } row)
+        {
+            outcome["workPlanId"] = row.Id;
+            outcome["workPlanVersion"] = row.Version;
+        }
+
+        // The discard's own receipt: a plan that declared abandonEarlierResults records HOW MANY finished results it
+        // took off the merge/publish floor. A discard nobody can read back off the ledger is indistinguishable from
+        // the silent loss this whole carry-over ladder exists to end. Counted against the floor as it stood BEFORE
+        // this plan (context.PriorDecisions excludes the in-flight decision), so it is exactly what THIS plan removed.
+        var abandoned = plan.AbandonEarlierResults ? SupervisorMergeContributors.SettledAcrossGenerations(context.PriorDecisions).Count : 0;
+
+        if (abandoned > 0) outcome["abandonedEarlierResults"] = abandoned;
 
         // The edges token is the dep-handoff diagnosis's join key (run 31170757534: every staged unit logged "no
         // dependsOn edge" while the failing assertion read edges off the LATEST plan — whether the model keeps
@@ -146,7 +163,10 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
         // edges). One grep-able line per plan beside the staged-units line closes that.
         _logger.LogInformation("Supervisor plan recorded {Count} subtask(s) in {PhaseCount} phase(s); dependency edges: {Edges}", plan.Subtasks.Count, plan.Phases?.Count ?? 0, DescribeEdges(plan.Subtasks));
 
-        return SupervisorExecution.Synchronous(outcome);
+        if (abandoned > 0)
+            _logger.LogInformation("Supervisor plan ABANDONED {Abandoned} earlier succeeded result(s) — the plan declared the previous direction wrong; they are neither mergeable nor publishable", abandoned);
+
+        return SupervisorExecution.Synchronous(JsonSerializer.Serialize(outcome, AgentJson.Options));
     }
 
     /// <summary>The plan's dependency edges, one token per edge-bearing unit ("s2->[s1] s3->[s1,s2]"), or "(none)" for a flat plan. Pure + pinned — a CI grep joins this against the staged-units log to see whether the units carrying edges are the ones actually spawned.</summary>

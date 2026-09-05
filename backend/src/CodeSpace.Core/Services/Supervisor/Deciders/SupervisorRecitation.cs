@@ -63,10 +63,17 @@ public static class SupervisorRecitation
         // the block above mentions them and the brain reads the run as having produced nothing. It has not: the merge
         // door carries them over, and this is the one line that says so — off the SAME selection the merge executes,
         // so the prompt can never promise a fold that would not happen.
-        var carriedOver = SupervisorMergeContributors.Resolve(priorDecisions).CarriedOverFromEarlierGenerations;
+        var selection = SupervisorMergeContributors.Resolve(priorDecisions);
 
-        if (carriedOver > 0)
-            builder.AppendLine().Append($"{carriedOver} succeeded result(s) from earlier plan generations are not merged yet — 'merge' will include them.");
+        if (selection.CarriedOverFromEarlierGenerations > 0)
+            builder.AppendLine().Append($"{selection.CarriedOverFromEarlierGenerations} succeeded result(s) from earlier plan generations are not merged yet — 'merge' will include them.");
+
+        // The other half of the same honesty: a plan that declared abandonEarlierResults REVOKED that promise for the
+        // generations before it, so reciting only the carry-over would tell the brain a fold the merge will not do.
+        // Both lines can render together — a plan that abandoned gen1 and then produced its own stranded gen2 has one
+        // true fact of each kind, and suppressing either would hide finished work exactly as before.
+        if (selection.AbandonedFromEarlierGenerations > 0)
+            builder.AppendLine().Append($"{selection.AbandonedFromEarlierGenerations} earlier result(s) excluded — the plan abandoned them.");
 
         return builder.ToString();
     }

@@ -113,7 +113,8 @@ public static class SupervisorDecisionSchema
                     "targetBranch": { "type": "string", "description": "The branch a requested pull request should target. Omit to use the repository's own default branch." }
                   },
                   "description": "Optional delivery contract for what this run should produce beyond the code change itself. The operator's own configuration always overrides this per field when it names one."
-                }
+                },
+                "abandonEarlierResults": { "type": "boolean", "description": "true when finished results from earlier plan generations must NOT be merged or published (the plan changes direction); false/absent keeps them mergeable." }
               },
               "required": ["goal", "subtasks"],
               "description": "Required when kind == 'plan'. Decompose into 'subtasks'; optionally group them into named 'phases'."

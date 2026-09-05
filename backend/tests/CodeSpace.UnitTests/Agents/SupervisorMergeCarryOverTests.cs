@@ -33,10 +33,16 @@ public class SupervisorMergeCarryOverTests
         return new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = 1, DecisionKind = kind, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = outcome };
     }
 
-    private static SupervisorPriorDecision Plan(string subtaskId = "s1") => new()
+    private static SupervisorPriorDecision Plan(string subtaskId = "s1", bool abandonEarlierResults = false) => new()
     {
         Id = Guid.NewGuid(), Sequence = 2, DecisionKind = SupervisorDecisionKinds.Plan, Status = SupervisorDecisionStatus.Succeeded,
-        PayloadJson = $$"""{"goal":"replacement","subtasks":[{"id":"{{subtaskId}}","title":"{{subtaskId}}","instruction":"do it"}]}""", OutcomeJson = "{}",
+        PayloadJson = $$"""{"goal":"replacement","subtasks":[{"id":"{{subtaskId}}","title":"{{subtaskId}}","instruction":"do it"}]{{(abandonEarlierResults ? ""","abandonEarlierResults":true""" : "")}}}""", OutcomeJson = "{}",
+    };
+
+    private static SupervisorPlanPayload FlatPlan() => new()
+    {
+        Goal = "g",
+        Subtasks = new[] { new SupervisorPlannedSubtask { Id = "s1", Title = "T", Instruction = "do" } },
     };
 
     /// <summary>A merge that INTEGRATED its contributors onto one reviewable head — consolidated.</summary>
@@ -197,17 +203,96 @@ public class SupervisorMergeCarryOverTests
         }).ShouldBe(new[] { a.AgentRunId, resolver.AgentRunId }, "every agent-STAGING verb settles work — a resolver's own branch is finished work too");
     }
 
-    [Fact]
-    public void A_replan_that_abandoned_the_earlier_direction_still_merges_it()
+    [Theory]
+    [InlineData(false, false, true)]
+    [InlineData(false, true, false)]
+    [InlineData(true, false, false)]
+    public void An_earlier_generations_result_survives_a_replan_unless_a_plan_abandoned_it(bool firstAbandons, bool secondAbandons, bool stillMergeable)
     {
-        // ACCEPTED LIMITATION, pinned so a future change is deliberate (see SupervisorPlanPayload's class doc): a plan
-        // carries no supersedes/discard signal, so the server cannot tell "re-planned because gen1 was the wrong
-        // direction" from "re-planned after gen1 landed". Conservation wins — losing finished work is the strictly
-        // worse failure — and the brain is told which way it goes by the recitation line, so it can spawn first.
+        // Conservation stays the DEFAULT (arm 1): a bare re-plan says only "here is the current instruction", and
+        // losing finished work is the strictly worse failure — so a merge that follows one still folds what came
+        // before. The plan payload's explicit abandonEarlierResults is the ONLY thing that discards (arm 2), and it is
+        // MONOTONIC (arm 3): a later plan that says nothing does not un-abandon what an earlier one already called the
+        // wrong direction. Nothing is inferred from the boundary itself — inferring a discard once destroyed three
+        // finished, pushed agent branches on a live run.
+        var earlier = Unit();
+
+        var selection = SupervisorMergeContributors.Resolve(new[]
+        {
+            Plan("s1"), Staging(SupervisorDecisionKinds.Spawn, earlier),
+            Plan("s2", abandonEarlierResults: firstAbandons), Plan("s3", abandonEarlierResults: secondAbandons),
+        });
+
+        selection.AgentRunIds.ShouldBe(stillMergeable ? new[] { earlier.AgentRunId } : Array.Empty<Guid>());
+        selection.CarriedOverFromEarlierGenerations.ShouldBe(stillMergeable ? 1 : 0);
+        selection.AbandonedFromEarlierGenerations.ShouldBe(stillMergeable ? 0 : 1);
+    }
+
+    [Fact]
+    public void The_abandoning_plans_own_replacement_work_is_still_carried_over()
+    {
+        // The flag draws its line at ITS OWN boundary: it discards what came BEFORE it, never the replacement work it
+        // asked for. Without that, a model that re-planned a new direction, spawned it, then re-planned once more
+        // would find its own new work discarded by its own earlier abandon — the flag would be a one-way run-killer.
+        var abandoned = Unit();
+        var replacement = Unit();
+
+        var selection = SupervisorMergeContributors.Resolve(new[]
+        {
+            Plan("s1"), Staging(SupervisorDecisionKinds.Spawn, abandoned),
+            Plan("s2", abandonEarlierResults: true), Staging(SupervisorDecisionKinds.Spawn, replacement), Plan("s3"),
+        });
+
+        selection.AgentRunIds.ShouldBe(new[] { replacement.AgentRunId }, "work produced AFTER the abandoning plan is that plan's own direction — it carries over exactly as before");
+        selection.CarriedOverFromEarlierGenerations.ShouldBe(1);
+        selection.AbandonedFromEarlierGenerations.ShouldBe(1);
+    }
+
+    [Fact]
+    public void A_plan_that_opened_no_generation_cannot_abandon_anything()
+    {
+        // The flag is honoured on the SAME bar SupervisorPlanWindow opens a generation on. A plan that opened none
+        // (no subtasks — RealSupervisorActionExecutor rejects it outright and never persists it) must not be able to
+        // destroy finished work: an unreachable-but-destructive marker is exactly the silent-loss failure this file exists to prevent.
+        var earlier = Unit();
+        var rejectedPlan = Plan() with { PayloadJson = """{"goal":"g","subtasks":[],"abandonEarlierResults":true}""" };
+
+        SupervisorMergeContributors.Resolve(new[] { Plan("s1"), Staging(SupervisorDecisionKinds.Spawn, earlier), rejectedPlan })
+            .AgentRunIds.ShouldBe(new[] { earlier.AgentRunId }, "a plan that opens no generation draws no abandonment boundary either");
+    }
+
+    [Fact]
+    public void The_publish_rungs_own_floor_drops_the_abandoned_work_too()
+    {
+        // ONE floor, both rungs (SupervisorPublishedBranchResolver's ledger-direct rung reads this same function): a
+        // tape must never be unmergeable-but-publishable purely because the two rungs asked different questions.
         var abandoned = Unit();
 
-        SupervisorMergeContributors.Resolve(new[] { Plan("wrong-direction"), Staging(SupervisorDecisionKinds.Spawn, abandoned), Plan("start-over") })
-            .AgentRunIds.ShouldBe(new[] { abandoned.AgentRunId }, "a re-plan cannot DISCARD work — until a plan can say so explicitly, a merge that follows one folds what came before");
+        SupervisorMergeContributors.SettledAcrossGenerations(new[]
+        {
+            Plan("s1"), Staging(SupervisorDecisionKinds.Spawn, abandoned), Plan("s2", abandonEarlierResults: true),
+        }).ShouldBeEmpty("the abandoned branch is no more publishable than it is mergeable");
+    }
+
+    [Fact]
+    public void A_plan_that_abandons_nothing_projects_byte_identical_to_before_the_field()
+    {
+        var decision = SupervisorDecisionProjector.Project(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = FlatPlan() });
+
+        decision.PayloadJson.ShouldBe("""{"goal":"g","subtasks":[{"id":"s1","title":"T","instruction":"do"}]}""",
+            "conservation is the default and the default is ABSENT — every existing plan's idempotency-key bytes are unchanged");
+    }
+
+    [Fact]
+    public void An_abandoning_plan_carries_the_flag_in_the_hashed_payload_and_round_trips()
+    {
+        var decision = SupervisorDecisionProjector.Project(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = FlatPlan() with { AbandonEarlierResults = true } });
+
+        decision.PayloadJson.ShouldBe("""{"goal":"g","subtasks":[{"id":"s1","title":"T","instruction":"do"}],"abandonEarlierResults":true}""",
+            "the flag is ordinary plan data, not a non-hashed marker: it CHANGES what the decision does, so it must change the idempotency key the payload hashes");
+
+        JsonSerializer.Deserialize<SupervisorPlanPayload>(decision.PayloadJson, AgentJson.Options)!.AbandonEarlierResults
+            .ShouldBeTrue("the executor reads the signal back off the frozen payload");
     }
 
     [Theory]
@@ -254,6 +339,19 @@ public class SupervisorMergeCarryOverTests
         recited.ShouldNotBeNull();
         recited.ShouldContain("2 succeeded result(s) from earlier plan generations are not merged yet", Case.Sensitive,
             "the brain must be told the work still exists, or it re-plans and re-spawns what is already done");
+    }
+
+    [Fact]
+    public void The_recitation_tells_the_brain_the_plan_abandoned_the_earlier_results()
+    {
+        var a = Unit();
+
+        var recited = SupervisorRecitation.Render(new[] { Plan("s1"), Staging(SupervisorDecisionKinds.Spawn, a), Plan("s2", abandonEarlierResults: true) });
+
+        recited.ShouldContain("1 earlier result(s) excluded — the plan abandoned them", Case.Sensitive,
+            "the brain that asked for the discard must read back what its own flag did");
+        recited.ShouldNotContain("'merge' will include them", Case.Sensitive,
+            "the carry-over PROMISE is exactly what the flag revokes — reciting it would promise a fold the merge no longer performs");
     }
 
     [Fact]

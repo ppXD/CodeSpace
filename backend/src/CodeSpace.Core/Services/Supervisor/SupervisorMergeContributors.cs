@@ -27,11 +27,11 @@ public static class SupervisorMergeContributors
     {
         ArgumentNullException.ThrowIfNull(priorDecisions);
 
-        if (!ActiveGenerationHasNoMergeableResult(priorDecisions)) return new SupervisorMergeContributorSelection(ActiveGeneration(priorDecisions), 0);
+        if (!ActiveGenerationHasNoMergeableResult(priorDecisions)) return new SupervisorMergeContributorSelection(ActiveGeneration(priorDecisions), 0, 0);
 
         var carriedOver = StrandedByAReplan(priorDecisions);
 
-        return new SupervisorMergeContributorSelection(carriedOver, carriedOver.Count);
+        return new SupervisorMergeContributorSelection(carriedOver, carriedOver.Count, AbandonedEarlierResults(priorDecisions));
     }
 
     /// <summary>
@@ -108,6 +108,13 @@ public static class SupervisorMergeContributors
     /// a resolver's own succeeded branch is the reconciliation of the contributors it replaced, so conserving those
     /// contributors while dropping the resolver would carry over precisely the stale halves.
     ///
+    /// <para>The floor's ONE exclusion beyond that: everything staged before the newest plan that declared
+    /// <see cref="SupervisorPlanPayload.AbandonEarlierResults"/> (<see cref="AbandonBoundary"/>). Conservation
+    /// answers "the model re-planned AFTER the work landed"; it must not also answer "the model re-planned BECAUSE
+    /// the work was the wrong direction", and only the model can tell those apart — so the discard is its explicit
+    /// declaration, never an inference from the boundary. Applied HERE, on the shared floor, so the merge rung and
+    /// the publish rung drop the abandoned work together.</para>
+    ///
     /// <para>Says nothing about what a prior <c>merge</c> already folded — that exclusion belongs to the merge rung
     /// alone (<see cref="StrandedByAReplan"/>). DC-3's ledger-direct publish rung must NOT inherit it: that rung only
     /// runs when NO merge integrated a branch at all (it is gated on
@@ -119,15 +126,52 @@ public static class SupervisorMergeContributors
     {
         ArgumentNullException.ThrowIfNull(priorDecisions);
 
-        return priorDecisions
+        return Settled(priorDecisions, AbandonBoundary(priorDecisions) + 1, priorDecisions.Count);
+    }
+
+    /// <summary>
+    /// How many settled results the newest ABANDONING plan removed from the floor above — the plan's own receipt
+    /// (<c>RealSupervisorActionExecutor.ExecutePlanAsync</c> records it) and the number the recitation tells the brain.
+    /// 0 when no plan abandoned anything, which is every run that never emits the signal.
+    /// </summary>
+    public static int AbandonedEarlierResults(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
+    {
+        ArgumentNullException.ThrowIfNull(priorDecisions);
+
+        var boundary = AbandonBoundary(priorDecisions);
+
+        return boundary < 0 ? 0 : Settled(priorDecisions, 0, boundary).Count;
+    }
+
+    /// <summary>
+    /// The tape index of the NEWEST plan that declared <see cref="SupervisorPlanPayload.AbandonEarlierResults"/>, or
+    /// -1 when none did. Newest-first, so abandonment is MONOTONIC: a later plan that says nothing leaves the line
+    /// where the abandoning plan drew it rather than un-abandoning work the model already called the wrong direction.
+    /// Only a plan that actually OPENS a generation (<see cref="SupervisorPlanWindow.IsValidBoundary"/>) may draw one —
+    /// a malformed or subtask-less plan is not a boundary anywhere else, and it must not become one here, where the
+    /// consequence is destroying finished work.
+    /// </summary>
+    private static int AbandonBoundary(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
+    {
+        for (var i = priorDecisions.Count - 1; i >= 0; i--)
+            if (SupervisorPlanWindow.IsValidBoundary(priorDecisions[i]) && SupervisorOutcome.ReadPlanAbandonsEarlierResults(priorDecisions[i].PayloadJson))
+                return i;
+
+        return -1;
+    }
+
+    /// <summary>The settled, unwithheld agent-run ids staged by the decisions in [<paramref name="from"/>, <paramref name="to"/>), in the order they were produced.</summary>
+    private static IReadOnlyList<Guid> Settled(IReadOnlyList<SupervisorPriorDecision> priorDecisions, int from, int to) =>
+        priorDecisions
+            .Take(to)
+            .Skip(from)
             .Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind))
             .SelectMany(d => SupervisorOutcome.ReadAgentResults(d.OutcomeJson))
             .Where(r => r.Status == nameof(AgentRunStatus.Succeeded) && !SupervisorOutcome.IsWithheldFromHead(r))
             .Select(r => r.AgentRunId)
             .Distinct()
             .ToList();
-    }
 }
 
-/// <summary>The contributors one <c>merge</c> folds, plus how many of them a plan-generation boundary would otherwise have stranded. A pure read of the tape.</summary>
-public sealed record SupervisorMergeContributorSelection(IReadOnlyList<Guid> AgentRunIds, int CarriedOverFromEarlierGenerations);
+/// <summary>The contributors one <c>merge</c> folds, how many of them a plan-generation boundary would otherwise have stranded, and how many a plan explicitly ABANDONED. A pure read of the tape.</summary>
+public sealed record SupervisorMergeContributorSelection(IReadOnlyList<Guid> AgentRunIds, int CarriedOverFromEarlierGenerations, int AbandonedFromEarlierGenerations);
