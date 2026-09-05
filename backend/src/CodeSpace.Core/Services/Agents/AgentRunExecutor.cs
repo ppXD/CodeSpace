@@ -2722,8 +2722,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var credential = await _modelCredentials.ResolveAsync(task, teamId, projector, cancellationToken).ConfigureAwait(false);
 
         var env = projector is not null && credential is not null ? projector.ProjectToEnv(credential) : EmptySecretEnv;
-        // Redact only the actual SECRET (the api key / gateway token) — never the non-secret base URL.
-        var redactor = credential?.ApiKey is { Length: > 0 } key ? new SecretRedactor(new[] { key }) : SecretRedactor.None;
+
+        // Keyed on EVERY secret this launch injects into the child — over the merged env the run actually runs with,
+        // so an author-supplied token is covered exactly like the resolved key.
+        var redactor = BuildRunRedactor(MergeEnvironment(task.Environment, env), credential);
 
         // The non-secret base URL + provider tag flow out so a restricted (Allowlist) run can pin its model-API host
         // in the egress allowlist (B3.3b). DefaultModel flows out so a model-less ("auto") run falls back to one of the
@@ -2731,6 +2733,89 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // names the ROW whose key is now in the environment (null for the operator-global key, which has no row) —
         // D3 bounds an escalation's candidate models to exactly that row.
         return (env, redactor, credential?.BaseUrl, credential?.Provider, credential?.DefaultModel, credential?.CredentialId);
+    }
+
+    /// <summary>
+    /// The shortest value usable as a redaction needle. Below this a value is a fragment, not an identifier —
+    /// striking it would shred unrelated text (an injected <c>1</c> would hit every line carrying a digit), so it is
+    /// left readable. The SAME threshold the real-model artifact redactor applies (<c>MIN_NEEDLE_LENGTH</c> in
+    /// <c>.github/scripts/collect-real-model-verdicts.sh</c>); no real api key or access token is shorter.
+    /// </summary>
+    internal const int MinimumNeedleLength = 8;
+
+    /// <summary>
+    /// Name fragments that mark an injected value a SECRET — applied to an <see cref="AgentTask.Environment"/> entry's
+    /// variable name and to a base URL's query-parameter name alike. Both are opaque name/value string pairs with no
+    /// per-entry secret flag for the executor to read, so the name is the only signal available — and it is the signal
+    /// that separates the token from the values beside it that must stay READABLE: the gateway base URL, the model
+    /// tier pins, an <c>api-version</c> stamp. Those are what an operator reads the error FOR, and masking a low-entropy
+    /// one would shred every unrelated line that happens to carry it (an <c>api-version</c> date also matches every
+    /// timestamp of that day).
+    /// </summary>
+    private static readonly string[] SecretNameMarkers = ["KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "AUTH"];
+
+    /// <summary>Whether a name — an env variable's or a URL query parameter's — marks its value a secret.</summary>
+    private static bool MarksASecret(string name) => SecretNameMarkers.Any(marker => name.Contains(marker, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// The run's redactor, built from EVERY secret this launch injects into the child process — not the model key
+    /// alone. Three carriers: the decrypted api key; the credential parts embedded in the base URL (a gateway that
+    /// authenticates by <c>user:key@host</c> or <c>?api-key=</c>); and each injected env value whose name marks it
+    /// secret (an author-supplied git token, an MCP secret an agent definition carries). All three reach the same
+    /// child and come back through the same failure modes — a 401 body, an init banner, a clone error — into text
+    /// this run PERSISTS: <c>AgentRun.Error</c> (journal card, Room, supervisor prompt), the append-only event log,
+    /// and the diagnostic records.
+    ///
+    /// <para>De-duplicated and ordinal-sorted so <see cref="SecretRedactor.Fingerprint"/> is a function of the SET
+    /// and never of dictionary enumeration order: the launch stamps that fingerprint onto the durable handle, and a
+    /// re-attach may re-tail the spool only if it rebuilds exactly the same one.</para>
+    ///
+    /// <para>The needles are never logged — they only ever reach the redactor.</para>
+    /// </summary>
+    internal static SecretRedactor BuildRunRedactor(IReadOnlyDictionary<string, string> injectedEnv, ResolvedModelCredential? credential)
+    {
+        var needles = new List<string>();
+
+        if (credential?.ApiKey is { } apiKey) needles.Add(apiKey);
+
+        needles.AddRange(UrlEmbeddedSecrets(credential?.BaseUrl));
+
+        foreach (var (name, value) in injectedEnv)
+        {
+            if (MarksASecret(name)) needles.Add(value);
+        }
+
+        var usable = needles.Where(needle => needle.Length >= MinimumNeedleLength).Distinct(StringComparer.Ordinal).OrderBy(needle => needle, StringComparer.Ordinal).ToList();
+
+        return usable.Count == 0 ? SecretRedactor.None : new SecretRedactor(usable);
+    }
+
+    /// <summary>
+    /// The credential parts embedded IN a base URL — every userinfo segment, and each query value whose parameter
+    /// name <see cref="MarksASecret">marks it a secret</see> — in both the raw and the percent-decoded spelling,
+    /// since a CLI may echo either. Userinfo is credential material by construction, so all of it is a needle; a
+    /// query string is not, so it is filtered by name. The URL itself is never a needle: its host is the fact that
+    /// says WHICH endpoint answered, which is the point of surfacing the error at all.
+    /// </summary>
+    private static IEnumerable<string> UrlEmbeddedSecrets(string? baseUrl)
+    {
+        if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var parsed)) yield break;
+
+        foreach (var part in parsed.UserInfo.Split(':', StringSplitOptions.RemoveEmptyEntries))
+        {
+            yield return part;
+            yield return Uri.UnescapeDataString(part);
+        }
+
+        foreach (var pair in parsed.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var separator = pair.IndexOf('=');
+
+            if (separator < 0 || !MarksASecret(pair[..separator])) continue;
+
+            yield return pair[(separator + 1)..];
+            yield return Uri.UnescapeDataString(pair[(separator + 1)..]);
+        }
     }
 
     /// <summary>Re-persist the run's stored task with its RESOLVED model filled, so the live projection shows what an "auto" run actually dispatches from the moment it starts (mirrors the harness-reconciliation write). The task is the ORIGINAL (no injected secret env) with only <see cref="AgentTask.Model"/> set, so serializing it is safe.</summary>

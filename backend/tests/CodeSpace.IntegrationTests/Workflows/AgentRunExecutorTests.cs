@@ -606,6 +606,44 @@ public class AgentRunExecutorTests
     }
 
     [Fact]
+    public async Task Redacts_an_echoed_author_supplied_env_token_from_the_error_and_the_append_only_log()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The model key is not the only secret a launch injects: an author-supplied AgentTask.Environment entry (a
+        // git token, an MCP secret an agent definition carries) reaches the SAME child environment and is echoed
+        // back by the same failure modes. It must be masked wherever the run's redactor is applied.
+        const string key = "sk-env-case-4b19de";
+        const string gitToken = "ghp-env-leak-8d21fa";
+
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedModelCredentialAsync(teamId, "scripted-provider", key);
+        var runId = await CreateRunWithCredentialAndEnvAsync(teamId, credId, new Dictionary<string, string> { ["GIT_ASKPASS_TOKEN"] = gitToken });
+
+        await ExecuteAsync(runId, new EnvTokenEchoingHarness("scripted-provider", "SCRIPTED_MODEL_KEY", "GIT_ASKPASS_TOKEN"));
+
+        using var scope = _fixture.BeginScope();
+        var svc = scope.Resolve<IAgentRunService>();
+        var run = await svc.GetAsync(runId, CancellationToken.None);
+        var events = await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None);
+
+        run.Error.ShouldNotBeNullOrWhiteSpace("the harness failed with a JSON error line, which folds onto AgentRun.Error");
+        run.Error!.ShouldContain("clone failed for", customMessage: "the folded error carries BOTH openings — the protocol line and the stderr excerpt — so the assertions below cover both");
+        run.Error.ShouldNotContain(gitToken, customMessage: "the persisted error fans out to the journal card, the Room and the supervisor prompt");
+        run.Error.ShouldContain(SecretRedactor.Placeholder, customMessage: "the token is masked, not silently dropped");
+
+        events.ShouldNotBeEmpty();
+        foreach (var e in events)
+        {
+            e.Text.ShouldNotContain(gitToken, customMessage: "the append-only log cannot be edited later — it must never freeze the token");
+            (e.DataJson ?? "").ShouldNotContain(gitToken, customMessage: "the structured payload leaks it just as well as the text");
+        }
+
+        (run.ResultJson ?? "").ShouldNotContain(gitToken);
+        (run.Error ?? "").ShouldNotContain(key, customMessage: "the model key stays masked too — widening the needle set must not lose the case it already covered");
+    }
+
+    [Fact]
     public async Task Does_not_re_run_an_already_claimed_run()
     {
         if (OperatingSystem.IsWindows()) return;
@@ -1199,6 +1237,16 @@ public class AgentRunExecutorTests
         using var scope = _fixture.BeginScope();
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
             new AgentTask { Goal = "scripted", Harness = "scripted-projector", Model = "test-model", ModelCredentialId = modelCredentialId },
+            teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
+        return run.Id;
+    }
+
+    /// <summary>A credentialed run whose task ALSO carries author-supplied environment — the second injection carrier the run's redactor must cover.</summary>
+    private async Task<Guid> CreateRunWithCredentialAndEnvAsync(Guid teamId, Guid modelCredentialId, IReadOnlyDictionary<string, string> environment)
+    {
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().CreateAsync(
+            new AgentTask { Goal = "scripted", Harness = "scripted-projector", Model = "test-model", ModelCredentialId = modelCredentialId, Environment = environment },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
         return run.Id;
     }
@@ -1914,5 +1962,48 @@ public class AgentRunExecutorTests
 
         public IReadOnlyDictionary<string, string> ProjectToEnv(ResolvedModelCredential credential) =>
             new Dictionary<string, string> { [_envVar] = credential.ApiKey ?? "" };
+    }
+
+    /// <summary>A projecting harness whose script echoes the run's AUTHOR-SUPPLIED env token onto stderr AND into a JSON error line on stdout, then fails — the two surfaces a non-model secret leaks through.</summary>
+    private sealed class EnvTokenEchoingHarness : IAgentHarness, IModelCredentialProjector
+    {
+        private readonly string _provider;
+        private readonly string _keyEnvVar;
+        private readonly string _tokenEnvVar;
+
+        public EnvTokenEchoingHarness(string provider, string keyEnvVar, string tokenEnvVar)
+        {
+            _provider = provider;
+            _keyEnvVar = keyEnvVar;
+            _tokenEnvVar = tokenEnvVar;
+        }
+
+        public string Kind => "scripted-projector";
+        public string Version => "test";
+        public IReadOnlyList<string> Models { get; } = new[] { "test-model" };
+
+        public SandboxSpec BuildInvocation(AgentTask task) => new()
+        {
+            Command = "/bin/sh",
+            Args = new[] { "-c", $"echo \"clone failed for ${_tokenEnvVar} with ${_keyEnvVar}\" >&2; echo \"{{\\\"error\\\":\\\"authentication failed for ${_tokenEnvVar}\\\"}}\"; exit 1" },
+            Environment = task.Environment,
+            TimeoutSeconds = task.TimeoutSeconds,
+        };
+
+        public IReadOnlyList<AgentEvent> ParseEvents(string rawLine)
+        {
+            var line = rawLine.Trim();
+            return line.Length == 0 ? Array.Empty<AgentEvent>() : new[] { new AgentEvent { Kind = AgentEventKind.Error, Text = line, Data = JsonSerializer.SerializeToElement(new { line }) } };
+        }
+
+        // Folds BOTH openings into the error the way a real harness does: the protocol stream's last line AND the
+        // process's stderr (the executor hands it in already redacted — the seam the folded diagnostic excerpt uses).
+        public IAgentEventFolder CreateFolder() => new TestEventFolder((fold, exitCode) =>
+            new() { Status = exitCode == 0 ? AgentRunStatus.Succeeded : AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"{fold.LastText} | stderr: {fold.Diagnostics.Trim()}" });
+
+        public IReadOnlyList<string> SupportedProviders => new[] { _provider };
+
+        public IReadOnlyDictionary<string, string> ProjectToEnv(ResolvedModelCredential credential) =>
+            new Dictionary<string, string> { [_keyEnvVar] = credential.ApiKey ?? "" };
     }
 }
