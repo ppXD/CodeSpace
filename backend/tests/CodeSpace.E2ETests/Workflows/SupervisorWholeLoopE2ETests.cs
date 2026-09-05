@@ -134,15 +134,12 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
         await RunEngineAsync(runId);
         await jobClient.WaitForPendingAsync();
 
-        // A failed agent is a SIGNAL the supervisor recovers from — the retry lands the work, and every downstream
-        // claim below still holds. The run's TERMINAL, though, is a park: unlike this suite's other arcs (which
-        // reach Success under the same C5 default), a retry-recovered run reaches the authority with
-        // outcome=Unknown, verification=Unknown even though artifact=Captured and delivery=Delivered — the
-        // acceptance verdict asserted below never becomes completion-ledger evidence across the retry. Enforcement
-        // parks it rather than stamping a Success nothing verified, which is the conservative direction. That
-        // evidence gap is a PRE-EXISTING product hole this default merely made visible, tracked separately; when it
-        // closes, this assertion goes red and should become Success again.
-        await AssertRunParkedByTheAuthorityAsync(runId);
+        // A failed agent is a SIGNAL the supervisor recovers from — the run still reaches Success via the retry.
+        // Under the C5 default this arc is ALSO the enforcement proof: the authority arbitrates the recovered run's
+        // own contract ledger, so a Success here means the retry's obligations were re-staked on their real kinds
+        // and settled from the recovered attempt's evidence. A park here means enforcement started charging honest
+        // recoveries for the product's own bookkeeping.
+        await AssertRunReachedSuccessAsync(runId);
         await AssertOneAgentFailedThenTheRetrySucceededAsync(runId);
         await AssertDecisionLedgerAsync(runId, teamId, SupervisorDecisionKinds.Plan, SupervisorDecisionKinds.Spawn, SupervisorDecisionKinds.Retry, SupervisorDecisionKinds.Merge, SupervisorDecisionKinds.Stop);
 
@@ -659,17 +656,6 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
         run.CompletionEnforcementMode.ShouldBe("Enforced", customMessage: "the definition opted in — the seed/starter must stamp it; check workflow_version.definition_jsonb carries completionMode and the seed's resolution");
     }
 
-    /// <summary>The terminal a retry-recovered arc actually earns under the C5 default: parked by the completion authority, naming it, with no Success stamped over unverified evidence.</summary>
-    private async Task AssertRunParkedByTheAuthorityAsync(Guid runId)
-    {
-        using var verify = _fixture.BeginScope();
-        var run = await verify.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
-
-        run.Status.ShouldBe(WorkflowRunStatus.Suspended, customMessage: "the retry arc's completion evidence is incomplete, so the authority must park it — a Success here means the default cohort stopped arbitrating");
-        run.Error.ShouldNotBeNull();
-        run.Error.ShouldContain("completion-authority", customMessage: "the park must name its arbiter — a park from anywhere else means the arc broke for an unrelated reason; check workflow_run.error");
-    }
-
     private async Task AssertRunReachedSuccessAsync(Guid runId)
     {
         using var verify = _fixture.BeginScope();
@@ -677,7 +663,9 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
 
         var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
         run.Status.ShouldBe(WorkflowRunStatus.Success,
-            customMessage: "the supervisor→real-agent→patch→merge→acceptance→stop arc must reach Success; if not, inspect the AgentRun.Error + failed WorkflowRunNode rows + the supervisor decision outcomes");
+            // The run's own error is quoted because a completion-authority PARK names the unanswered obligation in
+            // it — without that line a Suspended here is indistinguishable from an agent/merge break.
+            customMessage: $"the supervisor→real-agent→patch→merge→acceptance→stop arc must reach Success; if not, inspect the AgentRun.Error + failed WorkflowRunNode rows + the supervisor decision outcomes. workflow_run.error: {run.Error ?? "<none>"}");
     }
 
     private async Task AssertBothAgentsProducedRealPatchesAsync(Guid runId)

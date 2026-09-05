@@ -419,6 +419,13 @@ public sealed partial class RealSupervisorActionExecutor
         var retryContractHashes = plannedUnit is not null
             ? new Dictionary<string, string>(StringComparer.Ordinal) { [retry.SubtaskId] = SupervisorUnitContract.Hash(plannedUnit, retry.RevisedInstruction, repositoryOverride: null) }
             : null;
+        // A retry re-stakes the SAME obligation shape the spawn staked — read off the unit's own planned spec, kind
+        // by kind, exactly as the spawn wave computes it. The two sets are NOT interchangeable: acceptance is owed
+        // only where the plan authored an oracle, delivery only where the unit expects its change to arrive. Cross
+        // them and a spec-less unit's `acceptance:<id>` becomes a REQUIRED obligation no grader will ever answer
+        // (the fold reads Unknown → Completed+Unknown → an Enforced run parks after legitimately recovering) while
+        // the delivery/output evidence the retry actually produced is demoted to authorized-not-applicable.
+        var retryAcceptanceUnits = plannedUnit is not null && SupervisorUnitContract.OwesAcceptance(plannedUnit) ? new HashSet<string>(StringComparer.Ordinal) { retry.SubtaskId } : null;
         var retryDeliveryUnits = plannedUnit is not null && SupervisorUnitContract.OwesDelivery(plannedUnit) ? new HashSet<string>(StringComparer.Ordinal) { retry.SubtaskId } : null;
 
         var (escalatedTask, escalation) = await ApplyRetryEscalationAsync(builtTask, priorResult, context, cancellationToken).ConfigureAwait(false);
@@ -428,7 +435,7 @@ public sealed partial class RealSupervisorActionExecutor
         if (AgentRetryCauses.Classify(priorResult?.Error) == AgentRetryCauses.GatewayFormatFault)
             _logger.LogWarning("Supervisor retry of subtask {SubtaskId}: the prior attempt died on a gateway FORMAT fault — retrying FRESH (a conversation replay re-triggers the fault) with extended thinking disabled ({EnvVar}=0)", retry.SubtaskId, AgentRetryCauses.MaxThinkingTokensEnvVar);
 
-        return await StageAgentsAndParkAsync(new List<(AgentTask, SupervisorAgentDispatch?)> { (task, null) }, context, cancellationToken, escalation, retryContractHashes, retryDeliveryUnits).ConfigureAwait(false);
+        return await StageAgentsAndParkAsync(new List<(AgentTask, SupervisorAgentDispatch?)> { (task, null) }, context, cancellationToken, escalation, contractHashes: retryContractHashes, acceptanceUnits: retryAcceptanceUnits, deliveryUnits: retryDeliveryUnits).ConfigureAwait(false);
     }
 
     /// <summary>
