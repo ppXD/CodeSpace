@@ -291,6 +291,80 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
         ctx.CompletionRecital.ShouldContain("cannot read Solved", Case.Sensitive);
     }
 
+    /// <summary>
+    /// The gap the whole-loop headline exposed (real-model runs 33930904059 / 33943475246): two units merged into a
+    /// CONFLICT, the resolver's reconciliation came back UNVERIFIED, and the decider stopped 'completed' anyway —
+    /// then <c>CompletionTerminalAuthority</c> refused the stop over an Integrate stage with no evidence and parked
+    /// the run. The refusal is knowable a full turn earlier, and this drives the real rehydrate over that exact tape
+    /// to pin that the NEXT turn's rendered prompt says so. That the line agrees with the authority's own verdict is
+    /// pinned over the full CleanSuccess predicate in <c>CompletionTerminalAuthorityFlowTests</c>.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]   // conflicted merge + unverified resolve → nothing integrated → the stop would be refused
+    [InlineData(true)]    // the same run, merged clean → Integrate evidenced → no refusal line, no stage park
+    public async Task A_run_whose_branches_are_unreconciled_recites_the_authoritys_stage_refusal(bool mergesClean)
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        await StampContractAsync(runId, teamId);
+
+        // No authored acceptance command on either unit — nothing for the fold to grade, so this run can go through
+        // the CONTAINER-resolved turn service instead of a hand-built one. That is deliberate: the stage line only
+        // reaches the prompt if Autofac actually supplies the profile registry, and a hand-built service would
+        // answer that question by construction.
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", null), ("s2", null)));
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1","s2"]}""",
+            SpawnOutcome(Unit(Guid.NewGuid(), "codespace/agent/s1"), Unit(Guid.NewGuid(), "codespace/agent/s2")));
+
+        if (mergesClean)
+        {
+            await SeedDecisionAsync(runId, teamId, 3, SupervisorDecisionKinds.Merge, "{}", CleanMergeOutcome);
+        }
+        else
+        {
+            await SeedDecisionAsync(runId, teamId, 3, SupervisorDecisionKinds.Merge, "{}", ConflictedMergeOutcome);
+            // The resolver ran and pushed, but self-reported NO verification — the exact tape the decider was told
+            // to stop or ask over, and the one that leaves the run with no reviewable integrated head.
+            await SeedDecisionAsync(runId, teamId, 4, SupervisorDecisionKinds.Resolve, "{}", SpawnOutcome(Unit(Guid.NewGuid(), "codespace/resolve/head")));
+        }
+
+        using var scope = _fixture.BeginScope();
+        var ctx = await scope.Resolve<ISupervisorTurnService>().RehydrateFromDecisionLogAsync(runId, teamId, NodeId, Goal, GoalConfig(Guid.NewGuid()), CancellationToken.None);
+        var prompt = CodeSpace.Core.Services.Supervisor.Deciders.LlmSupervisorDecider.BuildUserPromptForTest(ctx);
+
+        prompt.ShouldContain(CodeSpace.Core.Services.Supervisor.Deciders.SupervisorStopNowRecital.Header, Case.Sensitive, "the run is contract-bearing, so the block renders either way");
+
+        prompt.Contains(CodeSpace.Core.Services.Supervisor.Deciders.SupervisorStopNowRecital.RefusalLead, StringComparison.Ordinal).ShouldBe(!mergesClean,
+            "the decider's prompt must warn about the refusal EXACTLY while the branches are un-reconciled — a prompt that promises a stop the authority refuses is the defect this slice fixes");
+
+        if (!mergesClean)
+            prompt.ShouldContain("requires 1 stage(s) with no evidence — Integrate.", Case.Sensitive,
+                "the un-reconciled branches are the missing evidence, and the line has to name the stage the park names");
+    }
+
+    /// <summary>A CONFLICTED integration: nothing was combined, so no reviewable head exists and the Integrate cell stays unevidenced.</summary>
+    private const string ConflictedMergeOutcome = """{"integration":{"status":"Conflicted","reason":"the agents edited the same file","outcomes":[{"conflictedFiles":["src/Feature.cs"],"fallbackBranch":"codespace/agent/s1"}]}}""";
+
+    /// <summary>A CLEAN integration whose combined head is named — the Integrate cell's first ledger.</summary>
+    private const string CleanMergeOutcome = """{"integration":{"status":"Clean","integratedBranch":"codespace/integration/head"}}""";
+
+    /// <summary>Stamp the run post-F0 and stake the obligations a spawned wave would have staked — the shape the recital and the authority both read.</summary>
+    private async Task StampContractAsync(Guid runId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var run = await db.WorkflowRun.SingleAsync(r => r.Id == runId);
+        run.CompletionPolicyVersion = Core.Services.Completion.CompletionPolicy.CurrentVersion;
+        run.CompletionEnforcementMode = Core.Services.Completion.CompletionPolicy.CurrentMode.ToString();
+        await db.SaveChangesAsync();
+
+        await scope.Resolve<Core.Services.Completion.ICompletionContractStore>().UpsertRequirementsAsync(runId, teamId, new[]
+        {
+            new Messages.Contracts.RequirementEnvelope { RequirementRef = "acceptance:s1", Kind = Messages.Contracts.ContractKinds.Acceptance, Requiredness = Messages.Contracts.Requiredness.Required, Authority = Messages.Contracts.ContractAuthority.ModelProposal, ContractSchemaVersion = "1" },
+        }, CancellationToken.None);
+    }
+
     [Fact]
     public async Task A_run_without_a_stamped_policy_rehydrates_without_a_recital()
     {
@@ -1119,7 +1193,9 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
             scope.Resolve<CodeSpace.Core.Services.Plans.IWorkPlanService>(),
             scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Supervisor.ISupervisorPublishedBranchResolver>(), scope.Resolve<CodeSpace.Core.Services.Completion.ICompletionAssessmentComposer>(), new AdmitAllBudgetLedger(),
         scope.Resolve<CodeSpace.Core.Services.Learning.ILessonReader>(),
-        scope.Resolve<ILogger<SupervisorTurnService>>());
+        scope.Resolve<ILogger<SupervisorTurnService>>(),
+        rubricJudge: null,
+        modes: scope.Resolve<CodeSpace.Core.Services.Completion.IModeProfileRegistry>());
 
         return await service.RehydrateFromDecisionLogAsync(runId, teamId, NodeId, Goal, goalConfig, CancellationToken.None);
     }

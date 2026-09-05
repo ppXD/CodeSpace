@@ -169,6 +169,47 @@ public sealed class CompletionTerminalAuthorityFlowTests
         arbitration.Reason!.ShouldContain("mode 'supervisor'", customMessage: "…and the profile it was judged against");
     }
 
+    /// <summary>
+    /// The BOND between the terminal gate and the mid-run prompt. The whole-loop headline (real-model runs
+    /// 33930904059 / 33943475246) failed here: the decider's "IF YOU STOPPED NOW" block recited four contract
+    /// dimensions, all settled, while THIS gate — the fifth — was already guaranteed to refuse the stop over an
+    /// un-reconciled Integrate. The block now renders the refusal from the authority's OWN reader, so the mid-run
+    /// mirror and the terminal verdict cannot disagree: the line renders exactly when the arbitration parks on
+    /// stages, over the same run, at the same instant, with the FULL completion-side predicate held constant.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]   // nothing was ever integrated → the authority parks naming Integrate
+    [InlineData(true)]    // the same claim, merged → CleanSuccess, and the block must stay silent
+    public async Task The_stopped_now_recital_warns_of_the_stage_refusal_exactly_when_the_authority_raises_it(bool merged)
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunningRunAsync(teamId, userId, mode: "Enforced");
+        var attemptId = await SeedGradedTapeAsync(runId, teamId, acceptancePassed: true, merged: merged);
+        var repositoryId = await SeedRepositoryAsync(teamId);
+        await SeedManifestAsync(teamId, attemptId, repositoryId);
+        await StakeAsync(runId, teamId, "acceptance:s1", ContractKinds.Acceptance);
+        await StakeAsync(runId, teamId, "delivery:s1", ContractKinds.Delivery);
+        await StakeAsync(runId, teamId, "output:s1", ContractKinds.Output);
+
+        using var scope = _fixture.BeginScope();
+        var arbitration = await scope.Resolve<ICompletionTerminalAuthority>().ArbitrateAsync(runId, teamId, "Enforced", WorkflowRunStatus.Success, CancellationToken.None);
+
+        var parkedOnStages = arbitration.Reason?.Contains("required stage(s) without evidence", StringComparison.Ordinal) == true;
+        parkedOnStages.ShouldBe(!merged, "the fixture must put the authority's stage gate exactly where this test says it is, or the bond below pins nothing");
+
+        // The mid-run render, through the same three readings SupervisorTurnService.BuildCompletionRecitalAsync does.
+        var composed = await scope.Resolve<ICompletionAssessmentComposer>().ComposeIfStoppedNowAsync(runId, teamId, CancellationToken.None);
+        var mode = await RunModeReader.DeriveAsync(scope.Resolve<CodeSpaceDbContext>(), runId, teamId, CancellationToken.None);
+        var recital = Core.Services.Supervisor.Deciders.SupervisorStopNowRecital.Render(composed?.Assessment, composed?.ExercisedUpstreamStages, scope.Resolve<IModeProfileRegistry>().Resolve(mode));
+
+        recital.ShouldNotBeNull("the run is contract-bearing, so the block renders in both arms");
+        recital!.Contains(Core.Services.Supervisor.Deciders.SupervisorStopNowRecital.RefusalLead, StringComparison.Ordinal).ShouldBe(parkedOnStages,
+            "a stop the authority would refuse must be announced BEFORE it is chosen, and a stop it would allow must not be nagged about");
+
+        if (parkedOnStages)
+            recital.ShouldContain("requires 1 stage(s) with no evidence — Integrate.", Case.Sensitive, "the line must name what the park names — the authority's own missing list, not a second derivation");
+    }
+
     [Fact]
     public async Task A_run_level_integration_manifest_satisfies_the_integrate_cell()
     {

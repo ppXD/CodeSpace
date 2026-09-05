@@ -43,9 +43,12 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     /// <summary>C1 — the rubric judge a BRANCHLESS <c>LlmJudge</c> stop reads its summary with. OPTIONAL so the many hand-built test doubles keep compiling; DI always supplies it, and a null one fails the gate CLOSED rather than passing it silently.</summary>
     private readonly Review.IRubricJudge? _rubricJudge;
 
+    /// <summary>The mode profiles the terminal authority gates a Success claim on — read at rehydrate so the stopped-now recital can name the stage(s) a stop would be refused over. OPTIONAL for the same reason as the judge above; a null one renders the recital exactly as it rendered before the stage line existed (the gate itself is the authority's, and is unaffected).</summary>
+    private readonly Completion.IModeProfileRegistry? _modes;
+
     private readonly ILogger<SupervisorTurnService> _logger;
 
-    public SupervisorTurnService(ISupervisorDecisionLog ledger, ISupervisorDecider decider, ISupervisorActionExecutor executor, CodeSpaceDbContext db, ISupervisorAcceptanceGrader acceptanceGrader, IDecisionQueueService decisionQueue, IDecisionArbiter arbiter, IDecisionAnswerService decisionAnswer, Plans.IWorkPlanService workPlans, Workflows.Lifecycle.IRunRecordLogger recordLogger, Workflows.Artifacts.IArtifactOffloader offloader, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, Completion.ICompletionAssessmentComposer completion, Workflows.Budget.IBudgetLedger budget, Learning.ILessonReader lessons, ILogger<SupervisorTurnService> logger, Review.IRubricJudge? rubricJudge = null)
+    public SupervisorTurnService(ISupervisorDecisionLog ledger, ISupervisorDecider decider, ISupervisorActionExecutor executor, CodeSpaceDbContext db, ISupervisorAcceptanceGrader acceptanceGrader, IDecisionQueueService decisionQueue, IDecisionArbiter arbiter, IDecisionAnswerService decisionAnswer, Plans.IWorkPlanService workPlans, Workflows.Lifecycle.IRunRecordLogger recordLogger, Workflows.Artifacts.IArtifactOffloader offloader, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, Completion.ICompletionAssessmentComposer completion, Workflows.Budget.IBudgetLedger budget, Learning.ILessonReader lessons, ILogger<SupervisorTurnService> logger, Review.IRubricJudge? rubricJudge = null, Completion.IModeProfileRegistry? modes = null)
     {
         _ledger = ledger;
         _decider = decider;
@@ -64,6 +67,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         _publishedBranches = publishedBranches;
         _completion = completion;
         _rubricJudge = rubricJudge;
+        _modes = modes;
         _logger = logger;
     }
 
