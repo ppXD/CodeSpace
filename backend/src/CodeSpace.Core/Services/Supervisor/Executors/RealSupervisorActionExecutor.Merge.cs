@@ -26,9 +26,9 @@ public sealed partial class RealSupervisorActionExecutor
     {
         var merge = Deserialize<SupervisorMergePayload>(decision.PayloadJson) ?? new SupervisorMergePayload();
 
-        var agentRunIds = ResolveAgentRunIdsToMerge(context);
+        var selection = SupervisorMergeContributors.Resolve(context.PriorDecisions);
 
-        var contributors = await ReadMergeContributorsAsync(agentRunIds, context.TeamId, cancellationToken).ConfigureAwait(false);
+        var contributors = await ReadMergeContributorsAsync(selection.AgentRunIds, context.TeamId, cancellationToken).ConfigureAwait(false);
         var merged = contributors.Agents;
 
         // The deterministic fold — byte-identical to pre-SOTA-#3: an ordered dictionary whose first three keys
@@ -41,11 +41,18 @@ public sealed partial class RealSupervisorActionExecutor
             ["synthesisInstruction"] = merge.SynthesisInstruction,
         };
 
+        // Null-omitted the same way every other optional key is: a merge whose own generation staged the work
+        // serializes byte-identical to before.
+        if (selection.CarriedOverFromEarlierGenerations > 0) outcome["carriedOverFromEarlierGenerations"] = selection.CarriedOverFromEarlierGenerations;
+
         if (contributors.Integrity is not null) outcome["contributorIntegrity"] = contributors.Integrity;
 
         await AugmentWithIntegrationAndSynthesisAsync(outcome, context, contributors, merge, cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation("Supervisor merged {Count} prior agent result(s)", merged.Count);
+
+        if (selection.CarriedOverFromEarlierGenerations > 0)
+            _logger.LogInformation("Supervisor merge carried over {CarriedOver} succeeded result(s) from earlier plan generation(s) — the active plan generation staged none", selection.CarriedOverFromEarlierGenerations);
 
         return SupervisorExecution.Synchronous(JsonSerializer.Serialize(outcome, AgentJson.Options));
     }
@@ -63,33 +70,9 @@ public sealed partial class RealSupervisorActionExecutor
         error = a.Error,
     };
 
-    /// <summary>
-    /// Collect the agent-run ids recorded by EVERY spawn/retry decision in the active Plan generation (in order) — the
-    /// merge folds that generation's Attempt results — MINUS any unit a per-unit acceptance grade objectively REJECTED (loopability slice 4,
-    /// "局部綠≠整合綠"): a unit that failed its OWN definition-of-done must NOT be integrated into the reviewable head,
-    /// even if the model merges. The verdict (<see cref="SupervisorAgentResult.AcceptancePassed"/>) rides each spawn
-    /// outcome's <c>agentResults</c> by agent-run id; a unit re-RUN after a rejection has a fresh id, so its retry
-    /// (passing or ungraded) integrates while the rejected original is withheld. A unit with NO verdict (ungraded — no
-    /// per-unit contract, the pre-slice case) integrates exactly as before (byte-identical). A plan-less legacy tape
-    /// retains the old whole-tape fold.
-    /// </summary>
-    internal static IReadOnlyList<Guid> ResolveAgentRunIdsToMerge(SupervisorTurnContext context)
-    {
-        var staging = SupervisorPlanWindow.Read(context.PriorDecisions).Decisions
-            .Where(d => d.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry)
-            .ToList();
-
-        var rejected = staging
-            .SelectMany(d => SupervisorOutcome.ReadAgentResults(d.OutcomeJson))
-            .Where(SupervisorOutcome.IsWithheldFromHead)
-            .Select(r => r.AgentRunId)
-            .ToHashSet();
-
-        return staging
-            .SelectMany(d => SupervisorOutcome.ReadStagedAgentRunIds(d.OutcomeJson))
-            .Where(id => !rejected.Contains(id))
-            .ToList();
-    }
+    /// <summary>The merge's door to the reviewable head — the ids <see cref="SupervisorMergeContributors.Resolve"/> selects, which is also what the decider's plan recitation recites.</summary>
+    internal static IReadOnlyList<Guid> ResolveAgentRunIdsToMerge(SupervisorTurnContext context) =>
+        SupervisorMergeContributors.Resolve(context.PriorDecisions).AgentRunIds;
 
     /// <summary>
     /// Load every recorded active-generation contributor id without dropping holes. The one query reads cross-team
