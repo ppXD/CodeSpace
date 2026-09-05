@@ -45,7 +45,7 @@ public static class SupervisorApprovalRequest
 
         if (last?.DecisionKind != SupervisorDecisionKinds.AskHuman) return false;
 
-        if (!IsApprovalCard(last.PayloadJson)) return false;
+        if (!QuestionCarriesMarker(last.PayloadJson)) return false;
 
         return OutcomeApproves(last.OutcomeJson);
     }
@@ -70,9 +70,11 @@ public static class SupervisorApprovalRequest
         return Approves(SupervisorOutcome.ReadAskHumanAnswer(outcomeJson));
     }
 
-    /// <summary>An ask_human is one of THIS gate's approval cards iff its question carries the approval marker — a content ask_human (the decider's own question) never does, so it never grants a spurious pass.</summary>
-    private static bool IsApprovalCard(string askHumanPayloadJson)
+    /// <summary>Whether an ask_human payload's question carries the approval marker — a content ask_human (the decider's own question) never does, so it never grants a spurious pass. Public and named like its three siblings so a caller that must recognise ANY verdict-seeking card (the journal's decision-gate flag) reads all four the same way.</summary>
+    public static bool QuestionCarriesMarker(string? askHumanPayloadJson)
     {
+        if (string.IsNullOrEmpty(askHumanPayloadJson)) return false;
+
         try
         {
             var root = JsonDocument.Parse(askHumanPayloadJson).RootElement;

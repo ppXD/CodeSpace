@@ -457,7 +457,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
 
         if (UnattendedAskResponder.MustLeaveForAHuman(newestAsk)) return ParkedAskDisposition.LeftForAHuman;
 
-        var outcome = await scope.Resolve<ISupervisorAskAnswerService>().AnswerAsync(runId, teamId, userId, answer, null, CancellationToken.None);
+        var outcome = await scope.Resolve<ISupervisorAskAnswerService>().AnswerAsync(runId, teamId, userId, answer, UnattendedAskResponder.ApprovalVerdict, CancellationToken.None);
 
         return outcome is { Resumed: true } ? ParkedAskDisposition.Answered : ParkedAskDisposition.NothingParked;
     }

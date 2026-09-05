@@ -76,6 +76,9 @@ public sealed record JournalStep
     /// <summary>Whether an ASK step is the PLAN-CONFIRMATION card (the S3 gate's park). The plan checklist card right above it is that park's structured answer surface (approve / request changes), so the frontend suppresses the generic inline answer bar here — one park, one surface. False on every other step. Enriched off the ask payload's confirmation marker.</summary>
     public bool PlanConfirmation { get; init; }
 
+    /// <summary>Whether an ASK step is a DECISION GATE — a card that asks the human to RULE (approve, or say what to do instead) rather than to supply content: the plan confirmation, the irreversible-action approval, the review-gate escalation, the acceptance amendment co-sign. The frontend's answer surface sends the structured <c>decision</c> verdict on these and only these, so a non-English approval is never re-read as feedback. False on a content ask. Enriched off the ask payload's card markers.</summary>
+    public bool DecisionGate { get; init; }
+
     /// <summary>The render tone — the timeline's closed severity axis (Info / Success / Warning / Error).</summary>
     public TimelineSeverity Tone { get; init; } = TimelineSeverity.Info;
 

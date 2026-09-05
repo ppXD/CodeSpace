@@ -109,6 +109,52 @@ public class AskAnswerFactsSourceTests
         facts[key].ReviewEscalation.ShouldBeFalse("the two gates never claim each other's cards");
     }
 
+    /// <summary>
+    /// EVERY verdict-seeking card — built by its OWN production gate, so a marker reword can never silently unflag one.
+    /// The flag is what makes the Room's answer surface send the structured <c>decision</c>; before it, only the
+    /// escalation card was flagged and the other three fell through to the legacy approve-PREFIX read, which reads a
+    /// 繁中「批准」as revision feedback.
+    /// </summary>
+    public static TheoryData<string, string> VerdictSeekingCards() => new()
+    {
+        { "gate escalation", EscalationPayload() },
+        { "plan confirmation", Core.Services.Supervisor.SupervisorPlanConfirmation.IntoAskHuman(planVersion: 1, itemCount: 2, delivery: null, priorApprovedDelivery: null).PayloadJson },
+        { "irreversible-action approval", Core.Services.Supervisor.SupervisorApprovalRequest.IntoAskHuman(new SupervisorDecision { Kind = SupervisorDecisionKinds.Spawn, PayloadJson = "{}" }).PayloadJson },
+        { "amend co-sign", Core.Services.Supervisor.SupervisorAmendAcceptance.IntoAskHuman(new SupervisorAmendAcceptancePayload { SubtaskId = "s1", Waive = true, Reason = "the oracle names a file the goal never asked for" }).PayloadJson },
+    };
+
+    [Theory]
+    [MemberData(nameof(VerdictSeekingCards))]
+    public async Task Every_card_that_asks_for_a_verdict_is_flagged_as_a_decision_gate(string card, string payloadJson)
+    {
+        var runId = Guid.NewGuid();
+        var teamId = Guid.NewGuid();
+        var log = new FakeSupervisorDecisionLog();
+
+        log.SeedTerminal(runId, teamId, SupervisorDecisionKinds.AskHuman, payloadJson, "{}");   // parked, unanswered
+
+        var facts = await new AskAnswerFactsSource(log).GatherAsync(runId, teamId, CancellationToken.None);
+
+        facts[SupervisorDecisionTimelineMap.EventId(log.Rows.Single())].DecisionGate
+            .ShouldBeTrue($"the {card} card asks the human to RULE, so the answer surface must send the structured verdict rather than leave the gate reading the leading word of free text");
+    }
+
+    [Fact]
+    public async Task A_content_ask_is_not_a_decision_gate()
+    {
+        var runId = Guid.NewGuid();
+        var teamId = Guid.NewGuid();
+        var log = new FakeSupervisorDecisionLog();
+
+        log.SeedTerminal(runId, teamId, SupervisorDecisionKinds.AskHuman, QuestionCard("Which log format should I use?"), AnswerOutcome("structured JSON"));
+
+        (await new AskAnswerFactsSource(log).GatherAsync(runId, teamId, CancellationToken.None))
+            [SupervisorDecisionTimelineMap.EventId(log.Rows.Single())].DecisionGate
+            .ShouldBeFalse("a question asking for CONTENT has no verdict to give — sending one would invent an approval the operator never made");
+    }
+
+    private static string QuestionCard(string question) => System.Text.Json.JsonSerializer.Serialize(new { question });
+
     /// <summary>A REAL escalation card's payload — built by the production gate so the marker can't drift from the recognizer.</summary>
     private static string EscalationPayload() =>
         Core.Services.Supervisor.SupervisorGateEscalation.IntoAskHuman(
