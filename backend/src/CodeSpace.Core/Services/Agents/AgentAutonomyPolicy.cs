@@ -93,18 +93,36 @@ public static class AgentAutonomyPolicy
     ///
     /// <list type="bullet">
     ///   <item><c>Network: on (Trusted)</c> — the operator asked, and policy allowed it.</item>
-    ///   <item><c>Network: off (Standard)</c> — policy would have allowed network; nobody asked. The default.</item>
-    ///   <item><c>Network: clamped off by policy (ceiling Standard)</c> — the route's ceiling cannot reach a
-    ///     network-granting tier at all, so this run had no network available however it was launched. Naming the
-    ///     ceiling is the point: "off" and "off because you could not have it" are different facts.</item>
+    ///   <item><c>Network: off (Standard) — severed only where the sandbox confines</c> — policy would have allowed
+    ///     network; nobody asked. The default.</item>
+    ///   <item><c>Network: clamped off by policy (ceiling Standard) — severed only where the sandbox confines</c> —
+    ///     the route's ceiling cannot reach a network-granting tier at all, so this run had no network available
+    ///     however it was launched. Naming the ceiling is the point: "off" and "off because you could not have it"
+    ///     are different facts.</item>
     /// </list>
+    ///
+    /// <para><b>Why "off" is qualified.</b> The tier's <see cref="AgentPermissions.Network"/> becomes a real severed
+    /// namespace only where <c>LocalProcessRunner</c> rewrites the command as a bubblewrap invocation, which needs
+    /// <c>BubblewrapSandbox.Available</c> — absent on macOS development, on a host without <c>bwrap</c>, and on one
+    /// that denies unprivileged user namespaces. <c>Sandbox:RequireConfinement</c> (the setting that turns an
+    /// unconfinable host into a refused run) defaults to FALSE, so an unqualified "off" would be a claim this
+    /// sentence cannot make. The runner records no per-run confinement outcome to read back, so the caveat is stated
+    /// rather than resolved; when it does, this is the one place that changes.</para>
     /// </summary>
     public static string DescribeNetwork(AgentAutonomyLevel effective, AgentAutonomyLevel ceiling)
     {
         if (Derive(effective).Network == AgentNetworkAccess.On) return $"Network: on ({effective})";
 
-        if (Derive(ceiling).Network != AgentNetworkAccess.On) return $"Network: clamped off by policy (ceiling {ceiling})";
+        if (Derive(ceiling).Network != AgentNetworkAccess.On) return $"Network: clamped off by policy (ceiling {ceiling}){ConfinementCaveat}";
 
-        return $"Network: off ({effective})";
+        return $"Network: off ({effective}){ConfinementCaveat}";
     }
+
+    /// <summary>
+    /// The qualifier every "off" posture carries — the sandbox severs egress only where it actually confines (see
+    /// <see cref="DescribeNetwork"/>). A named constant because the Launch composer states the SAME posture before a
+    /// run exists, and the two wordings are pinned against each other by a committed fixture
+    /// (<c>frontend/src/lib/networkPosture.fixture.json</c>) that both stacks assert on.
+    /// </summary>
+    public const string ConfinementCaveat = " — severed only where the sandbox confines";
 }

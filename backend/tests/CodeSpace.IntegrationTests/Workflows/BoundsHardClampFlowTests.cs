@@ -181,7 +181,7 @@ public class BoundsHardClampFlowTests
             task.Permissions.Network.ShouldBe(AgentNetworkAccess.Off, "a clamped run must reach the runner severed, whatever the launch asked for");
         }
 
-        NetworkPostureOf(run.RoutePlanJson!).ShouldBe("Network: clamped off by policy (ceiling Standard)",
+        NetworkPostureOf(run.RoutePlanJson!).ShouldBe("Network: clamped off by policy (ceiling Standard)" + AgentAutonomyPolicy.ConfinementCaveat,
             customMessage: "a DENIED network reads differently from one nobody asked for — the run's own record has to carry that distinction or the operator cannot tell why their install failed");
     }
 
