@@ -253,20 +253,25 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
     /// already contains that other's work (the dependency-staging shape), so the upstream contribution must apply
     /// FIRST or the dependent's patch meets a pre-image the tree does not have yet. A stable topological sort by
     /// "how many peers' bases are strict ancestors of mine" — equal / unrelated bases keep the request's spawn order,
-    /// and the overwhelmingly common single-base set short-circuits without touching git.
+    /// and the overwhelmingly common single-base set short-circuits without touching git. The pairwise walk runs over
+    /// the DISTINCT bases, not the contributions: a fan-out is bounded by the spawn cap (up to 1,000 agents) but its
+    /// bases are a handful, and one <c>merge-base</c> subprocess per contribution PAIR would dwarf the apply itself.
     /// </summary>
     private async Task<IReadOnlyList<ResolvedContribution>> InAncestryOrderAsync(string directory, IReadOnlyList<ResolvedContribution> resolved, CancellationToken cancellationToken)
     {
-        if (resolved.Select(r => r.Contribution.BaseSha).Distinct(StringComparer.Ordinal).Count() <= 1) return resolved;
+        var bases = resolved.Select(r => r.Contribution.BaseSha!).Distinct(StringComparer.Ordinal).ToList();
 
-        var upstreamCounts = new int[resolved.Count];
+        if (bases.Count <= 1) return resolved;
 
-        for (var i = 0; i < resolved.Count; i++)
-            for (var j = 0; j < resolved.Count; j++)
-                if (i != j && await IsStrictAncestorAsync(directory, resolved[j].Contribution.BaseSha!, resolved[i].Contribution.BaseSha!, cancellationToken).ConfigureAwait(false))
-                    upstreamCounts[i]++;
+        var upstreamCounts = bases.ToDictionary(b => b, _ => 0, StringComparer.Ordinal);
 
-        return Enumerable.Range(0, resolved.Count).OrderBy(i => upstreamCounts[i]).Select(i => resolved[i]).ToList();
+        for (var i = 0; i < bases.Count; i++)
+            for (var j = 0; j < bases.Count; j++)
+                if (i != j && await IsStrictAncestorAsync(directory, bases[j], bases[i], cancellationToken).ConfigureAwait(false))
+                    upstreamCounts[bases[i]]++;
+
+        // OrderBy is a STABLE sort, so contributions sharing a base keep the order the request handed them in.
+        return resolved.OrderBy(r => upstreamCounts[r.Contribution.BaseSha!]).ToList();
     }
 
     /// <summary>True when <paramref name="ancestor"/> is a STRICT ancestor of <paramref name="descendant"/>. The objects are in the clone because it is full — every agent branch is fetched. A non-zero exit ("not an ancestor", or an object this clone doesn't have) is false: an unknown base is never treated as downstream.</summary>
