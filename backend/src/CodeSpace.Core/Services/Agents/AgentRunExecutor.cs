@@ -1793,8 +1793,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         return new AgentModelEscalation { From = priorModel, To = picked, Reason = reason };
     }
 
-    /// <summary>The note a format-fault respawn announces on the timeline. Written as a fact about THIS attempt (never a promise about a next one) — it is emitted only from the dispatch of a task that already carries the degrade, so it exists exactly when the respawn does.</summary>
-    internal const string FormatFaultMitigationNote = "Gateway format fault — respawned once with thinking disabled (fresh conversation: the mangled block lives in the prior transcript).";
+    /// <summary>The note a format-fault respawn announces on the timeline. Written as a fact about THIS attempt (never a promise about a next one, and never a count) — it is emitted from the dispatch of every task that already carries the degrade, so it exists exactly when a respawn does, and the supervisor lane can legitimately buy more than one per run. Wording pinned by unit test.</summary>
+    internal const string FormatFaultMitigationNote = "Gateway format fault — respawned with thinking disabled (fresh conversation: the mangled block lives in the prior transcript).";
 
     /// <summary>Announce the format-fault repair on the timeline — the operator sees WHY this attempt starts cold and runs degraded, instead of a silent second agent. Best-effort like the escalation event beside it.</summary>
     private async Task AppendMitigationEventAsync(Guid runId, CancellationToken cancellationToken)

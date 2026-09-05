@@ -87,6 +87,30 @@ public class AgentRetryCausesTests
     }
 
     [Fact]
+    public void A_task_whose_persisted_environment_is_null_is_not_mitigated()
+    {
+        // The predicate reads the DURABLE envelope — task_jsonb on every claim, and the engine's own suspend payload —
+        // and System.Text.Json writes a literal `null` straight onto the property, bypassing the record's default
+        // initializer (that runs only when the key is ABSENT). An unguarded dereference would kill the dispatch with an
+        // NRE before the harness ever starts, on a task whose only sin is carrying no environment at all.
+        var task = JsonSerializer.Deserialize<AgentTask>("""{"goal":"fix it","harness":"claude-code","environment":null}""", AgentJson.Options)!;
+
+        AgentRetryCauses.IsFormatFaultMitigated(task).ShouldBeFalse("no environment carries no degrade — the answer is 'not mitigated', never a throw");
+    }
+
+    [Fact]
+    public void The_mitigation_note_describes_this_attempt_and_counts_nothing()
+    {
+        // The note is emitted from the dispatch of EVERY mitigated task, and the supervisor lane re-applies the
+        // mitigation on each format-fault retry (RealSupervisorActionExecutor.ApplyRetryDisposition) — so several of
+        // these can stand on one run's timeline. A note that says "once" would then be a claim the run's own history
+        // refutes, and would read as a promise about the budget the dispatcher cannot see. It reports THIS attempt's
+        // shape and nothing else; pinned here because the wording is the whole of what it delivers.
+        AgentRunExecutor.FormatFaultMitigationNote.ShouldBe(
+            "Gateway format fault — respawned with thinking disabled (fresh conversation: the mangled block lives in the prior transcript).");
+    }
+
+    [Fact]
     public async Task Both_retry_lanes_repair_a_format_fault_through_the_same_helper()
     {
         // Drift detector (Rule 12.5, behavioural form): the supervisor's `retry` and agent.run's respawn resolve
