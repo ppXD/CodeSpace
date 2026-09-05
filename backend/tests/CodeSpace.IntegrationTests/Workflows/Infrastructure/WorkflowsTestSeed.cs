@@ -22,8 +22,17 @@ public static class WorkflowsTestSeed
     /// Seeds a fresh user + team + Owner membership. Returns ids the caller scopes mediator
     /// calls under via <see cref="PostgresFixture.BeginScopeAs"/>. The seeded user has the
     /// Admin role so tenancy enforcement doesn't reject test calls.
+    ///
+    /// <para><paramref name="inProcessPool"/> seeds the deterministic in-process fakes into the team's model pool (see
+    /// <see cref="SeedInProcessModelPool"/>). A REAL-MODEL arm must pass <c>false</c>: those rows are pool candidates
+    /// like any other, and several of the fakes are structured-capable, so they are eligible BRAIN candidates the
+    /// supervisor's pool failover can hop onto. A live arm that seeds them is not measuring the live model — real-model
+    /// run 33930904059 hopped off a throttled brain onto <c>DeterministicCoordinatedLlmClient</c>, whose
+    /// coordinator-shaped reply carried no decision kind, and the arm scored the throttle a capability miss. An arm that
+    /// deliberately retargets a NODE onto a fake tag (a synth stub next to a live planner) still passes <c>true</c> —
+    /// it needs those rows to resolve — and pins its live model explicitly.</para>
     /// </summary>
-    public static async Task<(Guid TeamId, Guid UserId)> SeedTeamAsync(PostgresFixture fixture)
+    public static async Task<(Guid TeamId, Guid UserId)> SeedTeamAsync(PostgresFixture fixture, bool inProcessPool = true)
     {
         using var scope = fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -59,7 +68,7 @@ public static class WorkflowsTestSeed
             LastModifiedBy = SystemUsers.SeederId,
         });
 
-        SeedInProcessModelPool(db, teamId);
+        if (inProcessPool) SeedInProcessModelPool(db, teamId);
 
         await db.SaveChangesAsync().ConfigureAwait(false);
         return (teamId, userId);

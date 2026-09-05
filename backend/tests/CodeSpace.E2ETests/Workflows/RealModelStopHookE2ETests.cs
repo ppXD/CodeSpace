@@ -138,7 +138,7 @@ public sealed class RealModelStopHookE2ETests : IDisposable
         if (OperatingSystem.IsWindows()) return null;
         if (!await ClaudeReadyAsync()) throw RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed — the in-loop verify E2E needs the harness binary (skip ≠ pass)");
 
-        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
         return new LiveContext(teamId, baseUrl!.TrimEnd('/'), apiKey!, model!);
     }
 

@@ -54,7 +54,7 @@ public sealed class RealModelQualificationRehearsalE2ETests
         }
 
         if (OperatingSystem.IsWindows()) return;
-        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
         var credId = await SeedAgentCredentialAsync(teamId, baseUrl!.TrimEnd('/'), apiKey!);
 
         await RealModelGate.AssessLiveWholeLoopAsync(Provider, async () =>
