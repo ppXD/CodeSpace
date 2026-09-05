@@ -348,10 +348,32 @@ public class SupervisorMergeCarryOverTests
 
         var recited = SupervisorRecitation.Render(new[] { Plan("s1"), Staging(SupervisorDecisionKinds.Spawn, a), Plan("s2", abandonEarlierResults: true) });
 
-        recited.ShouldContain("1 earlier result(s) excluded — the plan abandoned them", Case.Sensitive,
+        recited.ShouldContain("1 result(s) from BEFORE the abandoning plan are excluded", Case.Sensitive,
             "the brain that asked for the discard must read back what its own flag did");
         recited.ShouldNotContain("'merge' will include them", Case.Sensitive,
             "the carry-over PROMISE is exactly what the flag revokes — reciting it would promise a fold the merge no longer performs");
+    }
+
+    [Fact]
+    public void The_recitation_locates_the_abandoned_results_relative_to_the_carried_over_ones()
+    {
+        // Both lines render on the ONE tape that carries a true fact of each kind: a plan abandoned gen 1, then
+        // produced its own gen 2, which a later re-plan stranded. Un-located, "N from earlier plan generations … will
+        // be merged" beside "M earlier result(s) excluded" reads as two dispositions of the SAME results — and the
+        // brain deciding whether to re-spawn cannot act on a count it cannot place on its own tape.
+        var abandoned = Unit();
+        var replacement = Unit();
+
+        var recited = SupervisorRecitation.Render(new[]
+        {
+            Plan("s1"), Staging(SupervisorDecisionKinds.Spawn, abandoned),
+            Plan("s2", abandonEarlierResults: true), Staging(SupervisorDecisionKinds.Spawn, replacement), Plan("s3"),
+        });
+
+        recited.ShouldContain("1 succeeded result(s) from earlier plan generations are not merged yet", Case.Sensitive,
+            "the replacement work the abandoning plan asked for is still carried over — that half of the honesty is unchanged");
+        recited.ShouldContain("1 result(s) from BEFORE the abandoning plan are excluded", Case.Sensitive,
+            "the excluded count must name the boundary it was measured from, or the two lines cannot be told apart");
     }
 
     [Fact]
