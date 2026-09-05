@@ -237,6 +237,73 @@ public class SupervisorSpawnFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task A_retrys_re_stake_leaves_every_obligation_on_the_kind_the_unit_actually_owes()
+    {
+        // The staging chokepoint is SHARED by spawn and retry, and the obligations it stakes decide whether a
+        // recovered run can ever terminalize. A unit whose plan authored no oracle owes NO acceptance verdict
+        // (nobody will ever grade it) but DOES owe delivery + output. The retry must re-stake that SAME shape:
+        // crossing the two wires makes `acceptance:<unit>` a REQUIRED obligation nothing can answer (the fold
+        // reads Unknown → Completed+Unknown → the Enforced authority parks a run that legitimately recovered)
+        // while silently demoting the delivery/output evidence the retry actually produced to "not applicable".
+        using (var s = _fixture.BeginScope()) s.Resolve<SupervisorDecisionScript>().PlanSpawnRetryMergeStop();
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);              // turn 0: plan(sa, sb) — neither authors an acceptance spec
+            await ResolveSelfAdvanceAsync(runId);
+            await RunEngineAsync(runId);              // turn 1: spawn[sa, sb]
+
+            Guid agentSa, agentSb;
+            using (var verify = _fixture.BeginScope())
+            {
+                var waits = await verify.Resolve<CodeSpaceDbContext>().WorkflowRunWait.AsNoTracking()
+                    .Where(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.AgentRun && w.Status == WorkflowWaitStatuses.Pending)
+                    .OrderBy(w => w.IterationKey).ToListAsync();
+
+                waits.Count.ShouldBe(2, "spawn[sa,sb] staged two real agent runs");
+                agentSa = Guid.Parse(waits[0].Token);
+                agentSb = Guid.Parse(waits[1].Token);
+            }
+
+            await SimulateAgentCompletionAsync(agentSa, "ALPHA");
+            await SimulateAgentCompletionAsync(agentSb, "BETA");
+            await RunEngineAsync(runId);              // turn 2: retry(sb) — re-stakes sb's obligations
+
+            using var scope = _fixture.BeginScope();
+            var requirements = await scope.Resolve<Core.Services.Completion.ICompletionContractStore>()
+                .ListRequirementsAsync(runId, teamId, CancellationToken.None);
+
+            Messages.Contracts.Requiredness Owed(string requirementRef, string kind) =>
+                requirements.Single(r => r.RequirementRef == requirementRef && r.Kind == kind).Requiredness;
+
+            Owed("acceptance:sb", Messages.Contracts.ContractKinds.Acceptance)
+                .ShouldBe(Messages.Contracts.Requiredness.ServerPolicyAuthorizedNotApplicable,
+                    "sb's plan authored no oracle, so its RE-staked acceptance obligation is authorized-not-applicable — a Required row here is an obligation no grader will ever answer, and the run parks on it forever");
+            Owed("delivery:sb", Messages.Contracts.ContractKinds.Delivery)
+                .ShouldBe(Messages.Contracts.Requiredness.Required,
+                    "the retried unit still owes its change ARRIVING — demoting it discards the very evidence the retry produced");
+            Owed("output:sb", Messages.Contracts.ContractKinds.Output)
+                .ShouldBe(Messages.Contracts.Requiredness.Required, "…and still owes its captured bytes");
+
+            // The untouched sibling pins that the shape above is the SPAWN's shape, not a coincidence of the retry.
+            Owed("acceptance:sa", Messages.Contracts.ContractKinds.Acceptance).ShouldBe(Messages.Contracts.Requiredness.ServerPolicyAuthorizedNotApplicable);
+            Owed("delivery:sa", Messages.Contracts.ContractKinds.Delivery).ShouldBe(Messages.Contracts.Requiredness.Required);
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
     public async Task A_staged_wave_reserves_its_budget_slices_idempotently()
     {
         // W-hard 2a: the capped run's wave reserved one slice per attempt at the staging chokepoint.
@@ -1002,7 +1069,10 @@ public class SupervisorSpawnFlowTests : IDisposable
     private static WorkflowDefinition SupervisorDefinition(string? supervisorConfig = null) => new()
     {
         SchemaVersion = 1,
-        // Mechanics suite — declares Shadow so C5's default Enforced stamp doesn't park its contract-less stops.
+        // Mechanics suite — declares Shadow. Its spawned units DO stake delivery/output obligations; what is
+        // missing is the EVIDENCE: the simulated agent completion mints no publish manifest, so those rows stay
+        // honestly unanswered and C5's default Enforced stamp would park every arc here. The park would be
+        // correct — completion arbitration is just not this suite's subject; CompletionEnforcedCohortFlowTests owns it.
         CompletionMode = WorkflowDefinition.CompletionModeShadow,
         Nodes = new List<NodeDefinition>
         {

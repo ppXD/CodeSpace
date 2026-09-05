@@ -122,6 +122,35 @@ public class CompletionEnforcedCohortFlowTests
     }
 
     [Fact]
+    public async Task A_default_supervisor_run_that_recovered_via_retry_terminalizes_success()
+    {
+        // The recovery half of C5's bargain: enforcement must not park a run that legitimately RECOVERED. The unit's
+        // first attempt failed its check and produced nothing; the RETRY passed and delivered. The completion
+        // dimensions must read the LATEST attempt — the superseded attempt's Failed verdict never reaches the fold
+        // (admission drops it as superseded), so verification is Passed and the run terminalizes CleanSuccess.
+        // A run that parks here tells an operator to adjudicate work the run itself already verified.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await StartSupervisorSnapshotAsync(teamId, userId, completionMode: null, DeclaredOutputs);
+
+        var retryAttemptId = await SeedRetryRecoveredTapeAsync(runId, teamId);
+        var repositoryId = await SeedRepositoryAsync(teamId);
+        await SeedManifestAsync(teamId, retryAttemptId, repositoryId);   // only the RECOVERED attempt ever delivered
+        await StakeAsync(runId, teamId, "acceptance:s1", ContractKinds.Acceptance);
+        await StakeAsync(runId, teamId, "delivery:s1", ContractKinds.Delivery);
+        await StakeAsync(runId, teamId, "output:s1", ContractKinds.Output);
+
+        await ForceEnqueuedAsync(runId);
+        await RunEngineAsync(runId);
+
+        var run = await ReadRunAsync(runId);
+
+        run.CompletionEnforcementMode.ShouldBe("Enforced", "the supervisor default resolved Enforced — this is the arbitrated path, not a Shadow pass-through");
+        run.Status.ShouldBe(WorkflowRunStatus.Success,
+            customMessage: $"a retry-recovered run must terminalize, not park — the retried unit's own PASS is its completion evidence; the authority's refusal reason was: {run.Error}");
+        run.CompletionParkedAt.ShouldBeNull("nothing about a recovery is unadjudicated — the run must not carry a park stamp");
+    }
+
+    [Fact]
     public async Task A_default_plan_map_run_is_untouched_by_the_flip()
     {
         // The cohort line is the mode PROFILE's, not a global switch: plan-map holds ProtocolReadiness.Open, so an
@@ -417,6 +446,34 @@ public class CompletionEnforcedCohortFlowTests
             $$$"""{"integration":{"status":"integrated","integratedBranch":"codespace/integration/{{{runId:N}}}"}}""");
         await SeedDecisionAsync(runId, teamId, 4, SupervisorDecisionKinds.Stop, "{}", "{}");
         return attemptId;
+    }
+
+    /// <summary>
+    /// A RECOVERED supervisor tape (plan → spawn(REJECTED, produced nothing) → retry(passed, produced a branch) →
+    /// merge → stop): the unit's only passing verdict lives on its SECOND attempt, and its first attempt's Failed
+    /// verdict is on the tape to be superseded — the fold must read the latest attempt, never fold the two. Returns
+    /// the RETRY attempt's id (the one that has a manifest to deliver).
+    /// </summary>
+    private async Task<Guid> SeedRetryRecoveredTapeAsync(Guid runId, Guid teamId)
+    {
+        var firstAttemptId = Guid.NewGuid();
+        var retryAttemptId = Guid.NewGuid();
+        var planId = Guid.NewGuid();
+
+        await SeedDecisionAsync(runId, teamId, 1, SupervisorDecisionKinds.Plan,
+            """{"subtasks":[{"id":"s1","title":"T","instruction":"fix it"}]}""",
+            $$"""{"planned":[],"count":1,"workPlanId":"{{planId}}","workPlanVersion":1}""");
+        await SeedDecisionAsync(runId, teamId, 2, SupervisorDecisionKinds.Spawn,
+            """{"subtaskIds":["s1"]}""",
+            JsonSerializer.Serialize(new { agentResults = new[] { new { agentRunId = firstAttemptId, status = "Failed", acceptancePassed = false, acceptanceDetail = "check exited 1", acceptanceEvidenceId = (Guid?)Guid.NewGuid(), producedBranch = (string?)null } } }));
+        await SeedDecisionAsync(runId, teamId, 3, SupervisorDecisionKinds.Retry,
+            """{"subtaskId":"s1","revisedInstruction":"fix it, this time honouring the check"}""",
+            JsonSerializer.Serialize(new { agentResults = new[] { new { agentRunId = retryAttemptId, status = "Succeeded", acceptancePassed = true, acceptanceDetail = (string?)null, acceptanceEvidenceId = (Guid?)Guid.NewGuid(), producedBranch = "codespace/agent/s1" } } }));
+        await SeedDecisionAsync(runId, teamId, 4, SupervisorDecisionKinds.Merge,
+            """{"branches":["codespace/agent/s1"]}""",
+            $$$"""{"integration":{"status":"integrated","integratedBranch":"codespace/integration/{{{runId:N}}}"}}""");
+        await SeedDecisionAsync(runId, teamId, 5, SupervisorDecisionKinds.Stop, "{}", "{}");
+        return retryAttemptId;
     }
 
     private async Task SeedDecisionAsync(Guid runId, Guid teamId, int sequence, string kind, string payloadJson, string outcomeJson)
