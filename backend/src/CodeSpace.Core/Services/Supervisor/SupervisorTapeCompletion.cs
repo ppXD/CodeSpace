@@ -5,6 +5,14 @@ using CodeSpace.Messages.Enums;
 namespace CodeSpace.Core.Services.Supervisor;
 
 /// <summary>
+/// The tape mirror's outputs — the same pair <c>ComposedAssessment</c> carries out of the database: the reducer's
+/// verdict, and P4's upstream stage trace. Both are needed to render the decider's stopped-now block the way
+/// production renders it; a mirror that projected only the assessment showed the harness's brain four contract
+/// dimensions while production's prompt also named the stage the terminal authority objects to.
+/// </summary>
+public sealed record TapeStoppedNow(CompletionAssessment Assessment, IReadOnlySet<CompletionStage> ExercisedUpstreamStages);
+
+/// <summary>
 /// The supervisor tape's own projection into completion envelopes — the pure core of what
 /// <c>CompletionAssessmentComposer</c> does with a database.
 ///
@@ -42,12 +50,12 @@ namespace CodeSpace.Core.Services.Supervisor;
 public static class SupervisorTapeCompletion
 {
     /// <summary>
-    /// The reducer's verdict on "what if this run stopped cleanly right now", derived from the tape alone. Null when
-    /// there is nothing to recite — no authorized wave has staked an obligation yet — which is production's own gate
-    /// (<c>ComposeIfStoppedNowAsync</c> returns null on an empty requirement set), so a harness that renders this
-    /// stays silent exactly where production is silent.
+    /// The reducer's verdict on "what if this run stopped cleanly right now", plus the upstream stages the tape
+    /// evidences, derived from the tape alone. Null when there is nothing to recite — no authorized wave has staked
+    /// an obligation yet — which is production's own gate (<c>ComposeIfStoppedNowAsync</c> returns null on an empty
+    /// requirement set), so a harness that renders this stays silent exactly where production is silent.
     /// </summary>
-    public static CompletionAssessment? ProjectIfStoppedNow(IReadOnlyList<SupervisorPriorDecision> decisions)
+    public static TapeStoppedNow? ProjectIfStoppedNow(IReadOnlyList<SupervisorPriorDecision> decisions)
     {
         // The mirror stamps the LATEST ref-bearing plan's identity — the same ref production's staging chokepoint
         // read at its own stake time (the guard below already requires one to exist before anything is staked).
@@ -71,7 +79,13 @@ public static class SupervisorTapeCompletion
 
         var admission = Completion.ReceiptAdmission.Admit(receipts, requirements, SupervisorExecutableSet.Compute(decisions), Completion.AttemptSelectors.SelectOperationalActive(attempts));
 
-        return Completion.CompletionReducer.Reduce(requirements, admission.Admitted, StoppedNowFacts(decisions));
+        // The SAME reader the composer feeds from rows, over the tape's own inputs. No integration manifests exist
+        // off a tape, so the Integrate cell rests on the two supervisor-tape ledgers alone — conservative in the
+        // direction this class already declares: it can read a stage unevidenced where production evidences it,
+        // never the reverse.
+        var stages = Completion.UpstreamStageTrace.Derive(requirements, decisions, attempts, []);
+
+        return new TapeStoppedNow(Completion.CompletionReducer.Reduce(requirements, admission.Admitted, StoppedNowFacts(decisions)), stages);
     }
 
     /// <summary>

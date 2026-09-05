@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Executors;
 using CodeSpace.Core.Services.Supervisor.Deciders;
@@ -57,9 +58,7 @@ public static class SupervisorTrajectory
                 MaxResolveAttempts = environment.MaxResolveAttempts,
                 TotalSpawnedAgents = SupervisorTurnService.FoldTotalSpawnedAgents(priors),
                 NoProgressDecisions = SupervisorTurnService.FoldNoProgressDecisions(priors),
-                // The stopped-now recital, through the SAME projection production's composer reduces to — null until
-                // an authorized wave has staked an obligation, exactly as production omits the block until then.
-                CompletionRecital = SupervisorStopNowRecital.Render(SupervisorTapeCompletion.ProjectIfStoppedNow(priors)),
+                CompletionRecital = RenderRecital(priors),
             };
 
             SupervisorDecision decision;
@@ -83,6 +82,25 @@ public static class SupervisorTrajectory
         // scorer names the failure precisely (a true loop vs. a slow run that never converged inside the time budget).
         return new SupervisorTrajectoryResult { Kinds = kinds, ReachedStop = false, HitTurnCap = !cancellationToken.IsCancellationRequested, Ledger = priors };
     }
+
+    /// <summary>The mode profile the trajectory's runs answer to — the harness drives the SUPERVISOR lane, so it is the supervisor lane's committed profile, resolved from the production registry rather than a fixture that could declare a stage story production never enforces.</summary>
+    private static readonly Messages.Contracts.ModeProfile SupervisorProfile = new ModeProfileRegistry().Resolve(RunModeKeys.Supervisor)!;
+
+    /// <summary>
+    /// The stopped-now recital, through the SAME projection production's composer reduces to — null until an
+    /// authorized wave has staked an obligation, exactly as production omits the block until then.
+    ///
+    /// <para>All THREE of the block's inputs are supplied, or the harness would score the model on a prompt
+    /// production does not ship: the assessment, the tape's own upstream STAGE TRACE, and the lane's mode profile
+    /// — without the last two the ConflictThenResolve arc's brain never saw the stage line at all, the very line
+    /// that tells it an un-reconciled merge leaves Integrate unevidenced. The enforcement mode is
+    /// <c>CompletionPolicy.CurrentMode</c>, what production stamps a run that does not opt in, so the harness reads
+    /// the same wording the default cohort reads.</para>
+    /// </summary>
+    private static string? RenderRecital(IReadOnlyList<SupervisorPriorDecision> priors) =>
+        SupervisorTapeCompletion.ProjectIfStoppedNow(priors) is not { } stoppedNow
+            ? null
+            : SupervisorStopNowRecital.Render(stoppedNow.Assessment, stoppedNow.ExercisedUpstreamStages, SupervisorProfile, CompletionPolicy.CurrentMode);
 }
 
 /// <summary>An environment the trajectory harness drives the decider over: it folds the decided action into the durable-shape outcome the NEXT turn reads, given the ledger so far — the SAME <c>SupervisorOutcome</c> shapes the engine writes, so the decider reads exactly what it would in production.</summary>

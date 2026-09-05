@@ -195,7 +195,7 @@ public sealed class CompletionComposerFlowTests
         var composed = await scope.Resolve<ICompletionAssessmentComposer>().ComposeIfStoppedNowAsync(runId, teamId, CancellationToken.None);
 
         var fromRows = SupervisorStopNowRecital.Render(composed?.Assessment);
-        var fromTape = SupervisorStopNowRecital.Render(SupervisorTapeCompletion.ProjectIfStoppedNow(tape));
+        var fromTape = SupervisorStopNowRecital.Render(SupervisorTapeCompletion.ProjectIfStoppedNow(tape)?.Assessment);
 
         fromRows.ShouldNotBeNull("the seeded run is contract-bearing, so production has a verdict to recite");
         fromTape.ShouldBe(fromRows, "the tape-only projection must recite the SAME block production recites — a divergence here is the live gates scoring a prompt that does not ship");
@@ -252,7 +252,7 @@ public sealed class CompletionComposerFlowTests
         var projected = SupervisorTapeCompletion.ProjectIfStoppedNow(tape);
 
         var fromRows = SupervisorStopNowRecital.Render(composed?.Assessment);
-        var fromTape = SupervisorStopNowRecital.Render(projected);
+        var fromTape = SupervisorStopNowRecital.Render(projected?.Assessment);
 
         fromRows.ShouldNotBeNull();
         fromRows.ShouldContain("SETTLED", Case.Sensitive, "a pushed, accepted, fully-attested run IS settled — if production still reads owed here, the block can never steer a finished run to stop");
@@ -290,9 +290,9 @@ public sealed class CompletionComposerFlowTests
         var projected = SupervisorTapeCompletion.ProjectIfStoppedNow(tape);
 
         composed!.Assessment.Delivery.ShouldBe(DeliveryDisposition.Delivered, "the pushed manifest settles delivery for the row-reading compose");
-        projected!.Delivery.ShouldNotBe(DeliveryDisposition.Delivered, "the tape carries no manifest, so the projection cannot claim delivery — and must not");
+        projected!.Assessment.Delivery.ShouldNotBe(DeliveryDisposition.Delivered, "the tape carries no manifest, so the projection cannot claim delivery — and must not");
 
-        SupervisorStopNowRecital.Render(projected).ShouldContain("UNRESOLVED", Case.Sensitive,
+        SupervisorStopNowRecital.Render(projected.Assessment).ShouldContain("UNRESOLVED", Case.Sensitive,
             "the safe direction: unseen evidence reads as owed, never as settled. A projection that recited an all-clear here would tell a model its contract is met when the tape cannot show it.");
     }
 
@@ -320,7 +320,7 @@ public sealed class CompletionComposerFlowTests
         var composed = await scope.Resolve<ICompletionAssessmentComposer>().ComposeIfStoppedNowAsync(runId, teamId, CancellationToken.None);
 
         SupervisorStopNowRecital.Render(composed?.Assessment).ShouldBeNull("nothing was staked, so production has no verdict to recite");
-        SupervisorStopNowRecital.Render(SupervisorTapeCompletion.ProjectIfStoppedNow(tape)).ShouldBeNull("the projection must be silent wherever production is silent — an invented contract is the worse error");
+        SupervisorStopNowRecital.Render(SupervisorTapeCompletion.ProjectIfStoppedNow(tape)?.Assessment).ShouldBeNull("the projection must be silent wherever production is silent — an invented contract is the worse error");
     }
 
     /// <summary>The run's tape in the shape a decider holds it — the same read <c>SupervisorTurnService</c> rehydrates.</summary>
