@@ -211,8 +211,14 @@ public static class RealModelGate
         try
         {
             // BOUNDED (Rule 12.10): an unbounded await here let one hung agent ride to the CI job's wall-clock cap.
+            // A bust MEASURED NOTHING, so on the GATING wire it lands the same non-gating SKIP a gateway timeout does
+            // (the doctrine on DriveWithinDeadlineAsync) — reporting it as a clean informational line would have written
+            // a green `Passed` into the trx for an arm that never produced a verdict, and every blessed caller (the
+            // decision-eval, the capability tier, the `gating: true` default) would have read as a real pass.
             if (await DriveWithinDeadlineAsync(drive, attemptDeadline).ConfigureAwait(false) is not { } outcome)
             {
+                if (gating) throw new SkipException(ReportInfraSkip(provider, new TimeoutException(DidNotConvergeNote(provider, attemptDeadline)), stepSummaryPath));
+
                 ReportInformational(provider, false, DidNotConvergeNote(provider, attemptDeadline), stepSummaryPath, test);
                 return;
             }
@@ -355,7 +361,31 @@ public static class RealModelGate
     /// Await <paramref name="drive"/> bounded by <see cref="AttemptDeadline"/> (Rule 12.10 — every long wait carries an
     /// explicit timeout). Returns the arm's verdict, or <c>null</c> when the attempt BUSTS the deadline: a hung agent or
     /// a gateway call that never returned. Mirrors the bound <see cref="AssessLiveWholeLoopAsync(string, Func{Task{ValueTuple{RealModelOutcome, string}}}, int?)"/>
-    /// already has; the CALLER decides how to report the bust, because their verdict vocabularies differ.
+    /// already has; the CALLER reports the bust in its own verdict vocabulary.
+    ///
+    /// <para><b>THE DOCTRINE (one rule for every caller of this method).</b> A bust is INFRA, never a capability
+    /// verdict: the attempt produced NO verdict, so there is nothing to score. Concretely — a report-only arm REPORTS
+    /// it (<see cref="DidNotConvergeNote"/>) and stays green; a gating arm (single-shot or a best-of-N attempt) routes
+    /// it to <see cref="ReportInfraSkip"/>, which does not consume a capability slot and lands a <see cref="SkipException"/>
+    /// (NotExecuted) when nothing else was ever measured. It is never a PASS (that would green an arm that measured
+    /// nothing) and never a RED (these arms have no best-of-N floor, so redding would block main on the owner's gateway
+    /// being slow — the exact failure the infra-is-non-gating rule exists to prevent).</para>
+    ///
+    /// <para><b>The one deliberate exception</b> is the STRICT whole-loop gate, which bounds its own attempts inline
+    /// rather than through here: there a bust ACCRUES toward the best-of-N budget so a PERSISTENT hang reds in
+    /// ~budget×deadline. It can afford to, and this cannot: that gate has both a capability floor and
+    /// <see cref="InfraRetryBudget"/> spare attempts on top, so no single slow attempt decides it.</para>
+    ///
+    /// <para><b>Why abandoning <paramref name="drive"/> is safe.</b> <c>WaitAsync</c> stops AWAITING the closure; it
+    /// cannot cancel it, and threading a token in would mean re-authoring every arm's closure across both test
+    /// assemblies for a token no arm's inner call could honour anyway. The abandoned work is bounded WITHOUT one: the
+    /// wedge this bounds is an agent CLI process, and <c>LocalProcessRunner</c> enforces
+    /// <c>SandboxSpec.TimeoutSeconds</c> by KILLING it (plus a 600s no-progress stall watchdog on by default), so the
+    /// runaway dies at the lane's own agent cap — 300s for a fake-backed arm, 480s for the real-CLI one, both pinned
+    /// BELOW this deadline by <c>RealModelLaneBoundsTests</c>. A hung GATEWAY call is bounded by <c>HttpClient.Timeout</c>
+    /// on the same order. What is left over is a background continuation writing to a throwaway job database, which the
+    /// job tears down. The bound that actually failed in run 33972713055 was the agent cap (3600s, six times the gate
+    /// attempt containing it) — capping it is what makes abandonment bounded, not a token.</para>
     /// </summary>
     private static async Task<T?> DriveWithinDeadlineAsync<T>(Func<Task<T>> drive, TimeSpan? attemptDeadline) where T : struct
     {
@@ -366,14 +396,15 @@ public static class RealModelGate
     }
 
     /// <summary>
-    /// The verdict line a deadline BUST reports — Rule 12.10's "name the watched signal AND how to diagnose it". A bust is
-    /// LOUD but NEVER gating on these arms: unlike the strict whole-loop gate they have no best-of-N floor to absorb a slow
-    /// gateway, so redding on one over-long attempt would block main on the owner's gateway being slow — the exact failure
-    /// the gate's infra-is-non-gating rule exists to prevent. It is bounded and surfaced instead of silently killing the job.
+    /// The reason text a deadline BUST carries — Rule 12.10's "name the watched signal AND how to diagnose it". Per the
+    /// doctrine on <see cref="DriveWithinDeadlineAsync{T}"/> a bust is INFRA: neither a red (these arms have no
+    /// best-of-N floor, so one over-long attempt would block main on the owner's gateway being slow) NOR a pass (the
+    /// attempt produced no verdict at all). A report-only arm surfaces this line as its informational verdict; a gating
+    /// arm carries it as the reason inside <see cref="ReportInfraSkip"/>, so the trx records NotExecuted.
     /// </summary>
     internal static string DidNotConvergeNote(string provider, TimeSpan? attemptDeadline = null) =>
         $"{provider} arm did NOT converge within {(attemptDeadline ?? AttemptDeadline()).TotalSeconds:0}s — likely a hung agent CLI or a gateway call that never returned (per-attempt deadline). "
-      + "Reported, ⚠️ NOT red: a single-attempt arm has no best-of-N floor to absorb a slow gateway, so a bust is bounded + surfaced rather than gating. "
+      + "⚠️ NOT red and NOT a pass: the attempt produced no verdict, so it is routed as INFRA — reported on a report-only arm, a non-gating SKIP on a gating one. "
       + $"To diagnose: re-run this arm alone and watch its agent runs' Status/Harness; raise {AttemptDeadlineEnvVar} on the lane if the arm legitimately needs longer.";
 
     /// <summary>
@@ -512,6 +543,12 @@ public static class RealModelGate
                 // that never returned). Treat it as a non-converging MISS, NOT a gateway-infra skip: a bounded hang is a
                 // real "did not drive to completion" signal, so it accrues toward the budget and a PERSISTENT hang REDs
                 // fast (~budget×deadline), well under the CI job cap — instead of one stuck test silently killing the job.
+                //
+                // THE DELIBERATE EXCEPTION to the bust-is-infra doctrine on DriveWithinDeadlineAsync, and the ONLY one.
+                // Accruing is affordable HERE and nowhere else because this gate alone has a capability floor (`budget`
+                // independent re-runs) PLUS `InfraRetryBudget` spare attempts on top, so no single slow attempt can
+                // decide it — a lone gateway hiccup is absorbed and only a hang that repeats through the whole budget
+                // reds. The single-shot and best-of-N arms have no such floor, which is why a bust there is infra.
                 var note = $"did not converge within {deadline.TotalMinutes:0}m — likely a hung agent or gateway call (per-attempt deadline)";
                 ReportThreeWay(RealModelOutcome.CapabilityMiss, note, stepSummaryPath, test);
                 missNotes.Add(note);
