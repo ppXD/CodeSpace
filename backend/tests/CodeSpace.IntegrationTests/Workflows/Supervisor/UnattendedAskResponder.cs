@@ -1,4 +1,5 @@
 using CodeSpace.Core.Services.Supervisor;
+using CodeSpace.Messages.Agents;
 
 namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 
@@ -37,6 +38,9 @@ public static class UnattendedAskResponder
     /// rejection. The one card family it must NOT reach is the amend co-sign — see <see cref="MustLeaveForAHuman"/>.
     /// </summary>
     public static readonly string ApprovalAnswer = $"{SupervisorApprovalRequest.ApproveReply} — proceed";
+
+    /// <summary>The STRUCTURED verdict the responder sends alongside <see cref="ApprovalAnswer"/>, so the live lane exercises the same field-carrying path a real operator's click takes rather than the legacy prefix read (which keeps its own unit coverage). A content ask ignores it; every gate card rules on it exactly.</summary>
+    public const string ApprovalVerdict = SupervisorAnswerDecision.Approve;
 
     /// <summary>How many cards one attempt will answer. Comfortably above the no-progress bound an unanswered arc dies on (8) and well under the 30-decision budget, so a converging run is never starved while a brain that only ever asks still terminates as the miss it is.</summary>
     public const int MaxAnsweredAsks = 12;

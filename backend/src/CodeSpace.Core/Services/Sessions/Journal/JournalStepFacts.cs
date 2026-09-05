@@ -41,6 +41,9 @@ public sealed record JournalStepFacts
     /// <summary>Whether an ASK step is the PLAN-CONFIRMATION card (the S3 gate's park) — the plan checklist card is that park's answer surface, so the frontend suppresses the generic answer bar. False elsewhere.</summary>
     public bool PlanConfirmation { get; init; }
 
+    /// <summary>Whether an ASK step is a DECISION GATE — a card asking the human for an approve/revise VERDICT (any of the four markers), not for content. The answering surface sends the structured decision field on it. False on a content ask.</summary>
+    public bool DecisionGate { get; init; }
+
     /// <summary>The DISCARDED DRAFT a decision replaced (pre-rendered "plan draft · via metis-coder-max · 8.2k tokens") — rides the SURVIVING decision's beat so the once-anonymous authoring call reads as part of the exchange. Null when the decision replaced nothing.</summary>
     public string? Draft { get; init; }
 
@@ -57,6 +60,7 @@ public sealed record JournalStepFacts
         Review = other.Review ?? Review,
         ReviewEscalation = other.ReviewEscalation || ReviewEscalation,
         PlanConfirmation = other.PlanConfirmation || PlanConfirmation,
+        DecisionGate = other.DecisionGate || DecisionGate,
         Draft = other.Draft ?? Draft,
     };
 

@@ -19,6 +19,12 @@ namespace CodeSpace.Core.Services.Sessions.Journal.FactsSources;
 /// A PLAN-CONFIRMATION card (<see cref="SupervisorPlanConfirmation.QuestionCarriesMarker"/>) is flagged the same way,
 /// so the frontend suppresses the generic answer bar on it — the plan checklist card is that park's richer answer
 /// surface (structured approve / request-changes), and two bars answering one wait would just be noise.</para>
+///
+/// <para>Separately flags a DECISION GATE — an ask carrying ANY of the four cards' markers, i.e. one asking the human
+/// for an approve/revise VERDICT rather than for content. The answering surface reads this to send the structured
+/// <c>decision</c> field, so the gate rules on what the operator CHOSE instead of on the leading word of what they
+/// typed. Defined over all four markers (not just the ones that happen to reach a given surface), so the fact means
+/// "this card wants a verdict" on its own terms and a new gate card inherits the behaviour by carrying its marker.</para>
 /// </summary>
 public sealed class AskAnswerFactsSource : IJournalFactsSource
 {
@@ -40,9 +46,10 @@ public sealed class AskAnswerFactsSource : IJournalFactsSource
             var answer = SupervisorOutcome.ReadAskHumanAnswer(decision.OutcomeJson);
             var escalation = SupervisorGateEscalation.QuestionCarriesMarker(decision.PayloadJson);
             var planGate = SupervisorPlanConfirmation.QuestionCarriesMarker(decision.PayloadJson);
+            var decisionGate = escalation || planGate || SupervisorApprovalRequest.QuestionCarriesMarker(decision.PayloadJson) || SupervisorAmendAcceptance.QuestionCarriesMarker(decision.PayloadJson);
 
-            if (!string.IsNullOrWhiteSpace(answer) || escalation || planGate)
-                facts[SupervisorDecisionTimelineMap.EventId(decision)] = new JournalStepFacts { Answer = string.IsNullOrWhiteSpace(answer) ? null : answer.Trim(), ReviewEscalation = escalation, PlanConfirmation = planGate };
+            if (!string.IsNullOrWhiteSpace(answer) || decisionGate)
+                facts[SupervisorDecisionTimelineMap.EventId(decision)] = new JournalStepFacts { Answer = string.IsNullOrWhiteSpace(answer) ? null : answer.Trim(), ReviewEscalation = escalation, PlanConfirmation = planGate, DecisionGate = decisionGate };
         }
 
         return facts;

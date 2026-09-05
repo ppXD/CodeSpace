@@ -1178,7 +1178,7 @@ function JournalStepRow({ step, muted, planCard, planVersion, planSuperseded, as
         : isAsk
           ? <JournalAskQuestion text={step.detail!} tone={jTone(step.tone)} />
           : <div className={`room-jdetail room-jdetail-${jTone(step.tone)}`}>{step.detail}</div>)}
-      {isAsk && askAnswerable && !step.answer && !muted && !step.planConfirmation && <AskAnswerBar escalation={step.reviewEscalation === true} />}
+      {isAsk && askAnswerable && !step.answer && !muted && !step.planConfirmation && <AskAnswerBar decisionGate={step.decisionGate === true} escalation={step.reviewEscalation === true} />}
       {step.modelCall && (
         <div className="room-jmodel">
           <span className="room-jmodel-l">└ via · </span>
@@ -1264,14 +1264,17 @@ function JournalAskQuestion({ text, tone }: { text: string; tone: string }) {
 /** The INLINE answer bar under a PENDING ask beat — the run page's own answer surface, so a parked run is operable
  *  right where the question appears (previously the sole surface was the conversation card, invisible from here).
  *  Posts to the run-scoped ask/answer endpoint, which resolves the SAME durable wait the card's Answer button does
- *  (first answer wins). A review-gate ESCALATION adds the one-shot "Approve anyway" quick action — the absolution
- *  the gate honours; any typed text is guidance the supervisor's next decide reads.
+ *  (first answer wins). A DECISION GATE — any card that asks the human to RULE rather than to supply content — adds
+ *  the approve quick action; any typed text is guidance the supervisor's next decide reads.
  *
- *  On an escalation both paths send the STRUCTURED verdict (approve / revise) alongside the text, so the gate rules
- *  on what the operator CLICKED rather than on the leading word of what they typed — a 繁中 approval no longer reads
- *  as feedback, and guidance beginning "approve nothing until…" no longer risks releasing the gate. A CONTENT
- *  question sends no verdict: there is nothing to approve, only an answer. */
-function AskAnswerBar({ escalation }: { escalation: boolean }) {
+ *  On a gate BOTH paths send the STRUCTURED verdict (approve / revise) alongside the text, so the gate rules on what
+ *  the operator CLICKED rather than on the leading word of what they typed — a 繁中 approval no longer reads as
+ *  feedback, and guidance beginning "approve nothing until…" no longer risks releasing the gate. Driven by
+ *  `decisionGate`, which the backend sets from ALL the card markers: keying it on the review escalation alone left the
+ *  irreversible-action approval and the amend co-sign posting bare text, so two of the gates still read the word.
+ *  A CONTENT question sends no verdict: there is nothing to approve, only an answer. `escalation` narrows only the
+ *  COPY — an escalation approve is an absolution of a review, which the other gates are not. */
+export function AskAnswerBar({ decisionGate, escalation }: { decisionGate: boolean; escalation: boolean }) {
   const run = useContext(RunActionsContext);
   const queryClient = useQueryClient();
   const [text, setText] = useState("");
@@ -1317,18 +1320,18 @@ function AskAnswerBar({ escalation }: { escalation: boolean }) {
     <div className="room-jask-bar">
       <input
         className="room-jask-input"
-        placeholder={escalation ? "Describe what to do instead…" : "Type your answer…"}
+        placeholder={decisionGate ? "Describe what to do instead…" : "Type your answer…"}
         value={text}
         disabled={busy}
         onChange={(e) => setText(e.target.value)}
-        onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) void send(text, escalation ? "revise" : undefined); }}
+        onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) void send(text, decisionGate ? "revise" : undefined); }}
       />
-      <button type="button" className="room-jask-btn room-jask-send" disabled={busy || text.trim().length === 0} onClick={() => void send(text, escalation ? "revise" : undefined)}>
+      <button type="button" className="room-jask-btn room-jask-send" disabled={busy || text.trim().length === 0} onClick={() => void send(text, decisionGate ? "revise" : undefined)}>
         Answer
       </button>
-      {escalation && (
-        <button type="button" className="room-jask-btn room-jask-approve" disabled={busy} title="Proceed with the blocked decision despite the review (one-shot)" onClick={() => void send("approve", "approve")}>
-          <Sym n="check" s={11} /> Approve anyway
+      {decisionGate && (
+        <button type="button" className="room-jask-btn room-jask-approve" disabled={busy} title={escalation ? "Proceed with the blocked decision despite the review (one-shot)" : "Approve what this card proposes"} onClick={() => void send("approve", "approve")}>
+          <Sym n="check" s={11} /> {escalation ? "Approve anyway" : "Approve"}
         </button>
       )}
       {error && <span className="room-jask-err">{error}</span>}

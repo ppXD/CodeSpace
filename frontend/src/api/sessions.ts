@@ -584,6 +584,10 @@ export interface JournalStep {
   draft?: string | null;
   /// Whether an ASK step is the PLAN-CONFIRMATION card — the plan checklist card is that park's answer surface, so the generic inline answer bar is suppressed.
   planConfirmation?: boolean;
+  /// Whether an ASK step is a DECISION GATE — a card asking the human to RULE (approve, or say what to do instead) rather
+  /// than to supply content. The answer surface sends the structured `decision` verdict on these and only these, so an
+  /// approval typed in any language is read as an approval instead of as feedback.
+  decisionGate?: boolean;
   tone: JournalTone;
   milestone: boolean;
   agents: JournalAgentCard[];

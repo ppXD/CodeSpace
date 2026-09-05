@@ -68,5 +68,8 @@ public class JournalStepFactsTests
 
         new JournalStepFacts { ReviewEscalation = true }.Merge(new JournalStepFacts())
             .ReviewEscalation.ShouldBeTrue("the OR holds in both orientations");
+
+        new JournalStepFacts { DecisionGate = true }.Merge(new JournalStepFacts())
+            .DecisionGate.ShouldBeTrue("the decision-gate flag ORs the same way — a later source can never un-flag a card that asks for a verdict");
     }
 }
