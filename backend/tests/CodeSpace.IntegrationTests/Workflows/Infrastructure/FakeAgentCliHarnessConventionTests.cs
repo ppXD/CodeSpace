@@ -33,9 +33,20 @@ public sealed class FakeAgentCliHarnessConventionTests
 
         fakes.Count.ShouldBeGreaterThan(3, "the scan must actually find the fakes the real-model arms construct, or this test passes by finding nothing");
 
-        var offenders = fakes
-            .Where(f => FakeSource(f) is { } src && !(src.Contains(nameof(CodexHarness) + "." + nameof(CodexHarness.CommandEnvVar), StringComparison.Ordinal)
-                                                  && src.Contains(nameof(ClaudeCodeHarness) + "." + nameof(ClaudeCodeHarness.CommandEnvVar), StringComparison.Ordinal)))
+        var sources = fakes.ToDictionary(f => f, FakeSource, StringComparer.Ordinal);
+
+        // A fake whose source this cannot READ is a fake this convention does not POLICE, and the old lookup answered
+        // null for anything outside three hard-coded folders — so moving a fake one directory over (or adding one in a
+        // new folder) silently exempted it from the very check that exists because the exemption is invisible. An
+        // unreadable fake is now a RED, not a skip: the scan either sees every fake or says which one it lost.
+        sources.Where(kv => kv.Value is null).Select(kv => kv.Key).OrderBy(f => f, StringComparer.Ordinal).ToList().ShouldBeEmpty(
+            "a fake a REAL-MODEL arm constructs must have a locatable source file named after its type under backend/tests — "
+          + "this convention can only police what it can read, and an unlocatable fake would pass by being invisible rather than by being correct");
+
+        var offenders = sources
+            .Where(kv => !(kv.Value!.Contains(nameof(CodexHarness) + "." + nameof(CodexHarness.CommandEnvVar), StringComparison.Ordinal)
+                        && kv.Value!.Contains(nameof(ClaudeCodeHarness) + "." + nameof(ClaudeCodeHarness.CommandEnvVar), StringComparison.Ordinal)))
+            .Select(kv => kv.Key)
             .OrderBy(f => f, StringComparer.Ordinal)
             .ToList();
 
@@ -67,9 +78,7 @@ public sealed class FakeAgentCliHarnessConventionTests
 
     /// <summary>The distinct fake-CLI type names constructed by any <c>RealModel*</c> test class across both test assemblies.</summary>
     private static IReadOnlyList<string> FakesUsedByRealModelArms() =>
-        new[] { "backend/tests/CodeSpace.E2ETests", "backend/tests/CodeSpace.IntegrationTests" }
-            .Select(rel => new DirectoryInfo(Path.Combine(FindRepoRoot(), rel)))
-            .Where(d => d.Exists)
+        TestSourceRoots()
             .SelectMany(d => d.GetFiles("RealModel*.cs", SearchOption.AllDirectories))
             .Where(f => !f.FullName.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
             .Where(f => !f.FullName.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
@@ -77,13 +86,19 @@ public sealed class FakeAgentCliHarnessConventionTests
             .Distinct(StringComparer.Ordinal)
             .ToList();
 
-    /// <summary>The source of a fake by type name, or null when it lives outside the two known fake folders (nothing to police).</summary>
+    /// <summary>The source of a fake by type name, searched across BOTH test assemblies (one file per type, named after it — the repo's convention). Null ONLY when no such file exists anywhere, which the caller REDS on rather than treating as "nothing to police".</summary>
     private static string? FakeSource(string typeName) =>
-        new[] { "backend/tests/CodeSpace.IntegrationTests/Workflows/Infrastructure", "backend/tests/CodeSpace.IntegrationTests/Agents", "backend/tests/CodeSpace.E2ETests/Infrastructure" }
-            .Select(rel => Path.Combine(FindRepoRoot(), rel, typeName + ".cs"))
-            .Where(File.Exists)
-            .Select(File.ReadAllText)
+        TestSourceRoots()
+            .SelectMany(d => d.GetFiles(typeName + ".cs", SearchOption.AllDirectories))
+            .Where(f => !f.FullName.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => !f.FullName.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Select(f => File.ReadAllText(f.FullName))
             .FirstOrDefault();
+
+    private static IEnumerable<DirectoryInfo> TestSourceRoots() =>
+        new[] { "backend/tests/CodeSpace.E2ETests", "backend/tests/CodeSpace.IntegrationTests" }
+            .Select(rel => new DirectoryInfo(Path.Combine(FindRepoRoot(), rel)))
+            .Where(d => d.Exists);
 
     private static string FindRepoRoot()
     {
