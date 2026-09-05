@@ -251,6 +251,37 @@ public class SupervisorDecisionTimelineMapTests
         SupervisorDecisionTimelineMap.ToEvent(Decision(SupervisorDecisionKinds.Merge)).Summary.ShouldBeNull("a clean success carries no failure reason");
     }
 
+    // ── A decision the brain reached only after being asked again says so on the tape ────────────────────────────
+
+    [Fact]
+    public void A_payload_re_asked_decision_names_the_kind_it_started_from_beside_its_own_summary()
+    {
+        var reasked = SupervisorOutcome.WritePayloadReask(StopOutcome("completed", "shipped the endpoint"), SupervisorDecisionKinds.Plan);
+
+        var summary = SupervisorDecisionTimelineMap.ToEvent(Decision(SupervisorDecisionKinds.Stop, outcome: reasked)).Summary;
+
+        summary.ShouldContain("shipped the endpoint", customMessage: "the verb's own summary still leads — the re-ask is how the decision was authored, not what it did");
+        summary.ShouldContain("re-asked from 'plan'", customMessage: "…and the step says the decision cost a second round-trip, and which verb it abandoned");
+    }
+
+    [Fact]
+    public void A_retry_target_re_asked_decision_says_so_on_a_verb_that_carries_no_summary_of_its_own()
+    {
+        // retry has no outcome-derived summary — before this the note had nowhere to land and the marker was written
+        // to the ledger and read by nobody.
+        var reasked = SupervisorOutcome.WriteRetryTargetReask("{}", reasked: true);
+
+        SupervisorDecisionTimelineMap.ToEvent(Decision(SupervisorDecisionKinds.Retry, outcome: reasked)).Summary
+            .ShouldBe("Retry target re-asked — the first reply aimed at a subtask that was already done while others had failed.");
+    }
+
+    [Fact]
+    public void A_decision_that_needed_no_re_ask_renders_exactly_as_before()
+    {
+        SupervisorDecisionTimelineMap.ToEvent(Decision(SupervisorDecisionKinds.Retry)).Summary.ShouldBeNull("the overwhelmingly common path — and every row written before the markers existed — is untouched");
+        SupervisorDecisionTimelineMap.ToEvent(Decision(SupervisorDecisionKinds.Stop, outcome: StopOutcome("completed", "shipped it"))).Summary.ShouldBe("shipped it");
+    }
+
     [Fact]
     public void Stamps_a_stable_id_kind_order_time_and_source_with_no_node_or_agent_tag()
     {
