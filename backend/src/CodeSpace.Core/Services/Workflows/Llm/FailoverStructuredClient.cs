@@ -21,8 +21,9 @@ namespace CodeSpace.Core.Services.Workflows.Llm;
 /// call's real story. Two places honour that. A completion carries it on
 /// <see cref="StructuredLLMCompletion.FailedOverCause"/>, so a caller that cannot USE the substitute's answer surfaces
 /// the throttle instead of reading the answer as a capability verdict. And an EXHAUSTED pool whose last candidate
-/// failed for a model / credential reason re-throws that same wire-health fault, because a substitute's 400 is not
-/// why the caller has no answer — the throttle on its own model is.</para>
+/// ended model-side — a 4xx, or the D1 price refusal above — re-throws that same wire-health fault, because a
+/// substitute's 400 or missing price is not why the caller has no answer; the throttle on its own model is, and it is
+/// the only one of the two a retry or a park can clear.</para>
 /// </summary>
 public sealed class FailoverStructuredClient : IStructuredLLMClient
 {
@@ -76,8 +77,18 @@ public sealed class FailoverStructuredClient : IStructuredLLMClient
                 // the bounded retry and the node's infra park act on — keeping the substitute's fault as the inner.
                 Skip(trail, client, pick, Describe(ex));
 
-                throw new LlmApiException(wireHealth.Provider, wireHealth.StatusCode, wireHealth.Category,
-                    $"{wireHealth.ProviderMessage} — and no pool alternate could answer either ({string.Join(" | ", trail)})", wireHealth.RetryAfter, ex);
+                throw Exhausted(wireHealth, trail, ex);
+            }
+            catch (Agents.Cost.UnpricedModelUnderCapException ex) when (i == _candidates.Count - 1 && wireHealth is not null)
+            {
+                // The same re-label as above, for the OTHER way an exhausted pool ends model-side: the last candidate
+                // was refused for having no price. That refusal is a real operator problem, but it is not why this call
+                // has no answer — the throttle that pushed it off its own model is, and it is the only one of the two a
+                // retry or a park can act on. Surfacing the unpriced refusal here would park the run under a reason no
+                // pricing fix can clear.
+                Skip(trail, client, pick, "unpriced under the run's cost cap");
+
+                throw Exhausted(wireHealth, trail, ex);
             }
             catch (Agents.Cost.UnpricedModelUnderCapException) when (i < _candidates.Count - 1)
             {
@@ -92,6 +103,11 @@ public sealed class FailoverStructuredClient : IStructuredLLMClient
 
         throw new InvalidOperationException("unreachable: the last candidate either returned or threw");
     }
+
+    /// <summary>The fault an EXHAUSTED pool raises when the last candidate ended model-side (a 4xx, or a cost-cap price refusal) but a wire-health fault is what pushed the call off its own model: the wire-health fault's category / status / Retry-After verbatim — the values the bounded retry and the node's infra park act on — with the whole trail in the message and the last candidate's own fault as the inner, so nothing is lost.</summary>
+    private static LlmApiException Exhausted(LlmApiException wireHealth, IReadOnlyList<string> trail, Exception last) =>
+        new(wireHealth.Provider, wireHealth.StatusCode, wireHealth.Category,
+            $"{wireHealth.ProviderMessage} — and no pool alternate could answer either ({string.Join(" | ", trail)})", wireHealth.RetryAfter, last);
 
     /// <summary>Record one candidate's outcome on the trail AND announce it at Warning — a silent hop is how a throttled pool reads as ordinary model behaviour in a log.</summary>
     private void Skip(List<string> trail, IStructuredLLMClient client, ModelPoolPick pick, string outcome)

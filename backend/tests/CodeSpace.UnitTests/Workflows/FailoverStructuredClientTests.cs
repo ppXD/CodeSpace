@@ -208,6 +208,28 @@ public class FailoverStructuredClientTests
     }
 
     [Fact]
+    public async Task An_exhausted_pool_whose_last_candidate_is_UNPRICED_still_surfaces_the_throttle_that_started_the_hop()
+    {
+        // The second way an exhausted pool ends model-side: the last candidate had no price under the run's cap. That
+        // refusal is a real operator problem, but it is not why this call has no answer — the throttle that pushed it
+        // off its own model is, and it is the only one of the two a retry or a park can clear. Parking the run on the
+        // price refusal would suspend it under a reason no pricing fix reaches.
+        // Only the FIRST candidate is priced — so it is actually called (and throttles, forcing the hop), and the
+        // alternate the hop lands on is the one the cost cap refuses.
+        var anthropic = new ScriptedStructured("Anthropic", _ => throw new LlmApiException("Anthropic", 429, LlmErrorCategory.RateLimited, "slow down", retryAfter: TimeSpan.FromSeconds(6)));
+        var openai = new ScriptedStructured("OpenAI", Answer);
+        var prices = Priced("Anthropic-model");
+        var client = new FailoverStructuredClient(new[] { (Guarded(anthropic, prices), Pick("Anthropic")), (Guarded(openai, prices), Pick("OpenAI")) });
+
+        var ex = await Should.ThrowAsync<LlmApiException>(() => client.CompleteStructuredAsync(Request("Anthropic-model"), CancellationToken.None));
+
+        ex.Category.ShouldBe(LlmErrorCategory.RateLimited, "a throttle no alternate could cover is still a throttle — never a cost-cap verdict the park cannot act on");
+        ex.RetryAfter.ShouldBe(TimeSpan.FromSeconds(6));
+        ex.Message.ShouldContain("unpriced under the run's cost cap", customMessage: "the price refusal is not lost — it rides the message so the operator still sees the pool's real state");
+        ex.InnerException.ShouldBeOfType<UnpricedModelUnderCapException>().Model.ShouldBe("OpenAI-model");
+    }
+
+    [Fact]
     public async Task An_unpriced_candidate_under_NO_cap_is_never_skipped()
     {
         // The whole rule is scoped to a declared cap; without one the guard passes everything through, so the first
