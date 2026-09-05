@@ -54,7 +54,7 @@ public sealed class SupervisorPullRequestOpener : ISupervisorPullRequestOpener, 
             ? resolved
             : resolved.Select(t => t with { TargetBranch = targetBranchOverride }).ToList();
 
-        if (targets.Count == 0) return new RoomPullRequestResult { PullRequests = Array.Empty<RoomPullRequestOpened>() };
+        if (targets.Count == 0) return await NothingToOpenAsync(primaryRepositoryId, teamId, cancellationToken).ConfigureAwait(false);
 
         var degraded = targets.Where(t => t.RepositoryId is null)
             .Select(t => new RoomPullRequestOpened { Alias = t.Alias, Disposition = RoomPullRequestDisposition.Failed, Error = "no resolvable repository id for this repo" })
@@ -88,7 +88,7 @@ public sealed class SupervisorPullRequestOpener : ISupervisorPullRequestOpener, 
         var patchOnlyIds = await PatchOnlyRepositoryIdsAsync(candidates.Select(t => t.RepositoryId!.Value), teamId, cancellationToken).ConfigureAwait(false);
 
         var patchOnlySkipped = candidates.Where(t => patchOnlyIds.Contains(t.RepositoryId!.Value))
-            .Select(t => new RoomPullRequestOpened { RepositoryId = t.RepositoryId, Alias = t.Alias, Disposition = RoomPullRequestDisposition.Skipped, Error = "the repository requires patch-only publishing" })
+            .Select(t => PatchOnlySkip(t.RepositoryId, t.Alias))
             .ToList();
 
         var toOpen = candidates.Where(t => !patchOnlyIds.Contains(t.RepositoryId!.Value)).ToList();
@@ -114,6 +114,36 @@ public sealed class SupervisorPullRequestOpener : ISupervisorPullRequestOpener, 
 
         return new RoomPullRequestResult { PullRequests = degraded.Concat(alreadyOpened).Concat(patchOnlySkipped).Concat(freshlyOpened).ToList() };
     }
+
+    /// <summary>
+    /// Zero resolved targets is TWO different worlds, and <see cref="SupervisorDeliveryGate"/>'s card must name the
+    /// right one. A PatchOnly repository can never resolve a target AT ALL — the same publish policy the filter below
+    /// applies to a resolved target already stopped the work upstream (<c>RepositoryPolicyPublishGuard</c> skips the
+    /// agent push, so no manifest reaches <c>PublishState.Pushed</c>, and skips the merge integration, so no
+    /// <c>integratedBranch</c> is ever recorded) — so "no published branch" is the POLICY's doing, not missing work.
+    /// Reporting it as an empty result made the gate's policy-conflict card UNREACHABLE in production for the exact
+    /// case it exists for, parking patch-only runs on the misleading "found no published branch to open one from"
+    /// instead. Mint the SAME skip entry a resolved patch-only target gets, so the conflict reads as policy and the
+    /// human is told what to change. A repository that PERMITS publishing keeps the empty result (a genuinely
+    /// work-free run's honest card), and so does the post-terminal Room caller, which passes no
+    /// <paramref name="primaryRepositoryId"/> at all and owns its own "nothing to open" contract.
+    /// </summary>
+    private async Task<RoomPullRequestResult> NothingToOpenAsync(Guid? primaryRepositoryId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var empty = new RoomPullRequestResult { PullRequests = Array.Empty<RoomPullRequestOpened>() };
+
+        if (primaryRepositoryId is null) return empty;
+
+        var patchOnly = await PatchOnlyRepositoryIdsAsync(new[] { primaryRepositoryId.Value }, teamId, cancellationToken).ConfigureAwait(false);
+
+        return patchOnly.Count == 0 ? empty : new RoomPullRequestResult { PullRequests = new[] { PatchOnlySkip(primaryRepositoryId, "primary") } };
+    }
+
+    /// <summary>The ONE patch-only skip entry — minted both for a target the resolver DID surface and for the zero-target case above, so the two can never drift on how the policy skip reads to the gate or to a human.</summary>
+    private static RoomPullRequestOpened PatchOnlySkip(Guid? repositoryId, string alias) => new()
+    {
+        RepositoryId = repositoryId, Alias = alias, Disposition = RoomPullRequestDisposition.Skipped, Error = "the repository requires patch-only publishing",
+    };
 
     private async Task<IReadOnlySet<Guid>> PatchOnlyRepositoryIdsAsync(IEnumerable<Guid> repositoryIds, Guid teamId, CancellationToken cancellationToken)
     {

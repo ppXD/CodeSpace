@@ -245,8 +245,12 @@ public sealed class SupervisorDeliveryGateFlowTests
         // interim waiver until Phase T's structured WaivedByPolicy — releases the stop exactly once for this state.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var conversationId = await SeedConversationAsync(teamId, userId);
+        // The seeded Pushed manifest on a patch-only repo is the ONE ordering that reaches this rung in production:
+        // the agent pushed while the repo still permitted branches and the operator flipped it to patch-only after.
+        // The ORDINARY patch-only run never gets here at all — nothing is ever pushed, so the resolver surfaces zero
+        // targets; that arm is the theory below, and conflating the two is what hid the zero-target defect.
         var repoId = await SeedBoundRepositoryAsync(teamId);
-        await SetPatchOnlyAsync(repoId);
+        await SetPublishModeAsync(repoId, RepositoryPublishMode.PatchOnly);
         var runId = await SeedSupervisorRunAsync(teamId, userId);
 
         var agentRunId = Guid.NewGuid();
@@ -274,6 +278,51 @@ public sealed class SupervisorDeliveryGateFlowTests
 
         var stop = await RunTurnAsync(runId, teamId, decider, goalConfig, conversationId: conversationId);
         stop.DecisionKind.ShouldBe(SupervisorDecisionKinds.Stop, "still policy-blocked after the adjudicated re-check — the answer stands as the interim waiver, the run completes");
+    }
+
+    [Theory]
+    [InlineData(RepositoryPublishMode.PatchOnly, "patch-only")]
+    [InlineData(RepositoryPublishMode.Branch, "no published branch")]
+    public async Task A_zero_target_publish_parks_on_the_card_the_repositorys_publish_mode_earns_then_completes_after_a_human_adjudicates(RepositoryPublishMode publishMode, string expectedWording)
+    {
+        // The defect a REQUIRED real-model gate caught (RealModelDeliveryGateE2ETests): an ORDINARY patch-only run
+        // can never resolve a publish target at all — the same policy skips the agent push (no manifest reaches
+        // Pushed) and the merge integration (no integratedBranch) — so the forced publish came back EMPTY and the
+        // run parked on the "no published branch" card written for a WORK-FREE run, never naming the policy the
+        // human actually has to change. Nothing is seeded to publish here on purpose: the publish mode ALONE has to
+        // decide which card the human gets, and the Branch arm proves the work-free wording still stands for a
+        // repository that permits publishing.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var conversationId = await SeedConversationAsync(teamId, userId);
+        var repoId = await SeedBoundRepositoryAsync(teamId);
+        await SetPublishModeAsync(repoId, publishMode);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var goalConfig = GoalConfig(repoId, new DeliverySpec { OpenPullRequest = true });
+        var decider = new AlwaysStopDecider();
+
+        var publish = await RunTurnAsync(runId, teamId, decider, goalConfig, conversationId: conversationId);
+        publish.DecisionKind.ShouldBe(SupervisorDecisionKinds.Publish, "the operator's own declaration authorizes the PR — the gate forces the publish before the stop can terminalize");
+
+        var result = JsonSerializer.Deserialize<RoomPullRequestResult>(publish.OutcomeJson!, AgentJson.Options)!;
+
+        if (publishMode == RepositoryPublishMode.PatchOnly)
+            result.PullRequests.Single().Disposition.ShouldBe(RoomPullRequestDisposition.Skipped, "the policy is why nothing resolved — that is a deliberate skip the outcome must record, not a silent empty result");
+        else
+            result.PullRequests.ShouldBeEmpty("a repository that PERMITS publishing genuinely had nothing to open a pull request from");
+
+        var parked = await RunTurnAsync(runId, teamId, decider, goalConfig, conversationId: conversationId);
+        parked.DecisionKind.ShouldBe(SupervisorDecisionKinds.AskHuman, "zero resolved targets satisfies nothing — the contract goes to a human either way");
+        JsonSerializer.Deserialize<SupervisorAskHumanPayload>(parked.PayloadJson, AgentJson.Options)!
+            .Question.ShouldContain(expectedWording, Case.Insensitive, $"a {publishMode} repository must park on the card naming ITS OWN blocker — a human can only fix what the card names");
+
+        await AnswerPendingAskAsync(runId, teamId, userId, "understood — finish without the pull request");
+
+        var reCheck = await RunTurnAsync(runId, teamId, decider, goalConfig, conversationId: conversationId);
+        reCheck.DecisionKind.ShouldBe(SupervisorDecisionKinds.Publish, "the answer buys exactly one fresh re-attempt — had the human unblocked it, THIS is where the real PR would open");
+
+        var stop = await RunTurnAsync(runId, teamId, decider, goalConfig, conversationId: conversationId);
+        stop.DecisionKind.ShouldBe(SupervisorDecisionKinds.Stop, "still nothing to open after the adjudicated re-check — the answer stands as the interim waiver, the run completes");
     }
 
     [Fact]
@@ -544,12 +593,12 @@ public sealed class SupervisorDeliveryGateFlowTests
         return repoId;
     }
 
-    private async Task SetPatchOnlyAsync(Guid repoId)
+    private async Task SetPublishModeAsync(Guid repoId, RepositoryPublishMode publishMode)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         var repo = await db.Repository.SingleAsync(r => r.Id == repoId);
-        repo.PublishMode = RepositoryPublishMode.PatchOnly;
+        repo.PublishMode = publishMode;
         await db.SaveChangesAsync();
     }
 
