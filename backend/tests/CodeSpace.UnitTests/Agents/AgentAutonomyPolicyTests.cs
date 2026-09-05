@@ -72,4 +72,36 @@ public class AgentAutonomyPolicyTests
         AgentAutonomyPolicy.Clamp(AgentAutonomyLevel.Unleashed, AgentAutonomyLevel.Standard)
             .ShouldBe(AgentAutonomyPolicy.Clamp(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Unleashed));
     }
+
+    // ── B5: the journal's network-posture sentence (the run's honest answer to "did these agents have the internet?") ──
+
+    [Theory]
+    // Policy ALLOWED network and the launcher asked for it.
+    [InlineData(AgentAutonomyLevel.Trusted, AgentAutonomyLevel.Trusted, "Network: on (Trusted)")]
+    [InlineData(AgentAutonomyLevel.Unleashed, AgentAutonomyLevel.Unleashed, "Network: on (Unleashed)")]
+    // Policy allowed it; nobody asked. The DEFAULT — an ordinary launch, stated rather than assumed.
+    [InlineData(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Trusted, "Network: off (Standard)")]
+    [InlineData(AgentAutonomyLevel.Confined, AgentAutonomyLevel.Trusted, "Network: off (Confined)")]
+    // The ceiling cannot reach a network-granting tier: this run could NOT have had network however it was
+    // launched. Distinct wording from "off" on purpose — declined and denied are different facts.
+    [InlineData(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Standard, "Network: clamped off by policy (ceiling Standard)")]
+    [InlineData(AgentAutonomyLevel.Confined, AgentAutonomyLevel.Confined, "Network: clamped off by policy (ceiling Confined)")]
+    public void DescribeNetwork_states_the_effective_posture_and_who_decided(AgentAutonomyLevel effective, AgentAutonomyLevel ceiling, string expected)
+    {
+        AgentAutonomyPolicy.DescribeNetwork(effective, ceiling).ShouldBe(expected,
+            customMessage: "the journal sentence is derived from the SAME Derive table the sandbox enforces — it must never claim a posture the runner does not have");
+    }
+
+    [Fact]
+    public void DescribeNetwork_never_says_on_for_a_tier_Derive_leaves_severed()
+    {
+        // The load-bearing invariant: the sentence is a projection of Derive, not a parallel table. Whichever tiers
+        // Derive grants network to are exactly the tiers that may read "on" — so adding a tier cannot desync them.
+        foreach (var tier in Enum.GetValues<AgentAutonomyLevel>())
+        {
+            var saysOn = AgentAutonomyPolicy.DescribeNetwork(tier, AgentAutonomyLevel.Unleashed).Contains("on (");
+
+            saysOn.ShouldBe(AgentAutonomyPolicy.Derive(tier).Network == AgentNetworkAccess.On, $"the '{tier}' sentence must agree with Derive('{tier}')");
+        }
+    }
 }

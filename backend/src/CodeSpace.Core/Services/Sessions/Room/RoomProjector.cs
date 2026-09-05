@@ -425,7 +425,46 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             RawError = deepError ?? error,
             RetrySteps = retrySteps,
             RespawnSteps = respawnSteps,
+            NetworkPosture = await NetworkPostureAsync(runId, teamId, cancellationToken).ConfigureAwait(false),
         };
+    }
+
+    /// <summary>
+    /// The run's effective network posture, read from the ONE column that records it — the launch-stamped route
+    /// provenance (<c>route_plan_jsonb</c>: the resolved tier plus the ceiling it was clamped to). A single narrow
+    /// column projection, never the frozen definition graph. Null (no row rendered) for a run with no route
+    /// provenance, or one staged before the launch stamped its resolved tier: an unknown posture is left UNSAID
+    /// rather than guessed as "off", since a wrong "off" is exactly the silent claim this row exists to end.
+    /// </summary>
+    private async Task<string?> NetworkPostureAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var json = await _db.WorkflowRun.AsNoTracking()
+            .Where(r => r.Id == runId && r.TeamId == teamId)
+            .Select(r => r.RoutePlanJson)
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (string.IsNullOrWhiteSpace(json)) return null;
+
+        var route = TryReadRoute(json);
+
+        if (route is null || route.EffectiveAutonomy.Length == 0) return null;
+
+        return AgentAutonomyPolicy.DescribeNetwork(
+            AgentAutonomyPolicy.Parse(route.EffectiveAutonomy, AgentAutonomyLevel.Standard),
+            AgentAutonomyPolicy.Parse(route.Caps.AutonomyCeiling, AgentAutonomyLevel.Unleashed));
+    }
+
+    /// <summary>Deserialize the stamped route provenance with the SAME web options <c>TaskRunSnapshotFactory</c> wrote it with; a malformed / legacy column degrades to null (the room drops one row, never fails a turn).</summary>
+    private static Messages.Tasks.RoutePlan? TryReadRoute(string json)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<Messages.Tasks.RoutePlan>(json, RouteJson);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -659,6 +698,9 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// <summary>A file is unique by repository + repo-relative path. AgentRunId remains on the selected identity so the click resolves the exact producing attempt.</summary>
     private static (Guid? RepositoryId, string? RepositoryAlias, string Path) FileKey(RoomFileIdentity file) =>
         (file.RepositoryId, file.RepositoryId is null ? file.RepositoryAlias : null, file.Path);
+
+    /// <summary>The web defaults <c>TaskRunSnapshotFactory</c> stamped <c>route_plan_jsonb</c> with — the read side must match the write side or every posture row silently disappears.</summary>
+    private static readonly JsonSerializerOptions RouteJson = new(JsonSerializerDefaults.Web);
 
     private const int MaxChangedFiles = 200;
     private const int MaxAgentFiles = 40;

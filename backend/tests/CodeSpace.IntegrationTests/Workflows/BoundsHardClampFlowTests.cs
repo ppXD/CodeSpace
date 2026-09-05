@@ -108,6 +108,84 @@ public class BoundsHardClampFlowTests
     }
 
     [Fact]
+    public async Task A_network_launch_on_a_permitting_route_reaches_the_runner_with_egress_allowed()
+    {
+        if (OperatingSystem.IsWindows()) return;   // the fake CLI is a /bin/sh script the runner spawns
+
+        using var cli = new SubtaskAwareFakeCli();
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        // B5: the operator explicitly asks for network on a STANDARD-effort launch, whose bounds preset caps autonomy
+        // at Trusted — the first tier AgentAutonomyPolicy.Derive grants Network.On. This is the choice the composer's
+        // "Network access: On" row now sends; before it, every launch was clamped to Standard and silently severed.
+        var request = NetworkRequest(teamId, userId, TaskEffortModes.Standard);
+
+        var result = await LaunchAsync(request);
+
+        await RunEngineAsync(result.RunId);
+        await jobClient.WaitForPendingAsync();
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == result.RunId);
+
+        // The standard tier fans out, so assert EVERY dispatched agent — one severed sibling is still a silent denial.
+        // (Only the agents are under test here; this fixture's fake CLI serves no structured LLM, so the run's own
+        // synth stage is out of scope — the agent tasks are already persisted by then.)
+        foreach (var task in await PersistedTasksAsync(db, result.RunId))
+        {
+            task.Autonomy.ShouldBe(AgentAutonomyLevel.Trusted, "the permitting route must let the operator's Trusted request through — clamping it here is what made the choice fake");
+            task.Permissions.Network.ShouldBe(AgentNetworkAccess.On,
+                customMessage: "the REAL persisted permissions the runner receives must carry network On — this is what SandboxSpec.AllowNetwork is built from (ClaudeCodeHarness/CodexHarness)");
+            task.Permissions.ShouldBe(AgentAutonomyPolicy.Derive(AgentAutonomyLevel.Trusted));
+        }
+
+        NetworkPostureOf(run.RoutePlanJson!).ShouldBe("Network: on (Trusted)",
+            customMessage: "the run's own provenance must SAY it had network — the Room reads this line, and an unstated posture is exactly the silence B5 removes");
+    }
+
+    [Fact]
+    public async Task The_same_network_launch_on_a_forbidding_route_is_clamped_off_and_the_run_says_so()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        using var cli = new SubtaskAwareFakeCli();
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        // The SAME request, routed QUICK — whose preset ceiling is Standard, a tier with no network. The clamp must
+        // deny it at the real permission set, and the run must record that it was DENIED rather than declined.
+        var result = await LaunchAsync(NetworkRequest(teamId, userId, TaskEffortModes.Quick));
+
+        await RunEngineAsync(result.RunId);
+        await jobClient.WaitForPendingAsync();
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == result.RunId);
+
+        foreach (var task in await PersistedTasksAsync(db, result.RunId))
+        {
+            task.Autonomy.ShouldBe(AgentAutonomyLevel.Standard, "the Quick preset's Standard ceiling clamps the Trusted request — asking cannot raise a ceiling");
+            task.Permissions.Network.ShouldBe(AgentNetworkAccess.Off, "a clamped run must reach the runner severed, whatever the launch asked for");
+        }
+
+        NetworkPostureOf(run.RoutePlanJson!).ShouldBe("Network: clamped off by policy (ceiling Standard)",
+            customMessage: "a DENIED network reads differently from one nobody asked for — the run's own record has to carry that distinction or the operator cannot tell why their install failed");
+    }
+
+    [Fact]
     public async Task A_standard_route_freezes_the_map_parallelism_cap_into_the_flow_map_config()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -130,6 +208,38 @@ public class BoundsHardClampFlowTests
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────
+
+    /// <summary>The B5 launch: an explicit <c>Trusted</c> (network) request on the given effort tier — identical apart from the tier, so the two network tests differ only in the ROUTE'S policy, never in what was asked.</summary>
+    private static TaskLaunchRequest NetworkRequest(Guid teamId, Guid userId, string effort) => new()
+    {
+        TeamId = teamId,
+        ActorUserId = userId,
+        SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+        TaskText = "Install the dependencies and push the branch",
+        RequestedEffort = effort,
+        Autonomy = "Trusted",
+        Overrides = new TaskExecutionOverrides { Harness = "codex-cli", RunnerKind = "local" },
+    };
+
+    /// <summary>EVERY REAL <see cref="AgentTask"/> the runner was handed for this run — the permissions the sandbox enforces, not the displayed config string. All of them, because a posture that held for one branch of a fan-out and not its siblings would still be a silently severed agent.</summary>
+    private static async Task<List<AgentTask>> PersistedTasksAsync(CodeSpaceDbContext db, Guid runId)
+    {
+        var rows = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).Select(r => r.TaskJson).ToListAsync();
+
+        rows.ShouldNotBeEmpty("the run must actually have dispatched an agent — an empty set would make every permission assertion below vacuously true");
+
+        return rows.Select(json => JsonSerializer.Deserialize<AgentTask>(json, AgentJson.Options)!).ToList();
+    }
+
+    /// <summary>The posture sentence the Room renders, read back off the run's OWN stamped route provenance (effective tier + the ceiling it was clamped to) — the same two fields <c>RoomProjector</c> reads.</summary>
+    private static string NetworkPostureOf(string routePlanJson)
+    {
+        var route = JsonSerializer.Deserialize<RoutePlan>(routePlanJson, new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+
+        return AgentAutonomyPolicy.DescribeNetwork(
+            AgentAutonomyPolicy.Parse(route.EffectiveAutonomy, AgentAutonomyLevel.Standard),
+            AgentAutonomyPolicy.Parse(route.Caps.AutonomyCeiling, AgentAutonomyLevel.Unleashed));
+    }
 
     private async Task<LaunchTaskResult> LaunchAsync(TaskLaunchRequest request)
     {

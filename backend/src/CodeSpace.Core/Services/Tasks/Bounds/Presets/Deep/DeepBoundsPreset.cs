@@ -15,6 +15,11 @@ namespace CodeSpace.Core.Services.Tasks.Bounds.Presets.Deep;
 /// (realized token spend), or the best-effort no-progress guard — NOT an arbitrary round or total-spawn count (those
 /// strangled real multi-subtask plans). The round / total-spawn ceilings survive ONLY as hidden runaway back-stops
 /// (their defaults in <c>SupervisorGoalPlan</c>), never a tuned tier knob.</para>
+///
+/// <para><b>Why the ceiling is Trusted.</b> Same reasoning as <c>StandardBoundsPreset</c>: the ceiling bounds what
+/// the operator may ASK for, and Trusted is the first tier <c>AgentAutonomyPolicy.Derive</c> gives
+/// <c>AgentNetworkAccess.On</c>. The default posture is untouched — every recipe recommends <c>Standard</c>, so a
+/// launch that does not ask for network still runs without it. Unleashed remains unreachable on every preset.</para>
 /// </summary>
 public sealed class DeepBoundsPreset : IBoundsPreset, ISingletonDependency
 {
@@ -23,7 +28,7 @@ public sealed class DeepBoundsPreset : IBoundsPreset, ISingletonDependency
     public RouteCaps ToCaps() => new()
     {
         MaxParallelism = 5,
-        AutonomyCeiling = "Standard",
+        AutonomyCeiling = "Trusted",
         RequiresApproval = false,
     };
 }

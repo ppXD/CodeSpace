@@ -29,6 +29,9 @@ export interface LaunchFormState {
    *  confirm card with a tier. Sent as `deliverableShape` so the explicit-tier path (which skips the classifier)
    *  keeps the shape instead of reverting to `code`. Undefined ⇒ omitted ⇒ the backend's own reading. */
   deliverableShape?: string;
+  /** The requested permission tier — ALSO the network choice, since network is not an independent axis: `Trusted`
+   *  is the one tier `AgentAutonomyPolicy.Derive` grants `Network.On`. One field, so the composer's Permissions row
+   *  and its Network row can never disagree about what the launch asks for. See {@link effectiveAutonomy}. */
   autonomy: string;
   model: string;
   modelCredentialId: string;
@@ -118,6 +121,24 @@ const tierExposesCaps = (effort: string) => effort === "deep" || effort === "aut
 const tierExposesBudget = (effort: string) => tierExposesCaps(effort) || effort === "standard";
 
 /**
+ * Which tiers can actually GRANT network access. `Trusted` is the lowest tier `AgentAutonomyPolicy.Derive` gives
+ * `AgentNetworkAccess.On`, and a launch only reaches it where the effort tier's bounds preset admits it: the
+ * Standard and Deep presets cap autonomy at `Trusted`, Quick at `Standard`. So Quick is severed by policy, and
+ * `auto` is out because the tier it resolves to isn't known here — offering a control whose answer the router
+ * might discard is the exact dishonesty this replaces.
+ */
+export const tierGrantsNetwork = (effort: string) => effort === "standard" || effort === "deep";
+
+/**
+ * The autonomy tier a launch actually SENDS. `Trusted` — the network-granting tier — falls back to `Standard` on a
+ * tier whose ceiling cannot grant it, because `TaskLaunchService.ClampAutonomy` would clamp it there anyway: the
+ * wire must carry the posture the operator can SEE, never a request the run silently drops. The composer hides the
+ * Network control off-tier, so this is what keeps a choice made on Deep from riding along after a switch to Fast.
+ */
+export const effectiveAutonomy = (autonomy: string, effort: string) =>
+  autonomy === "Trusted" && !tierGrantsNetwork(effort) ? "Standard" : autonomy;
+
+/**
  * Map the Launch-modal form state to the wire `LaunchTaskInput`. The single source of truth for what the
  * modal sends — extracted as a pure function so every field, the multi-repo split, and the caps gating are
  * exhaustively unit-tested. Optional fields are OMITTED (undefined) when the operator leaves a default, so
@@ -132,7 +153,7 @@ export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
     repositoryId: primary?.repositoryId || null,
     baseBranch: primary?.branch || null,
     effort: state.effort,
-    autonomy: state.autonomy,
+    autonomy: effectiveAutonomy(state.autonomy, state.effort),
     model: state.model || null,
     harness: state.harness || null,
     agentDefinitionId: state.agentDefinitionId || null,

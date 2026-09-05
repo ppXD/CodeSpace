@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 import type { RoutePlan, TaskSpecSuggestion, TaskSurfaceKind } from "@/api/tasks";
-import { buildLaunchInput, buildRoutePreviewInput, DEFAULT_ACCEPTANCE, type LaunchBooleanOverride, type LaunchFormState } from "@/lib/launchInput";
+import { buildLaunchInput, buildRoutePreviewInput, DEFAULT_ACCEPTANCE, effectiveAutonomy, tierGrantsNetwork, type LaunchBooleanOverride, type LaunchFormState } from "@/lib/launchInput";
 import { presetOf, QUALITY_PRESETS, type QualityTier } from "@/lib/qualityPresets";
 import { Combo, type Option } from "@/components/common/Combo";
 import { DecisionLadderDiagram, EvaluationPipelineDiagram, HelpTip, PlanCriticDiagram } from "@/components/tasks/LaunchHelp";
@@ -65,12 +65,19 @@ const PERMS = [
   { v: "Trusted", d: "workspace edits · network" },
   { v: "Unleashed", d: "controlled runner · high trust" },
 ];
-// Every bounds preset's autonomy ceiling is "Standard" today (TaskLaunchService.ClampAutonomy clamps down to it),
-// so a Trusted/Unleashed REQUEST is silently reduced to Standard on every launch — offering them as reachable
-// choices would be a lie. Same reasoning covers the Coordination "Autonomy ceiling" control: it can only TIGHTEN
-// the preset's ceiling (EffortRouter.TightenCeiling), never raise it, so picking Trusted/Unleashed there over an
-// already-Standard preset ceiling is inert too. PERMS (all four) survives only as the shared option-shape source.
-const REACHABLE_PERMS = PERMS.filter(p => p.v === "Confined" || p.v === "Standard");
+// Which of PERMS a launch on THIS tier can actually reach — the composer never offers a tier the backend would
+// silently reduce (TaskLaunchService.ClampAutonomy clamps every request to the effort preset's AutonomyCeiling).
+// Confined/Standard are reachable everywhere. Trusted — the only tier that grants network — is reachable exactly
+// where its preset admits it (Standard/Deep cap at Trusted; Quick at Standard). Unleashed is reachable nowhere:
+// no preset names it, so it stays an option-shape entry only.
+const reachablePerms = (effort: string) =>
+  PERMS.filter(p => p.v === "Confined" || p.v === "Standard" || (p.v === "Trusted" && tierGrantsNetwork(effort)));
+
+/** The Network row's two answers. "On" is stated with its real consequence, not a reassurance. */
+const NETWORK_OPTIONS: Option[] = [
+  { value: "off", label: "Off", desc: "The sandbox severs egress: no package installs, no pushes, no API calls" },
+  { value: "on", label: "On", desc: "Agents may reach the internet; pushes and package installs work; egress is not sandboxed beyond team policy" },
+];
 
 /**
  * The one generic "Launch a task" composer — a minimal Copilot/Gemini-style box: a task input with the
@@ -106,6 +113,19 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   // Per-row tier honesty (the Coordination tab's lt3-cdisabled pattern, at row grain — these two tabs mix tiers):
   // an off-tier control renders as a muted read-only row instead of an armed switch the wire would silently drop.
   const planCapable = effort !== "quick";   // every tier that authors a plan can park on it + critique it
+
+  // Network is NOT an independent axis: `Trusted` IS "workspace edits + network" (AgentAutonomyPolicy.Derive), so
+  // the Permissions row and the Network row read and write ONE value and can never disagree. Shown EFFECTIVE, never
+  // raw — a Trusted pick made on Deep has to visibly fall back to Standard when the tier changes to Fast, because
+  // that is what the wire does too (buildLaunchInput), and the composer must show what actually launches.
+  const autonomyShown = effectiveAutonomy(autonomy, effort);
+  const networkOn = autonomyShown === "Trusted";
+  // The one honest consequence line — the same posture sentence the run's journal will carry, said BEFORE launching.
+  const networkPosture = !tierGrantsNetwork(effort)
+    ? "Network: off — this tier's ceiling is Standard, which has no network. Switch Effort to Standard or Deep to choose."
+    : networkOn
+      ? "Network: on (Trusted) — agents may reach the internet; pushes and package installs work; egress is not sandboxed beyond team policy."
+      : "Network: off (Standard) — the sandbox severs egress: no package installs, no pushes, no API calls.";
 
   // TIER-AWARE Gate copy: the same "Plan critic = Gate" is a SOFT annotate-for-the-human on Standard (concerns land
   // as risks on the plan / confirm card, the plan is never discarded) but the HARD decision ladder on Deep (a flagged
@@ -224,7 +244,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   // ONE snapshot of the form, shared by the launch and the route preview. Two snapshots would let the preview
   // predict a launch that differs from the one the button sends — the whole point of previewing.
   const formState: LaunchFormState = {
-    taskText, surface, sessionId, workspace, effort, autonomy, model, modelCredentialId, modelCredentialModelId, harness, agentDefinitionId, runnerKind,
+    taskText, surface, sessionId, workspace, effort, autonomy: autonomyShown, model, modelCredentialId, modelCredentialModelId, harness, agentDefinitionId, runnerKind,
     // Only while the confirmed shape still belongs to the text on screen — editing the task after confirming makes
     // the echo stale, and a stale shape is worse than none (it would project the OLD task's shape onto a new one).
     deliverableShape: confirmedShape?.text === taskText.trim() ? confirmedShape.shape : undefined,
@@ -400,15 +420,15 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
 
             <div className="lt3-anchor">
               <button className="lt3-pill" title="Permission" onClick={() => setMenu(m => m === "perm" ? null : "perm")}>
-                <Ic.Lock size={16} /><span>{autonomy}</span><Ic.ChevronDown size={14} />
+                <Ic.Lock size={16} /><span>{autonomyShown}</span><Ic.ChevronDown size={14} />
               </button>
               {menu === "perm" && (
                 <Pop align="left">
                   <div className="lt3-pop-t">Permission</div>
-                  {REACHABLE_PERMS.map(p => (
-                    <button key={p.v} className="lt3-opt" data-on={autonomy === p.v} onClick={() => { setAutonomy(p.v); closeMenu(); }}>
+                  {reachablePerms(effort).map(p => (
+                    <button key={p.v} className="lt3-opt" data-on={autonomyShown === p.v} onClick={() => { setAutonomy(p.v); closeMenu(); }}>
                       <span className="lt3-opt-m"><span className="lt3-opt-t">{p.v}</span><span className="lt3-opt-d">{p.d}</span></span>
-                      {autonomy === p.v && <Ic.Check size={14} />}
+                      {autonomyShown === p.v && <Ic.Check size={14} />}
                     </button>
                   ))}
                 </Pop>
@@ -604,8 +624,8 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
                   </div>
                   <div className="lt3-poolhint">The run keeps working the plan until it's done — bounded by this concurrency and the Budget, not a fixed round or agent count.</div>
                 </RowPop>
-                <Combo label="Autonomy ceiling" value={cfg.autonomyCeiling} options={[{ value: "", label: "Inherit" }, ...REACHABLE_PERMS.map(p => ({ value: p.v, label: p.v }))]} onChange={v => setC({ autonomyCeiling: v })} />
-                <div className="lt3-poolhint">Trusted and Unleashed aren't offered here either — this ceiling can only TIGHTEN the preset's own Standard ceiling, never raise it, so they would be inert picks (backend policy).</div>
+                <Combo label="Autonomy ceiling" value={cfg.autonomyCeiling} options={[{ value: "", label: "Inherit" }, ...reachablePerms(effort).map(p => ({ value: p.v, label: p.v }))]} onChange={v => setC({ autonomyCeiling: v })} />
+                <div className="lt3-poolhint">A cap on what the run's agents may reach, applied on top of the tier's own ceiling. It can only TIGHTEN it (EffortRouter.TightenCeiling), so setting Standard here forbids network even when the Permissions tab asked for it. Unleashed isn't offered — no preset reaches it.</div>
                 <Combo label="Integrate branches" value={cfg.integrateBranches} options={BOOLEAN_OVERRIDE_OPTIONS} onChange={v => setC({ integrateBranches: v as LaunchBooleanOverride })} />
                 <div className="lt3-hrow">
                   <Combo label="Decision critic" value={cfg.decisionReview} options={[
@@ -624,8 +644,11 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
 
               {customizeTab === "safety" && <>
                 <div className="lt3-cnote">What agents can do alone, and when they must ask.</div>
-                <Combo label="Permissions" value={autonomy} options={REACHABLE_PERMS.map(p => ({ value: p.v, label: p.v, desc: p.d }))} onChange={setAutonomy} />
-                <div className="lt3-poolhint">Trusted and Unleashed aren't reachable from Launch yet — every preset's autonomy ceiling clamps a request down to Standard (backend policy).</div>
+                <Combo label="Permissions" value={autonomyShown} options={reachablePerms(effort).map(p => ({ value: p.v, label: p.v, desc: p.d }))} onChange={setAutonomy} />
+                {tierGrantsNetwork(effort)
+                  ? <Combo label="Network access" value={networkOn ? "on" : "off"} options={NETWORK_OPTIONS} onChange={v => setAutonomy(v === "on" ? "Trusted" : "Standard")} />
+                  : <TierRow label="Network access" tier="Off — only Standard and Deep can grant it" />}
+                <div className="lt3-poolhint" data-testid="network-posture">{networkPosture}</div>
                 <SToggleRow label="Ask when uncertain" on locked />
                 <SToggleRow label="Approve irreversible actions" on locked />
                 <SToggleRow label="Stop before merge / push" on locked />

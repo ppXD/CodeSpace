@@ -69,6 +69,9 @@ public sealed record RoomTurnFacts
     /// <summary>The raw engine error, surfaced behind "Show raw error" on a failure diagnostic. Null when there's nothing rawer than the humanized text.</summary>
     public string? RawError { get; init; }
 
+    /// <summary>The run's EFFECTIVE network posture as one line (<c>AgentAutonomyPolicy.DescribeNetwork</c>) — whether these agents had the internet, and whether that was the launcher's choice or the route's ceiling. Null when the run carries no route provenance to say it from (an authored workflow run, or a task run staged before the launch stamped its resolved tier) — never guessed.</summary>
+    public string? NetworkPosture { get; init; }
+
     /// <summary>The supervisor's RETRY beats in tape order — one per retry decision ("Supervisor retried a subtask"). The narrative renders each as a step so the room shows the recovery flow, not just the surviving agents. Empty when the turn had no retries.</summary>
     public IReadOnlyList<RoomRetryStep> RetrySteps { get; init; } = Array.Empty<RoomRetryStep>();
 

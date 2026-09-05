@@ -164,7 +164,7 @@ public class EffortRouterTests
         // A looser override ceiling (Unleashed) on a Standard route must NOT raise the ceiling — the privilege
         // bound stays un-bypassable; a stricter override (Confined) lowers it.
         var loosen = await Router().RouteAsync(Request("x", requestedEffort: TaskEffortModes.Standard, capsOverride: new RouteCaps { AutonomyCeiling = "Unleashed" }), CancellationToken.None);
-        loosen.Caps.AutonomyCeiling.ShouldBe("Standard", "an override can never RAISE the autonomy ceiling above the preset");
+        loosen.Caps.AutonomyCeiling.ShouldBe("Trusted", "an override can never RAISE the autonomy ceiling above the preset — it stops at Standard's own Trusted, never Unleashed");
 
         var tighten = await Router().RouteAsync(Request("x", requestedEffort: TaskEffortModes.Standard, capsOverride: new RouteCaps { AutonomyCeiling = "Confined" }), CancellationToken.None);
         tighten.Caps.AutonomyCeiling.ShouldBe("Confined", "an override may LOWER the ceiling to a stricter tier");
