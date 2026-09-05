@@ -44,8 +44,13 @@ public class TaskLaunchServiceClampTests
     [InlineData("Standard", "Standard", "Standard")]
     // Case-insensitive parse (mirrors agent.run's ReadAutonomyLevel).
     [InlineData("unleashed", "standard", "Standard")]
-    // No ceiling declared (blank) ⇒ the top tier ⇒ no-op ⇒ the request passes through.
-    [InlineData("Trusted", "", "Trusted")]
+    // No ceiling declared (blank) ⇒ FAIL-CLOSED to Standard, the safe floor — not the top tier. A RoutePlan whose
+    // caps nobody filled in (RouteCaps.AutonomyCeiling defaults to "", which EffortRouter yields whenever no bounds
+    // preset resolves) must not be the one route on which a caller can ask for network and get it.
+    [InlineData("Trusted", "", "Standard")]
+    [InlineData("Unleashed", "", "Standard")]
+    // …and a request at or below that floor is untouched, so the fail-closed default never over-tightens.
+    [InlineData("Confined", "", "Confined")]
     public void BuildAgentProfile_clamps_requested_autonomy_to_the_route_ceiling(string requested, string ceiling, string expected)
     {
         var profile = TaskLaunchService.BuildAgentProfile(Request(requested), Seed, Route(ceiling));
@@ -87,11 +92,11 @@ public class TaskLaunchServiceClampTests
     [Theory]
     // Policy ALLOWS network (the Standard / Deep presets' Trusted ceiling): the choice is the launcher's.
     [InlineData("Trusted",  "Trusted",  "Trusted",  AgentNetworkAccess.On,  "Network: on (Trusted)")]
-    [InlineData("Standard", "Trusted",  "Standard", AgentNetworkAccess.Off, "Network: off (Standard)")]
+    [InlineData("Standard", "Trusted",  "Standard", AgentNetworkAccess.Off, "Network: off (Standard)" + AgentAutonomyPolicy.ConfinementCaveat)]
     // Policy FORBIDS network (the Quick preset's Standard ceiling, or any operator-tightened ceiling): asking
     // changes nothing, and the run says so in different words than a launcher who simply did not ask.
-    [InlineData("Trusted",  "Standard", "Standard", AgentNetworkAccess.Off, "Network: clamped off by policy (ceiling Standard)")]
-    [InlineData("Standard", "Standard", "Standard", AgentNetworkAccess.Off, "Network: clamped off by policy (ceiling Standard)")]
+    [InlineData("Trusted",  "Standard", "Standard", AgentNetworkAccess.Off, "Network: clamped off by policy (ceiling Standard)" + AgentAutonomyPolicy.ConfinementCaveat)]
+    [InlineData("Standard", "Standard", "Standard", AgentNetworkAccess.Off, "Network: clamped off by policy (ceiling Standard)" + AgentAutonomyPolicy.ConfinementCaveat)]
     public void BuildAgentProfile_resolves_the_network_choice_against_the_route_ceiling(string requested, string ceiling, string expectedTier, AgentNetworkAccess expectedNetwork, string expectedLine)
     {
         var profile = TaskLaunchService.BuildAgentProfile(Request(requested), Seed, Route(ceiling));

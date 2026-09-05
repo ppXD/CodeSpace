@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Tasks.Bounds;
 using CodeSpace.Core.Services.Tasks.Bounds.Presets.Deep;
 using CodeSpace.Core.Services.Tasks.Bounds.Presets.Quick;
 using CodeSpace.Core.Services.Tasks.Bounds.Presets.Standard;
@@ -47,9 +48,23 @@ public class BoundsPresetCeilingTests
     public void No_preset_ever_reaches_Unleashed()
     {
         // The one bound that survives the Trusted raise: Unleashed (AgentToolGate's "Allow without approval" tier)
-        // is unreachable from ANY launch, on every preset. A new preset that names it must fail here first.
-        string[] ceilings = [new QuickBoundsPreset().ToCaps().AutonomyCeiling, new StandardBoundsPreset().ToCaps().AutonomyCeiling, new DeepBoundsPreset().ToCaps().AutonomyCeiling];
+        // is unreachable from ANY launch, on every preset. ENUMERATED off the registry, never listed by hand: a
+        // preset arrives by dropping a self-registering folder (Rule 18.3), so a hardcoded trio would silently
+        // stop covering the very preset a reviewer most needs it to catch.
+        var registry = new BoundsPresetRegistry(DiscoverPresets());
 
-        ceilings.ShouldNotContain("Unleashed", "no effort tier may hand a launch the unapproved-side-effect tier");
+        registry.All.ShouldNotBeEmpty("the discovery below found no IBoundsPreset — this test would then prove nothing");
+
+        foreach (var preset in registry.All)
+        {
+            preset.ToCaps().AutonomyCeiling.ShouldNotBe("Unleashed",
+                customMessage: $"the '{preset.PresetKind}' preset hands a launch the unapproved-side-effect tier — no effort tier may");
+        }
     }
+
+    /// <summary>Every concrete <see cref="IBoundsPreset"/> Core ships, instantiated the way DI does (parameterless, one per impl) — so the enumeration above tracks the Presets folder rather than this file.</summary>
+    private static IEnumerable<IBoundsPreset> DiscoverPresets() =>
+        typeof(IBoundsPreset).Assembly.GetTypes()
+            .Where(t => t is { IsClass: true, IsAbstract: false } && typeof(IBoundsPreset).IsAssignableFrom(t))
+            .Select(t => (IBoundsPreset)Activator.CreateInstance(t)!);
 }
