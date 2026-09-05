@@ -333,17 +333,20 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
 
     /// <summary>
     /// The SINGLE choke point that pins the run's autonomy: clamp the operator's requested tier down to the route's
-    /// <see cref="RouteCaps.AutonomyCeiling"/>, and stamp the CLAMPED tier string. A blank / unrecognised request
-    /// folds to the route's recipe/effort default (NOT Unleashed); a blank / unrecognised ceiling means "no ceiling"
-    /// (the top tier, so the clamp is a no-op and the requested tier passes through). The clamped string is what
-    /// flows through projection → the agent.run node config → <c>AgentAutonomyPolicy.Derive</c> → the sandbox
-    /// runner, so a Quick/Standard route can never run Trusted/Unleashed however the caller asks.
+    /// <see cref="RouteCaps.AutonomyCeiling"/>, and stamp the CLAMPED tier string. BOTH sides fail closed: a blank /
+    /// unrecognised request folds to the route's recipe/effort default (NOT Unleashed), and a blank / unrecognised
+    /// CEILING folds to <see cref="AgentAutonomyLevel.Standard"/> — the highest tier that grants no network. It used
+    /// to mean "no ceiling" (the top tier), which made the one route nobody bounded the one route on which a caller
+    /// could ask for network and get it: <see cref="RouteCaps.AutonomyCeiling"/> defaults to blank, and that is what
+    /// <c>EffortRouter</c> yields whenever no bounds preset resolves. The clamped string is what flows through
+    /// projection → the agent.run node config → <c>AgentAutonomyPolicy.Derive</c> → the sandbox runner, so a
+    /// Quick/Standard route — or an unbounded one — can never run Trusted/Unleashed however the caller asks.
     /// </summary>
     private static string ClampAutonomy(TaskLaunchRequest request, RoutePlan route)
     {
         var requested = AgentAutonomyPolicy.Parse(request.Autonomy, AgentAutonomyPolicy.Parse(route.RecommendedAutonomy, AgentAutonomyLevel.Standard));
 
-        var ceiling = AgentAutonomyPolicy.Parse(route.Caps.AutonomyCeiling, AgentAutonomyLevel.Unleashed);
+        var ceiling = AgentAutonomyPolicy.Parse(route.Caps.AutonomyCeiling, AgentAutonomyLevel.Standard);
 
         return AgentAutonomyPolicy.Clamp(requested, ceiling).ToString();
     }
