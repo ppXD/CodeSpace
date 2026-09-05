@@ -140,6 +140,16 @@ public static class SupervisorTrajectoryEnvironments
 
     private sealed class ConflictThenResolveEnvironment : ISupervisorTrajectoryEnvironment
     {
+        /// <summary>
+        /// The arc's honest minimum is short (plan→spawn→merge→resolve→stop), but its honest MAXIMUM is not: a brain
+        /// that walks a dependency chain SERIALLY spends a turn per planned unit before it can attempt the
+        /// integration, and the conflict then costs a resolve and a re-merge on top. Run 33931943478's conflict lane
+        /// did exactly that, earned a CLEAN merge on turn 8, and had no turn left to say stop — scored "never
+        /// stopped", which measured the budget rather than the brain, on an arc that had passed the run before. Ten
+        /// leaves it the same slack the persistent-conflict sibling gets for its own longest path.
+        /// </summary>
+        public int MaxTurns => 10;
+
         public SupervisorPriorDecision Fold(SupervisorDecision d, long seq, IReadOnlyList<SupervisorPriorDecision> priors) => d.Kind switch
         {
             var k when k == SupervisorDecisionKinds.Plan => TrajectoryOutcomes.Plan(d, seq),
@@ -407,32 +417,44 @@ internal static class TrajectoryOutcomes
     public static int CountRetries(IReadOnlyList<SupervisorPriorDecision> priors) =>
         priors.Count(p => p.DecisionKind == SupervisorDecisionKinds.Retry);
 
-    /// <summary>Terminal spawn dispatches on the tape — the failure envs treat the SECOND-and-later spawn as an active recovery re-dispatch (production-faithful: a fresh attempt can succeed).</summary>
+    /// <summary>
+    /// Spawns that actually DISPATCHED work — the failure envs treat the SECOND-and-later such spawn as an active
+    /// recovery re-dispatch (production-faithful: a fresh attempt can succeed).
+    ///
+    /// <para>Counting every prior tagged <c>spawn</c> instead let a REFUSED one spend the arc's failure slot: run
+    /// 33931943478's live model opened with a schema-valid <c>spawn</c> carrying no spawn object, production staged
+    /// ZERO agents for it, and the injection then skipped the real spawn that followed — so nothing on the tape ever
+    /// failed and the multi-failure arc could not be completed by any move. A spawn that dispatched no agent is not
+    /// an attempt at the work, which is exactly what production's refusal says.</para>
+    /// </summary>
     public static int CountSpawns(IReadOnlyList<SupervisorPriorDecision> priors) =>
-        priors.Count(p => p.DecisionKind == SupervisorDecisionKinds.Spawn);
+        priors.Count(p => p.DecisionKind == SupervisorDecisionKinds.Spawn && SupervisorOutcome.ReadSpawnSubtaskIds(p.PayloadJson).Count > 0);
 
     /// <summary>
-    /// Whether every unit a staging decision left NOT succeeded was later RE-DISPATCHED BY NAME, and none is still
-    /// outstanding. Counting re-dispatches instead (a bare "a second spawn happened") would let a brain re-spawn the
-    /// unit that ALREADY succeeded and ship on a failure nobody touched — the bar has to read the TARGET, not the
-    /// tally. Walks the tape in order because a unit can be owed, recovered, and owed again.
+    /// Whether NO unit a staging decision left NOT succeeded is still outstanding. Counting re-dispatches instead (a
+    /// bare "a second spawn happened") would let a brain re-spawn the unit that ALREADY succeeded and ship on a
+    /// failure nobody touched — the bar has to read the TARGET, not the tally, which is what the owed set does: a
+    /// unit only leaves it when a later decision NAMES it and grades it succeeded. Walks the tape in order because a
+    /// unit can be owed, recovered, and owed again.
+    ///
+    /// <para>An extra <c>recovered</c> flag, flipped only by a re-dispatch overlapping something owed, used to gate
+    /// this as well — so a tape on which nothing was EVER owed read as unrecovered, VACUOUSLY. That is the second
+    /// half of run 33931943478's multi-failure turn-cap loop: once a refused spawn had spent the failure slot
+    /// (see <see cref="CountSpawns"/>) every merge came back Incomplete and no action could open the gate.</para>
     /// </summary>
     public static bool HasRecoveredEveryFailedUnit(IReadOnlyList<SupervisorPriorDecision> priors)
     {
         var owed = new HashSet<string>(StringComparer.Ordinal);
-        var recovered = false;
 
         foreach (var d in priors.Where(p => p.DecisionKind == SupervisorDecisionKinds.Spawn || p.DecisionKind == SupervisorDecisionKinds.Retry))
         {
             var attempted = AttemptedSubtaskIds(d);
 
-            if (owed.Overlaps(attempted)) recovered = true;
-
             owed.ExceptWith(attempted);
             owed.UnionWith(FailedSubtaskIds(d, attempted));
         }
 
-        return recovered && owed.Count == 0;
+        return owed.Count == 0;
     }
 
     /// <summary>The units a staging decision dispatched, read off the payload the SAME way the folds read it — so what "was attempted" can never disagree with what was graded.</summary>

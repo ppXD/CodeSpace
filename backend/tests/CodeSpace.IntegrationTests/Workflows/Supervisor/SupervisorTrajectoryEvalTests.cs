@@ -493,13 +493,15 @@ public sealed class SupervisorTrajectoryEvalTests
     // ── Turn budgets: a cap below an arc's honest minimum measures the budget, not the brain ────────────────
 
     /// <summary>
-    /// Every arc gets the default cap except persistent-conflict, whose second reconciliation costs two extra turns.
-    /// Pinned per environment because the numbers are load-bearing: under a flat 8 both blessed attempts of run
-    /// 33754366815 earned a CLEAN merge on that arc and were then scored "never stopped" for running out of turns.
+    /// Every arc gets the default cap except the two whose recovery costs extra turns — persistent-conflict's second
+    /// reconciliation, and conflict's serial staging. Pinned per environment because the numbers are load-bearing:
+    /// under a flat 8 both blessed attempts of run 33754366815 earned a CLEAN merge on the persistent-conflict arc,
+    /// and run 33931943478's conflict lane earned one on turn 8, and all of them were then scored "never stopped"
+    /// for running out of turns.
     /// </summary>
     [Theory]
     [InlineData("happy", SupervisorTrajectory.DefaultMaxTurns)]
-    [InlineData("conflict", SupervisorTrajectory.DefaultMaxTurns)]
+    [InlineData("conflict", 10)]
     [InlineData("failure", SupervisorTrajectory.DefaultMaxTurns)]
     [InlineData("multi-failure", SupervisorTrajectory.DefaultMaxTurns)]
     [InlineData("persistent-conflict", 10)]
@@ -525,6 +527,27 @@ public sealed class SupervisorTrajectoryEvalTests
 
         var (ok, note) = SupervisorTrajectoryScore.Score(result);
         ok.ShouldBeTrue($"re-resolving to a VERIFIED reconciliation, re-merging it clean and stopping is a sound recovery ({note})");
+    }
+
+    /// <summary>
+    /// The conflict arc's longest honest path is the SERIAL one: a brain that walks a dependency chain a unit per
+    /// turn spends four turns staging before it can even attempt the integration, and the conflict then costs a
+    /// resolve and a re-merge — nine turns, one past the flat default. Run 33931943478's conflict lane earned a
+    /// CLEAN merge on turn 8 exactly this way and had no turn left to say stop; it was scored "never stopped", which
+    /// measured the budget rather than the brain, on the same arc that passed the run before.
+    /// </summary>
+    [Fact]
+    public async Task The_conflict_budget_clears_its_longest_honest_path()
+    {
+        var environment = SupervisorTrajectoryEnvironments.ConflictThenResolve;
+
+        var result = await SupervisorTrajectory.RunAsync(new SerialConflictResolvingDecider(), environment, environment.MaxTurns, CancellationToken.None);
+
+        result.ReachedStop.ShouldBeTrue("staging a dependency chain serially and then reconciling the conflict is an honest path, and the cap must leave room to say stop at the end of it");
+        result.Kinds.Count.ShouldBe(9);
+
+        var (ok, note) = SupervisorTrajectoryScore.Score(result);
+        ok.ShouldBeTrue($"four distinct units staged one per turn, the conflict resolved and re-merged clean, then stopped ({note})");
     }
 
     /// <summary>The environment a real-model scenario name selects — the SAME mapping the live flow test uses, so a budget pinned here is the budget that lane runs under.</summary>
@@ -593,6 +616,52 @@ public sealed class SupervisorTrajectoryEvalTests
         var (ok, note) = SupervisorTrajectoryScore.Score(result);
         ok.ShouldBeFalse("re-spawning a unit that already succeeded recovers nothing — the failure is still unintegrated");
         note.ShouldContain("WITHOUT shipping");
+    }
+
+    /// <summary>
+    /// A REFUSED spawn must not spend the arc's failure slot. The injection fires only while no spawn has happened
+    /// yet, and the counter it asked counted EVERY prior spawn — including one production refused for naming no
+    /// unit. So the malformed turn-1 spawn of run 33931943478 burned the slot, the real spawn came back all-green,
+    /// nothing was ever owed, and the merge gate (which reads as unrecovered on a tape that owed nothing) held shut
+    /// forever: both attempts of the multi-failure lane ran plan→spawn→spawn→merge→merge→merge into the turn cap.
+    /// A spawn that dispatched ZERO agents is not an attempt at the work, and the arc must still get to fail.
+    /// </summary>
+    [Fact]
+    public async Task A_refused_first_spawn_does_not_spend_the_arcs_failure_slot()
+    {
+        var environment = SupervisorTrajectoryEnvironments.MultiFailureThenRetry;
+
+        var result = await SupervisorTrajectory.RunAsync(new RefusedThenRecoveringDecider(), environment, environment.MaxTurns, CancellationToken.None);
+
+        result.Kinds.ShouldBe(new[]
+        {
+            SupervisorDecisionKinds.Plan, SupervisorDecisionKinds.Spawn, SupervisorDecisionKinds.Spawn,
+            SupervisorDecisionKinds.Retry, SupervisorDecisionKinds.Retry, SupervisorDecisionKinds.Merge, SupervisorDecisionKinds.Stop,
+        }, "the REAL spawn — the first one that dispatched anything — must be the one that carries the double failure, so the brain has something to recover");
+
+        var (ok, note) = SupervisorTrajectoryScore.Score(result);
+        ok.ShouldBeTrue($"recovering both injected failures by name and merging clean is a sound arc, and a refused spawn before it changes nothing ({note})");
+    }
+
+    /// <summary>
+    /// A tape that never OWED a unit must not read as unrecovered. The gate returned <c>recovered &amp;&amp; owed.Count == 0</c>
+    /// with <c>recovered</c> flipped only by a re-dispatch overlapping something owed, so a run where nothing ever
+    /// failed was VACUOUSLY false — every merge behind it came back Incomplete no matter what the brain did. That is
+    /// the second half of run 33931943478's turn-cap loop: once the refused spawn had eaten the failure injection,
+    /// no action existed that could open the merge.
+    /// </summary>
+    [Fact]
+    public void A_merge_behind_a_wave_that_owed_nothing_integrates_instead_of_reading_as_unrecovered()
+    {
+        var environment = SupervisorTrajectoryEnvironments.MultiFailureThenRetry;
+        var spawn = new SupervisorDecision { Kind = SupervisorDecisionKinds.Spawn, PayloadJson = ScriptedPayload(SupervisorDecisionKinds.Spawn) };
+        var allGreen = TrajectoryOutcomes.AllSucceeded(spawn, seq: 1);
+
+        TrajectoryOutcomes.HasRecoveredEveryFailedUnit(new[] { allGreen }).ShouldBeTrue("no unit was ever owed, so none is outstanding — reading that as 'never recovered' is a gate no action can open");
+
+        var merge = environment.Fold(new SupervisorDecision { Kind = SupervisorDecisionKinds.Merge, PayloadJson = "{}" }, 2, new[] { allGreen });
+
+        SupervisorOutcome.ReadIntegration(merge.OutcomeJson)!.IntegratedBranch.ShouldNotBeNullOrEmpty("a merge over a wave that failed nothing has a real head to integrate");
     }
 
     /// <summary>The agent statuses a folded outcome carries, read by the SAME production reader the decider's context is rendered from.</summary>
@@ -974,6 +1043,74 @@ public sealed class SupervisorTrajectoryEvalTests
             var payload = kind == SupervisorDecisionKinds.Spawn && spawns == 1 ? """{"subtaskIds":["s1"]}""" : ScriptedPayload(kind);
 
             return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = payload });
+        }
+    }
+
+    /// <summary>The SERIAL walk through the conflict arc: plan four units, stage them one per turn, merge (conflicted), resolve, re-merge clean, stop — nine turns, the arc's longest honest path.</summary>
+    private sealed class SerialConflictResolvingDecider : ISupervisorDecider
+    {
+        private static readonly string[] Units = { "u1", "u2", "u3", "u4" };
+
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+        {
+            var kinds = context.PriorDecisions.Select(d => d.DecisionKind).ToList();
+            var staged = kinds.Count(k => k == SupervisorDecisionKinds.Spawn);
+            var merges = kinds.Count(k => k == SupervisorDecisionKinds.Merge);
+
+            var (kind, payload) =
+                !kinds.Contains(SupervisorDecisionKinds.Plan) ? (SupervisorDecisionKinds.Plan, $$"""{"subtasks":[{{string.Join(",", Units.Select(u => $$"""{"id":"{{u}}","title":"{{u}}","instruction":"do {{u}}"}"""))}}]}""")
+                : staged < Units.Length ? (SupervisorDecisionKinds.Spawn, $$"""{"subtaskIds":["{{Units[staged]}}"]}""")
+                : merges == 0 ? (SupervisorDecisionKinds.Merge, "{}")
+                : !kinds.Contains(SupervisorDecisionKinds.Resolve) ? (SupervisorDecisionKinds.Resolve, "{}")
+                : merges < 2 ? (SupervisorDecisionKinds.Merge, "{}")
+                : (SupervisorDecisionKinds.Stop, """{"outcome":"completed"}""");
+
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = payload });
+        }
+    }
+
+    /// <summary>
+    /// The live multi-failure shape of run 33931943478: the first spawn is REFUSED — the model emitted kind "spawn"
+    /// with no spawn object at all, which is schema-valid and so reaches the executor, which names no unit and
+    /// stages nothing — and the brain then spawns properly and RETRIES BY NAME whatever that wave left failed,
+    /// merging until the integration comes back clean. Deliberately ledger-aware: a decider that retried on a fixed
+    /// schedule would open the merge gate on its retry TALLY and never notice whether the failure was injected.
+    /// </summary>
+    private sealed class RefusedThenRecoveringDecider : ISupervisorDecider
+    {
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+        {
+            var priors = context.PriorDecisions;
+            var kinds = priors.Select(d => d.DecisionKind).ToList();
+            var spawns = kinds.Count(k => k == SupervisorDecisionKinds.Spawn);
+            var owed = UnitsStillOwed(priors);
+            var integrated = priors.Any(d => d.DecisionKind == SupervisorDecisionKinds.Merge && SupervisorOutcome.ReadIntegration(d.OutcomeJson) is { IntegratedBranch: { Length: > 0 } });
+
+            var (kind, payload) =
+                !kinds.Contains(SupervisorDecisionKinds.Plan) ? (SupervisorDecisionKinds.Plan, """{"subtasks":[{"id":"s1","title":"s1","instruction":"do s1"},{"id":"s2","title":"s2","instruction":"do s2"}]}""")
+                : spawns == 0 ? (SupervisorDecisionKinds.Spawn, "{}")
+                : spawns == 1 ? (SupervisorDecisionKinds.Spawn, ScriptedPayload(SupervisorDecisionKinds.Spawn))
+                : owed.Count > 0 ? (SupervisorDecisionKinds.Retry, $$"""{"subtaskId":"{{owed[0]}}"}""")
+                : !integrated ? (SupervisorDecisionKinds.Merge, "{}")
+                : (SupervisorDecisionKinds.Stop, """{"outcome":"completed"}""");
+
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = payload });
+        }
+
+        /// <summary>The units a spawn wave graded as NOT succeeded and no retry has since re-run — the brain's own read of what it still owes.</summary>
+        private static IReadOnlyList<string> UnitsStillOwed(IReadOnlyList<SupervisorPriorDecision> priors)
+        {
+            var retried = priors.Where(d => d.DecisionKind == SupervisorDecisionKinds.Retry).Select(d => SupervisorOutcome.ReadRetrySubtaskId(d.PayloadJson) ?? "").ToHashSet(StringComparer.Ordinal);
+
+            return priors.Where(d => d.DecisionKind == SupervisorDecisionKinds.Spawn).SelectMany(FailedUnitsOf).Where(u => !retried.Contains(u)).Distinct(StringComparer.Ordinal).ToList();
+        }
+
+        /// <summary>The units one spawn left failed — its folded results are positional with the ids it named, exactly as every fold builds them.</summary>
+        private static IEnumerable<string> FailedUnitsOf(SupervisorPriorDecision spawn)
+        {
+            var results = SupervisorOutcome.ReadAgentResults(spawn.OutcomeJson);
+
+            return SupervisorOutcome.ReadSpawnSubtaskIds(spawn.PayloadJson).Where((_, i) => i < results.Count && results[i].Status != "Succeeded");
         }
     }
 
