@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using CodeSpace.IntegrationTests.Workflows.Supervisor;
 using CodeSpace.Messages.Agents;
 using Shouldly;
@@ -21,6 +22,17 @@ namespace CodeSpace.E2ETests.Workflows;
 [Trait("Surface", "Engine")]
 public sealed class RealModelLaneBoundsTests
 {
+    [Fact]
+    public void The_two_lane_caps_are_pinned()
+    {
+        // Rule 8: the relational asserts below say a cap must SIT below two other numbers — they stay green if both
+        // caps are quietly halved, or if one is raised to 599s and left a single second inside the attempt deadline it
+        // is supposed to have orders of magnitude of headroom against. Pin the literals so a re-tune is a deliberate,
+        // reviewed edit of THIS line rather than an invisible drift of a value the lane's behaviour rests on.
+        RealModelSupervisorWholeLoopE2ETests.FakeAgentTimeoutSeconds.ShouldBe(300);
+        RealModelSupervisorWholeLoopE2ETests.RealAgentTimeoutSeconds.ShouldBe(480);
+    }
+
     [Fact]
     public void The_lane_caps_its_spawned_agents_far_below_the_production_default()
     {
@@ -68,16 +80,45 @@ public sealed class RealModelLaneBoundsTests
     }
 
     [Fact]
-    public void The_lanes_supervisor_config_is_actually_built_from_that_fragment()
+    public void Every_real_model_arm_that_authors_an_agent_profile_builds_it_from_that_fragment()
     {
         // The half the assertion above cannot see: C# does not warn on an unused internal method, so re-inlining the
         // agentProfile object would leave AgentProfileJson green, unused, and the lane silently back on the 3600s
         // default. Scanned from source because the alternative — building the real config — needs the DB fixture.
-        var source = File.ReadAllText(Path.Combine(FindRepoRoot(), "backend/tests/CodeSpace.E2ETests/Workflows/RealModelSupervisorWholeLoopE2ETests.cs"));
+        //
+        // Scanned across EVERY real-model arm, not just the supervisor file: the delivery-gate arm authored its own
+        // inline agentProfile and inherited the 3600s production default for exactly as long as this scan was pointed
+        // at one path. A per-file list would rot the same way, so the set is DERIVED — any RealModel* source that
+        // mentions an agentProfile is in scope, which is the property that actually matters.
+        var authors = RealModelSourcesMentioning(ProfileKey);
 
-        source.ShouldContain("\"agentProfile\": {{AgentProfileJson(",
-            customMessage: "the lane's supervisor config must build its agentProfile through AgentProfileJson — an inlined object drops the timeoutSeconds cap and RealSupervisorActionExecutor.Spawn's `?? 3600` quietly restores the production default");
+        authors.Count.ShouldBeGreaterThanOrEqualTo(2,
+            customMessage: "the scan must find the real-model arms that author an agentProfile, or it passes by finding nothing");
+
+        var inlined = authors.Where(f => !AuthorsThroughTheHelper.IsMatch(File.ReadAllText(f))).Select(Path.GetFileName).OrderBy(n => n, StringComparer.Ordinal).ToList();
+
+        inlined.ShouldBeEmpty(
+            "every real-model arm's supervisor config must build its agentProfile through AgentProfileJson — an inlined object drops the timeoutSeconds cap and RealSupervisorActionExecutor.Spawn's `?? 3600` quietly restores the production default, which is longer than the whole gate attempt containing the agent");
     }
+
+    /// <summary>The authored JSON key, assembled from parts so this file is never itself a match for its own scan.</summary>
+    private const string ProfileKey = "\"agent" + "Profile\": ";
+
+    /// <summary>An <c>agentProfile</c> built through the shared helper, however it is qualified (the supervisor file calls it unqualified; a sibling arm calls it through the class).</summary>
+    private static readonly Regex AuthorsThroughTheHelper = new(
+        Regex.Escape(ProfileKey) + @"\{\{[A-Za-z0-9_.]*" + nameof(RealModelSupervisorWholeLoopE2ETests.AgentProfileJson) + @"\(", RegexOptions.Compiled);
+
+    /// <summary>Every <c>RealModel*.cs</c> test source (both test assemblies) containing <paramref name="needle"/>, bin/obj excluded.</summary>
+    private static IReadOnlyList<string> RealModelSourcesMentioning(string needle) =>
+        new[] { "backend/tests/CodeSpace.E2ETests", "backend/tests/CodeSpace.IntegrationTests" }
+            .Select(rel => new DirectoryInfo(Path.Combine(FindRepoRoot(), rel)))
+            .Where(d => d.Exists)
+            .SelectMany(d => d.GetFiles("RealModel*.cs", SearchOption.AllDirectories))
+            .Where(f => !f.FullName.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => !f.FullName.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => File.ReadAllText(f.FullName).Contains(needle, StringComparison.Ordinal))
+            .Select(f => f.FullName)
+            .ToList();
 
     private static string FindRepoRoot()
     {

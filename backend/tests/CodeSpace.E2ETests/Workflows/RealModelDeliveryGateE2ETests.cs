@@ -314,7 +314,7 @@ public sealed class RealModelDeliveryGateE2ETests : IDisposable
             {
               "goal": "Add server-side email-format validation to the signup endpoint, with unit tests.",
               "supervisorModelId": "{{brainModelId}}",
-              "agentProfile": { "repositoryId": "{{repoId}}", "pushBranch": true, "integrateBranches": true },
+              "agentProfile": {{RealModelSupervisorWholeLoopE2ETests.AgentProfileJson(repoId, RealModelSupervisorWholeLoopE2ETests.FakeAgentTimeoutSeconds, "", "")}},
               "acceptanceChecks": ["sh", "check.sh"],
               "conversationId": "{{conversationId}}",
               "deliverySpec": { "openPullRequest": true }
