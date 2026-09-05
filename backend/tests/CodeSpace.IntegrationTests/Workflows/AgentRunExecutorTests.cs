@@ -5,6 +5,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.AgentRunLogging;
 using CodeSpace.Core.Services.Agents.Harnesses.Claude;
+using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
@@ -641,6 +642,48 @@ public class AgentRunExecutorTests
 
         (run.ResultJson ?? "").ShouldNotContain(gitToken);
         (run.Error ?? "").ShouldNotContain(key, customMessage: "the model key stays masked too — widening the needle set must not lose the case it already covered");
+    }
+
+    [Fact]
+    public async Task Redacts_an_echoed_mcp_run_token_from_the_error_and_the_append_only_log()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The per-run MCP capability token is the one injected secret that does not exist yet when the credential is
+        // resolved: it is minted afterwards and rides the declaration file's server env into the agent's config home.
+        // A CLI that echoes its loaded MCP config — an init banner, a "failed to start server" dump — therefore puts a
+        // LIVE capability into AgentRun.Error and the append-only log, neither of which can be edited afterwards.
+        const string key = "sk-mcp-case-7c02af";
+
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedModelCredentialAsync(teamId, "scripted-provider", key);
+        var runId = await CreateRunWithCredentialAsync(teamId, credId);
+
+        using var connectScope = _fixture.BeginScope();
+        var harness = new McpTokenEchoingHarness("scripted-provider", "SCRIPTED_MODEL_KEY", runId, connectScope.Resolve<IAgentMcpConnectRegistry>());
+
+        await ExecuteAsync(runId, harness);
+
+        harness.EchoedToken.ShouldNotBeNullOrWhiteSpace("the endpoint must have opened and registered a token before the harness ran, or this test asserts nothing");
+
+        using var scope = _fixture.BeginScope();
+        var svc = scope.Resolve<IAgentRunService>();
+        var run = await svc.GetAsync(runId, CancellationToken.None);
+        var events = await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None);
+
+        run.Error.ShouldNotBeNullOrWhiteSpace("the harness failed with a JSON error line, which folds onto AgentRun.Error");
+        run.Error!.ShouldNotContain(harness.EchoedToken!, customMessage: "the run token authenticates the agent to the fabric — a persisted one is a live capability in the journal card, the Room and the supervisor prompt");
+        run.Error.ShouldContain(SecretRedactor.Placeholder, customMessage: "the token is masked, not silently dropped");
+
+        events.ShouldNotBeEmpty();
+        foreach (var e in events)
+        {
+            e.Text.ShouldNotContain(harness.EchoedToken!, customMessage: "the append-only log cannot be edited later — it must never freeze the token");
+            (e.DataJson ?? "").ShouldNotContain(harness.EchoedToken!, customMessage: "the structured payload leaks it just as well as the text");
+        }
+
+        (run.ResultJson ?? "").ShouldNotContain(harness.EchoedToken!);
+        (run.Error ?? "").ShouldNotContain(key, customMessage: "folding the token in must not lose the model key the redactor already carried");
     }
 
     [Fact]
@@ -1998,6 +2041,63 @@ public class AgentRunExecutorTests
 
         // Folds BOTH openings into the error the way a real harness does: the protocol stream's last line AND the
         // process's stderr (the executor hands it in already redacted — the seam the folded diagnostic excerpt uses).
+        public IAgentEventFolder CreateFolder() => new TestEventFolder((fold, exitCode) =>
+            new() { Status = exitCode == 0 ? AgentRunStatus.Succeeded : AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"{fold.LastText} | stderr: {fold.Diagnostics.Trim()}" });
+
+        public IReadOnlyList<string> SupportedProviders => new[] { _provider };
+
+        public IReadOnlyDictionary<string, string> ProjectToEnv(ResolvedModelCredential credential) =>
+            new Dictionary<string, string> { [_keyEnvVar] = credential.ApiKey ?? "" };
+    }
+
+    /// <summary>
+    /// A projecting harness that stands in for a CLI echoing its loaded MCP config. It reads the run's LIVE token off
+    /// the <see cref="IAgentMcpConnectRegistry"/> seam the executor just registered — the same seam a real proxy
+    /// authenticates through — and writes it to stderr AND into a JSON error line, then fails. <see cref="EchoedToken"/>
+    /// lets the test refuse to pass when no endpoint opened, so a torn-down fabric can never make this green by default.
+    /// </summary>
+    private sealed class McpTokenEchoingHarness : IAgentHarness, IModelCredentialProjector
+    {
+        private readonly string _provider;
+        private readonly string _keyEnvVar;
+        private readonly Guid _runId;
+        private readonly IAgentMcpConnectRegistry _connects;
+
+        public McpTokenEchoingHarness(string provider, string keyEnvVar, Guid runId, IAgentMcpConnectRegistry connects)
+        {
+            _provider = provider;
+            _keyEnvVar = keyEnvVar;
+            _runId = runId;
+            _connects = connects;
+        }
+
+        /// <summary>The token this harness actually echoed — empty when the endpoint never opened.</summary>
+        public string? EchoedToken { get; private set; }
+
+        public string Kind => "scripted-projector";
+        public string Version => "test";
+        public IReadOnlyList<string> Models { get; } = new[] { "test-model" };
+
+        public SandboxSpec BuildInvocation(AgentTask task)
+        {
+            // BuildInvocation runs AFTER the endpoint opens, so the run's socket + token already resolve here.
+            EchoedToken = _connects.TryConnect(_runId, out var connect) ? connect.Token : "";
+
+            return new SandboxSpec
+            {
+                Command = "/bin/sh",
+                Args = new[] { "-c", $"echo 'mcp server init failed with token {EchoedToken}' >&2; echo '{{\"error\":\"mcp handshake rejected token {EchoedToken}\"}}'; exit 1" },
+                Environment = task.Environment,
+                TimeoutSeconds = task.TimeoutSeconds,
+            };
+        }
+
+        public IReadOnlyList<AgentEvent> ParseEvents(string rawLine)
+        {
+            var line = rawLine.Trim();
+            return line.Length == 0 ? Array.Empty<AgentEvent>() : new[] { new AgentEvent { Kind = AgentEventKind.Error, Text = line, Data = JsonSerializer.SerializeToElement(new { line }) } };
+        }
+
         public IAgentEventFolder CreateFolder() => new TestEventFolder((fold, exitCode) =>
             new() { Status = exitCode == 0 ? AgentRunStatus.Succeeded : AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"{fold.LastText} | stderr: {fold.Diagnostics.Trim()}" });
 
