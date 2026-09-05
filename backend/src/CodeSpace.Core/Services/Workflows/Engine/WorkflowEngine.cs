@@ -3028,9 +3028,19 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// when the prior offloaded it, or inline bytes when it was small — never inlines a large transcript into task_jsonb.
     /// Both-or-neither (the service returns null unless a transcript is present), so a resume never lands without its
     /// transcript. A no-lineage / no-prior stage returns the task unchanged (byte-identical fresh run).
+    ///
+    /// <para>ONE task shape declines the hint outright: a gateway-format-fault respawn
+    /// (<see cref="Supervisor.AgentRetryCauses.ApplyFormatFaultMitigation"/>) has ALREADY decided this attempt starts
+    /// cold, because a mangled thinking block lives in the transcript any resume re-sends. On a fork (from-node rerun /
+    /// map-branch) the lineage still holds a session at this cell, so without this guard the stage would re-stamp the
+    /// resume triple the respawn just nulled — restoring the poisoned conversation while the degrade still reads as
+    /// spent, so the node declines to buy a second respawn too, and the fork loses the run to the very fault the
+    /// repair exists for. The mitigated envelope is the decision; this lookup does not overrule it.</para>
     /// </summary>
     private async Task<AgentTask> ApplyResumeHintAsync(AgentTask task, WorkflowRun run, string nodeId, string iterationKey, CancellationToken cancellationToken)
     {
+        if (Supervisor.AgentRetryCauses.IsFormatFaultMitigated(task)) return task;
+
         if (await _agentRunService.FindResumableSessionAsync(run.TeamId, run.ParentRunId, nodeId, iterationKey, cancellationToken).ConfigureAwait(false) is not { } prior)
             return task;
 
