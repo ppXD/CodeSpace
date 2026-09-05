@@ -624,7 +624,7 @@ public class CodexHarnessTests
             new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "Fixed the tests." },
         };
 
-        var result = Harness.BuildResult(events, exitCode: 0);
+        var result = Harness.BuildResult(events, exitCode: 0, "");
 
         result.Status.ShouldBe(AgentRunStatus.Succeeded);
         result.ExitReason.ShouldBe("completed");
@@ -639,7 +639,7 @@ public class CodexHarnessTests
         // structured Error event — the run must still fail with that reason, not an opaque exit code.
         var events = new[] { new AgentEvent { Kind = AgentEventKind.FinalSummary, Text = "API Error: 401 Authentication Error" } };
 
-        var result = Harness.BuildResult(events, exitCode: 1);
+        var result = Harness.BuildResult(events, exitCode: 1, "");
 
         result.Status.ShouldBe(AgentRunStatus.Failed);
         result.Error.ShouldBe("API Error: 401 Authentication Error");
@@ -649,7 +649,7 @@ public class CodexHarnessTests
     [Fact]
     public void Build_result_falls_back_to_an_exit_code_error_when_a_failed_run_has_no_diagnostic()
     {
-        Harness.BuildResult(System.Array.Empty<AgentEvent>(), exitCode: 137).Error.ShouldContain("137");
+        Harness.BuildResult(System.Array.Empty<AgentEvent>(), exitCode: 137, "").Error.ShouldContain("137");
     }
 
     [Fact]
@@ -657,7 +657,7 @@ public class CodexHarnessTests
     {
         var events = new[] { new AgentEvent { Kind = AgentEventKind.Error, Text = "patch failed to apply" } };
 
-        var result = Harness.BuildResult(events, exitCode: 1);
+        var result = Harness.BuildResult(events, exitCode: 1, "");
 
         result.Status.ShouldBe(AgentRunStatus.Failed);
         result.ExitReason.ShouldBe("non-zero-exit");
@@ -672,7 +672,7 @@ public class CodexHarnessTests
         var failedTurn = Harness.ParseEvents("""{"type":"turn.failed","error":{"message":"unexpected status 401 Unauthorized"}}""").Single();
         var events = new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "working" }, failedTurn };
 
-        var result = Harness.BuildResult(events, exitCode: 0);
+        var result = Harness.BuildResult(events, exitCode: 0, "");
 
         result.Status.ShouldBe(AgentRunStatus.Failed);
         result.ExitReason.ShouldBe("harness-reported-failure");
@@ -688,7 +688,7 @@ public class CodexHarnessTests
         var turnCompleted = Harness.ParseEvents("""{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":2}}""").Single();
         var events = new[] { itemError, turnCompleted };
 
-        Harness.BuildResult(events, exitCode: 0).Status.ShouldBe(AgentRunStatus.Succeeded);
+        Harness.BuildResult(events, exitCode: 0, "").Status.ShouldBe(AgentRunStatus.Succeeded);
     }
 
     [Fact]
@@ -699,7 +699,7 @@ public class CodexHarnessTests
         var tokenCount = Harness.ParseEvents("{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":1850,\"output_tokens\":420}}}").Single();
         var events = new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "done" }, tokenCount };
 
-        var result = Harness.BuildResult(events, exitCode: 0);
+        var result = Harness.BuildResult(events, exitCode: 0, "");
 
         result.TokenUsage.ShouldNotBeNull("the run's token usage is captured for cost accounting");
         result.TokenUsage!.InputTokens.ShouldBe(1850);
@@ -711,7 +711,7 @@ public class CodexHarnessTests
     {
         var events = new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "done" } };
 
-        Harness.BuildResult(events, exitCode: 0).TokenUsage.ShouldBeNull("no usage event → no figure, never a fabricated zero");
+        Harness.BuildResult(events, exitCode: 0, "").TokenUsage.ShouldBeNull("no usage event → no figure, never a fabricated zero");
     }
 
     [Fact]
@@ -722,7 +722,7 @@ public class CodexHarnessTests
         var threadStarted = Harness.ParseEvents("{\"type\":\"thread.started\",\"thread_id\":\"thr-codex-9c21\"}").Single();
         var events = new[] { threadStarted, new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "done" } };
 
-        Harness.BuildResult(events, exitCode: 0).SessionId.ShouldBe("thr-codex-9c21", "the captured thread id is the handle a CONTINUE resumes");
+        Harness.BuildResult(events, exitCode: 0, "").SessionId.ShouldBe("thr-codex-9c21", "the captured thread id is the handle a CONTINUE resumes");
     }
 
     [Fact]
@@ -730,7 +730,7 @@ public class CodexHarnessTests
     {
         var events = new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "done" } };
 
-        Harness.BuildResult(events, exitCode: 0).SessionId.ShouldBeNull("no thread.started → null");
+        Harness.BuildResult(events, exitCode: 0, "").SessionId.ShouldBeNull("no thread.started → null");
     }
 
     [Fact]
@@ -741,7 +741,7 @@ public class CodexHarnessTests
         var threadStarted = Harness.ParseEvents("{\"type\":\"thread.started\",\"thread_id\":\"thr-codex-failed\"}").Single();
         var events = new[] { threadStarted, new AgentEvent { Kind = AgentEventKind.Error, Text = "patch failed to apply" } };
 
-        Harness.BuildResult(events, exitCode: 1).SessionId.ShouldBe("thr-codex-failed", "a failed run's thread id is captured so a rerun can continue the broken conversation");
+        Harness.BuildResult(events, exitCode: 1, "").SessionId.ShouldBe("thr-codex-failed", "a failed run's thread id is captured so a rerun can continue the broken conversation");
     }
 
     [Fact]

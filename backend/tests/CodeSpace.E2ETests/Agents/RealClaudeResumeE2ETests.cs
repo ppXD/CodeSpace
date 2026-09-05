@@ -55,7 +55,7 @@ public sealed class RealClaudeResumeE2ETests
             var freshConfig = NewDir();
             var fresh = await RunClaudeAsync(Harness.BuildInvocation(FreshTask(cwd)), freshConfig);
 
-            var sessionId = Harness.BuildResult(ParseAll(fresh.Stdout), fresh.ExitCode).SessionId;
+            var sessionId = Harness.BuildResult(ParseAll(fresh.Stdout), fresh.ExitCode, "").SessionId;
             sessionId.ShouldNotBeNullOrEmpty("the production harness captured a session_id from the REAL claude stream-json");
 
             // ── The encoder matches the binary's ACTUAL on-disk projects dir (ground truth, not a fixture). ──

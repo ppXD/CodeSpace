@@ -613,7 +613,7 @@ public class ClaudeCodeHarnessTests
             new AgentEvent { Kind = AgentEventKind.Completed, Text = "Fixed the billing tests." },
         };
 
-        var result = Harness.BuildResult(events, exitCode: 0);
+        var result = Harness.BuildResult(events, exitCode: 0, "");
 
         result.Status.ShouldBe(AgentRunStatus.Succeeded);
         result.ExitReason.ShouldBe("completed");
@@ -626,7 +626,7 @@ public class ClaudeCodeHarnessTests
     {
         var events = new[] { new AgentEvent { Kind = AgentEventKind.Error, Text = "patch did not apply" } };
 
-        var result = Harness.BuildResult(events, exitCode: 1);
+        var result = Harness.BuildResult(events, exitCode: 1, "");
 
         result.Status.ShouldBe(AgentRunStatus.Failed);
         result.ExitReason.ShouldBe("non-zero-exit");
@@ -641,7 +641,7 @@ public class ClaudeCodeHarnessTests
         var errorResult = Harness.ParseEvents("""{"type":"result","subtype":"error_during_execution","result":"API Error (429)","is_error":true}""").Single();
         var events = new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "working" }, errorResult };
 
-        var result = Harness.BuildResult(events, exitCode: 0);
+        var result = Harness.BuildResult(events, exitCode: 0, "");
 
         result.Status.ShouldBe(AgentRunStatus.Failed);
         result.ExitReason.ShouldBe("harness-reported-failure");
@@ -654,7 +654,7 @@ public class ClaudeCodeHarnessTests
         var okResult = Harness.ParseEvents("""{"type":"result","subtype":"success","result":"done","is_error":false}""").Single();
         var events = new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "working" }, okResult };
 
-        Harness.BuildResult(events, exitCode: 0).Status.ShouldBe(AgentRunStatus.Succeeded, "a clean is_error:false result line on exit 0 is unaffected");
+        Harness.BuildResult(events, exitCode: 0, "").Status.ShouldBe(AgentRunStatus.Succeeded, "a clean is_error:false result line on exit 0 is unaffected");
     }
 
     [Fact]
@@ -665,7 +665,7 @@ public class ClaudeCodeHarnessTests
         var resultLine = Harness.ParseEvents("""{"type":"result","subtype":"success","result":"done","is_error":false,"usage":{"input_tokens":920,"output_tokens":175,"cache_read_input_tokens":40}}""").Single();
         var events = new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "working" }, resultLine };
 
-        var result = Harness.BuildResult(events, exitCode: 0);
+        var result = Harness.BuildResult(events, exitCode: 0, "");
 
         result.TokenUsage.ShouldNotBeNull("the run's token usage is captured for cost accounting");
         result.TokenUsage!.InputTokens.ShouldBe(920);
@@ -677,7 +677,7 @@ public class ClaudeCodeHarnessTests
     {
         var events = new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "done" } };
 
-        Harness.BuildResult(events, exitCode: 0).TokenUsage.ShouldBeNull("no usage object → no figure, never a fabricated zero");
+        Harness.BuildResult(events, exitCode: 0, "").TokenUsage.ShouldBeNull("no usage object → no figure, never a fabricated zero");
     }
 
     [Fact]
@@ -688,7 +688,7 @@ public class ClaudeCodeHarnessTests
         var resultLine = Harness.ParseEvents("""{"type":"result","subtype":"success","result":"done","is_error":false,"session_id":"sess-claude-7f3a"}""").Single();
         var events = new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "working" }, resultLine };
 
-        Harness.BuildResult(events, exitCode: 0).SessionId.ShouldBe("sess-claude-7f3a", "the captured session id is the handle a CONTINUE resumes");
+        Harness.BuildResult(events, exitCode: 0, "").SessionId.ShouldBe("sess-claude-7f3a", "the captured session id is the handle a CONTINUE resumes");
     }
 
     [Fact]
@@ -697,7 +697,7 @@ public class ClaudeCodeHarnessTests
         // A result line with no session_id (or a pre-session CLI) → null, byte-identical to today; never fabricated.
         var resultLine = Harness.ParseEvents("""{"type":"result","subtype":"success","result":"done","is_error":false}""").Single();
 
-        Harness.BuildResult(new[] { resultLine }, exitCode: 0).SessionId.ShouldBeNull("no session_id in the stream → null");
+        Harness.BuildResult(new[] { resultLine }, exitCode: 0, "").SessionId.ShouldBeNull("no session_id in the stream → null");
     }
 
     [Fact]
@@ -707,13 +707,13 @@ public class ClaudeCodeHarnessTests
         // can CONTINUE from where it broke (the whole point of P3 for the "continue-from-where-it-broke" intent).
         var errorResult = Harness.ParseEvents("""{"type":"result","subtype":"error_during_execution","result":"API Error (429)","is_error":true,"session_id":"sess-claude-failed"}""").Single();
 
-        Harness.BuildResult(new[] { errorResult }, exitCode: 1).SessionId.ShouldBe("sess-claude-failed", "a failed run's session id is captured so a rerun can continue the broken conversation");
+        Harness.BuildResult(new[] { errorResult }, exitCode: 1, "").SessionId.ShouldBe("sess-claude-failed", "a failed run's session id is captured so a rerun can continue the broken conversation");
     }
 
     [Fact]
     public void Build_result_falls_back_to_an_exit_code_error_when_no_error_event()
     {
-        Harness.BuildResult(Array.Empty<AgentEvent>(), exitCode: 137).Error.ShouldContain("137");
+        Harness.BuildResult(Array.Empty<AgentEvent>(), exitCode: 137, "").Error.ShouldContain("137");
     }
 
     [Fact]
@@ -723,7 +723,7 @@ public class ClaudeCodeHarnessTests
         // structured Error event — the run must still fail with that reason, not an opaque exit code.
         var events = new[] { new AgentEvent { Kind = AgentEventKind.FinalSummary, Text = "API Error: 401 Authentication Error" } };
 
-        var result = Harness.BuildResult(events, exitCode: 1);
+        var result = Harness.BuildResult(events, exitCode: 1, "");
 
         result.Status.ShouldBe(AgentRunStatus.Failed);
         result.Error.ShouldBe("API Error: 401 Authentication Error");

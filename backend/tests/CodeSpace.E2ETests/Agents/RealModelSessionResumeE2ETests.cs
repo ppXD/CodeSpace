@@ -66,7 +66,7 @@ public sealed class RealModelSessionResumeE2ETests
                 // ── FRESH run: tell the model a unique codeword + capture the real session id + the session transcript. ──
                 var freshConfig = NewDir();
                 var fresh = await RunClaudeAsync(Harness.BuildInvocation(Task(cwd, model!, env, $"Remember this codeword, I will ask you to recall it: {codeword}. Reply with only: ok.")), freshConfig);
-                var freshResult = Harness.BuildResult(ParseAll(fresh.Stdout), fresh.ExitCode);
+                var freshResult = Harness.BuildResult(ParseAll(fresh.Stdout), fresh.ExitCode, "");
 
                 if (freshResult.Status != AgentRunStatus.Succeeded || string.IsNullOrEmpty(freshResult.SessionId))
                     throw new AgentExecutionInfraException($"the fresh claude run did not complete (status={freshResult.Status}, session={freshResult.SessionId ?? "null"}) — gateway/exec infra, not a recall verdict");
@@ -79,7 +79,7 @@ public sealed class RealModelSessionResumeE2ETests
                 var continueTask = Task(cwd, model!, env, "What was the codeword I told you to remember? Reply with ONLY the codeword, nothing else.")
                     with { ResumeFromSessionId = sessionId, RestoredTranscript = transcript };
                 var resumed = await RunClaudeAsync(Harness.BuildInvocation(continueTask), NewDir());
-                var resumedResult = Harness.BuildResult(ParseAll(resumed.Stdout), resumed.ExitCode);
+                var resumedResult = Harness.BuildResult(ParseAll(resumed.Stdout), resumed.ExitCode, "");
 
                 if (resumedResult.Status != AgentRunStatus.Succeeded)
                     throw new AgentExecutionInfraException($"the resumed claude run did not complete (status={resumedResult.Status}) — gateway/exec infra, not a recall verdict");
