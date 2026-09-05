@@ -1276,8 +1276,75 @@ public class SupervisorDeciderTests
         var ex = await Should.ThrowAsync<LlmApiException>(() => decider.DecideAsync(Context(), CancellationToken.None));
 
         ex.Category.ShouldBe(LlmErrorCategory.RateLimited, "the run's story is the throttle on its own brain — the substitute's shrug is not a capability verdict");
-        pool.SubstituteCalls.ShouldBeGreaterThan(0, "the failover DID reach the substitute — otherwise this pins the plain single-candidate propagation, not the hop");
+        ex.StatusCode.ShouldBe(429);
+        ex.InnerException.ShouldBeSameAs(throttled, "the fault is RE-RAISED, not re-thrown: a bare `throw ex` would overwrite the original's stack with this line and lose the frame that says which call was throttled");
+        pool.SubstituteCalls.ShouldBe(2, "the repair round-trip was spent FIRST — the throttle is surfaced only once a second reply also failed to bind");
     }
+
+    [Fact]
+    public async Task A_hop_whose_substitute_only_NEARLY_misses_is_repaired_rather_than_parked()
+    {
+        // A hop does not always land on a non-decision model — the pool's other rows are usually weaker models that CAN
+        // decide and merely fumble the shape. That near-miss is precisely what the bounded repair round-trip exists to
+        // correct, so it must run BEFORE the throttle floor: surfacing the fault first would park a run one cheap
+        // re-ask away from a real decision, and spend a whole 24h window on an alternate that was already answering.
+        var pool = new ThrottledBrainWithSubstitute(
+            brain: new[] { ThrottledBrainWithSubstitute.Throttles(new LlmApiException("TestSupervisor", 429, LlmErrorCategory.RateLimited, "throttled")) },
+            substitute: new[] { ThrottledBrainWithSubstitute.Unbindable(), ThrottledBrainWithSubstitute.Decides(SubstitutePlan) });
+        var decider = new LlmSupervisorDecider(new FakeRegistry(pool), FakeSelector.WithTwoBrainRows(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Plan, "the repaired reply IS a decision — a run that can keep moving must never be parked as an outage");
+        pool.SubstituteCalls.ShouldBe(2, "the repair was actually spent on the alternate, not skipped");
+    }
+
+    [Fact]
+    public async Task A_hop_followed_by_a_CLEAN_retry_stops_on_the_reply_in_hand_never_the_stale_throttle()
+    {
+        // The truncated-completion retry and the repair each issue a FRESH pool call with its own hop — or none. Here
+        // the retry reaches the run's OWN brain with the throttle already over, so the unbindable reply it brings back
+        // is a real non-conformance by the model the operator chose. Parking on the earlier hop's 429 would suspend a
+        // run for an outage that is over AND hide the model's actual miss behind an infra skip, so the cause must be
+        // read off the completion in hand, never captured before those calls run.
+        var pool = new ThrottledBrainWithSubstitute(
+            brain: new[] { ThrottledBrainWithSubstitute.Throttles(new LlmApiException("TestSupervisor", 429, LlmErrorCategory.RateLimited, "slow down")), ThrottledBrainWithSubstitute.Unbindable() },
+            substitute: new[] { ThrottledBrainWithSubstitute.Unbindable(truncated: true) });
+        var decider = new LlmSupervisorDecider(new FakeRegistry(pool), FakeSelector.WithTwoBrainRows(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Stop);
+        JsonDocument.Parse(decision.PayloadJson).RootElement.GetProperty("outcome").GetString()
+            .ShouldBe("no-decision", "the last reply came from the brain itself on a healthy wire — that is a capability verdict, and it must gate as one");
+        pool.BrainCalls.ShouldBe(3, "the raised-budget retry AND the repair both reached the brain — the hop happened only on the first call");
+    }
+
+    [Fact]
+    public async Task A_hop_that_happens_only_on_the_raised_budget_RETRY_still_surfaces_the_throttle()
+    {
+        // The mirror image, and the half a captured cause silently drops: the FIRST call was clean, so there was no
+        // fault to capture up front — the throttle arrives later, on the retry's own pool call, and the reply finally
+        // in hand is a substitute's after all. Reading the cause at the use site is what sees it.
+        var throttled = new LlmApiException("TestSupervisor", 429, LlmErrorCategory.RateLimited, "slow down", retryAfter: TimeSpan.FromSeconds(7));
+        var pool = new ThrottledBrainWithSubstitute(
+            brain: new[] { ThrottledBrainWithSubstitute.Unbindable(truncated: true), ThrottledBrainWithSubstitute.Throttles(throttled) },
+            substitute: new[] { ThrottledBrainWithSubstitute.Unbindable() });
+        var decider = new LlmSupervisorDecider(new FakeRegistry(pool), FakeSelector.WithTwoBrainRows(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        var ex = await Should.ThrowAsync<LlmApiException>(() => decider.DecideAsync(Context(), CancellationToken.None));
+
+        ex.Category.ShouldBe(LlmErrorCategory.RateLimited);
+        ex.RetryAfter.ShouldBe(TimeSpan.FromSeconds(7), "the provider's own backoff hint rides through — it is what the bounded retry waits on");
+        pool.SubstituteCalls.ShouldBeGreaterThan(0, "the retry's call DID hop — otherwise this pins nothing about a cause read late");
+    }
+
+    /// <summary>The decision a weaker pool alternate produces once its near-miss is repaired — a real, executable plan.</summary>
+    private static readonly SupervisorModelDecision SubstitutePlan = new()
+    {
+        Kind = SupervisorDecisionKinds.Plan,
+        Plan = new SupervisorPlanPayload { Goal = "ship", Subtasks = new[] { new SupervisorPlannedSubtask { Id = "s1", Title = "Audit", Instruction = "audit it" } } },
+    };
 
     [Fact]
     public async Task A_substitute_that_CAN_decide_still_answers_normally_after_a_hop()
@@ -1306,20 +1373,30 @@ public class SupervisorDeciderTests
 
         var ex = await Should.ThrowAsync<LlmApiException>(() => new RetryingSupervisorDeciderDecorator(decider, options, NullLogger<RetryingSupervisorDeciderDecorator>.Instance).DecideAsync(Context(), CancellationToken.None));
 
-        pool.BrainCalls.ShouldBe(3, "the whole in-call budget was spent on the throttle before it was allowed to escape");
+        pool.BrainCalls.ShouldBe(6, "the whole in-call budget was spent on the throttle before it was allowed to escape — 3 attempts, each spending the primary call plus the ONE bind repair the throttle floor now runs first");
         CodeSpace.Core.Services.Supervisor.SupervisorInfraPark.IsParkable(ex.Category).ShouldBeTrue("what escapes must be a fault the node parks on — the resumable ending, not a terminal stop");
     }
 
-    /// <summary>A pool of exactly the shape that broke: the run's own brain THROTTLES every call, and the alternate the failover hops to answers something that is not a supervisor decision (by default a planner-shaped object with no <c>kind</c>) — or, when given one, a real decision.</summary>
+    /// <summary>
+    /// A pool of exactly the shape that broke: the run's own brain and the alternate the failover hops to, each driven
+    /// by its OWN script of per-call behaviours. One fake plays both because the failover resolves a candidate by its
+    /// pool ROW and both rows name this client; the LAST scripted entry repeats, so "throttles every call" is a
+    /// one-entry script. Per-call scripting is what lets a test place a hop on a SPECIFIC round-trip — the decider
+    /// makes up to three (the primary call, the truncated-budget retry, the bind repair) and each is a fresh pool call.
+    /// </summary>
     private sealed class ThrottledBrainWithSubstitute : ILLMClient, IStructuredLLMClient
     {
-        private readonly LlmApiException _throttle;
-        private readonly SupervisorModelDecision? _substituteDecision;
+        private readonly IReadOnlyList<Func<StructuredLLMCompletion>> _brain;
+        private readonly IReadOnlyList<Func<StructuredLLMCompletion>> _substitute;
 
+        /// <summary>The shape the bug wore: the brain throttles EVERY call, and the alternate answers something that is not a supervisor decision — or, when given one, a real decision.</summary>
         public ThrottledBrainWithSubstitute(LlmApiException throttle, SupervisorModelDecision? substituteDecision = null)
+            : this(new[] { Throttles(throttle) }, new[] { substituteDecision is { } decision ? Decides(decision) : Unbindable() }) { }
+
+        public ThrottledBrainWithSubstitute(IReadOnlyList<Func<StructuredLLMCompletion>> brain, IReadOnlyList<Func<StructuredLLMCompletion>> substitute)
         {
-            _throttle = throttle;
-            _substituteDecision = substituteDecision;
+            _brain = brain;
+            _substitute = substitute;
         }
 
         public const string BrainModel = "throttled-brain";
@@ -1330,20 +1407,34 @@ public class SupervisorDeciderTests
 
         public string Provider => "TestSupervisor";
 
+        /// <summary>A candidate that faults on the wire — what forces the failover to hop.</summary>
+        public static Func<StructuredLLMCompletion> Throttles(LlmApiException throttle) => () => throw throttle;
+
+        /// <summary>A reply that is well-formed JSON carrying no decision kind anywhere — the shrug a non-decision pool row answers with. <paramref name="truncated"/> stamps the finish reason that buys the decider's ONE raised-budget retry.</summary>
+        public static Func<StructuredLLMCompletion> Unbindable(bool truncated = false) => () => new StructuredLLMCompletion
+        {
+            Json = JsonSerializer.SerializeToElement(new { plan = new { title = "a planner reply — no decision kind anywhere in it" } }),
+            Model = "",
+            Usage = truncated ? new LlmUsage { FinishReason = "max_tokens" } : LlmUsage.None,
+        };
+
+        /// <summary>A reply that IS a bindable supervisor decision.</summary>
+        public static Func<StructuredLLMCompletion> Decides(SupervisorModelDecision decision) => () => new StructuredLLMCompletion
+        {
+            Json = JsonSerializer.SerializeToElement(decision, AgentJson.Options),
+            Model = "",
+        };
+
         public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken) =>
             Task.FromResult(new LLMCompletion { Text = "", Model = request.Model });
 
         public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
         {
-            if (request.Model == BrainModel) { BrainCalls++; throw _throttle; }
+            var isBrain = request.Model == BrainModel;
+            var script = isBrain ? _brain : _substitute;
+            var index = isBrain ? BrainCalls++ : SubstituteCalls++;
 
-            SubstituteCalls++;
-
-            var json = _substituteDecision is { } decision
-                ? JsonSerializer.SerializeToElement(decision, AgentJson.Options)
-                : JsonSerializer.SerializeToElement(new { plan = new { title = "a planner reply — no decision kind anywhere in it" } });
-
-            return Task.FromResult(new StructuredLLMCompletion { Json = json, Model = request.Model });
+            return Task.FromResult(script[Math.Min(index, script.Count - 1)]() with { Model = request.Model });
         }
     }
 
