@@ -59,6 +59,10 @@ public static class AgentDiagnosticExcerpt
 
         var excerpt = string.Join('\n', kept);
 
-        return excerpt.Length <= MaxChars ? excerpt : "…" + excerpt[^MaxChars..];
+        if (excerpt.Length <= MaxChars) return excerpt;
+
+        var cut = char.IsLowSurrogate(excerpt[^MaxChars]) ? MaxChars - 1 : MaxChars;
+
+        return "…" + excerpt[^cut..];
     }
 }

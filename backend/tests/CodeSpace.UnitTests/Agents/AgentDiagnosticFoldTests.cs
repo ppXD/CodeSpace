@@ -105,6 +105,19 @@ public class AgentDiagnosticFoldTests
     }
 
     [Fact]
+    public void The_capped_excerpt_never_splits_an_emoji_straddling_the_cut()
+    {
+        // The excerpt keeps the TAIL, so an astral char (a surrogate PAIR) whose LOW surrogate lands exactly on the
+        // cut boundary must be dropped WHOLE, not split — a lone low surrogate is invalid UTF-16 (mirrors
+        // AgentMetricsReader.Truncate's own back-off on the opposite, keep-the-head boundary).
+        var diagnostics = "🚀" + new string('x', AgentDiagnosticExcerpt.MaxChars - 1);
+
+        var error = AgentDiagnosticExcerpt.Explain("exit", diagnostics);
+
+        HasUnpairedSurrogate(error).ShouldBeFalse();
+    }
+
+    [Fact]
     public void A_nul_byte_on_the_fatal_line_is_stripped_so_the_error_can_be_persisted()
     {
         // Postgres text refuses U+0000 outright: an unsanitized excerpt would take the whole completion transaction
@@ -133,5 +146,19 @@ public class AgentDiagnosticFoldTests
         var maximal = new ClaudeCodeHarness().BuildResult(Array.Empty<AgentEvent>(), exitCode: 137, diagnostics: new string('x', AgentDiagnosticExcerpt.MaxChars * 4));
 
         maximal.Error!.Length.ShouldBeLessThanOrEqualTo(400, "the whole folded error — exit text, separator and excerpt — has to clear AgentMetricsReader's card cap");
+    }
+
+    private static bool HasUnpairedSurrogate(string value)
+    {
+        for (var i = 0; i < value.Length; i++)
+        {
+            if (char.IsHighSurrogate(value[i]))
+            {
+                if (++i >= value.Length || !char.IsLowSurrogate(value[i])) return true;
+            }
+            else if (char.IsLowSurrogate(value[i])) return true;
+        }
+
+        return false;
     }
 }
