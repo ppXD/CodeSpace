@@ -28,4 +28,14 @@ public sealed record EffortRouteRequest
 
     /// <summary>Bounds the operator wants merged on top of the resolved preset's caps (set fields win). Null ⇒ the preset's caps unchanged.</summary>
     public RouteCaps? CapsOverride { get; init; }
+
+    /// <summary>
+    /// A deliverable SHAPE (an open <see cref="DeliverableShapes"/> string) the caller ALREADY had classified for this
+    /// same task — echoed back so an explicit tier does not throw it away. It exists because the confirm card's answer
+    /// re-enters as an explicit <see cref="RequestedEffort"/>, which short-circuits the classifier: without carrying
+    /// the shape, EVERY confirmed launch reverted to the default <c>code</c> projection, and the heuristic lane (which
+    /// always confirms) could never ship a non-code shape at all. Null / blank ⇒ nothing carried ⇒ the classifier's
+    /// own reading on the auto path, and the <c>code</c> default on the explicit one — byte-identical.
+    /// </summary>
+    public string? DeliverableShape { get; init; }
 }

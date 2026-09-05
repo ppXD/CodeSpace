@@ -96,8 +96,9 @@ public sealed class EffortRouter : IEffortRouter, IScopedDependency
         !string.IsNullOrWhiteSpace(requestedEffort) && !string.Equals(requestedEffort.Trim(), TaskEffortModes.Auto, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
-    /// The decision when the operator chose the effort verbatim — no signals, full confidence. The recipe is the
-    /// operator's pin if set, else the DEFAULT SHAPE for the explicit tier (<c>RecipeForEffort</c>, data-driven —
+    /// The decision when the operator chose the effort verbatim — no classified signals (only a carried shape, see
+    /// <see cref="OperatorSignals"/>), full confidence. The recipe is the operator's pin if set, else the
+    /// DEFAULT SHAPE for the explicit tier (<c>RecipeForEffort</c>, data-driven —
     /// no hardcoded switch): explicit <c>quick</c> ⇒ single-agent, <c>standard</c> ⇒ map-fanout, <c>deep</c> ⇒
     /// supervisor (degraded to map-fanout when the supervisor lane is unavailable). (The AUTO path is unchanged —
     /// the heuristic still suggests single-agent + always confirms; the operator escalates by picking
@@ -106,12 +107,24 @@ public sealed class EffortRouter : IEffortRouter, IScopedDependency
     /// </summary>
     private EffortDecision OperatorDecision(EffortRouteRequest request) => new()
     {
-        Signals = new EffortSignals(),
+        Signals = OperatorSignals(request),
         SuggestedEffort = request.RequestedEffort!.Trim(),
         SuggestedRecipe = request.RequestedRecipe ?? _recipes.RecipeForEffort(request.RequestedEffort!.Trim()).RecipeKind,
         Confidence = 1.0,
         ClassifierKind = "operator",
     };
+
+    /// <summary>
+    /// The operator decision's signals — empty (no classifier ran), EXCEPT for a deliverable shape the caller carried
+    /// back from an earlier classification of the same task. The confirm card's answer re-enters here as an explicit
+    /// tier, so without the carry the operator's tier choice silently reverted an answer / document / research task to
+    /// the coding projection — and on the always-confirming heuristic lane, that was every task. Blank ⇒ the plain
+    /// empty signals ⇒ the <c>code</c> default, byte-identical.
+    /// </summary>
+    private static EffortSignals OperatorSignals(EffortRouteRequest request) =>
+        string.IsNullOrWhiteSpace(request.DeliverableShape)
+            ? new EffortSignals()
+            : new EffortSignals { DeliverableShape = DeliverableShapes.Normalize(request.DeliverableShape) };
 
     /// <summary>Resolve the recipe — the request's pin wins, else the classifier's suggestion, else the default; an unknown kind fails OPEN to the default (never throws).</summary>
     private ITaskRecipe ResolveRecipe(EffortRouteRequest request, EffortDecision decision)
@@ -185,8 +198,9 @@ public sealed class EffortRouter : IEffortRouter, IScopedDependency
     {
         EffortMode = effortMode,
         // The shape the classifier read out of the task, carried first-class so the projection layer routes by WHAT is
-        // being asked for, not only by how much of it. An explicit operator tier classifies nothing, so its decision's
-        // default shape ("code") flows through — the operator's own choice, unchanged.
+        // being asked for, not only by how much of it. An explicit operator tier classifies nothing, so its decision
+        // carries either the shape the caller echoed back from an earlier classification of the SAME task, or the
+        // "code" default when none was carried.
         DeliverableShape = DeliverableShapes.Normalize(decision.Signals.DeliverableShape),
         RecipeKind = recipe.RecipeKind,
         ProjectionKind = projectionKind,

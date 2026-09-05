@@ -38,6 +38,7 @@ public sealed class PreviewTaskRouteCommandHandler : IRequestHandler<PreviewTask
             BaseBranch = request.BaseBranch,
             RequestedEffort = request.Effort,
             RequestedRecipe = request.Recipe,
+            DeliverableShape = request.DeliverableShape,
             CapsOverride = LaunchTaskCommandHandler.BuildCapsOverride(request.Caps, request.AutonomyCeiling),
         }, cancellationToken);
 }

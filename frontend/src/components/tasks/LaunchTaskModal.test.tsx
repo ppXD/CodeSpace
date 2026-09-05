@@ -469,6 +469,34 @@ describe("LaunchTaskModal — route preview (B1)", () => {
     expect(lastInput).toMatchObject({ effort: "standard" });
   });
 
+  it("carries the previewed deliverable shape onto the launch the confirmed tier sends", () => {
+    // The defect: answering the card sends an EXPLICIT effort, which short-circuits the backend classifier — so
+    // without echoing the shape, an answer-shaped task silently reverted to the coding projection on the one lane
+    // (heuristic) that always confirms.
+    routeState = { route: { ...ROUTE, deliverableShape: "answer" }, failed: false, loading: false, answered: true };
+    renderBox({ surface: "chat", autofill: {} });
+    typeTask("Explain how the retry loop works");
+
+    fireEvent.click(within(screen.getByTestId("route-confirm-card")).getByText("Quick"));
+    fireEvent.click(screen.getByLabelText("Launch task"));
+
+    expect(lastInput).toMatchObject({ effort: "quick", deliverableShape: "answer" });
+  });
+
+  it("drops the carried shape once the task text no longer matches the one it was classified for", () => {
+    // A stale echo is worse than none: it would project the OLD task's shape onto a task the classifier never read.
+    routeState = { route: { ...ROUTE, deliverableShape: "answer" }, failed: false, loading: false, answered: true };
+    renderBox({ surface: "chat", autofill: {} });
+    typeTask("Explain how the retry loop works");
+
+    fireEvent.click(within(screen.getByTestId("route-confirm-card")).getByText("Quick"));
+    typeTask("Fix the failing login test");
+    fireEvent.click(screen.getByLabelText("Launch task"));
+
+    expect(lastInput).toMatchObject({ effort: "quick" });
+    expect(lastInput).not.toHaveProperty("deliverableShape");
+  });
+
   it("flags a risky route with a badge and its own header copy (colour is never the only signal)", () => {
     routeState = {
       route: { ...ROUTE, decision: { ...ROUTE.decision!, signals: { riskySideEffects: true } } },

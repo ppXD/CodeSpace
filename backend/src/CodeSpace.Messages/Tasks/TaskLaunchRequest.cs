@@ -47,6 +47,9 @@ public sealed record TaskLaunchRequest
     /// <summary>An operator-pinned recipe (open <see cref="Effort.TaskRecipeKinds"/> string). Null ⇒ the classifier's suggestion / the default recipe.</summary>
     public string? RequestedRecipe { get; init; }
 
+    /// <summary>A deliverable SHAPE (an open <c>DeliverableShapes</c> string) the caller already had classified for this same task, echoed back so an EXPLICIT tier (a confirm-card answer) does not revert an answer / document / research task to the coding projection. Null / blank ⇒ nothing carried ⇒ byte-identical.</summary>
+    public string? DeliverableShape { get; init; }
+
     /// <summary>The autonomy tier the agent runs at (open tier-name string). Null / unrecognised → the safe <c>Standard</c> default.</summary>
     public string? Autonomy { get; init; }
 

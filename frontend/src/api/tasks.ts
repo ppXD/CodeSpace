@@ -93,6 +93,11 @@ export interface LaunchTaskInput {
   reviseRounds?: number;
   /** S8: review each agent's output with a REAL independent agent (read-only clone of the produced branch, prefers a different harness; the model critic is the fallback). Omitted ⇒ the model critic. */
   reviewerAgent?: boolean;
+  /** The deliverable SHAPE (`"answer"` / `"document"` / `"code"` / `"research"`) a route preview already classified
+   *  for this same task, echoed back. Read by the backend ONLY under an EXPLICIT `effort` — the path that skips the
+   *  classifier — so answering the confirm card with a tier keeps the shape the card was raised about instead of
+   *  silently reverting to the coding projection. Omitted ⇒ the classifier's own reading. */
+  deliverableShape?: string;
   /** P3.2: the QUALITY tier this launch MANDATES (`"Delivery"` / `"Unattended"`) — the backend enforces it server-side (an executable `acceptanceChecks` floor on a Deep launch, an `outputReviewMode` floor), so a caller can't claim Delivery/Unattended while skipping the knobs that actually gate it. Omitted ⇒ Prototype (self-report only, byte-identical to before this field existed). */
   tier?: string;
 }
@@ -167,6 +172,9 @@ export interface RouteDecision {
  *  risky auto-classified task started with no human gate at all. */
 export interface RoutePlan {
   effortMode: string;
+  /** WHAT the task is asked to produce (`"answer"` / `"document"` / `"code"` / `"research"`) — echoed back on the
+   *  launch so an explicit tier (a confirm-card answer) does not lose the shape the classifier read. */
+  deliverableShape?: string;
   recipeKind: string;
   projectionKind: string;
   boundsPreset: string;
@@ -197,6 +205,7 @@ export interface RoutePreviewInput {
   effort?: string;
   caps?: LaunchCaps;
   autonomyCeiling?: string;
+  deliverableShape?: string;
 }
 
 export const tasksApi = {

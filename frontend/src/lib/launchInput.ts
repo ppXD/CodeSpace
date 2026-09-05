@@ -25,6 +25,10 @@ export interface LaunchFormState {
   sessionId?: string;
   workspace: LaunchWorkspaceRepo[];
   effort: string;
+  /** The deliverable shape a prior route preview classified for THIS task text, kept when the operator answers the
+   *  confirm card with a tier. Sent as `deliverableShape` so the explicit-tier path (which skips the classifier)
+   *  keeps the shape instead of reverting to `code`. Undefined ⇒ omitted ⇒ the backend's own reading. */
+  deliverableShape?: string;
   autonomy: string;
   model: string;
   modelCredentialId: string;
@@ -137,6 +141,9 @@ export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
     modelCredentialModelId: state.modelCredentialModelId || null,
   };
 
+  // The shape a prior preview classified, echoed back so an explicit tier keeps it (the backend ignores it on auto).
+  if (state.deliverableShape) input.deliverableShape = state.deliverableShape;
+
   // Continue an existing session as its next turn (the session-room composer sets it); unset ⇒ a fresh session opens.
   if (state.sessionId) input.sessionId = state.sessionId;
 
@@ -248,6 +255,7 @@ export function buildRoutePreviewInput(state: LaunchFormState): RoutePreviewInpu
   if (launch.relatedRepositories) input.relatedRepositories = launch.relatedRepositories;
   if (launch.caps) input.caps = launch.caps;
   if (launch.autonomyCeiling) input.autonomyCeiling = launch.autonomyCeiling;
+  if (launch.deliverableShape) input.deliverableShape = launch.deliverableShape;
 
   return input;
 }

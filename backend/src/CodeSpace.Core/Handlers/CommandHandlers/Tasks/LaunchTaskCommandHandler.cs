@@ -41,6 +41,7 @@ public sealed class LaunchTaskCommandHandler : IRequestHandler<LaunchTaskCommand
             BaseBranch = request.BaseBranch,
             CompletionMode = request.CompletionMode,
             RequestedEffort = request.Effort,
+            DeliverableShape = request.DeliverableShape,
             Autonomy = request.Autonomy,
             Overrides = BuildOverrides(request),
             CapsOverride = BuildCapsOverride(request.Caps, request.AutonomyCeiling),

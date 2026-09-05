@@ -1204,6 +1204,32 @@ public class AgentCodeNodeTests
             .ShouldBe(true, "an explicit pushBranch override wins over the mode=research base");
     }
 
+    [Theory]
+    // A shape-derived contract on a research run: the acceptance force must NOT reach past the mode's no-publish base.
+    [InlineData("research", false)]
+    // The same contract on a code / document run still forces publish — a contract implies a gradable branch (F4).
+    [InlineData("code", true)]
+    public async Task An_acceptance_never_forces_a_research_run_to_publish_a_branch(string mode, bool expectedPush)
+    {
+        // The refutation: every answer / research launch now carries an LlmJudge acceptance, and the F4 force-push
+        // read `acceptance != null` alone — so a repo-bound "explain how X works" published a branch whose only
+        // content was the DELIVERABLE.md it was told to write, contradicting the mode's own no-publish boundary.
+        var config = new Dictionary<string, JsonElement>
+        {
+            ["goal"] = Str("Explain how the retry loop works"),
+            ["harness"] = Str("codex-cli"),
+            ["mode"] = Str(mode),
+            ["acceptance"] = JsonDocument.Parse("""{"kind":"LlmJudge","command":["DELIVERABLE.md"],"rubric":{"criteria":[{"id":"goal","requirement":"answers the question"}]}}""").RootElement,
+        };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
+
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+        task.Acceptance.ShouldNotBeNull("the contract still grades the run — only the PUBLISH decision changes");
+        task.PushProducedBranch.ShouldBe(expectedPush,
+            customMessage: $"mode={mode} with a bound acceptance must resolve push to {expectedPush} — research publishes nothing, whatever grades it");
+    }
+
     [Fact]
     public async Task Absent_mode_is_byte_identical_to_today_deferring_to_the_tier_and_the_push_flag()
     {

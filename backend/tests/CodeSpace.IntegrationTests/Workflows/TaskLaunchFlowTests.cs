@@ -10,6 +10,7 @@ using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Commands.Tasks;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
@@ -1442,6 +1443,50 @@ public class TaskLaunchFlowTests
         acceptance.GetProperty("command").EnumerateArray().Select(e => e.GetString()).ShouldBe(new[] { "sh", "check.sh" });
         config.GetProperty("acceptanceAuthority").GetString().ShouldBe("Operator");
         config.GetProperty("goal").GetString().ShouldNotContain("DELIVERABLE.md", customMessage: "a coding run is never told to write a deliverable file");
+    }
+
+    [Fact]
+    public async Task A_repo_bound_answer_launch_is_graded_but_publishes_no_branch()
+    {
+        // The refutation this closes: an answer-shaped launch now ALWAYS carries an LlmJudge contract, and the node's
+        // force-push read "an acceptance is bound" alone — so a repo-bound "explain how X works" published a branch
+        // whose only content was the DELIVERABLE.md the agent had been told to write, contradicting the research mode's
+        // own no-publish boundary. The staged AgentTask (written at suspend, before any dispatch) is the evidence.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var repoId = await SeedRepositoryAsync(teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;   // stage the task, don't dispatch — a real clone of a seed-only repo would fail
+
+        try
+        {
+            var result = await LaunchAsync(new TaskLaunchRequest
+            {
+                TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+                TaskText = "Explain how the retry loop works", RepositoryId = repoId,
+                RequestedEffort = TaskEffortModes.Quick, DeliverableShape = DeliverableShapes.Answer,
+                Overrides = new TaskExecutionOverrides { Harness = "codex-cli", RunnerKind = "local" },
+            });
+
+            result.Route.DeliverableShape.ShouldBe(DeliverableShapes.Answer,
+                "the explicit tier is a confirm-card answer — the shape the caller carried must survive the classifier short-circuit");
+
+            await RunEngineAsync(result.RunId);
+
+            var task = JsonSerializer.Deserialize<AgentTask>((await LoadAgentRunAsync(result.RunId)).TaskJson, AgentJson.Options)!;
+
+            task.PushProducedBranch.ShouldBe(false,
+                customMessage: "a repo-bound question publishes NOTHING — a branch here would carry only the DELIVERABLE.md the oracle reads");
+            task.Permissions.Network.ShouldBe(AgentNetworkAccess.Off, "the answer shape projects mode=research, which reads the tree it was given");
+            task.Acceptance.ShouldNotBeNull("the contract still grades the run — withholding the branch never disarms the oracle");
+            task.Acceptance!.Kind.ShouldBe(BenchmarkGradingKind.LlmJudge);
+            task.Acceptance.Command.ShouldBe(new[] { "DELIVERABLE.md" }, "the judge reads the file captured from the workspace, not a branch");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
     }
 
     private async Task<LaunchTaskResult> LaunchAsync(TaskLaunchRequest request)
