@@ -264,12 +264,20 @@ public class SupervisorGoldenPromptFidelityTests
     /// and a scenario that is missing a stage differs by that single line and nothing else. The line is taken FROM
     /// the renderer rather than restated (this file pins arms and presence, never copy — the wording is the decider's
     /// own unit tests' job), which is also what makes the assertion survive a future rewording.</para>
+    ///
+    /// <para>The "before" side is ANCHORED to <see cref="DimensionsOnlyCorpusDigest"/> — the digest this corpus was
+    /// actually pinned at before the mirror carried the trace. Without that anchor the receipt is tautological:
+    /// both sides are re-derived from today's code, so a corpus that drifted for some unrelated reason would still
+    /// differ from its own re-derivation by exactly one line and report a clean, attributable re-pin.</para>
     /// </summary>
     [Fact]
     public void Only_a_scenario_missing_a_required_stage_renders_a_different_prompt_than_before()
     {
         var profile = new ModeProfileRegistry().Resolve(RunModeKeys.Supervisor)!;
         var moved = new List<string>();
+
+        Digest(RenderedCorpus(DimensionsOnlyPrompt)).ShouldBe(DimensionsOnlyCorpusDigest,
+            "the 'before' half of this receipt must be the corpus that was really pinned before the mirror carried the trace — if it is not, the per-scenario deltas below are a re-derivation comparing today's code with itself, and they would look clean across a drift that has nothing to do with the stage line");
 
         foreach (var scenario in SupervisorDecisionGoldenScenarios.All)
         {
@@ -279,7 +287,7 @@ public class SupervisorGoldenPromptFidelityTests
             var dimensionsOnly = SupervisorStopNowRecital.Render(projected?.Assessment);
             var withTrace = scenario.Context.CompletionRecital;
 
-            var before = LlmSupervisorDecider.BuildUserPromptForTest(scenario.Context with { CompletionRecital = dimensionsOnly });
+            var before = DimensionsOnlyPrompt(scenario);
             var after = LlmSupervisorDecider.BuildUserPromptForTest(scenario.Context);
 
             // Render appends the stage line to the dimensions-only block, so the suffix past that block's length IS
@@ -308,13 +316,19 @@ public class SupervisorGoldenPromptFidelityTests
     /// <para>TO RE-PIN DELIBERATELY: run this test, copy the SHA-256 the failure prints into this constant, and say
     /// in the commit body WHICH block changed and why the corpus's numbers are still comparable across the change.
     /// A re-pin with no such sentence is the failure mode this exists to make visible, not a chore to be rubber-stamped.</para>
+    ///
+    /// <para>The superseded pin stays beside it as HISTORY, and is still asserted (over the rendering that produced
+    /// it) by the re-pin receipt above — a digest whose predecessor is deleted can only ever be compared with itself.</para>
     /// </summary>
     private const string GoldenPromptDigest = "9a06aec3056ee4851e8ccd69cdb67585b6b3f20a4414ec03be2dc0ea188426ba";
+
+    /// <summary>The pin this corpus carried while the stopped-now block was rendered from the ASSESSMENT ALONE — no stage trace, no profile, no mode. Superseded, never deleted: it is the fixed point the re-pin receipt measures the current rendering against.</summary>
+    private const string DimensionsOnlyCorpusDigest = "40e8c14c75e6f90d017a4780aa9479fc782379f7851f950a04a1962c9ddee4f8";
 
     [Fact]
     public void The_rendered_corpus_matches_its_pinned_digest()
     {
-        var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(RenderedCorpus()))).ToLowerInvariant();
+        var digest = Digest(RenderedCorpus());
 
         digest.ShouldBe(GoldenPromptDigest,
             $"the rendered golden prompts changed. If that was intended, re-pin GoldenPromptDigest to '{digest}' and name the block that changed in the commit body; if it was not, a decider edit has silently moved what every real-model score measures.");
@@ -361,15 +375,27 @@ public class SupervisorGoldenPromptFidelityTests
     }
 
     /// <summary>Every scenario's rendered prompt, name-ordered and name-labelled — deterministic over the corpus, so the digest moves only when the RENDERING moves.</summary>
-    private static string RenderedCorpus()
+    private static string RenderedCorpus() => RenderedCorpus(s => LlmSupervisorDecider.BuildUserPromptForTest(s.Context));
+
+    /// <summary>The same canonical corpus over an ALTERNATIVE rendering, so a historical digest is recomputed by exactly the concatenation that produced it — a second hand-rolled loop would be its own drift risk.</summary>
+    private static string RenderedCorpus(Func<SupervisorGoldenScenario, string> render)
     {
         var builder = new StringBuilder();
 
         foreach (var scenario in SupervisorDecisionGoldenScenarios.All.OrderBy(s => s.Name, StringComparer.Ordinal))
-            builder.Append("\u0000").Append(scenario.Name).Append("\u0000").Append(LlmSupervisorDecider.BuildUserPromptForTest(scenario.Context));
+            builder.Append("\u0000").Append(scenario.Name).Append("\u0000").Append(render(scenario));
 
         return builder.ToString();
     }
+
+    /// <summary>One scenario's prompt as this corpus rendered it BEFORE the mirror carried the trace: the stopped-now block from the assessment ALONE — no stage trace, no profile, no enforcement mode.</summary>
+    private static string DimensionsOnlyPrompt(SupervisorGoldenScenario scenario) =>
+        LlmSupervisorDecider.BuildUserPromptForTest(scenario.Context with
+        {
+            CompletionRecital = SupervisorStopNowRecital.Render(SupervisorTapeCompletion.ProjectIfStoppedNow(scenario.Context.PriorDecisions)?.Assessment),
+        });
+
+    private static string Digest(string corpus) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(corpus))).ToLowerInvariant();
 
     [Fact]
     public void The_negative_controls_exclude_resolve_from_their_accepted_set()
