@@ -33,7 +33,7 @@ public sealed class FakeAgentCliHarnessConventionTests
 
         fakes.Count.ShouldBeGreaterThan(3, "the scan must actually find the fakes the real-model arms construct, or this test passes by finding nothing");
 
-        var sources = fakes.ToDictionary(f => f, FakeSource, StringComparer.Ordinal);
+        var sources = fakes.ToDictionary(f => f, FakeCliSourceLocator.SourceFor, StringComparer.Ordinal);
 
         // A fake whose source this cannot READ is a fake this convention does not POLICE, and the old lookup answered
         // null for anything outside three hard-coded folders — so moving a fake one directory over (or adding one in a
@@ -78,32 +78,10 @@ public sealed class FakeAgentCliHarnessConventionTests
 
     /// <summary>The distinct fake-CLI type names constructed by any <c>RealModel*</c> test class across both test assemblies.</summary>
     private static IReadOnlyList<string> FakesUsedByRealModelArms() =>
-        TestSourceRoots()
+        FakeCliSourceLocator.TestSourceRoots()
             .SelectMany(d => d.GetFiles("RealModel*.cs", SearchOption.AllDirectories))
-            .Where(f => !f.FullName.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-            .Where(f => !f.FullName.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => !FakeCliSourceLocator.IsBuildOutput(f))
             .SelectMany(f => ConstructsAFakeCli.Matches(File.ReadAllText(f.FullName)).Select(m => m.Groups[1].Value))
             .Distinct(StringComparer.Ordinal)
             .ToList();
-
-    /// <summary>The source of a fake by type name, searched across BOTH test assemblies (one file per type, named after it — the repo's convention). Null ONLY when no such file exists anywhere, which the caller REDS on rather than treating as "nothing to police".</summary>
-    private static string? FakeSource(string typeName) =>
-        TestSourceRoots()
-            .SelectMany(d => d.GetFiles(typeName + ".cs", SearchOption.AllDirectories))
-            .Where(f => !f.FullName.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-            .Where(f => !f.FullName.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-            .Select(f => File.ReadAllText(f.FullName))
-            .FirstOrDefault();
-
-    private static IEnumerable<DirectoryInfo> TestSourceRoots() =>
-        new[] { "backend/tests/CodeSpace.E2ETests", "backend/tests/CodeSpace.IntegrationTests" }
-            .Select(rel => new DirectoryInfo(Path.Combine(FindRepoRoot(), rel)))
-            .Where(d => d.Exists);
-
-    private static string FindRepoRoot()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null && !Directory.Exists(Path.Combine(dir.FullName, "backend"))) dir = dir.Parent;
-        return dir?.FullName ?? throw new InvalidOperationException("repo root not found");
-    }
 }
