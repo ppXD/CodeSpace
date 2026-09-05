@@ -132,7 +132,7 @@ public class WorkflowRun : IEntity<Guid>, IAuditable
     /// <summary>P2a (Lock Clause 1): the completion-protocol version this execution runs under — stamped IMMUTABLY at creation in the same transaction as the row; null = a pre-protocol Legacy run. A replay/rerun is a new execution stamped with the policy current at ITS creation.</summary>
     public int? CompletionPolicyVersion { get; set; }
 
-    /// <summary>P2a: Legacy | Shadow | Enforced — stored as text, read fail-closed (unknown → Legacy). Enforced is only ever set by P2b's qualified-cohort rollout, never at generic creation.</summary>
+    /// <summary>P2a: Legacy | Shadow | Enforced — stored as text, read fail-closed (unknown → Legacy). Set by P2b's qualified-cohort opt-in; since C5 (#1774) also the DEFAULT stamp at generic creation for an Enforceable mode profile (e.g. supervisor) with no explicit opt-in — see <see cref="Services.Completion.CompletionPolicy.DefaultModeFor"/>.</summary>
     public string? CompletionEnforcementMode { get; set; }
 
     /// <summary>P4 ("NeedsReview must be a durable Park"): when the completion authority last parked this run at the terminal boundary — the discriminator between a DELIBERATE park (a human's to look at; the stranded-run reconciler must not re-drive it) and a stranded suspension. Cleared by the operator's Continue (the one re-arbitration channel) and by any arbitrated terminal stamp.</summary>
