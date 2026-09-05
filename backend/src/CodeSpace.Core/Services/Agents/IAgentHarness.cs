@@ -62,7 +62,7 @@ public interface IAgentHarness
 /// </summary>
 internal static class AgentHarnessFoldExtensions
 {
-    internal static AgentRunResult BuildResult(this IAgentHarness harness, IReadOnlyList<AgentEvent> events, int exitCode) => harness.Folded(events).BuildResult(AgentRunFacts.From(events, harness), exitCode);
+    internal static AgentRunResult BuildResult(this IAgentHarness harness, IReadOnlyList<AgentEvent> events, int exitCode, string diagnostics = "") => harness.Folded(events).BuildResult(AgentRunFacts.From(events, harness), exitCode, diagnostics);
 
     /// <summary>The folder this harness would have accumulated over the whole stream — for the callers that need the FOLDER rather than the result (the executor's own mapping, driven with a finished stream).</summary>
     internal static IAgentEventFolder Folded(this IAgentHarness harness, IReadOnlyList<AgentEvent> events)

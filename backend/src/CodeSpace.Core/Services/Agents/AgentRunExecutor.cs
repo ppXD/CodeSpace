@@ -723,7 +723,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         ReportUnestablishedFacts(context.Harness, facts, context.RunId);
 
-        var result = await AttachTranscriptAsync(_artifacts, MapSandboxResult(sandbox, folder, facts), context.TeamId, transcript, cancellationToken).ConfigureAwait(false);
+        var result = await AttachTranscriptAsync(_artifacts, MapSandboxResult(Redacted(sandbox, redactor), folder, facts), context.TeamId, transcript, cancellationToken).ConfigureAwait(false);
 
         // Capture the resumable session transcript here too — a run that completes via durable re-attach (worker restart
         // mid-run) is exactly the durability case continuity serves; the config home still lives under the handle's spool.
@@ -750,6 +750,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// They read the executor's own <see cref="AgentRunFacts"/>, never the harness's folder: those three are
     /// harness-independent by construction, so making them depend on what a given folder chose to keep would let a
     /// harness silently drop them from every forced terminal (Rule 7 — a sibling accumulator, not a wider folder).
+    /// The folded branch also hands the folder the run's stderr, which is the process's OTHER opening and therefore
+    /// reaches no folder through its events: a harness whose protocol stream said nothing about the failure can fold
+    /// the process's own last words in rather than reporting a bare exit code (see <see cref="AgentDiagnosticExcerpt"/>).
+    /// The caller redacts it first — <see cref="Redacted"/> — because unlike the events it arrives raw.
     /// </summary>
     internal static AgentRunResult MapSandboxResult(SandboxResult sandbox, IAgentEventFolder folder, AgentRunFacts facts) => sandbox.Status switch
     {
@@ -766,8 +770,17 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // to the agent's own last message, so an OOM-killed run reported whatever the CLI happened to be saying as its
         // cause. Say what actually happened, and let the retry verdict see it (see ResourceExhaustedExitReason).
         SandboxStatus.ResourceExhausted => new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = ResourceExhaustedExitReason, Error = $"The agent run exceeded its resource ceiling and its process tree was killed by the kernel (exit {SandboxExitCode.Describe(sandbox.ExitCode)}). This is the sandbox limit for the run's autonomy tier, not a fault in the agent's work — the fix is a higher ceiling (a less-narrow deployment memory budget, a higher autonomy tier, or a change to the committed per-tier table by PR), never another attempt under the same one.", TokenUsage = facts.TokenUsage, SessionId = facts.SessionId, Model = facts.Model },
-        _ => folder.BuildResult(facts, sandbox.ExitCode),
+        _ => folder.BuildResult(facts, sandbox.ExitCode, sandbox.Stderr),
     };
+
+    /// <summary>
+    /// The same masking every event already gets, applied to the run's diagnostics before they can reach the folded
+    /// result. The event stream is redacted line by line as it is captured, so a result folded from it is redacted
+    /// too; <see cref="SandboxResult.Stderr"/> comes back from the runner RAW, and it is now an input to that same
+    /// result — so an echoed key on a fatal line would otherwise be frozen into <c>AgentRun.error</c>.
+    /// </summary>
+    private static SandboxResult Redacted(SandboxResult sandbox, SecretRedactor redactor) =>
+        redactor.IsEmpty || sandbox.Stderr.Length == 0 ? sandbox : sandbox with { Stderr = redactor.Redact(sandbox.Stderr) };
 
     /// <summary>Fallback when the credential can't be re-resolved to redact a re-attached tail: complete from the exit marker WITHOUT re-tailing (so no unredacted line reaches the log) — Succeeded/Failed by the code if it's present, Failed if the process is gone, or null (leave Running for a later sweep) both when it's still alive and we can't safely observe it AND when this worker can't answer the handle's liveness at all (<see cref="SandboxRunState.Indeterminate"/> — another host minted it).</summary>
     private static async Task<AgentRunResult?> CompleteFromMarkerOnlyAsync(ISandboxDurableRunner durable, SandboxHandle handle, CancellationToken cancellationToken)
@@ -2884,10 +2897,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         ReportUnestablishedFacts(context.Harness, facts, context.RunId);
 
-        // Events are already redacted, so a result the harness folds from them (summary / error) is redacted too. The
-        // faithful raw transcript is NOT attached here: it belongs to the whole run (every revise round streams into
-        // the same spool) and is sealed/reopened through bounded storage streams at the end by AttachTranscriptAsync.
-        return MapSandboxResult(sandbox, folder, facts);
+        // Events are already redacted, so a result the harness folds from them (summary / error) is redacted too; the
+        // diagnostics are the one input that arrives raw, so they are masked here. The faithful raw transcript is NOT
+        // attached here: it belongs to the whole run (every revise round streams into the same spool) and is
+        // sealed/reopened through bounded storage streams at the end by AttachTranscriptAsync.
+        return MapSandboxResult(Redacted(sandbox, context.Redactor), folder, facts);
     }
 
     /// <summary>

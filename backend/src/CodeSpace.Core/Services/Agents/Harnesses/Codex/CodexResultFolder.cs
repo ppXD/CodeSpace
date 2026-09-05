@@ -16,7 +16,7 @@ internal sealed class CodexResultFolder : IAgentEventFolder
 
     public void Add(AgentEvent normalized) => _fold.Add(normalized);
 
-    public AgentRunResult BuildResult(AgentRunFacts facts, int exitCode)
+    public AgentRunResult BuildResult(AgentRunFacts facts, int exitCode, string diagnostics)
     {
         var changedFiles = _fold.ChangedFiles;
 
@@ -42,9 +42,11 @@ internal sealed class CodexResultFolder : IAgentEventFolder
         // Prefer an explicit Error event, else the CLI's final message (on a non-zero exit that's the
         // failure reason — e.g. a provider 401), else the bare exit code — so the real reason reaches
         // AgentRun.error and the node failure instead of an opaque "codex exited with code 1".
+        // The last rung is where a stderr-only death lands — the CLI printed a plain-text fatal on the OTHER
+        // opening and this side dropped it as non-JSON — so that rung, and only that rung, folds it back in.
         var error = _fold.LastTextOf(AgentEventKind.Error)
                     ?? (string.IsNullOrWhiteSpace(summary) ? null : summary)
-                    ?? $"codex exited with code {SandboxExitCode.Describe(exitCode)}";
+                    ?? AgentDiagnosticExcerpt.Explain($"codex exited with code {SandboxExitCode.Describe(exitCode)}", diagnostics);
 
         var exitReason = exitCode != 0 ? "non-zero-exit" : "harness-reported-failure";
 

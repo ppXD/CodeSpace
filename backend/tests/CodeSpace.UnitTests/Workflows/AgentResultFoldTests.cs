@@ -355,7 +355,7 @@ public class AgentResultFoldTests
             if (normalized.Kind == AgentEventKind.ToolCall) _toolCalls++;
         }
 
-        public AgentRunResult BuildResult(AgentRunFacts facts, int exitCode) => new() { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = $"{_toolCalls} tool calls" };
+        public AgentRunResult BuildResult(AgentRunFacts facts, int exitCode, string diagnostics) => new() { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = $"{_toolCalls} tool calls" };
     }
 
     // ── Fixtures ────────────────────────────────────────────────────────────────────────────────────
