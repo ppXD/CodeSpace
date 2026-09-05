@@ -300,14 +300,16 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
     /// pinned over the full CleanSuccess predicate in <c>CompletionTerminalAuthorityFlowTests</c>.
     ///
     /// <para>The COHORT is a parameter, because the refusal verb is one. The authority arbitrates only an Enforced
-    /// run (<c>CompletionTerminalAuthority.cs:59</c>) and <c>CompletionPolicy.CurrentMode</c> is Shadow — so the
-    /// stamped mode decides whether the same un-reconciled tape is told its stop WILL be refused or merely that a
-    /// 'completed' claim would be recorded against evidence the profile declares owed. The facts do not move.</para>
+    /// run (<c>CompletionTerminalAuthority.cs:59</c>) — so the stamped mode decides whether the same un-reconciled
+    /// tape is told its stop WILL be refused or merely that a 'completed' claim would be recorded against evidence
+    /// the profile declares owed. The facts do not move. BOTH arms are stamped explicitly: since C5 a default
+    /// supervisor run resolves Enforced, so Shadow here is the below-the-bar wording, reachable by an explicit
+    /// 'shadow' opt-in, not the cohort a supervisor run lands in by omission.</para>
     /// </summary>
     [Theory]
     [InlineData(false, "Enforced")]   // conflicted merge + unverified resolve, Enforced → nothing integrated → the stop really would be refused
     [InlineData(true, "Enforced")]    // the same run, merged clean → Integrate evidenced → no stage line at all
-    [InlineData(false, "Shadow")]     // CompletionPolicy.CurrentMode — the DEFAULT cohort gets the facts, never the false threat
+    [InlineData(false, "Shadow")]     // an explicit shadow opt-in gets the facts, never the threat it can never receive
     [InlineData(true, "Shadow")]
     public async Task A_run_whose_branches_are_unreconciled_is_told_which_stage_it_has_not_evidenced(bool mergesClean, string enforcementMode)
     {
@@ -359,7 +361,7 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
     /// <summary>A CLEAN integration whose combined head is named — the Integrate cell's first ledger.</summary>
     private const string CleanMergeOutcome = """{"integration":{"status":"Clean","integratedBranch":"codespace/integration/head"}}""";
 
-    /// <summary>Stamp the run post-F0 and stake the obligations a spawned wave would have staked — the shape the recital and the authority both read. <paramref name="enforcementMode"/> defaults to what production stamps a run that does not opt in (<c>CompletionPolicy.CurrentMode</c> — Shadow).</summary>
+    /// <summary>Stamp the run post-F0 and stake the obligations a spawned wave would have staked — the shape the recital and the authority both read. <paramref name="enforcementMode"/> defaults to the below-the-bar fallback constant (<c>CompletionPolicy.CurrentMode</c> — Shadow), NOT to what a default supervisor run is stamped: since C5 that is Enforced, and a caller that means the default cohort must say so.</summary>
     private async Task StampContractAsync(Guid runId, Guid teamId, string? enforcementMode = null)
     {
         using var scope = _fixture.BeginScope();
@@ -392,6 +394,15 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
     /// requirements are staked through the PRODUCTION helper over the same planned specs and the same plan ref the
     /// tape carries, so a divergence here is a divergence in the RENDERING — never two people inventing different
     /// obligations.</para>
+    ///
+    /// <para>NOTHING here hand-stamps the enforcement mode, and that is the second half of the guarantee. The seed
+    /// stamps this run exactly as <c>RunStarter</c> does — <c>CompletionPolicy.StampModeFor</c> over the definition's
+    /// own supervisor shape, which since C5 resolves ENFORCED by default. A test that pinned both sides to
+    /// <c>CurrentMode</c> instead would agree with itself in a cohort production no longer puts a default supervisor
+    /// run in, which is the same class of blindness as the missing stage line above.</para>
+    ///
+    /// <para>The four sibling tape-vs-rows parity detectors live in <c>CompletionComposerFlowTests</c>; this is the
+    /// fifth, and it sits here because it drives the real turn service's rehydrate rather than the composer.</para>
     /// </summary>
     [Fact]
     public async Task The_golden_corpus_mirror_recites_exactly_what_a_real_rehydrate_recites()
@@ -401,19 +412,6 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
         var planRef = (WorkPlanId: Guid.NewGuid(), Version: 1);
         var planPayload = PlanPayload(("s1", null), ("s2", null));
 
-        // Post-F0 and stamped with what production stamps a run that does not opt in — the DEFAULT cohort, whose
-        // wording is the advisory rather than the refusal. Deliberately not StampContractAsync: that helper stakes a
-        // hand-written single requirement for its own siblings, and this test's whole point is that BOTH sides read
-        // the same production-shaped contract.
-        using (var stamp = _fixture.BeginScope())
-        {
-            var db = stamp.Resolve<CodeSpaceDbContext>();
-            var run = await db.WorkflowRun.SingleAsync(r => r.Id == runId);
-            run.CompletionPolicyVersion = Core.Services.Completion.CompletionPolicy.CurrentVersion;
-            run.CompletionEnforcementMode = Core.Services.Completion.CompletionPolicy.CurrentMode.ToString();
-            await db.SaveChangesAsync();
-        }
-
         await SeedDecisionAsync(runId, teamId, 1, SupervisorDecisionKinds.Plan, planPayload,
             $$"""{"planned":[],"count":2,"workPlanId":"{{planRef.WorkPlanId}}","workPlanVersion":{{planRef.Version}}}""");
         await SeedSpawnAsync(runId, teamId, 2, """{"subtaskIds":["s1","s2"]}""",
@@ -421,6 +419,8 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
         await SeedDecisionAsync(runId, teamId, 3, SupervisorDecisionKinds.Merge, "{}", ConflictedMergeOutcome);
         await SeedDecisionAsync(runId, teamId, 4, SupervisorDecisionKinds.Resolve, "{}", SpawnOutcome(Unit(Guid.NewGuid(), "codespace/resolve/head")));
 
+        // Deliberately not StampContractAsync: that helper stakes a hand-written single requirement for its own
+        // siblings, and this test's whole point is that BOTH sides read the same production-shaped contract.
         using (var stake = _fixture.BeginScope())
         {
             var planned = SupervisorOutcome.ReadPlanSubtasks(planPayload);
@@ -437,9 +437,11 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
         production.ShouldNotBeNull("the seeded run is contract-bearing, so production has a verdict to recite");
 
         // Pin that this tape actually EXERCISES the line before pinning that both sides agree about it — two paths
-        // that both render nothing agree perfectly and prove nothing, which is exactly how the gap survived.
-        production!.ShouldContain(Core.Services.Supervisor.Deciders.SupervisorStopNowRecital.AdvisoryLead, Case.Sensitive,
-            "an un-reconciled Shadow run must be told a 'completed' claim would be recorded against missing evidence");
+        // that both render nothing agree perfectly and prove nothing, which is exactly how the gap survived. The
+        // LEAD is pinned too, not just the facts: a default supervisor run is stamped Enforced, so the authority
+        // really would refuse this stop, and a mirror that recited the advisory would be understating it.
+        production!.ShouldContain(Core.Services.Supervisor.Deciders.SupervisorStopNowRecital.RefusalLead, Case.Sensitive,
+            "the default supervisor cohort is Enforced (CompletionPolicy.DefaultModeFor over the lane's Enforceable profile), so an un-reconciled run must be told the stop WILL be refused");
         production.ShouldContain("requires 1 stage(s) with no evidence — Integrate.", Case.Sensitive,
             "the un-reconciled branches leave Integrate unevidenced, and production names the stage the park would name");
 

@@ -458,13 +458,22 @@ public static class SupervisorDecisionGoldenScenarios
     /// does not ship: the assessment, the tape's own upstream STAGE TRACE, and the lane's mode profile. Withholding
     /// the last two kept the corpus a dimensions-only rendering, so a conflicted-then-unverified fixture read LESS
     /// unresolved than the same tape does in production — the pinned digest could not have detected a regression in
-    /// a line no scenario was able to reach. The enforcement mode is <c>CompletionPolicy.CurrentMode</c>, what
-    /// production stamps a run that does not opt in, so the corpus reads the same wording the default cohort reads.</para>
+    /// a line no scenario was able to reach.</para>
+    ///
+    /// <para>The enforcement mode is derived the way a launching run derives it — <c>CompletionPolicy.DefaultModeFor</c>
+    /// over THIS lane's profile — never the <c>CurrentMode</c> fallback constant. The supervisor profile holds
+    /// Enforceable standing, so a default supervisor run is stamped Enforced and reads the REFUSAL lead; pinning the
+    /// corpus to the constant would have shown the model an advisory production stopped shipping the day that profile
+    /// graduated, and neither the digest nor a drift test pinned to the same constant could have seen it.</para>
     /// </summary>
-    public static string? RenderStoppedNowRecital(IReadOnlyList<SupervisorPriorDecision> priors) =>
-        SupervisorTapeCompletion.ProjectIfStoppedNow(priors) is not { } stoppedNow
-            ? null
-            : SupervisorStopNowRecital.Render(stoppedNow.Assessment, stoppedNow.ExercisedUpstreamStages, SupervisorProfile, Core.Services.Completion.CompletionPolicy.CurrentMode);
+    public static string? RenderStoppedNowRecital(IReadOnlyList<SupervisorPriorDecision> priors)
+    {
+        if (SupervisorTapeCompletion.ProjectIfStoppedNow(priors) is not { } stoppedNow) return null;
+
+        var profile = SupervisorProfile;
+
+        return SupervisorStopNowRecital.Render(stoppedNow.Assessment, stoppedNow.ExercisedUpstreamStages, profile, Core.Services.Completion.CompletionPolicy.DefaultModeFor(profile));
+    }
 
     /// <summary>
     /// A context whose resolve budget is EXPLICIT. A scenario that intends another resolve to be available must say

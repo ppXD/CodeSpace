@@ -309,7 +309,7 @@ public class SupervisorGoldenPromptFidelityTests
     /// in the commit body WHICH block changed and why the corpus's numbers are still comparable across the change.
     /// A re-pin with no such sentence is the failure mode this exists to make visible, not a chore to be rubber-stamped.</para>
     /// </summary>
-    private const string GoldenPromptDigest = "3b1e2df4419951a363433b79e411f0ad9e005a119c104538d704e1be3a13ed9a";
+    private const string GoldenPromptDigest = "9a06aec3056ee4851e8ccd69cdb67585b6b3f20a4414ec03be2dc0ea188426ba";
 
     [Fact]
     public void The_rendered_corpus_matches_its_pinned_digest()

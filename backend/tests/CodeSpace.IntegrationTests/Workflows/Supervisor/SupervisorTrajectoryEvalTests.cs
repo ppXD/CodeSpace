@@ -203,14 +203,14 @@ public sealed class SupervisorTrajectoryEvalTests
 
         var afterConflictedMerge = spy.Prompts[3];
 
-        afterConflictedMerge.ShouldContain(SupervisorStopNowRecital.AdvisoryLead, Case.Sensitive,
-            "the harness stamps CompletionPolicy.CurrentMode like production does, so the DEFAULT cohort's advisory is the wording the live gate must score against — not a refusal, and not silence");
+        afterConflictedMerge.ShouldContain(SupervisorStopNowRecital.RefusalLead, Case.Sensitive,
+            "the harness derives its mode the way a launching run does (CompletionPolicy.DefaultModeFor over the supervisor lane's Enforceable profile), so the DEFAULT cohort is ENFORCED and the wording the live gate must score against is the refusal — not an advisory, and not silence");
         afterConflictedMerge.ShouldContain("requires 1 stage(s) with no evidence — Integrate.", Case.Sensitive,
             "a conflicted merge integrates no branch, so Integrate is unevidenced and the brain has to be told which stage that is before it chooses a stop");
-        afterConflictedMerge.ShouldNotContain(SupervisorStopNowRecital.RefusalLead, Case.Sensitive,
-            "nothing here is Enforced — the harness must not train the brain against a threat production would not make");
+        afterConflictedMerge.ShouldNotContain(SupervisorStopNowRecital.AdvisoryLead, Case.Sensitive,
+            "the authority really does refuse this stop — softening it to an advisory trains the brain that a stop it cannot take is merely frowned upon");
 
-        spy.Prompts[1].ShouldNotContain(SupervisorStopNowRecital.AdvisoryLead, Case.Sensitive,
+        spy.Prompts[1].ShouldNotContain(SupervisorStopNowRecital.RefusalLead, Case.Sensitive,
             "a plan alone stakes nothing, so there is no contract to judge a stage against yet");
     }
 
