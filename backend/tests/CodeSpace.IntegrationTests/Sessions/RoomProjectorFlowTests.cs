@@ -182,6 +182,24 @@ public class RoomProjectorFlowTests
         return AllBlocks(room).OfType<DeliverablesBlock>().ShouldHaveSingleItem();
     }
 
+    [Theory]
+    [InlineData("Enforced", "Completion: Enforced")]   // C5: the completion authority owned this terminal
+    [InlineData("Shadow", "Completion: Shadow")]       // observed only — the engine's own claim stood
+    [InlineData(null, null)]                           // a pre-protocol row reads Legacy — say nothing rather than guess
+    [InlineData("yolo", null)]                         // an unreadable stamp is Legacy fail-closed, same silence
+    public async Task The_turn_names_which_completion_authority_owned_its_terminal(string? stamped, string? expected)
+    {
+        // The stamp decides whether an unverified "completed" stop ends the run as Success or parks it. C5 made it
+        // the DEFAULT for the supervisor cohort, so an operator must be able to read it off the turn — not off the row.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Ship it");
+        var runId = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Ship it", resultSummary: "done", enforcementMode: stamped);
+
+        var room = (await ProjectAsync(runId, teamId)).ShouldNotBeNull();
+
+        room.Blocks.OfType<AssistantTurnBlock>().ShouldHaveSingleItem().CompletionNote.ShouldBe(expected);
+    }
+
     private async Task<RoomView?> ProjectAsync(Guid runId, Guid teamId)
     {
         using var scope = _fixture.BeginScope();
@@ -1341,7 +1359,7 @@ public class RoomProjectorFlowTests
         return id;
     }
 
-    private async Task<Guid> SeedTurnAsync(Guid teamId, Guid sessionId, int turn, string goal, string? resultSummary, WorkflowRunStatus status = WorkflowRunStatus.Success)
+    private async Task<Guid> SeedTurnAsync(Guid teamId, Guid sessionId, int turn, string goal, string? resultSummary, WorkflowRunStatus status = WorkflowRunStatus.Success, string? enforcementMode = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -1362,6 +1380,7 @@ public class RoomProjectorFlowTests
         {
             Id = runId, TeamId = teamId, RunRequestId = requestId, SourceType = WorkflowRunSourceTypes.Snapshot,
             Status = status, SessionId = sessionId, SessionTurnIndex = turn,
+            CompletionEnforcementMode = enforcementMode,
             DefinitionSnapshotJson = "{\"nodes\":[],\"edges\":[]}", DefinitionSnapshotHash = "sha256:test",
             OutputsJson = outputs,
             CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,

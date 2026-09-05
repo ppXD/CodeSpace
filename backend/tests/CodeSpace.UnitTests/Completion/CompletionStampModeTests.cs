@@ -7,8 +7,10 @@ namespace CodeSpace.UnitTests.Completion;
 
 /// <summary>
 /// 🟢 Unit: the P2b cohort stamp + the Q3 admission gate — how a NEW run's enforcement mode derives from its
-/// definition's own opt-in AND its operating mode's standing. Pins: null inherits the platform default (Shadow
-/// while the rollout holds), 'shadow' maps without consulting the cohort, 'enforced' is a cohort privilege
+/// definition's own opt-in AND its operating mode's standing. Pins: null takes the C5 DEFAULT (the mode's own
+/// standing — Enforced for an Enforceable mode, the Shadow fallback for everything below the bar, and the same
+/// predicate the terminal authority arbitrates by), 'shadow' maps without consulting the cohort — an explicit
+/// request wins in both directions — 'enforced' is a cohort privilege
 /// (stamps only for a mode holding Enforceable standing; an unready or unregistered mode refuses to launch,
 /// naming what fell short), and an unreadable value THROWS (stamping weaker than the author declared is the
 /// unacceptable direction).
@@ -17,11 +19,47 @@ namespace CodeSpace.UnitTests.Completion;
 public class CompletionStampModeTests
 {
     [Fact]
-    public void The_platform_default_stays_shadow_while_the_rollout_holds()
+    public void The_fallback_default_stays_shadow_for_a_mode_below_the_bar()
     {
-        // Flipping this constant is THE platform-wide consumer switch — a deliberate PR, never a side effect.
+        // C5: the constant is no longer the whole default — it is the FALLBACK a mode without Enforceable
+        // standing lands on. Flipping it is still a deliberate PR, never a side effect.
         CompletionPolicy.CurrentMode.ShouldBe(CompletionEnforcementMode.Shadow);
         CompletionPolicy.StampModeFor(null, RunModeKeys.Generic, profile: null).ShouldBe(CompletionEnforcementMode.Shadow);
+    }
+
+    [Theory]
+    // C5: a run carrying NO opt-in inherits its own operating mode's standing — Enforceable means the completion
+    // authority is the default terminal owner, everything below the bar keeps the Shadow fallback.
+    [InlineData(RunModeKeys.Supervisor, null, CompletionEnforcementMode.Enforced)]
+    [InlineData(RunModeKeys.PlanMap, null, CompletionEnforcementMode.Shadow)]           // ProtocolReadiness.Open
+    [InlineData(RunModeKeys.SingleAgent, null, CompletionEnforcementMode.Shadow)]       // ProtocolReadiness.Shadow
+    [InlineData(RunModeKeys.Generic, null, CompletionEnforcementMode.Shadow)]           // unregistered — no conformance story
+    // …and an EXPLICIT request still wins in both directions, on the very mode the default would have enforced.
+    [InlineData(RunModeKeys.Supervisor, WorkflowDefinition.CompletionModeShadow, CompletionEnforcementMode.Shadow)]
+    [InlineData(RunModeKeys.Supervisor, WorkflowDefinition.CompletionModeEnforced, CompletionEnforcementMode.Enforced)]
+    [InlineData(RunModeKeys.PlanMap, WorkflowDefinition.CompletionModeShadow, CompletionEnforcementMode.Shadow)]
+    public void A_run_without_an_opt_in_inherits_its_modes_standing(string mode, string? definitionCompletionMode, CompletionEnforcementMode expected)
+    {
+        CompletionPolicy.StampModeFor(definitionCompletionMode, mode, new ModeProfileRegistry().Resolve(mode)).ShouldBe(expected);
+    }
+
+    [Fact]
+    public void The_default_rides_the_terminal_authoritys_own_readiness_predicate()
+    {
+        // The stamp and the arbitration must never disagree: a run stamped Enforced by default whose mode the
+        // authority then reads as below the bar would park Unsupported forever — a cohort of one, unarbitrable.
+        // This pins the stamp against the authority's LITERAL gate (CompletionTerminalAuthority: readiness must
+        // be Enforceable), over the whole registered vocabulary, so adding a mode cannot skip the question.
+        var registry = new ModeProfileRegistry();
+
+        foreach (var mode in registry.RegisteredModes)
+        {
+            var profile = registry.Resolve(mode).ShouldNotBeNull();
+            var stamped = CompletionPolicy.StampModeFor(null, mode, profile);
+
+            (stamped == CompletionEnforcementMode.Enforced).ShouldBe(profile.Readiness == ProtocolReadiness.Enforceable,
+                customMessage: $"mode '{mode}' holds ProtocolReadiness.{profile.Readiness} but defaults to {stamped} — the default stamp and the authority's readiness gate have diverged");
+        }
     }
 
     [Fact]

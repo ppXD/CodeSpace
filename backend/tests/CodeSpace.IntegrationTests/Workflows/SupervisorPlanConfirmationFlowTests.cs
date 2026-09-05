@@ -261,6 +261,8 @@ public class SupervisorPlanConfirmationFlowTests : IDisposable
                 Definition = new WorkflowDefinition
                 {
                     SchemaVersion = 1,
+                    // Mechanics suite — declares Shadow so C5's default Enforced stamp doesn't park its contract-less stops.
+                    CompletionMode = WorkflowDefinition.CompletionModeShadow,
                     Nodes = new List<NodeDefinition>
                     {
                         new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
@@ -296,6 +298,10 @@ public class SupervisorPlanConfirmationFlowTests : IDisposable
                 TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
                 TaskText = "Ship the whole feature end to end", RequestedEffort = TaskEffortModes.Deep,
                 RequirePlanConfirmation = true,
+                // The gate under test is plan confirmation, not completion arbitration; the scripted stop stakes no
+                // contract, which C5's default Enforced stamp would park. Declared on the launch request itself —
+                // the one production seam that can override the mode-profile default.
+                CompletionMode = CodeSpace.Messages.Dtos.Workflows.WorkflowDefinition.CompletionModeShadow,
             }, CancellationToken.None);
         }
 
@@ -493,6 +499,8 @@ public class SupervisorPlanConfirmationFlowTests : IDisposable
     private static WorkflowDefinition SupervisorDefinition(Guid conversationId, bool requireConfirmation) => new()
     {
         SchemaVersion = 1,
+        // Mechanics suite — declares Shadow so C5's default Enforced stamp doesn't park its contract-less stops.
+        CompletionMode = WorkflowDefinition.CompletionModeShadow,
         Nodes = new List<NodeDefinition>
         {
             new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },

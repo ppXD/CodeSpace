@@ -79,8 +79,10 @@ public sealed class CompletionTerminalAuthority : ICompletionTerminalAuthority, 
         // Q3 (cohort admission, arbitration side): the mode must HOLD Enforceable standing at arbitration time,
         // not merely at launch — a cohort demoted by a reviewed registry edit stops terminalizing IMMEDIATELY:
         // its in-flight Enforced rows park here until re-graduation. Structural like the two registration gates
-        // above (recomputed from the registry on every arbitration, nothing baked into the shadow mirror).
-        if (profile.Readiness != ProtocolReadiness.Enforceable)
+        // above (recomputed from the registry on every arbitration, nothing baked into the shadow mirror). The
+        // predicate is THE one CompletionPolicy stamps the default cohort by (C5) — one reading, so the launch
+        // stamp and this gate can never draw different cohort lines.
+        if (!CompletionPolicy.IsEnforceable(profile))
             return new TerminalArbitration(WorkflowRunStatus.Suspended, $"completion-authority: Unsupported — mode '{mode}' holds ProtocolReadiness.{profile.Readiness}, below the Enforceable standing the Enforced cohort requires", TerminalDecision.Unsupported);
 
         // Lock Clause 2: capture the ledgers' watermarks BEFORE composing — conservative direction: a fact that

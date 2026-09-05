@@ -425,6 +425,10 @@ public class SupervisorAskHumanFlowTests : IDisposable
     private static WorkflowDefinition SupervisorDefinition(Guid conversationId) => new()
     {
         SchemaVersion = 1,
+        // This suite measures supervisor MECHANICS, not completion arbitration — its scripted stops deliberately
+        // stake no contract, which a supervisor run's DEFAULT Enforced mode (C5) would park. Declare Shadow so the
+        // mechanic under test stays the thing that fails; CompletionEnforcedCohortFlowTests owns the default cohort.
+        CompletionMode = WorkflowDefinition.CompletionModeShadow,
         Nodes = new List<NodeDefinition>
         {
             new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
