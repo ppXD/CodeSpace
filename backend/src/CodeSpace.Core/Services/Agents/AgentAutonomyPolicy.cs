@@ -33,6 +33,17 @@ public static class AgentAutonomyPolicy
         Enum.TryParse<AgentAutonomyLevel>(value, ignoreCase: true, out var level) ? level : fallback;
 
     /// <summary>
+    /// The tier a BLANK / unrecognised autonomy CEILING means — the highest tier that grants no network, NOT the top
+    /// tier. A route that resolved no bounds preset carries a blank <c>RouteCaps.AutonomyCeiling</c>, and reading that
+    /// as "no ceiling" made the one route nobody bounded the one route on which a caller could ask for network and get
+    /// it. Named here rather than repeated as a literal because two layers fold the same blank — the launch clamp
+    /// (<c>TaskLaunchService.ClampAutonomy</c>) and the router's deployment tighten (<c>EffortRouter</c>) — and a
+    /// disagreement between them is not a cosmetic drift: when the router folded blank to the TOP tier, committing a
+    /// <c>Trusted</c> deployment ceiling RAISED an unbounded route's network from off to on.
+    /// </summary>
+    public const AgentAutonomyLevel UnboundedRouteCeiling = AgentAutonomyLevel.Standard;
+
+    /// <summary>
     /// The ceiling a deployment that has NOT configured one gets: the TOP tier, i.e. no deployment bound beyond the
     /// per-route ones that already exist. It is deliberately the highest tier rather than a safer-looking
     /// <see cref="AgentAutonomyLevel.Trusted"/>: Trusted and Unleashed grant identical sandbox knobs

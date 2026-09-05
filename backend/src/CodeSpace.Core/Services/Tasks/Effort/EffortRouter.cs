@@ -156,7 +156,10 @@ public sealed class EffortRouter : IEffortRouter, IScopedDependency
     /// <para>A deployment that has not lowered its ceiling returns the caps UNTOUCHED — including a BLANK
     /// <see cref="RouteCaps.AutonomyCeiling"/>, which must stay blank: the launch clamp reads a blank ceiling as the
     /// fail-closed <c>Standard</c>, so rewriting it to a concrete top-tier string would hand the one route nobody
-    /// bounded exactly the network it was denied.</para>
+    /// bounded exactly the network it was denied. A LOWERED ceiling writes a concrete string, and
+    /// <see cref="TightenCeiling"/> folds that same blank base to
+    /// <see cref="AgentAutonomyPolicy.UnboundedRouteCeiling"/> first — so the tighten stays a tighten and can never
+    /// land above what the launch would have allowed anyway.</para>
     /// </summary>
     private static RouteCaps TightenToDeploymentCeiling(RouteCaps caps)
     {
@@ -183,12 +186,21 @@ public sealed class EffortRouter : IEffortRouter, IScopedDependency
         };
     }
 
-    /// <summary>The autonomy ceiling an override yields — the stricter (lower-privilege) of base and override, so an override can only LOWER the ceiling, never raise it. A blank override keeps the preset's ceiling.</summary>
+    /// <summary>
+    /// The autonomy ceiling an override yields — the stricter (lower-privilege) of base and override, so an override
+    /// can only LOWER the ceiling, never raise it. A blank override keeps the base ceiling, blank included.
+    ///
+    /// <para>A blank BASE folds to <see cref="AgentAutonomyPolicy.UnboundedRouteCeiling"/>, the same fail-closed
+    /// reading the launch clamp gives it — never the top tier. Parsing it as Unleashed made this a RAISE: on the
+    /// route that resolved no preset, <c>TightenCeiling("", "Trusted")</c> yielded <c>"Trusted"</c>, so an operator
+    /// committing a Trusted deployment ceiling — an act that can only mean "allow less" — turned that route's network
+    /// on. Tighten-only is the whole contract of this method; it has to hold against a blank too.</para>
+    /// </summary>
     private static string TightenCeiling(string baseCeiling, string? overrideCeiling)
     {
         if (string.IsNullOrWhiteSpace(overrideCeiling)) return baseCeiling;
 
-        var tightened = AgentAutonomyPolicy.Clamp(AgentAutonomyPolicy.Parse(overrideCeiling, AgentAutonomyLevel.Unleashed), AgentAutonomyPolicy.Parse(baseCeiling, AgentAutonomyLevel.Unleashed));
+        var tightened = AgentAutonomyPolicy.Clamp(AgentAutonomyPolicy.Parse(overrideCeiling, AgentAutonomyLevel.Unleashed), AgentAutonomyPolicy.Parse(baseCeiling, AgentAutonomyPolicy.UnboundedRouteCeiling));
 
         return tightened.ToString();
     }

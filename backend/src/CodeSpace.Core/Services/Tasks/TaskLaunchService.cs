@@ -346,7 +346,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     {
         var requested = AgentAutonomyPolicy.Parse(request.Autonomy, AgentAutonomyPolicy.Parse(route.RecommendedAutonomy, AgentAutonomyLevel.Standard));
 
-        var ceiling = AgentAutonomyPolicy.Parse(route.Caps.AutonomyCeiling, AgentAutonomyLevel.Standard);
+        var ceiling = AgentAutonomyPolicy.Parse(route.Caps.AutonomyCeiling, AgentAutonomyPolicy.UnboundedRouteCeiling);
 
         return AgentAutonomyPolicy.Clamp(requested, ceiling).ToString();
     }

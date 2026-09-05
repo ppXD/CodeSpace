@@ -1,5 +1,9 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Commands;
+using CodeSpace.Core.Services.Agents.Eval.Benchmark;
+using CodeSpace.Core.Services.Supervisor;
+using CodeSpace.Core.Services.Supervisor.Executors;
 using CodeSpace.Core.Services.Tasks.Bounds;
 using CodeSpace.Core.Services.Tasks.Bounds.Presets.Deep;
 using CodeSpace.Core.Services.Tasks.Bounds.Presets.Quick;
@@ -16,6 +20,8 @@ using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Core.Settings;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Agents.Benchmark;
+using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks;
 using CodeSpace.Messages.Tasks.Effort;
@@ -111,13 +117,27 @@ public class DeploymentAutonomyCeilingTests
         plan.Caps.AutonomyCeiling.ShouldBeEmpty("no preset resolved, so there is no ceiling to state — and a blank one still folds to Standard at the launch");
     }
 
-    [Fact]
-    public async Task An_unbounded_route_is_still_bound_by_a_lowered_deployment_ceiling()
+    [Theory]
+    // deployment ceiling → the ceiling the UNBOUNDED route ends up carrying, and the network a Trusted request gets
+    [InlineData("Confined", "Confined", AgentNetworkAccess.Off)]
+    [InlineData("Standard", "Standard", AgentNetworkAccess.Off)]
+    [InlineData("Trusted", "Standard", AgentNetworkAccess.Off)]
+    public async Task A_lowered_deployment_ceiling_only_ever_NARROWS_an_unbounded_route(string deployment, string expected, AgentNetworkAccess expectedNetwork)
     {
-        var plan = await WithCeilingAsync("Confined", () => Router(withPresets: false).RouteAsync(RouteRequest(TaskEffortModes.Deep), CancellationToken.None));
+        // Two directions, one property — a ceiling can only take away. DOWN: the blank ceiling's fail-closed fold is
+        // Standard, which is ABOVE Confined, so without this tighten the unbounded route would out-rank the
+        // deployment's own bound. UP is the sharper one: a blank base parsed as the TOP tier made
+        // TightenCeiling("", "Trusted") yield "Trusted", so committing a Trusted ceiling — an act that can only mean
+        // "allow less" — RAISED this route from the launch's fail-closed Standard into the network tier. A setting
+        // whose whole job is to narrow must never be the thing that grants egress.
+        var plan = await WithCeilingAsync(deployment, () => Router(withPresets: false).RouteAsync(RouteRequest(TaskEffortModes.Deep), CancellationToken.None));
 
-        plan.Caps.AutonomyCeiling.ShouldBe("Confined",
-            customMessage: "the blank ceiling's fail-closed fold is Standard, which is ABOVE Confined — without this tighten the unbounded route would out-rank the deployment's own bound");
+        plan.Caps.AutonomyCeiling.ShouldBe(expected);
+
+        var effective = AgentAutonomyPolicy.Clamp(AgentAutonomyLevel.Trusted, AgentAutonomyPolicy.Parse(plan.Caps.AutonomyCeiling, AgentAutonomyPolicy.UnboundedRouteCeiling));
+
+        AgentAutonomyPolicy.Derive(effective).Network.ShouldBe(expectedNetwork,
+            customMessage: $"a Trusted request on the route nobody bounded, under deployment ceiling '{deployment}', reaches the sandbox with network {expectedNetwork}");
     }
 
     // ── The authored / replay lane: the node clamps what no route reaches ─────
@@ -155,6 +175,70 @@ public class DeploymentAutonomyCeilingTests
         task.Permissions.WriteScope.ShouldBe(AgentWriteScope.ReadOnly);
     }
 
+    // ── The supervisor lane: ONE profile tier fans out to N agents ────────────
+
+    [Theory]
+    // profile tier   per-agent dispatch   deployment ceiling → the tier + network EVERY spawned agent carries
+    [InlineData("Trusted", null, null, AgentAutonomyLevel.Trusted, AgentNetworkAccess.On)]              // inert at the committed default
+    [InlineData("Trusted", null, "Standard", AgentAutonomyLevel.Standard, AgentNetworkAccess.Off)]      // the fan-out bypass this closes
+    [InlineData("Unleashed", "Trusted", "Standard", AgentAutonomyLevel.Standard, AgentNetworkAccess.Off)]
+    [InlineData("Unleashed", null, "Confined", AgentAutonomyLevel.Confined, AgentNetworkAccess.Off)]
+    [InlineData("Standard", null, "Trusted", AgentAutonomyLevel.Standard, AgentNetworkAccess.Off)]      // a ceiling that grants network raises nothing
+    [InlineData("Confined", null, "Standard", AgentAutonomyLevel.Confined, AgentNetworkAccess.Off)]     // a profile UNDER the ceiling keeps its own tier
+    public void Every_supervisor_spawn_is_clamped_to_the_deployment_ceiling(string profileTier, string? dispatchTier, string? deployment, AgentAutonomyLevel expectedTier, AgentNetworkAccess expectedNetwork)
+    {
+        // The widest lane of the three, and the last one bounded: the profile tier is frozen into the supervisor
+        // node's config at launch and read back VERBATIM on every rehydrate, so a hand-authored agent.supervisor —
+        // or a replay of any supervisor run — fanned out N agents at its own tier with no ceiling consulted at all.
+        // One node, many sandboxes: the tier is read once here and derives every spawned agent's permissions.
+        var context = new SupervisorTurnContext { Goal = "ship it", AgentProfile = new SupervisorAgentProfile { AutonomyLevel = profileTier } };
+        var spec = dispatchTier is null ? null : new SupervisorAgentDispatch { SubtaskId = SubtaskId, AutonomyLevel = dispatchTier };
+
+        var task = WithCeiling(deployment, () => RealSupervisorActionExecutor.BuildAgentTask(NoSubtasks, SubtaskId, revisedInstruction: null, context, spec));
+
+        task.Autonomy.ShouldBe(expectedTier);
+        task.Permissions.Network.ShouldBe(expectedNetwork,
+            customMessage: $"a '{profileTier}' supervisor profile under deployment ceiling '{deployment ?? "(unset)"}' must fan out agents with network {expectedNetwork} — every spawn derives its permissions from this one tier");
+    }
+
+    // ── The command lane: agent.run_command's own raw network flag ────────────
+
+    [Theory]
+    [InlineData(true, null, true)]           // inert at the committed default
+    [InlineData(true, "Trusted", true)]      // a ceiling that grants network changes nothing
+    [InlineData(true, "Standard", false)]    // the bypass this closes — no tier under Standard may reach the internet
+    [InlineData(false, null, false)]         // an unasked-for network stays off, ceiling or no ceiling
+    public void An_authored_run_command_network_flag_cannot_out_rank_the_deployment_ceiling(bool authored, string? deployment, bool expected)
+    {
+        // agent.run_command spawns a sandbox of its own, with NO autonomy tier anywhere in its vocabulary: the node's
+        // raw "network": true goes straight onto SandboxSpec.AllowNetwork. It is the one materialization site the
+        // tier clamps cannot reach, so the ceiling's DERIVED network posture narrows it directly.
+        var spec = WithCeiling(deployment, () => RunCommandService.BuildSpec(new RunCommandRequest { Command = "curl", AllowNetwork = authored }, workingDirectory: null));
+
+        spec.AllowNetwork.ShouldBe(expected,
+            customMessage: $"an authored network={authored} command under deployment ceiling '{deployment ?? "(unset)"}' reaches the runner with AllowNetwork={expected}");
+    }
+
+    // ── The benchmark lane: a caller-supplied verifier tier ───────────────────
+
+    [Theory]
+    [InlineData(AgentAutonomyLevel.Trusted, null, AgentAutonomyLevel.Trusted, AgentNetworkAccess.On)]      // inert at the committed default
+    [InlineData(AgentAutonomyLevel.Trusted, "Standard", AgentAutonomyLevel.Standard, AgentNetworkAccess.Off)]
+    [InlineData(AgentAutonomyLevel.Unleashed, "Confined", AgentAutonomyLevel.Confined, AgentNetworkAccess.Off)]
+    [InlineData(null, "Confined", AgentAutonomyLevel.Confined, AgentNetworkAccess.Off)]                    // even the corpus default Standard narrows
+    public void A_benchmark_selection_cannot_out_rank_the_deployment_ceiling(AgentAutonomyLevel? selected, string? deployment, AgentAutonomyLevel expectedTier, AgentNetworkAccess expectedNetwork)
+    {
+        // A qualification round is launched by a global admin posting an autonomy tier at a command — a caller-supplied
+        // value with no route and no node between it and a live agent on this host. It spends real budget on real
+        // agents, which is exactly the traffic an operator who lowered the ceiling meant to bound.
+        var selection = selected is { } tier ? new BenchmarkAgentSelection { Harness = "codex-cli", Autonomy = tier } : null;
+
+        var task = WithCeiling(deployment, () => BenchmarkRunner.BuildAgentTask(BenchmarkTask(), BenchmarkMode.HarnessCli, "/tmp/cs-bench-ws", selection));
+
+        task.Autonomy.ShouldBe(expectedTier);
+        task.Permissions.Network.ShouldBe(expectedNetwork);
+    }
+
     // ── The spec default the ceiling ultimately lands on ──────────────────────
 
     [Fact]
@@ -166,6 +250,23 @@ public class DeploymentAutonomyCeilingTests
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────
+
+    private const string SubtaskId = "s1";
+
+    private static readonly IReadOnlyDictionary<string, SupervisorPlannedSubtask> NoSubtasks = new Dictionary<string, SupervisorPlannedSubtask>();
+
+    private static BenchmarkTask BenchmarkTask() => new()
+    {
+        Id = "task-a",
+        Description = "task-a",
+        FixtureRef = "fixture-task-a",
+        Goal = "make the check pass",
+        Grading = BenchmarkGradingKind.TestsPass,
+        TestCommand = new[] { "sh", "check.sh" },
+        Harness = "codex-cli",
+        TimeoutSeconds = 123,
+        Modes = new[] { BenchmarkMode.HarnessCli },
+    };
 
     private static EffortRouter Router(bool withPresets = true) => new(
         new EffortClassifierRegistry(new IEffortClassifier[] { new HeuristicEffortClassifier() }),
@@ -219,6 +320,11 @@ public class DeploymentAutonomyCeilingTests
     private static void WithCeiling(string? configured, Action assert)
     {
         using (RuntimeSettings.Override(Read(configured))) assert();
+    }
+
+    private static T WithCeiling<T>(string? configured, Func<T> act)
+    {
+        using (RuntimeSettings.Override(Read(configured))) return act();
     }
 
     private static async Task<T> WithCeilingAsync<T>(string? configured, Func<Task<T>> act)
