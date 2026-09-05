@@ -141,21 +141,7 @@ public sealed class RealModelDeliveryGateE2ETests : IDisposable
             if (afterDrive.PendingQuestion?.StartsWith(SupervisorDeliveryGate.QuestionPrefix, StringComparison.Ordinal) != true)
                 return (RealModelOutcome.CapabilityMiss, $"the run parked on a NON-gate card ('{Truncate(afterDrive.PendingQuestion)}') before the delivery conflict ever surfaced — reported, not gating");
 
-            // The gate's ladder has an HONEST empty-result card ("no published branch to open one from") for a run
-            // whose agents captured nothing at all — under the 2026-07 gateway model drift, agents routinely
-            // "succeed" with an empty diff, so zero manifests ⇒ that card is the truth and the miss is the MODEL's
-            // (first seen run 29235518700). Only a mis-named card OVER captured work is a code fault.
-            if (!afterDrive.PendingQuestion.Contains("patch-only", StringComparison.OrdinalIgnoreCase))
-                if (afterDrive.AgentManifestCount > 0)
-                    return (RealModelOutcome.CodeFault, $"the gate parked but its card does not name the patch-only policy conflict despite {afterDrive.AgentManifestCount} captured manifest(s): '{Truncate(afterDrive.PendingQuestion)}'");
-
-                // Zero manifests is the MODEL's miss only when the tape independently shows no work — the manifest
-                // ledger must never grade its own absence: agents whose results show changed files / a produced
-                // branch with NOTHING captured means the capture/publish pipeline swallowed the work (a code fault
-                // the previous manifest-count-only read was permanently blind to).
-                return afterDrive.AnyAgentShowsWork
-                    ? (RealModelOutcome.CodeFault, $"agent results on the tape SHOW work but zero publish manifests were captured — the capture/publish pipeline swallowed it: '{Truncate(afterDrive.PendingQuestion)}'")
-                    : (RealModelOutcome.CapabilityMiss, $"the agents captured NO work at all (zero publish manifests, and no agent result shows work) — the gate's empty-publish card is honest; the live model never produced a diff to publish: '{Truncate(afterDrive.PendingQuestion)}' — reported, not gating");
+            if (ParkedCardFault(afterDrive.PendingQuestion, afterDrive.AgentManifestCount, afterDrive.AnyAgentShowsWork) is { } cardFault) return cardFault;
 
             afterDrive.PublishCount.ShouldBeGreaterThanOrEqualTo(1, "the gate must have forced the first server publish before parking");
 
@@ -204,6 +190,40 @@ public sealed class RealModelDeliveryGateE2ETests : IDisposable
         });
     }
 
+    // ─── The parked card's verdict ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// Phase 1's verdict on the card the gate parked on, as a PURE decision over the only three facts it has: the
+    /// card's own wording, the Agent-kind manifest count, and the tape's INDEPENDENT work signal. Null means the card
+    /// NAMES the patch-only conflict — the honest arc this arm exists to prove — and Phase 1 proceeds.
+    ///
+    /// <para>The gate's ladder has an HONEST empty-result card ("no published branch to open one from") for a run
+    /// whose agents captured nothing at all — under the 2026-07 gateway model drift, agents routinely "succeed" with
+    /// an empty diff, so zero manifests ⇒ that card is the truth and the miss is the MODEL's (first seen run
+    /// 29235518700). Only a mis-named card OVER captured work is a code fault. Zero manifests is the MODEL's miss
+    /// only when the tape independently shows no work — the manifest ledger must never grade its own absence: agents
+    /// whose results show changed files / a produced branch with NOTHING captured means the capture/publish pipeline
+    /// swallowed the work.</para>
+    ///
+    /// <para>ONE method rather than nested statements on purpose. The three readings used to be an unbraced
+    /// <c>if (!names-the-conflict) if (count > 0) return …;</c> followed by a second <c>return</c> that LOOKED
+    /// nested but was not: it escaped the outer guard and fired for every run — including the honest patch-only
+    /// card — reporting "zero publish manifests were captured" over a run that captured one, and making Phase 2
+    /// unreachable (run 33946934743 on main, where the opener's mint evidence was real). An early return whose
+    /// condition is the method's own first line cannot drift that way again.</para>
+    /// </summary>
+    internal static (RealModelOutcome Outcome, string Note)? ParkedCardFault(string question, int agentManifestCount, bool anyAgentShowsWork)
+    {
+        if (question.Contains("patch-only", StringComparison.OrdinalIgnoreCase)) return null;
+
+        if (agentManifestCount > 0)
+            return (RealModelOutcome.CodeFault, $"the gate parked but its card does not name the patch-only policy conflict despite {agentManifestCount} captured manifest(s): '{Truncate(question)}'");
+
+        return anyAgentShowsWork
+            ? (RealModelOutcome.CodeFault, $"agent results on the tape SHOW work but zero publish manifests were captured — the capture/publish pipeline swallowed it: '{Truncate(question)}'")
+            : (RealModelOutcome.CapabilityMiss, $"the agents captured NO work at all (zero publish manifests, and no agent result shows work) — the gate's empty-publish card is honest; the live model never produced a diff to publish: '{Truncate(question)}' — reported, not gating");
+    }
+
     // ─── Tape/state snapshot ─────────────────────────────────────────────────────────
 
     private sealed record Snapshot(WorkflowRunStatus RunStatus, string? RunError, string? PendingActionToken, string? PendingQuestion,
@@ -239,6 +259,13 @@ public sealed class RealModelDeliveryGateE2ETests : IDisposable
         var manifests = await scope.Resolve<IPublishManifestStore>().ListForWorkflowRunAsync(runId, teamId, CancellationToken.None);
         var prOnManifest = manifests.Any(m => m.PullRequestNumber is not null || m.PullRequestUrl is not null);
 
+        // Agent-kind ONLY, of ANY shape: patch-only evidence is BRANCHLESS by design (RepositoryPolicyPublishGuard
+        // skips the push, the captured diff still records a row), and an Integration row is the SERVER's own PR
+        // bookkeeping, never agent work. The exact rows SupervisorPullRequestOpener.CapturedWorkByRepositoryAsync
+        // reads as its patch-only mint evidence — one definition of "the agents captured something", so the arm and
+        // the code it grades can never disagree about whether a run produced work.
+        var agentManifestCount = manifests.Count(m => m.Kind == PublishManifestKind.Agent);
+
         // The INDEPENDENT work signal (audit fix): agent results on the tape, not the manifest ledger — the
         // ledger must never grade its own absence.
         var anyAgentShowsWork = decisions
@@ -254,7 +281,7 @@ public sealed class RealModelDeliveryGateE2ETests : IDisposable
             pendingQuestion,
             publishes.Count,
             decisions.Count(d => d.DecisionKind == SupervisorDecisionKinds.AskHuman && ReadQuestion(d.PayloadJson)?.StartsWith(SupervisorDeliveryGate.QuestionPrefix, StringComparison.Ordinal) == true),
-            anySatisfied, prOnManifest, manifests.Count,
+            anySatisfied, prOnManifest, agentManifestCount,
             anyAgentShowsWork,
             last?.DecisionKind, lastStopReason,
             string.Join("→", decisions.Select(d => d.DecisionKind)),
