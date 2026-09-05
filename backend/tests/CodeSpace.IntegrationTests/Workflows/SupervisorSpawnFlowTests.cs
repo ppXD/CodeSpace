@@ -780,9 +780,11 @@ public class SupervisorSpawnFlowTests : IDisposable
             // Pending→Enqueued) instead of failing it; AutoExecute is off so the engine doesn't auto-run yet. ──
             var summary = await ReconcileAsync();
 
-            summary.RecoveredAbandonedSupervisorRun.ShouldBe(1, "the reconciler must RE-DISPATCH the abandoned-Running supervisor run, not fail it");
-            summary.MarkedAbandonedFromRunning.ShouldBe(0, "the recovery sweep ran FIRST + flipped the run out of Running, so the abandoned sweep must not also fail it");
-            (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Enqueued, "the recovered run was re-dispatched into Enqueued, waiting for the worker");
+            // >= not == : StuckRunReconcileSummary counters are deployment-wide, so rows left stuck by the other
+            // classes sharing this database land in the same pass. The row assertions below prove THIS run recovered.
+            summary.RecoveredAbandonedSupervisorRun.ShouldBeGreaterThanOrEqualTo(1, "the reconciler must RE-DISPATCH the abandoned-Running supervisor run, not fail it");
+            (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Enqueued,
+                "the recovered run was re-dispatched into Enqueued, waiting for the worker — Enqueued rather than Failure also proves the recovery sweep ran FIRST and the abandoned sweep did not also fail it");
 
             (await CountRecoveryMarkersAsync(runId)).ShouldBe(1, "exactly one durable supervisor.run_recovered marker — the bound counter advanced by one");
 
@@ -863,19 +865,17 @@ public class SupervisorSpawnFlowTests : IDisposable
             // counts these and excludes a run at/over the cap.
             await PlantRecoveryMarkersAsync(runId, StuckRunReconcilerService.MaxSupervisorRunRecoveries);
 
-            var summary = await ReconcileAsync();
+            await ReconcileAsync();
 
-            summary.RecoveredAbandonedSupervisorRun.ShouldBe(0,
-                "a run already at the recovery cap must NOT be re-dispatched — the loop-guard stops here");
-            summary.MarkedAbandonedFromRunning.ShouldBe(1,
-                "at the cap the run falls through to the abandoned-Running sweep, which fails it cleanly — the loop TERMINATES");
-
+            // Both claims — "not re-dispatched" and "failed cleanly instead" — are settled by this run's own row
+            // below: recovery writes Enqueued, the abandoned sweep writes Failure. The deployment-wide counters
+            // cannot say either thing about THIS run once another class's rows land in the same pass.
             using (var verify = _fixture.BeginScope())
             {
                 var db = verify.Resolve<CodeSpaceDbContext>();
                 var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
                 run.Status.ShouldBe(WorkflowRunStatus.Failure,
-                    customMessage: "the deterministically-crashing run terminates in Failure once the recovery budget is exhausted — it does NOT loop forever");
+                    customMessage: "a run at the recovery cap is NOT re-dispatched — it falls through to the abandoned-Running sweep and terminates in Failure once the budget is exhausted; it does NOT loop forever");
                 run.Error.ShouldNotBeNullOrEmpty();
                 run.Error!.ShouldContain("abandoned", customMessage: "the failure surfaces the abandoned reason for the operator");
 
