@@ -211,6 +211,39 @@ public class CompletionEnforcedCohortFlowTests
     }
 
     [Fact]
+    public async Task A_default_supervisor_run_that_gave_up_with_a_failed_unit_ends_an_honest_failure()
+    {
+        // The continue-on-error terminal: one unit passed and merged, the other FAILED its own check, and the model
+        // stopped `gave_up` rather than claiming completion. That is a decided, honest non-success — the authority
+        // must stamp Failure and let the run END. Parking it would hand an operator a decision the run already made,
+        // and would make every partially-failing run under the default cohort wait on a human forever.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await StartSupervisorSnapshotAsync(teamId, userId, completionMode: null, DeclaredOutputs);
+
+        var attempts = await SeedPartialFailureTapeAsync(runId, teamId);
+        var repositoryId = await SeedRepositoryAsync(teamId);
+        await SeedManifestAsync(teamId, attempts[0], repositoryId, "codespace/agent/s1");   // only the PASSING unit ever delivered
+
+        foreach (var unit in new[] { "s1", "s2" })
+            await StakeAsync(runId, teamId, $"acceptance:{unit}", ContractKinds.Acceptance);
+
+        await StakeAsync(runId, teamId, "delivery:s1", ContractKinds.Delivery);
+        await StakeAsync(runId, teamId, "output:s1", ContractKinds.Output);
+
+        await ForceEnqueuedAsync(runId);
+        await RunEngineAsync(runId);
+
+        var run = await ReadRunAsync(runId);
+
+        run.CompletionEnforcementMode.ShouldBe("Enforced", "the supervisor default resolved Enforced — this is the arbitrated path");
+        run.Status.ShouldBe(WorkflowRunStatus.Failure,
+            customMessage: $"a give-up over a failed unit is a DECIDED outcome — the authority must stamp Failure, not park. It said: {run.Error}");
+        run.Error.ShouldNotBeNull();
+        run.Error!.ShouldContain("honest failure", customMessage: "the terminal must name the arbitration that produced it");
+        run.CompletionParkedAt.ShouldBeNull("nothing is unadjudicated — a decided failure is not a park");
+    }
+
+    [Fact]
     public async Task A_default_plan_map_run_is_untouched_by_the_flip()
     {
         // The cohort line is the mode PROFILE's, not a global switch: plan-map holds ProtocolReadiness.Open, so an
@@ -551,6 +584,28 @@ public class CompletionEnforcedCohortFlowTests
             JsonSerializer.Serialize(new { agentResults = unitIds.Select((id, i) => AgentResult(attemptIds[i], id, accepted: true)) }));
         await SeedDecisionAsync(runId, teamId, 3, SupervisorDecisionKinds.Stop, "{}", "{}");
         return attemptIds;
+    }
+
+    /// <summary>
+    /// The continue-on-error tape (plan(s1,s2) → spawn(s1 accepted + branch, s2 REJECTED) → merge(integrated) → stop
+    /// with the model's own <c>gave_up</c> outcome): the run carried on past a unit that failed its own check, merged
+    /// what passed, and reported honestly. Returns both attempt ids, s1 first.
+    /// </summary>
+    private async Task<IReadOnlyList<Guid>> SeedPartialFailureTapeAsync(Guid runId, Guid teamId)
+    {
+        var passed = Guid.NewGuid();
+        var failed = Guid.NewGuid();
+
+        await SeedPlanAsync(runId, teamId, "s1", "s2");
+        await SeedDecisionAsync(runId, teamId, 2, SupervisorDecisionKinds.Spawn,
+            """{"subtaskIds":["s1","s2"]}""",
+            JsonSerializer.Serialize(new { agentResults = new[] { AgentResult(passed, "s1", accepted: true), AgentResult(failed, "s2", accepted: false) } }));
+        await SeedDecisionAsync(runId, teamId, 3, SupervisorDecisionKinds.Merge,
+            """{"branches":["codespace/agent/s1"]}""",
+            $$$"""{"integration":{"status":"integrated","integratedBranch":"codespace/integration/{{{runId:N}}}"}}""");
+        await SeedDecisionAsync(runId, teamId, 4, SupervisorDecisionKinds.Stop, "{}",
+            $$"""{"outcome":"{{SupervisorStopPayload.GaveUpOutcome}}","summary":"s2 could not be made to pass its check"}""");
+        return new[] { passed, failed };
     }
 
     /// <summary>The authorized plan every staking tape needs — its recorded <c>workPlanId</c> is what the fold reads a unit's obligations under.</summary>
