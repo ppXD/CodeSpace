@@ -57,6 +57,13 @@ public sealed class SecretRedactor
         }
     }
 
+    /// <summary>
+    /// This redactor plus <paramref name="additional"/> secrets — a new instance; the receiver is unchanged. For a
+    /// secret that only EXISTS later in the launch (the per-run MCP capability token, minted after the credential
+    /// resolve), so it becomes a needle without the credential having to be resolved a second time.
+    /// </summary>
+    public SecretRedactor With(IEnumerable<string> additional) => new(_secrets.Concat(additional));
+
     public string Redact(string text)
     {
         if (string.IsNullOrEmpty(text) || IsEmpty) return text;

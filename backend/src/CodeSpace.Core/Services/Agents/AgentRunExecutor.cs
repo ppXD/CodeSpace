@@ -371,6 +371,17 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // points at it. Null when no endpoint → nothing to re-open.
             var mcpToken = mcp is null ? null : token;
 
+            // The run token is the fourth secret this launch injects: it rides the MCP declaration's server env
+            // (McpDeclarationWriter.TokenEnvVar) into the agent's config home, so a CLI that echoes its loaded MCP
+            // config — an init banner, a "failed to start server" dump — puts a live capability straight into
+            // AgentRun.Error and the append-only log. It only EXISTS after the mint, which is why it joins the
+            // redactor here rather than in BuildRunRedactor. Folded exactly when it is stamped on the handle, so the
+            // re-attach that rebuilds from handle.McpRunToken reproduces this fingerprint precisely — a token folded
+            // in when none was stamped would fail the re-attach's equality gate for a secret that never left the
+            // worker. The endpoint above keeps the pre-fold redactor: it is the token's own issuer and validator, and
+            // when there is no token to fold there is no endpoint either.
+            redactor = WithMcpRunToken(redactor, mcpToken);
+
             // D3/G0: the run's faithful raw stream, accumulated across EVERY revise round without being retained —
             // bounded at the artifact offloader's own inline threshold, so what the durable record carries is
             // unchanged while the heap stops growing with stdout. Disposed with the run (its spill file with it), and
@@ -630,13 +641,17 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// launch — only then have we provably reconstructed the same key that masked the original output. If the
     /// credential threw, re-resolved to nothing, or rotated (fingerprint mismatch), we complete from the exit
     /// marker only (NEVER re-tail with an un/mis-keyed redactor) so an echoed secret is never frozen into the log.
+    ///
+    /// <para>The run's MCP capability token is re-folded from the handle — it was minted at launch, not derived from
+    /// the credential, so re-resolving alone would rebuild a NARROWER redactor that both leaks an echoed token and
+    /// fails the fingerprint gate for every fabric-carrying run.</para>
     /// </summary>
     private async Task<AgentRunResult?> ReattachAndFoldAsync(ReattachFoldContext context, CancellationToken cancellationToken)
     {
         SecretRedactor redactor;
         try
         {
-            redactor = (await ResolveModelCredentialEnvAsync(context.Task, context.TeamId, context.Harness, cancellationToken).ConfigureAwait(false)).Redactor;
+            redactor = WithMcpRunToken((await ResolveModelCredentialEnvAsync(context.Task, context.TeamId, context.Harness, cancellationToken).ConfigureAwait(false)).Redactor, context.Handle.McpRunToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -2744,13 +2759,16 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     internal const int MinimumNeedleLength = 8;
 
     /// <summary>
-    /// The most needles one run's redactor will carry. <see cref="AgentTask.Environment"/> is author-supplied and
-    /// uncapped, so without this a task naming a thousand secret-marked variables would make every redaction pass a
-    /// thousand-pattern scan over every event line and every spooled byte — and the byte-stream redactor holds a carry
-    /// suffix as long as its longest pattern. A run legitimately injects a handful; 64 is far above any real launch and
-    /// far below the point where the scan costs anything. The overflow is dropped SILENTLY: naming the dropped
-    /// variables would put author-chosen secret names into the log, which is the sort of thing this file exists to
-    /// prevent.
+    /// The most needles <see cref="BuildRunRedactor"/> will hand back. <see cref="AgentTask.Environment"/> is
+    /// author-supplied and uncapped, so without this a task naming a thousand secret-marked variables would make every
+    /// redaction pass a thousand-pattern scan over every event line and every spooled byte — and the byte-stream
+    /// redactor holds a carry suffix as long as its longest pattern. A run legitimately injects a handful; 64 is far
+    /// above any real launch and far below the point where the scan costs anything. The overflow is dropped SILENTLY:
+    /// naming the dropped variables would put author-chosen secret names into the log, which is the sort of thing this
+    /// file exists to prevent.
+    ///
+    /// <para>It bounds what an AUTHOR can push in, which is why <see cref="WithMcpRunToken"/> adds the run's own minted
+    /// token beyond it: that one is this launch's, exactly one per run, and dropping it would leak a live capability.</para>
     /// </summary>
     internal const int MaximumNeedles = 64;
 
@@ -2814,6 +2832,15 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         return usable.Count == 0 ? SecretRedactor.None : new SecretRedactor(usable);
     }
+
+    /// <summary>
+    /// A redactor widened by the run's per-run MCP capability token — the one secret the launch mints AFTER the
+    /// credential resolve, so <see cref="BuildRunRedactor"/> cannot see it. A no-op when the run has no token (no
+    /// endpoint opened → nothing was injected) or when the token is too short to be a needle, which keeps the
+    /// launch-side and re-attach-side fingerprints equal for exactly the runs that carry one.
+    /// </summary>
+    private static SecretRedactor WithMcpRunToken(SecretRedactor redactor, string? mcpRunToken) =>
+        mcpRunToken is { Length: >= MinimumNeedleLength } token ? redactor.With([token]) : redactor;
 
     /// <summary>
     /// The credential parts embedded IN a base URL — every userinfo segment, and each query value whose parameter

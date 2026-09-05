@@ -49,6 +49,20 @@ public class SecretRedactorTests
     }
 
     [Fact]
+    public void With_widens_a_redactor_without_changing_the_one_it_was_built_from()
+    {
+        // The seam the per-run MCP capability token arrives through — minted after the credential resolve, so it
+        // cannot be a needle at construction. The receiver must stay put: the MCP endpoint is handed the narrower
+        // redactor and the launch keeps using the wider one.
+        var credentialOnly = new SecretRedactor(new[] { "sk-aaa-key1" });
+
+        var widened = credentialOnly.With(new[] { "run-token-9911" });
+
+        widened.Redact("init sk-aaa-key1 via run-token-9911").ShouldBe("init *** via ***");
+        credentialOnly.Redact("init sk-aaa-key1 via run-token-9911").ShouldBe("init *** via run-token-9911");
+    }
+
+    [Fact]
     public void Masks_a_secret_embedded_in_a_larger_blob()
     {
         var r = new SecretRedactor(new[] { "sk-secret" });
