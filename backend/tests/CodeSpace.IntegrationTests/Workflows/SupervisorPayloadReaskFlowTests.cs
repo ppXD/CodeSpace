@@ -24,13 +24,16 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// <summary>
 /// 🟢 Integration (real Postgres + the REAL <see cref="SupervisorTurnService"/> over the real decision ledger and
 /// the REAL <see cref="LlmSupervisorDecider"/>; only the gateway is scripted, at the one honest
-/// <see cref="IStructuredLLMClient"/> seam): a brain that names a kind and omits its payload gets ONE bounded
-/// re-ask, and the recovered decision reaches the durable row with the re-ask on it.
+/// <see cref="IStructuredLLMClient"/> seam): a brain whose reply the run cannot execute gets ONE bounded re-ask,
+/// and the recovered decision reaches the durable row with the re-ask on it.
 ///
-/// <para>The live shape (real-model run 33943475246): a bare <c>{"kind":"plan"}</c> — schema-valid, binds cleanly,
-/// and projects to an empty plan the executor then rejects, spending the turn. The unit tier pins the decider's
-/// recovery; THIS tier pins the half the decider cannot see — that the marker survives projection, execution and
-/// the terminal CAS, so the ledger says the decision cost a second round-trip instead of reading like a clean one.</para>
+/// <para>Two live shapes. A bare <c>{"kind":"plan"}</c> (real-model run 33943475246) — schema-valid, binds cleanly,
+/// and projects to an empty plan the executor then rejects, spending the turn. And a <c>retry</c> aimed at a unit
+/// that already succeeded while another sat failed (golden <c>five-subtask-middle-failed</c>, main runs 33945398336
+/// and 33946934743) — whole payload, plan-declared id, so the run re-runs finished work. The unit tier pins the
+/// decider's recovery; THIS tier pins the half the decider cannot see — that the marker survives projection,
+/// execution and the terminal CAS, so the ledger says the decision cost a second round-trip instead of reading like
+/// a clean one.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -41,6 +44,8 @@ public sealed class SupervisorPayloadReaskFlowTests
 
     private const string PayloadLessPlan = """{"kind":"plan","rationale":{"why":"decompose the goal"}}""";
     private const string WholePlan = """{"kind":"plan","plan":{"goal":"ship the feature","subtasks":[{"id":"s1","title":"Audit","instruction":"audit it"}]}}""";
+
+    private const string RetryFinishedUnit = """{"kind":"retry","retry":{"subtaskId":"s1"}}""";
 
     private readonly PostgresFixture _fixture;
 
@@ -84,6 +89,35 @@ public sealed class SupervisorPayloadReaskFlowTests
 
         OutcomeFlag(row, "payloadReasked").ShouldBeNull("the common path stays untouched — a re-ask marker on a decision that never needed one is a false signal in every read of the tape");
         SupervisorOutcome.ReadPayloadReaskedFromKind(row.OutcomeJson).ShouldBeNull();
+        SupervisorOutcome.ReadRetryTargetReasked(row.OutcomeJson).ShouldBeFalse("neither correction fired — both markers stay off the row");
+    }
+
+    [Fact]
+    public async Task A_retry_aimed_at_finished_work_is_re_asked_and_the_re_authored_decision_lands_on_the_ledger_row()
+    {
+        // LIVE shape (golden 'five-subtask-middle-failed', main runs 33945398336 + 33946934743): the brain retried a
+        // unit that had already succeeded and been accepted, while another sat FAILED. Schema-valid, whole payload,
+        // plan-declared id — nothing downstream can see it, so the turn re-runs finished work.
+        //
+        // The re-ask reply here re-PLANS: the correction invites a different action, and the server never re-aims the
+        // retry itself. The decider tier pins the re-aim-to-the-failed-unit case; THIS tier pins the half the decider
+        // cannot see — that the marker survives projection, execution and the terminal CAS onto the durable row.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = Guid.NewGuid();
+
+        await SeedMixedFanOutAsync(runId, teamId);
+
+        var client = await RunTurnAsync(runId, teamId, RetryFinishedUnit, WholePlan);
+
+        client.Requests.Count.ShouldBe(2, "the misaimed first reply buys exactly ONE bounded re-ask");
+        client.Requests[1].UserPrompt.ShouldContain("s2", customMessage: "the correction quotes the unit ids a retry is actually owed");
+        client.Requests[1].UserPrompt.ShouldContain("build failed: missing symbol", customMessage: "…on top of the run context it decides from, so a real id is authorable");
+
+        var row = await LatestDecisionAsync(runId, teamId);
+
+        row.DecisionKind.ShouldBe(SupervisorDecisionKinds.Plan, "the re-ask reply DECIDES — it may abandon the verb it first named");
+        OutcomeFlag(row, "retryTargetReasked").ShouldBe(true, "the row says the decision cost a second round-trip");
+        SupervisorOutcome.ReadRetryTargetReasked(row.OutcomeJson).ShouldBeTrue();
     }
 
     // ─── Plumbing ────────────────────────────────────────────────────────────────
@@ -113,6 +147,53 @@ public sealed class SupervisorPayloadReaskFlowTests
         return await scope.Resolve<CodeSpaceDbContext>().SupervisorDecisionRecord.AsNoTracking()
             .SingleAsync(d => d.SupervisorRunId == runId && d.TeamId == teamId);
     }
+
+    private async Task<SupervisorDecisionRecord> LatestDecisionAsync(Guid runId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId).OrderByDescending(d => d.Sequence).FirstAsync();
+    }
+
+    /// <summary>The live fan-out on the tape before the turn under test: s1 succeeded and is accepted, s2 FAILED. A retry is owed to s2 and to nothing else.</summary>
+    private async Task SeedMixedFanOutAsync(Guid runId, Guid teamId)
+    {
+        var plan = new SupervisorPlanPayload
+        {
+            Goal = "ship the feature",
+            Subtasks = new[]
+            {
+                new SupervisorPlannedSubtask { Id = "s1", Title = "Audit", Instruction = "audit it" },
+                new SupervisorPlannedSubtask { Id = "s2", Title = "Implement", Instruction = "implement it" },
+            },
+        };
+
+        var results = new[]
+        {
+            new SupervisorAgentResult { AgentRunId = Guid.NewGuid(), Status = "Succeeded", Summary = "audited", AcceptancePassed = true, AcceptanceDetail = "tests-passed" },
+            new SupervisorAgentResult { AgentRunId = Guid.NewGuid(), Status = "Failed", Error = "build failed: missing symbol" },
+        };
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+
+        db.SupervisorDecisionRecord.AddRange(
+            Seeded(runId, teamId, 1, SupervisorDecisionKinds.Plan, JsonSerializer.Serialize(plan, AgentJson.Options), "{}", now),
+            Seeded(runId, teamId, 2, SupervisorDecisionKinds.Spawn, """{"subtaskIds":["s1","s2"]}""",
+                JsonSerializer.Serialize(new { agentRunIds = results.Select(r => r.AgentRunId), agentCount = results.Length, agentResults = results }, AgentJson.Options), now));
+
+        await db.SaveChangesAsync();
+    }
+
+    private static SupervisorDecisionRecord Seeded(Guid runId, Guid teamId, long sequence, string kind, string payloadJson, string outcomeJson, DateTimeOffset now) => new()
+    {
+        Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId, Sequence = sequence,
+        DecisionKind = kind, IdempotencyKey = $"{kind}-{Guid.NewGuid():N}", InputHash = "test",
+        Status = SupervisorDecisionStatus.Succeeded, PayloadJson = payloadJson, OutcomeJson = outcomeJson,
+        FenceEpoch = 1, CreatedDate = now, CreatedBy = Guid.Empty, LastModifiedDate = now, LastModifiedBy = Guid.Empty,
+    };
 
     private async Task<string> CurrentWorkPlanItemsAsync(Guid runId, Guid teamId)
     {

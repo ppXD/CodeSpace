@@ -1588,7 +1588,7 @@ public class SupervisorDeciderTests
         client.Requests.Count.ShouldBe(2, "exactly one bounded repair round-trip");
         client.Requests[1].UserPrompt.ShouldContain("fan out st-1", customMessage: "the model repairs its OWN raw reply — the echo is what lets it see the defect instead of inferring it");
         client.Requests[1].UserPrompt.ShouldContain("'spawn' object", customMessage: "the defect names the exact sub-object the payload must ride in");
-        client.Requests[1].SystemPrompt.ShouldContain("corrected decision JSON", customMessage: "repair-only framing — same intent, no new decisions");
+        client.Requests[1].SystemPrompt.ShouldContain("complete decision JSON object", customMessage: "correction framing — a COMPLETE decision, and (unlike the bind repair) no clause forbidding the different action the prompt invites");
     }
 
     [Theory]
@@ -1892,6 +1892,141 @@ public class SupervisorDeciderTests
 
         decision.PayloadJson.ShouldContain("do a");
         client.Requests.Count.ShouldBe(2, "an empty plan is unexecutable authorship at decide time — repairable, exactly like an empty fan-out");
+    }
+
+    [Fact]
+    public async Task The_re_ask_carries_the_RUN_context_so_a_real_subtask_id_is_authorable()
+    {
+        // The echo + the schema fragment tell the model WHAT shape to write. Neither tells it WHICH ids exist — and a
+        // spawn's payload is nothing but plan-local ids. Asked without the run in front of it, the only ids the model
+        // can produce are invented ones, and the correction becomes a shape production can satisfy only by accident.
+        var bare = JsonDocument.Parse("""{"kind":"spawn"}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(bare);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        await decider.DecideAsync(Context(turnNumber: 2, PlanPrior(1, "s1", "s2"), SpawnPrior(2, ("s1", "Succeeded", null), ("s2", "Failed", "build failed: missing symbol"))), CancellationToken.None);
+
+        var reask = client.Requests[1].UserPrompt;
+
+        reask.ShouldContain("ship the feature", customMessage: "the re-ask carries the run's GOAL — the same prompt the first call had, exactly as the re-plan rung does");
+        reask.ShouldContain(SupervisorRecitation.Header, customMessage: "…and the live plan state, so the model can see which ids exist and what each one did");
+        reask.ShouldContain("[s1]");
+        reask.ShouldContain("[s2]");
+        reask.ShouldContain("build failed: missing symbol", customMessage: "…and the evidence the corrected decision should act on");
+        reask.ShouldContain("omitted the 'spawn' object", customMessage: "the correction itself still rides at the TAIL — the recency-biased position");
+    }
+
+    [Fact]
+    public async Task The_re_ask_never_forbids_the_new_decision_it_invites()
+    {
+        // The bind repair genuinely wants the SAME decision re-emitted with a path fixed, so "no new decisions" is
+        // right there. This rung's whole point is the opposite — the reply DECIDES, and its own last sentence says
+        // "if a different action now fits, choose it instead". Carrying the bind repair's clause here instructed
+        // against the headline behaviour in the same request.
+        var bare = JsonDocument.Parse("""{"kind":"plan"}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(bare);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        await decider.DecideAsync(Context(), CancellationToken.None);
+
+        var system = client.Requests[1].SystemPrompt;
+
+        system.ShouldNotContain("no new decisions", Case.Insensitive, "the correction invites a different action in the SAME request — forbidding one here is a self-contradicting instruction");
+        system.ShouldContain("Your reply IS the decision", customMessage: "…and says plainly whose call it is");
+        client.Requests[1].UserPrompt.ShouldContain("choose it instead", customMessage: "fixture check — the user prompt really does invite the different action the system prompt must not forbid");
+    }
+
+    // ── The retry's TARGET: a retry aimed at finished work while real failures wait buys ONE bounded re-ask ──
+
+    [Fact]
+    public async Task A_retry_aimed_at_finished_work_is_re_asked_once_and_the_re_aimed_decision_is_recorded()
+    {
+        // LIVE: golden 'five-subtask-middle-failed' failed on two consecutive main runs (33945398336, 33946934743) —
+        // one retried 's1', a succeeded and accepted unit, while s2 sat failed. The payload is whole and the id is
+        // plan-declared, so nothing downstream can see it: the executor re-runs finished work and the failure stands.
+        var misaimed = JsonDocument.Parse("""{"kind":"retry","retry":{"subtaskId":"s1"}}""").RootElement;
+        var reaimed = JsonDocument.Parse("""{"kind":"retry","retry":{"subtaskId":"s2"}}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(misaimed, reaimed);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        var decision = await decider.DecideAsync(MixedFanOut(), CancellationToken.None);
+
+        decision.PayloadJson.ShouldContain("s2", customMessage: "the re-aimed decision is the one projected — the retry now targets the unit that actually failed");
+        decision.RetryTargetReasked.ShouldBeTrue("the ledger row says the decision cost a second round-trip, like payloadReasked");
+        client.Requests.Count.ShouldBe(2, "exactly one bounded re-ask");
+        client.Requests[1].UserPrompt.ShouldContain("s2", customMessage: "the correction QUOTES the failed unit ids rather than leaving the model to re-derive them");
+        client.Requests[1].UserPrompt.ShouldContain(SupervisorRecitation.Header, customMessage: "…on top of the run context it decides from");
+    }
+
+    [Fact]
+    public async Task A_re_ask_that_re_emits_the_SAME_retry_target_is_accepted_as_the_model_answer()
+    {
+        // The server never re-aims a retry: picking the id would be the server deciding. Shown the failed units and
+        // its own reply, a model that still means s1 has answered on the evidence — that answer stands, and the row
+        // still records that a round-trip bought it.
+        var misaimed = JsonDocument.Parse("""{"kind":"retry","retry":{"subtaskId":"s1"}}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(misaimed);   // the re-ask replays the same target
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        var decision = await decider.DecideAsync(MixedFanOut(), CancellationToken.None);
+
+        decision.PayloadJson.ShouldContain("s1");
+        decision.RetryTargetReasked.ShouldBeTrue();
+        client.Requests.Count.ShouldBe(2, "BOUNDED — the repeat is an answer, not a defect to correct twice");
+    }
+
+    [Fact]
+    public async Task A_retry_target_re_ask_that_misses_keeps_the_original_decision_and_records_nothing()
+    {
+        var misaimed = JsonDocument.Parse("""{"kind":"retry","retry":{"subtaskId":"s1"}}""").RootElement;
+        var client = new ReplyThenCapabilityMissClient(misaimed);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        var decision = await decider.DecideAsync(MixedFanOut(), CancellationToken.None);
+
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Retry, "a model-side miss during the re-ask fails toward the ORIGINAL decision — never a crash, never a loop");
+        decision.PayloadJson.ShouldContain("s1");
+        decision.RetryTargetReasked.ShouldBeFalse("nothing came back, so nothing may claim a round-trip bought this decision");
+    }
+
+    [Fact]
+    public async Task A_retry_that_targets_the_FAILED_unit_costs_exactly_one_call()
+    {
+        var aimed = JsonDocument.Parse("""{"kind":"retry","retry":{"subtaskId":"s2"}}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(aimed);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        var decision = await decider.DecideAsync(MixedFanOut(), CancellationToken.None);
+
+        decision.RetryTargetReasked.ShouldBeFalse("the overwhelmingly common path must stay byte-identical — a marker here is a false signal in every read of the tape");
+        client.Requests.Count.ShouldBe(1, "a correctly aimed retry must never buy a correction it did not earn");
+    }
+
+    /// <summary>The live fan-out shape: s1 succeeded and is accepted, s2 failed. A retry is owed to s2 and to nothing else.</summary>
+    private static SupervisorTurnContext MixedFanOut() =>
+        Context(turnNumber: 2, PlanPrior(1, "s1", "s2"), SpawnPrior(2, ("s1", "Succeeded", null), ("s2", "Failed", "build failed: missing symbol")));
+
+    private static SupervisorPriorDecision PlanPrior(long sequence, params string[] subtaskIds) => new()
+    {
+        Id = Guid.NewGuid(), Sequence = sequence, DecisionKind = SupervisorDecisionKinds.Plan, Status = SupervisorDecisionStatus.Succeeded,
+        PayloadJson = JsonSerializer.Serialize(new SupervisorPlanPayload { Goal = "ship", Subtasks = subtaskIds.Select(id => new SupervisorPlannedSubtask { Id = id, Title = id, Instruction = $"do {id}" }).ToArray() }, AgentJson.Options),
+    };
+
+    private static SupervisorPriorDecision SpawnPrior(long sequence, params (string Id, string Status, string? Error)[] units)
+    {
+        var results = units.Select(u => new SupervisorAgentResult
+        {
+            AgentRunId = Guid.NewGuid(), Status = u.Status, Error = u.Error,
+            AcceptancePassed = u.Status == "Succeeded" ? true : null,
+            AcceptanceDetail = u.Status == "Succeeded" ? "tests-passed" : null,
+        }).ToArray();
+
+        return new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = sequence, DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = JsonSerializer.Serialize(new SupervisorSpawnPayload { SubtaskIds = units.Select(u => u.Id).ToArray() }, AgentJson.Options),
+            OutcomeJson = JsonSerializer.Serialize(new { agentRunIds = results.Select(r => r.AgentRunId), agentCount = results.Length, agentResults = results }, AgentJson.Options),
+        };
     }
 
     // ── P1.4: a TRUNCATED completion buys ONE retry with a RAISED output budget before the bind-check flow ──

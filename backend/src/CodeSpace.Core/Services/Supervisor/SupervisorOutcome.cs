@@ -459,6 +459,48 @@ public static class SupervisorOutcome
     private const string PayloadReaskedFromKindField = "payloadReaskedFromKind";
 
     /// <summary>
+    /// Fold the retry-TARGET re-ask onto a decision's OUTCOME — <c>retryTargetReasked: true</c> — NON-hashed like
+    /// <see cref="WritePayloadReask"/>, so replay identity never drifts. <c>false</c> (the overwhelmingly common
+    /// path: the model aimed the retry correctly first time) returns the outcome unchanged and BYTE-IDENTICAL.
+    /// </summary>
+    public static string WriteRetryTargetReask(string? outcomeJson, bool reasked)
+    {
+        if (!reasked) return outcomeJson ?? "{}";
+
+        System.Text.Json.Nodes.JsonNode? root;
+
+        try { root = System.Text.Json.Nodes.JsonNode.Parse(string.IsNullOrWhiteSpace(outcomeJson) ? "{}" : outcomeJson); }
+        catch (JsonException) { return outcomeJson ?? "{}"; }
+
+        if (root is not System.Text.Json.Nodes.JsonObject obj) return outcomeJson ?? "{}";
+
+        obj[RetryTargetReaskedField] = true;
+
+        return obj.ToJsonString();
+    }
+
+    /// <summary>Whether one bounded re-ask stood between the model's first reply and this retry — it first aimed at a unit already done while others were failed. False on every decision aimed correctly first time (and on a malformed outcome).</summary>
+    public static bool ReadRetryTargetReasked(string? outcomeJson) => ReadBoolField(outcomeJson, RetryTargetReaskedField);
+
+    private const string RetryTargetReaskedField = "retryTargetReasked";
+
+    private static bool ReadBoolField(string? outcomeJson, string field)
+    {
+        if (string.IsNullOrWhiteSpace(outcomeJson)) return false;
+
+        try
+        {
+            var root = JsonDocument.Parse(outcomeJson).RootElement;
+
+            return root.ValueKind == JsonValueKind.Object && root.TryGetProperty(field, out var v) && v.ValueKind == JsonValueKind.True;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Fold the MODEL-critic review chain (the adversarial middle: draft flagged → revised → re-reviewed) into a
     /// decision's OUTCOME under a <c>reviews</c> key — NON-hashed like <see cref="WriteModelUsage"/>, so replay
     /// identity never drifts. An empty chain returns the outcome unchanged (byte-identical — the common no-critic case).

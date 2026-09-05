@@ -113,4 +113,25 @@ public class SupervisorOutcomeFoldTests
         SupervisorOutcome.ReadPayloadReaskedFromKind("not json").ShouldBeNull();
         SupervisorOutcome.ReadPayloadReaskedFromKind(null).ShouldBeNull();
     }
+
+    [Fact]
+    public void The_retry_target_re_ask_fold_round_trips_and_preserves_the_keys_it_does_not_own()
+    {
+        var folded = SupervisorOutcome.WriteRetryTargetReask(SpawnOutcomeWithEscalation(Guid.Parse("44444444-4444-4444-4444-444444444444")), reasked: true);
+
+        SupervisorOutcome.ReadRetryTargetReasked(folded).ShouldBeTrue();
+        folded.ShouldContain("\"retryTargetReasked\":true");
+        SupervisorOutcome.ReadEscalation(folded).ShouldNotBeNull("every fold here runs post-barrier over an outcome someone else authored");
+    }
+
+    [Fact]
+    public void A_retry_the_model_aimed_correctly_first_time_is_left_byte_identical()
+    {
+        const string outcome = """{"agentCount":1}""";
+
+        SupervisorOutcome.WriteRetryTargetReask(outcome, reasked: false).ShouldBe(outcome, "the overwhelmingly common path must not touch the outcome at all");
+        SupervisorOutcome.ReadRetryTargetReasked(outcome).ShouldBeFalse();
+        SupervisorOutcome.ReadRetryTargetReasked("not json").ShouldBeFalse();
+        SupervisorOutcome.ReadRetryTargetReasked(null).ShouldBeFalse();
+    }
 }

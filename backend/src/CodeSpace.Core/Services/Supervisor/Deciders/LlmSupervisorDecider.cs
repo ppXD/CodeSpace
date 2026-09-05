@@ -179,7 +179,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             else
             {
                 var namedKind = model.Kind;
-                var repaired = await TryRepairMissingPayloadAsync(structured, pick, completion, namedKind, defect, cancellationToken).ConfigureAwait(false);
+                var repaired = await TryRepairMissingPayloadAsync(structured, pick, context, catalog, completion, namedKind, defect, cancellationToken).ConfigureAwait(false);
 
                 if (repaired is not null && TryDeserialize(repaired.Json, out _) is { } coherent && !string.IsNullOrWhiteSpace(coherent.Kind) && SupervisorDecisionCoherence.MissingPayload(coherent) is null)
                 {
@@ -194,6 +194,32 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
                 else
                     _logger.LogWarning("Supervisor decision payload repair missed for kind '{Kind}' — proceeding with the original decision; the executor will refuse it", model.Kind);
             }
+        }
+
+        // Set only when the retry-TARGET re-ask actually produced a usable decision — including one that re-emitted
+        // the same target, which is the model's answer on the evidence rather than a defect corrected twice.
+        var retryTargetReasked = false;
+
+        // The retry's TARGET invariant, checked on the decision the run would actually execute (so a payload re-ask
+        // that lands on 'retry' is checked too): a retry aimed at a unit that is already done while other units are
+        // still failed spends the turn on finished work and leaves the real failure untouched. Live: golden
+        // 'five-subtask-middle-failed' failed on two consecutive main runs (33945398336, 33946934743) — one retried
+        // 's1', a succeeded and accepted unit. Nothing below can see it: the payload is whole, the id is
+        // plan-declared, and the executor re-runs exactly what it was told.
+        if (SupervisorDecisionCoherence.MisdirectedRetry(model, context.PriorDecisions) is { } misdirected)
+        {
+            _logger.LogWarning("Supervisor retry targets finished work — {Defect}; raw reply: {RawReply}", misdirected, StructuredJsonText.Preview(completion.Json.GetRawText()));
+
+            var reaimed = await TryRepairRetryTargetAsync(structured, pick, context, catalog, completion, misdirected, cancellationToken).ConfigureAwait(false);
+
+            if (reaimed is not null && TryDeserialize(reaimed.Json, out _) is { } aimed && !string.IsNullOrWhiteSpace(aimed.Kind) && SupervisorDecisionCoherence.MissingPayload(aimed) is null)
+            {
+                completion = reaimed;
+                model = aimed;
+                retryTargetReasked = true;
+            }
+            else
+                _logger.LogWarning("Supervisor retry-target re-ask missed — proceeding with the original decision, exactly as before this existed");
         }
 
         // The STOP floor, applied after every repair above has had its chance (so a model that re-authors an honest
@@ -237,9 +263,11 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         if (SupervisorPlanValidator.Validate(decision) is { } planError)
             decision = await TryRepairInvalidPlanAsync(structured, pick, context, catalog, decision, planError, cancellationToken).ConfigureAwait(false) ?? decision;
 
-        // Stamped LAST so the marker survives the re-plan above (which projects a fresh decision), and only when a
+        // Stamped LAST so the markers survive the re-plan above (which projects a fresh decision), and only when a
         // re-ask actually recovered something — a decision that never needed one is returned untouched.
-        return reaskedFromKind is null ? decision : decision with { PayloadReaskedFromKind = reaskedFromKind };
+        return reaskedFromKind is null && !retryTargetReasked
+            ? decision
+            : decision with { PayloadReaskedFromKind = reaskedFromKind, RetryTargetReasked = retryTargetReasked };
     }
 
     /// <summary>
@@ -329,17 +357,21 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     ///
     /// <para>It asks and never assumes: the reply DECIDES. A model that named a verb the run cannot execute (a spawn
     /// with nothing left unspawned) is free to answer with a different one — inventing the payload it omitted would
-    /// put words in its mouth on exactly the turn it proved it was confused.</para>
+    /// put words in its mouth on exactly the turn it proved it was confused. For that reply to be authorable at all
+    /// it must carry the RUN, not just the reply: the correction is prefixed with the SAME <see cref="BuildUserPrompt"/>
+    /// the first call had (the plan, the per-unit states, the real subtask ids), exactly as the re-plan rung does.
+    /// Without it the model is asked to name plan-local ids it can no longer see, and the only payloads it can
+    /// author are invented ones.</para>
     /// </summary>
-    private static async Task<StructuredLLMCompletion?> TryRepairMissingPayloadAsync(IStructuredLLMClient structured, ModelPoolPick pick, StructuredLLMCompletion broken, string kind, string defect, CancellationToken cancellationToken)
+    private static async Task<StructuredLLMCompletion?> TryRepairMissingPayloadAsync(IStructuredLLMClient structured, ModelPoolPick pick, SupervisorTurnContext context, string catalog, StructuredLLMCompletion broken, string kind, string defect, CancellationToken cancellationToken)
     {
         try
         {
             return await structured.CompleteStructuredAsync(new StructuredLLMCompletionRequest
             {
                 Model = pick.ModelId,
-                SystemPrompt = "You repair one malformed supervisor decision. Reply with ONLY the corrected decision JSON object — same intent, no commentary, no new decisions.",
-                UserPrompt = MissingPayloadRepairPrompt(kind, defect, broken.Json.GetRawText()),
+                SystemPrompt = ReaskSystemPrompt,
+                UserPrompt = $"{BuildUserPrompt(context, catalog)}\n\n{MissingPayloadRepairPrompt(kind, defect, broken.Json.GetRawText())}",
                 JsonSchema = SupervisorDecisionSchema.ResponseSchema,
                 MaxOutputTokens = 4096,
                 Temperature = 0,
@@ -351,6 +383,53 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             return null;
         }
     }
+
+    /// <summary>
+    /// The system prompt BOTH re-asks that may legitimately land on a DIFFERENT verb run under. Deliberately without
+    /// the bind repair's "same intent, no new decisions" clause: that clause forbade, in the same request, the very
+    /// thing the correction below invites ("if a different action now fits, choose it") — and the whole point of
+    /// these two rungs is that the reply decides. The bind repair keeps its own wording, because re-emitting the
+    /// SAME decision with a path corrected is exactly what it asks for.
+    /// </summary>
+    private const string ReaskSystemPrompt = "You correct one supervisor decision the server cannot execute as written. Reply with ONLY a complete decision JSON object — no commentary. Your reply IS the decision: keep the action you first chose or pick a different one on the evidence, but carry that action's own payload object.";
+
+    /// <summary>
+    /// One bounded RE-AIM round-trip after a retry aimed at finished work (<see cref="SupervisorDecisionCoherence.MisdirectedRetry"/>):
+    /// the model receives the run context it decided from — the SAME prompt the first call had, so its plan state and
+    /// real subtask ids are in front of it — plus which units are actually failed and its own reply. Returns null on a
+    /// model-side miss (fail toward the ORIGINAL decision, which the executor then runs exactly as before this
+    /// existed); a genuine INFRA fault propagates, same as every other repair call in this file.
+    ///
+    /// <para>It ASKS and never re-aims: the server picking a different subtask id would be the server deciding. A
+    /// reply that re-emits the same target is accepted as the model's answer on the evidence.</para>
+    /// </summary>
+    private static async Task<StructuredLLMCompletion?> TryRepairRetryTargetAsync(IStructuredLLMClient structured, ModelPoolPick pick, SupervisorTurnContext context, string catalog, StructuredLLMCompletion aimed, string defect, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await structured.CompleteStructuredAsync(new StructuredLLMCompletionRequest
+            {
+                Model = pick.ModelId,
+                SystemPrompt = ReaskSystemPrompt,
+                UserPrompt = $"{BuildUserPrompt(context, catalog)}\n\n{MisdirectedRetryRepairPrompt(defect, aimed.Json.GetRawText())}",
+                JsonSchema = SupervisorDecisionSchema.ResponseSchema,
+                MaxOutputTokens = 4096,
+                Temperature = 0,
+                Credential = pick.Credential,
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (LlmApiException ex) when (IsModelCapabilityMiss(ex.Category))
+        {
+            return null;
+        }
+    }
+
+    /// <summary>The correction a retry aimed at finished work earns: which units are actually failed, and the model's OWN reply echoed back. Pure.</summary>
+    private static string MisdirectedRetryRepairPrompt(string defect, string rawReply) =>
+        "Your decision re-runs work this run has already finished.\n\n"
+      + $"Defect: {defect}\n\n"
+      + $"Your previous reply:\n{rawReply}\n\n"
+      + "Re-read the CURRENT PLAN STATE above and reply with the COMPLETE decision you now judge correct — retry a subtask that actually failed, or choose a different action entirely. If on that evidence you still mean to retry the same subtask, re-emit it and say why in the rationale: your reply decides.";
 
     /// <summary>The correction a payload-less reply earns: the named defect, the model's OWN reply echoed back, that kind's payload schema, and the complete envelope to re-emit. Pure + unit-pinned per kind.</summary>
     internal static string MissingPayloadRepairPrompt(string kind, string defect, string rawReply)
