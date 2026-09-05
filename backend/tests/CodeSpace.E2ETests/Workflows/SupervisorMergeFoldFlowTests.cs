@@ -182,6 +182,11 @@ public sealed class SupervisorMergeFoldFlowTests : IDisposable
     private static WorkflowDefinition SupervisorDefinition() => new()
     {
         SchemaVersion = 1,
+        // This suite measures supervisor MECHANICS, not completion arbitration — its scripted stop stakes no
+        // contract (the authority reads artifact=Unknown, delivery=Unknown), which C5's default Enforced stamp
+        // would park. Declare Shadow so the mechanic under test stays the thing that fails;
+        // CompletionEnforcedCohortFlowTests owns the default cohort.
+        CompletionMode = WorkflowDefinition.CompletionModeShadow,
         Nodes = new List<NodeDefinition>
         {
             new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
