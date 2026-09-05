@@ -29,6 +29,10 @@ public class SupervisorDeciderTests
     private static SupervisorTurnContext Context(int turnNumber = 0, params SupervisorPriorDecision[] prior) =>
         new() { Goal = "ship the feature", TurnNumber = turnNumber, PriorDecisions = prior, SupervisorModelId = BrainModelId };
 
+    /// <summary>A plan the way a live model authors one — at least one subtask. Tests that only need SOME decision to reach the prompt use this rather than an EMPTY plan, which is itself an incoherent shape the decider now re-asks about (and which no useful model reply ever looks like).</summary>
+    private static SupervisorPlanPayload OnePlannedSubtask() =>
+        new() { Goal = "ship", Subtasks = new[] { new SupervisorPlannedSubtask { Id = "s1", Title = "Audit", Instruction = "audit it" } } };
+
     // ── The decider folds context → a schema-valid canonical decision ────────────────
 
     [Fact]
@@ -1121,7 +1125,7 @@ public class SupervisorDeciderTests
         // the user prompt; no repo ⇒ no lookup ⇒ byte-identical.
         var repoId = Guid.NewGuid();
         var grounding = new RecordingRepoGrounding();
-        var client = new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = new SupervisorPlanPayload() });
+        var client = new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = OnePlannedSubtask() });
         var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), grounding, NullLogger<LlmSupervisorDecider>.Instance);
 
         await decider.DecideAsync(Context() with { AgentProfile = new CodeSpace.Messages.Dtos.Agents.SupervisorAgentProfile { RepositoryId = repoId, PinnedSha = "abc123def456" } }, CancellationToken.None);
@@ -1138,7 +1142,7 @@ public class SupervisorDeciderTests
         // Scan M2: with no pin, the operator's launch-pinned branch is the next-most-stable anchor — grounding on
         // the default branch would show the brain a DIFFERENT tree than the one its agents clone.
         var grounding = new RecordingRepoGrounding();
-        var decider = new LlmSupervisorDecider(new FakeRegistry(new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = new SupervisorPlanPayload() })), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), grounding, NullLogger<LlmSupervisorDecider>.Instance);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = OnePlannedSubtask() })), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), grounding, NullLogger<LlmSupervisorDecider>.Instance);
 
         await decider.DecideAsync(Context() with { AgentProfile = new CodeSpace.Messages.Dtos.Agents.SupervisorAgentProfile { RepositoryId = Guid.NewGuid(), BaseRef = "release/2.x" } }, CancellationToken.None);
 
@@ -1149,7 +1153,7 @@ public class SupervisorDeciderTests
     public async Task A_run_without_a_repo_never_looks_up_grounding()
     {
         var grounding = new RecordingRepoGrounding();
-        var decider = new LlmSupervisorDecider(new FakeRegistry(new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = new SupervisorPlanPayload() })), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), grounding, NullLogger<LlmSupervisorDecider>.Instance);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = OnePlannedSubtask() })), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), grounding, NullLogger<LlmSupervisorDecider>.Instance);
 
         await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -1169,7 +1173,7 @@ public class SupervisorDeciderTests
     public async Task A_run_with_no_selected_brain_model_fails_closed_to_a_terminal_stop()
     {
         // supervisorModelId is REQUIRED — the operator must pick the brain model; the supervisor never guesses its own.
-        var decider = new LlmSupervisorDecider(new FakeRegistry(new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = new SupervisorPlanPayload() })), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = OnePlannedSubtask() })), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         var decision = await decider.DecideAsync(Context() with { SupervisorModelId = null }, CancellationToken.None);
 
@@ -1183,7 +1187,7 @@ public class SupervisorDeciderTests
     {
         // The structured provider IS registered, but the team's credentialed-model pool yields nothing (none
         // configured, or none within the allowed pool) → the brain stops cleanly rather than guess a model or key.
-        var decider = new LlmSupervisorDecider(new FakeRegistry(new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = new SupervisorPlanPayload() })), FakeSelector.Empty(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = OnePlannedSubtask() })), FakeSelector.Empty(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -1263,7 +1267,7 @@ public class SupervisorDeciderTests
     [Fact]
     public async Task The_decider_calls_with_the_model_the_selector_picked_from_the_pool()
     {
-        var fake = new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = new SupervisorPlanPayload() });
+        var fake = new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = OnePlannedSubtask() });
         var decider = new LlmSupervisorDecider(new FakeRegistry(fake), FakeSelector.WithModel("claude-opus-4-8"), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         await decider.DecideAsync(Context(), CancellationToken.None);
@@ -1319,7 +1323,7 @@ public class SupervisorDeciderTests
     {
         // End-to-end through DecideAsync (not just the static helper): a populated pool + a registered harness must
         // flow through BuildCapabilityCatalogAsync → the LLM request's user prompt, so the live brain is informed.
-        var client = new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = new SupervisorPlanPayload() });
+        var client = new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = OnePlannedSubtask() });
         var decider = new LlmSupervisorDecider(
             new FakeRegistry(client),
             FakeSelector.WithModelAndPool("claude-sonnet-4-5", new PoolModelInfo("metis-coder-max", "Anthropic")),
@@ -1337,7 +1341,7 @@ public class SupervisorDeciderTests
     {
         // P3 — the brain authors a per-agent persona by slug, so the team's persona library must reach the live decide
         // prompt (slug + name + description), end-to-end through BuildCapabilityCatalogAsync.
-        var client = new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = new SupervisorPlanPayload() });
+        var client = new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = OnePlannedSubtask() });
         var decider = new LlmSupervisorDecider(
             new FakeRegistry(client),
             FakeSelector.WithModel(),
@@ -1584,6 +1588,132 @@ public class SupervisorDeciderTests
 
         decision.Kind.ShouldBe(kind);
         client.Requests.Count.ShouldBe(1, "a kind whose payload is legitimately optional must never be 'repaired' — that would burn a call correcting a defect the model did not commit");
+    }
+
+    // ── The re-ask is TARGETED (it quotes the shape) and LEGIBLE (the row says a re-ask paid for the decision) ──
+
+    [Fact]
+    public async Task A_recovered_payload_less_decision_records_the_re_ask_and_the_kind_it_started_from()
+    {
+        // LIVE shape, real-model run 33943475246: the brain answered a spawn-ready turn with a bare '{"kind":"plan"}'.
+        // The re-ask reply DECIDES — here it re-authors the plan it meant — and the row must say the decision cost a
+        // second round-trip, otherwise a reader scoring the eval cannot tell an outright answer from a rescued one.
+        var bare = JsonDocument.Parse("""{"kind":"plan","rationale":{"why":"decompose the goal"}}""").RootElement;
+        var full = JsonDocument.Parse("""{"kind":"plan","plan":{"goal":"ship","subtasks":[{"id":"s1","title":"A","instruction":"do a"}]}}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(bare, full);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Plan);
+        decision.PayloadJson.ShouldContain("do a", customMessage: "the re-asked payload is the one projected");
+        decision.PayloadReaskedFromKind.ShouldBe(SupervisorDecisionKinds.Plan, "the accepted decision carries the kind the payload-less first reply named, so the ledger row can say a re-ask paid for it");
+        client.Requests.Count.ShouldBe(2, "exactly one bounded re-ask");
+    }
+
+    [Fact]
+    public async Task A_decision_the_model_got_right_first_time_records_no_re_ask()
+    {
+        var whole = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":["st-1"]}}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(whole);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        decision.PayloadReaskedFromKind.ShouldBeNull("the overwhelmingly common path must stay byte-identical — a re-ask marker on a decision that never needed one is a false signal in every read of the tape");
+    }
+
+    [Fact]
+    public async Task A_re_ask_that_changes_the_verb_still_records_the_kind_it_started_from()
+    {
+        // The turn the live miss actually wasted: the plan was already authored, so the correct move was 'spawn'.
+        // The re-ask reply DECIDES — the server never invents a payload for the kind the model first named — and the
+        // row keeps the abandoned verb so a reader can see the brain corrected itself rather than answering cleanly.
+        var bare = JsonDocument.Parse("""{"kind":"plan"}""").RootElement;
+        var spawn = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":["s1","s2"]}}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(bare, spawn);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Spawn, "the re-ask reply decides — the server never fabricates a payload for the verb the model abandoned");
+        decision.PayloadReaskedFromKind.ShouldBe(SupervisorDecisionKinds.Plan);
+    }
+
+    [Fact]
+    public async Task A_re_ask_that_is_still_payload_less_records_no_re_ask_and_fails_exactly_as_before()
+    {
+        var bare = JsonDocument.Parse("""{"kind":"plan"}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(bare);   // the re-ask replays the same bare reply
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Plan, "the ORIGINAL decision proceeds, exactly as before the targeted re-ask existed");
+        JsonDocument.Parse(decision.PayloadJson).RootElement.GetProperty("subtasks").GetArrayLength().ShouldBe(0, "the canonical empty payload — unchanged");
+        decision.PayloadReaskedFromKind.ShouldBeNull("nothing was recovered, so nothing may claim a recovery");
+        SupervisorDecisionCoherence.MissingPayload(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan })
+            .ShouldBe("the decision chose kind 'plan' but carries NO 'plan' object — its payload is only read from INSIDE a 'plan' object carrying 'goal' and 'subtasks'; fields written anywhere else (e.g. at the top level of the decision) are never read",
+                customMessage: "the named defect the journal and the re-ask both quote is pinned verbatim — it is the only thing a reader gets when the re-ask misses too");
+        client.Requests.Count.ShouldBe(2, "the re-ask is BOUNDED — one attempt, never a loop");
+    }
+
+    [Theory]
+    [InlineData(SupervisorDecisionKinds.Plan, "plan", "Decompose into 'subtasks'")]
+    [InlineData(SupervisorDecisionKinds.Spawn, "spawn", "Plan-local subtask ids")]
+    [InlineData(SupervisorDecisionKinds.Retry, "retry", "The plan-local subtask id to re-run")]
+    [InlineData(SupervisorDecisionKinds.AskHuman, "askHuman", "The question to ask the human")]
+    [InlineData(SupervisorDecisionKinds.Stop, "stop", "Short summary of what the supervisor accomplished")]
+    [InlineData(SupervisorDecisionKinds.AmendAcceptance, "amendAcceptance", "The ONE plan-declared subtask whose acceptance check this proposal targets")]
+    public async Task The_re_ask_quotes_the_named_kind_own_schema_fragment(string kind, string property, string fragmentMarker)
+    {
+        // The echo alone tells the model WHAT it wrote; it never tells it what the missing object must LOOK like.
+        // The first reply already proved the model could not recall that shape, so the re-ask hands it over.
+        var bare = JsonDocument.Parse($$"""{"kind":"{{kind}}"}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(bare);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        await decider.DecideAsync(Context(), CancellationToken.None);
+
+        var reask = client.Requests[1].UserPrompt;
+
+        reask.ShouldContain($"'{property}'", customMessage: "the re-ask names the sub-object by the key the contract reads");
+        reask.ShouldContain(fragmentMarker, customMessage: $"the re-ask quotes the '{property}' object's own JSON-schema fragment, so the model is shown the shape rather than asked to recall it");
+        reask.ShouldContain($"\"kind\": \"{kind}\"", customMessage: "…and it spells out the COMPLETE decision envelope the reply must have");
+    }
+
+    [Fact]
+    public async Task A_stop_the_re_ask_could_not_fix_is_still_filled_by_the_narration_lift_and_costs_no_second_call()
+    {
+        // The stop floor is A7's, not this arc's: the summary is recovered from the model's own rationale. The one
+        // bounded re-ask that already existed still runs (it may yet return an honest outcome), and NOTHING here
+        // adds a second one — a lift that can fill the payload must never be pre-empted or duplicated by a re-ask.
+        var bare = JsonDocument.Parse("""{"kind":"stop","rationale":{"why":"Both plan units are accepted."}}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(bare, bare);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        StopField(decision, "summary").ShouldContain("Both plan units are accepted", customMessage: "#1755's narration lift still wins — the words the model wrote become the summary");
+        decision.PayloadReaskedFromKind.ShouldBeNull("the re-ask recovered nothing; the LIFT did — the row must not credit a round-trip that missed");
+        client.Requests.Count.ShouldBe(2, "the ONE pre-existing bounded re-ask, and no more");
+    }
+
+    [Fact]
+    public async Task A_plan_carrying_an_EMPTY_subtasks_array_is_re_asked_before_projection()
+    {
+        // The sibling of the empty-spawn gate, and the shape SupervisorPlanValidator cannot see (it validates EDGES,
+        // and a plan with no subtasks has none): a present-but-empty 'plan' object projects to a plan that can never
+        // spawn anything, so the run spins to its no-progress bound instead of being asked once for the real plan.
+        var empty = JsonDocument.Parse("""{"kind":"plan","plan":{"goal":"ship","subtasks":[]}}""").RootElement;
+        var full = JsonDocument.Parse("""{"kind":"plan","plan":{"goal":"ship","subtasks":[{"id":"s1","title":"A","instruction":"do a"}]}}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(empty, full);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        decision.PayloadJson.ShouldContain("do a");
+        client.Requests.Count.ShouldBe(2, "an empty plan is unexecutable authorship at decide time — repairable, exactly like an empty fan-out");
     }
 
     // ── P1.4: a TRUNCATED completion buys ONE retry with a RAISED output budget before the bind-check flow ──
@@ -2064,7 +2194,7 @@ public class SupervisorDeciderTests
         // 6 priors → foldable = max(0, 6−8) = 0 < MinCompactFold: compaction can't shrink the prompt, so the
         // overflow falls to the existing fail-closed clean stop (honest Stopped downstream) and nothing persists.
         var store = new FakeTapeStore();
-        var client = new CompactionScriptClient("unused", new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = new SupervisorPlanPayload() }) { AlwaysOverflow = true };
+        var client = new CompactionScriptClient("unused", new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = OnePlannedSubtask() }) { AlwaysOverflow = true };
         var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), store, new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         var decision = await decider.DecideAsync(Context(turnNumber: 6, Tape(6)), CancellationToken.None);

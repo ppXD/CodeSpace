@@ -427,6 +427,38 @@ public static class SupervisorOutcome
     }
 
     /// <summary>
+    /// Fold the payload RE-ASK onto a decision's OUTCOME — <c>payloadReasked: true</c> plus the kind the model's
+    /// payload-less first reply named — NON-hashed like <see cref="WriteModelUsage"/>, so replay identity never
+    /// drifts. A null / blank kind (no re-ask, or one that recovered nothing) returns the outcome unchanged and
+    /// BYTE-IDENTICAL: the marker only ever appears on a decision a second round-trip actually paid for.
+    ///
+    /// <para>Both fields are written, not one derived from the other: a reader scanning the tape for how often the
+    /// brain needed asking twice looks for the FLAG, and a reader asking which verb it abandoned looks for the KIND.</para>
+    /// </summary>
+    public static string WritePayloadReask(string? outcomeJson, string? reaskedFromKind)
+    {
+        if (string.IsNullOrWhiteSpace(reaskedFromKind)) return outcomeJson ?? "{}";
+
+        System.Text.Json.Nodes.JsonNode? root;
+
+        try { root = System.Text.Json.Nodes.JsonNode.Parse(string.IsNullOrWhiteSpace(outcomeJson) ? "{}" : outcomeJson); }
+        catch (JsonException) { return outcomeJson ?? "{}"; }
+
+        if (root is not System.Text.Json.Nodes.JsonObject obj) return outcomeJson ?? "{}";
+
+        obj[PayloadReaskedField] = true;
+        obj[PayloadReaskedFromKindField] = reaskedFromKind;
+
+        return obj.ToJsonString();
+    }
+
+    /// <summary>The kind a decision's payload-less first reply named before one bounded re-ask recovered it, folded by <see cref="WritePayloadReask"/>. Null when the model got it right first time (or on a malformed outcome) — a pre-fold row reads exactly as before.</summary>
+    public static string? ReadPayloadReaskedFromKind(string? outcomeJson) => ReadStringField(outcomeJson, PayloadReaskedFromKindField);
+
+    private const string PayloadReaskedField = "payloadReasked";
+    private const string PayloadReaskedFromKindField = "payloadReaskedFromKind";
+
+    /// <summary>
     /// Fold the MODEL-critic review chain (the adversarial middle: draft flagged → revised → re-reviewed) into a
     /// decision's OUTCOME under a <c>reviews</c> key — NON-hashed like <see cref="WriteModelUsage"/>, so replay
     /// identity never drifts. An empty chain returns the outcome unchanged (byte-identical — the common no-critic case).

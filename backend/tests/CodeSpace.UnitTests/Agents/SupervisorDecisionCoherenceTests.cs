@@ -74,6 +74,17 @@ public class SupervisorDecisionCoherenceTests
         SupervisorDecisionCoherence.MissingPayload(model).ShouldNotBeNull().ShouldContain("EMPTY");
     }
 
+    [Fact]
+    public void A_plan_with_an_EMPTY_subtasks_array_is_named_incoherent()
+    {
+        // The empty-spawn arm's sibling, and the shape SupervisorPlanValidator cannot see: it validates DependsOn
+        // EDGES, and a plan with no subtasks has none. Left unnamed, a subtask-less plan projects cleanly and the
+        // run spins on empty spawns until the no-progress bound instead of the model being asked once for a plan.
+        var model = new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = new SupervisorPlanPayload { Goal = "ship" } };
+
+        SupervisorDecisionCoherence.MissingPayload(model).ShouldNotBeNull().ShouldContain("EMPTY");
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData("   ")]
@@ -97,7 +108,7 @@ public class SupervisorDecisionCoherenceTests
     [Fact]
     public void A_decision_carrying_the_payload_its_kind_names_is_coherent()
     {
-        SupervisorDecisionCoherence.MissingPayload(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = new SupervisorPlanPayload() }).ShouldBeNull();
+        SupervisorDecisionCoherence.MissingPayload(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = new SupervisorPlanPayload { Subtasks = new[] { new SupervisorPlannedSubtask { Id = "st-1", Title = "A", Instruction = "do a" } } } }).ShouldBeNull();
         SupervisorDecisionCoherence.MissingPayload(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Spawn, Spawn = new SupervisorSpawnPayload { SubtaskIds = new[] { "st-1" } } }).ShouldBeNull();
         SupervisorDecisionCoherence.MissingPayload(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Retry, Retry = new SupervisorRetryPayload { SubtaskId = "st-1" } }).ShouldBeNull();
         SupervisorDecisionCoherence.MissingPayload(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.AskHuman, AskHuman = new SupervisorAskHumanPayload { Question = "which db?" } }).ShouldBeNull();

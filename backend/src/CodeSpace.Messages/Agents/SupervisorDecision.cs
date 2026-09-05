@@ -39,6 +39,16 @@ public sealed record SupervisorDecision
     /// </summary>
     public bool ServerAuthored { get; init; }
 
+    /// <summary>
+    /// The kind the model's FIRST reply named when that reply carried no usable payload for it and ONE bounded
+    /// re-ask recovered the decision — null on every reply the model got right first time (the overwhelmingly
+    /// common case) and on a re-ask that missed too, where nothing was recovered and nothing may claim a recovery.
+    /// Carried like <see cref="Usage"/>: NOT hashed, never part of the decision's identity; the turn service folds
+    /// it into the NON-hashed outcome so a reader can tell a decision the model authored outright from one it only
+    /// reached after being asked again — and, when the re-ask changed its mind, see the verb it started from.
+    /// </summary>
+    public string? PayloadReaskedFromKind { get; init; }
+
     /// <summary>True when this decision ends the turn loop (<see cref="SupervisorDecisionKinds.Stop"/>). The run then completes via the normal walk.</summary>
     public bool IsTerminal => Kind == SupervisorDecisionKinds.Stop;
 }

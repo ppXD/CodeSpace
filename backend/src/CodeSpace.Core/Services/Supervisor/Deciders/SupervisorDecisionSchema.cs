@@ -242,6 +242,21 @@ public static class SupervisorDecisionSchema
         }
         """).RootElement.Clone();
 
+    /// <summary>
+    /// The raw JSON-Schema text of ONE top-level property of <see cref="ResponseSchema"/> — the fragment a repair
+    /// prompt quotes so a model that named a kind and omitted its payload is SHOWN the shape it must fill instead of
+    /// being asked to recall it (its first reply already proved it could not). Null when the schema declares no such
+    /// property.
+    ///
+    /// <para>The caller names the property (<c>SupervisorDecisionPayloadLift.PayloadPropertyFor</c> maps a kind to
+    /// it), so this class never re-derives the kind→payload convention and the two cannot drift apart. Read off the
+    /// schema itself, so a payload field added or renamed there reaches the prompt with no change here.</para>
+    /// </summary>
+    public static string? PayloadSchemaFor(string? payloadProperty) =>
+        !string.IsNullOrWhiteSpace(payloadProperty) && ResponseSchema.GetProperty("properties").TryGetProperty(payloadProperty, out var fragment)
+            ? fragment.GetRawText()
+            : null;
+
     /// <summary>Deserialization options for mapping a schema-valid object back into <c>SupervisorModelDecision</c>. Case-insensitive so the model's lower-camel keys bind to the record's Pascal properties; the string-enum converter binds the acceptance <c>kind</c> ("TestsPass"/"ArtifactPresent") to <c>BenchmarkGradingKind</c>; the lenient Guid converter absorbs a non-uuid PROPOSAL (a repo alias where an id belongs) as an absent field instead of killing the whole decision.</summary>
     public static readonly JsonSerializerOptions Options = new()
     {
