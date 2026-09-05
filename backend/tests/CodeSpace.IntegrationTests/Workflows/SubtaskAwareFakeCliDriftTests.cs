@@ -51,7 +51,7 @@ public class SubtaskAwareFakeCliDriftTests
 
         // The summary BuildResult folds (what the executor records + the synthesizer composes) must match the
         // deterministic transform the E2E asserts. A drift in how codex's final message maps to Summary breaks this.
-        var result = harness.BuildResult(parsed, exitCode: 0);
+        var result = harness.BuildResult(parsed, exitCode: 0, "");
         result.Status.ShouldBe(AgentRunStatus.Succeeded);
         result.Summary.ShouldBe(SubtaskAwareFakeCli.ExpectedSummaryFor(goal),
             customMessage: "BuildResult must fold the fake CLI's final agent_message into exactly the summary HeadlineFlowE2ETests composes — the mirror + the E2E's expectation are one contract");
@@ -84,7 +84,7 @@ public class SubtaskAwareFakeCliDriftTests
         var parsed = lines.SelectMany(harness.ParseEvents).ToList();
         parsed.Select(e => e.Kind).ShouldBe(new[] { AgentEventKind.Reasoning, AgentEventKind.AssistantMessage, AgentEventKind.Completed });
 
-        var result = harness.BuildResult(parsed, exitCode: 0);
+        var result = harness.BuildResult(parsed, exitCode: 0, "");
         result.Status.ShouldBe(AgentRunStatus.Succeeded);
         result.Summary.ShouldBe(FileWritingFakeCli.ExpectedSummaryFor(goal));
 
@@ -111,7 +111,7 @@ public class SubtaskAwareFakeCliDriftTests
         };
 
         var claude = new ClaudeCodeHarness();
-        var result = claude.BuildResult(claudeLines.SelectMany(claude.ParseEvents).ToList(), exitCode: 0);
+        var result = claude.BuildResult(claudeLines.SelectMany(claude.ParseEvents).ToList(), exitCode: 0, "");
 
         result.Status.ShouldBe(AgentRunStatus.Succeeded);
         result.Summary.ShouldBe(FileWritingFakeCli.ExpectedSummaryFor(goal), "the two dialects must fold the SAME summary — the claude fold prefers the result line's text");
@@ -141,9 +141,9 @@ public class SubtaskAwareFakeCliDriftTests
             var claudeStdout = RunScript(dir, script, "--print", "--output-format", "stream-json", goal);
 
             var codex = new CodexHarness();
-            var codexResult = codex.BuildResult(codexStdout.SelectMany(codex.ParseEvents).ToList(), exitCode: 0);
+            var codexResult = codex.BuildResult(codexStdout.SelectMany(codex.ParseEvents).ToList(), exitCode: 0, "");
             var claude = new ClaudeCodeHarness();
-            var claudeResult = claude.BuildResult(claudeStdout.SelectMany(claude.ParseEvents).ToList(), exitCode: 0);
+            var claudeResult = claude.BuildResult(claudeStdout.SelectMany(claude.ParseEvents).ToList(), exitCode: 0, "");
 
             codexResult.Summary.ShouldBe(FileWritingFakeCli.ExpectedSummaryFor(goal));
             claudeResult.Summary.ShouldBe(codexResult.Summary, "one script, two dialects, one summary — the $1 branch must serve whichever harness the model picked");
@@ -232,6 +232,6 @@ public class SubtaskAwareFakeCliDriftTests
         parsed[1].Text.ShouldBe(expected[^1]);    // "<goal>#060"
         expected.Count.ShouldBe(HighVolumeSubtaskFakeCli.LineCount);
 
-        harness.BuildResult(parsed, exitCode: 0).Status.ShouldBe(AgentRunStatus.Succeeded);
+        harness.BuildResult(parsed, exitCode: 0, "").Status.ShouldBe(AgentRunStatus.Succeeded);
     }
 }

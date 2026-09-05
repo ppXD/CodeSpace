@@ -52,11 +52,11 @@ public abstract class AgentHarnessContractTests
 
     [Fact]
     public void BuildResult_maps_exit_zero_to_succeeded() =>
-        Harness.BuildResult(Array.Empty<AgentEvent>(), 0).Status.ShouldBe(AgentRunStatus.Succeeded);
+        Harness.BuildResult(Array.Empty<AgentEvent>(), 0, "").Status.ShouldBe(AgentRunStatus.Succeeded);
 
     [Fact]
     public void BuildResult_maps_nonzero_exit_to_failed() =>
-        Harness.BuildResult(Array.Empty<AgentEvent>(), 1).Status.ShouldBe(AgentRunStatus.Failed);
+        Harness.BuildResult(Array.Empty<AgentEvent>(), 1, "").Status.ShouldBe(AgentRunStatus.Failed);
 
     /// <summary>A native session-bearing line (Claude's result / Codex's thread.started) + the id it carries — the contract every harness must surface so a rerun can CONTINUE the prior conversation (P3.1a).</summary>
     protected abstract (string Line, string ExpectedId) SessionIdLine { get; }
@@ -66,7 +66,7 @@ public abstract class AgentHarnessContractTests
     {
         var (line, expectedId) = SessionIdLine;
 
-        Harness.BuildResult(Harness.ParseEvents(line), exitCode: 0).SessionId
+        Harness.BuildResult(Harness.ParseEvents(line), exitCode: 0, "").SessionId
             .ShouldBe(expectedId, "every harness must surface its CLI session/thread id so a rerun can CONTINUE the prior conversation");
     }
 

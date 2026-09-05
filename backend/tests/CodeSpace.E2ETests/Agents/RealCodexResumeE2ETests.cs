@@ -66,7 +66,7 @@ public sealed class RealCodexResumeE2ETests
             var freshHome = NewDir();
             var fresh = await RunCodexUntilAsync(Harness.BuildInvocation(FreshTask(cwd)), freshHome, line => line.Contains("thread.started"), awaitRolloutInHome: freshHome);
 
-            var threadId = Harness.BuildResult(ParseAll(fresh.Stdout), exitCode: 0).SessionId;   // only SessionId is read; the kill makes the real exit code irrelevant
+            var threadId = Harness.BuildResult(ParseAll(fresh.Stdout), exitCode: 0, "").SessionId;   // only SessionId is read; the kill makes the real exit code irrelevant
             threadId.ShouldNotBeNullOrEmpty("the production harness captured a thread_id from the REAL codex exec --json stream");
 
             // PRODUCTION capture-locate: the harness GLOBS its sessions/ for the id-bearing rollout the real binary wrote

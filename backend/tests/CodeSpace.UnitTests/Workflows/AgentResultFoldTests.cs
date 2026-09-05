@@ -50,7 +50,7 @@ public class AgentResultFoldTests
     {
         var events = RepresentativeStream();
 
-        new ClaudeCodeHarness().BuildResult(events, exitCode).ShouldMatch(LegacyClaudeBuildResult(events, exitCode));
+        new ClaudeCodeHarness().BuildResult(events, exitCode, "").ShouldMatch(LegacyClaudeBuildResult(events, exitCode));
     }
 
     [Theory]
@@ -61,7 +61,7 @@ public class AgentResultFoldTests
     {
         var events = RepresentativeStream(CodexSessionIdKey);
 
-        new CodexHarness().BuildResult(events, exitCode).ShouldMatch(LegacyCodexBuildResult(events, exitCode));
+        new CodexHarness().BuildResult(events, exitCode, "").ShouldMatch(LegacyCodexBuildResult(events, exitCode));
     }
 
     [Theory]
@@ -75,8 +75,8 @@ public class AgentResultFoldTests
         var claudeEvents = RepresentativeStream().Append(Event(AgentEventKind.Error, "gateway 429 mid-turn")).ToList();
         var codexEvents = RepresentativeStream(CodexSessionIdKey).Append(Event(AgentEventKind.Error, "gateway 429 mid-turn")).ToList();
 
-        new ClaudeCodeHarness().BuildResult(claudeEvents, exitCode).ShouldMatch(LegacyClaudeBuildResult(claudeEvents, exitCode));
-        new CodexHarness().BuildResult(codexEvents, exitCode).ShouldMatch(LegacyCodexBuildResult(codexEvents, exitCode));
+        new ClaudeCodeHarness().BuildResult(claudeEvents, exitCode, "").ShouldMatch(LegacyClaudeBuildResult(claudeEvents, exitCode));
+        new CodexHarness().BuildResult(codexEvents, exitCode, "").ShouldMatch(LegacyCodexBuildResult(codexEvents, exitCode));
     }
 
     [Theory]
@@ -86,8 +86,8 @@ public class AgentResultFoldTests
     {
         var events = Array.Empty<AgentEvent>();
 
-        new ClaudeCodeHarness().BuildResult(events, exitCode).ShouldMatch(LegacyClaudeBuildResult(events, exitCode));
-        new CodexHarness().BuildResult(events, exitCode).ShouldMatch(LegacyCodexBuildResult(events, exitCode));
+        new ClaudeCodeHarness().BuildResult(events, exitCode, "").ShouldMatch(LegacyClaudeBuildResult(events, exitCode));
+        new CodexHarness().BuildResult(events, exitCode, "").ShouldMatch(LegacyCodexBuildResult(events, exitCode));
     }
 
     [Fact]
@@ -98,8 +98,8 @@ public class AgentResultFoldTests
         // `LastTextOf(FinalSummary) ?? LastTextOf(AssistantMessage)` would silently "improve" that. It must not.
         var events = new[] { Event(AgentEventKind.AssistantMessage, "a useful message"), Event(AgentEventKind.FinalSummary, "") };
 
-        new ClaudeCodeHarness().BuildResult(events, exitCode: 0).ShouldMatch(LegacyClaudeBuildResult(events, exitCode: 0));
-        new CodexHarness().BuildResult(events, exitCode: 0).ShouldMatch(LegacyCodexBuildResult(events, exitCode: 0));
+        new ClaudeCodeHarness().BuildResult(events, exitCode: 0, "").ShouldMatch(LegacyClaudeBuildResult(events, exitCode: 0));
+        new CodexHarness().BuildResult(events, exitCode: 0, "").ShouldMatch(LegacyCodexBuildResult(events, exitCode: 0));
     }
 
     // ── Re-attach parity: the live tail and the re-attached tail fold identically ────────────────────
@@ -157,7 +157,7 @@ public class AgentResultFoldTests
             Event(AgentEventKind.ToolCall, "edit"),
         };
 
-        new ToolCallCountingHarness().BuildResult(events, exitCode: 0).Summary.ShouldBe("2 tool calls");
+        new ToolCallCountingHarness().BuildResult(events, exitCode: 0, "").Summary.ShouldBe("2 tool calls");
     }
 
     // ── Memory shape: retention is O(1) in the event count ───────────────────────────────────────────
@@ -206,7 +206,7 @@ public class AgentResultFoldTests
         // The one retained collection that legitimately grows is ChangedFiles — bounded by the number of DISTINCT
         // files touched, never by the number of events. SyntheticStream re-touches the same 3 paths forever.
         foreach (var harness in ProductionHarnesses())
-            harness.BuildResult(SyntheticStream(200_000), exitCode: 0).ChangedFiles.Count.ShouldBe(3, $"{harness.Kind} must keep the distinct files, not one entry per event");
+            harness.BuildResult(SyntheticStream(200_000), exitCode: 0, "").ChangedFiles.Count.ShouldBe(3, $"{harness.Kind} must keep the distinct files, not one entry per event");
     }
 
     /// <summary>The accumulators the executor holds for a whole run's duration: each production harness's own folder, and the run-facts accumulator it drives alongside them.</summary>
