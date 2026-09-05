@@ -66,4 +66,23 @@ public sealed class RealModelLaneBoundsTests
         fakeProfile.ShouldContain($"\"timeoutSeconds\": {RealModelSupervisorWholeLoopE2ETests.FakeAgentTimeoutSeconds}");
         realProfile.ShouldContain($"\"timeoutSeconds\": {RealModelSupervisorWholeLoopE2ETests.RealAgentTimeoutSeconds}");
     }
+
+    [Fact]
+    public void The_lanes_supervisor_config_is_actually_built_from_that_fragment()
+    {
+        // The half the assertion above cannot see: C# does not warn on an unused internal method, so re-inlining the
+        // agentProfile object would leave AgentProfileJson green, unused, and the lane silently back on the 3600s
+        // default. Scanned from source because the alternative — building the real config — needs the DB fixture.
+        var source = File.ReadAllText(Path.Combine(FindRepoRoot(), "backend/tests/CodeSpace.E2ETests/Workflows/RealModelSupervisorWholeLoopE2ETests.cs"));
+
+        source.ShouldContain("\"agentProfile\": {{AgentProfileJson(",
+            customMessage: "the lane's supervisor config must build its agentProfile through AgentProfileJson — an inlined object drops the timeoutSeconds cap and RealSupervisorActionExecutor.Spawn's `?? 3600` quietly restores the production default");
+    }
+
+    private static string FindRepoRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !Directory.Exists(Path.Combine(dir.FullName, "backend"))) dir = dir.Parent;
+        return dir?.FullName ?? throw new InvalidOperationException("repo root not found");
+    }
 }
