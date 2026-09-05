@@ -75,9 +75,11 @@ public static class SupervisorMergeContributors
     }
 
     /// <summary>
-    /// Every agent run this supervisor run FINISHED and no merge has CONSOLIDATED, when the active generation has no
-    /// mergeable result of its own — <see cref="SettledAcrossGenerations"/> minus what an earlier merge genuinely
-    /// folded (this rung's own runaway backstop: re-folding consolidated ids must not read as new progress).
+    /// Every agent run this supervisor run FINISHED and no merge has CONSOLIDATED — <see cref="SettledAcrossGenerations"/>
+    /// minus what an earlier merge genuinely folded (this rung's own runaway backstop: re-folding consolidated ids must
+    /// not read as new progress). The floor a <c>merge</c> would ACTUALLY fold, which is also what an abandoning plan's
+    /// own receipt counts: a result already consolidated onto a head was never on that floor, so a plan that discards
+    /// it takes nothing from anyone and must not be credited with having done so.
     ///
     /// <para>The exclusion is keyed on <see cref="SupervisorOutcome.MergeConsolidatedContributors"/> and not on the
     /// presence of a <c>merged[]</c> array: that array is written BEFORE the integration is attempted, so a merge
@@ -88,8 +90,10 @@ public static class SupervisorMergeContributors
     /// accumulator already dedupes across merges, so a second merge over the same stranded tape folds zero NEW
     /// ids.</para>
     /// </summary>
-    private static IReadOnlyList<Guid> StrandedByAReplan(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
+    public static IReadOnlyList<Guid> StrandedByAReplan(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
     {
+        ArgumentNullException.ThrowIfNull(priorDecisions);
+
         var alreadyConsolidated = priorDecisions
             .Where(SupervisorOutcome.MergeConsolidatedContributors)
             .SelectMany(d => SupervisorOutcome.ReadMergedAgentRunIds(d.OutcomeJson))
@@ -148,9 +152,14 @@ public static class SupervisorMergeContributors
     }
 
     /// <summary>
-    /// How many settled results the newest ABANDONING plan removed from the floor above — the plan's own receipt
-    /// (<c>RealSupervisorActionExecutor.ExecutePlanAsync</c> records it) and the number the recitation tells the brain.
-    /// 0 when no plan abandoned anything, which is every run that never emits the signal.
+    /// How many still-mergeable results the newest ABANDONING plan took off <see cref="StrandedByAReplan"/>'s floor —
+    /// the number the recitation tells the brain, and BY CONSTRUCTION the same number that plan's own receipt recorded
+    /// (<c>RealSupervisorActionExecutor.ExecutePlanAsync</c> runs <see cref="StrandedByAReplan"/> over exactly the
+    /// tape as it stood before the plan, which is the slice below). 0 when no plan abandoned anything.
+    ///
+    /// <para>The stranded floor and not the raw settled set, on both: a result an earlier merge already CONSOLIDATED
+    /// was not on the floor to begin with, so counting it credits the plan with discarding work it took from nobody —
+    /// and makes the ledger row and the prompt line disagree about the same tape.</para>
     /// </summary>
     public static int AbandonedEarlierResults(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
     {
@@ -158,7 +167,7 @@ public static class SupervisorMergeContributors
 
         var boundary = AbandonBoundary(priorDecisions);
 
-        return boundary < 0 ? 0 : Settled(priorDecisions.Take(boundary).ToArray()).Count;
+        return boundary < 0 ? 0 : StrandedByAReplan(priorDecisions.Take(boundary).ToArray()).Count;
     }
 
     /// <summary>

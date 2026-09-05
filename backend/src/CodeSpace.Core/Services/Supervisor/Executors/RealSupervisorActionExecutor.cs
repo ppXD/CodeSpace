@@ -152,8 +152,10 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
         // The discard's own receipt: a plan that declared abandonEarlierResults records HOW MANY finished results it
         // took off the merge/publish floor. A discard nobody can read back off the ledger is indistinguishable from
         // the silent loss this whole carry-over ladder exists to end. Counted against the floor as it stood BEFORE
-        // this plan (context.PriorDecisions excludes the in-flight decision), so it is exactly what THIS plan removed.
-        var abandoned = plan.AbandonEarlierResults ? SupervisorMergeContributors.SettledAcrossGenerations(context.PriorDecisions).Count : 0;
+        // this plan (context.PriorDecisions excludes the in-flight decision), so it is exactly what THIS plan removed
+        // — the STRANDED floor a merge would actually have folded, never the raw settled set: a result an earlier
+        // merge already consolidated onto a head was not there to take, and counting it inflates the receipt.
+        var abandoned = plan.AbandonEarlierResults ? SupervisorMergeContributors.StrandedByAReplan(context.PriorDecisions).Count : 0;
 
         if (abandoned > 0) outcome["abandonedEarlierResults"] = abandoned;
 
