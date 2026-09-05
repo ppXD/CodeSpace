@@ -477,9 +477,16 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// was confined" — the reader's question is whether ANY of these agents could reach the network, and one
     /// unconfined agent answers it yes. Unparseable rows are skipped (a malformed column drops the resolution back to
     /// the hedge, never fails a turn); an all-unparseable set therefore reads as no record at all.
+    ///
+    /// <para>The rows arrive from an UNORDERED query and the rank ties records that print DIFFERENT causes (an
+    /// unconfined host vs a runner that confines nothing; two hosts that hit different walls), so the reason breaks
+    /// the tie — otherwise one turn reads two ways across two page loads. Ordinal, so the pick is the same on every
+    /// host's culture.</para>
     /// </summary>
     internal static SandboxConfinement? LeastConfined(IEnumerable<string> json) =>
-        json.Select(TryReadConfinement).OfType<SandboxConfinement>().MinBy(ConfinementRank);
+        json.Select(TryReadConfinement).OfType<SandboxConfinement>()
+            .OrderBy(ConfinementRank).ThenBy(c => c.Reason ?? "", StringComparer.Ordinal)
+            .FirstOrDefault();
 
     /// <summary>Ascending strength: anything not confined is 0 (the reader's "yes, one of them could reach the network"), confinement without a severed netns 1, full severance 2.</summary>
     private static int ConfinementRank(SandboxConfinement confinement) =>
