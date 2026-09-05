@@ -1,6 +1,12 @@
+using System.Text.Json;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Executors;
+using CodeSpace.Core.Services.Workflows.Nodes;
+using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
+using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Agents;
+using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents;
@@ -62,6 +68,67 @@ public class AgentRetryCausesTests
         cold.ResumeFromSessionId.ShouldBeNull();
         cold.Environment.ContainsKey(AgentRetryCauses.MaxThinkingTokensEnvVar).ShouldBeFalse();
     }
+
+    [Fact]
+    public void The_shared_mitigation_owns_both_halves_of_the_repair()
+    {
+        // The helper is the ONE place "what a format-fault retry runs as" is written. Both halves are load-bearing:
+        // a fresh conversation (a resume re-sends the transcript the mangled block lives in) AND thinking disabled.
+        var warm = Task_() with { ResumeFromSessionId = "sess-1", RestoredTranscript = "transcript", RestoredTranscriptArtifactId = Guid.NewGuid() };
+
+        var mitigated = AgentRetryCauses.ApplyFormatFaultMitigation(warm);
+
+        mitigated.ResumeFromSessionId.ShouldBeNull();
+        mitigated.RestoredTranscript.ShouldBeNull();
+        mitigated.RestoredTranscriptArtifactId.ShouldBeNull();
+        mitigated.Environment["KEEP"].ShouldBe("kept", "the degrade adds one variable — it never rebuilds the environment from scratch");
+        AgentRetryCauses.IsFormatFaultMitigated(mitigated).ShouldBeTrue();
+        AgentRetryCauses.IsFormatFaultMitigated(warm).ShouldBeFalse("the predicate reads the degrade, not the intent — an un-mitigated task must never look repaired");
+    }
+
+    [Fact]
+    public async Task Both_retry_lanes_repair_a_format_fault_through_the_same_helper()
+    {
+        // Drift detector (Rule 12.5, behavioural form): the supervisor's `retry` and agent.run's respawn resolve
+        // their prior attempt from different sources — a DB-loaded ResumableSession vs. a flat resume payload — but
+        // the repair they apply must be the ONE the helper owns. A lane that copies the literal instead passes today
+        // and silently un-repairs the moment the helper changes (a renamed env var, a third half added), so both
+        // lanes are asserted through the helper's own predicate, never through a re-typed "MAX_THINKING_TOKENS".
+        const string liveError = "API Error: Content block is not a thinking block";
+
+        var supervisorTask = RealSupervisorActionExecutor.ApplyRetryDisposition(
+            Task_(), new ResumableSession(Guid.NewGuid(), "sess-1", "transcript", null), Result(liveError), workspaceHasPriorWork: true);
+
+        var priorAttempt = JsonDocument.Parse($$"""
+            {"status":"Failed","exitReason":"non-zero-exit","error":"{{liveError}}","sessionId":"sess-1","sessionTranscript":"transcript"}
+            """).RootElement;
+
+        var node = await new AgentCodeNode().RunAsync(NodeContext(priorAttempt), CancellationToken.None);
+        var nodeTask = JsonSerializer.Deserialize<AgentTask>(node.SuspendUntil!.Payload, AgentJson.Options)!;
+
+        foreach (var (lane, task) in new[] { ("supervisor retry", supervisorTask), ("agent.run respawn", nodeTask) })
+        {
+            AgentRetryCauses.IsFormatFaultMitigated(task).ShouldBeTrue($"the {lane} lane must apply the SHARED mitigation, not its own copy of it");
+            task.ResumeFromSessionId.ShouldBeNull($"the {lane} lane must start FRESH — a replay re-triggers the fault deterministically");
+            task.RestoredTranscript.ShouldBeNull($"the {lane} lane must not carry the poisoned transcript forward");
+        }
+    }
+
+    private static NodeRunContext NodeContext(JsonElement priorAttemptPayload) => new()
+    {
+        Inputs = new Dictionary<string, JsonElement>(),
+        Config = new Dictionary<string, JsonElement>
+        {
+            ["goal"] = JsonSerializer.SerializeToElement("fix it"),
+            ["harness"] = JsonSerializer.SerializeToElement("claude-code"),
+        },
+        RawInputs = JsonDocument.Parse("{}").RootElement,
+        RawConfig = JsonDocument.Parse("{}").RootElement,
+        Scope = new NodeRunScope { Trigger = new Dictionary<string, JsonElement>() },
+        Logger = NullLogger.Instance,
+        Observability = NodeObservability.NoOp,
+        PriorAttemptPayload = priorAttemptPayload,
+    };
 
     private static AgentTask Task_() => new() { Goal = "fix it", Harness = "claude-code", Environment = new Dictionary<string, string> { ["KEEP"] = "kept" } };
 

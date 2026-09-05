@@ -324,6 +324,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                     await PersistResolvedModelAsync(agentRunId, task with { Model = escalated }, cancellationToken).ConfigureAwait(false);
             }
 
+            // The escalation event's sibling, for the OTHER thing a dispatcher can decide a respawn owes: this
+            // attempt IS the gateway-format-fault repair. Announced here, at the moment the repair actually runs,
+            // so the note can never outlive the respawn it describes — and once, for BOTH retry lanes, because
+            // both write the same degrade into the same envelope (AgentRetryCauses.ApplyFormatFaultMitigation).
+            if (Supervisor.AgentRetryCauses.IsFormatFaultMitigated(effectiveTask))
+                await AppendMitigationEventAsync(agentRunId, cancellationToken).ConfigureAwait(false);
+
             // The model in force for the NEXT harness invocation, carried across revise rounds: an escalation won in
             // round 1 must not evaporate in round 2 just because round 2's own result asked for nothing further.
             var dispatchedModel = effectiveTask.Model;
@@ -1784,6 +1791,22 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var picked = SupervisorRetryEscalation.PickStrongerModel(candidates, m => m.IsDefault, m => m.ProbedCapabilityTier, m => m.CapabilityTier, m => m.ModelId, priorModel)?.ModelId;
 
         return new AgentModelEscalation { From = priorModel, To = picked, Reason = reason };
+    }
+
+    /// <summary>The note a format-fault respawn announces on the timeline. Written as a fact about THIS attempt (never a promise about a next one) — it is emitted only from the dispatch of a task that already carries the degrade, so it exists exactly when the respawn does.</summary>
+    internal const string FormatFaultMitigationNote = "Gateway format fault — respawned once with thinking disabled (fresh conversation: the mangled block lives in the prior transcript).";
+
+    /// <summary>Announce the format-fault repair on the timeline — the operator sees WHY this attempt starts cold and runs degraded, instead of a silent second agent. Best-effort like the escalation event beside it.</summary>
+    private async Task AppendMitigationEventAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _runs.AppendEventAsync(runId, new AgentEvent { Kind = AgentEventKind.Warning, Text = FormatFaultMitigationNote }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Agent run {RunId}: could not record the gateway-format-fault mitigation event", runId);
+        }
     }
 
     /// <summary>Announce the escalation on the timeline — the operator sees the run reached for a stronger model and WHY, or that it wanted to and the team had nothing stronger. Best-effort like the other completion-tail events.</summary>

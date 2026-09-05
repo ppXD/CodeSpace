@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.Core.Services.Workflows.Runtime;
@@ -676,6 +677,138 @@ public class AgentCodeNodeTests
 
         JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!.Escalation
             .ShouldBeNull("escalation costs real money — it fires only on a resolved proposal naming a real, stronger model");
+    }
+
+    // ── Gateway format fault: the quick lane's own bounded repair ──
+
+    [Fact]
+    public async Task A_gateway_format_fault_respawn_drops_the_poisoned_conversation_and_disables_thinking()
+    {
+        // The live 2026-08-30 shape: the gateway's Anthropic-compat layer mangles thinking-block continuation and
+        // the CLI dies in ~5s before any turn. The mangled block lives in the transcript, so a warm resume re-sends
+        // exactly what re-triggers it — every attempt dying identically, which is how a transient gateway fault
+        // took whole runs. The respawn is the SHARED repair: same model, same task, FRESH conversation, thinking off.
+        var priorAttempt = JsonDocument.Parse("""
+            {"status":"Failed","exitReason":"non-zero-exit","error":"API Error: Content block is not a thinking block",
+             "sessionId":"sess-poisoned","sessionTranscript":"{\"role\":\"user\"}"}
+            """).RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, priorAttemptPayload: priorAttempt), CancellationToken.None);
+
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+
+        task.ResumeFromSessionId.ShouldBeNull("resuming re-sends the very transcript the mangled block lives in — the respawn must start FRESH");
+        task.RestoredTranscript.ShouldBeNull();
+        task.Model.ShouldBe("gpt-5.3-codex", "the gateway mangled the wire, not the model — the respawn re-runs the SAME model");
+        task.Goal.ShouldBe("Fix the tests", "same task: the repair is transport-level, so nothing is added to the prompt");
+        AgentRetryCauses.IsFormatFaultMitigated(task).ShouldBeTrue("…and runs with extended thinking disabled, the shape the gateway cannot mangle");
+    }
+
+    [Fact]
+    public async Task A_gateway_format_fault_respawn_keeps_the_prior_attempts_pushed_work()
+    {
+        // The degrade drops the broken CONVERSATION, never the preserved WORK — the same split the supervisor's
+        // retry makes. A respawn that re-cloned the default branch would throw away a pushed branch to fix a
+        // transport fault that had nothing to do with it.
+        var repositoryId = Guid.NewGuid();
+        var priorAttempt = JsonDocument.Parse($$"""
+            {"status":"Failed","exitReason":"non-zero-exit","error":"API Error: Content block is not a thinking block",
+             "sessionId":"sess-poisoned","branch":"codespace/agent/attempt-1","changedFiles":["src/a.ts"]}
+            """).RootElement;
+        var inputs = new Dictionary<string, JsonElement> { ["repositoryId"] = Str(repositoryId.ToString()) };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, inputs, priorAttempt), CancellationToken.None);
+
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+
+        task.Workspace.ShouldNotBeNull().Primary!.Ref.ShouldBe("codespace/agent/attempt-1", "the produced branch is still the respawn's base — only the conversation is dropped");
+        task.ResumeFromSessionId.ShouldBeNull();
+        AgentRetryCauses.IsFormatFaultMitigated(task).ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task A_gateway_format_fault_respawn_never_claims_a_conversation_it_did_not_restore()
+    {
+        // The honest-redo line ASSERTS a restored conversation ("your prior attempt's conversation is restored,
+        // but its git changes were NOT preserved"). A mitigated respawn restores none, so stamping it would be a
+        // lie told to the model on the one path where it is least able to check.
+        var priorAttempt = JsonDocument.Parse("""
+            {"status":"Failed","exitReason":"non-zero-exit","error":"API Error: Content block is not a thinking block","sessionId":"sess-poisoned"}
+            """).RootElement;
+        var inputs = new Dictionary<string, JsonElement> { ["repositoryId"] = Str(Guid.NewGuid().ToString()) };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, inputs, priorAttempt), CancellationToken.None);
+
+        JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!.Goal
+            .ShouldNotContain("conversation is restored", customMessage: "nothing was restored — the honest-redo line must not fire on a session-less respawn");
+    }
+
+    [Theory]
+    // An ordinary transient death still warm-resumes: the marker vocabulary is tight on purpose, and stripping
+    // resume continuity from every failure would throw away the D3 respawn's whole point.
+    [InlineData("gateway 429", "sess-123", false)]
+    [InlineData("acceptance: ./check.sh exited 2", "sess-123", false)]
+    // Only the pinned gateway text inverts the decision.
+    [InlineData("API Error: Content block is not a thinking block", null, true)]
+    public async Task Only_a_gateway_format_fault_inverts_the_respawns_resume_decision(string error, string? expectedSession, bool expectMitigated)
+    {
+        var priorAttempt = JsonDocument.Parse($$"""
+            {"status":"Failed","exitReason":"non-zero-exit","error":"{{error}}","sessionId":"sess-123"}
+            """).RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, priorAttemptPayload: priorAttempt), CancellationToken.None);
+
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+
+        task.ResumeFromSessionId.ShouldBe(expectedSession);
+        AgentRetryCauses.IsFormatFaultMitigated(task).ShouldBe(expectMitigated);
+    }
+
+    [Fact]
+    public async Task A_first_gateway_format_fault_is_retryable_and_names_the_cause()
+    {
+        var resume = JsonDocument.Parse("""
+            {"status":"Failed","exitReason":"non-zero-exit","error":"API Error: Content block is not a thinking block"}
+            """).RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Retryable.ShouldBeTrue("the gateway mangled the wire — infra, not a verdict: the respawn gets to apply the repair");
+        result.Error.ShouldContain(AgentRetryCauses.GatewayFormatFault, customMessage: "the timeline must say the gateway mangled the wire, not just echo an opaque CLI line");
+    }
+
+    [Fact]
+    public async Task A_second_gateway_format_fault_is_terminal_with_the_cause_named()
+    {
+        // The bound: this attempt WAS the repair (thinkingDisabled, projected from its own dispatched envelope) and
+        // hit the same fault, so the repair does not hold here. Respawning again would only re-bill a broken
+        // gateway and bury the one fact the operator needs under N identical five-second deaths.
+        var resume = JsonDocument.Parse("""
+            {"status":"Failed","exitReason":"non-zero-exit","error":"API Error: Content block is not a thinking block","thinkingDisabled":true}
+            """).RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Retryable.ShouldBeFalse("the repair is bought exactly once — a mitigated attempt that died the same way is terminal");
+        result.Error.ShouldContain(AgentRetryCauses.GatewayFormatFault);
+        result.Error.ShouldContain("hit the same fault", customMessage: "the failure must say the repair already ran, so nobody re-diagnoses it as a first fault");
+    }
+
+    [Fact]
+    public async Task A_mitigated_attempt_that_dies_of_something_else_keeps_todays_retry_verdict()
+    {
+        // The bound is on the CAUSE, not on the flag: a mitigated respawn that dies of an ordinary transient death
+        // is an ordinary transient death, and gets the same fresh-respawn chance any crash/timeout gets.
+        var resume = JsonDocument.Parse("""
+            {"status":"Failed","exitReason":"non-zero-exit","error":"gateway 429","thinkingDisabled":true}
+            """).RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume), CancellationToken.None);
+
+        result.Retryable.ShouldBeTrue("a 429 is not a format fault — the one-shot bound must not leak onto every later failure");
+        result.Error.ShouldNotContain(AgentRetryCauses.GatewayFormatFault, customMessage: "every non-format-fault message stays byte-identical");
     }
 
     [Fact]

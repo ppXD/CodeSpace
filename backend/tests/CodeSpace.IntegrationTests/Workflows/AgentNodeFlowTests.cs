@@ -4,6 +4,7 @@ using CodeSpace.Core.Constants;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
@@ -712,6 +713,138 @@ public class AgentNodeFlowTests
             var task = JsonSerializer.Deserialize<AgentTask>(secondAgent.TaskJson, AgentJson.Options)!;
 
             task.ResumeFromSessionId.ShouldBe("sess-rate-limited", "the respawn continues attempt 1's session instead of starting a brand-new conversation");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    // ── Gateway format fault: the quick lane recovers once, then stops honestly ──
+
+    /// <summary>The verbatim text the gateway's Anthropic-compat layer killed the claude CLI with (2026-08-30 live, 51 occurrences across 20 CI jobs) — the thing the whole repair exists for, so the test must fail on nothing less.</summary>
+    private const string LiveGatewayFormatFault = "API Error: Content block is not a thinking block";
+
+    [Fact]
+    public async Task A_gateway_format_fault_respawns_fresh_with_thinking_disabled_and_the_run_recovers()
+    {
+        // The lost-run shape, end to end on the production path: attempt 1 dies in seconds on a mangled wire, with a
+        // resumable session captured and real work pushed. Before this, the respawn warm-resumed that session — and
+        // the resume re-sends the transcript the mangled block lives in, so every attempt died identically and a
+        // transient gateway fault took the whole run. Now the respawn drops the conversation, keeps the work, and
+        // runs the SAME model with thinking disabled; its success completes the run.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, RetryingAgentNodeDefinition(maxAttempts: 3));   // the quick lane's own AgentNodeMapping.DefaultRetry budget
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            var firstAgent = await GetAgentRunIdAsync(runId);
+
+            await SimulateAgentExecutorAsync(firstAgent, new AgentRunResult
+            {
+                Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = LiveGatewayFormatFault,
+                SessionId = "sess-poisoned", SessionTranscript = "{\"role\":\"user\"}",
+            });
+
+            await RunEngineAsync(runId);   // resume → attempt 1 fails → the respawn stages a FRESH, mitigated agent + parks again
+
+            Guid secondAgent;
+            using (var mid = _fixture.BeginScope())
+            {
+                var db = mid.Resolve<CodeSpaceDbContext>();
+
+                var agents = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).OrderBy(r => r.CreatedDate).ToListAsync();
+                agents.Count.ShouldBe(2, "the format fault is infra, not a verdict — the node respawns rather than failing the run");
+                secondAgent = agents.Single(a => a.Id != firstAgent).Id;
+
+                // The load-bearing fact, asserted on the durable envelope the executor provisions the sandbox from —
+                // never a log line. A TaskJson that still names the poisoned session is the exact refutation evidence.
+                var task = JsonSerializer.Deserialize<AgentTask>(agents.Single(a => a.Id == secondAgent).TaskJson, AgentJson.Options)!;
+                task.ResumeFromSessionId.ShouldBeNull("resuming re-sends the transcript the mangled block lives in — the respawn MUST start fresh");
+                task.RestoredTranscript.ShouldBeNull();
+                AgentRetryCauses.IsFormatFaultMitigated(task).ShouldBeTrue("the respawn carries the SHARED mitigation — the shape the gateway cannot mangle");
+                task.Model.ShouldBe("gpt-5.3-codex", "the gateway mangled the wire, not the model — same model, same task");
+
+                // The attempt is both COUNTED and EXPLAINED in one durable record: the timeline says the gateway
+                // mangled the wire instead of only echoing an opaque CLI line.
+                var attempts = await db.WorkflowRunRecord.AsNoTracking()
+                    .Where(r => r.RunId == runId && r.RecordType == WorkflowRunRecordTypes.AttemptFailed).ToListAsync();
+                attempts.Count.ShouldBe(1, "the consumed attempt is durably ledgered so the budget survives the suspend cycle");
+                attempts[0].PayloadJson.ShouldContain(AgentRetryCauses.GatewayFormatFault);
+            }
+
+            await SimulateAgentExecutorAsync(secondAgent, new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = "Worked once the wire was clean." });
+
+            await RunEngineAsync(runId);
+
+            using var verify = _fixture.BeginScope();
+            (await verify.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+                .ShouldBe(WorkflowRunStatus.Success, "the mitigated respawn succeeded — the transient gateway fault no longer costs the run");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task A_second_gateway_format_fault_fails_the_run_with_the_cause_named()
+    {
+        // The bound, proven where it matters: the budget still has an attempt left (3 authored, 1 consumed), so
+        // nothing but the one-shot rule stops a third agent. A repair that already ran and hit the same fault has
+        // proven it does not hold here — respawning again would only re-bill a broken gateway and bury the one fact
+        // the operator needs under N identical five-second deaths.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, RetryingAgentNodeDefinition(maxAttempts: 3));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            var firstAgent = await GetAgentRunIdAsync(runId);
+
+            await SimulateAgentExecutorAsync(firstAgent, new AgentRunResult
+            {
+                Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = LiveGatewayFormatFault, SessionId = "sess-poisoned",
+            });
+
+            await RunEngineAsync(runId);
+
+            var secondAgent = await GetLatestAgentRunIdAsync(runId);
+            secondAgent.ShouldNotBe(firstAgent, "the first fault still buys its one respawn");
+
+            await SimulateAgentExecutorAsync(secondAgent, new AgentRunResult
+            {
+                Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = LiveGatewayFormatFault, SessionId = "sess-poisoned-again",
+            });
+
+            await RunEngineAsync(runId);
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            (await db.AgentRun.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId))
+                .ShouldBe(2, "the repair is bought exactly once — a third agent would re-bill the same broken gateway");
+
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Failure);
+
+            // …and it fails LEGIBLY: the terminal record names the cause AND says the repair already ran, so nobody
+            // re-diagnoses this as a first fault or goes looking for a respawn that was deliberately not bought.
+            var failed = await db.WorkflowRunRecord.AsNoTracking()
+                .SingleAsync(r => r.RunId == runId && r.RecordType == WorkflowRunRecordTypes.NodeFailed);
+            failed.PayloadJson.ShouldContain(AgentRetryCauses.GatewayFormatFault,
+                customMessage: "the timeline must read 'the gateway mangled the wire', not an opaque CLI line");
+            failed.PayloadJson.ShouldContain("hit the same fault");
         }
         finally
         {

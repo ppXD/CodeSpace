@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using CodeSpace.Messages.Agents;
 
 namespace CodeSpace.Core.Services.Supervisor;
 
@@ -36,4 +37,23 @@ public static class AgentRetryCauses
         var copy = new Dictionary<string, string>(environment) { [MaxThinkingTokensEnvVar] = "0" };
         return copy;
     }
+
+    /// <summary>
+    /// The WHOLE format-fault mitigation folded onto a retry's task — the ONE composition both retry lanes call
+    /// (<c>RealSupervisorActionExecutor.ApplyRetryDisposition</c> and <c>AgentCodeNode</c>'s respawn), so "what a
+    /// format-fault retry runs as" can never mean two different things in the two lanes (the
+    /// <see cref="AgentRetryContinuity"/> discipline, one level up).
+    ///
+    /// <para>Both halves are load-bearing. FRESH conversation: the mangled block lives in the very transcript a
+    /// <c>--resume</c> re-sends, so a warm retry re-triggers the fault deterministically — it dies in seconds,
+    /// before any turn, and burns a whole attempt relearning it. THINKING DISABLED: the shape the gateway's
+    /// Anthropic-compat layer cannot mangle. The workspace is untouched on purpose — the degrade drops the broken
+    /// conversation, never the preserved work.</para>
+    /// </summary>
+    public static AgentTask ApplyFormatFaultMitigation(AgentTask task) =>
+        task with { ResumeFromSessionId = null, RestoredTranscript = null, RestoredTranscriptArtifactId = null, Environment = WithThinkingDisabled(task.Environment) };
+
+    /// <summary>Whether a dispatched task IS the one mitigated attempt — the fact the dispatcher announces on the timeline, and the bound the next retry verdict keys on (a mitigated attempt that hits the SAME fault has proven the repair does not hold, so it is terminal rather than respawned identically).</summary>
+    public static bool IsFormatFaultMitigated(AgentTask task) =>
+        task.Environment.TryGetValue(MaxThinkingTokensEnvVar, out var budget) && budget == "0";
 }

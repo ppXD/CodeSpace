@@ -383,6 +383,39 @@ public sealed class AgentRunReviseLoopFlowTests
     }
 
     [Fact]
+    public async Task A_format_fault_respawns_degrade_reaches_the_harness_and_says_so_on_the_timeline()
+    {
+        // The other half of the gateway-format-fault repair, at the only altitude that can prove it: a respawn
+        // staged with the shared mitigation must carry the degrade into the ACTUAL harness invocation (an env var
+        // that stops at the envelope repairs nothing), and the operator must be able to see WHY this attempt runs
+        // degraded — announced here, at dispatch, so the note cannot outlive the respawn it describes.
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(CheckScript);
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+
+        // Exactly what AgentCodeNode / the supervisor's retry stage after a format fault — composed through the one
+        // shared helper, never a re-typed literal, so this test moves with the repair instead of pinning a copy.
+        var mitigated = AgentRetryCauses.ApplyFormatFaultMitigation(TaskWith(repoId));
+        var runId = await CreateRunAsync(teamId, mitigated);
+
+        var harness = new ReviseAwareHarness(first: RevisedScript, revised: RevisedScript);
+        await ExecuteAsync(runId, harness);
+
+        (await LoadAsync(runId)).Run.Status.ShouldBe(AgentRunStatus.Succeeded, "the degrade changes the thinking budget, nothing else — the run still works");
+
+        harness.InvokedEnvironments.ShouldHaveSingleItem()
+            .ShouldContainKeyAndValue(AgentRetryCauses.MaxThinkingTokensEnvVar, "0",
+                customMessage: "the degrade must reach the harness invocation itself — a mitigation that stops at the durable envelope repairs nothing");
+
+        (await LoadEventsAsync(runId)).ShouldContain(AgentRunExecutor.FormatFaultMitigationNote,
+            "the operator must see why this attempt starts cold and runs degraded, instead of a silent second agent");
+    }
+
+    [Fact]
     public async Task A_run_whose_check_passes_first_time_records_no_escalation_at_all()
     {
         if (OperatingSystem.IsWindows()) return;
@@ -646,9 +679,13 @@ public sealed class AgentRunReviseLoopFlowTests
         /// <summary>The model of every invocation, in order — the ground truth for whether an escalated pick reached the actual dispatch (D3), not merely a record.</summary>
         public List<string> InvokedModels { get; } = new();
 
+        /// <summary>The environment of every invocation, in order — the same ground truth for a DEGRADE (the gateway-format-fault repair): an env var that never reaches the harness repairs nothing.</summary>
+        public List<IReadOnlyDictionary<string, string>> InvokedEnvironments { get; } = new();
+
         public SandboxSpec BuildInvocation(AgentTask task)
         {
             InvokedModels.Add(task.Model ?? "(none)");
+            InvokedEnvironments.Add(task.Environment);
 
             return new SandboxSpec
             {
