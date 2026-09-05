@@ -6,11 +6,12 @@ namespace CodeSpace.Messages.Agents;
 /// noun (Rule 18.1): the repo URL + token are resolved upstream (the same way <see cref="WorkspaceRequest"/> is),
 /// and each contribution carries the durable, base-anchored input the integrator needs.
 ///
-/// <para><b>Base-anchored by construction:</b> the request carries the single shared <see cref="BaseSha"/> the K
-/// agents were expected to branch from, and EACH <see cref="BranchContribution"/> carries the base it actually
-/// recorded. The integrator checks out <see cref="BaseSha"/> before applying and REFUSES any contribution whose
-/// own base disagrees — a stale-base patch otherwise applies "cleanly" onto a moved tree and silently grafts
-/// incoherent work.</para>
+/// <para><b>Base-anchored by construction:</b> the request carries the shared <see cref="BaseSha"/> the K agents
+/// were expected to branch from, and EACH <see cref="BranchContribution"/> carries the base it actually recorded.
+/// The integrator checks out <see cref="BaseSha"/> before applying and REFUSES any contribution whose own base is
+/// neither that commit nor DOWNSTREAM of it — a stale-base patch otherwise applies "cleanly" onto a moved tree and
+/// silently grafts incoherent work, while a downstream base is the legitimate dependency-staging shape (a dependent
+/// agent re-parented onto its producer's branch).</para>
 /// </summary>
 public sealed record IntegrationRequest
 {
@@ -23,7 +24,7 @@ public sealed record IntegrationRequest
     /// <summary>The branch / ref to clone for context. Null → the remote's default branch. The integration NEVER pushes here — it always pushes a run-id-derived reviewable branch.</summary>
     public string? BaseRef { get; init; }
 
-    /// <summary>The shared base revision ALL contributions must be rooted at — the commit the integrator checks out before applying. The integrity anchor: a contribution whose own base differs is refused.</summary>
+    /// <summary>The shared base revision ALL contributions must be rooted at or downstream of — the commit the integrator checks out before applying. The integrity anchor: a contribution whose own base is not this commit or a descendant of it is refused.</summary>
     public required string BaseSha { get; init; }
 
     /// <summary>Access token for HTTPS auth (clone + the integration-branch push). Null → an anonymous clone with no push (a read-only integration that reports but cannot write a branch).</summary>
@@ -56,7 +57,7 @@ public sealed record BranchContribution
     /// <summary>The repository this agent worked in. The integrator refuses a set whose contributions span multiple source repositories (a multi-repo fan-out has no single repo to integrate into).</summary>
     public Guid SourceRepositoryId { get; init; }
 
-    /// <summary>The base revision THIS contribution's patch is rooted at — must equal the request's <see cref="IntegrationRequest.BaseSha"/> or the contribution is refused (the moved-base integrity guard). Null when the agent recorded no base (a re-attached run with no surviving clone) → refused as unintegrable.</summary>
+    /// <summary>The base revision THIS contribution's patch is rooted at — must be the request's <see cref="IntegrationRequest.BaseSha"/> or a DESCENDANT of it (dependency staging re-parents a dependent agent onto its producer's branch), else the contribution is refused (the moved-base integrity guard). Null when the agent recorded no base (a re-attached run with no surviving clone) → refused as unintegrable.</summary>
     public string? BaseSha { get; init; }
 
     /// <summary>The inline unified diff (git format) of the agent's changes vs its base. Empty when offloaded (see <see cref="PatchArtifactId"/>) or when the agent changed nothing. A patch carrying the truncation marker (a diff over the inline cap) is refused — the truncated text cannot be applied.</summary>
