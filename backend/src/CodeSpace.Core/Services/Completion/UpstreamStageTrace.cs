@@ -27,7 +27,7 @@ public static class UpstreamStageTrace
         CompletionStage.Contract, CompletionStage.Plan, CompletionStage.Execute, CompletionStage.Integrate,
     };
 
-    public static IReadOnlySet<CompletionStage> Derive(IReadOnlyList<RequirementEnvelope> requirements, IReadOnlyList<SupervisorPriorDecision> decisions, IReadOnlyList<AttemptProjection> attempts, IReadOnlyList<PublishManifest> manifests)
+    public static IReadOnlySet<CompletionStage> Derive(IReadOnlyList<RequirementEnvelope> requirements, IReadOnlyList<SupervisorPriorDecision> decisions, IReadOnlyList<AttemptProjection> attempts, IReadOnlyList<PublishManifest> integrationManifests)
     {
         var exercised = new HashSet<CompletionStage>();
 
@@ -37,7 +37,7 @@ public static class UpstreamStageTrace
 
         if (attempts.Count > 0) exercised.Add(CompletionStage.Execute);
 
-        if (HasIntegratedCandidate(decisions, manifests)) exercised.Add(CompletionStage.Integrate);
+        if (HasIntegratedCandidate(decisions, integrationManifests)) exercised.Add(CompletionStage.Integrate);
 
         return exercised;
     }
@@ -46,7 +46,7 @@ public static class UpstreamStageTrace
     /// The Integrate cell's evidence ledgers: the supervisor tape's final reviewable head, OR an EXECUTED merge that
     /// integrated a branch at any point (<see cref="SupervisorOutcome.AnyMergeIntegratedABranch"/>), OR a PUSHED
     /// run-level Integration manifest row with its branch named (a PatchOnly/branch-less row attests no reviewable
-    /// candidate and stays silent), OR DC-3's ledger-direct head (<see cref="IsLedgerDirectHead"/>).
+    /// candidate and stays silent).
     ///
     /// <para>The middle ledger is deliberately BARRIER-FREE while the first is not. The final-head readers answer
     /// "which head may we ship now", so they must go silent past fresh un-integrated work; this cell asks whether the
@@ -62,48 +62,14 @@ public static class UpstreamStageTrace
     /// rung of the publish ladder may deliver. Every supervisor-tape ledger reads from that line; the run-level
     /// Integration manifest belongs to no generation and is untouched.</para>
     /// </summary>
-    private static bool HasIntegratedCandidate(IReadOnlyList<SupervisorPriorDecision> decisions, IReadOnlyList<PublishManifest> manifests)
+    private static bool HasIntegratedCandidate(IReadOnlyList<SupervisorPriorDecision> decisions, IReadOnlyList<PublishManifest> integrationManifests)
     {
         var publishable = SupervisorMergeContributors.SinceLatestAbandonment(decisions);
 
         return SupervisorOutcome.ReadFinalIntegratedBranch(publishable) is not null
             || SupervisorOutcome.ReadFinalRepositoryBranches(publishable).Count > 0
             || SupervisorOutcome.AnyMergeIntegratedABranch(publishable)
-            || manifests.Any(m => m.Kind == PublishManifestKind.Integration && m.PublishStateValue == PublishState.Pushed && m.Branch is { Length: > 0 })
-            || IsLedgerDirectHead(publishable, manifests);
-    }
-
-    /// <summary>
-    /// DC-3's LEDGER-DIRECT head: the run's ONE accepted contributor published its own branch and no merge decision
-    /// ever ran. This is a DESIGNED terminal shape, not a degenerate one — <see cref="SupervisorPublishGate"/> lets
-    /// exactly it terminalize with no merge at all ("a single already-pushed, accepted agent satisfies published
-    /// directly off the canonical ledger"), and <see cref="SupervisorPublishedBranchResolver"/>'s ledger-direct rung
-    /// resolves that same branch as the run's publish target. With ONE contributor its branch IS the run's head:
-    /// there was nothing left to combine, so the stage was exercised. Without this cell such a run parks under the
-    /// Enforced default for skipping work it never had — the shape the first complete supervisor-arcs window
-    /// (real-model run 29215356358) already had to teach the I3 auditor to read.
-    ///
-    /// <para>STRICTLY one. A contributor branch is otherwise a PARTIAL head (#1762): two accepted contributors with
-    /// nothing merging them means the head omits somebody's work, so crediting either would let a run claim an
-    /// integration it never performed. That case stays unevidenced and parks — which is exactly why "some Agent-kind
-    /// row is Pushed" is NOT the predicate here.</para>
-    ///
-    /// <para>Published is <see cref="SupervisorTurnService.FoldPublishedAgentRunIds"/> — the SAME predicate the I3
-    /// gate's own context is folded with, all-or-nothing per agent run, so a multi-repo contributor that published
-    /// only some of its repos counts as nothing. Contributors come off the PUBLISHABLE tape (past the abandonment
-    /// line, like every ledger above) minus anything <see cref="SupervisorOutcome.IsWithheldFromHead"/> rejected or
-    /// waived — the same 局部綠≠整合綠 bar every other door to the head enforces.</para>
-    /// </summary>
-    private static bool IsLedgerDirectHead(IReadOnlyList<SupervisorPriorDecision> publishable, IReadOnlyList<PublishManifest> manifests)
-    {
-        var accepted = publishable
-            .Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind))
-            .SelectMany(d => SupervisorOutcome.ReadAgentResults(d.OutcomeJson))
-            .Where(r => !SupervisorOutcome.IsWithheldFromHead(r))
-            .Select(r => r.AgentRunId)
-            .ToHashSet();
-
-        return SupervisorTurnService.FoldPublishedAgentRunIds(manifests).Count(accepted.Contains) == 1;
+            || integrationManifests.Any(m => m.Kind == PublishManifestKind.Integration && m.PublishStateValue == PublishState.Pushed && m.Branch is { Length: > 0 });
     }
 
     /// <summary>The profile's Required upstream stages the trace does NOT evidence — non-empty means the Success claim skipped a declared stage and must park. A null trace (never derived — a legacy compose) evidences nothing: fail-close.</summary>

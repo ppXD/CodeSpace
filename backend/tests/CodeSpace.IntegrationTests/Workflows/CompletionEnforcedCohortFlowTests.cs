@@ -151,66 +151,6 @@ public class CompletionEnforcedCohortFlowTests
     }
 
     [Fact]
-    public async Task A_default_supervisor_run_whose_one_contributor_published_without_a_merge_terminalizes_success()
-    {
-        // DC-3's LEDGER-DIRECT shape, and the second thing the default flip must not cost: a run with ONE accepted
-        // contributor never runs a merge decision at all, because there is nothing to combine — its own pushed
-        // branch IS the run's head, which is what the publish gate terminalizes on and what the branch resolver's
-        // ledger-direct rung publishes. Reading Integrate off merge/resolve ledgers alone parked this by design.
-        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var runId = await StartSupervisorSnapshotAsync(teamId, userId, completionMode: null, DeclaredOutputs);
-
-        var attempts = await SeedLedgerDirectTapeAsync(runId, teamId, "s1");
-        var repositoryId = await SeedRepositoryAsync(teamId);
-        await SeedManifestAsync(teamId, attempts[0], repositoryId, "codespace/agent/s1");
-        await StakeAsync(runId, teamId, "acceptance:s1", ContractKinds.Acceptance);
-        await StakeAsync(runId, teamId, "delivery:s1", ContractKinds.Delivery);
-        await StakeAsync(runId, teamId, "output:s1", ContractKinds.Output);
-
-        await ForceEnqueuedAsync(runId);
-        await RunEngineAsync(runId);
-
-        var run = await ReadRunAsync(runId);
-
-        run.CompletionEnforcementMode.ShouldBe("Enforced", "the supervisor default resolved Enforced — this is the arbitrated path, not a Shadow pass-through");
-        run.Status.ShouldBe(WorkflowRunStatus.Success,
-            customMessage: $"a no-merge run whose single accepted contributor published its own head must terminalize, not park — the authority's refusal reason was: {run.Error}");
-        run.CompletionParkedAt.ShouldBeNull("nothing here is unadjudicated — the run must not carry a park stamp");
-    }
-
-    [Fact]
-    public async Task A_default_supervisor_run_with_two_unmerged_contributors_parks_naming_integrate()
-    {
-        // The other side of that cell, and the #1762 line it must not cross. TWO accepted contributors with no merge
-        // means whichever branch got published OMITS the other's work — a PARTIAL head. Everything else about this
-        // run is answered, so the ONLY thing standing between it and a Success claim is integration work it never
-        // performed; the park must name that stage rather than let the run ship a subset of itself.
-        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var runId = await StartSupervisorSnapshotAsync(teamId, userId, completionMode: null, DeclaredOutputs);
-
-        var attempts = await SeedLedgerDirectTapeAsync(runId, teamId, "s1", "s2");
-        var repositoryId = await SeedRepositoryAsync(teamId);
-        await SeedManifestAsync(teamId, attempts[0], repositoryId, "codespace/agent/s1");
-        await SeedManifestAsync(teamId, attempts[1], repositoryId, "codespace/agent/s2");
-
-        foreach (var unit in new[] { "s1", "s2" })
-        {
-            await StakeAsync(runId, teamId, $"acceptance:{unit}", ContractKinds.Acceptance);
-            await StakeAsync(runId, teamId, $"delivery:{unit}", ContractKinds.Delivery);
-            await StakeAsync(runId, teamId, $"output:{unit}", ContractKinds.Output);
-        }
-
-        await ForceEnqueuedAsync(runId);
-        await RunEngineAsync(runId);
-
-        var run = await ReadRunAsync(runId);
-
-        run.Status.ShouldBe(WorkflowRunStatus.Suspended, "two contributors and nothing merging them is a partial head — the Success claim must park");
-        run.Error.ShouldNotBeNull();
-        run.Error!.ShouldContain("Integrate", customMessage: "the park must name the stage it found unevidenced, not read like an acceptance or delivery gap");
-    }
-
-    [Fact]
     public async Task A_default_supervisor_run_that_gave_up_with_a_failed_unit_ends_an_honest_failure()
     {
         // The continue-on-error terminal: one unit passed and merged, the other FAILED its own check, and the model
@@ -567,23 +507,6 @@ public class CompletionEnforcedCohortFlowTests
             $$$"""{"integration":{"status":"integrated","integratedBranch":"codespace/integration/{{{runId:N}}}"}}""");
         await SeedDecisionAsync(runId, teamId, 5, SupervisorDecisionKinds.Stop, "{}", "{}");
         return retryAttemptId;
-    }
-
-    /// <summary>
-    /// DC-3's LEDGER-DIRECT tape (plan → spawn(every unit accepted, each producing its own branch) → stop): NO merge
-    /// decision ever runs. With ONE unit that is the designed no-merge shape whose contributor branch IS the head;
-    /// with TWO it is the partial head the Integrate cell must refuse. Returns each unit's attempt id, in plan order.
-    /// </summary>
-    private async Task<IReadOnlyList<Guid>> SeedLedgerDirectTapeAsync(Guid runId, Guid teamId, params string[] unitIds)
-    {
-        var attemptIds = unitIds.Select(_ => Guid.NewGuid()).ToArray();
-
-        await SeedPlanAsync(runId, teamId, unitIds);
-        await SeedDecisionAsync(runId, teamId, 2, SupervisorDecisionKinds.Spawn,
-            JsonSerializer.Serialize(new { subtaskIds = unitIds }),
-            JsonSerializer.Serialize(new { agentResults = unitIds.Select((id, i) => AgentResult(attemptIds[i], id, accepted: true)) }));
-        await SeedDecisionAsync(runId, teamId, 3, SupervisorDecisionKinds.Stop, "{}", "{}");
-        return attemptIds;
     }
 
     /// <summary>
