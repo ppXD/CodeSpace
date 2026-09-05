@@ -52,6 +52,28 @@ public sealed class RoomConfinementReductionTests
             .Outcome.ShouldBe(SandboxConfinementOutcome.NotApplicable, "a runner that confines nothing is weaker than one that confines without severing");
     }
 
+    [Theory]
+    // An unconfined agent vs a runner that confines nothing — the rank ties them at "yes, something here could reach
+    // the network", but the two print DIFFERENT causes, so the tie must not be broken by arrival order.
+    [InlineData(SandboxConfinement.ReasonNoBubblewrap, null, null)]
+    [InlineData(null, SandboxConfinement.ReasonNoBubblewrap, null)]
+    // Two unconfined agents that hit DIFFERENT walls — the same tie, and here the reason IS the whole sentence.
+    [InlineData(SandboxConfinement.ReasonNoUserNamespaces, SandboxConfinement.ReasonNoBubblewrap, SandboxConfinement.ReasonNoBubblewrap)]
+    [InlineData(SandboxConfinement.ReasonNoBubblewrap, SandboxConfinement.ReasonNoUserNamespaces, SandboxConfinement.ReasonNoBubblewrap)]
+    public void Records_the_rank_cannot_separate_resolve_the_same_way_whatever_order_they_arrive_in(string? firstReason, string? secondReason, string? expectedReason)
+    {
+        // The rows come back from an UNORDERED query, so a tie the rank cannot break must not be decided by whichever
+        // row the database happened to hand over first: the Room prints the surviving record's cause, and one turn
+        // must not read two different ways across two page loads.
+        var reduced = RoomProjector.LeastConfined(new[] { Unconfinable(firstReason), Unconfinable(secondReason) }).ShouldNotBeNull();
+
+        reduced.Reason.ShouldBe(expectedReason, "a tie between equally-unconfined records must resolve deterministically — row order must not choose which cause the reader sees");
+    }
+
+    /// <summary>One equally-unconfined row: a host that could not confine (<paramref name="reason"/>), or — with no reason — a runner that attempts no confinement at all. Both rank as "something here could reach the network".</summary>
+    private static string Unconfinable(string? reason) =>
+        reason is null ? Json(SandboxConfinementOutcome.NotApplicable) : Json(SandboxConfinementOutcome.Unconfined, reason: reason);
+
     [Fact]
     public void Every_agent_confined_and_severed_reduces_to_the_strong_posture()
     {
