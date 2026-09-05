@@ -54,11 +54,18 @@ public sealed class SupervisorPublishedBranchResolver : ISupervisorPublishedBran
     {
         var window = SupervisorPlanWindow.Read(priorDecisions);
 
+        // THE tape this whole ladder is allowed to publish from: everything after the newest plan that declared the
+        // work before it abandoned (the whole tape verbatim on every run that never emits the signal). Applied ONCE,
+        // above every rung, because none of the rungs below can see the line themselves — the head readers' only
+        // barrier is agent-STAGING work, which a plan is not, so an abandoned generation's cleanly-merged head sailed
+        // through rungs 1-2 and the run published exactly what the flag had declared unpublishable.
+        var publishable = SupervisorMergeContributors.SinceLatestAbandonment(priorDecisions);
+
         // The ONE carry-over trigger, shared with the merge rung: when the active generation has no mergeable result
-        // of its own, EVERY rung below reads the whole tape instead of the window — the ladder itself is unchanged,
+        // of its own, EVERY rung below reads that whole tape instead of the window — the ladder itself is unchanged,
         // so an earlier generation's integrated head still outranks that generation's individual contributors.
         var acrossGenerations = SupervisorMergeContributors.ActiveGenerationHasNoMergeableResult(priorDecisions);
-        var decisions = acrossGenerations ? priorDecisions : window.Decisions;
+        var decisions = acrossGenerations ? publishable : window.Decisions;
 
         var repositoryBranches = SupervisorOutcome.ReadFinalRepositoryBranchesWithin(decisions);
 
@@ -73,10 +80,11 @@ public sealed class SupervisorPublishedBranchResolver : ISupervisorPublishedBran
         // above, but falling through to the generic manifest rung would publish an OLDER contributor branch from
         // before the attempted reconciliation — precisely the conflicted/incomplete head resolve was meant to
         // replace. Only a later authoritative merge/resolve may clear this barrier (and would have returned above).
-        // Read over the WHOLE tape, since the rung it guards is now allowed to read there too.
-        if (SupervisorOutcome.HasActiveResolveContributorIntegrityBarrier(priorDecisions)) return Array.Empty<SupervisorRepositoryBranch>();
+        // Read over the same publishable tape the rung it guards reads: a barrier is a reason to publish LESS, and
+        // it has no work left to protect once its own generation is abandoned.
+        if (SupervisorOutcome.HasActiveResolveContributorIntegrityBarrier(publishable)) return Array.Empty<SupervisorRepositoryBranch>();
 
-        return await ResolveLedgerDirectAsync(workflowRunId, teamId, priorDecisions, window, acrossGenerations, cancellationToken).ConfigureAwait(false);
+        return await ResolveLedgerDirectAsync(workflowRunId, teamId, publishable, window, acrossGenerations, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>The traditional single-repo merge-derived path: the run's ONE configured primary repository, based against ITS OWN default branch. Prefers the caller's LIVE <paramref name="primaryRepositoryId"/> (pre-terminal); falls back to the run's terminal <c>OutputsJson</c> otherwise. Empty when the repository is unresolvable either way — never thrown; the caller decides whether that's an error.</summary>
@@ -117,8 +125,12 @@ public sealed class SupervisorPublishedBranchResolver : ISupervisorPublishedBran
     /// no merge ever integrated is a contributor's own pushed branch genuinely the run's published artifact — and
     /// there an already-merged id is deliberately NOT excluded, the same posture this rung already takes toward
     /// merged contributors inside the active generation.</para>
+    ///
+    /// <para><paramref name="publishable"/> is the tape past
+    /// <see cref="SupervisorMergeContributors.SinceLatestAbandonment"/>'s line, so the gate above cannot be held shut
+    /// by a merge the model already discarded, and the floor below cannot re-offer that merge's contributors.</para>
     /// </summary>
-    private async Task<IReadOnlyList<SupervisorRepositoryBranch>> ResolveLedgerDirectAsync(Guid workflowRunId, Guid teamId, IReadOnlyList<SupervisorPriorDecision> priorDecisions, SupervisorPlanWindowSlice window, bool acrossGenerations, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<SupervisorRepositoryBranch>> ResolveLedgerDirectAsync(Guid workflowRunId, Guid teamId, IReadOnlyList<SupervisorPriorDecision> publishable, SupervisorPlanWindowSlice window, bool acrossGenerations, CancellationToken cancellationToken)
     {
         var manifests = await _manifests.ListForWorkflowRunAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false);
 
@@ -126,8 +138,8 @@ public sealed class SupervisorPublishedBranchResolver : ISupervisorPublishedBran
             ? window.Decisions.Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind)).SelectMany(d => SupervisorOutcome.ReadStagedAgentRunIds(d.OutcomeJson)).ToHashSet()
             : null;
 
-        var carriedOver = staged is not null && acrossGenerations && !SupervisorOutcome.AnyMergeIntegratedABranch(priorDecisions)
-            ? SupervisorMergeContributors.SettledAcrossGenerations(priorDecisions)
+        var carriedOver = staged is not null && acrossGenerations && !SupervisorOutcome.AnyMergeIntegratedABranch(publishable)
+            ? SupervisorMergeContributors.SettledAcrossGenerations(publishable)
             : null;
 
         var activeAgentRunIds = carriedOver is null ? staged : carriedOver.ToHashSet();

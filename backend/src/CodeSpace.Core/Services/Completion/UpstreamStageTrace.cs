@@ -55,12 +55,22 @@ public static class UpstreamStageTrace
     /// defect to missing integration work (real-model run 33755336097). A run with no merge, a conflicted merge, or a
     /// branch-less merge still evidences nothing: this widens what counts as integration WORK, never what counts as a
     /// shippable head.</para>
+    ///
+    /// <para>The one thing a later decision CAN un-make is a plan that declared the earlier direction abandoned
+    /// (<see cref="SupervisorMergeContributors.SinceLatestAbandonment"/>) — that head is unmergeable and unpublishable
+    /// by the model's own instruction, so crediting the stage off it would let a Success claim rest on a candidate no
+    /// rung of the publish ladder may deliver. Every supervisor-tape ledger reads from that line; the run-level
+    /// Integration manifest belongs to no generation and is untouched.</para>
     /// </summary>
-    private static bool HasIntegratedCandidate(IReadOnlyList<SupervisorPriorDecision> decisions, IReadOnlyList<PublishManifest> integrationManifests) =>
-        SupervisorOutcome.ReadFinalIntegratedBranch(decisions) is not null
-        || SupervisorOutcome.ReadFinalRepositoryBranches(decisions).Count > 0
-        || SupervisorOutcome.AnyMergeIntegratedABranch(decisions)
-        || integrationManifests.Any(m => m.Kind == PublishManifestKind.Integration && m.PublishStateValue == PublishState.Pushed && m.Branch is { Length: > 0 });
+    private static bool HasIntegratedCandidate(IReadOnlyList<SupervisorPriorDecision> decisions, IReadOnlyList<PublishManifest> integrationManifests)
+    {
+        var publishable = SupervisorMergeContributors.SinceLatestAbandonment(decisions);
+
+        return SupervisorOutcome.ReadFinalIntegratedBranch(publishable) is not null
+            || SupervisorOutcome.ReadFinalRepositoryBranches(publishable).Count > 0
+            || SupervisorOutcome.AnyMergeIntegratedABranch(publishable)
+            || integrationManifests.Any(m => m.Kind == PublishManifestKind.Integration && m.PublishStateValue == PublishState.Pushed && m.Branch is { Length: > 0 });
+    }
 
     /// <summary>The profile's Required upstream stages the trace does NOT evidence — non-empty means the Success claim skipped a declared stage and must park. A null trace (never derived — a legacy compose) evidences nothing: fail-close.</summary>
     public static IReadOnlyList<CompletionStage> MissingRequired(ModeProfile profile, IReadOnlySet<CompletionStage>? exercised) =>

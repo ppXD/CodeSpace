@@ -196,6 +196,27 @@ public sealed class SupervisorPublishedBranchResolverTests
     }
 
     [Fact]
+    public async Task An_integrated_head_from_a_generation_the_plan_abandoned_is_never_published()
+    {
+        // plan(1) → spawn (Succeeded, PUSHED) → merge (Clean) → plan(1, ABANDON) → publish. The exclusion reached
+        // only the ledger-direct rung, so the merge-derived rung above it still read the WHOLE tape and resolved
+        // exactly the head the flag declared unpublishable: the merge folded none of that work and the run shipped it.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var repoId = await SeedBoundRepositoryAsync(teamId);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var agentRunId = Guid.NewGuid();
+        await SeedPlanAsync(runId, teamId, "s1", sequence: 1);
+        await SeedSpawnAsync(runId, teamId, agentRunId, acceptancePassed: true, sequence: 2);
+        await SeedAgentManifestAsync(runId, teamId, agentRunId, repoId, "codespace/agent/a", PublishState.Pushed);
+        await SeedSingleRepoMergeAsync(runId, teamId, "codespace/integration/run/turn1", sequence: 3);
+        await SeedPlanAsync(runId, teamId, "s2", sequence: 4, abandonEarlierResults: true);
+
+        (await ResolveAsync(runId, teamId, primaryRepositoryId: repoId))
+            .ShouldBeEmpty("the head AND the contributor branch under it both came from the direction the plan abandoned — every rung of the ladder has to read from that plan onward, not just the last one");
+    }
+
+    [Fact]
     public async Task Ledger_direct_fallback_excludes_an_acceptance_rejected_contributor()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -324,14 +345,14 @@ public sealed class SupervisorPublishedBranchResolverTests
         return repoId;
     }
 
-    private async Task SeedSingleRepoMergeAsync(Guid runId, Guid teamId, string integratedBranch)
+    private async Task SeedSingleRepoMergeAsync(Guid runId, Guid teamId, string integratedBranch, int sequence = 0)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
 
         var outcome = JsonSerializer.Serialize(new { integration = new { status = "Clean", integratedBranch, appliedCount = 1, reason = (string?)null, excludedAgents = Array.Empty<string>() } }, AgentJson.Options);
 
-        await AddTerminalDecisionAsync(db, runId, teamId, SupervisorDecisionKinds.Merge, outcome);
+        await AddTerminalDecisionAsync(db, runId, teamId, SupervisorDecisionKinds.Merge, outcome, sequence: sequence);
     }
 
     private async Task SeedMultiRepoMergeAsync(Guid runId, Guid teamId, params (Guid? RepositoryId, string Alias, string SourceBranch, string TargetBranch)[] repos)
@@ -366,7 +387,7 @@ public sealed class SupervisorPublishedBranchResolverTests
         await AddTerminalDecisionAsync(db, runId, teamId, SupervisorDecisionKinds.Merge, outcome);
     }
 
-    private async Task SeedPlanAsync(Guid runId, Guid teamId, string subtaskId, int sequence = 0)
+    private async Task SeedPlanAsync(Guid runId, Guid teamId, string subtaskId, int sequence = 0, bool abandonEarlierResults = false)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -374,6 +395,7 @@ public sealed class SupervisorPublishedBranchResolverTests
         {
             Goal = "replacement",
             Subtasks = new[] { new SupervisorPlannedSubtask { Id = subtaskId, Title = subtaskId, Instruction = $"do {subtaskId}" } },
+            AbandonEarlierResults = abandonEarlierResults,
         }, AgentJson.Options);
 
         await AddTerminalDecisionAsync(db, runId, teamId, SupervisorDecisionKinds.Plan, "{}", payload, sequence);

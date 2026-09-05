@@ -92,6 +92,25 @@ public class UpstreamStageTraceTests
             .ShouldContain(CompletionStage.Integrate);
     }
 
+    [Theory]
+    [InlineData(false, true)]   // an ordinary re-plan cannot un-make integration that LANDED
+    [InlineData(true, false)]   // a plan that abandoned that direction took the head off every publishable floor
+    public void A_merge_evidences_integrate_unless_a_later_plan_abandoned_the_work(bool abandoned, bool expected)
+    {
+        // The barrier-free ledger is what keeps this cell honest past later work — and it is exactly what let the cell
+        // credit work the model explicitly threw away. An abandoning plan makes that head unmergeable AND unpublishable,
+        // so crediting Integrate off it lets a Success claim rest on a candidate no rung of the ladder may ship.
+        var tape = new[]
+        {
+            Decision(1, SupervisorDecisionKinds.Spawn),
+            Decision(2, SupervisorDecisionKinds.Merge, outcomeJson: """{"integration":{"status":"integrated","integratedBranch":"codespace/integration/x"}}"""),
+            Plan(3, abandoned),
+        };
+
+        UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), tape, Array.Empty<AttemptProjection>(), Array.Empty<PublishManifest>())
+            .Contains(CompletionStage.Integrate).ShouldBe(expected, "the completion authority must credit exactly the integration work the run may still deliver");
+    }
+
     [Fact]
     public void A_clean_merge_behind_an_unverified_resolve_and_a_refused_stop_evidences_integrate()
     {
@@ -219,6 +238,12 @@ public class UpstreamStageTraceTests
     private static SupervisorPriorDecision Decision(long sequence, string kind, SupervisorDecisionStatus status = SupervisorDecisionStatus.Succeeded, string? outcomeJson = null) => new()
     {
         Id = Guid.NewGuid(), Sequence = sequence, DecisionKind = kind, Status = status, PayloadJson = "{}", OutcomeJson = outcomeJson,
+    };
+
+    /// <summary>A structurally-valid, non-empty plan — the only shape <see cref="SupervisorPlanWindow.IsValidBoundary"/> lets draw an abandonment line.</summary>
+    private static SupervisorPriorDecision Plan(long sequence, bool abandonEarlierResults) => Decision(sequence, SupervisorDecisionKinds.Plan) with
+    {
+        PayloadJson = $$"""{"goal":"g","subtasks":[{"id":"s1","title":"s1","instruction":"do it"}]{{(abandonEarlierResults ? ""","abandonEarlierResults":true""" : "")}}}""",
     };
 
     private static AttemptProjection Attempt() => new()
