@@ -308,6 +308,11 @@ public sealed partial class SupervisorTurnService
     /// DB-reading rehydrate step, so the decider's prompt build stays pure over its context. Null (prompt omits
     /// the block) for a contract-less or pre-F0 run — and BEST-EFFORT: a recital fault must never strand the
     /// turn; the decider simply decides without it, exactly as before the slice.
+    ///
+    /// <para>The compose's STAGE TRACE rides along with its assessment, under the mode profile the terminal
+    /// authority resolves the same way (RunModeReader + the profile registry) — without it the block recited four
+    /// contract dimensions while the authority's fifth gate, the one that actually parked the run over an
+    /// un-reconciled Integrate, stayed invisible to the decider.</para>
     /// </summary>
     private async Task<string?> BuildCompletionRecitalAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken)
     {
@@ -315,7 +320,11 @@ public sealed partial class SupervisorTurnService
         {
             var composed = await _completion.ComposeIfStoppedNowAsync(supervisorRunId, teamId, cancellationToken).ConfigureAwait(false);
 
-            return Deciders.SupervisorStopNowRecital.Render(composed?.Assessment);
+            if (composed is null) return null;
+
+            var mode = await Completion.RunModeReader.DeriveAsync(_db, supervisorRunId, teamId, cancellationToken).ConfigureAwait(false);
+
+            return Deciders.SupervisorStopNowRecital.Render(composed.Assessment, composed.ExercisedUpstreamStages, _modes?.Resolve(mode));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
