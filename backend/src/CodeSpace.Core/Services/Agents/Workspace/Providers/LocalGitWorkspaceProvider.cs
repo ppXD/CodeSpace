@@ -189,7 +189,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     private async Task<string> ReadBaseShaAsync(string directory, CancellationToken cancellationToken)
     {
         var result = await _runners.Resolve(Kind).RunAsync(
-            new SandboxSpec { Command = "git", Args = new[] { "-C", directory, "rev-parse", "HEAD" }, TimeoutSeconds = CloneTimeoutSeconds }, cancellationToken).ConfigureAwait(false);
+            new SandboxSpec { Command = "git", Args = new[] { "-C", directory, "rev-parse", "HEAD" }, TimeoutSeconds = CloneTimeoutSeconds, AllowNetwork = true }, cancellationToken).ConfigureAwait(false);
 
         if (result.Status != SandboxStatus.Success)
             throw new WorkspaceException($"Could not read the workspace base revision (exit {result.ExitCode}): {Summarize(result.Stderr)}");
@@ -212,7 +212,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
 
         async Task<string> RunOrThrowAsync(IReadOnlyList<string> args)
         {
-            var result = await runner.RunAsync(new SandboxSpec { Command = "git", Args = args, WorkingDirectory = directory, TimeoutSeconds = CaptureTimeoutSeconds }, cancellationToken).ConfigureAwait(false);
+            var result = await runner.RunAsync(new SandboxSpec { Command = "git", Args = args, WorkingDirectory = directory, TimeoutSeconds = CaptureTimeoutSeconds, AllowNetwork = true }, cancellationToken).ConfigureAwait(false);
 
             if (result.Status != SandboxStatus.Success)
                 throw new WorkspaceException($"git {string.Join(' ', args)} failed (exit {result.ExitCode}): {Summarize(result.Stderr)}");
@@ -493,7 +493,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     internal static async Task StripTokenFromRemoteAsync(ISandboxRunner runner, int timeoutSeconds, ILogger logger, string cleanUrl, string directory, CancellationToken cancellationToken)
     {
         Task<SandboxResult> RunGitAsync(IReadOnlyList<string> args) =>
-            runner.RunAsync(new SandboxSpec { Command = "git", Args = args, TimeoutSeconds = timeoutSeconds }, cancellationToken);
+            runner.RunAsync(new SandboxSpec { Command = "git", Args = args, TimeoutSeconds = timeoutSeconds, AllowNetwork = true }, cancellationToken);
 
         var rewrite = await RunGitAsync(new[] { "-C", directory, "remote", "set-url", "origin", cleanUrl }).ConfigureAwait(false);
 
@@ -507,8 +507,15 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
             logger.LogError("Could not strip OR remove the tokened origin (set-url exit {SetExit}, remove exit {RemoveExit}); .git/config may retain credentials until the workspace janitor reclaims it", rewrite.ExitCode, remove.ExitCode);
     }
 
+    /// <summary>
+    /// Run one host-side git command. <see cref="SandboxSpec.AllowNetwork"/> is stated rather than inherited on every
+    /// git spec in this provider: the field's default is now FAIL-CLOSED, and these helpers are shared by the
+    /// commands that DO reach the remote (clone, fetch, push) as well as the local ones, so a single severed helper
+    /// would break materialization on any runner that enforces it. The value is the egress they have always had —
+    /// this batch path is the unconfined one (see <see cref="LocalWorkspaceHandle"/>'s own git runner).
+    /// </summary>
     private Task<SandboxResult> RunGitAsync(IReadOnlyList<string> args, CancellationToken cancellationToken) =>
-        _runners.Resolve(Kind).RunAsync(new SandboxSpec { Command = "git", Args = args, TimeoutSeconds = CloneTimeoutSeconds }, cancellationToken);
+        _runners.Resolve(Kind).RunAsync(new SandboxSpec { Command = "git", Args = args, TimeoutSeconds = CloneTimeoutSeconds, AllowNetwork = true }, cancellationToken);
 
     /// <summary>Build the HTTPS clone URL with embedded basic-auth credentials. No token → the URL unchanged. Pure + internal so it's unit-pinned.</summary>
     internal static string BuildAuthenticatedUrl(string repositoryUrl, string? tokenUsername, string? token)
@@ -723,7 +730,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
             try
             {
                 return await _runner.RunAsync(
-                    new SandboxSpec { Command = "git", Args = args, WorkingDirectory = repo.Directory, TimeoutSeconds = timeoutSeconds }, cancellationToken).ConfigureAwait(false);
+                    new SandboxSpec { Command = "git", Args = args, WorkingDirectory = repo.Directory, TimeoutSeconds = timeoutSeconds, AllowNetwork = true }, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {

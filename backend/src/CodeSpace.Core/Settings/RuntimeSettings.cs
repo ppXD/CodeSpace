@@ -43,6 +43,27 @@ public sealed record RuntimeSettings
     /// </summary>
     public int? AgentMemoryCeilingMb { get; init; }
 
+    /// <summary>
+    /// This deployment's OWN autonomy ceiling — the tier name (<c>Confined</c> / <c>Standard</c> / <c>Trusted</c> /
+    /// <c>Unleashed</c>) no run on this host may exceed, however it is launched. It is the operator's answer to the
+    /// three paths the per-route ceiling never meets: a team Member enabling network per run, an API client posting
+    /// <c>autonomy: "Trusted"</c> straight at the launch command, and an authored / replayed <c>agent.run</c> node
+    /// that carries its own tier and its own raw <c>network</c> override with no route at all.
+    ///
+    /// <para>TIGHTEN-ONLY, like every other ceiling here: it can only LOWER what a route or a node already allowed,
+    /// never raise it. Blank or unrecognised ⇒ <c>AgentAutonomyPolicy.DefaultDeploymentCeiling</c>, matching
+    /// <see cref="AgentMemoryCeilingMb"/>'s precedent that a malformed operator value falls back to the committed
+    /// behaviour instead of being read as "no limit" — a typo in a ConfigMap must not sever every run's network.</para>
+    ///
+    /// <para>Read through the key <see cref="MaxAutonomyKey"/>, whose literal value is pinned by a unit test: an
+    /// operator who lowers this ceiling does it by committing a value here, and a rename that looked harmless would
+    /// silently restore the top tier on every deployment that had pinned the old name.</para>
+    /// </summary>
+    public string? MaxAutonomy { get; init; }
+
+    /// <summary>The configuration key <see cref="MaxAutonomy"/> is read from. Pinned by a unit test (Rule 8) — see <see cref="MaxAutonomy"/> for why a rename is not a harmless refactor.</summary>
+    public const string MaxAutonomyKey = "Sandbox:MaxAutonomy";
+
     /// <summary>Root directory for agent-run spool files (stdout/stderr capture, pid files). Null ⇒ a path under the system temp dir, which is fine for development but is NOT durable across a pod restart — a deployment that wants re-attach to survive one points this at a volume.</summary>
     public string? AgentRunSpoolDirectory { get; init; }
 
@@ -97,6 +118,7 @@ public sealed record RuntimeSettings
         RequireSandboxConfinement = configuration.GetValue("Sandbox:RequireConfinement", false),
         AgentCgroupRoot = Trimmed(configuration["Sandbox:CgroupRoot"]),
         AgentMemoryCeilingMb = PositiveOrNull(configuration["Sandbox:AgentMemoryCeilingMb"]),
+        MaxAutonomy = Trimmed(configuration[MaxAutonomyKey]),
         AgentRunSpoolDirectory = Trimmed(configuration["Agents:RunSpoolDirectory"]),
         ArtifactStoreDirectory = Trimmed(configuration["Artifacts:StoreDirectory"]),
         ArtifactLocalRwxShared = configuration.GetValue("Artifacts:LocalRwxShared", false),

@@ -191,6 +191,10 @@ export interface RoutePlan {
 /** Mirror of the backend `TaskRoutePreviewResult`. */
 export interface TaskRoutePreviewResult {
   route: RoutePlan;
+  /** This deployment's own autonomy ceiling (`Sandbox:MaxAutonomy`) — already folded into `route.caps.autonomyCeiling`,
+   *  and named separately so the composer's posture line can say WHICH bound denied the network: a route ceiling the
+   *  operator can lift by picking another effort tier, or this one, which they cannot. */
+  deploymentAutonomyCeiling: string;
 }
 
 /** The WIRED subset of `PreviewTaskRouteCommand` — every field that actually changes the router's answer, and

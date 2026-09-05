@@ -150,13 +150,6 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   const ceilingShown = routeCeiling(effort, cfg.autonomyCeiling);
   const autonomyShown = effectiveAutonomy(autonomy, effort, cfg.autonomyCeiling);
   const networkOn = autonomyShown === "Trusted";
-  // The one honest consequence line: the SAME sentence AgentAutonomyPolicy.DescribeNetwork will write into the run's
-  // journal (shared words, pinned by networkPosture.fixture.json), plus what On actually costs. Off-tier keeps its
-  // own copy — there the resolved ceiling is not known yet, so it names the reason instead of claiming one.
-  const networkPosture = !tierGrantsNetwork(effort)
-    ? `Network: off${NETWORK_CONFINEMENT_CAVEAT} — this tier's ceiling is Standard, which has no network. Switch Effort to Standard or Deep to choose.`
-    : `${describeNetwork(autonomyShown, ceilingShown)}.${networkOn ? ` ${NETWORK_ON_CONSEQUENCE}` : ""}`;
-
   // "Time limit" defaults to 1h everywhere EXCEPT Deep, which defaults to 2h (matching
   // TaskLaunchService.DeepAgentTimeoutSeconds) — untouched, the row shows/sends that tier's OWN default (never
   // touched ⇒ omitted from the wire, byte-identical); once the operator picks a value explicitly, it sticks
@@ -279,6 +272,17 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   // the in-flight request, so a risky goal typed and sent inside ~1-3s would start unconfirmed — the card would
   // arrive after the run did. A settled failure counts as answered, so an outage never wedges the button.
   const routeUnanswered = !routePreview.answered;
+  // The one honest consequence line: the SAME sentence AgentAutonomyPolicy.DescribeNetwork will write into the run's
+  // journal (shared words, pinned by networkPosture.fixture.json), plus what On actually costs. Off-tier keeps its
+  // own copy — there the resolved ceiling is not known yet, so it names the reason instead of claiming one.
+  //
+  // The deployment's own ceiling (Sandbox:MaxAutonomy) rides in from the preview: it is a bound the operator cannot
+  // lift by switching effort tier, so when it denies network the sentence has to name IT rather than the route's.
+  // Blank until a preview has reported it (an explicitly-tiered launch asks for none) — the sentence then states
+  // only what the route accounts for, and the server clamps regardless.
+  const networkPosture = !tierGrantsNetwork(effort)
+    ? `Network: off${NETWORK_CONFINEMENT_CAVEAT} — this tier's ceiling is Standard, which has no network. Switch Effort to Standard or Deep to choose.`
+    : `${describeNetwork(autonomyShown, ceilingShown, routePreview.deploymentAutonomyCeiling)}.${networkOn ? ` ${NETWORK_ON_CONSEQUENCE}` : ""}`;
   // Answering the card picks a TIER, which rides the wire as an explicit effort and short-circuits the classifier —
   // so the shape the card was raised about has to ride along too, or every confirmed launch silently reverts to the
   // coding projection. Stored with the text it was classified for; see formState for the staleness guard.

@@ -38,7 +38,7 @@ export const ROUTE_PREVIEW_MIN_GOAL_LENGTH = 3;
  * that key is current; a sequence guard drops out-of-order resolutions of one key.</p>
  */
 export function useRoutePreview(input: RoutePreviewInput | null) {
-  const [reply, setReply] = useState<{ key: string; route: RoutePlan | null } | null>(null);
+  const [reply, setReply] = useState<{ key: string; route: RoutePlan | null; deploymentAutonomyCeiling: string } | null>(null);
   const [pendingKey, setPendingKey] = useState<string | null>(null);
   const seq = useRef(0);
 
@@ -58,11 +58,11 @@ export function useRoutePreview(input: RoutePreviewInput | null) {
       try {
         const result = await tasksApi.routePreview(JSON.parse(key) as RoutePreviewInput);
         if (seq.current !== mySeq) return;
-        setReply({ key, route: result.route ?? null });
+        setReply({ key, route: result.route ?? null, deploymentAutonomyCeiling: result.deploymentAutonomyCeiling ?? "" });
       } catch {
         // A failed preview is NOT a failed launch — record the miss (which counts as ANSWERED, so the gate
         // opens) and leave the route null so no card renders and nothing is blocked.
-        if (seq.current === mySeq) setReply({ key, route: null });
+        if (seq.current === mySeq) setReply(prev => ({ key, route: null, deploymentAutonomyCeiling: prev?.deploymentAutonomyCeiling ?? "" }));
       } finally {
         if (seq.current === mySeq) setPendingKey(p => (p === key ? null : p));
       }
@@ -80,5 +80,11 @@ export function useRoutePreview(input: RoutePreviewInput | null) {
     loading: pendingKey !== null && pendingKey === key,
     /** Whether the question for the CURRENT input has been settled. False through the debounce window AND the in-flight request; true when disabled or when a reply/failure has landed. */
     answered: key === null || current !== null,
+    /** This deployment's autonomy ceiling, read off the NEWEST reply rather than the current key's — deliberately
+     *  un-keyed, because unlike a route it is a constant of the deployment, so the last observation can never be
+     *  stale for a different request. It therefore survives the operator switching to an explicit tier, which
+     *  disables the preview entirely. "" until some reply has carried it (the composer then states today's wording;
+     *  the SERVER clamps either way). */
+    deploymentAutonomyCeiling: reply?.deploymentAutonomyCeiling ?? "",
   };
 }

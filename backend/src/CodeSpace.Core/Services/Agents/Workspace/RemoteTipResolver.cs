@@ -82,7 +82,7 @@ public sealed class RemoteTipResolver : IRemoteTipResolver, ISingletonDependency
         try
         {
             result = await _runners.Resolve(SandboxKinds.Local)
-                .RunAsync(new SandboxSpec { Command = "git", Args = args, TimeoutSeconds = LsRemoteTimeoutSeconds }, cancellationToken).ConfigureAwait(false);
+                .RunAsync(new SandboxSpec { Command = "git", Args = args, TimeoutSeconds = LsRemoteTimeoutSeconds, AllowNetwork = true }, cancellationToken).ConfigureAwait(false);
         }
         catch (Win32Exception ex)
         {

@@ -445,7 +445,7 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
         try
         {
             return await _runners.Resolve(Kind).RunAsync(
-                new SandboxSpec { Command = "git", Args = args, WorkingDirectory = workingDirectory, TimeoutSeconds = GitTimeoutSeconds }, cancellationToken).ConfigureAwait(false);
+                new SandboxSpec { Command = "git", Args = args, WorkingDirectory = workingDirectory, TimeoutSeconds = GitTimeoutSeconds, AllowNetwork = true }, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

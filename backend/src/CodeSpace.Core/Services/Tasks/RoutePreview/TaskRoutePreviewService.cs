@@ -1,4 +1,5 @@
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Tasks.Effort;
 using CodeSpace.Core.Services.Tasks.Launch;
 using CodeSpace.Messages.Tasks;
@@ -37,6 +38,6 @@ public sealed class TaskRoutePreviewService : ITaskRoutePreviewService, IScopedD
 
         var route = await _router.RouteAsync(TaskLaunchService.BuildRouteRequest(seed, request), cancellationToken).ConfigureAwait(false);
 
-        return new TaskRoutePreviewResult { Route = route };
+        return new TaskRoutePreviewResult { Route = route, DeploymentAutonomyCeiling = AgentAutonomyPolicy.DeploymentCeiling.ToString() };
     }
 }

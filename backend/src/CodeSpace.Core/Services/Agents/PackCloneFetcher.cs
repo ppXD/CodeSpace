@@ -56,7 +56,7 @@ public sealed class PackCloneFetcher : IPackSourceFetcher, IWorkspaceJanitor, IS
         try
         {
             result = await _runners.Resolve(SandboxKinds.Local)
-                .RunAsync(new SandboxSpec { Command = "git", Args = args, TimeoutSeconds = CloneTimeoutSeconds }, cancellationToken).ConfigureAwait(false);
+                .RunAsync(new SandboxSpec { Command = "git", Args = args, TimeoutSeconds = CloneTimeoutSeconds, AllowNetwork = true }, cancellationToken).ConfigureAwait(false);
         }
         catch
         {
