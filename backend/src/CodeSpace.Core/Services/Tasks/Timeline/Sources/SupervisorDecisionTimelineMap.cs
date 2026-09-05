@@ -167,7 +167,7 @@ public static class SupervisorDecisionTimelineMap
 
     // Each verb's summary carries its OUTCOME detail — the guidance a bare "it happened" line lacked — falling back to
     // the terminal failure reason (d.Error) when the outcome holds no detail, so a FAILED decision still surfaces why.
-    private static string? SummaryFor(SupervisorDecisionRecord d) => d.DecisionKind switch
+    private static string? SummaryFor(SupervisorDecisionRecord d) => WithReaskNotes(d, d.DecisionKind switch
     {
         SupervisorDecisionKinds.AskHuman => AskHumanSummary(d),
         SupervisorDecisionKinds.Spawn => SpawnSummary(d) ?? d.Error,
@@ -175,7 +175,30 @@ public static class SupervisorDecisionTimelineMap
         SupervisorDecisionKinds.Resolve => ResolveSummary(d) ?? d.Error,
         SupervisorDecisionKinds.Stop => StopSummary(d) ?? d.Error,
         _ => d.Error,
-    };
+    });
+
+    /// <summary>
+    /// A decision the brain reached only after being asked again says so, on every verb — the bounded corrections are
+    /// verb-neutral facts about HOW the decision was authored, not about what it did, so they append to whatever
+    /// summary the verb produced rather than replacing it. A decision that needed no re-ask (the overwhelmingly
+    /// common case, and every row written before the markers existed) renders byte-identically.
+    /// </summary>
+    private static string? WithReaskNotes(SupervisorDecisionRecord d, string? summary)
+    {
+        var notes = new List<string>();
+
+        if (SupervisorOutcome.ReadPayloadReaskedFromKind(d.OutcomeJson) is { } kind)
+            notes.Add($"Payload re-asked from '{kind}' — the first reply named that action without its payload.");
+
+        if (SupervisorOutcome.ReadRetryTargetReasked(d.OutcomeJson))
+            notes.Add("Retry target re-asked — the first reply aimed at a subtask that was already done while others had failed.");
+
+        if (notes.Count == 0) return summary;
+
+        var note = string.Join(" ", notes);
+
+        return string.IsNullOrWhiteSpace(summary) ? note : $"{summary} {note}";
+    }
 
     /// <summary>ask_human → the question joined with the human's answer once folded (falls back to the error when the outcome holds no question).</summary>
     private static string? AskHumanSummary(SupervisorDecisionRecord d)
