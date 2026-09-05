@@ -125,8 +125,33 @@ public class SupervisorDecisionEvalDeciderTests
     public async Task A_first_reply_that_is_already_whole_is_never_re_asked()
     {
         foreach (var scenario in SupervisorDecisionGoldenScenarios.All)
-            (await DecideAsync(scenario, CorrectDecisionJson(scenario.Name))).PayloadReaskedFromKind
-                .ShouldBeNull($"scenario '{scenario.Name}': a correct first reply must cost exactly one call — a marker here would mean the gate is firing on shapes it should not");
+        {
+            var decision = await DecideAsync(scenario, CorrectDecisionJson(scenario.Name));
+
+            decision.PayloadReaskedFromKind.ShouldBeNull($"scenario '{scenario.Name}': a correct first reply must cost exactly one call — a marker here would mean the gate is firing on shapes it should not");
+            decision.RetryTargetReasked.ShouldBeFalse($"scenario '{scenario.Name}': the retry-target gate must not fire on a correctly aimed decision either — the canned client repeats its reply, so a re-ask here would show up as a marker");
+        }
+    }
+
+    /// <summary>
+    /// The SECOND live miss this arc covers, at the eval grain: golden <c>five-subtask-middle-failed</c> failed on two
+    /// consecutive main runs (33945398336, 33946934743) — one answered the fan-out by retrying <c>s1</c>, a unit that
+    /// had already succeeded and been accepted, while <c>s3</c> sat failed. The reply is whole and its id is
+    /// plan-declared, so no gate below the tape can see it: the turn re-runs finished work and the failure stands.
+    ///
+    /// <para>With the re-ask the SAME first reply recovers — the model is shown which units actually failed and its
+    /// correction DECIDES. The scenario's rubric is untouched (it still demands a retry of <c>s3</c>).</para>
+    /// </summary>
+    [Fact]
+    public async Task A_retry_aimed_at_a_finished_unit_is_re_asked_and_the_re_aimed_decision_passes_its_golden_scenario()
+    {
+        var scenario = Scenario("five-subtask-middle-failed");
+
+        var decision = await DecideAsync(scenario, """{"kind":"retry","retry":{"subtaskId":"s1"}}""", CorrectDecisionJson(scenario.Name));
+
+        SupervisorDecisionEval.Score(scenario, decision).Pass.ShouldBeTrue("the re-aimed decision is scored on its own merits — the rubric never learns that a round-trip was spent");
+        decision.PayloadJson.ShouldContain("s3", customMessage: "the re-ask reply DECIDES — the server never re-aims the retry itself");
+        decision.RetryTargetReasked.ShouldBeTrue("…and the decision says it cost a second round-trip, so a scored run can be told apart from a clean one");
     }
 
     private static SupervisorGoldenScenario Scenario(string name) => SupervisorDecisionGoldenScenarios.All.Single(s => s.Name == name);

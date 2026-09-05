@@ -63,7 +63,7 @@ public static class SupervisorRecitation
     }
 
     /// <summary>The newest plan decision's subtasks — a re-plan supersedes (the same newest-plan rule the acceptance fold uses).</summary>
-    private static IReadOnlyList<SupervisorPlannedSubtask> LatestPlanSubtasks(IReadOnlyList<SupervisorPriorDecision> priors)
+    internal static IReadOnlyList<SupervisorPlannedSubtask> LatestPlanSubtasks(IReadOnlyList<SupervisorPriorDecision> priors)
     {
         for (var i = priors.Count - 1; i >= 0; i--)
             if (priors[i].DecisionKind == SupervisorDecisionKinds.Plan)
@@ -86,12 +86,27 @@ public static class SupervisorRecitation
         if (SupervisorAmendObligation.IsOutstanding(priors, subtaskId))
             return "its check was AMENDED by an approved co-sign — the recorded verdict is STALE; RETRY this subtask to re-grade under the new check (do not amend again)";
 
-        if (FindCoveringDecision(subtaskId, priors) is not { } decision) return "pending";
+        var (attempt, result) = LatestAttemptFor(subtaskId, priors);
+
+        if (attempt is null) return "pending";
+
+        return result is null ? "running" : Describe(result);   // staged, outcome not folded yet
+    }
+
+    /// <summary>
+    /// One subtask's LATEST covering spawn/retry and that attempt's folded result — <c>Attempt</c> null = never
+    /// staged, <c>Result</c> null = staged but the outcome is not folded yet. The ONE join <see cref="StateFor"/>
+    /// and <see cref="SupervisorDecisionCoherence.MisdirectedRetry"/> share, so the recitation the model reads and
+    /// the gate that corrects it can never disagree about which attempt is the freshest one.
+    /// </summary>
+    internal static (SupervisorPriorDecision? Attempt, SupervisorAgentResult? Result) LatestAttemptFor(string subtaskId, IReadOnlyList<SupervisorPriorDecision> priors)
+    {
+        if (FindCoveringDecision(subtaskId, priors) is not { } decision) return (null, null);
 
         var index = IndexOf(UnitSubtaskIds(decision), subtaskId);
         var results = SupervisorOutcome.ReadAgentResults(decision.OutcomeJson);
 
-        return index >= results.Count ? "running" : Describe(results[index]);   // staged, outcome not folded yet
+        return (decision, index < results.Count ? results[index] : null);
     }
 
     /// <summary>

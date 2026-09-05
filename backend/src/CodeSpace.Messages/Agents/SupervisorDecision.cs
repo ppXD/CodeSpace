@@ -49,6 +49,15 @@ public sealed record SupervisorDecision
     /// </summary>
     public string? PayloadReaskedFromKind { get; init; }
 
+    /// <summary>
+    /// True when the model's FIRST reply was a <c>retry</c> aimed at a unit that was already done while other units
+    /// were still failed, and ONE bounded re-ask produced the decision recorded here — including a re-ask that
+    /// re-emitted the SAME target (the reply decides; the server never re-aims a retry itself). False on every reply
+    /// the model aimed correctly first time and on a re-ask that came back unusable. Carried like
+    /// <see cref="PayloadReaskedFromKind"/>: NOT hashed, folded into the NON-hashed outcome.
+    /// </summary>
+    public bool RetryTargetReasked { get; init; }
+
     /// <summary>True when this decision ends the turn loop (<see cref="SupervisorDecisionKinds.Stop"/>). The run then completes via the normal walk.</summary>
     public bool IsTerminal => Kind == SupervisorDecisionKinds.Stop;
 }

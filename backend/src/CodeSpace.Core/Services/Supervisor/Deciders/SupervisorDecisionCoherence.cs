@@ -23,6 +23,10 @@ namespace CodeSpace.Core.Services.Supervisor.Deciders;
 /// this class and the schema cannot disagree silently. Deep semantic validation stays where it lives today:
 /// unbindable shapes go to the bind repair, plan-graph errors to <see cref="SupervisorPlanValidator"/>,
 /// everything else to the executor.</para>
+///
+/// <para><see cref="MisdirectedRetry"/> is the sibling invariant no schema could ever express, because it is about
+/// the RUN and not the reply: a retry may not re-run a unit that is already done while other units are still failed.
+/// It takes the tape for that reason, and it is the only check here that does.</para>
 /// </summary>
 internal static class SupervisorDecisionCoherence
 {
@@ -44,6 +48,58 @@ internal static class SupervisorDecisionCoherence
         SupervisorDecisionKinds.AmendAcceptance when !model.AmendAcceptance!.Waive && model.AmendAcceptance!.Acceptance is null => "the 'amendAcceptance' object proposes neither a replacement 'acceptance' nor 'waive: true' — an amendment must either carry the replacement check or explicitly waive verification",
         _ => null,
     };
+
+    /// <summary>
+    /// The retry's TARGET invariant — the sibling of <see cref="MissingPayload"/> that needs the run's own facts, so
+    /// it takes the tape rather than the decision alone: a <c>retry</c> may not re-run a unit that is ALREADY done
+    /// while other units are still failed. Live shape (golden <c>five-subtask-middle-failed</c>, two consecutive main
+    /// runs 33945398336 + 33946934743): the brain answered a fan-out with four succeeded units and one failed one by
+    /// retrying <c>s1</c> — a succeeded, accepted unit — spending the turn on work that was finished and leaving the
+    /// actual failure untouched. A blank target is not this defect: <see cref="MissingPayload"/> already owns it.
+    ///
+    /// <para>Deliberately NARROW, because a false correction costs a round-trip on a decision the model got right:
+    /// the target must be Succeeded AND still accepted (a rejected, waived, or amendment-stale unit is a LEGITIMATE
+    /// retry target and reads null here), and at least one other unit must be genuinely <c>Failed</c> — an
+    /// acceptance-rejected unit does not arm the rule, and neither does the P4-1 under-claim (a unit that reported
+    /// failure while its own check passed is objectively done, and the recitation already says not to retry it).</para>
+    ///
+    /// <para>It ASKS and never re-aims: the correction quotes the failed unit ids and the model's own reply, and
+    /// whatever comes back is the decision — a reply that re-emits the SAME target is the model's answer on the
+    /// evidence, not a defect to correct twice.</para>
+    /// </summary>
+    public static string? MisdirectedRetry(SupervisorModelDecision model, IReadOnlyList<SupervisorPriorDecision> priorDecisions)
+    {
+        if (model.Kind != SupervisorDecisionKinds.Retry) return null;
+
+        var target = model.Retry?.SubtaskId;
+
+        if (string.IsNullOrWhiteSpace(target) || !IsFinishedAndAccepted(target, priorDecisions)) return null;
+
+        var failed = SupervisorRecitation.LatestPlanSubtasks(priorDecisions).Select(s => s.Id).Where(id => IsFailed(id, priorDecisions)).ToList();
+
+        if (failed.Count == 0) return null;
+
+        return $"the 'retry' targets '{target}', whose latest attempt SUCCEEDED and is still accepted — re-running it cannot advance the run, "
+             + $"while {string.Join(", ", failed)} {(failed.Count == 1 ? "is" : "are")} still FAILED and unretried";
+    }
+
+    /// <summary>A unit whose freshest attempt succeeded and is still accepted — nothing left to re-run. A REJECTED, WAIVED, or amendment-stale unit is excluded: each is a legitimate retry target the recitation itself points the model at.</summary>
+    private static bool IsFinishedAndAccepted(string subtaskId, IReadOnlyList<SupervisorPriorDecision> priors)
+    {
+        if (SupervisorAmendObligation.IsOutstanding(priors, subtaskId)) return false;
+
+        var (_, result) = SupervisorRecitation.LatestAttemptFor(subtaskId, priors);
+
+        return result is { Status: "Succeeded" } && result.AcceptancePassed != false && !SupervisorOutcome.IsWaived(result);
+    }
+
+    /// <summary>A unit whose freshest attempt genuinely failed — the work a retry is owed. Excludes the P4-1 under-claim (reported failed, own check PASSED): that unit is objectively done.</summary>
+    private static bool IsFailed(string subtaskId, IReadOnlyList<SupervisorPriorDecision> priors)
+    {
+        var (_, result) = SupervisorRecitation.LatestAttemptFor(subtaskId, priors);
+
+        return result is { Status: "Failed" } && result.AcceptancePassed != true;
+    }
 
     private static string Missing(string kind, string property, string fields) =>
         $"the decision chose kind '{kind}' but carries NO '{property}' object — its payload is only read from INSIDE a '{property}' object carrying {fields}; fields written anywhere else (e.g. at the top level of the decision) are never read";

@@ -701,11 +701,11 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         execution = await ApplyStopAcceptanceGradeAsync(execution, context, decision, teamId, cancellationToken).ConfigureAwait(false);
 
         // Fold the authoring model call (model + tokens), the model-critic review chain (draft → verdict → revision)
-        // AND the payload re-ask (the brain named a kind and omitted its payload; one bounded correction recovered the
-        // decision) into the NON-hashed outcome — never the payload, so none can drift the idempotency key — so the
-        // journal can attribute how the decision was made, SHOW the adversarial middle, and distinguish a decision
-        // authored outright from one that cost a second round-trip. Null usage / no reviews / no re-ask are no-ops.
-        var outcome = SupervisorOutcome.WritePayloadReask(SupervisorOutcome.WriteReviews(SupervisorOutcome.WriteModelUsage(execution.OutcomeJson, decision.Usage), decision.Reviews), decision.PayloadReaskedFromKind);
+        // AND both bounded re-asks (the brain named a kind and omitted its payload; the brain aimed a retry at work
+        // already finished) into the NON-hashed outcome — never the payload, so none can drift the idempotency key —
+        // so the journal can attribute how the decision was made, SHOW the adversarial middle, and distinguish a
+        // decision authored outright from one that cost a second round-trip. Null usage / no reviews / no re-ask are no-ops.
+        var outcome = SupervisorOutcome.WriteRetryTargetReask(SupervisorOutcome.WritePayloadReask(SupervisorOutcome.WriteReviews(SupervisorOutcome.WriteModelUsage(execution.OutcomeJson, decision.Usage), decision.Reviews), decision.PayloadReaskedFromKind), decision.RetryTargetReasked);
 
         await _ledger.RecordTerminalAsync(decisionId, teamId, SupervisorDecisionStatus.Succeeded, outcome, error: null, cancellationToken).ConfigureAwait(false);
 
