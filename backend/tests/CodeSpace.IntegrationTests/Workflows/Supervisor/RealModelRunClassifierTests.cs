@@ -32,6 +32,7 @@ public sealed class RealModelRunClassifierTests
     [InlineData("non-zero-exit", "error: unexpected argument 'Say hello.' found", false)]     // arg-ordering swallowed the Goal
     [InlineData("executor-error", "AgentOperatingContract.Compose threw: value cannot be null", false)]   // the persona channel threw
     [InlineData("executor-error", "some failure mentioning a 429 in passing", false)]         // executor-error WINS over a gateway-looking word
+    [InlineData("reattach-error", "API Error: 503 upstream unavailable", false)]              // reattach-error reserves too — WINS even over a genuine gateway marker, same as executor-error above
     [InlineData("non-zero-exit", "claude exited with code 1", false)]                          // an unknown CLI failure defaults to a code fault (never a silent skip)
     [InlineData("non-zero-exit", "API Error: some shape nobody has classified yet", false)]     // the PINNED format marker is infra — a bare "API Error:" prefix is NOT a blanket skip
     // ── The measurement-honesty rows: a GENUINE code fault whose text merely CONTAINS a gateway-looking word. Each of
@@ -44,6 +45,14 @@ public sealed class RealModelRunClassifierTests
     [InlineData("non-zero-exit", "the api error path returned 500 in the fixture", false)]      // prose ABOUT an announcement is not one — the phrase is matched in the harness's own casing
     [InlineData("non-zero-exit", "the gateway quota check is unauthorized for this rate limit", false)]   // five old substrings at once, and still just prose
     [InlineData("non-zero-exit", "claude exited with code 1 — stderr: TimeoutException waiting for the fake CLI", false)]   // a genuinely slow gateway arrives as Status=TimedOut, not as prose
+    // ── Free-text shapes that LOOK like a real gateway signal but match no anchor yet — deliberately GENUINE, not a
+    //    gap in this PR: each is a candidate marker with no production anchor to read it from today, so it stays a
+    //    code fault (conservative) until a live lane observation pins the actual format, exactly as GatewayFormatFault
+    //    was pinned from the 2026-08-30 wedge. A future PR may promote any of these once that evidence exists.
+    [InlineData("non-zero-exit", "overloaded_error: the model is temporarily overloaded, please retry", false)]  // Anthropic's real error TYPE — no anchor reads it yet
+    [InlineData("non-zero-exit", "request timed out after 150s", false)]                       // prose timeout, not the libc ETIMEDOUT code DroppedTransportRegex reads
+    [InlineData("non-zero-exit", "503 service unavailable", false)]                            // no "API Error"/"unexpected status" phrase anchors the status
+    [InlineData("non-zero-exit", "API error: 401 unauthorized", false)]                         // lowercase "error" — not the harness's own casing the anchor matches
     public void Classifies_gateway_infra_versus_injection_code_fault(string exitReason, string error, bool expectedInfra)
     {
         var run = new AgentRun { Status = AgentRunStatus.Failed, Error = error, ResultJson = $"{{\"exitReason\":\"{exitReason}\"}}" };
