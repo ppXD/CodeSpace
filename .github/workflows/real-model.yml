@@ -786,6 +786,11 @@ jobs:
       # structurally cannot fit 10 minutes — run 29094292726/29099883836 both tripped it. 2700s (45m) fits the
       # corpus inside this job's own 60-minute cap while still bounding a genuine hang.
       CODESPACE_REALMODEL_WHOLE_LOOP_ATTEMPT_DEADLINE_SECONDS: "2700"
+      # This lane's arm rides the SINGLE-attempt gate, so it needs the same widening for the same reason: one attempt
+      # runs the WHOLE extended corpus (2 multi-step tasks × their modes, each with a generous 20-min per-task
+      # timeout), which structurally cannot fit the gate's 1200s default — it would bust every run and report nothing.
+      # 2700s (45m) matches the whole-loop value above and still fits this job's own 60-minute cap.
+      CODESPACE_REALMODEL_ATTEMPT_DEADLINE_SECONDS: "2700"
       CODESPACE_BWRAP_PATH: /nonexistent/bwrap-disabled-on-the-extended-benchmark-lane
       CODESPACE_AGENT_MAX_PROCESSES: '0'
       CODESPACE_AGENT_MAX_FILE_MB: '0'
@@ -907,6 +912,12 @@ jobs:
       # skill is applied only via the model's auto-invocation (progressive disclosure, a model decision), which we
       # surface but do NOT gate main on — so it takes one reported attempt; Codex is informational likewise.
       CODESPACE_REALMODEL_EVAL_ATTEMPTS: '3'
+      # The per-attempt deadline must fit the JOB, not just bound a hang: the gate's 1200s default was sized for the
+      # 120-minute supervisor lanes, and best-of-3 + InfraRetryBudget=2 means up to FIVE attempts — 100 minutes on a
+      # 30-minute job, i.e. no bound at all. The arms here are behavioral gates the lane header prices at ~30-90s, so
+      # 300s is many multiples of a healthy attempt while keeping even a full all-bust budget (5 × 300s = 25m) inside
+      # the ceiling. Raise it with the ceiling if an arm here ever legitimately runs long.
+      CODESPACE_REALMODEL_ATTEMPT_DEADLINE_SECONDS: '300'
       # Run the deterministic real-codex-binary proofs (RealCodexResume) — dummy key, no gateway needed. Its opt-in gate
       # var; the codex binary is installed below.
       CODESPACE_CODEX_RESUME_E2E: '1'
@@ -1048,6 +1059,10 @@ jobs:
       # best-of-N capability-floor (Rule 8 escape hatch): file-creation-then-push is near-deterministic, so the spare
       # attempts just absorb a rare gateway hiccup, not model judgement variance.
       CODESPACE_REALMODEL_EVAL_ATTEMPTS: '3'
+      # Same reason as the injection lane: the gate's 1200s default × up to five attempts (best-of-3 + the 2 spare
+      # infra retries) is 100 minutes on a 30-minute job. This arm is priced at ~30-90s, so 300s bounds a wedge inside
+      # the ceiling with orders of magnitude of headroom over a healthy attempt.
+      CODESPACE_REALMODEL_ATTEMPT_DEADLINE_SECONDS: '300'
       CODESPACE_BWRAP_PATH: /nonexistent/bwrap-disabled-on-the-publish-manifest-lane
       CODESPACE_AGENT_MAX_PROCESSES: '0'
       CODESPACE_AGENT_MAX_FILE_MB: '0'
@@ -1158,6 +1173,10 @@ jobs:
       # best-of-N capability-floor (Rule 8 escape hatch): a length-forced completion + a file-create-then-ls goal are
       # near-deterministic, so the spare attempts just absorb a rare gateway hiccup, not model judgement variance.
       CODESPACE_REALMODEL_EVAL_ATTEMPTS: '3'
+      # Same reason as the injection lane: the gate's 1200s default × up to five attempts (best-of-3 + the 2 spare
+      # infra retries) is 100 minutes on a 45-minute job. Both arms here are priced at ~30-90s, so 300s keeps even a
+      # full all-bust budget (25m) inside the ceiling while never truncating a healthy attempt.
+      CODESPACE_REALMODEL_ATTEMPT_DEADLINE_SECONDS: '300'
       # Force the llm.complete node onto its STREAMING path so a real completion persists interaction.delta rows — the
       # footer's live-token source (threshold 1 → any maxTokens > 1 streams). The test also sets this locally.
       CODESPACE_LLM_STREAMING_THRESHOLD_TOKENS: '1'
@@ -1272,6 +1291,10 @@ jobs:
       CODESPACE_LLM_BASE_URL: ${{ secrets.CODESPACE_LLM_BASE_URL }}
       CODESPACE_LLM_API_KEY: ${{ secrets.CODESPACE_LLM_API_KEY }}
       CODESPACE_LLM_MODEL_ID: ${{ secrets.CODESPACE_LLM_MODEL_ID }}
+      # Same reason as the injection lane, on the smaller budget the three single-attempt arms here share: the gate's
+      # 1200s default would let ONE wedged arm eat two thirds of this 30-minute job and take its siblings down at the
+      # cut. Each arm is priced at ~30-90s (see the lane header), so 300s truncates nothing healthy.
+      CODESPACE_REALMODEL_ATTEMPT_DEADLINE_SECONDS: '300'
       CODESPACE_BWRAP_PATH: /nonexistent/bwrap-disabled-on-the-stop-hook-lane
       CODESPACE_AGENT_MAX_PROCESSES: '0'
       CODESPACE_AGENT_MAX_FILE_MB: '0'
