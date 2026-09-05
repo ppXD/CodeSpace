@@ -59,6 +59,15 @@ public static class SupervisorRecitation
             ? "Every plan item is finished — merge the results and drive to a verified stop."
             : $"Unfinished: {string.Join(", ", unfinished)}.");
 
+        // A re-plan issued after a wave finished leaves those results OUTSIDE this plan's generation, so nothing in
+        // the block above mentions them and the brain reads the run as having produced nothing. It has not: the merge
+        // door carries them over, and this is the one line that says so — off the SAME selection the merge executes,
+        // so the prompt can never promise a fold that would not happen.
+        var carriedOver = SupervisorMergeContributors.Resolve(priorDecisions).CarriedOverFromEarlierGenerations;
+
+        if (carriedOver > 0)
+            builder.AppendLine().Append($"{carriedOver} succeeded result(s) from earlier plan generations are not merged yet — 'merge' will include them.");
+
         return builder.ToString();
     }
 

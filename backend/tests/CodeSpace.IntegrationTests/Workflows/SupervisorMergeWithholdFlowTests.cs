@@ -27,6 +27,10 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// contribution, and the rejected unit's branch never reaches the reviewable head. The withhold filter itself is
 /// pinned in isolation by <c>SupervisorMergeWithholdTests</c>; this proves the wiring through the real executor +
 /// the real AgentRun load over real Postgres.
+///
+/// <para>The same door's other half is here too: which contributors a merge folds when a RE-PLAN moved the
+/// generation boundary past the wave that produced them (<see cref="SupervisorMergeContributors"/>). The selection
+/// is pinned in isolation by <c>SupervisorMergeCarryOverTests</c>; these prove it through the real executor.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -86,6 +90,57 @@ public sealed class SupervisorMergeWithholdFlowTests
         var outcome = JsonDocument.Parse(merge!).RootElement;
         outcome.GetProperty("count").GetInt32().ShouldBe(2, "no per-unit verdicts → every unit folds, exactly as before the slice");
         outcome.TryGetProperty("contributorIntegrity", out _).ShouldBeFalse("a healthy merge keeps the pre-integrity outcome byte shape");
+        outcome.TryGetProperty("carriedOverFromEarlierGenerations", out _).ShouldBeFalse("a merge whose own generation staged the work records no carry-over");
+    }
+
+    [Fact]
+    public async Task A_replan_after_the_wave_finished_still_merges_the_results_it_stranded()
+    {
+        // The live trajectory: plan(2) → spawn×2 (both Succeeded and pushed) → plan(1). The plan window slices the
+        // tape at the newest plan, which has no spawn after it, so a window-scoped merge folded ZERO — two finished,
+        // pushed, accepted results became unmergeable and the publish that followed resolved no target at all.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var a = Guid.NewGuid();
+        var b = Guid.NewGuid();
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, "s1", "s2");
+        await SeedSpawnAsync(runId, teamId, sequence: 2, Unit(a, "codespace/agent/a", acceptancePassed: true), Unit(b, "codespace/agent/b", acceptancePassed: true));
+        await SeedAgentRunAsync(a, teamId, runId, "codespace/agent/a");
+        await SeedAgentRunAsync(b, teamId, runId, "codespace/agent/b");
+        await SeedPlanAsync(runId, teamId, sequence: 3, "s3");
+
+        var outcome = JsonDocument.Parse((await RunMergeTurnAsync(runId, teamId))!).RootElement;
+
+        outcome.GetProperty("count").GetInt32().ShouldBe(2, "a plan-generation boundary may supersede an instruction — it must not make FINISHED work invisible to the merge");
+        outcome.GetProperty("merged").EnumerateArray().Select(e => e.GetProperty("producedBranch").GetString())
+            .ShouldBe(new[] { "codespace/agent/a", "codespace/agent/b" }, "both stranded branches reach the reviewable head, in the order they were produced");
+        outcome.GetProperty("carriedOverFromEarlierGenerations").GetInt32().ShouldBe(2, "the outcome states plainly that this merge conserved work an earlier generation produced");
+        outcome.TryGetProperty("contributorIntegrity", out _).ShouldBeFalse("the carried-over contributors materialized faithfully — nothing to report");
+    }
+
+    [Fact]
+    public async Task A_carried_over_result_an_earlier_merge_already_consolidated_is_not_merged_twice()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var already = Guid.NewGuid();
+        var stranded = Guid.NewGuid();
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, "s1", "s2");
+        await SeedSpawnAsync(runId, teamId, sequence: 2, Unit(already, "codespace/agent/already", acceptancePassed: true), Unit(stranded, "codespace/agent/stranded", acceptancePassed: true));
+        await SeedAgentRunAsync(already, teamId, runId, "codespace/agent/already");
+        await SeedAgentRunAsync(stranded, teamId, runId, "codespace/agent/stranded");
+        await SeedEarlierMergeAsync(runId, teamId, sequence: 3, already);
+        await SeedPlanAsync(runId, teamId, sequence: 4, "s3");
+
+        var outcome = JsonDocument.Parse((await RunMergeTurnAsync(runId, teamId))!).RootElement;
+
+        outcome.GetProperty("merged").EnumerateArray().Select(e => e.GetProperty("producedBranch").GetString())
+            .ShouldBe(new[] { "codespace/agent/stranded" }, "the ledger's own merge outcomes say what is already consolidated — no second table, no double fold");
+        outcome.GetProperty("carriedOverFromEarlierGenerations").GetInt32().ShouldBe(1);
     }
 
     [Fact]
@@ -217,8 +272,9 @@ public sealed class SupervisorMergeWithholdFlowTests
         using var verify = _fixture.BeginScope();
         return await verify.Resolve<CodeSpaceDbContext>().SupervisorDecisionRecord.AsNoTracking()
             .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.Merge)
+            .OrderByDescending(d => d.Sequence)
             .Select(d => d.OutcomeJson)
-            .SingleAsync();
+            .FirstAsync();   // the turn this call just ran — a tape that already carried an earlier merge has two
     }
 
     private async Task SeedSpawnAsync(Guid runId, Guid teamId, int sequence, params SupervisorAgentResult[] units)
@@ -235,6 +291,45 @@ public sealed class SupervisorMergeWithholdFlowTests
             Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId, Sequence = sequence,
             DecisionKind = SupervisorDecisionKinds.Spawn, IdempotencyKey = $"spawn-{Guid.NewGuid():N}", InputHash = "test",
             Status = SupervisorDecisionStatus.Succeeded, PayloadJson = """{"subtaskIds":["s1","s2"]}""", OutcomeJson = outcome,
+            FenceEpoch = 1, CreatedDate = now, CreatedBy = Guid.Empty, LastModifiedDate = now, LastModifiedBy = Guid.Empty,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>A structurally-valid, non-empty plan — the boundary <see cref="SupervisorPlanWindow"/> opens a generation on, so a plan seeded AFTER a spawn slices that spawn out of the window.</summary>
+    private async Task SeedPlanAsync(Guid runId, Guid teamId, int sequence, params string[] subtaskIds)
+    {
+        var payload = JsonSerializer.Serialize(new
+        {
+            goal = Goal,
+            subtasks = subtaskIds.Select(id => new { id, title = id, instruction = $"do {id}" }),
+        }, AgentJson.Options);
+
+        await SeedDecisionAsync(runId, teamId, sequence, SupervisorDecisionKinds.Plan, payload, "{}");
+    }
+
+    /// <summary>An earlier <c>merge</c> that already consolidated the named agent runs — the ledger fact the carry-over reads to avoid folding the same result twice.</summary>
+    private async Task SeedEarlierMergeAsync(Guid runId, Guid teamId, int sequence, params Guid[] agentRunIds)
+    {
+        var outcome = JsonSerializer.Serialize(new
+        {
+            merged = agentRunIds.Select(id => new { agentRunId = id, status = nameof(AgentRunStatus.Succeeded) }),
+            count = agentRunIds.Length,
+        }, AgentJson.Options);
+
+        await SeedDecisionAsync(runId, teamId, sequence, SupervisorDecisionKinds.Merge, "{}", outcome);
+    }
+
+    private async Task SeedDecisionAsync(Guid runId, Guid teamId, int sequence, string kind, string payloadJson, string outcomeJson)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId, Sequence = sequence,
+            DecisionKind = kind, IdempotencyKey = $"{kind}-{Guid.NewGuid():N}", InputHash = "test",
+            Status = SupervisorDecisionStatus.Succeeded, PayloadJson = payloadJson, OutcomeJson = outcomeJson,
             FenceEpoch = 1, CreatedDate = now, CreatedBy = Guid.Empty, LastModifiedDate = now, LastModifiedBy = Guid.Empty,
         });
         await db.SaveChangesAsync();
