@@ -153,19 +153,46 @@ public sealed class SupervisorPublishedBranchResolverTests
     }
 
     [Fact]
-    public async Task Ledger_direct_fallback_does_not_surface_a_manifest_from_before_the_active_plan()
+    public async Task Ledger_direct_fallback_surfaces_a_manifest_a_replan_stranded_when_the_active_plan_staged_nothing()
     {
+        // Run 3a49c716's own failure, and the other half of the merge rung's carry-over: three Succeeded, PUSHED
+        // agent runs, then two re-plans, then publish. The active generation's staging set is EMPTY (not null), so
+        // this rung filtered out every manifest and the run logged "Supervisor publish … resolved 0 target(s)". A
+        // plan-generation boundary may supersede an INSTRUCTION; it must not make FINISHED, PUSHED work invisible.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var repoId = await SeedBoundRepositoryAsync(teamId);
         var runId = await SeedSupervisorRunAsync(teamId, userId);
 
         var oldAgentRunId = Guid.NewGuid();
-        await SeedSpawnAsync(runId, teamId, oldAgentRunId, acceptancePassed: true);
+        await SeedSpawnAsync(runId, teamId, oldAgentRunId, acceptancePassed: true, sequence: 1);
         await SeedAgentManifestAsync(runId, teamId, oldAgentRunId, repoId, "codespace/agent/old", PublishState.Pushed);
-        await SeedPlanAsync(runId, teamId, "replacement");
+        await SeedPlanAsync(runId, teamId, "replacement", sequence: 2);
 
-        (await ResolveAsync(runId, teamId, primaryRepositoryId: null))
-            .ShouldBeEmpty("a pushed manifest remains durable evidence, but it cannot become the current plan generation's published head");
+        var branch = (await ResolveAsync(runId, teamId, primaryRepositoryId: null)).ShouldHaveSingleItem();
+        branch.SourceBranch.ShouldBe("codespace/agent/old", "the run's only genuinely published work must stay reachable across a re-plan that staged nothing of its own");
+    }
+
+    [Fact]
+    public async Task Ledger_direct_fallback_does_not_surface_a_manifest_from_before_a_plan_that_staged_its_own_work()
+    {
+        // The invariant the carry-over deliberately keeps: a superseded generation's contributor never OUTRANKS the
+        // current generation's own staged work — it is conserved only when the active generation staged nothing.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var staleRepoId = await SeedBoundRepositoryAsync(teamId);
+        var currentRepoId = await SeedBoundRepositoryAsync(teamId);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var oldAgentRunId = Guid.NewGuid();
+        await SeedSpawnAsync(runId, teamId, oldAgentRunId, acceptancePassed: true, sequence: 1);
+        await SeedAgentManifestAsync(runId, teamId, oldAgentRunId, staleRepoId, "codespace/agent/old", PublishState.Pushed, alias: "web");
+        await SeedPlanAsync(runId, teamId, "replacement", sequence: 2);
+
+        var freshAgentRunId = Guid.NewGuid();
+        await SeedSpawnAsync(runId, teamId, freshAgentRunId, acceptancePassed: true, sequence: 3);
+        await SeedAgentManifestAsync(runId, teamId, freshAgentRunId, currentRepoId, "codespace/agent/fresh", PublishState.Pushed, alias: "api");
+
+        var branch = (await ResolveAsync(runId, teamId, primaryRepositoryId: null)).ShouldHaveSingleItem();
+        branch.SourceBranch.ShouldBe("codespace/agent/fresh", "a pushed manifest remains durable evidence, but it cannot join a plan generation that staged its own work");
     }
 
     [Fact]
@@ -339,7 +366,7 @@ public sealed class SupervisorPublishedBranchResolverTests
         await AddTerminalDecisionAsync(db, runId, teamId, SupervisorDecisionKinds.Merge, outcome);
     }
 
-    private async Task SeedPlanAsync(Guid runId, Guid teamId, string subtaskId)
+    private async Task SeedPlanAsync(Guid runId, Guid teamId, string subtaskId, int sequence = 0)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -349,11 +376,11 @@ public sealed class SupervisorPublishedBranchResolverTests
             Subtasks = new[] { new SupervisorPlannedSubtask { Id = subtaskId, Title = subtaskId, Instruction = $"do {subtaskId}" } },
         }, AgentJson.Options);
 
-        await AddTerminalDecisionAsync(db, runId, teamId, SupervisorDecisionKinds.Plan, "{}", payload);
+        await AddTerminalDecisionAsync(db, runId, teamId, SupervisorDecisionKinds.Plan, "{}", payload, sequence);
     }
 
     /// <summary>Hand-seeds a TERMINAL spawn decision with one folded agent result — the shape <see cref="SupervisorOutcome.ReadAgentResults"/> reads, which the ledger-direct fallback's rejection filter (<see cref="SupervisorOutcome.WithheldAgentRunIds"/>) scans.</summary>
-    private async Task SeedSpawnAsync(Guid runId, Guid teamId, Guid agentRunId, bool? acceptancePassed)
+    private async Task SeedSpawnAsync(Guid runId, Guid teamId, Guid agentRunId, bool? acceptancePassed, int sequence = 0)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -361,7 +388,7 @@ public sealed class SupervisorPublishedBranchResolverTests
         var result = new SupervisorAgentResult { AgentRunId = agentRunId, Status = "Succeeded", ChangedFiles = new[] { "a.txt" }, AcceptancePassed = acceptancePassed };
         var outcome = JsonSerializer.Serialize(new { agentRunIds = new[] { agentRunId }, agentCount = 1, agentResults = new[] { result } }, AgentJson.Options);
 
-        await AddTerminalDecisionAsync(db, runId, teamId, SupervisorDecisionKinds.Spawn, outcome);
+        await AddTerminalDecisionAsync(db, runId, teamId, SupervisorDecisionKinds.Spawn, outcome, sequence: sequence);
     }
 
     private async Task SeedAgentManifestAsync(Guid runId, Guid teamId, Guid agentRunId, Guid? repositoryId, string? branch, PublishState state, string alias = "primary")
@@ -379,12 +406,12 @@ public sealed class SupervisorPublishedBranchResolverTests
         }, CancellationToken.None);
     }
 
-    private static async Task AddTerminalDecisionAsync(CodeSpaceDbContext db, Guid runId, Guid teamId, string decisionKind, string outcomeJson, string payloadJson = "{}")
+    private static async Task AddTerminalDecisionAsync(CodeSpaceDbContext db, Guid runId, Guid teamId, string decisionKind, string outcomeJson, string payloadJson = "{}", int sequence = 0)
     {
         var now = DateTimeOffset.UtcNow;
         db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
         {
-            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId,
+            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId, Sequence = sequence,
             DecisionKind = decisionKind, IdempotencyKey = $"{decisionKind}-{Guid.NewGuid():N}", InputHash = "test",
             Status = SupervisorDecisionStatus.Succeeded, PayloadJson = payloadJson, OutcomeJson = outcomeJson,
             FenceEpoch = 1, CreatedDate = now, CreatedBy = Guid.Empty, LastModifiedDate = now, LastModifiedBy = Guid.Empty,

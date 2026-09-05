@@ -15,6 +15,10 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// invisible. So a window that yields nothing falls back to the run's earlier Succeeded, not-withheld,
 /// not-yet-merged agent runs — read off the same append-only tape (prior <c>merge</c> outcomes say what is already
 /// consolidated), never a second source of truth.</para>
+///
+/// <para>DC-3's ledger-direct publish rung (<see cref="SupervisorPublishedBranchResolver"/>) has the identical blind
+/// spot on its own rung and reads the same floor — <see cref="SettledAcrossGenerations"/>. See its remarks for why
+/// "already merged" is an exclusion here and not there.</para>
 /// </summary>
 public static class SupervisorMergeContributors
 {
@@ -58,11 +62,8 @@ public static class SupervisorMergeContributors
 
     /// <summary>
     /// Every agent run this supervisor run FINISHED and nobody has merged, when the active generation staged nothing
-    /// mergeable of its own. Deliberately narrower than <see cref="ActiveGeneration"/>: that path stages ids
-    /// regardless of status (a still-running wave is the generation's own work), while a carry-over only ever
-    /// conserves SETTLED work — Succeeded, past the same <see cref="SupervisorOutcome.IsWithheldFromHead"/> door
-    /// (a rejected or waived unit is no more mergeable here than it was there), and not already folded by an earlier
-    /// <c>merge</c> outcome. Tape order, so the fold sees them in the order they were produced.
+    /// mergeable of its own — <see cref="SettledAcrossGenerations"/> minus what an earlier <c>merge</c> outcome
+    /// already consolidated (this rung's own runaway backstop: re-folding the same ids must not read as new progress).
     /// </summary>
     private static IReadOnlyList<Guid> StrandedByAReplan(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
     {
@@ -71,10 +72,32 @@ public static class SupervisorMergeContributors
             .SelectMany(d => SupervisorOutcome.ReadMergedAgentRunIds(d.OutcomeJson))
             .ToHashSet();
 
+        return SettledAcrossGenerations(priorDecisions).Where(id => !alreadyMerged.Contains(id)).ToList();
+    }
+
+    /// <summary>
+    /// The whole tape's SETTLED work, in the order it was produced — the floor BOTH carry-over rungs read, so the
+    /// merge and the publish resolver cannot drift on what a plan-generation boundary is allowed to hide.
+    /// Deliberately narrower than <see cref="ActiveGeneration"/>: that path stages ids regardless of status (a
+    /// still-running wave is the generation's own work), while a carry-over only ever conserves finished work —
+    /// Succeeded, past the same <see cref="SupervisorOutcome.IsWithheldFromHead"/> door (a rejected or waived unit
+    /// is no more publishable here than it was mergeable there).
+    ///
+    /// <para>Says nothing about what a prior <c>merge</c> already folded — that exclusion belongs to the merge rung
+    /// alone (<see cref="StrandedByAReplan"/>). DC-3's ledger-direct publish rung must NOT inherit it: that rung only
+    /// runs when no merge produced an integrated branch at all (gate off, conflicted, patch-only), and there a
+    /// contributor's own pushed branch is still the only genuinely published artifact — which is also how that
+    /// resolver treats merged contributors today, since it reads the manifest ledger and never consults a merge
+    /// outcome.</para>
+    /// </summary>
+    public static IReadOnlyList<Guid> SettledAcrossGenerations(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
+    {
+        ArgumentNullException.ThrowIfNull(priorDecisions);
+
         return priorDecisions
             .Where(d => d.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry)
             .SelectMany(d => SupervisorOutcome.ReadAgentResults(d.OutcomeJson))
-            .Where(r => r.Status == nameof(AgentRunStatus.Succeeded) && !SupervisorOutcome.IsWithheldFromHead(r) && !alreadyMerged.Contains(r.AgentRunId))
+            .Where(r => r.Status == nameof(AgentRunStatus.Succeeded) && !SupervisorOutcome.IsWithheldFromHead(r))
             .Select(r => r.AgentRunId)
             .Distinct()
             .ToList();
