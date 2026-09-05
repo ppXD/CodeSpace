@@ -63,7 +63,7 @@ public sealed partial class RealSupervisorActionExecutor
             {
                 _logger.LogWarning("Supervisor amend_acceptance for subtask {SubtaskId} rejected at turn {Turn} on node {NodeId}: {Reason}", amend.SubtaskId, context.TurnNumber, context.NodeId, rejection);
 
-                return SupervisorExecution.Synchronous(JsonSerializer.Serialize(new { askHuman = "rejected", reason = rejection }, AgentJson.Options));
+                return SupervisorExecution.Synchronous(RejectedAskHumanOutcomeJson(rejection));
             }
 
             // MAJOR-3's third leg: the co-signer rules on the server's own raw verdict, never only the model's framing.
@@ -163,14 +163,18 @@ public sealed partial class RealSupervisorActionExecutor
         reason = "the ask_human decision carried no question text",
     };
 
+    /// <summary>The bytes a REFUSED ask records: <c>{askHuman:"rejected", reason}</c> — no token, no answer, nothing staged. Named so the decider's renderer (and its tests) can be pinned against the shape production actually writes rather than a hand-typed copy of it.</summary>
+    internal static string RejectedAskHumanOutcomeJson(string reason) => JsonSerializer.Serialize(new { askHuman = "rejected", reason }, AgentJson.Options);
+
+    /// <summary>The bytes a DEGRADED ask records: <c>{question, askHuman:"no-conversation", answer:null}</c> — a question that was never delivered and never will be answered. Named for the same reason as its refused sibling: the decider's renderer is pinned against production's shape, not a hand-typed one.</summary>
+    internal static string NoSurfaceAskHumanOutcomeJson(string question) => JsonSerializer.Serialize(new { question, askHuman = "no-conversation", answer = (string?)null }, AgentJson.Options);
+
     /// <summary>No usable conversation (none authored, or the tenancy check failed) → degrade to a SYNCHRONOUS no-surface outcome so the node self-advances rather than hanging on a card no one can answer.</summary>
     private SupervisorExecution DegradeNoSurface(string question)
     {
         _logger.LogWarning("Supervisor ask_human has no usable team conversation to post into — degrading to a no-surface synchronous outcome (self-advance)");
 
-        var outcome = JsonSerializer.Serialize(new { question, askHuman = "no-conversation", answer = (string?)null }, AgentJson.Options);
-
-        return SupervisorExecution.Synchronous(outcome);
+        return SupervisorExecution.Synchronous(NoSurfaceAskHumanOutcomeJson(question));
     }
 
     /// <summary>True only when a conversation is authored AND belongs to the run's team (tenancy guard — never post a card into, or auto-join the bot to, a foreign / unknown conversation named in node config).</summary>

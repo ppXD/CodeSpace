@@ -175,6 +175,42 @@ public static class SupervisorOutcome
     }
 
     /// <summary>
+    /// The reason an <c>ask_human</c> decision was REJECTED outright — the server refused to post the card and
+    /// staged NO human interruption at all. Two sites write it (both as <c>{askHuman: "rejected", reason}</c>):
+    /// a payload carrying no question text, and — the load-bearing one — an <c>amend_acceptance</c> card whose
+    /// HARD precondition failed (<c>SupervisorAmendPrecondition.Reject</c>), e.g. a dodge-work amendment against a
+    /// unit whose latest server verdict does not permit one.
+    ///
+    /// <para>A SIBLING of <see cref="ReadRejectionReason"/> rather than a widening of it: that reader keys on the
+    /// <c>spawn</c>/<c>retry</c> verbs and feeds a spawn-shaped "the same wave will be refused again" line, which
+    /// would be the wrong advice for a refused question. Keeping them apart lets each rejection carry the next
+    /// move its own verb implies.</para>
+    /// </summary>
+    public static string? ReadAskHumanRejectionReason(string? outcomeJson)
+    {
+        if (string.IsNullOrWhiteSpace(outcomeJson)) return null;
+
+        try
+        {
+            var root = JsonDocument.Parse(outcomeJson).RootElement;
+
+            if (root.ValueKind != JsonValueKind.Object) return null;
+
+            if (!root.TryGetProperty("askHuman", out var ask) || ask.ValueKind != JsonValueKind.String || ask.GetString() != "rejected") return null;
+
+            // Non-null for EVERY rejected row, reason recorded or not: a null here would drop the card back into the
+            // parked/degraded arm, which is the exact mis-read this reader exists to stop.
+            return root.TryGetProperty("reason", out var reason) && reason.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(reason.GetString())
+                ? reason.GetString()
+                : "(the server recorded no reason)";
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// The subtasks a spawn WITHHELD rather than staged, with the server's reason for each — read off a spawn
     /// outcome's <c>blockedSubtasks</c> array (<c>RealSupervisorActionExecutor.BuildBlockedSpawnOutcome</c>). Empty
     /// when the key is absent/malformed, which is every accepted spawn.

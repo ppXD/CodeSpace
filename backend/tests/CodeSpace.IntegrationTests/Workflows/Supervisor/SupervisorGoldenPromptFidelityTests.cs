@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Deciders;
 using CodeSpace.Messages.Agents;
@@ -233,6 +235,46 @@ public class SupervisorGoldenPromptFidelityTests
             .ShouldNotContain("resolve cap is spent", Case.Insensitive, "the budget-remaining half must not be told the cap is gone");
         LlmSupervisorDecider.BuildUserPromptForTest(capSpent.Context)
             .ShouldContain("resolve cap is spent", Case.Insensitive, "the budget-spent half must be told, or it is the same scenario twice");
+    }
+
+    /// <summary>
+    /// The corpus's rendered-prompt digest. Every real-model score this repository reports is a measurement of THESE
+    /// bytes, so a block edit anywhere in the decider silently changes what the gate measured — the assertions above
+    /// pin arms and presence, which a reworded (or newly added, or quietly dropped) block slips straight past.
+    ///
+    /// <para>TO RE-PIN DELIBERATELY: run this test, copy the SHA-256 the failure prints into this constant, and say
+    /// in the commit body WHICH block changed and why the corpus's numbers are still comparable across the change.
+    /// A re-pin with no such sentence is the failure mode this exists to make visible, not a chore to be rubber-stamped.</para>
+    /// </summary>
+    private const string GoldenPromptDigest = "40e8c14c75e6f90d017a4780aa9479fc782379f7851f950a04a1962c9ddee4f8";
+
+    [Fact]
+    public void The_rendered_corpus_matches_its_pinned_digest()
+    {
+        var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(RenderedCorpus()))).ToLowerInvariant();
+
+        digest.ShouldBe(GoldenPromptDigest,
+            $"the rendered golden prompts changed. If that was intended, re-pin GoldenPromptDigest to '{digest}' and name the block that changed in the commit body; if it was not, a decider edit has silently moved what every real-model score measures.");
+    }
+
+    [Fact]
+    public void The_digest_covers_every_scenario_in_the_corpus()
+    {
+        // A digest over a shrinking corpus is a green light for a shrinking corpus. Pin the count beside the bytes.
+        SupervisorDecisionGoldenScenarios.All.Count.ShouldBe(23, "a scenario was added or dropped — re-pin this count together with the digest");
+        SupervisorDecisionGoldenScenarios.All.Select(s => s.Name).Distinct(StringComparer.Ordinal).Count()
+            .ShouldBe(SupervisorDecisionGoldenScenarios.All.Count, "two scenarios share a name — the digest's ordering would not be stable");
+    }
+
+    /// <summary>Every scenario's rendered prompt, name-ordered and name-labelled — deterministic over the corpus, so the digest moves only when the RENDERING moves.</summary>
+    private static string RenderedCorpus()
+    {
+        var builder = new StringBuilder();
+
+        foreach (var scenario in SupervisorDecisionGoldenScenarios.All.OrderBy(s => s.Name, StringComparer.Ordinal))
+            builder.Append("\u0000").Append(scenario.Name).Append("\u0000").Append(LlmSupervisorDecider.BuildUserPromptForTest(scenario.Context));
+
+        return builder.ToString();
     }
 
     [Fact]

@@ -1,4 +1,5 @@
 using CodeSpace.Core.Services.Supervisor;
+using CodeSpace.Core.Services.Supervisor.Executors;
 using CodeSpace.Core.Services.Supervisor.Deciders;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
@@ -57,7 +58,10 @@ public class SupervisorPriorDecisionLegibilityTests
     [Fact]
     public void A_degraded_ask_human_with_no_human_surface_says_the_question_was_never_delivered()
     {
-        var prior = Ask(1, """{"question":"Which branch?"}""", """{"askHuman":"unsupported","reason":"no conversation is bound to this run"}""");
+        // The bytes come from the PRODUCTION writer: the hand-typed {"askHuman":"unsupported","reason":…} this
+        // fixture used to carry is a shape no code path ever records, so it pinned the fallback arm rather than the
+        // degraded one it names.
+        var prior = Ask(1, """{"question":"Which branch?"}""", RealSupervisorActionExecutor.NoSurfaceAskHumanOutcomeJson("Which branch?"));
 
         var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(prior));
 
@@ -110,7 +114,52 @@ public class SupervisorPriorDecisionLegibilityTests
         prompt.ShouldNotContain(Token);
     }
 
+    [Fact]
+    public void A_precondition_REFUSED_amend_card_names_the_server_reason_and_never_reads_as_no_surface()
+    {
+        // The bug this pins: a refused card records {askHuman:"rejected", reason} — no token, no answer — so it fell
+        // into the DEGRADED arm and told the brain "no human surface was bound to this run", which is a different
+        // fact with a different next move, while dropping the one thing the turn produced: WHY it was refused. The
+        // raw jsonb line it replaced at least showed the reason.
+        const string reason = "subtask 's1's check RAN and rejected the work (exit 1) — that is evidence against the WORK, not the check";
+
+        var card = SupervisorAmendAcceptance.IntoAskHuman(new SupervisorAmendAcceptancePayload
+        {
+            SubtaskId = "s1", Reason = "the assertion is impossible",
+            Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "dotnet", "test" } },
+        });
+        var prior = Ask(1, card.PayloadJson, RealSupervisorActionExecutor.RejectedAskHumanOutcomeJson(reason));
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(prior));
+
+        prompt.ShouldContain("REFUSED by the server", customMessage: "a refused ask must read as a refusal");
+        prompt.ShouldContain("evidence against the WORK", customMessage: "the server's named reason is the whole content of the turn — dropping it is the regression");
+        prompt.ShouldContain("refused again", customMessage: "and re-proposing the same amendment is futile");
+        prompt.ShouldNotContain("no human surface was bound", customMessage: "a refusal is NOT a missing surface — they imply opposite next moves");
+        prompt.ShouldNotContain("has NOT answered", customMessage: "nothing was posted, so nothing is pending");
+        prompt.ShouldNotContain("askHuman", customMessage: "no raw outcome key reaches the model");
+    }
+
+    [Fact]
+    public void A_refused_ordinary_question_names_the_reason_without_the_amendment_wording()
+    {
+        var prior = Ask(1, """{"question":"Which branch?"}""", RealSupervisorActionExecutor.RejectedAskHumanOutcomeJson("the ask_human decision carried no question text"));
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(prior));
+
+        prompt.ShouldContain("REFUSED by the server");
+        prompt.ShouldContain("carried no question text");
+        prompt.ShouldNotContain("acceptance check is still the one in force", customMessage: "a plain question refusal says nothing about any subtask's oracle");
+    }
+
     // ── plan ────────────────────────────────────────────────────────────────────────
+
+    private static SupervisorPriorDecision Plan(string payloadJson) => new()
+    {
+        Id = Guid.NewGuid(), Sequence = 1, DecisionKind = SupervisorDecisionKinds.Plan,
+        Status = SupervisorDecisionStatus.Succeeded, PayloadJson = payloadJson,
+    };
+
 
     [Fact]
     public void The_live_plan_renders_one_line_per_item_with_its_state_not_raw_payload_json()
@@ -128,6 +177,43 @@ public class SupervisorPriorDecisionLegibilityTests
         prompt.ShouldContain("depends on s1", customMessage: "the authored DAG edge stays legible");
         prompt.ShouldContain("write the parser", customMessage: "the instruction is the text a revisedInstruction is authored against — it must survive");
         prompt.ShouldNotContain("""- plan: payload={""", customMessage: "the live plan no longer dumps raw json");
+    }
+
+    [Fact]
+    public void The_live_plan_shows_the_EFFECTIVE_acceptance_check_not_the_amended_away_original()
+    {
+        // The plan arm printed the AUTHORED check straight off the payload, bypassing the co-sign overlay the
+        // recitation applies two blocks later. A co-signed replacement therefore reached the brain as its own dead
+        // original — the very bytes a human already ruled on — inviting a second amendment of a check nothing grades.
+        var plan = Plan("""{"goal":"ship","subtasks":[{"id":"s1","title":"Add the parser","instruction":"write the parser","acceptance":{"command":["npm","test"]}}]}""");
+
+        var card = SupervisorAmendAcceptance.IntoAskHuman(new SupervisorAmendAcceptancePayload
+        {
+            SubtaskId = "s1", Reason = "npm is not installed in this repository",
+            Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "dotnet", "test" } },
+        });
+        var approved = Ask(2, card.PayloadJson, """{"question":"q","answer":"approve"}""");
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(plan, approved));
+
+        prompt.ShouldContain("AMENDED by a co-signed amendment", customMessage: "the co-signed replacement is the check in force and must be marked as such");
+        prompt.ShouldContain("dotnet test", customMessage: "the effective command is what the brain writes its next move against");
+        prompt.ShouldNotContain("npm test", customMessage: "the amended-away original must not be shown as live");
+    }
+
+    [Fact]
+    public void A_waived_plan_item_says_WAIVED_and_never_recites_a_check_nothing_grades()
+    {
+        var plan = Plan("""{"goal":"ship","subtasks":[{"id":"s1","title":"Add the parser","instruction":"write the parser","acceptance":{"command":["npm","test"]}}]}""");
+
+        var card = SupervisorAmendAcceptance.IntoAskHuman(new SupervisorAmendAcceptancePayload { SubtaskId = "s1", Reason = "unverifiable by design", Waive = true });
+        var approved = Ask(2, card.PayloadJson, """{"question":"q","answer":"approve"}""");
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(plan, approved));
+
+        prompt.ShouldContain("WAIVED by a co-signed amendment");
+        prompt.ShouldContain("WAIVED is not PASSED", customMessage: "the B2 invariant holds at every door, this one included");
+        prompt.ShouldNotContain("npm test", customMessage: "a waived item carries NO oracle — reciting one invents a contract the run does not have");
     }
 
     // ── a budget-blocked wave ───────────────────────────────────────────────────────

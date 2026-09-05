@@ -956,6 +956,18 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         var answer = SupervisorOutcome.ReadAskHumanAnswer(prior.OutcomeJson);
         var parked = SupervisorOutcome.ReadHumanWaitToken(prior.OutcomeJson) is not null;
 
+        // A REFUSED ask, read FIRST: the server declined to post the card at all, so there is neither a token to
+        // park on nor an answer to wait for. Its outcome is {askHuman:"rejected", reason} — which carries no
+        // askHumanToken, so without this arm the row falls into the DEGRADED branch below and tells the brain "no
+        // human surface was bound", a different fact with a different next move, while silently dropping the named
+        // reason the raw jsonb line at least used to show. The reason is the whole content of the turn: a
+        // precondition-refused amend_acceptance must not be re-authored against the same verdict.
+        if (SupervisorOutcome.ReadAskHumanRejectionReason(prior.OutcomeJson) is { } refusal)
+        {
+            AppendRejectedAskHuman(builder, prior, question, refusal, maxChars);
+            return true;
+        }
+
         if (question is null && answer is null && !parked) return false;
 
         builder.AppendLine($"- ask_human{AmendCardHeader(prior)}: you asked — \"{BoundOneLine(question ?? "(the recorded question is missing)", maxChars)}\"");
@@ -973,6 +985,24 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         if (SupervisorAmendAcceptance.IsAmendCard(prior)) builder.AppendLine("    the amendment is NOT co-signed, so the subtask's ORIGINAL acceptance check is still the one in force.");
 
         return true;
+    }
+
+    /// <summary>
+    /// Render an ask the server REFUSED to put in front of a human: the question that was never posted, the
+    /// server's named reason, and the load-bearing consequence — nothing was staged, no human will reply, and
+    /// re-authoring the same card is refused again (the same last line a rejected spawn/retry gets, for the same
+    /// reason: a refusal read as commentary gets re-sent).
+    /// </summary>
+    private static void AppendRejectedAskHuman(StringBuilder builder, SupervisorPriorDecision prior, string? question, string reason, int maxChars)
+    {
+        builder.AppendLine($"- ask_human{AmendCardHeader(prior)}: REFUSED by the server — {BoundOneLine(reason, maxChars)}");
+
+        if (!string.IsNullOrWhiteSpace(question))
+            builder.AppendLine($"    the question you authored was never posted: \"{BoundOneLine(question, maxChars)}\"");
+
+        builder.AppendLine(SupervisorAmendAcceptance.IsAmendCard(prior)
+            ? "    no card was posted and no human was interrupted. The subtask's ORIGINAL acceptance check is still the one in force, and re-proposing the SAME amendment will be refused again."
+            : "    no card was posted and no human was interrupted. Re-authoring the SAME question will be refused again — decide without it.");
     }
 
     /// <summary>The parenthetical that turns a bare "ask_human" into "this is YOUR amendment proposal" — the target subtask and whether it proposes a replacement check or a waive. Empty for an ordinary question.</summary>
@@ -996,9 +1026,11 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     /// <summary>
     /// Render the live plan as its items rather than its payload json: each item's id, title and LIVE state (through
     /// <see cref="SupervisorRecitation.StateFor"/> — the one state renderer, so this line can never contradict the
-    /// recitation block at the prompt tail), its authored DAG edge, its instruction, and its authored acceptance
+    /// recitation block at the prompt tail), its authored DAG edge, its instruction, and its EFFECTIVE acceptance
     /// check. The instruction and the check are kept deliberately: they are the text the brain writes a
     /// <c>revisedInstruction</c> or an <c>amend_acceptance</c> proposal against, and the recitation carries neither.
+    /// The check is the EFFECTIVE one (<see cref="SupervisorAcceptanceOverlay.Resolve"/>) — the same overlay the
+    /// recitation applies — so a co-signed amendment or waiver is never shown as its dead original.
     /// Returns false for a plan whose payload declares no subtasks (nothing to project — keep the raw line).
     /// </summary>
     private static bool AppendPlanDecision(StringBuilder builder, SupervisorPriorDecision prior, IReadOnlyList<SupervisorPriorDecision> livePriors)
@@ -1008,6 +1040,12 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         var subtasks = SupervisorOutcome.ReadPlanSubtasks(prior.PayloadJson);
 
         if (subtasks.Count == 0) return false;
+
+        // The check the run GRADES against, not the bytes the plan authored: a co-signed amendment replaced it, or a
+        // co-signed waiver removed it entirely. Resolved through the SAME overlay the recitation and the fold's
+        // per-unit grade use — printing the authored original here would show a dead check as live, and the brain
+        // would re-propose an amendment a human already granted.
+        var effective = SupervisorAcceptanceOverlay.Resolve(livePriors, subtasks.Where(s => s.Acceptance is not null).ToDictionary(s => s.Id, s => s.Acceptance!, StringComparer.Ordinal));
 
         builder.AppendLine($"- plan: {subtasks.Count} subtask(s), each with its live state:");
 
@@ -1020,8 +1058,10 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             if (!string.IsNullOrWhiteSpace(subtask.Instruction))
                 builder.AppendLine($"        instruction: {BoundOneLine(subtask.Instruction, maxChars)}");
 
-            if (subtask.Acceptance is { } acceptance)
-                builder.AppendLine($"        acceptance check ({acceptance.Kind?.ToString() ?? "TestsPass"}): {BoundOneLine(string.Join(" ", acceptance.Command), maxChars)}");
+            if (effective.WaivedSubtaskIds.Contains(subtask.Id))
+                builder.AppendLine("        acceptance check: WAIVED by a co-signed amendment — this item carries no verification. WAIVED is not PASSED; do not report it as verified.");
+            else if (effective.BySubtask.GetValueOrDefault(subtask.Id) is { } acceptance)
+                builder.AppendLine($"        acceptance check ({acceptance.Kind?.ToString() ?? "TestsPass"}){(ReferenceEquals(acceptance, subtask.Acceptance) ? "" : ", AMENDED by a co-signed amendment")}: {BoundOneLine(string.Join(" ", acceptance.Command), maxChars)}");
         }
 
         return true;
