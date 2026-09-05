@@ -34,8 +34,9 @@ namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 ///
 /// <para><b>One vocabulary, four readers.</b> Nothing here re-decides what a failure means. The mangled Anthropic wire
 /// format is <see cref="AgentRetryCauses.GatewayFormatFault"/>, the engine's own typed transport failure is read
-/// through <see cref="RealModelGate.IsGatewayInfraError"/> (anchored to the slot <c>LlmApiException</c> writes), an
-/// announced HTTP status is graded by <see cref="LlmApiException.Classify"/>, and the transport-code split mirrors
+/// through <see cref="RealModelGate.IsGatewayInfraError"/> (anchored to the slot <c>LlmApiException</c> writes — kept
+/// DEFENSIVE here, since an AgentRun's own exception never reaches this string; see the arm below), an announced HTTP
+/// status is graded by <see cref="LlmApiException.Classify"/>, and the transport-code split mirrors
 /// <c>RealModelGate</c>'s wiring-versus-dropped rule on the exception path. A change to any of those moves this gate
 /// with it, so the retry path, the engine lane, and the agent lane can never disagree about the same failure.</para>
 /// </summary>
@@ -89,8 +90,11 @@ public static class RealModelRunClassifier
         // path can never leave a real-model gate reading the same exit as a code regression.
         if (AgentRetryCauses.Classify(error) == AgentRetryCauses.GatewayFormatFault) return true;
 
-        // OUR OWN typed transport failure, read from the slot the engine wrote (never from the provider's message that
-        // follows it) — the same anchored read the engine lane already gates on.
+        // DEFENSIVE: reads the same anchored slot the engine lane gates on, but unreachable here today — an
+        // AgentRun's own LlmApiException never survives to this string. The executor's generic catch folds ANY
+        // exception (this one included) into Failed/exitReason=executor-error, which the check above already returns
+        // false for before Error is ever read. Kept so this arm still gates if a future path ever lets that
+        // engine-written slot reach a run's Error the way it already reaches a supervisor node-failed payload.
         if (RealModelGate.IsGatewayInfraError(error)) return true;
 
         if (IsInfraAnnouncedStatus(error)) return true;
