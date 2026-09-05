@@ -54,7 +54,7 @@ public sealed class RealModelExtendedBenchmarkCorpusE2ETests
         if (!await GitReadyAsync()) return;
         if (!await ClaudeReadyAsync()) throw RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed — the benchmark needs a harness binary (skip ≠ pass)");   // honest-skip, NOT a pass
 
-        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
         var credId = await SeedAgentCredentialAsync(teamId, baseUrl!.TrimEnd('/'), apiKey!);
 
         await RealModelGate.AssessLiveAsync(Provider, async () =>

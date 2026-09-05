@@ -229,7 +229,7 @@ public sealed class RealModelPublishManifestE2ETests
         if (!await ClaudeReadyAsync()) throw RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed (skip ≠ pass)");
         if (!await GitAvailableAsync()) throw RealModelGate.ReportSkipped(Provider, "git is not installed (skip ≠ pass)");
 
-        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
         return new LiveContext(teamId, baseUrl!.TrimEnd('/'), apiKey!, model!);
     }
 

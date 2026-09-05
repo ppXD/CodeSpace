@@ -84,7 +84,7 @@ public sealed class RealModelFooterSignalsE2ETests : IDisposable
     {
         if (ReadLiveSecretsOrSkip() is not { } live) return;   // skip ≠ pass (surfaced loudly)
 
-        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
         await SeedBrainModelAsync(teamId, live.BaseUrl, live.ApiKey, live.Model);   // credentialed-model pool the node resolves
         var workflowId = await CreateLlmCompleteWorkflowAsync(teamId, userId, live.Model);
 
@@ -211,7 +211,7 @@ public sealed class RealModelFooterSignalsE2ETests : IDisposable
         if (ReadLiveSecretsOrSkip() is not { } live) return;   // skip ≠ pass (surfaced loudly)
         if (!await ClaudeReadyAsync()) throw RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed (skip ≠ pass)");
 
-        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
 
         // GATING best-of-N on the blessed wire: a file-create-then-ls goal is near-deterministic, so a persistent
         // absence of the agent feed REDs; a gateway/exec fault is a non-gating LOUD skip.

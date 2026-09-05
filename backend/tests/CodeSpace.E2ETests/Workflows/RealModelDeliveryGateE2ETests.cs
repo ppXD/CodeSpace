@@ -102,7 +102,7 @@ public sealed class RealModelDeliveryGateE2ETests : IDisposable
         jobClient.Clear();
         jobClient.AutoExecute = true;
 
-        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
         var conversationId = await SeedConversationAsync(teamId, userId);   // the surface the gate parks its card on
 
         using var remote = new BareRemote();

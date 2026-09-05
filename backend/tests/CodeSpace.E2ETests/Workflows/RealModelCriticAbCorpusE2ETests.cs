@@ -80,7 +80,7 @@ public sealed class RealModelCriticAbCorpusE2ETests
         if (!await GitReadyAsync()) return;
         if (!await ClaudeReadyAsync()) throw RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed — the benchmark needs a harness binary (skip ≠ pass)");
 
-        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
         var credId = await SeedAgentCredentialAsync(teamId, baseUrl!.TrimEnd('/'), apiKey!);
         var reviewerRowId = await SeedReviewerPoolRowAsync(teamId, credId, model!);   // an explicit pool row → the critic resolves the SAME live model (no auto-pick fail-open)
 

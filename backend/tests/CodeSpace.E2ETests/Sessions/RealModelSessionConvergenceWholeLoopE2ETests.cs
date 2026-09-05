@@ -92,7 +92,7 @@ public sealed class RealModelSessionConvergenceWholeLoopE2ETests
         jobClient.Clear();
         jobClient.AutoExecute = true;
 
-        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
 
         using var remote = new BareRemote();
         await remote.SeedBaseAsync(new() { ["check.sh"] = BothFeaturesCheckSh, ["add.sh"] = WrongStub, ["mul.sh"] = WrongStub });

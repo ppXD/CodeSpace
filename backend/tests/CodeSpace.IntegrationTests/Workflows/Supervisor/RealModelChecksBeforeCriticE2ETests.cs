@@ -54,7 +54,7 @@ public sealed class RealModelChecksBeforeCriticE2ETests
 
         if (baseUrl is null || apiKey is null || model is null) throw RealModelGate.ReportSkipped(Custom, "CODESPACE_LLM_* absent (fork/local — no live model)");   // skip ≠ pass: NotExecuted in the trx, never a green that measured nothing
 
-        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
         var reviewerRowId = await SeedCredentialedModelAsync(teamId, model, baseUrl, apiKey);
 
         await RealModelGate.AssessLiveAsync(Custom, async () =>

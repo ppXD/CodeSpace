@@ -193,7 +193,7 @@ public sealed class RealModelCodexInjectionE2ETests : IDisposable
         if (OperatingSystem.IsWindows()) return null;                       // the harness + sandbox are /bin/sh based
         if (!await CodexReadyAsync()) throw RealModelGate.ReportSkipped(Provider, "the `codex` coding-agent CLI is not installed — the injection gate needs the harness binary (skip ≠ pass)");
 
-        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
         return new LiveContext(teamId, baseUrl!.TrimEnd('/'), apiKey!, model!);
     }
 

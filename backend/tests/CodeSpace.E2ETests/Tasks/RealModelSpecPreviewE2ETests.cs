@@ -124,29 +124,15 @@ public sealed class RealModelSpecPreviewE2ETests
     }
 
     /// <summary>
-    /// A team whose ONLY structured model is the live one. <see cref="WorkflowsTestSeed.SeedTeamAsync"/> seeds a
-    /// keyless credential + enabled model for every in-process fake provider tag, several of which implement
-    /// <c>IStructuredLLMClient</c> — and <c>InProcessStructuredModel.ResolveAsync</c> takes the FIRST structured
-    /// client that has any pool pick. So a plain seeded team resolves a FAKE here and the live model is never
-    /// called; the first version of this file did exactly that and reported live verdicts about a fake's reply.
-    /// Clearing the fake pool rows is what makes the resolution deterministic AND actually live.
+    /// A team whose ONLY structured model is the live one. Seeding the in-process fakes would defeat that: several
+    /// implement <c>IStructuredLLMClient</c>, and <c>InProcessStructuredModel.ResolveAsync</c> takes the FIRST
+    /// structured client that has any pool pick — so a plain seeded team resolves a FAKE here and the live model is
+    /// never called (the first version of this file did exactly that and reported live verdicts about a fake's reply).
+    /// <c>inProcessPool: false</c> is what makes the resolution deterministic AND actually live.
     /// </summary>
     private async Task<Guid> SeedTeamWithOnlyTheLiveModelAsync(LiveSecrets live)
     {
-        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-
-        using (var scope = _fixture.BeginScope())
-        {
-            var db = scope.Resolve<CodeSpaceDbContext>();
-
-            var fakeCreds = await db.ModelCredential.Where(c => c.TeamId == teamId).ToListAsync();
-            var fakeCredIds = fakeCreds.Select(c => c.Id).ToList();
-
-            db.ModelCredentialModel.RemoveRange(await db.ModelCredentialModel.Where(m => fakeCredIds.Contains(m.ModelCredentialId)).ToListAsync());
-            db.ModelCredential.RemoveRange(fakeCreds);
-
-            await db.SaveChangesAsync();
-        }
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
 
         await SeedBrainModelAsync(teamId, live.BaseUrl, live.ApiKey, live.Model);
         return teamId;
