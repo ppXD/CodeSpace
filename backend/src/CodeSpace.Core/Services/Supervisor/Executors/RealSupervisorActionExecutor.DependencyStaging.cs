@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Agents.Workspace;
+using CodeSpace.Core.Services.Agents.Workspace.Integrators;
 using CodeSpace.Messages.Agents;
 using Microsoft.Extensions.Logging;
 
@@ -184,10 +185,22 @@ public sealed partial class RealSupervisorActionExecutor
     internal static int DependencyManifestReadLimit(SupervisorTurnContext context) =>
         Math.Clamp(context.MaxTotalSpawns ?? SupervisorLane.DefaultMaxTotalSpawns, 1, SupervisorLane.MaxTotalSpawnsCeiling);
 
-    /// <summary>Combine ≥2 producers' (or one patch-only producer's) recorded patches onto a fresh run integration branch via the SAME <see cref="IBranchIntegrator"/> the supervisor <c>merge</c> drives. Clean → that branch; anything else → BLOCKED, never a silent default.</summary>
+    /// <summary>
+    /// Combine ≥2 producers' (or one patch-only producer's) recorded patches onto a fresh run integration branch via
+    /// the SAME <see cref="IBranchIntegrator"/> the supervisor <c>merge</c> drives. Clean → that branch; anything
+    /// else → BLOCKED, never a silent default.
+    ///
+    /// <para>The handoff is anchored on the ANCESTOR-MOST base of the producer set (<see cref="IntegrationBaseAnchor"/>),
+    /// the same rule the merge and <c>git.integrate_run</c> lanes resolve from. A producer can itself have been
+    /// dependency-staged on an earlier phase's producer, so its recorded base is that producer's HEAD — and the order
+    /// the plan declared the dependencies in is model-authored, carrying no ancestry meaning. Anchoring on the FIRST
+    /// producer therefore put a sibling still rooted at the repository base UPSTREAM of the anchor, where the
+    /// integrator's base-integrity guard correctly refuses it as a stale-base graft: the handoff aborted, and the
+    /// dependent that did stage would have started from a tree missing that sibling's work.</para>
+    /// </summary>
     private async Task<DependencyStagingResult> IntegrateProducersAsync(IReadOnlyList<Persistence.Entities.PublishManifest> producers, Guid repositoryId, SupervisorTurnContext context, CancellationToken cancellationToken)
     {
-        var baseSha = producers.Select(p => p.BaseSha).FirstOrDefault(sha => !string.IsNullOrEmpty(sha));
+        var baseSha = IntegrationBaseAnchor.Resolve(producers, repositoryId, producers.Select(p => p.BaseSha).FirstOrDefault(sha => !string.IsNullOrEmpty(sha)));
 
         if (string.IsNullOrEmpty(baseSha))
             return BlockedStaging("the producers recorded no base revision to integrate the handoff from", context);

@@ -4,8 +4,8 @@ using CodeSpace.Messages.Agents;
 namespace CodeSpace.Core.Services.Agents.Workspace.Integrators;
 
 /// <summary>
-/// WHICH commit an integration checks out and anchors its base-integrity guard on — the ONE anchor rule both
-/// integrate lanes (the supervisor merge and <c>git.integrate_run</c>) resolve their
+/// WHICH commit an integration checks out and anchors its base-integrity guard on — the ONE anchor rule all three
+/// integrate lanes (the supervisor merge, <c>git.integrate_run</c>, and the dependency-staging handoff) resolve their
 /// <see cref="IntegrationRequest.BaseSha"/> from.
 ///
 /// <para><b>The rule: the ancestor-most base</b> — the one recorded base that is an ancestor of (or equal to) every
@@ -35,10 +35,32 @@ namespace CodeSpace.Core.Services.Agents.Workspace.Integrators;
 /// </summary>
 public static class IntegrationBaseAnchor
 {
-    /// <summary>The run's original root for one repository — the OLDEST base its Agent-kind publish-manifest rows recorded, tie-broken on id so the pick is total and repeats across reads. Null when the ledger recorded no base for the repository, leaving the caller its own first-eligible-contribution fallback.</summary>
-    public static string? OldestRecordedBase(IReadOnlyList<PublishManifest> manifests, Guid repositoryId) =>
-        manifests
-            .Where(m => m.Kind == PublishManifestKind.Agent && m.RepositoryId == repositoryId && !string.IsNullOrWhiteSpace(m.BaseSha))
-            .OrderBy(m => m.CreatedDate).ThenBy(m => m.Id)
-            .FirstOrDefault()?.BaseSha;
+    /// <summary>The anchor every integrate lane calls: the run's recorded root for this repository, else the caller's own first-contribution base (the pre-ledger behaviour) when nothing recorded one. Non-null whenever <paramref name="firstContributionBase"/> is.</summary>
+    public static string? Resolve(IReadOnlyList<PublishManifest> manifests, Guid repositoryId, string? firstContributionBase) =>
+        OldestRecordedBase(manifests, repositoryId) ?? firstContributionBase;
+
+    /// <summary>
+    /// The run's original root for one repository — the OLDEST base its Agent-kind publish-manifest rows recorded,
+    /// tie-broken on id so the pick is total and repeats across reads. Null when the ledger recorded no base for the
+    /// repository, leaving the caller its own first-contribution fallback.
+    ///
+    /// <para><b>The legacy tier.</b> <see cref="PublishManifest.RepositoryId"/> post-dates the manifest table, so a
+    /// row written before it carries null — and every manifest-backed consumer already honours that null row as the
+    /// legacy single-repository carrier (<c>PublishManifestRepositorySelector</c>). Filtering on the concrete id
+    /// alone therefore reads a legacy run's ledger as EMPTY and silently drops it to the caller's fallback, which is
+    /// the very anchor this rule exists to replace. The tier fires only when NOTHING in the list carries a concrete
+    /// repository — the same "a concrete mismatch never inherits the compatibility fallback" bound the selector
+    /// draws, so one repository's root can never be handed to another's integration.</para>
+    /// </summary>
+    public static string? OldestRecordedBase(IReadOnlyList<PublishManifest> manifests, Guid repositoryId)
+    {
+        var rooted = manifests.Where(m => m.Kind == PublishManifestKind.Agent && !string.IsNullOrWhiteSpace(m.BaseSha)).ToList();
+
+        if (Oldest(rooted.Where(m => m.RepositoryId == repositoryId)) is { } recorded) return recorded;
+
+        return manifests.Any(m => m.RepositoryId is not null) ? null : Oldest(rooted.Where(m => m.RepositoryId is null));
+    }
+
+    private static string? Oldest(IEnumerable<PublishManifest> rows) =>
+        rows.OrderBy(m => m.CreatedDate).ThenBy(m => m.Id).FirstOrDefault()?.BaseSha;
 }

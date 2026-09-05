@@ -568,6 +568,61 @@ public sealed class SupervisorDependencyStagingFlowTests
     }
 
     /// <summary>
+    /// The STAGING twin of <see cref="A_withheld_producers_dependent_still_anchors_the_merge_on_the_repository_base"/>,
+    /// at the only tier that can show it: a phase-2 producer is itself dependency-staged ON a phase-1 producer, so its
+    /// recorded base is that producer's HEAD rather than the repository base. A phase-3 dependent that hands off BOTH
+    /// therefore integrates a producer set whose bases sit at two different depths — and the order the plan declared
+    /// them in is MODEL-authored, carrying no ancestry meaning, so the FIRST producer is routinely the re-parented one.
+    ///
+    /// <para>Anchoring the handoff on that first producer's base puts its own phase-1 sibling UPSTREAM of the anchor,
+    /// which <c>LocalGitBranchIntegrator</c>'s base-integrity guard refuses as a stale-base graft ("base SHA
+    /// mismatch"). The whole handoff then aborts, so the dependent is never staged at all — and had the guard let it
+    /// through, the dependent would have started from a tree missing its phase-1 producer's work. The anchor is the
+    /// ANCESTOR-MOST recorded base instead, the same <see cref="IntegrationBaseAnchor"/> rule the supervisor merge and
+    /// <c>git.integrate_run</c> resolve from.</para>
+    ///
+    /// <para>Mutation check: anchor <c>IntegrateProducersAsync</c> on the first producer's base again and this goes
+    /// RED with zero staged tasks.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_re_parented_producer_never_anchors_the_handoff_downstream_of_its_sibling()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedRepositoryAsync(teamId, remote.Url, await SeedCredentialAsync(teamId), RepositoryPublishMode.Branch);
+        var runId = await SeedSupervisorRunAsync(teamId);
+
+        // Phase 1: `a` is rooted at the repository base.
+        var (a, _) = await RunProducerAsync(teamId, repoId, "printf 'by a\\n' > a.txt; echo edited", workflowRunId: runId);
+        var aBranch = (await SingleManifestAsync(a, teamId)).Branch.ShouldNotBeNull("PublishMode=Branch + a bound credential → the phase-1 producer's work was pushed");
+
+        // Phase 2: `b` is re-parented ONTO `a` — cloned at exactly the ref the lone-branch-producer staging arm
+        // resolves for a dependent of `a` (proven in its own row above), so `b` records a's HEAD as its base.
+        var (b, _) = await RunProducerAsync(teamId, repoId, "printf 'by b\\n' > b.txt; echo edited", checkoutRef: aBranch, workflowRunId: runId);
+
+        (await SingleManifestAsync(b, teamId)).BaseSha.ShouldNotBe((await SingleManifestAsync(a, teamId)).BaseSha,
+            "the re-parented producer must genuinely record a DOWNSTREAM base — if the two bases are equal this probe measures nothing");
+
+        // Phase 3: `c` hands off both, declared b-FIRST — a plan's dependsOn order is authored, not topological.
+        var context = ContextWith(runId, teamId, repoId,
+            plan: Plan(("a", null), ("b", new[] { "a" }), ("c", new[] { "b", "a" })),
+            priorSpawns: await SucceededSpawn(teamId, ("a", a), ("b", b)));
+
+        await ExecuteSpawnAsync(context, "c");
+
+        var tasks = await StagedTasksAsync(runId);
+        tasks.Count.ShouldBe(1, "the handoff integrated BOTH producers, so the dependent stages — anchoring on b's base refuses a as a stale-base graft, which aborts the whole spawn");
+
+        var handoffRef = tasks[0].Workspace.ShouldNotBeNull("a dependency handoff pins an explicit clone ref").Repositories.Single().Ref!;
+
+        (await remote.FileOnBranchAsync(handoffRef, "a.txt")).Trim().ShouldBe("by a", "the phase-1 producer's work reaches the tree the dependent clones");
+        (await remote.FileOnBranchAsync(handoffRef, "b.txt")).Trim().ShouldBe("by b", "so does the re-parented phase-2 producer's — a partial handoff would start the dependent from an incomplete tree");
+    }
+
+    /// <summary>
     /// The P1 live-run break, at the only tier that can show it: TWO dependents staged in the SAME turn over
     /// DIFFERENT producer sets. With the handoff branch keyed on run + turn alone both asked for one name, so the
     /// second integration found a remote branch carrying the first's (different) tree,
