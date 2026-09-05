@@ -28,8 +28,9 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// decision. A publish already ran AFTER every such state change and a REAL pull request exists (any Opened /
 /// AlreadyOpened) with no Failed target → proceed unchanged (the contract is genuinely satisfied). A publish
 /// already ran and is UNSATISFIED — ANY target Failed, an EMPTY result (nothing was ever published to open a
-/// PR from), or an all-Skipped result (every repo is PatchOnly policy, which CONFLICTS with the operator's own
-/// PR requirement rather than satisfying it) → <c>ask_human</c> naming exactly which; satisfaction is never by
+/// PR from), or an all-Skipped result (PatchOnly policy on every repository the attempt REACHED, which CONFLICTS
+/// with the operator's own PR requirement rather than satisfying it) → <c>ask_human</c> naming exactly which —
+/// including WHICH repositories were skipped, never a blanket "every repository"; satisfaction is never by
 /// absence (H1, the verified vacuous-success fix), and a diagnosed failure never blind-retries — the SAME
 /// "diagnosed failure wins" shape I3's own <c>attemptedMerge</c> check uses. A human ANSWER to the gate's own
 /// card (recognized by <see cref="QuestionPrefix"/>; content-blind, never parsed into an authorization) buys
@@ -102,9 +103,13 @@ public static class SupervisorDeliveryGate
         if (failed.Count > 0)
             return ParkOrForceStop(context, $"a pull request could not be opened ({string.Join("; ", failed.Select(f => $"{f.Alias}: {f.Error}"))}) — fix the cause and answer to re-attempt once; if it still fails, the run completes without the pull request (it can still be opened from Room afterwards)");
 
+        // NAME the skipped repositories rather than claim "every repository here is configured patch-only" — a claim
+        // this gate can never see the evidence for. A skip entry only ever describes a repository the publish
+        // attempt actually reached: a publish-permitting sibling with nothing to open contributes NO entry at all,
+        // so under a multi-repo run one patch-only repo's skip used to speak for repositories it knows nothing about.
         return pullRequests.Count == 0
             ? ParkOrForceStop(context, "the delivery contract requires a pull request, but the publish attempt found no published branch to open one from — answering re-attempts the publish once; if there is still nothing to open, the run completes without it")
-            : ParkOrForceStop(context, "every repository here is configured patch-only, so the required pull request was skipped by policy — change the publish mode and answer to re-attempt once; if still blocked, the run completes without the pull request");
+            : ParkOrForceStop(context, $"the required pull request was skipped by policy ({string.Join("; ", pullRequests.Select(p => $"{p.Alias}: {p.Error}"))}) — change the publish mode there and answer to re-attempt once; if still blocked, the run completes without the pull request");
     }
 
     /// <summary>

@@ -240,6 +240,28 @@ public class SupervisorDeliveryGateTests
     }
 
     [Fact]
+    public async Task A_zero_target_publish_names_only_the_patch_only_repository_never_every_repository()
+    {
+        // Multi-repo: the primary is patch-only, a sibling publishes fine and simply had nothing to open. The card
+        // used to assert "every repository here is configured patch-only" off a single skip entry — false for this
+        // run, and equally false in the mirror case where the SIBLING is the patch-only one. Only repositories the
+        // publish attempt actually reached may be named.
+        var teamId = Guid.NewGuid();
+        var plan = Plan(1, openPullRequest: true);
+
+        var outcome = await ZeroTargetPublishOutcomeAsync(teamId, plan, (RepositoryPublishMode.PatchOnly, true), (RepositoryPublishMode.Branch, true));
+
+        var context = Context(new DeliverySpec { OpenPullRequest = true }, plan, Decision(SupervisorDecisionKinds.Publish, 2, outcome));
+
+        var question = JsonSerializer.Deserialize<SupervisorAskHumanPayload>(
+            SupervisorDeliveryGate.Validate(context, StopDecision())!.PayloadJson, AgentJson.Options)!.Question;
+
+        question.ShouldContain("repo0", Case.Insensitive, "the human can only flip the publish mode on a repository the card actually names");
+        question.ShouldNotContain("repo1", Case.Insensitive, "the sibling PERMITS publishing — naming it would send the human to change a setting that is not the blocker");
+        question.ShouldNotContain("every", Case.Insensitive, "a skip entry describes ONE repository; a publish-permitting sibling contributes none, so 'every repository' is a claim the gate can never see evidence for");
+    }
+
+    [Fact]
     public void A_mixed_opened_and_skipped_publish_attempt_still_satisfies()
     {
         // Multi-repo: one repo got its PR, a sibling is patch-only. Something REAL was delivered against the
