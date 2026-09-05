@@ -329,6 +329,37 @@ public class SupervisorGoldenPromptFidelityTests
             .ShouldBe(SupervisorDecisionGoldenScenarios.All.Count, "two scenarios share a name — the digest's ordering would not be stable");
     }
 
+    /// <summary>
+    /// Every scenario carries the fixture ids the corpus THINKS it carries. <c>All</c> is a static initializer, and
+    /// a <c>static readonly</c> field declared below it in the same class is still its default value while every
+    /// scenario is being built — so the brain-model id and the authorized plan ref, both declared below <c>All</c>,
+    /// read back as <c>Guid.Empty</c> in all 23 contexts, while the E2E and the drift tests that name the same
+    /// symbols directly got the real values. Nothing failed: an all-zeros plan ref still PARSES, so obligations were
+    /// staked against it and every downstream block rendered plausibly.
+    ///
+    /// <para>Pinned on the VALUES rather than on the declaration mechanism, so it keeps holding however the ids are
+    /// later expressed — and fails the moment one of them silently becomes a default again.</para>
+    /// </summary>
+    [Fact]
+    public void Every_scenario_carries_the_fixture_ids_the_corpus_declares()
+    {
+        SupervisorDecisionGoldenScenarios.BrainModelRowId.ShouldNotBe(Guid.Empty, "the brain-model row id is the fixture's identity — an empty one is a default, not a pick");
+
+        foreach (var scenario in SupervisorDecisionGoldenScenarios.All)
+        {
+            scenario.Context.SupervisorModelId.ShouldBe(SupervisorDecisionGoldenScenarios.BrainModelRowId,
+                $"'{scenario.Name}' was built with a different brain id than the corpus declares — the real-model lane resolves the declared one, so the two lanes would be running different fixtures");
+
+            foreach (var plan in scenario.Context.PriorDecisions.Where(d => d.DecisionKind == SupervisorDecisionKinds.Plan))
+            {
+                var planRef = SupervisorOutcome.ReadPlanRef(plan.OutcomeJson);
+
+                planRef.ShouldNotBeNull($"'{scenario.Name}' has a plan whose outcome carries no readable ref — production stakes NOTHING without one, so the whole stopped-now verdict would vanish");
+                planRef!.Value.WorkPlanId.ShouldNotBe(Guid.Empty, $"'{scenario.Name}' stakes its obligations against an all-zeros plan ref — it parses, so nothing complains, and the fixture silently stops describing the run it claims to");
+            }
+        }
+    }
+
     /// <summary>Every scenario's rendered prompt, name-ordered and name-labelled — deterministic over the corpus, so the digest moves only when the RENDERING moves.</summary>
     private static string RenderedCorpus()
     {

@@ -333,12 +333,12 @@ public static class SupervisorDecisionGoldenScenarios
 
     // ── Builders (fixed strings; real folds) ─────────────────────────────────────────────────────────────────
 
-    /// <summary>The operator-picked brain model row id — non-null so the real <c>LlmSupervisorDecider</c> proceeds past its fail-closed "no brain model" guard.</summary>
-    public static readonly Guid BrainModelRowId = Guid.Parse("44444444-4444-4444-4444-444444444444");
+    /// <summary>The operator-picked brain model row id — non-null so the real <c>LlmSupervisorDecider</c> proceeds past its fail-closed "no brain model" guard. A PROPERTY for the ordering reason spelled out on <see cref="SupervisorProfile"/>: as a <c>static readonly</c> declared below <see cref="All"/> it read back as <c>Guid.Empty</c> in every context the corpus ships, while the E2E that names the same symbol got the real id — the two disagreed silently.</summary>
+    public static Guid BrainModelRowId => Guid.Parse("44444444-4444-4444-4444-444444444444");
 
     /// <summary>The canonical real-model fixture goal — deliberately SPECIFIC and unambiguous (clear deliverable + acceptance) so the only correct first move is to PLAN, never to ask a clarifying question. Shared with the trajectory eval so both gates score the same well-specified task.</summary>
-    /// <summary>The fixture's authorized plan ref. Production's plan executor records <c>workPlanId</c>/<c>workPlanVersion</c> on every plan outcome, and the spawn executor stakes NOTHING without one — so a fixture omitting it describes a pre-protocol run whose obligations, and therefore whose stopped-now verdict, do not exist.</summary>
-    private static readonly Guid FixtureWorkPlanId = Guid.Parse("9f2c7d10-3c1e-4a5b-9f8a-6d2b41e07c55");
+    /// <summary>The fixture's authorized plan ref. Production's plan executor records <c>workPlanId</c>/<c>workPlanVersion</c> on every plan outcome, and the spawn executor stakes NOTHING without one — so a fixture omitting it describes a pre-protocol run whose obligations, and therefore whose stopped-now verdict, do not exist. A property for the same ordering reason as <see cref="BrainModelRowId"/>: read from below <see cref="All"/> it staked every fixture's obligations against an all-zeros plan ref.</summary>
+    private static Guid FixtureWorkPlanId => Guid.Parse("9f2c7d10-3c1e-4a5b-9f8a-6d2b41e07c55");
 
     public const string FixtureGoal = "Add server-side email-format validation to the signup endpoint: reject malformed addresses with HTTP 400 and a clear error message, and cover it with unit tests.";
 
