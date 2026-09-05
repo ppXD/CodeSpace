@@ -71,9 +71,11 @@ public static class SupervisorRecitation
         // The other half of the same honesty: a plan that declared abandonEarlierResults REVOKED that promise for the
         // generations before it, so reciting only the carry-over would tell the brain a fold the merge will not do.
         // Both lines can render together — a plan that abandoned gen1 and then produced its own stranded gen2 has one
-        // true fact of each kind, and suppressing either would hide finished work exactly as before.
+        // true fact of each kind, and suppressing either would hide finished work exactly as before. Which is why this
+        // line names WHERE the discard was drawn: side by side, an unlocated count reads as a second disposition of
+        // the very results the line above just promised to merge.
         if (selection.AbandonedFromEarlierGenerations > 0)
-            builder.AppendLine().Append($"{selection.AbandonedFromEarlierGenerations} earlier result(s) excluded — the plan abandoned them.");
+            builder.AppendLine().Append($"{selection.AbandonedFromEarlierGenerations} result(s) from BEFORE the abandoning plan are excluded — it declared that direction wrong.");
 
         return builder.ToString();
     }
