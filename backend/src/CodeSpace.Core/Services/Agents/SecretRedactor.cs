@@ -37,6 +37,11 @@ public sealed class SecretRedactor
     /// or rotated since launch) means it could freeze an unmaskable echoed key, so it must NOT re-tail. A SHA-256
     /// of a long, high-entropy API key is not a practical leak, so persisting the fingerprint (e.g. on the run
     /// handle) is safe where persisting the key would not be.
+    ///
+    /// <para>The digest is taken over a TOTAL order imposed here — length descending, then ordinal — so it is a
+    /// function of the secret SET and of nothing else. Ordering at the hash rather than at the caller is what makes
+    /// that a property of the fingerprint itself: the constructor's <c>OrderByDescending</c> alone would leave the
+    /// digest resting on LINQ's sort being stable over whatever order the caller happened to enumerate in.</para>
     /// </summary>
     public string? Fingerprint
     {
@@ -44,8 +49,10 @@ public sealed class SecretRedactor
         {
             if (IsEmpty) return null;
 
+            var ordered = _secrets.OrderByDescending(s => s.Length).ThenBy(s => s, StringComparer.Ordinal);
+
             // Domain-separated so the digest can't be confused with any other hash of the same value.
-            var bytes = SHA256.HashData(Encoding.UTF8.GetBytes("codespace-secret-fingerprint-v1\n" + string.Join('\n', _secrets)));
+            var bytes = SHA256.HashData(Encoding.UTF8.GetBytes("codespace-secret-fingerprint-v1\n" + string.Join('\n', ordered)));
             return Convert.ToHexString(bytes);
         }
     }

@@ -35,6 +35,20 @@ public class SecretRedactorTests
     }
 
     [Fact]
+    public void Fingerprint_is_a_function_of_the_secret_set_not_of_construction_order()
+    {
+        // Two EQUAL-LENGTH secrets are the case that separates a total order from a stable one: the constructor's
+        // longest-first sort leaves them in whatever order the caller passed, so a fingerprint taken over that order
+        // would differ between these two — and a re-attach whose needles came back in the other order would refuse to
+        // re-tail a run nothing had happened to. The order belongs to the hash, not to the caller.
+        var forward = new SecretRedactor(new[] { "aaa-11112222", "bbb-33334444" }).Fingerprint;
+        var reversed = new SecretRedactor(new[] { "bbb-33334444", "aaa-11112222" }).Fingerprint;
+
+        forward.ShouldNotBeNull();
+        forward.ShouldBe(reversed);
+    }
+
+    [Fact]
     public void Masks_a_secret_embedded_in_a_larger_blob()
     {
         var r = new SecretRedactor(new[] { "sk-secret" });
