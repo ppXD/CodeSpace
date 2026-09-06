@@ -241,13 +241,16 @@ make_censusless_predecessor() {
 set_history() { printf '%s\n' "$@" > "${history}/run-ids"; }
 
 # The guard as GitHub runs it on the streak branch: run 999 is THIS run and must be skipped in its own history.
-run_on() {
-  local ref="$1"; shift
+# The history read's two fallible prerequisites — the token and the listing endpoint — are parameters, because the
+# cases that matter most are the ones where one of them is missing.
+run_on_history() {
+  local token="$1" history_dir="$2" ref="$3"; shift 3
 
   : > "$summary"
   env PATH="${stub_bin}:${PATH}" \
-    GUARD_TEST_HISTORY="$history" \
-    GH_TOKEN=stub-token \
+    GUARD_TEST_HISTORY="$history_dir" \
+    GH_TOKEN="$token" \
+    GITHUB_TOKEN="$token" \
     GITHUB_REF="$ref" \
     GITHUB_REPOSITORY=owner/repo \
     GITHUB_RUN_ID=999 \
@@ -255,6 +258,8 @@ run_on() {
     GITHUB_STEP_SUMMARY="$summary" \
     bash "$guard" "$@"
 }
+
+run_on() { run_on_history stub-token "$history" "$@"; }
 
 expect_summary() {
   local needle="$1" name="$2"; shift 2
@@ -308,6 +313,37 @@ expect_output has "::error::RealModelBenchmark has now measured NOTHING on 3 con
 expect_output has "evaluator health 50 % (infra-dead cells 9/18) below the 90 % floor" \
   "the error names the last recorded skip reason" \
   run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+# Fail OPEN. The history read is this guard's own instrument, and an instrument that cannot read must red nothing:
+# a denied `actions: read`, a token the workflow forgot to pass, a listing endpoint that 500s. Each leaves today's
+# one-off warning standing and says WHICH prerequisite was missing — otherwise the guard becomes the silent nothing
+# it exists to abolish. The history staged above is the streak-3 one that DOES red, so every case below is that same
+# red minus the ability to read the evidence for it.
+expect 0 "a step with no token warns instead of redding the lane" \
+  run_on_history "" "$history" refs/heads/main "$dark_trx" RealModelBenchmark
+
+expect_output has "could NOT run (no GH_TOKEN/GITHUB_TOKEN on this step" \
+  "a step with no token names the missing token as the reason the check could not run" \
+  run_on_history "" "$history" refs/heads/main "$dark_trx" RealModelBenchmark
+
+# ...and the streak cell says so too, rather than reporting a confident 0 nobody measured.
+expect_summary '| `RealModelBenchmark` | UNMEASURED | 0 | 0 | 1 | not checked |' \
+  "an unreadable history reports 'not checked', never a fabricated streak" \
+  run_on_history "" "$history" refs/heads/main "$dark_trx" RealModelBenchmark
+
+# The same fail-open one layer down: the token is there, the listing itself fails (no `actions: read`, or a 5xx).
+unlistable="${tmp}/unlistable-history"
+mkdir -p "$unlistable"
+
+expect 0 "a run-history listing that FAILS warns instead of redding the lane" \
+  run_on_history stub-token "$unlistable" refs/heads/main "$dark_trx" RealModelBenchmark
+
+expect_output has "could NOT run (the workflow's run history could not be listed" \
+  "a failed listing names the listing as the reason, pointing at \`actions: read\`" \
+  run_on_history stub-token "$unlistable" refs/heads/main "$dark_trx" RealModelBenchmark
+
+expect_output lacks "::error::" "a failed listing emits no error at all" \
+  run_on_history stub-token "$unlistable" refs/heads/main "$dark_trx" RealModelBenchmark
 
 # A branch run has no streak to be consecutive with, so the same history must never red it.
 expect 0 "a run off the streak branch never reds on a streak" \
