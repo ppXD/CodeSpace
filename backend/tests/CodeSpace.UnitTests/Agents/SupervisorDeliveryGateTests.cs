@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.PullRequests;
@@ -318,7 +319,7 @@ public class SupervisorDeliveryGateTests
         var context = Context(new DeliverySpec { OpenPullRequest = true },
             Plan(1, openPullRequest: true),
             Decision(SupervisorDecisionKinds.Publish, 2, EmptyPublishOutcome()),
-            GateCard(3, answer: "understood — finish without the PR"),
+            GateCard(3, answer: "understood — finish without the PR", Reason(SupervisorDeliveryGateReason.NothingToOpen)),
             Decision(SupervisorDecisionKinds.Publish, 4, EmptyPublishOutcome()));
 
         SupervisorDeliveryGate.Validate(context, StopDecision()).ShouldBeNull("adjudicated AND re-verified — the waiver stands");
@@ -349,10 +350,10 @@ public class SupervisorDeliveryGateTests
     }
 
     [Fact]
-    public void An_answered_gate_card_invalidated_by_fresh_work_before_the_publish_does_not_release()
+    public void An_answered_gate_card_whose_blocker_the_fresh_publish_no_longer_reports_does_not_release()
     {
-        // The answer adjudicated an OLDER state; a merge then moved the world and the publish after it produced
-        // a fresh verdict the human has never seen. Stale adjudication must not leak forward.
+        // The human ruled on a FAILED provider; a merge then moved the world and the re-check came back EMPTY —
+        // a blocker they have never seen diagnosed. A new question earns a new card, however recent the answer.
         var context = Context(new DeliverySpec { OpenPullRequest = true },
             Plan(1, openPullRequest: true),
             GateCard(2, answer: "fine"),
@@ -360,6 +361,124 @@ public class SupervisorDeliveryGateTests
             Decision(SupervisorDecisionKinds.Publish, 4, EmptyPublishOutcome()));
 
         SupervisorDeliveryGate.Validate(context, StopDecision())!.Kind.ShouldBe(SupervisorDecisionKinds.AskHuman);
+    }
+
+    // ── The live dead-end (run 34001620515): post-answer work must not un-ask the answered question ──
+
+    [Fact]
+    public void An_adjudicated_policy_skip_still_releases_after_the_brain_kept_working()
+    {
+        // The verified CodeFault: plan→publish(skip patch-only repoA)→ask→ANSWER→spawn→merge→publish(skip repoA
+        // again)→ the gate re-minted the IDENTICAL card. The release used to clamp the answer's freshness against
+        // the newest STATE-CHANGING decision, so any spawn the brain authored after the human ruled invalidated
+        // the adjudication forever — and a PatchOnly policy can never become satisfiable, so the card could only
+        // be re-asked, never answered usefully. The answer adjudicates the BLOCKER, not the tape position.
+        var context = Context(new DeliverySpec { OpenPullRequest = true },
+            Plan(1, openPullRequest: true),
+            Decision(SupervisorDecisionKinds.Publish, 2, SkippedPublishOutcome("repoA")),
+            GateCard(3, answer: "patch-only is deliberate — finish without the PR", Reason(SupervisorDeliveryGateReason.PolicySkipped, "repoA")),
+            Decision(SupervisorDecisionKinds.Spawn, 4, "{}"),
+            Decision(SupervisorDecisionKinds.Merge, 5, "{}"),
+            Decision(SupervisorDecisionKinds.Publish, 6, SkippedPublishOutcome("repoA")));
+
+        SupervisorDeliveryGate.Validate(context, StopDecision())
+            .ShouldBeNull("the re-check ran AFTER the new work and reports the SAME policy skip the human already ruled on — re-asking it is a dead end");
+    }
+
+    [Fact]
+    public void A_failed_target_after_an_adjudicated_policy_skip_earns_a_new_card()
+    {
+        // Same tape, except the re-check FAILED on the same repository — a provider fault the human never saw and
+        // one they can actually fix. A blocker of a different KIND is a new question, not a covered one.
+        var context = Context(new DeliverySpec { OpenPullRequest = true },
+            Plan(1, openPullRequest: true),
+            Decision(SupervisorDecisionKinds.Publish, 2, SkippedPublishOutcome("repoA")),
+            GateCard(3, answer: "patch-only is deliberate — finish without the PR", Reason(SupervisorDeliveryGateReason.PolicySkipped, "repoA")),
+            Decision(SupervisorDecisionKinds.Spawn, 4, "{}"),
+            Decision(SupervisorDecisionKinds.Publish, 6, PublishOutcome(new RoomPullRequestOpened { Alias = "repoA", Disposition = RoomPullRequestDisposition.Failed, Error = "the provider rejected the request" })));
+
+        var substituted = SupervisorDeliveryGate.Validate(context, StopDecision());
+
+        substituted!.Kind.ShouldBe(SupervisorDecisionKinds.AskHuman, "a Failed target is a different blocker than a policy skip — the human ruled on the policy, never on this");
+        JsonSerializer.Deserialize<SupervisorAskHumanPayload>(substituted.PayloadJson, AgentJson.Options)!.Question.ShouldContain("the provider rejected the request");
+    }
+
+    [Fact]
+    public void A_policy_skip_on_a_DIFFERENT_repository_earns_a_new_card()
+    {
+        // Same kind of blocker, different repository: the human flipped repoA's publish mode and the re-check
+        // surfaced repoB instead. Naming WHICH repositories is the whole point of the card — a release here would
+        // finish the run on an adjudication of a setting nobody was ever asked about.
+        var context = Context(new DeliverySpec { OpenPullRequest = true },
+            Plan(1, openPullRequest: true),
+            Decision(SupervisorDecisionKinds.Publish, 2, SkippedPublishOutcome("repoA")),
+            GateCard(3, answer: "repoA is deliberate", Reason(SupervisorDeliveryGateReason.PolicySkipped, "repoA")),
+            Decision(SupervisorDecisionKinds.Spawn, 4, "{}"),
+            Decision(SupervisorDecisionKinds.Publish, 6, SkippedPublishOutcome("repoB")));
+
+        var substituted = SupervisorDeliveryGate.Validate(context, StopDecision());
+
+        substituted!.Kind.ShouldBe(SupervisorDecisionKinds.AskHuman, "repoB's policy is a question the human has never been asked");
+        JsonSerializer.Deserialize<SupervisorAskHumanPayload>(substituted.PayloadJson, AgentJson.Options)!.Question.ShouldContain("repoB");
+    }
+
+    [Fact]
+    public void The_same_skipped_repositories_in_a_different_order_are_the_same_blocker()
+    {
+        // The card here is the one PRODUCTION actually minted for the first attempt (not a hand-written copy of
+        // it), so what a card records can never drift from what the gate writes — and the re-check reports the
+        // very same repositories in the opposite order, which must read as the same question, not a new one.
+        var plan = Plan(1, openPullRequest: true);
+        var firstAttempt = Decision(SupervisorDecisionKinds.Publish, 2, SkippedPublishOutcome("repoA", "repoB"));
+
+        var context = Context(new DeliverySpec { OpenPullRequest = true },
+            plan,
+            firstAttempt,
+            MintedGateCard(3, answer: "both are deliberate", plan, firstAttempt),
+            Decision(SupervisorDecisionKinds.Publish, 4, SkippedPublishOutcome("repoB", "repoA")));
+
+        SupervisorDeliveryGate.Validate(context, StopDecision()).ShouldBeNull("the same two repositories are the same question, whatever order the attempt reported them in");
+    }
+
+    [Fact]
+    public void A_card_that_recorded_no_blocker_at_all_never_releases()
+    {
+        // A run parked before the card carried a structured blocker (an in-flight upgrade). What it adjudicated is
+        // unknowable, so it earns ONE fresh card that does name the blocker — never a release nobody can audit.
+        var context = Context(new DeliverySpec { OpenPullRequest = true },
+            Plan(1, openPullRequest: true),
+            Decision(SupervisorDecisionKinds.Publish, 2, SkippedPublishOutcome("repoA")),
+            AskCard(3, question: $"{SupervisorDeliveryGate.QuestionPrefix}the required pull request was skipped by policy (repoA: patch-only)", answer: "fine"),
+            Decision(SupervisorDecisionKinds.Spawn, 4, "{}"),
+            Decision(SupervisorDecisionKinds.Publish, 5, SkippedPublishOutcome("repoA")));
+
+        SupervisorDeliveryGate.Validate(context, StopDecision())!.Kind.ShouldBe(SupervisorDecisionKinds.AskHuman);
+    }
+
+    [Fact]
+    public void Every_parked_card_records_the_blocker_it_asks_about()
+    {
+        var context = Context(new DeliverySpec { OpenPullRequest = true },
+            Plan(1, openPullRequest: true),
+            Decision(SupervisorDecisionKinds.Publish, 2, SkippedPublishOutcome("repoA")));
+
+        var card = SupervisorDeliveryGate.Validate(context, StopDecision())!;
+
+        var reason = JsonNode.Parse(card.PayloadJson)![SupervisorDeliveryGate.ReasonNode].Deserialize<SupervisorDeliveryGateReason>(AgentJson.Options)!;
+        reason.Kind.ShouldBe(SupervisorDeliveryGateReason.PolicySkipped);
+        reason.Aliases.ShouldBe(new[] { "repoA" });
+    }
+
+    [Fact]
+    public void The_blocker_kinds_and_their_wire_key_are_pinned()
+    {
+        // Durable TAPE bytes: a later turn reads these back to recognize what a parked card adjudicated. Renaming
+        // one silently stops every in-flight parked run from releasing — a rename must be a visible decision.
+        SupervisorDeliveryGate.ReasonNode.ShouldBe("gateReason");
+        SupervisorDeliveryGateReason.Unauthorized.ShouldBe("unauthorized");
+        SupervisorDeliveryGateReason.PublishFailed.ShouldBe("publish-failed");
+        SupervisorDeliveryGateReason.NothingToOpen.ShouldBe("nothing-to-open");
+        SupervisorDeliveryGateReason.PolicySkipped.ShouldBe("policy-skipped");
     }
 
     [Fact]
@@ -573,16 +692,47 @@ public class SupervisorDeliveryGateTests
     private static SupervisorPriorDecision Decision(string kind, long sequence, string? outcomeJson) =>
         new() { Id = Guid.NewGuid(), Sequence = sequence, DecisionKind = kind, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = outcomeJson };
 
-    /// <summary>One of THIS gate's own parked cards (question carries the pinned prefix), answered or not.</summary>
-    private static SupervisorPriorDecision GateCard(long sequence, string? answer) =>
-        AskCard(sequence, question: $"{SupervisorDeliveryGate.QuestionPrefix}a pull request could not be opened — resolve", answer);
+    /// <summary>One of THIS gate's own parked cards (question carries the pinned prefix), answered or not, recording WHICH blocker it asked about — defaulting to the failed-provider blocker its own question describes.</summary>
+    private static SupervisorPriorDecision GateCard(long sequence, string? answer, SupervisorDeliveryGateReason? reason = null) =>
+        AskCard(sequence, question: $"{SupervisorDeliveryGate.QuestionPrefix}a pull request could not be opened — resolve", answer,
+            reason ?? Reason(SupervisorDeliveryGateReason.PublishFailed, "primary"));
 
-    private static SupervisorPriorDecision AskCard(long sequence, string question, string? answer) => new()
+    /// <summary>An ANSWERED card the PRODUCTION mint actually produced for <paramref name="tape"/>'s own unsatisfied publish — never a hand-written approximation, so the recorded blocker cannot drift from what the gate writes.</summary>
+    private static SupervisorPriorDecision MintedGateCard(long sequence, string answer, params SupervisorPriorDecision[] tape)
     {
-        Id = Guid.NewGuid(), Sequence = sequence, DecisionKind = SupervisorDecisionKinds.AskHuman, Status = SupervisorDecisionStatus.Succeeded,
-        PayloadJson = JsonSerializer.Serialize(new SupervisorAskHumanPayload { Question = question }, AgentJson.Options),
-        OutcomeJson = JsonSerializer.Serialize(new { question, askHumanToken = "tok", answer }, AgentJson.Options),
-    };
+        var card = SupervisorDeliveryGate.Validate(Context(new DeliverySpec { OpenPullRequest = true }, tape), StopDecision())!;
+
+        card.Kind.ShouldBe(SupervisorDecisionKinds.AskHuman, "the tape handed in must be one the gate genuinely parks on — otherwise the fixture pins nothing");
+
+        return new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = sequence, DecisionKind = SupervisorDecisionKinds.AskHuman, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = card.PayloadJson,
+            OutcomeJson = JsonSerializer.Serialize(new { askHumanToken = "tok", answer }, AgentJson.Options),
+        };
+    }
+
+    /// <summary>A blocker identity naming <paramref name="aliases"/>.</summary>
+    private static SupervisorDeliveryGateReason Reason(string kind, params string[] aliases) => new() { Kind = kind, Aliases = aliases };
+
+    /// <summary>An ask card, optionally carrying the structured root <c>gateReason</c> node beside its question — the shape <c>SupervisorDeliveryGate.IntoAskHuman</c> writes (the release compares THAT node, never the prose).</summary>
+    private static SupervisorPriorDecision AskCard(long sequence, string question, string? answer, SupervisorDeliveryGateReason? reason = null)
+    {
+        var payload = JsonNode.Parse(JsonSerializer.Serialize(new SupervisorAskHumanPayload { Question = question }, AgentJson.Options))!.AsObject();
+
+        if (reason is not null) payload[SupervisorDeliveryGate.ReasonNode] = JsonSerializer.SerializeToNode(reason, AgentJson.Options);
+
+        return new()
+        {
+            Id = Guid.NewGuid(), Sequence = sequence, DecisionKind = SupervisorDecisionKinds.AskHuman, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = payload.ToJsonString(AgentJson.Options),
+            OutcomeJson = JsonSerializer.Serialize(new { question, askHumanToken = "tok", answer }, AgentJson.Options),
+        };
+    }
+
+    /// <summary>A publish attempt that REACHED <paramref name="aliases"/> and skipped every one by publish policy — the all-Skipped shape the policy card is minted from.</summary>
+    private static string SkippedPublishOutcome(params string[] aliases) =>
+        PublishOutcome(aliases.Select(alias => new RoomPullRequestOpened { Alias = alias, Disposition = RoomPullRequestDisposition.Skipped, Error = "patch-only" }).ToArray());
 
     private static string EmptyPublishOutcome() =>
         JsonSerializer.Serialize(new RoomPullRequestResult { PullRequests = Array.Empty<RoomPullRequestOpened>() }, AgentJson.Options);
