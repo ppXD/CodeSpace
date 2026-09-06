@@ -210,6 +210,38 @@ public sealed class CompletionTerminalAuthorityFlowTests
             "the refusal warning renders exactly when the authority raises it — never over a stage nobody owes");
     }
 
+    [Theory]
+    [InlineData(false)]   // the run's ONE repository is branchless and no guard ever ruled — the by-choice record is simply absent
+    [InlineData(true)]    // a SECOND repository the same agent touched is branchless too, and the policy bound only the first
+    public async Task A_branchless_repository_no_policy_record_accounts_for_still_owes_integrate(bool withPermittingSibling)
+    {
+        // The other half of "never for a publish-permitting repository". A branchless row with a null PublishError is
+        // NOT the guard chain's record — three ordinary paths on a repository that PERMITS pushing produce exactly
+        // that shape and write no skip reason at all (AgentRunExecutor.PushProducedBranchIfEnabledAsync: a handle
+        // that cannot push, the fence refusal on a reclaimed run, a push that returned null). And the answered card
+        // names EXACTLY the patch-only repositories the publish attempt reached, so it can never speak for a
+        // permitting sibling that reached no branch either — the identical tape and the identical answer must still
+        // owe the stage in both shapes.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunningRunAsync(teamId, userId, mode: "Enforced");
+        var attemptId = await SeedGradedTapeAsync(runId, teamId, acceptancePassed: true, merged: false, adjudicatedPolicySkip: true);
+        var repositoryId = await SeedRepositoryAsync(teamId);
+        await SeedRunScopedAgentManifestAsync(teamId, runId, attemptId, repositoryId, pushed: false, byChoice: withPermittingSibling);
+        await StakeAsync(runId, teamId, "acceptance:s1", ContractKinds.Acceptance);
+        await StakeAsync(runId, teamId, "output:s1", ContractKinds.Output);
+
+        // The sibling shares the agent run: one multi-repo unit whose SECOND repository the card never named, so the
+        // frontier-capture half is fully satisfied and only the branchless-coverage clause can refuse the claim.
+        if (withPermittingSibling)
+            await SeedRunScopedAgentManifestAsync(teamId, runId, attemptId, await SeedRepositoryAsync(teamId), pushed: false, byChoice: false, alias: "web");
+
+        using var scope = _fixture.BeginScope();
+        var arbitration = await scope.Resolve<ICompletionTerminalAuthority>().ArbitrateAsync(runId, teamId, "Enforced", WorkflowRunStatus.Success, CancellationToken.None);
+
+        arbitration.Decision.ShouldBe(TerminalDecision.Park, "no policy record accounts for every repository this run left branchless — the stage is owed");
+        arbitration.Reason!.ShouldContain("Integrate", customMessage: "the park must name the exact stage nothing excused");
+    }
+
     /// <summary>
     /// The BOND between the terminal gate and the mid-run prompt. The whole-loop headline (real-model runs
     /// 33930904059 / 33943475246) failed here: the decider's "IF YOU STOPPED NOW" block recited four contract
@@ -601,15 +633,15 @@ public sealed class CompletionTerminalAuthorityFlowTests
             JsonSerializer.Serialize(new { question, askHumanToken = "tok", answer = "patch-only is deliberate - finish without the pull request" }, AgentJson.Options));
     }
 
-    /// <summary>The BY-CHOICE branchless row <c>AgentRunExecutor</c> writes when the publish guard chain kept a captured diff off a branch: PatchOnly, no branch, and — the load-bearing detail — no <c>PublishError</c>. <paramref name="pushed"/> flips it to the publish-permitting shape the SAME tape must still be refused over.</summary>
-    private async Task SeedRunScopedAgentManifestAsync(Guid teamId, Guid runId, Guid agentRunId, Guid repositoryId, bool pushed)
+    /// <summary>The BY-CHOICE branchless row <c>AgentRunExecutor</c> writes when the publish guard chain kept a captured diff off a branch: PatchOnly, no branch, no <c>PublishError</c>, and — the load-bearing detail — the winning guard's reason on <c>Summary</c> (<c>AgentRunResult.PublishSkipReason</c>). <paramref name="pushed"/> flips it to the publish-permitting shape the SAME tape must still be refused over; <paramref name="byChoice"/> false is the OTHER permitting shape — branchless, but with no guard record at all.</summary>
+    private async Task SeedRunScopedAgentManifestAsync(Guid teamId, Guid runId, Guid agentRunId, Guid repositoryId, bool pushed, bool byChoice = true, string alias = "primary")
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         db.PublishManifest.Add(new PublishManifest
         {
             Id = Guid.NewGuid(), TeamId = teamId, Kind = PublishManifestKind.Agent, WorkflowRunId = runId, AgentRunId = agentRunId, RepositoryId = repositoryId,
-            RepositoryAlias = "primary", BaseSha = "b1", ChangedFileCount = 1,
+            RepositoryAlias = alias, BaseSha = "b1", ChangedFileCount = 1,
             // The captured diff's artifact — production offloads it BEFORE the guard chain decides whether to push
             // (I1 holds regardless), so it is present on both shapes. Without it the output obligation would never
             // settle and this test would measure the artifact dimension instead of the stage gate it is about.
@@ -617,7 +649,7 @@ public sealed class CompletionTerminalAuthorityFlowTests
             Branch = pushed ? "codespace/agent/s1" : null,
             CommitSha = pushed ? "c1" : null,
             PublishStateValue = pushed ? PublishState.Pushed : PublishState.PatchOnly,
-            Summary = pushed ? null : "the repository requires patch-only publishing",
+            Summary = pushed || !byChoice ? null : "the repository requires patch-only publishing",
         });
         await db.SaveChangesAsync();
     }

@@ -265,6 +265,44 @@ public class UpstreamStageTraceTests
     }
 
     [Fact]
+    public void A_branchless_row_with_no_BY_CHOICE_record_is_never_read_as_policy()
+    {
+        // `PublishError is null` is NOT the guard chain's record — it is the ABSENCE of a failure. Three production
+        // paths on a publish-PERMITTING repository leave branch AND PublishError null and write no skip reason at
+        // all (AgentRunExecutor.PushProducedBranchIfEnabledAsync: a handle that cannot push, the fence refusal on a
+        // reclaimed run, and a push that returned null). The POSITIVE record is the winning guard's reason, folded
+        // onto the row's Summary (AgentRunResult.PublishSkipReason → BuildManifestUpsert) — without it, every one of
+        // those runs read as policy-bounded and completed on a stage nobody had excused.
+        var agentRunId = Guid.NewGuid();
+        var tape = new[] { Decision(1, SupervisorDecisionKinds.Spawn, outcomeJson: SpawnOutcome(agentRunId)), AnsweredPolicySkipCard(2) };
+
+        var branchless = PatchOnlyAgentManifest(agentRunId);
+        branchless.Summary = null;
+
+        UpstreamStageTrace.NotApplicableIntegration(tape, new[] { branchless })
+            .ShouldBeNull("no guard ever ruled on this row — a push that never happened is not a policy that forbade it");
+    }
+
+    [Fact]
+    public void One_repositorys_adjudicated_skip_never_speaks_for_a_branchless_sibling()
+    {
+        // The card the delivery gate mints names EXACTLY the patch-only repositories the publish attempt reached
+        // (SupervisorPullRequestOpener.NothingToOpenAsync filters CapturedWorkByRepositoryAsync by publish mode), so
+        // a publish-permitting sibling that reached no branch contributes no entry and the human never ruled on it.
+        // Matching the blocker's KIND alone let repoA's answer excuse Integrate run-wide, permitting sibling included.
+        var patchOnly = Guid.NewGuid();
+        var permitting = Guid.NewGuid();
+
+        var tape = new[] { Decision(1, SupervisorDecisionKinds.Spawn, outcomeJson: SpawnOutcome(patchOnly, permitting)), AnsweredPolicySkipCard(2) };
+
+        var sibling = PatchOnlyAgentManifest(permitting, alias: "web");
+        sibling.Summary = null;   // a repository that PERMITS pushing: no guard fired, so no by-choice record exists
+
+        UpstreamStageTrace.NotApplicableIntegration(tape, new[] { PatchOnlyAgentManifest(patchOnly), sibling })
+            .ShouldBeNull("'web' reached no branch and no policy accounts for it — one repository's answer cannot excuse the stage for another");
+    }
+
+    [Fact]
     public void An_ATTEMPTED_push_that_failed_is_never_read_as_policy()
     {
         // PublishError non-null is the ledger's own "attempted and failed", not "by choice" (PublishManifest.cs:72).
@@ -352,9 +390,9 @@ public class UpstreamStageTraceTests
         AttemptId = Guid.NewGuid(), UnitId = "s1", WorkUnit = null, AttemptOrdinal = 1, State = AttemptState.Settled,
     };
 
-    /// <summary>A spawn whose single unit produced real, head-eligible work — the frontier the capture check is measured against.</summary>
-    private static string SpawnOutcome(Guid agentRunId) =>
-        $$"""{"agentRunIds":["{{agentRunId}}"],"agentCount":1,"agentResults":[{"agentRunId":"{{agentRunId}}","status":"Succeeded","changedFiles":["a.txt"]}]}""";
+    /// <summary>A spawn whose unit(s) produced real, head-eligible work — the frontier the capture check is measured against.</summary>
+    private static string SpawnOutcome(params Guid[] agentRunIds) =>
+        $$"""{"agentRunIds":[{{string.Join(",", agentRunIds.Select(id => $"\"{id}\""))}}],"agentCount":{{agentRunIds.Length}},"agentResults":[{{string.Join(",", agentRunIds.Select(id => $$"""{"agentRunId":"{{id}}","status":"Succeeded","changedFiles":["a.txt"]}"""))}}]}""";
 
     /// <summary>The delivery gate's OWN card recording a publish-policy skip, answered unless <paramref name="answer"/> is null — the durable record that a human was shown this repository's policy conflict and ruled on it.</summary>
     private static SupervisorPriorDecision AnsweredPolicySkipCard(long sequence, string? answer = "patch-only is deliberate")
@@ -369,11 +407,11 @@ public class UpstreamStageTraceTests
         };
     }
 
-    /// <summary>The BY-CHOICE branchless row <c>AgentRunExecutor</c> writes when the publish guard chain kept a captured diff off a branch: PatchOnly, no branch, and — the load-bearing detail — no <c>PublishError</c>.</summary>
-    private static PublishManifest PatchOnlyAgentManifest(Guid agentRunId) => new()
+    /// <summary>The BY-CHOICE branchless row <c>AgentRunExecutor</c> writes when the publish guard chain kept a captured diff off a branch: PatchOnly, no branch, no <c>PublishError</c>, and — the load-bearing detail — the winning guard's reason on <c>Summary</c> (<c>AgentRunResult.PublishSkipReason</c>, the ONE positive record that the skip was a choice).</summary>
+    private static PublishManifest PatchOnlyAgentManifest(Guid agentRunId, string alias = "primary") => new()
     {
         Id = Guid.NewGuid(), TeamId = Guid.NewGuid(), Kind = PublishManifestKind.Agent, WorkflowRunId = Guid.NewGuid(), AgentRunId = agentRunId,
-        RepositoryAlias = "primary", PublishStateValue = PublishState.PatchOnly, ChangedFileCount = 1, Summary = "the repository requires patch-only publishing",
+        RepositoryAlias = alias, PublishStateValue = PublishState.PatchOnly, ChangedFileCount = 1, Summary = "the repository requires patch-only publishing",
     };
 
     private static PublishManifest IntegrationManifest(PublishState state, string? branch, PublishManifestKind kind = PublishManifestKind.Integration) => new()
