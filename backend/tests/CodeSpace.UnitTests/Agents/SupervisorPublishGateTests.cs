@@ -255,7 +255,7 @@ public class SupervisorPublishGateTests
         var context = Context(
             Decision(SupervisorDecisionKinds.Spawn, 1, SpawnOutcome(hasWork: true)),
             Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome("Skipped", integratedBranch: null, reason: "publish policy: repository is patch-only")),
-            GateCard(3, answer: "patch-only is deliberate — finish without an integrated branch", Blocker("Skipped")),
+            GateCard(3, answer: "patch-only is deliberate — finish without an integrated branch", Blocker("Skipped", "publish policy: repository is patch-only")),
             Decision(SupervisorDecisionKinds.Merge, 4, MergeOutcome("Skipped", integratedBranch: null, reason: "publish policy: repository is patch-only")));
 
         SupervisorPublishGate.Validate(context, StopDecision("captured as patches")).ShouldBeNull(
@@ -271,7 +271,7 @@ public class SupervisorPublishGateTests
         var context = Context(
             Decision(SupervisorDecisionKinds.Spawn, 1, SpawnOutcome(hasWork: true)),
             Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome("Skipped", integratedBranch: null, reason: "publish policy: repository is patch-only")),
-            GateCard(3, answer: "I flipped the repository to branch mode", Blocker("Skipped")));
+            GateCard(3, answer: "I flipped the repository to branch mode", Blocker("Skipped", "publish policy: repository is patch-only")));
 
         SupervisorPublishGate.Validate(context, StopDecision("done"))!.Kind.ShouldBe(SupervisorDecisionKinds.Merge,
             "the answer re-arms the gate for one server-authored attempt — a release here would launder every 'fix it and retry' answer into a waiver");
@@ -285,13 +285,33 @@ public class SupervisorPublishGateTests
         var context = Context(
             Decision(SupervisorDecisionKinds.Spawn, 1, SpawnOutcome(hasWork: true)),
             Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome("Skipped", integratedBranch: null, reason: "publish policy: repository is patch-only")),
-            GateCard(3, answer: "patch-only is deliberate", Blocker("Skipped")),
+            GateCard(3, answer: "patch-only is deliberate", Blocker("Skipped", "publish policy: repository is patch-only")),
             Decision(SupervisorDecisionKinds.Merge, 4, MergeOutcome("Conflicted", integratedBranch: null, reason: "a contribution conflicted while integrating")));
 
         var substituted = SupervisorPublishGate.Validate(context, StopDecision("done"));
 
         substituted!.Kind.ShouldBe(SupervisorDecisionKinds.AskHuman, "a conflict is a different blocker than a policy block — the human ruled on the policy, never on this");
         JsonSerializer.Deserialize<SupervisorAskHumanPayload>(substituted.PayloadJson, AgentJson.Options)!.Question.ShouldContain("a contribution conflicted while integrating");
+    }
+
+    [Fact]
+    public void A_different_SKIP_CAUSE_after_an_adjudicated_policy_block_earns_a_new_card()
+    {
+        // FOUR different causes all record status "Skipped" (RealSupervisorActionExecutor.Integrate.cs: the resolver
+        // threw, the clone target would not resolve, nothing was integrable, the publish policy blocked). Scoping the
+        // blocker by status alone let an answer about "the repository could not be resolved" release the POLICY card
+        // the next merge raises — a question the human has never been shown, silently waived.
+        var context = Context(
+            Decision(SupervisorDecisionKinds.Spawn, 1, SpawnOutcome(hasWork: true)),
+            Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome("Skipped", integratedBranch: null, reason: SupervisorIntegrationOutcome.UnresolvedTargetReason)),
+            GateCard(3, answer: "I re-pointed the repository", Blocker("Skipped", SupervisorIntegrationOutcome.UnresolvedTargetReason)),
+            Decision(SupervisorDecisionKinds.Merge, 4, MergeOutcome("Skipped", integratedBranch: null, reason: "publish policy: repository is patch-only")));
+
+        var substituted = SupervisorPublishGate.Validate(context, StopDecision("done"));
+
+        substituted.ShouldNotBeNull("a policy block is a different question than an unresolvable repository — the human ruled on the latter only");
+        substituted!.Kind.ShouldBe(SupervisorDecisionKinds.AskHuman);
+        ReasonOf(substituted).Aliases.ShouldBe(new[] { "Skipped", SupervisorIntegrationOutcome.PolicyCause });
     }
 
     [Fact]
@@ -321,7 +341,8 @@ public class SupervisorPublishGateTests
         var reason = ReasonOf(SupervisorPublishGate.Validate(context, StopDecision("done"))!);
 
         reason.Kind.ShouldBe(SupervisorDeliveryGateReason.UnpublishedMerge);
-        reason.Aliases.ShouldBe(new[] { "Skipped" }, "the integration STATUS scopes the blocker — the prose carries volatile git text, the node carries the identity");
+        reason.Aliases.ShouldBe(new[] { "Skipped", SupervisorIntegrationOutcome.PolicyCause },
+            "the integration STATUS and the CAUSE behind it scope the blocker — four different causes all record 'Skipped', and the prose that tells them apart carries volatile git text");
     }
 
     // ── (5)/(6): published — the summary requirement ───────────────────────────────────
@@ -451,9 +472,9 @@ public class SupervisorPublishGateTests
         return JsonSerializer.Serialize(new { agentRunIds = new[] { result.AgentRunId }, agentCount = 1, agentResults = new[] { result } }, AgentJson.Options);
     }
 
-    /// <summary>The blocker identity I3's own card records for a merge that diagnosed <paramref name="integrationStatus"/>.</summary>
-    private static SupervisorDeliveryGateReason Blocker(string integrationStatus) =>
-        new() { Kind = SupervisorDeliveryGateReason.UnpublishedMerge, Aliases = new[] { integrationStatus } };
+    /// <summary>The blocker identity I3's own card records for a merge that diagnosed <paramref name="integrationStatus"/> — the status AND the CAUSE tag behind it, classified through the executor's own reason contract so the fixture cannot claim a scoping production never mints.</summary>
+    private static SupervisorDeliveryGateReason Blocker(string integrationStatus, string reason) =>
+        new() { Kind = SupervisorDeliveryGateReason.UnpublishedMerge, Aliases = new[] { integrationStatus, SupervisorIntegrationOutcome.CauseTag(reason) } };
 
     /// <summary>The structured blocker a parked card recorded — read back the same way a later turn reads it off the tape.</summary>
     private static SupervisorDeliveryGateReason ReasonOf(SupervisorDecision card) =>

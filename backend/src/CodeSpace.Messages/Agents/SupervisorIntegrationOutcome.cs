@@ -32,4 +32,44 @@ public sealed record SupervisorIntegrationOutcome
 
     /// <summary>True when the integration conflicted — the signal that gates the resolver loop. Case-insensitive against <see cref="Status"/>.</summary>
     public bool IsConflicted => string.Equals(Status, "Conflicted", StringComparison.OrdinalIgnoreCase);
+
+    // ── The reason contract: the executor's own mint-side words, and the CAUSE tag a gate scopes a blocker by ──
+
+    /// <summary>The publish-guard block's pinned reason PREFIX (the winning guard's own words follow it). Durable tape bytes AND the executor's mint literal — read from here on both sides so a reword can never silently reclassify an in-flight parked run's blocker. Pinned (Rule 8).</summary>
+    public const string PolicyBlockedPrefix = "publish policy: ";
+
+    /// <summary>The pinned reason for a repository that resolved to no clone target. Mint literal + classifier key, shared for the same reason as <see cref="PolicyBlockedPrefix"/>.</summary>
+    public const string UnresolvedTargetReason = "the repository could not be resolved to a clone target";
+
+    /// <summary>The single-repo pinned reason for a set with nothing integrable in it.</summary>
+    public const string NoBaseRevisionReason = "no agent recorded a base revision (an analysis-only run has nothing to integrate)";
+
+    /// <summary>The per-repo (multi-repo axis) pinned reason for a repository nothing integrable touched — the same CAUSE as <see cref="NoBaseRevisionReason"/>, worded for one axis.</summary>
+    public const string NoRepositoryChangeReason = "no agent changed this repository with a recorded base revision";
+
+    /// <summary>Cause tag: the repository's publish policy forbade the integration.</summary>
+    public const string PolicyCause = "policy";
+
+    /// <summary>Cause tag: the repository itself could not be resolved to something clonable.</summary>
+    public const string UnresolvedRepositoryCause = "unresolved-repository";
+
+    /// <summary>Cause tag: the set carried nothing that could be integrated.</summary>
+    public const string NothingIntegrableCause = "nothing-integrable";
+
+    /// <summary>Cause tag: the reason names no cause this contract knows — a git error string, or a multi-repo aggregate's count sentence. STABLE by construction (it is a constant, never the prose), so it scopes a blocker without re-asking a question whose wording drifted.</summary>
+    public const string UnclassifiedCause = "unclassified";
+
+    /// <summary>
+    /// WHICH cause a non-clean integration's <see cref="Reason"/> describes — the tag a stop gate's blocker carries
+    /// BESIDE <see cref="Status"/>. Four distinct causes all record the status "Skipped"
+    /// (<c>RealSupervisorActionExecutor.IntegrateMergedAsync</c>), so the status alone lets an answer about one of
+    /// them release the card a different one raises. Classified off the pinned mint literals above rather than the
+    /// prose, which carries provider error text and per-attempt counts a comparison must never key on.
+    /// </summary>
+    public static string CauseTag(string? reason) =>
+        reason is null ? UnclassifiedCause
+        : reason.StartsWith(PolicyBlockedPrefix, StringComparison.Ordinal) ? PolicyCause
+        : reason == UnresolvedTargetReason ? UnresolvedRepositoryCause
+        : reason == NoBaseRevisionReason || reason == NoRepositoryChangeReason ? NothingIntegrableCause
+        : UnclassifiedCause;
 }
