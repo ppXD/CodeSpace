@@ -251,7 +251,7 @@ public sealed partial class RealSupervisorActionExecutor
             return new { status = "Skipped", reason = ex.Message };
         }
 
-        if (workspace is null) return new { status = "Skipped", reason = "the repository could not be resolved to a clone target" };
+        if (workspace is null) return new { status = "Skipped", reason = SupervisorIntegrationOutcome.UnresolvedTargetReason };
 
         // Only agents that recorded a base AND captured actual work (a patch or a produced branch) can be integrated by
         // patch — a failed / abandoned / analysis-only agent is EXCLUDED so it can't sink the whole clean set. A FAILED
@@ -262,10 +262,10 @@ public sealed partial class RealSupervisorActionExecutor
         var eligible = merged.Where(IsIntegrable).ToList();
         var excluded = merged.Where(m => !IsIntegrable(m)).Select(m => m.AgentRunId.ToString()).ToList();
 
-        if (eligible.Count == 0) return new { status = "Skipped", reason = "no agent recorded a base revision (an analysis-only run has nothing to integrate)", excludedAgents = excluded };
+        if (eligible.Count == 0) return new { status = "Skipped", reason = SupervisorIntegrationOutcome.NoBaseRevisionReason, excludedAgents = excluded };
 
         if (await EvaluatePublishGuardAsync(repoId, cancellationToken).ConfigureAwait(false) is { } guardVerdict)
-            return new { status = "Skipped", reason = $"publish policy: {guardVerdict.Reason}", excludedAgents = excluded };
+            return new { status = "Skipped", reason = $"{SupervisorIntegrationOutcome.PolicyBlockedPrefix}{guardVerdict.Reason}", excludedAgents = excluded };
 
         var anchor = await AnchorBaseShaAsync(repoId, context, eligible[0].BaseSha!, cancellationToken).ConfigureAwait(false);
 
@@ -460,12 +460,12 @@ public sealed partial class RealSupervisorActionExecutor
             return ("Skipped", RepoSkipBlock(repo, "Skipped", ex.Message, excluded));
         }
 
-        if (workspace is null) return ("Skipped", RepoSkipBlock(repo, "Skipped", "the repository could not be resolved to a clone target", excluded));
+        if (workspace is null) return ("Skipped", RepoSkipBlock(repo, "Skipped", SupervisorIntegrationOutcome.UnresolvedTargetReason, excluded));
 
-        if (eligible.Count == 0) return ("Skipped", RepoSkipBlock(repo, "Skipped", "no agent changed this repository with a recorded base revision", excluded));
+        if (eligible.Count == 0) return ("Skipped", RepoSkipBlock(repo, "Skipped", SupervisorIntegrationOutcome.NoRepositoryChangeReason, excluded));
 
         if (await EvaluatePublishGuardAsync(repo.RepositoryId, cancellationToken).ConfigureAwait(false) is { } guardVerdict)
-            return ("Skipped", RepoSkipBlock(repo, "Skipped", $"publish policy: {guardVerdict.Reason}", excluded));
+            return ("Skipped", RepoSkipBlock(repo, "Skipped", $"{SupervisorIntegrationOutcome.PolicyBlockedPrefix}{guardVerdict.Reason}", excluded));
 
         var anchor = await AnchorBaseShaAsync(repo.RepositoryId, context, eligible[0].RepoResult.BaseSha!, cancellationToken).ConfigureAwait(false);
 

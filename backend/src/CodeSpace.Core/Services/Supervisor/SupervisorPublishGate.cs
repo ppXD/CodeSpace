@@ -124,7 +124,10 @@ public static class SupervisorPublishGate
     /// enforced by the rungs above: fresh work is a NEW frontier, whose merge lookup is scoped
     /// <c>Sequence &gt; frontier.Sequence</c> and therefore empty, forcing <see cref="ServerAuthoredMerge"/> first —
     /// so a release only ever rides a verdict produced AFTER the human ruled. <paramref name="integrationStatus"/>
-    /// scopes the blocker: a merge that CONFLICTED is a question a human who ruled on a policy Skip has never seen.
+    /// AND the CAUSE behind it (<see cref="SupervisorIntegrationOutcome.CauseTag"/>) scope the blocker: a merge that
+    /// CONFLICTED is a question a human who ruled on a policy Skip has never seen — and neither is a policy block a
+    /// question they answered about an unresolvable repository, which records the very SAME "Skipped" status
+    /// (<c>RealSupervisorActionExecutor.IntegrateMergedAsync</c> emits it for four distinct causes).
     /// </para>
     /// </summary>
     private static SupervisorDecision? AdjudicateUnpublishedMerge(IReadOnlyList<SupervisorPriorDecision> priorDecisions, SupervisorPriorDecision attemptedMerge, string? integrationStatus, string? reason)
@@ -132,7 +135,9 @@ public static class SupervisorPublishGate
         var blocker = new SupervisorDeliveryGateReason
         {
             Kind = SupervisorDeliveryGateReason.UnpublishedMerge,
-            Aliases = integrationStatus is { Length: > 0 } ? new[] { integrationStatus } : Array.Empty<string>(),
+            Aliases = integrationStatus is { Length: > 0 }
+                ? new[] { integrationStatus, SupervisorIntegrationOutcome.CauseTag(reason) }
+                : Array.Empty<string>(),
         };
 
         if (SupervisorGateAdjudication.AnsweredCardExists(priorDecisions, QuestionPrefix, after: attemptedMerge.Sequence, before: long.MaxValue))
