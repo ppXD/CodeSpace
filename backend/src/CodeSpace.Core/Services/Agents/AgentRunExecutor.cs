@@ -23,6 +23,7 @@ using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Core.Settings;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Review;
 using Microsoft.EntityFrameworkCore;
@@ -2312,11 +2313,46 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             return result;
         }
 
+        var feedback = RenderReviewFeedback(verdict);
+
+        // The verdict itself, on the run's ledger. Until this beat existed the only durable trace of a review that
+        // HAPPENED was its interaction.completed row — which says a model call was made, never what it concluded — so
+        // every reader downstream (the Session Room's "Verified" chip first among them) could only ask "did anything
+        // look at this?" and counted a FLAG as a pass. Recorded for BOTH verdicts, so the answer is the review's own.
+        await RecordOutputReviewVerdictAsync(run, verdict.Approved, feedback, cancellationToken).ConfigureAwait(false);
+
         if (verdict.Approved) return result;   // a clean pass ⇒ byte-identical
 
         await AppendOutputFlaggedWarningAsync(runId, verdict, cancellationToken).ConfigureAwait(false);
 
-        return result with { Status = AgentRunStatus.NeedsReview, CompletionDisposition = CompletionDisposition.NeedsReview, ExitReason = "output-flagged", ReviewFeedback = RenderReviewFeedback(verdict) };
+        return result with { Status = AgentRunStatus.NeedsReview, CompletionDisposition = CompletionDisposition.NeedsReview, ExitReason = "output-flagged", ReviewFeedback = feedback };
+    }
+
+    /// <summary>
+    /// Append the <see cref="WorkflowRunRecordTypes.ReviewCompleted"/> beat carrying the OUTPUT review's own verdict
+    /// (<c>approved</c>) and its words (<c>reason</c> — the same <see cref="RenderReviewFeedback"/> string the result
+    /// persists, so the ledger and the result can never tell different stories about one review).
+    ///
+    /// <para>FAIL-OPEN in both directions, exactly like the critic's <c>review.skipped</c> sibling: a STANDALONE run
+    /// (no <see cref="AgentRun.WorkflowRunId"/>) has no workflow ledger to land on and records nothing, and a ledger
+    /// write that faults is swallowed — saying what a review decided may never itself break the run.</para>
+    /// </summary>
+    private async Task RecordOutputReviewVerdictAsync(AgentRun run, bool approved, string reason, CancellationToken cancellationToken)
+    {
+        if (run.WorkflowRunId is not { } workflowRunId) return;
+
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var payload = JsonSerializer.SerializeToElement(new { kind = LlmStructuredCritic.OutputReviewCallKind, approved, reason });
+
+            await scope.ServiceProvider.GetRequiredService<IRunRecordLogger>()
+                .RecordInteractionAsync(workflowRunId, WorkflowRunRecordTypes.ReviewCompleted, run.NodeId, run.IterationKey, Guid.NewGuid(), parentRecordId: null, payload, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Agent run {RunId}: could not record the output-review verdict beat; the verdict is reported by the result alone", run.Id);
+        }
     }
 
     /// <summary>

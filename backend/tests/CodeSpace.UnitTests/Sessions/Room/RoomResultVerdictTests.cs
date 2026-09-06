@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Sessions.Room;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Agents;
@@ -131,22 +132,50 @@ public class RoomResultVerdictTests
     {
         // The most expensive silence in the room: a run with no operator floor, no model-authored oracle and no output
         // critic terminalizes a green "Result" that reads exactly like a fully-verified one.
-        var verification = RoomProjector.Verification(graded: false, criticReviewed: false);
+        var verification = RoomProjector.Verification(graded: false, review: null);
 
         verification.Verified.ShouldBe(false);
         verification.Note.ShouldBe("Unverified — no check ran on this result", "the copy is BACKEND-authored — the FE never maps a flag to words");
     }
 
     [Theory]
-    [InlineData(true, false)]    // an acceptance grade (the stop's, or any unit's)
-    [InlineData(false, true)]    // an output-critic verdict, including a silent approval
+    [InlineData(true, false)]    // an acceptance grade every graded unit PASSED (the stop's, or the per-unit fold's)
+    [InlineData(false, true)]    // an output-critic verdict that APPROVED
     [InlineData(true, true)]
-    public void A_success_something_checked_carries_no_marker(bool graded, bool criticReviewed)
+    public void A_success_something_checked_and_passed_carries_no_marker(bool graded, bool approvedReview)
     {
-        var verification = RoomProjector.Verification(graded, criticReviewed);
+        var verification = RoomProjector.Verification(graded, approvedReview ? (true, "Looks correct.") : null);
 
         verification.Verified.ShouldBe(true);
         verification.Note.ShouldBeNull("a verified card is byte-identical to before — the chip exists only for the unexamined one");
+    }
+
+    [Fact]
+    public void A_success_whose_output_review_FLAGGED_it_is_not_verified_and_carries_the_reviewers_reason()
+    {
+        // A flag is the STRONGEST evidence the room can hold that something examined this result — and it says the
+        // opposite of verified. Counting "a critic.output call happened" as a pass spent the reviewer's objection as
+        // its endorsement, and the objection itself (persisted as ReviewFeedback) reached no surface at all.
+        var verification = RoomProjector.Verification(graded: false, review: (false, "The migration drops a column with no backfill."));
+
+        verification.Verified.ShouldBe(false);
+        verification.Note.ShouldBe("Unverified — the output review flagged this result: The migration drops a column with no backfill.",
+            "the reviewer's own words reach the card — backend-framed, so the FE still never maps a flag to copy");
+    }
+
+    [Fact]
+    public void A_flagged_review_with_no_words_still_says_which_silence_it_is()
+    {
+        RoomProjector.Verification(graded: false, review: (false, null)).Note
+            .ShouldBe("Unverified — the output review flagged this result.", "an empty rationale must not degrade to the ungraded copy, which claims nothing looked");
+    }
+
+    [Fact]
+    public void A_GRADED_pass_outranks_a_flagged_review()
+    {
+        // The objective oracle ran and every unit it graded passed. The chip reports the strongest EVIDENCE, and a
+        // model's opinion never outranks an executed check — the critic's own beat is only consulted when nothing ran.
+        RoomProjector.Verification(graded: true, review: (false, "I would have done it differently.")).Verified.ShouldBe(true);
     }
 
     [Fact]
@@ -155,7 +184,7 @@ public class RoomResultVerdictTests
         // A prose-judged pass IS a verdict — it decides Solved exactly as before — but the model's account of its own
         // work is not evidence about the work. Presenting it as "verified" would launder the weakest grade the system
         // can produce into the strongest claim the card can make.
-        var verification = RoomProjector.Verification(graded: false, criticReviewed: false, judgedSummary: true);
+        var verification = RoomProjector.Verification(graded: false, review: null, judgedSummary: true);
 
         verification.Verified.ShouldBe(false);
         verification.Note.ShouldBe("Unverified — judged from the stop summary", "the card says WHICH silence it is, not just that there is one");
@@ -165,7 +194,103 @@ public class RoomResultVerdictTests
     public void A_summary_judged_stop_alongside_a_real_check_is_verified()
     {
         // A unit grade or an output critic examined a real result; the prose grade riding alongside takes nothing away.
-        RoomProjector.Verification(graded: true, criticReviewed: false, judgedSummary: true).Verified.ShouldBe(true);
-        RoomProjector.Verification(graded: false, criticReviewed: true, judgedSummary: true).Verified.ShouldBe(true);
+        RoomProjector.Verification(graded: true, review: null, judgedSummary: true).Verified.ShouldBe(true);
+        RoomProjector.Verification(graded: false, review: (true, null), judgedSummary: true).Verified.ShouldBe(true);
     }
+
+    [Fact]
+    public void A_malformed_verdict_beat_reads_as_a_flag_not_as_an_approval()
+    {
+        // A half-written beat proves exactly one thing: a review ran. Reading its silence as approval is the same
+        // over-claim in a smaller font.
+        RoomProjector.ReadReviewVerdict("""{"kind":"critic.output"}""").Approved.ShouldBeFalse();
+        RoomProjector.ReadReviewVerdict("not json at all").Approved.ShouldBeFalse();
+        RoomProjector.ReadReviewVerdict("""{"kind":"critic.output","approved":true,"reason":"Fine."}""").ShouldBe((true, "Fine."));
+    }
+
+    // ── the per-UNIT fold: "did every graded unit PASS" ──
+
+    [Fact]
+    public void A_lane_whose_every_graded_unit_passed_folds_to_a_pass()
+    {
+        var fold = RoomProjector.UnitGrades(new[] { Unit(A, passed: true), Unit(B, passed: true) }, Labels);
+
+        fold.Passed.ShouldBe(true);
+        fold.Failed.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void A_lane_with_ONE_rejected_unit_folds_to_a_failure_that_names_it()
+    {
+        // The defect: the fold asked whether any unit had a grade AT ALL (`is not null`), so a plan-map run under
+        // `errorHandling: continue` reached Success with a REJECTED branch and painted the green, verified Result.
+        var fold = RoomProjector.UnitGrades(new[] { Unit(A, passed: true), Unit(B, passed: false) }, Labels);
+
+        fold.Passed.ShouldBe(false, "one rejected branch means the run's units did NOT all pass — presence of a grade is not a pass");
+        fold.Failed.ShouldBe(new[] { "parser" });
+    }
+
+    [Fact]
+    public void An_UNGRADED_lane_folds_to_null_because_absence_is_not_a_verdict()
+    {
+        RoomProjector.UnitGrades(new[] { Unit(A, passed: null), Unit(B, passed: null) }, Labels).Passed.ShouldBeNull();
+        RoomProjector.UnitGrades(Array.Empty<SupervisorAgentResult>(), Labels).Passed.ShouldBeNull();
+    }
+
+    [Fact]
+    public void A_VACUOUS_pass_is_not_a_graded_unit()
+    {
+        // "no changes were expected and none were produced" is the contract satisfied BY CONSTRUCTION — nothing ran,
+        // so counting it launders "nothing to do" into "checked and correct".
+        var fold = RoomProjector.UnitGrades(new[] { Unit(A, passed: true, detail: AgentAcceptanceContract.NotApplicableDetail) }, Labels);
+
+        fold.Passed.ShouldBeNull("no check executed, so the card must fall through to its unverified copy");
+    }
+
+    [Fact]
+    public void A_rejected_unit_no_phase_labelled_is_named_honestly_rather_than_by_raw_id()
+    {
+        var fold = RoomProjector.UnitGrades(new[] { Unit(Guid.NewGuid(), passed: false) }, Labels);
+
+        fold.Failed.ShouldBe(new[] { "an unnamed unit" });
+    }
+
+    [Theory]
+    [InlineData(1, "Checks failed: u0")]
+    [InlineData(3, "Checks failed: u0, u1, u2")]
+    [InlineData(5, "Checks failed: u0, u1, u2 and 2 more")]
+    public void The_reason_line_names_the_rejected_units_and_stays_one_line(int failedCount, string expected)
+    {
+        var units = Enumerable.Range(0, failedCount).Select(i => $"u{i}").ToArray();
+
+        RoomProjector.ResultVerdict(acceptancePassed: false, Stop(SupervisorStopKind.Succeeded, summary: "All done."), units).Reason.ShouldBe(expected);
+    }
+
+    [Fact]
+    public void The_SUPERVISOR_lanes_reason_line_is_byte_identical()
+    {
+        // The pin: a supervisor run passes no unit names (its stop grade is the head's own verdict), so its card reads
+        // exactly as it did before the per-unit fold existed.
+        RoomProjector.ResultVerdict(acceptancePassed: false, Stop(SupervisorStopKind.Succeeded, summary: "Shipped.")).Reason.ShouldBe("Checks failed");
+        RoomProjector.ResultVerdict(acceptancePassed: false, Stop(SupervisorStopKind.Succeeded, summary: "Shipped."), Array.Empty<string>()).Reason.ShouldBe("Checks failed");
+    }
+
+    [Fact]
+    public void A_supervisor_run_whose_units_ALL_passed_renders_byte_identically()
+    {
+        // Byte-identity pin for the untouched lane: an all-passed supervisor run is verified with no note, exactly as
+        // before — the fold changes what a REJECTED unit means, never what a clean one does.
+        var fold = RoomProjector.UnitGrades(new[] { Unit(A, passed: true), Unit(B, passed: true) }, Labels);
+
+        RoomProjector.ResultVerdict(acceptancePassed: true, Stop(SupervisorStopKind.Succeeded, summary: "Shipped.")).ShouldBe((false, (string?)null));
+        RoomProjector.Verification(graded: fold.Passed is true, review: null).ShouldBe(((bool?)true, (string?)null));
+    }
+
+    private static readonly Guid A = Guid.NewGuid();
+    private static readonly Guid B = Guid.NewGuid();
+
+    private static readonly IReadOnlyDictionary<Guid, string> Labels = new Dictionary<Guid, string> { [A] = "migrations", [B] = "parser" };
+
+    private static SupervisorAgentResult Unit(Guid id, bool? passed, string? detail = null) =>
+        new() { AgentRunId = id, Status = "Succeeded", AcceptancePassed = passed, AcceptanceDetail = detail };
 }

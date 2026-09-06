@@ -45,6 +45,7 @@ public class WorkflowRunRecordTypesTests
     [InlineData("interaction.completed", nameof(WorkflowRunRecordTypes.InteractionCompleted))]
     [InlineData("interaction.failed",    nameof(WorkflowRunRecordTypes.InteractionFailed))]
     [InlineData("review.skipped",        nameof(WorkflowRunRecordTypes.ReviewSkipped))]
+    [InlineData("review.completed",      nameof(WorkflowRunRecordTypes.ReviewCompleted))]
     [InlineData("log",                   nameof(WorkflowRunRecordTypes.Log))]
     public void Wire_value_pinned(string expectedWireValue, string constantName)
     {
