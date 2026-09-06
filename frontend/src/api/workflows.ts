@@ -199,6 +199,10 @@ export interface WorkflowRunSummary {
    *  every run that terminalized before the column existed — absence means "the status word is the whole truth",
    *  never a verdict, so every reader falls back rather than treating it as a degradation. */
   outcome?: string | null;
+  /** True while the completion authority has REFUSED this run's terminal and parked it. Both parks are `Suspended`,
+   *  so the status word alone calls this one "Waiting" — the word for a run whose signal is coming, when in fact
+   *  nothing but a person will ever move it. False for an ask-park and for a park a Continue / Stop already ended. */
+  parked: boolean;
   error: string | null;
   startedAt: string | null;
   completedAt: string | null;

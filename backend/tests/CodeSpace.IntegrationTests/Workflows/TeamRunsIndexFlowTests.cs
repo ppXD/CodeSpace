@@ -816,6 +816,36 @@ public class TeamRunsIndexFlowTests
     }
 
     [Fact]
+    public async Task A_completion_park_needs_attention_and_is_never_counted_live()
+    {
+        // The third Suspended shape. An approval suspend holds a human wait; an agent suspend holds a machine wait
+        // that auto-resumes. A completion PARK holds no wait at all — the authority refused the terminal and stamped
+        // the row — and the stranded-run reconciler deliberately skips a stamped row. Read as "Suspended with no human
+        // wait", it landed in LIVE, where the cockpit painted it with a spinner: a claim of progress that could not
+        // happen, on the one run nothing but a person will ever move.
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var t = DateTimeOffset.UtcNow;
+
+        var parked = await InsertRunAsync(teamA, null, t, workflowId: null, status: WorkflowRunStatus.Suspended, completionParkedAt: t);
+        var machineWait = await InsertRunAsync(teamA, null, t.AddMinutes(-1), workflowId: null, status: WorkflowRunStatus.Suspended);
+        await SeedWaitAsync(machineWait, WorkflowWaitKinds.AgentRun, WorkflowWaitStatuses.Pending);   // auto-resuming work — the contrast case
+
+        (await FilterAsync(teamA, new RunListFilter { NeedsAttention = true }))
+            .Select(r => r.Id).ShouldBe(new[] { parked }, ignoreOrder: true,
+                customMessage: "a completion park is a run only a person can move — the reconciler skips a stamped row, so nothing else ever will");
+
+        var s = await SummaryAsync(teamA, RunListFilter.None, t.AddDays(-1));
+
+        s.Live.ShouldBe(1, "only the agent-wait suspend is auto-resuming work; a park has nothing in flight to be live about");
+        s.SuspendedNeedingReview.ShouldBe(1, "the park is the one suspend needing a review");
+        s.Suspended.ShouldBe(2, "the raw Suspended count is unchanged — both are Suspended");
+
+        var rows = await FilterAsync(teamA, RunListFilter.None);
+        rows.Single(r => r.Id == parked).Parked.ShouldBeTrue("the index must be able to say 'Parked' — both shapes share the one word 'Waiting' otherwise");
+        rows.Single(r => r.Id == machineWait).Parked.ShouldBeFalse("an unstamped suspend is genuinely waiting on its own signal");
+    }
+
+    [Fact]
     public async Task Summary_counts_a_suspended_run_on_an_agent_wait_as_live_work_not_attention()
     {
         var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -993,7 +1023,7 @@ WHERE t.id = roots.run_id AND t.root_run_id IS NULL;");
         return page.Items;
     }
 
-    private async Task<Guid> InsertRunAsync(Guid teamId, Guid? parentRunId, DateTimeOffset createdDate, Guid? workflowId, string? sourceType = null, WorkflowRunStatus status = WorkflowRunStatus.Enqueued, DateTimeOffset? startedAt = null, List<Guid>? repositoryIds = null, List<Guid>? projectIds = null, Guid? actorId = null, string? projectionKind = null, Guid? rootRunId = null, string? rerunFromNodeId = null, Guid? sessionId = null)
+    private async Task<Guid> InsertRunAsync(Guid teamId, Guid? parentRunId, DateTimeOffset createdDate, Guid? workflowId, string? sourceType = null, WorkflowRunStatus status = WorkflowRunStatus.Enqueued, DateTimeOffset? startedAt = null, List<Guid>? repositoryIds = null, List<Guid>? projectIds = null, Guid? actorId = null, string? projectionKind = null, Guid? rootRunId = null, string? rerunFromNodeId = null, Guid? sessionId = null, DateTimeOffset? completionParkedAt = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -1030,6 +1060,7 @@ WHERE t.id = roots.run_id AND t.root_run_id IS NULL;");
             RootRunId = rootRunId,   // a production fork carries its lineage root; null = its own root (group key = own Id)
             RerunFromNodeId = rerunFromNodeId,   // the node a rerun fork re-ran from; null for the original / a replay
             Status = status,
+            CompletionParkedAt = completionParkedAt,   // the completion authority's refusal stamp — the discriminator between the two Suspended shapes
             StartedAt = startedAt,   // set for a "stuck running" run — NeedsAttention's running-stale branch reads StartedAt (not the audit timestamp)
             ScopeRepositoryIds = repositoryIds ?? [],
             ScopeProjectIds = projectIds ?? [],

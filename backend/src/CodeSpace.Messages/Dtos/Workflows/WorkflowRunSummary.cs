@@ -60,6 +60,15 @@ public sealed record WorkflowRunSummary
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Outcome { get; init; }
 
+    /// <summary>
+    /// True while the completion authority has REFUSED this run's terminal and parked it (<c>completion_parked_at</c>
+    /// on a still-<c>Suspended</c> row). Both parks are <see cref="Status"/> <c>Suspended</c> and would otherwise share
+    /// the one word "Waiting", which says a run only a person can move is merely pending — so the index reads this to
+    /// say "Parked" instead. False for an ask-park (waiting on its own approval / timer / callback) and for every run
+    /// whose park a Continue / Stop / terminal already ended.
+    /// </summary>
+    public bool Parked { get; init; }
+
     public string? Error { get; init; }
     public DateTimeOffset? StartedAt { get; init; }
     public DateTimeOffset? CompletedAt { get; init; }
