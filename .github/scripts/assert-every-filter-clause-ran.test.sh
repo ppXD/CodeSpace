@@ -321,6 +321,17 @@ make_predecessor 333 "$dark_trx" RealModelBenchmark
 expect 1 "a run with no census is stepped over, not counted as a measurement" \
   run_on refs/heads/main "$dark_trx" RealModelBenchmark
 
+# ...and the report says how thin that evidence is. "Streak 3" over three censuses and "streak 3" over one census
+# and a dozen silent runs are the same number describing opposite situations, so both counts travel with it: here
+# three predecessors were scanned and only two of them carried a census at all.
+expect_output has "2 of the 3 predecessor runs scanned carried a census" \
+  "the error names how much evidence the streak actually rests on" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+expect_summary "Streaks read from 2 of the 3 predecessor runs scanned" \
+  "the step summary names the same evidence base as the error" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
 # The same laundering one step subtler, and the one a live rehearsal actually caught: a run this lane was cancelled
 # in still ships a census — its OTHER lanes' tables — so the archive is not empty, the clause is merely ABSENT from
 # it. Reading that absence as "measured" reset a real four-run streak back to one.
