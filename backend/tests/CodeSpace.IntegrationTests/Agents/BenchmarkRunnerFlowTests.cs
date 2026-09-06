@@ -156,6 +156,12 @@ public sealed class BenchmarkRunnerFlowTests
     /// <summary>The verbatim text the gateway's Anthropic-compat layer kills the CLI with — the thing the whole repair exists for, so the test must fail on nothing less.</summary>
     private const string LiveGatewayFormatFault = "API Error: Content block is not a thinking block";
 
+    /// <summary>A REAL seed-corpus fixture ref — the respawn RE-STAGES through <c>IBenchmarkFixtureStager</c>, so a cell that can respawn must name a fixture the stager actually knows (the inline <c>"inline"</c> ref the plumbing cases use cannot be re-staged, and must not be, since they never fault).</summary>
+    private const string SeedFixtureRef = "failing-assertion";
+
+    /// <summary>The documented one-line edit that makes <c>SeedFixtureRef</c>'s check exit 0 — what "the agent solved it" means for this fixture.</summary>
+    private const string SolveTheSeedFixture = "printf 'REPORTED_SUM=5\\n' > solution.sh\n";
+
     /// <summary>
     /// A CLI that dies on a mangled wire, and solves the task once it gets a clean one. It tells the two attempts apart
     /// by the degrade ITSELF (<c>MAX_THINKING_TOKENS=0</c>) rather than a counter, so a mitigation that stopped at the
@@ -164,7 +170,7 @@ public sealed class BenchmarkRunnerFlowTests
     /// </summary>
     private static readonly string GatewayFaultThenSolveScript =
         $"if [ \"${AgentRetryCauses.MaxThinkingTokensEnvVar}\" = \"0\" ]; then\n" +
-        "  printf '#!/bin/sh\\nexit 0\\n' > check.sh\n" +
+        SolveTheSeedFixture +
         "  printf '{\"type\":\"agent_message\",\"message\":\"solved once the wire was clean\"}\\n'\n" +
         "  printf '{\"type\":\"task_complete\",\"message\":\"completed\"}\\n'\n" +
         "  exit 0\n" +
@@ -174,6 +180,22 @@ public sealed class BenchmarkRunnerFlowTests
 
     /// <summary>A gateway that stays broken: every attempt dies the same way, mitigated or not.</summary>
     private static readonly string GatewayFaultAlwaysScript = $"echo '{LiveGatewayFormatFault}' >&2\nexit 1\n";
+
+    /// <summary>
+    /// The pollution shape: the FIRST attempt edits the workspace — it even forges the solve — and litters a file, THEN
+    /// dies on the mangled wire; the mitigated respawn touches nothing. So the cell can only grade PASS if the oracle
+    /// judged the dead attempt's leftovers instead of the respawn's own (empty) work.
+    /// </summary>
+    private static readonly string GatewayFaultAfterDirtyingScript =
+        $"if [ \"${AgentRetryCauses.MaxThinkingTokensEnvVar}\" = \"0\" ]; then\n" +
+        "  printf '{\"type\":\"agent_message\",\"message\":\"clean wire, but this attempt changes nothing\"}\\n'\n" +
+        "  printf '{\"type\":\"task_complete\",\"message\":\"completed\"}\\n'\n" +
+        "  exit 0\n" +
+        "fi\n" +
+        SolveTheSeedFixture +
+        "printf 'scratch\\n' > leftover.txt\n" +
+        $"echo '{LiveGatewayFormatFault}' >&2\n" +
+        "exit 1\n";
 
     [Fact]
     public async Task A_cell_the_gateway_mangled_is_respawned_once_and_gets_a_real_capability_verdict()
@@ -185,10 +207,10 @@ public sealed class BenchmarkRunnerFlowTests
         if (OperatingSystem.IsWindows()) return;   // the fake CLI + check are /bin/sh scripts the runner spawns
 
         using var cli = new FakeBenchmarkCli(GatewayFaultThenSolveScript);
-        using var workspace = BenchmarkFixture.StageFailing();   // the check fails until an agent that GOT A TURN fixes it
+        using var workspace = BenchmarkFixture.StageSeed();   // a REAL seed fixture: the check fails until an agent that GOT A TURN fixes it
 
         var teamId = await SeedTeamAsync();
-        var task = TestsPassTask();
+        var task = SeedFixtureTask();
 
         var result = await RunAsync(task, BenchmarkMode.HarnessCli, workspace.Directory, teamId);
 
@@ -214,10 +236,10 @@ public sealed class BenchmarkRunnerFlowTests
         if (OperatingSystem.IsWindows()) return;
 
         using var cli = new FakeBenchmarkCli(GatewayFaultAlwaysScript);
-        using var workspace = BenchmarkFixture.StageFailing();
+        using var workspace = BenchmarkFixture.StageSeed();
 
         var teamId = await SeedTeamAsync();
-        var task = TestsPassTask() with { Modes = new[] { BenchmarkMode.HarnessCliWithMcp } };
+        var task = SeedFixtureTask() with { Modes = new[] { BenchmarkMode.HarnessCliWithMcp } };
 
         var result = await RunAsync(task, BenchmarkMode.HarnessCliWithMcp, workspace.Directory, teamId);
 
@@ -230,6 +252,58 @@ public sealed class BenchmarkRunnerFlowTests
                 .ShouldBe(2, "the second fault buys nothing further — two attempts, not three");
 
         CellStateOf(task, result).ShouldBe(CorpusCellState.InfraUnknown, "infra-dead, exactly as before — the respawn never launders a broken gateway into a capability verdict");
+    }
+
+    [Fact]
+    public async Task A_respawn_is_graded_over_a_freshly_staged_tree_not_the_dead_attempts_leftovers()
+    {
+        // The respawn's SOUNDNESS condition. The faulted attempt is DOCUMENTED as one where "the model never got a
+        // turn" — but nothing enforced it: both attempts execute in the SAME directory and the oracle runs over that
+        // directory AFTERWARDS, so anything the dead attempt wrote before the gateway killed it was graded as the
+        // respawn's work. Here the first attempt forges the solve outright and litters a scratch file, then dies; the
+        // respawn touches nothing. A PASS would mean the corpus scored the UNION of two attempts as one @1 cell.
+        if (OperatingSystem.IsWindows()) return;
+
+        using var cli = new FakeBenchmarkCli(GatewayFaultAfterDirtyingScript);
+        using var workspace = BenchmarkFixture.StageSeed();
+
+        var teamId = await SeedTeamAsync();
+        var task = SeedFixtureTask();
+
+        var result = await RunAsync(task, BenchmarkMode.HarnessCli, workspace.Directory, teamId);
+
+        result.FormatFaultRespawns.ShouldBe(1, "the repair WAS bought — this is the respawned path, not the single-attempt one");
+        result.RunStatus.ShouldBe(AgentRunStatus.Succeeded, "the respawn itself completed; the question is which tree it was graded over");
+
+        result.Grade.Passed.ShouldBeFalse(
+            "the dead attempt's forged solve must not count as the respawn's work — a pass here means the oracle graded the union of both attempts, i.e. the repair laundered a first attempt into a capability claim");
+        result.Grade.Detail.ShouldBe("tests-failed-exit-1", "the fixture is back in its failing start-state, so the check fails exactly as it does on a cell nobody touched");
+
+        File.Exists(Path.Combine(workspace.Directory, "leftover.txt"))
+            .ShouldBeFalse("the re-stage WIPES the workspace, not just the files the fixture happens to own — a scratch file the dead attempt left behind is still first-attempt work sitting in the respawn's tree");
+
+        (await File.ReadAllTextAsync(Path.Combine(workspace.Directory, SeedBenchmarkFixtures.SolutionFileName)))
+            .ShouldContain("REPORTED_SUM=4", customMessage: "the editable file is the FIXTURE's failing start-state again, re-materialized by the production stager — not the dead attempt's edit");
+
+        CellStateOf(task, result).ShouldBe(CorpusCellState.Unsolved, "an honest model verdict over a clean tree — never infra, and never a laundered solve");
+    }
+
+    [Fact]
+    public async Task A_cell_whose_fixture_cannot_be_re_staged_fails_closed_instead_of_grading_a_wiped_tree()
+    {
+        // FAIL-CLOSED, the other half of the re-stage. The wipe happens BEFORE the stager runs, so a stager that
+        // cannot resolve the ref leaves an EMPTY workspace — and an empty workspace grades tests-failed, which would
+        // charge the MODEL for an infra fault. So the throw must PROPAGATE: the corpus loop records the pair as an
+        // infra error (InfraUnknown, outside the solve denominator) instead of scoring a tree nothing vouches for.
+        if (OperatingSystem.IsWindows()) return;
+
+        using var cli = new FakeBenchmarkCli(GatewayFaultThenSolveScript);
+        using var workspace = BenchmarkFixture.StageSeed();
+
+        var teamId = await SeedTeamAsync();
+        var task = SeedFixtureTask() with { FixtureRef = "no-such-fixture" };
+
+        await Should.ThrowAsync<ArgumentException>(() => RunAsync(task, BenchmarkMode.HarnessCli, workspace.Directory, teamId));
     }
 
     // ─── Helpers ───
@@ -269,6 +343,20 @@ public sealed class BenchmarkRunnerFlowTests
         TimeoutSeconds = 60,
     };
 
+    /// <summary>
+    /// A cell on a REAL seed-corpus fixture, for the cases that actually fault. The respawn re-stages through the
+    /// production <c>IBenchmarkFixtureStager</c>, so a cell that can fault must name a ref that stager resolves — the
+    /// plumbing cases' <c>"inline"</c> ref would throw there (correct fail-closed behaviour, but not what these
+    /// measure). The test command is the seed corpus's OWN default, so the oracle here is the corpus's oracle.
+    /// </summary>
+    private static BenchmarkTask SeedFixtureTask() => TestsPassTask() with
+    {
+        Id = "gateway-fault-respawn-proof",
+        Description = "prove the gateway-format-fault repair end to end over a real seed fixture",
+        FixtureRef = SeedFixtureRef,
+        TestCommand = SeedBenchmarkCorpus.DefaultTestCommand,
+    };
+
     private async Task<Guid> SeedTeamAsync()
     {
         using var scope = _fixture.BeginScope();
@@ -288,8 +376,8 @@ public sealed class BenchmarkRunnerFlowTests
     /// <summary>
     /// Stages a benchmark fixture as a self-contained, offline local workspace — a dir with a <c>check.sh</c>
     /// whose exit code is the fixture's start-state. <see cref="StageSolved"/> already passes (exit 0);
-    /// <see cref="StageFailing"/> fails (exit 1). The runner runs the agent here; the grader re-runs the check
-    /// here. Disposing removes the dir.
+    /// <see cref="StageFailing"/> fails (exit 1); <see cref="StageSeed"/> materializes a REAL seed fixture through
+    /// production. The runner runs the agent here; the grader re-runs the check here. Disposing removes the dir.
     /// </summary>
     private sealed class BenchmarkFixture : IDisposable
     {
@@ -297,16 +385,31 @@ public sealed class BenchmarkRunnerFlowTests
 
         private BenchmarkFixture(int checkExitCode)
         {
-            Directory = Path.Combine(Path.GetTempPath(), "cs-bench-fx-" + Guid.NewGuid().ToString("N"));
-            System.IO.Directory.CreateDirectory(Directory);
+            Directory = NewWorkspace();
 
             var check = Path.Combine(Directory, "check.sh");
             File.WriteAllText(check, $"#!/bin/sh\nexit {checkExitCode}\n");
             File.SetUnixFileMode(check, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
         }
 
+        private BenchmarkFixture(string seedFixtureRef)
+        {
+            Directory = NewWorkspace();
+            SeedBenchmarkFixtures.Stage(seedFixtureRef, Directory);
+        }
+
+        private static string NewWorkspace()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "cs-bench-fx-" + Guid.NewGuid().ToString("N"));
+            System.IO.Directory.CreateDirectory(directory);
+            return directory;
+        }
+
         public static BenchmarkFixture StageSolved() => new(checkExitCode: 0);
         public static BenchmarkFixture StageFailing() => new(checkExitCode: 1);
+
+        /// <summary>Stage <see cref="SeedFixtureRef"/> through the PRODUCTION materialiser the corpus's stager delegates to (Rule 12.7) — so the start-state a respawn re-stages to is byte-identical to what the corpus loop staged, never a copy in this file that can drift from it.</summary>
+        public static BenchmarkFixture StageSeed() => new(SeedFixtureRef);
 
         public void Dispose()
         {
