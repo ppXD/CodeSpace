@@ -456,6 +456,38 @@ public class SupervisorDeliveryGateTests
     }
 
     [Fact]
+    public void An_adjudicated_reason_with_null_aliases_on_the_tape_does_not_throw()
+    {
+        // Defensive tape hygiene — SupervisorDeliveryGateReason.Aliases defaults to Array.Empty<string>() at
+        // construction, so no C# caller can ever hand SerializeToNode a genuinely null Aliases; but nothing stops
+        // OLDER or hand-edited tape bytes from spelling "aliases":null directly, and System.Text.Json happily
+        // deserializes that straight through the non-nullable-by-annotation property. SameBlocker's SequenceEqual
+        // used to NRE on the null side — an exception ReadReason's JsonException-only catch can never see, since
+        // it is thrown one call later, at the SameBlocker call site inside AdjudicatedSameBlocker.
+        var payload = JsonNode.Parse(JsonSerializer.Serialize(new SupervisorAskHumanPayload { Question = $"{SupervisorDeliveryGate.QuestionPrefix}nothing to open" }, AgentJson.Options))!.AsObject();
+        payload[SupervisorDeliveryGate.ReasonNode] = JsonNode.Parse($"{{\"kind\":\"{SupervisorDeliveryGateReason.NothingToOpen}\",\"aliases\":null}}");
+
+        var card = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 3, DecisionKind = SupervisorDecisionKinds.AskHuman, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = payload.ToJsonString(AgentJson.Options),
+            OutcomeJson = JsonSerializer.Serialize(new { askHumanToken = "tok", answer = "fine" }, AgentJson.Options),
+        };
+
+        var context = Context(new DeliverySpec { OpenPullRequest = true },
+            Plan(1, openPullRequest: true),
+            Decision(SupervisorDecisionKinds.Publish, 2, EmptyPublishOutcome()),
+            card,
+            Decision(SupervisorDecisionKinds.Publish, 4, EmptyPublishOutcome()));
+
+        SupervisorDecision? substituted = null;
+
+        Should.NotThrow(() => substituted = SupervisorDeliveryGate.Validate(context, StopDecision()));
+
+        substituted.ShouldBeNull("null aliases on the tape reads as no aliases — the same nothing-to-open blocker either side, so the earlier answer stands as the waiver");
+    }
+
+    [Fact]
     public void Every_parked_card_records_the_blocker_it_asks_about()
     {
         var context = Context(new DeliverySpec { OpenPullRequest = true },
