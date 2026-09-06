@@ -173,7 +173,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             DurationMs = DurationOf(focus.CreatedDate, focus.StartedAt, parked ? focus.CompletionParkedAt : focus.CompletedAt),
             StatusWord = parked ? RoomNarrative.ParkedWord : null,
             ParkedAt = parked ? focus.CompletionParkedAt : null,
-            CompletionNote = CompletionNoteOf(turn, focus),
+            CompletionNote = CompletionNoteOf(turn, focus, facts.PolicyBoundedStage),
             Attempts = AttemptsOf(turn, runId),
         };
     }
@@ -185,13 +185,17 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// also stays silent: the turn skeleton carries the LATEST attempt's stamp, and every rerun is stamped
     /// independently, so attributing it here would be a confident lie (same discipline as the Summary fallback).
     /// </summary>
-    private static string? CompletionNoteOf(SessionTurn turn, FocusRun focus)
+    private static string? CompletionNoteOf(SessionTurn turn, FocusRun focus, string? policyBoundedStage)
     {
         if (!focus.IsLatest) return null;
 
         var mode = CompletionPolicy.ModeFor(turn.CompletionEnforcementMode);
+        var authority = mode == Messages.Contracts.CompletionEnforcementMode.Legacy ? null : $"Completion: {mode}";
 
-        return mode == Messages.Contracts.CompletionEnforcementMode.Legacy ? null : $"Completion: {mode}";
+        // The policy-bounded stage rides beside the authority, and independently of it: it explains a finished run
+        // that integrated nothing, which an operator needs whatever mode owned the terminal (a Legacy run is
+        // silent about the authority precisely because there was none — not about where its branch went).
+        return string.Join(" · ", new[] { authority, policyBoundedStage }.Where(part => part is { Length: > 0 })) is { Length: > 0 } note ? note : null;
     }
 
     /// <summary>
@@ -460,6 +464,14 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             ? await DeepFailureErrorAsync(runId, cancellationToken).ConfigureAwait(false)
             : null;
 
+        // The stage the repository policy put out of reach, through the completion authority's OWN reader — so the
+        // Room and the authority can never word one run's patch-only finish differently. Only a TERMINAL turn asks
+        // (a live run has not finished integrating anything yet), so a running turn pays zero extra query.
+        var policyBoundedStage = WorkflowRunState.IsTerminal(status)
+            ? UpstreamStageTrace.NotApplicableIntegration(decisions.Select(ToPriorDecision).ToList(),
+                await _manifests.ListForWorkflowRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false))?.Reason
+            : null;
+
         return new RoomTurnFacts
         {
             Rounds = rounds,
@@ -481,6 +493,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             AcceptancePassed = acceptance,
             Delivery = delivery,
             RawError = deepError ?? error,
+            PolicyBoundedStage = policyBoundedStage,
             RetrySteps = retrySteps,
             RespawnSteps = respawnSteps,
             NetworkPosture = await NetworkPostureAsync(runId, teamId, cancellationToken).ConfigureAwait(false),
