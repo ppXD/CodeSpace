@@ -1030,6 +1030,11 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             .Where(r => r.Id == runId && r.TeamId == teamId && r.Status == current.Value)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(r => r.Status, WorkflowRunStatus.Cancelled)
+                // Stopping a parked run ENDS the park, so the stamp goes out with the terminal — the same clearing
+                // Continue and the engine's own success / failure terminals perform. Left behind, it outlives the state
+                // it describes: the lesson distiller labels a stamped row "Parked" whatever its status, and
+                // ActionableSuspendPredicate reads it as a run still awaiting a person.
+                .SetProperty(r => r.CompletionParkedAt, (DateTimeOffset?)null)
                 .SetProperty(r => r.CompletedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
             .ConfigureAwait(false);
 
