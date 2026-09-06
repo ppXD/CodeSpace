@@ -32,11 +32,17 @@ namespace CodeSpace.E2ETests.Workflows;
 /// <c>LlmSupervisorDecider</c> via the <see cref="SupervisorDeciderMode"/> seam, real jobs, real git on a bare
 /// <c>file://</c> remote, real Postgres) with a PATCH-ONLY repository and an operator delivery contract that
 /// REQUIRES a pull request. The two operator intents conflict by construction, so the honest arc is: the live
-/// model drives plan → spawn → merge → stop; the delivery gate forces a server publish (policy-Skipped, zero
-/// PRs); the NEXT live stop parks on the gate's own card naming the patch-only conflict; a human answer buys
-/// exactly ONE fresh re-attempt (still Skipped); and only then does the answer stand as the interim waiver and
-/// release the live model's stop to an honest terminal — with zero pull requests and the whole adjudication on
-/// the durable tape.
+/// model drives plan → spawn → merge → stop; the stop meets the server's TWO gates in turn, both blocked by the
+/// same repository policy — I3 wants an integrated branch the policy forbids pushing, then DC-2b wants a pull
+/// request it forbids opening. Each parks ONCE on its own card naming the patch-only conflict, each answer buys
+/// exactly ONE fresh server re-attempt (still blocked), and each re-check reporting the SAME blocker stands as
+/// the interim waiver. Only then does the live model's stop reach an honest terminal — zero pull requests, zero
+/// branches, and the whole adjudication on the durable tape.
+///
+/// <para>BOTH cards matter to the arc, not just the delivery one. An immutable publish policy can never be
+/// satisfied from inside the run, so a gate that only ever RE-ASKED would strand it — which is precisely what
+/// each gate did before it learned to release on the blocker a human ruled on. The loop below therefore
+/// adjudicates every card the run raises and calls a REPEAT of an already-answered question the dead end.</para>
 ///
 /// <para><b>What the live arm adds over the deterministic tiers</b> (40 unit + flow integration tests already
 /// pin the gate's ladder): the two rungs only a live brain can exercise — a REAL model's stop being rejected
@@ -46,8 +52,8 @@ namespace CodeSpace.E2ETests.Workflows;
 ///
 /// <para><b>Gate policy</b> (three-way, the reaction-arc shape): a CODE FAULT reds the blessed wire at once —
 /// above all the exact regression this arm exists to kill: the run terminalizing Success while the required-PR
-/// contract was never parked on a human (vacuous success), a re-park after adjudication (the released-state
-/// dead-end), or an engine Failure. A CAPABILITY MISS (the model parked short of ever stopping) is REPORTED,
+/// contract was never parked on a human (vacuous success), a re-park after adjudication — a card whose exact
+/// question a human ALREADY answered (the released-state dead-end) — or an engine Failure. A CAPABILITY MISS (the model parked short of ever stopping) is REPORTED,
 /// never gated — model capability is the headline whole-loop arc's criterion, not this arm's. Self-skips
 /// LOUDLY without <c>CODESPACE_LLM_*</c> (skip ≠ pass); FAILS on a partial secret config. POSIX-only.
 /// <c>[Category=RealModel]</c> so it runs ONLY on the real-model lane.</para>
@@ -138,31 +144,44 @@ public sealed class RealModelDeliveryGateE2ETests : IDisposable
             if (afterDrive.PendingActionToken is null)
                 return (RealModelOutcome.CapabilityMiss, $"the live model never drove to a gate-parked stop (runStatus={afterDrive.RunStatus}, decisions=[{afterDrive.KindTrail}]) — reported, not gating");
 
-            if (afterDrive.PendingQuestion?.StartsWith(SupervisorDeliveryGate.QuestionPrefix, StringComparison.Ordinal) != true)
+            // EITHER server gate: a patch-only stop meets I3 first (no branch the policy lets it push) and DC-2b
+            // second (no pull request it lets it open). Both are the SAME conflict, asked by the rung that owns it.
+            if (!IsServerGateCard(afterDrive.PendingQuestion))
                 return (RealModelOutcome.CapabilityMiss, $"the run parked on a NON-gate card ('{Truncate(afterDrive.PendingQuestion)}') before the delivery conflict ever surfaced — reported, not gating");
 
             if (ParkedCardFault(afterDrive.PendingQuestion, afterDrive.AgentManifestCount, afterDrive.AnyAgentShowsWork) is { } cardFault) return cardFault;
 
-            afterDrive.PublishCount.ShouldBeGreaterThanOrEqualTo(1, "the gate must have forced the first server publish before parking");
+            // ── Phase 2: adjudicate every card the arc raises; each answer buys ONE re-attempt, then releases. ──
+            var answered = new List<string>();
+            var final = afterDrive;
 
-            // ── Phase 2: the human adjudicates; the answer must buy exactly ONE re-attempt, then release. ──
-            await AnswerAsync(afterDrive.PendingActionToken, userId, teamId, "understood — patch-only is accepted, finish without the pull request");
-            await jobClient.WaitForPendingAsync();
+            while (final.PendingActionToken is not null && IsServerGateCard(final.PendingQuestion))
+            {
+                if (answered.Contains(final.PendingQuestion!, StringComparer.Ordinal))
+                    return (RealModelOutcome.CodeFault, $"a gate RE-PARKED on the state the human already adjudicated ('{Truncate(final.PendingQuestion)}') — the released-state dead-end both gates' releases exist to close (decisions=[{final.KindTrail}])");
 
-            var final = await SnapshotAsync(runId, teamId);
+                if (answered.Count >= MaxAdjudications)
+                    return (RealModelOutcome.CodeFault, $"the gates raised more than {MaxAdjudications} distinct cards ('{Truncate(final.PendingQuestion)}') — one immutable policy must not cost a human an unbounded number of rulings (decisions=[{final.KindTrail}])");
 
-            if (final.RunStatus == WorkflowRunStatus.Failure)
-                return (RealModelOutcome.CodeFault, $"the run FAILED after the adjudication answer (error={final.RunError ?? "(none)"})");
+                answered.Add(final.PendingQuestion!);
 
-            if (final.PendingActionToken is not null && final.PendingQuestion?.StartsWith(SupervisorDeliveryGate.QuestionPrefix, StringComparison.Ordinal) == true)
-                return (RealModelOutcome.CodeFault, $"the gate RE-PARKED on the state the human already adjudicated ('{Truncate(final.PendingQuestion)}') — the released-state dead-end H1's release exists to close (decisions=[{final.KindTrail}])");
+                await AnswerAsync(final.PendingActionToken, userId, teamId, "understood — patch-only is accepted, finish without the pull request");
+                await jobClient.WaitForPendingAsync();
+
+                final = await SnapshotAsync(runId, teamId);
+
+                if (final.RunStatus == WorkflowRunStatus.Failure)
+                    return (RealModelOutcome.CodeFault, $"the run FAILED after an adjudication answer (error={final.RunError ?? "(none)"})");
+            }
 
             if (final.RunStatus != WorkflowRunStatus.Success)
                 return (RealModelOutcome.CapabilityMiss, $"the live model did not drive to a terminal after the answer (runStatus={final.RunStatus}, decisions=[{final.KindTrail}]) — reported, not gating");
 
             // ── The honest terminal: exactly one adjudicated re-attempt, zero pull requests, model-authored stop. ──
-            if (final.PublishCount < afterDrive.PublishCount + 1)
-                return (RealModelOutcome.CodeFault, $"the answer did not buy the ONE fresh re-attempt (publishes before={afterDrive.PublishCount}, after={final.PublishCount}; decisions=[{final.KindTrail}]) — a direct release would turn 'fix it and retry' answers into silent waivers");
+            // At least TWO publishes: DC-2b's own first attempt (which earns its card) and the ONE fresh re-attempt
+            // its answer buys. A direct release would turn every "fix it and retry" answer into a silent waiver.
+            if (final.PublishCount < 2)
+                return (RealModelOutcome.CodeFault, $"the delivery answer did not buy the ONE fresh re-attempt (publishes={final.PublishCount}, cards adjudicated={answered.Count}; decisions=[{final.KindTrail}]) — a direct release would turn 'fix it and retry' answers into silent waivers");
 
             if (final.AnyPublishSatisfied)
                 return (RealModelOutcome.CodeFault, "a publish reported an Opened/AlreadyOpened PR against a patch-only repo — the policy guard did not hold");
@@ -183,12 +202,20 @@ public sealed class RealModelDeliveryGateE2ETests : IDisposable
             if (final.Outcome != nameof(SupervisorStopKind.Succeeded))
                 return (RealModelOutcome.CodeFault, $"a model-authored, human-adjudicated stop rendered '{final.Outcome ?? "(null)"}' rather than a plain success — the index would report this honest finish as a degraded one");
 
-            var verdict = $"{Provider} '{model}': the live brain drove real work to an integrated head; the delivery gate parked the required-PR × patch-only conflict on a human card, "
-                        + $"the answer bought exactly one re-attempt (publishes={final.PublishCount}, all policy-skipped), and the adjudicated stop terminalized honestly with ZERO pull requests as outcome '{final.Outcome}'.";
+            var verdict = $"{Provider} '{model}': the live brain drove real work; the server gates parked the patch-only conflict on {answered.Count} human card(s), "
+                        + $"each answer bought exactly one re-attempt (publishes={final.PublishCount}, all policy-skipped), and the adjudicated stop terminalized honestly with ZERO pull requests as outcome '{final.Outcome}'.";
             Console.WriteLine($"[delivery-gate-e2e] {verdict}");
             return (RealModelOutcome.Drove, verdict);
         });
     }
+
+    /// <summary>How many DISTINCT gate cards one immutable policy may cost a human. Two by construction — I3's branch and DC-2b's pull request — with one spare for a genuinely different blocker (a provider fault) the live run may also hit. Past that the run is asking more than it can honestly justify.</summary>
+    private const int MaxAdjudications = 3;
+
+    /// <summary>Whether the parked card is one of the SERVER's own stop gates, either rung. Recognized by the pinned question prefixes the gates themselves own, so a model-authored ask (which the clamp strips those tokens from) can never be mistaken for one.</summary>
+    private static bool IsServerGateCard(string? question) =>
+        question?.StartsWith(SupervisorDeliveryGate.QuestionPrefix, StringComparison.Ordinal) == true
+        || question?.StartsWith(SupervisorPublishGate.QuestionPrefix, StringComparison.Ordinal) == true;
 
     // ─── The parked card's verdict ───────────────────────────────────────────────────
 
