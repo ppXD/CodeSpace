@@ -323,17 +323,26 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
 
         var stop = decisions.LastOrDefault(d => d.DecisionKind == SupervisorDecisionKinds.Stop);
 
+        // Every agent this turn ran, keyed twice: by run id (the per-unit grade fold's names) and by the LEDGER CELL
+        // (nodeId + iterationKey) each agent's own review beat lands on, so a flagged branch can be named too.
+        var agentRefs = phases.SelectMany(p => p.Agents).ToList();
+
         // The per-UNIT objective grades, folded ONCE for every consumer below (the card's verdict + the Verified chip),
         // named by the same label the agent cards carry so a failed unit is identifiable rather than a bare id.
-        var units = UnitGrades(agentResults, phases.SelectMany(p => p.Agents).GroupBy(a => a.AgentRunId).ToDictionary(g => g.Key, g => RoomNarrative.UnitLabel(g.First())));
+        var units = UnitGrades(agentResults, agentRefs.GroupBy(a => a.AgentRunId).ToDictionary(g => g.Key, g => RoomNarrative.UnitLabel(g.First())));
 
         // The run's objective verdict. A SUPERVISOR run has one: its stop's own grade, which is the head's verdict over
         // the units it kept. The quick (single-agent) and standard (plan-map) lanes have NO stop tape at all, so their
         // per-unit grades ARE the only objective verdict the run produced — reading acceptance off the absent stop
         // alone is what let a plan-map run under `errorHandling: continue` reach Success with a REJECTED branch and
         // still paint the green, verified Result.
-        var acceptance = stop is null ? units.Passed : SupervisorOutcome.ReadAcceptanceGradePassed(stop.OutcomeJson);
-        var failedUnits = stop is null ? units.Failed : Array.Empty<string>();
+        //
+        // A stop that recorded NO run-level grade falls through to the same per-unit fold rather than to silence: a
+        // supervisor that stopped without grading, over a REJECTED unit, otherwise left acceptance null — which reads
+        // as "nothing was checked" on a card whose check had just refused the work.
+        var stopGrade = stop is null ? null : SupervisorOutcome.ReadAcceptanceGradePassed(stop.OutcomeJson);
+        var acceptance = stopGrade ?? units.Passed;
+        var failedUnits = stopGrade is null ? units.Failed : Array.Empty<string>();
 
         // A stop is a clean terminal Success at the ENGINE level even when the run did NOT finish well — a fail-closed
         // model GIVE-UP (no-decision / no-model / unknown-decision), OR a SERVER-FORCED stop (a budget / governance /
@@ -436,7 +445,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             Rounds = rounds,
             Checklist = checklist,
             FinalAnswer = BuildFinalAnswer(finalAnswerText, changedFileIdentities, delivery, verdict,
-                await VerificationOf(runId, status, verdict, acceptance, SupervisorOutcome.ReadAcceptanceGradeJudgedSummary(stop?.OutcomeJson), units, cancellationToken).ConfigureAwait(false)),
+                await VerificationOf(runId, status, verdict, acceptance, SupervisorOutcome.ReadAcceptanceGradeJudgedSummary(stop?.OutcomeJson), units, ReviewUnitLabels(agentRefs), cancellationToken).ConfigureAwait(false)),
             LatestLines = latestLines,
             AgentFiles = agentFiles,
             AgentFileIdentities = agentFileIdentities,
@@ -693,16 +702,22 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// no diff was expected and none came) is NOT a graded unit: no check ran, so counting it would launder "nothing
     /// to do" into "checked and correct", which is the same silence this fold exists to end one rung down.</para>
     ///
+    /// <para>A WAIVED unit (<see cref="SupervisorOutcome.IsWaived"/>) is not a graded unit either, in EITHER direction:
+    /// a human authorized forgoing its verification, so its executor-level grade — which can read FAILED, since the
+    /// waive is what let the work through anyway — is not a rejection the card may report, and the waive is certainly
+    /// not a pass. Rejection is read through the ONE documented definition of withheld-from-head, with the waived arm
+    /// excluded explicitly, so this fold and every door to the head agree on what a refused unit is.</para>
+    ///
     /// <para>Pure; internal so it is unit-pinned directly.</para>
     /// </summary>
     internal static (bool? Passed, IReadOnlyList<string> Failed) UnitGrades(IReadOnlyList<SupervisorAgentResult> results, IReadOnlyDictionary<Guid, string> labels)
     {
-        var graded = results.Where(r => r.AcceptancePassed is not null && !AgentAcceptanceContract.IsVacuousPass(r.AcceptanceDetail)).ToList();
+        var graded = results.Where(r => r.AcceptancePassed is not null && !SupervisorOutcome.IsWaived(r) && !AgentAcceptanceContract.IsVacuousPass(r.AcceptanceDetail)).ToList();
 
         if (graded.Count == 0) return (null, Array.Empty<string>());
 
         var failed = graded
-            .Where(r => r.AcceptancePassed is false)
+            .Where(r => SupervisorOutcome.IsWithheldFromHead(r) && !SupervisorOutcome.IsWaived(r))
             .Select(r => labels.TryGetValue(r.AgentRunId, out var label) ? label : UnnamedUnit)
             .ToList();
 
@@ -714,14 +729,32 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     {
         if (failedUnits is not { Count: > 0 }) return AcceptanceFailedReason;
 
-        var named = failedUnits.Distinct(StringComparer.Ordinal).ToList();
+        var named = failedUnits.Select(ClipLabel).Distinct(StringComparer.Ordinal).ToList();
         var shown = string.Join(", ", named.Take(MaxNamedFailedUnits));
 
         return named.Count <= MaxNamedFailedUnits ? $"{AcceptanceFailedReason}: {shown}" : $"{AcceptanceFailedReason}: {shown} and {named.Count - MaxNamedFailedUnits} more";
     }
 
+    /// <summary>
+    /// One unit's display name, clipped for a line that has to stay ONE line. The names are model-authored subtask
+    /// titles and goal lines — a real one can run past a hundred characters, and this line renders in the card's small
+    /// uppercase eyebrow, so bounding the COUNT alone (three of them) still let a single title overflow the row it
+    /// sits in. Clipped on a char boundary that never splits a surrogate pair, so an emoji cannot become U+FFFD.
+    /// </summary>
+    private static string ClipLabel(string label)
+    {
+        if (label.Length <= MaxUnitLabelChars) return label;
+
+        var cut = char.IsHighSurrogate(label[MaxUnitLabelChars - 1]) ? MaxUnitLabelChars - 1 : MaxUnitLabelChars;
+
+        return label[..cut].TrimEnd() + "…";
+    }
+
     /// <summary>How many rejected units the reason line names before it summarizes the rest.</summary>
     private const int MaxNamedFailedUnits = 3;
+
+    /// <summary>How much of ONE named unit rides the reason line / the flagged chip. The full title stays on the unit's own card.</summary>
+    private const int MaxUnitLabelChars = 40;
 
     /// <summary>What the reason line calls a rejected unit no phase carried a label for — honest about the gap rather than printing a raw id.</summary>
     private const string UnnamedUnit = "an unnamed unit";
@@ -735,20 +768,24 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// <summary>The chip's copy for a stop whose only grade read the model's own closing PROSE. A real verdict, but not one that examined a result — so the card says which it was rather than claiming the stronger thing.</summary>
     internal const string SummaryJudgedNote = "Unverified — judged from the stop summary";
 
+    /// <summary>The verb the flagged chip leads with, shared by its unnamed and its unit-naming form so the two can never drift.</summary>
+    private const string FlaggedNoteVerb = "Unverified — the output review flagged";
+
     /// <summary>The chip's copy for a result the OUTPUT critic READ and REJECTED. A flag is the strongest evidence the room has that a result was examined, and it says the opposite of verified — so it can never be spent as one.</summary>
-    internal const string FlaggedNoteLead = "Unverified — the output review flagged this result";
+    internal const string FlaggedNoteLead = FlaggedNoteVerb + " this result";
 
     /// <summary>How much of the reviewer's own critique rides the chip. The full text stays on the agent's result; the card carries enough to act on without becoming a wall.</summary>
     private const int MaxFlagReasonChars = 240;
 
-    /// <summary>The flagged chip's copy — the lead plus the REVIEWER's own words (the same <c>ReviewFeedback</c> string the result persists), bounded. The words are the critic's; the framing is the backend's.</summary>
-    internal static string FlaggedNote(string? reason)
+    /// <summary>The flagged chip's copy — the lead plus the REVIEWER's own words (the same <c>ReviewFeedback</c> string the result persists), bounded. The words are the critic's; the framing is the backend's. <paramref name="unit"/> NAMES the flagged branch when the run fanned out to more than one reviewed unit; a single-unit run says "this result", exactly as before.</summary>
+    internal static string FlaggedNote(string? reason, string? unit = null)
     {
+        var lead = string.IsNullOrWhiteSpace(unit) ? FlaggedNoteLead : $"{FlaggedNoteVerb} {ClipLabel(unit.Trim())}";
         var trimmed = reason?.Trim();
 
-        if (string.IsNullOrEmpty(trimmed)) return $"{FlaggedNoteLead}.";
+        if (string.IsNullOrEmpty(trimmed)) return $"{lead}.";
 
-        return $"{FlaggedNoteLead}: {(trimmed.Length <= MaxFlagReasonChars ? trimmed : trimmed[..MaxFlagReasonChars].TrimEnd() + "…")}";
+        return $"{lead}: {(trimmed.Length <= MaxFlagReasonChars ? trimmed : trimmed[..MaxFlagReasonChars].TrimEnd() + "…")}";
     }
 
     /// <summary>
@@ -786,7 +823,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// and must not gain a second, competing one (a rejected grade degrades the card, so its reason line is the one
     /// place that names the failure).</para>
     /// </summary>
-    private async Task<(bool? Verified, string? Note)> VerificationOf(Guid runId, Messages.Enums.WorkflowRunStatus status, (bool Degraded, string? Reason) verdict, bool? acceptance, bool judgedSummary, (bool? Passed, IReadOnlyList<string> Failed) units, CancellationToken cancellationToken)
+    private async Task<(bool? Verified, string? Note)> VerificationOf(Guid runId, Messages.Enums.WorkflowRunStatus status, (bool Degraded, string? Reason) verdict, bool? acceptance, bool judgedSummary, (bool? Passed, IReadOnlyList<string> Failed) units, IReadOnlyDictionary<string, string> cellLabels, CancellationToken cancellationToken)
     {
         if (status != Messages.Enums.WorkflowRunStatus.Success || verdict.Degraded) return (null, null);
 
@@ -794,23 +831,28 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
 
         return graded
             ? Verification(graded: true, review: null, judgedSummary)
-            : Verification(graded: false, await OutputReviewAsync(runId, cancellationToken).ConfigureAwait(false), judgedSummary);
+            : Verification(graded: false, await OutputReviewAsync(runId, cellLabels, cancellationToken).ConfigureAwait(false), judgedSummary);
     }
 
-    /// <summary>The pure half of <see cref="VerificationOf"/> — pinned directly so the claim "something checked this" can never be widened by accident. <paramref name="review"/> is the output critic's recorded verdict, or null when it never recorded one.</summary>
-    internal static (bool? Verified, string? Note) Verification(bool graded, (bool Approved, string? Reason)? review, bool judgedSummary = false)
+    /// <summary>The pure half of <see cref="VerificationOf"/> — pinned directly so the claim "something checked this" can never be widened by accident. <paramref name="review"/> is the output critic's folded verdict over every reviewed unit, or null when none recorded one.</summary>
+    internal static (bool? Verified, string? Note) Verification(bool graded, (bool Approved, string? Reason, string? Unit)? review, bool judgedSummary = false)
     {
         if (graded || review is { Approved: true }) return (true, null);
 
-        if (review is { Approved: false } flag) return (false, FlaggedNote(flag.Reason));
+        if (review is { Approved: false } flag) return (false, FlaggedNote(flag.Reason, flag.Unit));
 
         return (false, judgedSummary ? SummaryJudgedNote : UnverifiedNote);
     }
 
     /// <summary>
-    /// The OUTPUT critic's own verdict for this run, off its durable <c>review.completed</c> beat — the LATEST one, so
-    /// an Improve-mode revise round that turned a flag into an approval is read at its final word. Null when the critic
-    /// recorded no verdict at all.
+    /// The OUTPUT critic's verdict for this run, folded over EVERY reviewed unit off the durable <c>review.completed</c>
+    /// beats. Null when the critic recorded no verdict at all.
+    ///
+    /// <para>A run is one ledger, but a review is per UNIT: every fanned-out branch (a plan-map's, a supervisor
+    /// spawn's) runs its own output review and writes its own beat onto the same run. Reading the run's single newest
+    /// beat therefore let ONE branch's approval outrank a sibling's FLAG purely by write order, which is the same
+    /// over-claim this reader exists to end restated one rung wider. So: latest beat PER REVIEWED UNIT (the revise
+    /// round's final word, per branch), and the run is verified only when every one of those units approved.</para>
     ///
     /// <para>A run older than that beat has only the review's <c>interaction.completed</c> row, which records that a
     /// call HAPPENED and not what it decided. Reading it as an approval is exactly the over-claim this method exists to
@@ -818,39 +860,107 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// the same over-claim pointed the other way. So it stands as the legacy fallback, and ONLY there: every run with a
     /// recorded verdict is judged by the verdict.</para>
     /// </summary>
-    private async Task<(bool Approved, string? Reason)?> OutputReviewAsync(Guid runId, CancellationToken cancellationToken)
+    private async Task<(bool Approved, string? Reason, string? Unit)?> OutputReviewAsync(Guid runId, IReadOnlyDictionary<string, string> unitLabels, CancellationToken cancellationToken)
     {
-        var payload = await _db.WorkflowRunRecord.AsNoTracking()
+        var beats = await _db.WorkflowRunRecord.AsNoTracking()
             .Where(r => r.RunId == runId && r.RecordType == WorkflowRunRecordTypes.ReviewCompleted)
             .Where(r => EF.Functions.JsonContains(r.PayloadJson, CriticOutputReviewProbe))
             .OrderByDescending(r => r.Sequence)
-            .Select(r => r.PayloadJson)
-            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+            .Select(r => new { r.NodeId, r.IterationKey, r.Sequence, r.PayloadJson })
+            .Take(MaxReviewBeatScan)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        if (payload is not null) return ReadReviewVerdict(payload);
+        if (beats.Count > 0)
+            return FoldReviewVerdicts(beats.Select(b => (CellKey(b.NodeId, b.IterationKey), b.Sequence, b.PayloadJson)).ToList(), unitLabels);
 
         return await _db.WorkflowRunRecord.AsNoTracking()
             .Where(r => r.RunId == runId && r.RecordType == WorkflowRunRecordTypes.InteractionCompleted)
             .AnyAsync(r => EF.Functions.JsonContains(r.PayloadJson, CriticOutputReviewProbe), cancellationToken).ConfigureAwait(false)
-            ? (true, null)
+            ? (true, null, null)
             : null;
     }
 
-    /// <summary>Parse <c>approved</c> + <c>reason</c> out of a <c>review.completed</c> payload. A malformed / half-written beat reads as a FLAG carrying no reason — the conservative direction, since the one thing it proves is that a review ran. Internal for direct unit pinning.</summary>
-    internal static (bool Approved, string? Reason) ReadReviewVerdict(string payloadJson)
+    /// <summary>
+    /// Fold the run's <c>review.completed</c> beats into ONE verdict: the LATEST beat per reviewed UNIT (so an
+    /// Improve-mode revise round is read at its final word, per branch), and an approval only when EVERY unit approved.
+    /// A flagged unit carries its own reviewer's words, and — when the run reviewed more than one — the NAME of the
+    /// branch that was flagged, since "this result" is not an answer a reader of a twelve-branch fan-out can act on.
+    /// Null when there were no beats.
+    ///
+    /// <para>The unit is the beat's own <c>agentRunId</c>, NOT the ledger cell it landed on: a supervisor's entire
+    /// per-turn fan-out shares one <c>(NodeId, IterationKey)</c> (<c>&lt;nodeId&gt;#turn{N}</c> — stamped per TURN, not
+    /// per agent), so keying on the cell would re-collapse K sibling reviews into one and hand the verdict back to
+    /// write order on exactly the lane this fold exists to fix. The cell is the FALLBACK for a beat that named no
+    /// agent run — still finer than the run, and the map lane's cells are already one per branch.</para>
+    ///
+    /// <para>Pure; internal so it is unit-pinned directly rather than only through the DB tier.</para>
+    /// </summary>
+    internal static (bool Approved, string? Reason, string? Unit)? FoldReviewVerdicts(IReadOnlyList<(string Cell, long Sequence, string PayloadJson)> beats, IReadOnlyDictionary<string, string> unitLabels)
+    {
+        if (beats.Count == 0) return null;
+
+        var units = beats
+            .Select(b => (b.Sequence, b.Cell, Verdict: ReadReviewVerdict(b.PayloadJson)))
+            .GroupBy(b => b.Verdict.AgentRunId ?? b.Cell, StringComparer.Ordinal)
+            .Select(g => (Unit: g.Key, g.MaxBy(b => b.Sequence).Verdict))
+            .OrderBy(u => u.Unit, StringComparer.Ordinal)
+            .ToList();
+
+        var flagged = units.Where(u => !u.Verdict.Approved).ToList();
+
+        if (flagged.Count == 0) return (true, null, null);
+
+        // Named only for a real fan-out: with ONE reviewed unit there is nothing to disambiguate, and "this result" is
+        // the accurate word (and the byte-identical one). A fanned-out unit no phase labelled is named honestly.
+        var name = units.Count == 1 ? null : unitLabels.TryGetValue(flagged[0].Unit, out var label) ? label : UnnamedUnit;
+
+        return (false, flagged[0].Verdict.Reason, name);
+    }
+
+    /// <summary>The ledger CELL one review beat landed on — the same <c>(NodeId, IterationKey)</c> pair the executor stamps and a phase's agent ref carries, with both absent forms normalized so a null and an empty iteration key are one cell, not two. Joined on a UNIT SEPARATOR no node id or iteration key can contain, so <c>("ab", "c")</c> and <c>("a", "bc")</c> stay two cells.</summary>
+    internal static string CellKey(string? nodeId, string? iterationKey) => $"{nodeId}\u001f{iterationKey}";
+
+    /// <summary>
+    /// Each reviewed unit's display NAME — the same label the agent cards carry, so a flagged branch is named the way
+    /// the reader already knows it. Keyed BOTH ways the fold can identify a unit: by agent-run id (what the beat
+    /// names) and by ledger cell (its fallback). A guid and a unit-separated cell key cannot collide, so one map
+    /// answers either question. The cell arm keeps the FIRST agent of a shared cell — all it can honestly say about a
+    /// turn cell several agents share.
+    /// </summary>
+    private static IReadOnlyDictionary<string, string> ReviewUnitLabels(IReadOnlyList<PhaseAgentRef> agents)
+    {
+        var labels = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (var agent in agents)
+        {
+            var label = RoomNarrative.UnitLabel(agent);
+
+            labels[agent.AgentRunId.ToString()] = label;
+            labels.TryAdd(CellKey(agent.NodeId, agent.IterationKey), label);
+        }
+
+        return labels;
+    }
+
+    /// <summary>How many review beats the fold reads, newest first — a wide fan-out with several revise rounds each still fits, and the oldest rows dropped by the bound are superseded rounds.</summary>
+    private const int MaxReviewBeatScan = 400;
+
+    /// <summary>Parse the reviewed <c>agentRunId</c> plus <c>approved</c> + <c>reason</c> out of a <c>review.completed</c> payload, in ONE pass (the fold reads every beat). A malformed / half-written beat reads as a FLAG carrying no reason — the conservative direction, since the one thing it proves is that a review ran; a beat naming no agent run falls back to its ledger cell in the fold. Internal for direct unit pinning.</summary>
+    internal static (bool Approved, string? Reason, string? AgentRunId) ReadReviewVerdict(string payloadJson)
     {
         try
         {
             using var doc = JsonDocument.Parse(payloadJson);
 
-            if (doc.RootElement.ValueKind != JsonValueKind.Object) return (false, null);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return (false, null, null);
 
             var approved = doc.RootElement.TryGetProperty("approved", out var a) && a.ValueKind == JsonValueKind.True;
             var reason = doc.RootElement.TryGetProperty("reason", out var r) && r.ValueKind == JsonValueKind.String ? r.GetString() : null;
+            var agentRunId = doc.RootElement.TryGetProperty("agentRunId", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null;
 
-            return (approved, reason);
+            return (approved, reason, string.IsNullOrEmpty(agentRunId) ? null : agentRunId);
         }
-        catch (JsonException) { return (false, null); }
+        catch (JsonException) { return (false, null, null); }
     }
 
     /// <summary>The rich final answer — the stop summary text + typed attachments (the changed files + the PR). Images are a true gap (no run output exposes them). Null when there's nothing to deliver. <paramref name="verdict"/> marks a stop that did NOT finish well (a give-up / forced stop, or a failed acceptance grade) so the card renders neutral, not a green success.</summary>
