@@ -432,7 +432,7 @@ public static class SupervisorDecisionGoldenScenarios
             TurnNumber = turn,
             PriorDecisions = priors,
             SupervisorModelId = BrainModelRowId,
-            CompletionRecital = RenderStoppedNowRecital(priors),
+            CompletionRecital = RenderStoppedNowRecital(priors, null),
         };
 
     /// <summary>
@@ -454,11 +454,18 @@ public static class SupervisorDecisionGoldenScenarios
     /// authorized wave has staked an obligation, exactly as production omits the block until then. Shared with the
     /// multi-turn trajectory harness, which renders the identical block from the identical inputs.
     ///
-    /// <para>All THREE of the block's inputs are supplied, or the corpus grades the model on a prompt production
-    /// does not ship: the assessment, the tape's own upstream STAGE TRACE, and the lane's mode profile. Withholding
-    /// the last two kept the corpus a dimensions-only rendering, so a conflicted-then-unverified fixture read LESS
-    /// unresolved than the same tape does in production — the pinned digest could not have detected a regression in
-    /// a line no scenario was able to reach.</para>
+    /// <para>All FOUR of the block's inputs are supplied, or the corpus grades the model on a prompt production
+    /// does not ship: the assessment, the tape's own upstream STAGE TRACE, the lane's mode profile, and the LANDING
+    /// REACH the action mask derives from the same tape and cap. Withholding the middle two kept the corpus a
+    /// dimensions-only rendering, so a conflicted-then-unverified fixture read LESS unresolved than the same tape
+    /// does in production — the pinned digest could not have detected a regression in a line no scenario was able
+    /// to reach. Withholding the last one let the steer name a landing verb off no state at all, which is the miss
+    /// <c>resolve-cap-spent</c> reproduced live (run 34027621996): "Land that work" over a recorded conflict whose
+    /// resolve cap was spent reads as <c>merge</c>, and merging there just repeats the conflicted integration.</para>
+    ///
+    /// <para><paramref name="maxResolveAttempts"/> is the run's own cap and MUST be the same value the scenario puts
+    /// on its context — a recital rendered against the lane default while the context declares 2 would tell the
+    /// model a resolve is spent that the mask three lines below reports as available.</para>
     ///
     /// <para>The enforcement mode is derived the way a launching run derives it — <c>CompletionPolicy.DefaultModeFor</c>
     /// over THIS lane's profile — never the <c>CurrentMode</c> fallback constant. The supervisor profile holds
@@ -466,13 +473,14 @@ public static class SupervisorDecisionGoldenScenarios
     /// corpus to the constant would have shown the model an advisory production stopped shipping the day that profile
     /// graduated, and neither the digest nor a drift test pinned to the same constant could have seen it.</para>
     /// </summary>
-    public static string? RenderStoppedNowRecital(IReadOnlyList<SupervisorPriorDecision> priors)
+    public static string? RenderStoppedNowRecital(IReadOnlyList<SupervisorPriorDecision> priors, int? maxResolveAttempts)
     {
         if (SupervisorTapeCompletion.ProjectIfStoppedNow(priors) is not { } stoppedNow) return null;
 
         var profile = SupervisorProfile;
+        var landingReach = SupervisorActionMask.LandingReachFor(priors, maxResolveAttempts);
 
-        return SupervisorStopNowRecital.Render(stoppedNow.Assessment, stoppedNow.ExercisedUpstreamStages, profile, Core.Services.Completion.CompletionPolicy.DefaultModeFor(profile));
+        return SupervisorStopNowRecital.Render(stoppedNow.Assessment, stoppedNow.ExercisedUpstreamStages, profile, Core.Services.Completion.CompletionPolicy.DefaultModeFor(profile), null, landingReach);
     }
 
     /// <summary>
@@ -482,7 +490,7 @@ public static class SupervisorDecisionGoldenScenarios
     /// leaving the cap at 1 is measuring disobedience to the prompt, not judgement.
     /// </summary>
     private static SupervisorTurnContext Context(int turn, int maxResolveAttempts, IReadOnlyList<SupervisorPriorDecision> priors) =>
-        Context(turn, priors) with { MaxResolveAttempts = maxResolveAttempts };
+        Context(turn, priors) with { MaxResolveAttempts = maxResolveAttempts, CompletionRecital = RenderStoppedNowRecital(priors, maxResolveAttempts) };
 
     /// <summary>
     /// One folded agent result. These tapes STAKE an acceptance obligation per unit, so production would also fold

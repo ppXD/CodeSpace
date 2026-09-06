@@ -320,7 +320,27 @@ public class SupervisorGoldenPromptFidelityTests
     /// <para>The superseded pin stays beside it as HISTORY, and is still asserted (over the rendering that produced
     /// it) by the re-pin receipt above — a digest whose predecessor is deleted can only ever be compared with itself.</para>
     /// </summary>
-    private const string GoldenPromptDigest = "9a06aec3056ee4851e8ccd69cdb67585b6b3f20a4414ec03be2dc0ea188426ba";
+    private const string GoldenPromptDigest = "4b44d4d228bd23b4dfaad94cc0f403e641af82fc221db31f8b0d35772b4d4bea";
+
+    /// <summary>
+    /// The pin this corpus carried while the stopped-now block's steer was a CONSTANT ("Land that work, stop with
+    /// outcome 'gave_up', or ask_human"), regardless of which verbs the tape still reached. Superseded because that
+    /// constant is what the corpus's one failing scenario followed: <c>resolve-cap-spent</c> answered <c>merge</c>
+    /// (run 34027621996, golden 22/23) because with a conflicted integration recorded and the resolve cap spent,
+    /// <c>merge</c> was the only landing reading of "Land that work" — and it re-attempts the same conflicted merge.
+    ///
+    /// <para>The corpus's numbers stay comparable across the re-pin because the moved bytes are confined to ONE
+    /// clause of ONE line, in exactly the five scenarios that both record a conflict
+    /// (<see cref="ConflictedScenarios"/>) and render a stage line (<see cref="MissingARequiredStage"/>) — and every
+    /// one of them moves TOWARD its own already-pinned expectation rather than away from it. The four with resolve
+    /// runway left now name <c>resolve</c>, whose accepted set is exactly {resolve}; <c>resolve-cap-spent</c>, whose
+    /// accepted set is {stop, ask_human}, names only those two. No scenario's <c>AcceptedKinds</c> changed, and no
+    /// scenario acquired a steer toward a verb the action mask forbids on its own tape
+    /// (<see cref="No_scenario_steers_toward_a_verb_its_tape_cannot_reach"/>). Every other scenario is
+    /// byte-identical, which <see cref="Only_a_scenario_missing_a_required_stage_renders_a_different_prompt_than_before"/>
+    /// re-derives against the anchor below rather than taking on trust.</para>
+    /// </summary>
+    private const string ConstantSteerCorpusDigest = "9a06aec3056ee4851e8ccd69cdb67585b6b3f20a4414ec03be2dc0ea188426ba";
 
     /// <summary>The pin this corpus carried while the stopped-now block was rendered from the ASSESSMENT ALONE — no stage trace, no profile, no mode. Superseded, never deleted: it is the fixed point the re-pin receipt measures the current rendering against.</summary>
     private const string DimensionsOnlyCorpusDigest = "40e8c14c75e6f90d017a4780aa9479fc782379f7851f950a04a1962c9ddee4f8";
@@ -332,6 +352,67 @@ public class SupervisorGoldenPromptFidelityTests
 
         digest.ShouldBe(GoldenPromptDigest,
             $"the rendered golden prompts changed. If that was intended, re-pin GoldenPromptDigest to '{digest}' and name the block that changed in the commit body; if it was not, a decider edit has silently moved what every real-model score measures.");
+    }
+
+    /// <summary>
+    /// The scenarios whose tape records a conflicted integration — the only ones whose steer this re-pin could move.
+    /// Pinned as data so the digest above has a named receipt, exactly like <see cref="MissingARequiredStage"/>.
+    ///
+    /// <para>Six tapes, but only FIVE prompts moved: <c>verified-resolution</c> records a conflict AND has its cap
+    /// spent, yet its reconciliation VERIFIED, so its tape evidences Integrate, no stage line renders at all, and
+    /// its prompt is byte-identical. The movers are precisely this set ∩ <see cref="MissingARequiredStage"/> — which
+    /// is why both receipts are kept rather than merged into one.</para>
+    /// </summary>
+    private static readonly HashSet<string> ConflictedScenarios = new(StringComparer.Ordinal)
+    {
+        "merge-conflict", "multi-file-conflict", "resolve-cap-spent", "subset-conflict-across-three",
+        "unverified-resolution", "verified-resolution",
+    };
+
+    /// <summary>
+    /// THE regression this corpus exists to catch from now on: no scenario's prompt may steer the brain toward a verb
+    /// its own tape cannot reach. <c>resolve-cap-spent</c> is the live miss (run 34027621996) — a conflicted
+    /// integration recorded, the resolve cap spent, and the steer still reading "Land that work", whose only landing
+    /// verb is <c>merge</c>: a blind repeat of the conflicted merge already on the tape. The model chose exactly that.
+    ///
+    /// <para>Derived from <see cref="SupervisorActionMask"/> rather than restated, so the assertion is the SAME
+    /// reading the mask three lines below the steer publishes — a copy here could drift into blessing precisely the
+    /// contradiction this shares a reader to prevent.</para>
+    /// </summary>
+    [Fact]
+    public void No_scenario_steers_toward_a_verb_its_tape_cannot_reach()
+    {
+        var conflicted = new List<string>();
+
+        foreach (var scenario in SupervisorDecisionGoldenScenarios.All)
+        {
+            var prompt = LlmSupervisorDecider.BuildUserPromptForTest(scenario.Context);
+            var reach = SupervisorActionMask.LandingReachFor(scenario.Context.PriorDecisions, scenario.Context.MaxResolveAttempts);
+
+            if (reach != SupervisorLandingReach.Unconstrained) conflicted.Add(scenario.Name);
+
+            if (scenario.Context.CompletionRecital is null) continue;
+
+            var steer = SupervisorStopNowRecital.SteerFor(reach);
+
+            // A rendered stage line carries this reach's steer and no other — the two other steers must be absent.
+            if (scenario.Context.CompletionRecital.Contains(SupervisorStopNowRecital.RefusalLead, StringComparison.Ordinal)
+                || scenario.Context.CompletionRecital.Contains(SupervisorStopNowRecital.AdvisoryLead, StringComparison.Ordinal))
+            {
+                prompt.ShouldContain(steer, Case.Sensitive, $"'{scenario.Name}': the stage line must carry the steer its own tape earns");
+
+                if (reach == SupervisorLandingReach.NoLandingReachable)
+                    scenario.Context.CompletionRecital.ShouldNotContain("Land that work", Case.Insensitive,
+                        $"'{scenario.Name}': a conflict is recorded and a further resolve would FORCE-STOP the run, so 'merge' is the only landing reading left — and it re-attempts the conflict already on the tape");
+
+                if (reach != SupervisorLandingReach.ReconcileFirst)
+                    scenario.Context.CompletionRecital.ShouldNotContain("Resolve the recorded conflict", Case.Sensitive,
+                        $"'{scenario.Name}': the mask forbids resolve on this tape, so the steer must not offer it");
+            }
+        }
+
+        conflicted.ShouldBe(ConflictedScenarios.ToList(), ignoreOrder: true,
+            "the set of scenarios whose tape records a conflict must match the named receipt beside the digest");
     }
 
     [Fact]

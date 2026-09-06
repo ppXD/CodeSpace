@@ -163,7 +163,7 @@ public sealed partial class SupervisorTurnService
             SynthesisPromptBudgetChars = SupervisorSynthesisBudget.Normalize(goalConfig?.SynthesisPromptBudgetChars),
             SupervisorRunId = supervisorRunId,
             TeamId = teamId,
-            CompletionRecital = await BuildCompletionRecitalAsync(supervisorRunId, teamId, cancellationToken).ConfigureAwait(false),
+            CompletionRecital = await BuildCompletionRecitalAsync(supervisorRunId, teamId, priorDecisions, plan.MaxResolveAttempts, cancellationToken).ConfigureAwait(false),
             NodeId = nodeId,
             TurnNumber = priorDecisions.Count,
             PriorDecisions = priorDecisions,
@@ -316,8 +316,15 @@ public sealed partial class SupervisorTurnService
     /// (<c>ComposedAssessment.Mode</c> — the composer's <c>CompletionPolicy.ModeFor</c> reading of the run's own
     /// column, the very reading the authority gates on), so the block threatens a refusal only where one can
     /// happen and states the same facts advisorily everywhere else.</para>
+    ///
+    /// <para>The TAPE rides along too, as the landing reach the action mask derives from it
+    /// (<c>SupervisorActionMask.LandingReachFor</c>) over the same <paramref name="maxResolveAttempts"/> the
+    /// context itself carries. Without it the line's steer named a landing verb off no state at all: run
+    /// 34027621996 was told to "Land that work" over a recorded conflict whose resolve cap was spent, leaving
+    /// <c>merge</c> the only reading and a blind repeat of the conflicted integration the result — while the mask
+    /// three lines below and the decider's own resolution-verdict copy both said to stop or ask.</para>
     /// </summary>
-    private async Task<string?> BuildCompletionRecitalAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken)
+    private async Task<string?> BuildCompletionRecitalAsync(Guid supervisorRunId, Guid teamId, IReadOnlyList<SupervisorPriorDecision> priorDecisions, int? maxResolveAttempts, CancellationToken cancellationToken)
     {
         try
         {
@@ -327,7 +334,9 @@ public sealed partial class SupervisorTurnService
 
             var mode = await Completion.RunModeReader.DeriveAsync(_db, supervisorRunId, teamId, cancellationToken).ConfigureAwait(false);
 
-            return Deciders.SupervisorStopNowRecital.Render(composed.Assessment, composed.ExercisedUpstreamStages, _modes?.Resolve(mode), composed.Mode, composed.NotApplicableUpstream);
+            var landingReach = Deciders.SupervisorActionMask.LandingReachFor(priorDecisions, maxResolveAttempts);
+
+            return Deciders.SupervisorStopNowRecital.Render(composed.Assessment, composed.ExercisedUpstreamStages, _modes?.Resolve(mode), composed.Mode, composed.NotApplicableUpstream, landingReach);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

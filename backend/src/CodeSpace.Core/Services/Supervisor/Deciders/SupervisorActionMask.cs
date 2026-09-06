@@ -41,12 +41,15 @@ public static class SupervisorActionMask
     }
 
     /// <summary>The non-null reason resolve cannot advance the run this turn, else null (it is genuinely available). Reads the SAME conflict-presence authority the resolve executor acts on, so the mask and the executor can never disagree about whether a conflict exists.</summary>
-    internal static string? ResolveUnavailableReason(SupervisorTurnContext context)
+    internal static string? ResolveUnavailableReason(SupervisorTurnContext context) => ResolveUnavailableReason(context.PriorDecisions, context.MaxResolveAttempts);
+
+    /// <summary>The same answer over the RAW tape facts, for the one caller that has them before a <see cref="SupervisorTurnContext"/> exists: the rehydrate step prerenders the stopped-now recital while it is still building the context. Both entry points funnel here, so no caller can read a second opinion.</summary>
+    internal static string? ResolveUnavailableReason(IReadOnlyList<SupervisorPriorDecision> priorDecisions, int? maxResolveAttempts)
     {
-        if (SupervisorOutcome.FindConflictDecision(context.PriorDecisions) is null)
+        if (SupervisorOutcome.FindConflictDecision(priorDecisions) is null)
             return "no conflicted integration is recorded, so there is nothing to reconcile — a resolve would be a no-op and cost this turn";
 
-        var (spent, cap) = ResolveBudget(context);
+        var (spent, cap) = ResolveBudget(priorDecisions, maxResolveAttempts);
 
         return spent >= cap
             ? $"the resolve cap is spent ({spent} of {cap}) — a further resolve does not get refused, it FORCE-STOPS this run. Stop and leave the conflict to a human, or ask one to rule"
@@ -54,19 +57,36 @@ public static class SupervisorActionMask
     }
 
     /// <summary>
+    /// WHICH landing verb the stopped-now recital's steer may name, off the SAME two facts this mask masks
+    /// <c>resolve</c> on. The refusal/advisory line and the mask sit in one prompt, so a steer derived anywhere else
+    /// could name a verb the mask forbids three lines below it — which is precisely the shape of the live miss
+    /// (run 34027621996): "Land that work" over a recorded conflict whose resolve cap was spent, leaving
+    /// <c>merge</c> as the only reading and a blind re-merge of the same conflicted integration as the result.
+    /// </summary>
+    public static SupervisorLandingReach LandingReachFor(IReadOnlyList<SupervisorPriorDecision> priorDecisions, int? maxResolveAttempts)
+    {
+        if (SupervisorOutcome.FindConflictDecision(priorDecisions) is null) return SupervisorLandingReach.Unconstrained;
+
+        return IsResolveCapSpent(priorDecisions, maxResolveAttempts) ? SupervisorLandingReach.NoLandingReachable : SupervisorLandingReach.ReconcileFirst;
+    }
+
+    /// <summary>
     /// Whether another resolve would FORCE-STOP the run rather than reconcile. The ONE answer both this mask and
     /// the resolution-verdict copy read: the two sit in the same prompt, so a disagreement would tell the model to
     /// issue a resolve and forbid it in the same breath — which is exactly what shipped before this was shared.
     /// </summary>
-    public static bool IsResolveCapSpent(SupervisorTurnContext context)
+    public static bool IsResolveCapSpent(SupervisorTurnContext context) => IsResolveCapSpent(context.PriorDecisions, context.MaxResolveAttempts);
+
+    /// <summary>The same budget read over the raw tape facts — see the <see cref="ResolveUnavailableReason(IReadOnlyList{SupervisorPriorDecision}, int?)"/> overload for why a context-less entry point exists.</summary>
+    public static bool IsResolveCapSpent(IReadOnlyList<SupervisorPriorDecision> priorDecisions, int? maxResolveAttempts)
     {
-        var (spent, cap) = ResolveBudget(context);
+        var (spent, cap) = ResolveBudget(priorDecisions, maxResolveAttempts);
 
         return spent >= cap;
     }
 
     /// <summary>Resolves spent-vs-cap the way <c>SupervisorBounds.PostDecision</c> counts it — off the tape, with the lane default standing in for a context that carries no cap.</summary>
-    private static (int Spent, int Cap) ResolveBudget(SupervisorTurnContext context) =>
-        (context.PriorDecisions.Count(d => d.DecisionKind == SupervisorDecisionKinds.Resolve),
-         context.MaxResolveAttempts ?? SupervisorLane.DefaultMaxResolveAttempts);
+    private static (int Spent, int Cap) ResolveBudget(IReadOnlyList<SupervisorPriorDecision> priorDecisions, int? maxResolveAttempts) =>
+        (priorDecisions.Count(d => d.DecisionKind == SupervisorDecisionKinds.Resolve),
+         maxResolveAttempts ?? SupervisorLane.DefaultMaxResolveAttempts);
 }

@@ -432,7 +432,10 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
         using var scope = _fixture.BeginScope();
         var tape = await scope.Resolve<ISupervisorDecisionLog>().GetTerminalDecisionsAsync(runId, teamId, CancellationToken.None);
         var production = (await scope.Resolve<ISupervisorTurnService>().RehydrateFromDecisionLogAsync(runId, teamId, NodeId, Goal, GoalConfig(Guid.NewGuid()), CancellationToken.None)).CompletionRecital;
-        var mirror = CodeSpace.IntegrationTests.Workflows.Supervisor.SupervisorDecisionGoldenScenarios.RenderStoppedNowRecital(tape);
+        // GoalConfig declares no resolve cap, so production falls back to SupervisorLane.DefaultMaxResolveAttempts —
+        // the mirror is handed the same null and resolves the same default. Passing a number here would make the two
+        // sides agree about the stage line while disagreeing about which verbs the tape still reaches.
+        var mirror = CodeSpace.IntegrationTests.Workflows.Supervisor.SupervisorDecisionGoldenScenarios.RenderStoppedNowRecital(tape, null);
 
         production.ShouldNotBeNull("the seeded run is contract-bearing, so production has a verdict to recite");
 
@@ -444,6 +447,16 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
             "the default supervisor cohort is Enforced (CompletionPolicy.DefaultModeFor over the lane's Enforceable profile), so an un-reconciled run must be told the stop WILL be refused");
         production.ShouldContain("requires 1 stage(s) with no evidence — Integrate.", Case.Sensitive,
             "the un-reconciled branches leave Integrate unevidenced, and production names the stage the park would name");
+
+        // The live miss (run 34027621996), through a REAL rehydrate rather than a hand-built context: this tape has a
+        // conflicted merge AND its one resolve already spent against the lane default cap, so no landing verb is
+        // reachable. The steer that shipped said "Land that work", whose only reading here is 'merge' — a merge that
+        // re-attempts the very integration already recorded as conflicted.
+        production.ShouldContain("Integrate. Stop with outcome 'gave_up', or ask_human; do not claim completed.", Case.Sensitive,
+            "with the conflict recorded and the resolve cap spent, the honest exits are the only moves left and the steer must offer them alone");
+        production.ShouldNotContain("Land that work", Case.Insensitive,
+            "the tape reaches no landing verb; naming one is what run 34027621996 followed into a blind re-merge");
+        production.ShouldNotContain("merge", Case.Insensitive, "the verb the miss chose must not appear in the block that steered it");
 
         mirror.ShouldBe(production,
             "the golden corpus renders the decider's stopped-now block from this mirror, so every byte production shows the model it must show too — a divergence here is the corpus grading the model on a prompt production does not ship");
