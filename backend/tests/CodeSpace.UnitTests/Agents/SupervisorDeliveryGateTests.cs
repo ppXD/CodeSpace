@@ -483,7 +483,7 @@ public class SupervisorDeliveryGateTests
         // used to NRE on the null side — an exception ReadReason's JsonException-only catch can never see, since
         // it is thrown one call later, at the SameBlocker call site inside AdjudicatedSameBlocker.
         var payload = JsonNode.Parse(JsonSerializer.Serialize(new SupervisorAskHumanPayload { Question = $"{SupervisorDeliveryGate.QuestionPrefix}nothing to open" }, AgentJson.Options))!.AsObject();
-        payload[SupervisorDeliveryGate.ReasonNode] = JsonNode.Parse($"{{\"kind\":\"{SupervisorDeliveryGateReason.NothingToOpen}\",\"aliases\":null}}");
+        payload[SupervisorGateAdjudication.ReasonNode] = JsonNode.Parse($"{{\"kind\":\"{SupervisorDeliveryGateReason.NothingToOpen}\",\"aliases\":null}}");
 
         var card = new SupervisorPriorDecision
         {
@@ -514,7 +514,7 @@ public class SupervisorDeliveryGateTests
 
         var card = SupervisorDeliveryGate.Validate(context, StopDecision())!;
 
-        var reason = JsonNode.Parse(card.PayloadJson)![SupervisorDeliveryGate.ReasonNode].Deserialize<SupervisorDeliveryGateReason>(AgentJson.Options)!;
+        var reason = JsonNode.Parse(card.PayloadJson)![SupervisorGateAdjudication.ReasonNode].Deserialize<SupervisorDeliveryGateReason>(AgentJson.Options)!;
         reason.Kind.ShouldBe(SupervisorDeliveryGateReason.PolicySkipped);
         reason.Aliases.ShouldBe(new[] { "repoA" });
     }
@@ -524,11 +524,12 @@ public class SupervisorDeliveryGateTests
     {
         // Durable TAPE bytes: a later turn reads these back to recognize what a parked card adjudicated. Renaming
         // one silently stops every in-flight parked run from releasing — a rename must be a visible decision.
-        SupervisorDeliveryGate.ReasonNode.ShouldBe("gateReason");
+        SupervisorGateAdjudication.ReasonNode.ShouldBe("gateReason");
         SupervisorDeliveryGateReason.Unauthorized.ShouldBe("unauthorized");
         SupervisorDeliveryGateReason.PublishFailed.ShouldBe("publish-failed");
         SupervisorDeliveryGateReason.NothingToOpen.ShouldBe("nothing-to-open");
         SupervisorDeliveryGateReason.PolicySkipped.ShouldBe("policy-skipped");
+        SupervisorDeliveryGateReason.UnpublishedMerge.ShouldBe("unpublished-merge");
     }
 
     [Fact]
@@ -770,7 +771,7 @@ public class SupervisorDeliveryGateTests
     {
         var payload = JsonNode.Parse(JsonSerializer.Serialize(new SupervisorAskHumanPayload { Question = question }, AgentJson.Options))!.AsObject();
 
-        if (reason is not null) payload[SupervisorDeliveryGate.ReasonNode] = JsonSerializer.SerializeToNode(reason, AgentJson.Options);
+        if (reason is not null) payload[SupervisorGateAdjudication.ReasonNode] = JsonSerializer.SerializeToNode(reason, AgentJson.Options);
 
         return new()
         {
