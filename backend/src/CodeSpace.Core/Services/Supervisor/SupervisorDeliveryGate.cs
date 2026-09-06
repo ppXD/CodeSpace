@@ -1,5 +1,4 @@
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Sessions.Room;
@@ -34,7 +33,8 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// including WHICH repositories were skipped, never a blanket "every repository"; satisfaction is never by
 /// absence (H1, the verified vacuous-success fix), and a diagnosed failure never blind-retries — the SAME
 /// "diagnosed failure wins" shape I3's own <c>attemptedMerge</c> check uses. A human ANSWER to the gate's own
-/// card (recognized by <see cref="QuestionPrefix"/>; content-blind, never parsed into an authorization) buys
+/// card (recognized by <see cref="QuestionPrefix"/> through <see cref="SupervisorGateAdjudication"/>, the surface
+/// I3 shares; content-blind, never parsed into an authorization) buys
 /// exactly ONE fresh server-authored re-attempt — the card invites fixing the blocker and only this gate can
 /// re-issue a publish, so an answer that fixed the world produces the PR, not a waiver; only when the latest
 /// publish already WAS the post-adjudication re-check and is STILL unsatisfied for the SAME BLOCKER the card
@@ -78,7 +78,7 @@ public static class SupervisorDeliveryGate
         if (effective?.OpenPullRequest != true) return null;
 
         if (!IsAuthorized(context))
-            return AnsweredGateCardExists(context.PriorDecisions, after: LastStateChangeSequence(context.PriorDecisions), before: long.MaxValue)
+            return SupervisorGateAdjudication.AnsweredCardExists(context.PriorDecisions, QuestionPrefix, after: LastStateChangeSequence(context.PriorDecisions), before: long.MaxValue)
                 ? null
                 : ParkOrForceStop(context, new SupervisorDeliveryGateReason { Kind = SupervisorDeliveryGateReason.Unauthorized }, "the delivery contract requires opening a pull request, but it was never confirmed by a human or pre-declared by the operator — approve the plan once more, or open it manually from Room");
 
@@ -106,13 +106,13 @@ public static class SupervisorDeliveryGate
         // ONLY actor that can re-issue a publish is this gate, so an answer that fixed the world must produce
         // the PR, not a waiver. Content-blind by design: the answer's text is never parsed into an authorization
         // (that would be prefix-laundering); Phase T replaces this interim mechanism with structured waivers.
-        if (AnsweredGateCardExists(context.PriorDecisions, after: latestPublish.Sequence, before: long.MaxValue))
+        if (SupervisorGateAdjudication.AnsweredCardExists(context.PriorDecisions, QuestionPrefix, after: latestPublish.Sequence, before: long.MaxValue))
             return ServerAuthoredPublish(decision, effective.TargetBranch);
 
         // The re-check already ran and reports the SAME blocker a human has ALREADY ruled on — their answer
         // stands as the interim waiver and the stop is released. Anchored on WHAT they adjudicated, never on
         // WHERE the answer sits relative to later work: see the class doc for the live dead end that produced.
-        if (AdjudicatedSameBlocker(context.PriorDecisions, reason, before: latestPublish.Sequence))
+        if (SupervisorGateAdjudication.AdjudicatedSameBlocker(context.PriorDecisions, QuestionPrefix, reason, before: latestPublish.Sequence))
             return null;
 
         // A LEGACY answered card (parked before blocker tracking existed) can never satisfy AdjudicatedSameBlocker
@@ -152,35 +152,9 @@ public static class SupervisorDeliveryGate
         Aliases = entries.Select(p => p.Alias).OrderBy(alias => alias, StringComparer.Ordinal).ToArray(),
     };
 
-    /// <summary>
-    /// Whether a human ALREADY ANSWERED one of this gate's cards for the SAME blocker, at any point before
-    /// <paramref name="before"/> (the re-check publish) — the adjudication release. Deliberately UNBOUNDED below:
-    /// a spawn or merge landing after the answer does not un-ask the question the human already ruled on, and the
-    /// rung above has already forced a fresh publish for that new work, so the verdict being released is never a
-    /// stale one. See the class doc for the live dead-end a state-change-anchored clamp produced here.
-    /// </summary>
-    private static bool AdjudicatedSameBlocker(IReadOnlyList<SupervisorPriorDecision> priorDecisions, SupervisorDeliveryGateReason reason, long before) =>
-        priorDecisions.Any(d => d.Sequence < before && IsAnsweredGateCard(d) && SupervisorDeliveryGateReason.SameBlocker(ReadReason(d.PayloadJson), reason));
-
-    /// <summary>Whether an answered gate card before <paramref name="before"/> recorded NO blocker at all — a run parked before <see cref="ReasonNode"/> existed. <see cref="AdjudicatedSameBlocker"/> can never match it (what it adjudicated is unknowable), so the fresh card minted below must tell the human why they are asked again instead of silently repeating the first card's exact words.</summary>
+    /// <summary>Whether an answered gate card before <paramref name="before"/> recorded NO blocker at all — a run parked before the structured blocker existed. <see cref="SupervisorGateAdjudication.AdjudicatedSameBlocker"/> can never match it (what it adjudicated is unknowable), so the fresh card minted below must tell the human why they are asked again instead of silently repeating the first card's exact words.</summary>
     private static bool AnsweredLegacyCardExists(IReadOnlyList<SupervisorPriorDecision> priorDecisions, long before) =>
-        priorDecisions.Any(d => d.Sequence < before && IsAnsweredGateCard(d) && ReadReason(d.PayloadJson) is null);
-
-    /// <summary>
-    /// Whether one of THIS gate's own cards (question pinned to <see cref="QuestionPrefix"/>) was ANSWERED at a
-    /// sequence in (<paramref name="after"/>, <paramref name="before"/>) — the POSITIONAL read, which the two
-    /// rungs that genuinely turn on tape position use: the re-arm (an answer AFTER the latest publish buys one
-    /// fresh attempt) and the UNAUTHORIZED park (no publish attempt exists to anchor on at all). The release
-    /// rung does NOT use it — see <see cref="AdjudicatedSameBlocker"/> for why position cannot decide that one.
-    /// </summary>
-    private static bool AnsweredGateCardExists(IReadOnlyList<SupervisorPriorDecision> priorDecisions, long after, long before) =>
-        priorDecisions.Any(d => d.Sequence > after && d.Sequence < before && IsAnsweredGateCard(d));
-
-    /// <summary>One of THIS gate's own cards (question pinned to <see cref="QuestionPrefix"/>) that a human ANSWERED — the shared predicate both the positional re-arm and the blocker-identity release key on, so "whose card is this" can never drift between them.</summary>
-    private static bool IsAnsweredGateCard(SupervisorPriorDecision decision) =>
-        decision.DecisionKind == SupervisorDecisionKinds.AskHuman
-        && ReadQuestion(decision.PayloadJson)?.StartsWith(QuestionPrefix, StringComparison.Ordinal) == true
-        && SupervisorOutcome.ReadAskHumanAnswer(decision.OutcomeJson) is not null;
+        SupervisorGateAdjudication.AnsweredCardBlockers(priorDecisions, QuestionPrefix, before).Any(blocker => blocker is null);
 
     /// <summary>
     /// Park on the gate's own ask card — or, when the run has NO conversation surface to answer on (an ask would
@@ -195,19 +169,12 @@ public static class SupervisorDeliveryGate
                 Kind = SupervisorDecisionKinds.Stop,
                 PayloadJson = JsonSerializer.Serialize(new { reason = SupervisorStopReasons.DeliveryAdjudicationUnavailable, detail }, AgentJson.Options),
             }
-            : IntoAskHuman(reason, detail);
+            : SupervisorGateAdjudication.IntoAskHuman(QuestionPrefix, reason, detail);
 
     /// <summary>The newest state-changing decision's sequence (0 when none) — the freshness anchor for adjudicating an UNAUTHORIZED park, where no publish attempt exists to anchor on.</summary>
     private static long LastStateChangeSequence(IReadOnlyList<SupervisorPriorDecision> priorDecisions) =>
         priorDecisions.Where(d => d.DecisionKind == SupervisorDecisionKinds.Merge || SupervisorDecisionKinds.StagesAgents(d.DecisionKind))
             .Select(d => d.Sequence).DefaultIfEmpty(0).Max();
-
-    private static string? ReadQuestion(string? payloadJson)
-    {
-        if (payloadJson is null) return null;
-        try { return JsonSerializer.Deserialize<SupervisorAskHumanPayload>(payloadJson, AgentJson.Options)?.Question; }
-        catch (JsonException) { return null; }
-    }
 
     /// <summary>Whether a merge/spawn/retry/resolve landed AFTER the given sequence — any of these could have moved what's published, making an earlier publish attempt's verdict stale (adversarial-sweep finding: an unscoped lookup let a SECOND round's genuinely new work silently skip its own PR).</summary>
     private static bool StateChangedSince(IReadOnlyList<SupervisorPriorDecision> priorDecisions, long sequence) =>
@@ -268,43 +235,5 @@ public static class SupervisorDeliveryGate
     {
         try { return JsonSerializer.Deserialize<SupervisorStopPayload>(payloadJson, AgentJson.Options)?.Summary; }
         catch (JsonException) { return null; }
-    }
-
-    /// <summary>The parked card: the human-readable question, plus the STRUCTURED blocker it adjudicates as a root <see cref="ReasonNode"/> node beside it (the same server-attached shape <c>SupervisorAmendAcceptance</c> uses — a model-authored ask can never smuggle one, because binding erases undeclared fields). Written IN PLACE onto the canonical payload so the record stays the single source of the question's own serialization.</summary>
-    private static SupervisorDecision IntoAskHuman(SupervisorDeliveryGateReason reason, string detail)
-    {
-        var root = JsonNode.Parse(JsonSerializer.Serialize(new SupervisorAskHumanPayload { Question = $"{QuestionPrefix}{detail}" }, AgentJson.Options))!.AsObject();
-
-        root[ReasonNode] = JsonSerializer.SerializeToNode(reason, AgentJson.Options);
-
-        return new()
-        {
-            Kind = SupervisorDecisionKinds.AskHuman,
-            ServerAuthored = true,
-            PayloadJson = root.ToJsonString(AgentJson.Options),
-        };
-    }
-
-    /// <summary>The root key the structured blocker rides under. Durable tape bytes a later turn reads back — renaming it silently stops every in-flight parked run's release from recognizing its own card, so it is test-pinned.</summary>
-    internal const string ReasonNode = "gateReason";
-
-    /// <summary>The blocker a card recorded, or null when the payload carries no (object-valued) <see cref="ReasonNode"/> node, it does not parse, or it names no <c>kind</c> — never throws on tape bytes (mirrors <c>SupervisorAmendAcceptance.ReadAmend</c>).</summary>
-    private static SupervisorDeliveryGateReason? ReadReason(string? payloadJson)
-    {
-        if (string.IsNullOrEmpty(payloadJson)) return null;
-
-        try
-        {
-            var root = JsonDocument.Parse(payloadJson).RootElement;
-
-            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty(ReasonNode, out var reason) || reason.ValueKind != JsonValueKind.Object)
-                return null;
-
-            return reason.Deserialize<SupervisorDeliveryGateReason>(AgentJson.Options);
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
     }
 }
