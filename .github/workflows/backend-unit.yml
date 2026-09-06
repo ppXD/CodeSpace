@@ -14,10 +14,16 @@ on:
     paths:
       - 'backend/**'
       - '.github/workflows/backend-unit.yml'
+      # The real-model lane guards live here as scripts, and their self-tests are the ONLY place a PR can see them
+      # regress. Without this path a change to a guard merges unverified and is discovered by the lane it protects.
+      - '.github/scripts/**'
   pull_request:
     paths:
       - 'backend/**'
       - '.github/workflows/backend-unit.yml'
+      # The real-model lane guards live here as scripts, and their self-tests are the ONLY place a PR can see them
+      # regress. Without this path a change to a guard merges unverified and is discovered by the lane it protects.
+      - '.github/scripts/**'
   workflow_dispatch:
 
 concurrency:
