@@ -81,7 +81,10 @@ public sealed class RealModelExtendedBenchmarkCorpusE2ETests
 
             // report-only (gating:false below) — Ok carries no pass/fail meaning here, only whether the run itself
             // completed a genuine capability signal; the real information is the rate in the verdict text.
-            return (true, $"{Provider} model '{model}' EXTENDED-corpus solve-rate {overall.Succeeded}/{overall.Total} ({rate:P0}) over {SeedBenchmarkCorpus.ExtendedTasks.Count} tasks × their modes — graded={ran}, errored={run.Errored.Count} (report-only — new/unproven-difficulty tasks, no floor set yet)");
+            // Same gateway-health disclosure the blessed corpus carries: how many cells the format-fault mitigation
+            // respawned, and how many of the solves came out of those (the mitigation disables extended thinking, so
+            // a solve produced under it was produced under a different configuration than this lane claims to report).
+            return (true, $"{Provider} model '{model}' EXTENDED-corpus solve-rate {overall.Succeeded}/{overall.Total} ({rate:P0}) over {SeedBenchmarkCorpus.ExtendedTasks.Count} tasks × their modes — graded={ran}, errored={run.Errored.Count}, {run.FormatFaults} (report-only — new/unproven-difficulty tasks, no floor set yet)");
         }, gating: false);
     }
 
