@@ -193,6 +193,47 @@ public sealed class RealModelGateTests
     }
 
     [Fact]
+    public void A_missing_binary_is_a_visible_skip_on_a_developer_machine()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"realmodel-nobinary-local-{Guid.NewGuid():N}.md");
+        try
+        {
+            // OFF the lane the binary is genuinely optional, so the honest answer is the same NOT-A-PASS skip a missing
+            // credential gets — never the silent `return` that recorded a green over zero measurements.
+            var blocker = RealModelGate.MissingRealBinary("Anthropic", "claude", "run `which claude`", inCiLane: false, path);
+
+            blocker.ShouldBeOfType<SkipException>();
+            blocker.Message.ShouldContain("NOT EVALUATED");
+            File.ReadAllText(path).ShouldContain("claude");
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void A_missing_binary_is_a_RED_on_the_lane_whose_own_step_installs_it()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"realmodel-nobinary-ci-{Guid.NewGuid():N}.md");
+        try
+        {
+            // ON the lane the install step is FATAL, so "no binary" is that step having produced nothing this process
+            // can run — a fault, not a portability fact. A skip here is how a gate measures nothing for runs on end
+            // while its job reports green, so this branch must not be one; and the message has to name the manual check.
+            var blocker = RealModelGate.MissingRealBinary("Anthropic", "claude", "run `which claude`", inCiLane: true, path);
+
+            blocker.ShouldBeOfType<Xunit.Sdk.XunitException>();
+            blocker.Message.ShouldContain("which claude", customMessage: "a red with no way to diagnose it by hand is unfixable (Rule 12.10)");
+            File.Exists(path).ShouldBeFalse("a RED is not a skip — it must never write the 'NOT EVALUATED' line a reader greps for honest skips");
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
     public async Task An_informational_wire_fault_writes_a_greppable_console_line_and_never_throws()
     {
         var path = Path.Combine(Path.GetTempPath(), $"realmodel-infofail-{Guid.NewGuid():N}.md");

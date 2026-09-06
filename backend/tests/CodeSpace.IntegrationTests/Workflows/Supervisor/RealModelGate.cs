@@ -594,6 +594,28 @@ public static class RealModelGate
         return new SkipException(line);
     }
 
+    /// <summary>Whether this process is running inside a GitHub Actions STEP: GitHub sets <see cref="StepSummaryEnvVar"/> per step and nothing else does, which is why this gate already routes every CI-visible verdict through it. The one fact <see cref="MissingRealBinary(string, string, string, bool)"/> needs — a lane whose own step INSTALLED the binary, versus a developer's machine where it is simply optional.</summary>
+    internal static bool InCiLane => !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(StepSummaryEnvVar));
+
+    /// <summary>
+    /// What an ARMED real-binary gate does when the binary it drives is ABSENT — the fail-versus-skip decision, pure
+    /// given <paramref name="inCiLane"/>. On a developer's machine the binary is optional, so this is the honest
+    /// VISIBLE skip: NotExecuted in the trx, "skip ≠ pass" in the summary. On a lane it is a RED, because there a step
+    /// of the same job installs it (fatally), so "absent" means that step produced nothing this process can run — a
+    /// yanked package, a renamed executable, a PATH the test never inherited. A skip there is exactly how an
+    /// instrument measures nothing for runs on end while its job reports green.
+    /// </summary>
+    internal static Exception MissingRealBinary(string provider, string binary, string diagnosis, bool inCiLane) =>
+        MissingRealBinary(provider, binary, diagnosis, inCiLane, Environment.GetEnvironmentVariable(StepSummaryEnvVar));
+
+    /// <summary>Testable core of <see cref="MissingRealBinary(string, string, string, bool)"/> — explicit step-summary path, so a test pins BOTH branches without mutating process env. Returned rather than thrown, matching <see cref="ReportSkipped(string, string, string?)"/>: the call site reads <c>throw RealModelGate.MissingRealBinary(…)</c>.</summary>
+    internal static Exception MissingRealBinary(string provider, string binary, string diagnosis, bool inCiLane, string? stepSummaryPath)
+    {
+        if (!inCiLane) return ReportSkipped(provider, $"the `{binary}` binary is not installed — this gate needs it to measure anything", stepSummaryPath);
+
+        return new Xunit.Sdk.XunitException($"the `{binary}` binary is missing on a lane whose own step installs it, so this gate measured NOTHING while its job would otherwise have stayed green. Diagnose: {diagnosis}");
+    }
+
     /// <summary>Surface a three-way whole-loop outcome (ALWAYS — a CapabilityMiss must never read as a silent green) to the step-summary FILE when present (capture-immune → the job-summary UI), else the console. Names the TEST it came from: a whole-loop job runs a dozen arms into ONE step summary, and an unattributed "CAPABILITY MISS" line cannot be traced back to the arm that produced it. Pure given <paramref name="stepSummaryPath"/>.</summary>
     internal static void ReportThreeWay(RealModelOutcome outcome, string note, string? stepSummaryPath, [CallerMemberName] string? test = null)
     {

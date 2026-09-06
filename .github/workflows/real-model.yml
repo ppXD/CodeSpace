@@ -624,7 +624,12 @@ jobs:
           restore-keys: nuget-realmodel-e2e-${{ runner.os }}-
 
       - name: Restore
-        run: dotnet restore backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
+        # BOTH test projects this job drives: the benchmark runs E2ETests, the real-CLI MCP smoke below runs
+        # IntegrationTests. Restoring the second here rather than leaving `dotnet test` to do it implicitly keeps that
+        # cost inside a step whose duration is its own, so the smoke's timeout bounds build + test and nothing else.
+        run: |
+          dotnet restore backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
+          dotnet restore backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
 
       - name: Test (the live solve-rate — a real claude agent attempts the whole seed corpus)
         # GATING solve-rate FLOOR: the real claude agent must objectively SOLVE at least MinSolveRate (0.5) of the
@@ -656,22 +661,45 @@ jobs:
             backend/TestResults/real-model-benchmark.trx \
             RealModelBenchmark
 
-      # REPORT-ONLY: does the REAL claude CLI actually load the MCP declaration the runner writes for it? The benchmark
-      # above answers that only in aggregate (a cli-mcp cell whose fabric never handshook classifies InfraUnknown), and
-      # for 8 consecutive runs the answer was "no" on all 9 of them while nothing red-ed: the harness never named the
+      # Does the REAL claude CLI actually load the MCP declaration the runner writes for it? The benchmark above answers
+      # that only in aggregate (a cli-mcp cell whose fabric never handshook classifies InfraUnknown), and for 8
+      # consecutive runs the answer was "no" on all 9 of them while nothing red-ed: the harness never named the
       # declaration on the argv, and CLAUDE_CONFIG_DIR is not a place the CLI ever looks. This step isolates that one
       # leg — real binary, real proxy, real per-run socket, cwd = the workspace — so a regression is legible as itself
-      # instead of as a halved evaluator-health number. Non-gating while it earns its keep.
-      - name: Smoke (report only) — the real claude CLI loads the run's MCP declaration
-        continue-on-error: true
+      # instead of as a halved evaluator-health number.
+      #
+      # GATING, deliberately. A report-only step would be a FOURTH way for this leg to go unmeasured on top of the three
+      # that already hid it for its whole existence. The failure mode it now catches is the inverse of the one it was
+      # written for: a `claude` that drops or renames --mcp-config kills every claude run at startup, and nothing else
+      # in this repo would notice. A missing binary REDs here too — the install step above is fatal, so "absent" means
+      # that step produced nothing runnable (RealModelGate.MissingRealBinary); off a lane it stays a visible skip.
+      - name: Smoke — the real claude CLI loads the run's MCP declaration
+        # Bounded so a wedged CLI cannot ride to this job's 60-minute cap. The work is build + one test: the
+        # Backend · Integration lane builds this same project in ~85s on the same runner class, and the fixture schema
+        # plus the live-CLI leg add ~10s locally — so ~2 min expected, with headroom for a cold build.
+        timeout-minutes: 6
         env:
           CODESPACE_RUN_REAL_CLI_MCP_SMOKE: '1'
         run: >
           dotnet test backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
+          --no-restore
           --filter "FullyQualifiedName~On_demand_the_real_claude_cli"
           --logger "console;verbosity=normal"
           --logger "trx;LogFileName=real-cli-mcp-smoke.trx"
           --results-directory backend/TestResults
+
+      - name: Assert the real-CLI smoke actually ran (no silent skip)
+        # `dotnet test --filter` exits 0 when it matches ZERO tests, so a renamed test would stop running while this
+        # step stayed green — the same hole the benchmark's own guard closes. The clause below is exactly the text
+        # after `FullyQualifiedName~` above: change one, change the other.
+        env:
+          # Same read-only, step-scoped token as the benchmark's guard: the consecutive-dark check reads the previous
+          # runs' own logs to tell a one-off skip from an instrument that has measured nothing for runs on end.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash .github/scripts/assert-every-filter-clause-ran.sh \
+            backend/TestResults/real-cli-mcp-smoke.trx \
+            On_demand_the_real_claude_cli
 
       # The trx + the step-summary verdicts are the only record of WHAT the live model actually did — how many golden
       # points it scored, which wire skipped, which model answered. They were written to the runner and thrown away
