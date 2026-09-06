@@ -60,6 +60,11 @@ jobs:
       CODESPACE_LLM_MODEL_ID: ${{ secrets.CODESPACE_LLM_MODEL_ID }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # `permissions:` is workflow-scoped, so the `actions: read` the clause guard needs also rides on the token
+          # checkout would otherwise persist in `.git/config` — inside the very workspace the live agents run in.
+          # Nothing here pushes or fetches, and the guard takes its token step-scoped, so it must not persist.
+          persist-credentials: false
 
       - name: Set up .NET 10
         uses: actions/setup-dotnet@v4
@@ -229,6 +234,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # `permissions:` is workflow-scoped, so the `actions: read` the clause guard needs also rides on the token
+          # checkout would otherwise persist in `.git/config` — inside the very workspace the live agents run in.
+          # Nothing here pushes or fetches, and the guard takes its token step-scoped, so it must not persist.
+          persist-credentials: false
 
       - name: Set up .NET 10
         uses: actions/setup-dotnet@v4
@@ -403,6 +413,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # `permissions:` is workflow-scoped, so the `actions: read` the clause guard needs also rides on the token
+          # checkout would otherwise persist in `.git/config` — inside the very workspace the live agents run in.
+          # Nothing here pushes or fetches, and the guard takes its token step-scoped, so it must not persist.
+          persist-credentials: false
 
       - name: Set up .NET 10
         uses: actions/setup-dotnet@v4
@@ -573,6 +588,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # `permissions:` is workflow-scoped, so the `actions: read` the clause guard needs also rides on the token
+          # checkout would otherwise persist in `.git/config` — inside the very workspace the live agents run in.
+          # Nothing here pushes or fetches, and the guard takes its token step-scoped, so it must not persist.
+          persist-credentials: false
 
       - name: Set up .NET 10
         uses: actions/setup-dotnet@v4
@@ -699,6 +719,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # `permissions:` is workflow-scoped, so the `actions: read` the clause guard needs also rides on the token
+          # checkout would otherwise persist in `.git/config` — inside the very workspace the live agents run in.
+          # Nothing here pushes or fetches, and the guard takes its token step-scoped, so it must not persist.
+          persist-credentials: false
 
       - name: Stage the operator-held hidden suite (optional — absent ⇒ the rehearsal self-skips loudly)
         env:
@@ -826,6 +851,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # `permissions:` is workflow-scoped, so the `actions: read` the clause guard needs also rides on the token
+          # checkout would otherwise persist in `.git/config` — inside the very workspace the live agents run in.
+          # Nothing here pushes or fetches, and the guard takes its token step-scoped, so it must not persist.
+          persist-credentials: false
 
       - name: Set up .NET 10
         uses: actions/setup-dotnet@v4
@@ -964,6 +994,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # `permissions:` is workflow-scoped, so the `actions: read` the clause guard needs also rides on the token
+          # checkout would otherwise persist in `.git/config` — inside the very workspace the live agents run in.
+          # Nothing here pushes or fetches, and the guard takes its token step-scoped, so it must not persist.
+          persist-credentials: false
 
       - name: Set up .NET 10
         uses: actions/setup-dotnet@v4
@@ -1108,6 +1143,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # `permissions:` is workflow-scoped, so the `actions: read` the clause guard needs also rides on the token
+          # checkout would otherwise persist in `.git/config` — inside the very workspace the live agents run in.
+          # Nothing here pushes or fetches, and the guard takes its token step-scoped, so it must not persist.
+          persist-credentials: false
 
       - name: Set up .NET 10
         uses: actions/setup-dotnet@v4
@@ -1230,6 +1270,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # `permissions:` is workflow-scoped, so the `actions: read` the clause guard needs also rides on the token
+          # checkout would otherwise persist in `.git/config` — inside the very workspace the live agents run in.
+          # Nothing here pushes or fetches, and the guard takes its token step-scoped, so it must not persist.
+          persist-credentials: false
 
       - name: Set up .NET 10
         uses: actions/setup-dotnet@v4
@@ -1350,6 +1395,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # `permissions:` is workflow-scoped, so the `actions: read` the clause guard needs also rides on the token
+          # checkout would otherwise persist in `.git/config` — inside the very workspace the live agents run in.
+          # Nothing here pushes or fetches, and the guard takes its token step-scoped, so it must not persist.
+          persist-credentials: false
 
       - name: Set up .NET 10
         uses: actions/setup-dotnet@v4
