@@ -61,5 +61,6 @@ internal static class SessionSkeletonProjection
             CreatedDate = row.CreatedDate,
             IsLatest = row.Id == effectiveId,
             Error = row.Error,
+            CompletionParkedAt = row.CompletionParkedAt,
         }).ToList();
 }

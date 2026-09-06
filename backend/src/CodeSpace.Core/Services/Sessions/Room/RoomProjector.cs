@@ -145,10 +145,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             ? await DecisionBlocksAsync(runId, teamId, watermark, cancellationToken).ConfigureAwait(false)
             : Array.Empty<DecisionBlock>();
 
-        // The completion authority REFUSED this attempt's terminal: Suspended AND stamped. Both Suspended shapes reach
-        // here, so the stamp is the only honest discriminator — an ask-park is waiting on its own signal, while this one
-        // waits on nobody (the stranded reconciler skips a stamped row) until an operator continues it.
-        var parked = focus.Status == Messages.Enums.WorkflowRunStatus.Suspended && focus.CompletionParkedAt != null;
+        var parked = IsCompletionParked(focus.Status, focus.CompletionParkedAt);
 
         var facts = await GatherFactsAsync(runId, teamId, phases, focus.Status, focus.Error, cancellationToken).ConfigureAwait(false);
 
@@ -171,8 +168,11 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             Blocks = narrative.Blocks,
             Actions = _actions.ResolveTurnActions(runId, focus.Status, publish, parked),
             At = focus.CreatedDate,
-            DurationMs = DurationOf(focus.CreatedDate, focus.StartedAt, focus.CompletedAt),
+            // A parked turn's clock STOPS at the stamp. Nothing is running, so the live branch — elapsed since
+            // StartedAt, recomputed every poll — would tick a stopped run upward forever under the word "running".
+            DurationMs = DurationOf(focus.CreatedDate, focus.StartedAt, parked ? focus.CompletionParkedAt : focus.CompletedAt),
             StatusWord = parked ? RoomNarrative.ParkedWord : null,
+            ParkedAt = parked ? focus.CompletionParkedAt : null,
             CompletionNote = CompletionNoteOf(turn, focus),
             Attempts = AttemptsOf(turn, runId),
         };
@@ -250,9 +250,23 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
 
         return attempts
             .OrderBy(a => a.AttemptNumber)
-            .Select(a => new RoomTurnAttempt { RunId = a.RunId, AttemptNumber = a.AttemptNumber, Status = a.Status, At = a.CreatedDate, IsCurrent = a.RunId == focusRunId })
+            .Select(a => new RoomTurnAttempt
+            {
+                RunId = a.RunId, AttemptNumber = a.AttemptNumber, Status = a.Status, At = a.CreatedDate, IsCurrent = a.RunId == focusRunId,
+                StatusWord = IsCompletionParked(a.Status, a.CompletionParkedAt) ? RoomNarrative.ParkedWord : null,
+            })
             .ToList();
     }
+
+    /// <summary>
+    /// The completion-park discriminator — Suspended AND stamped. Both Suspended shapes reach the room, so the stamp is
+    /// the only honest separator: an ask-park is waiting on a signal that is coming, while a completion park waits on
+    /// nobody (the stranded reconciler skips a stamped row) until an operator continues it. Every place the room decides
+    /// what a Suspended run MEANS — the header word, the diagnostic, the Continue gate, the frozen clock, each rung of
+    /// the attempt ladder — reads it here, so they cannot drift apart.
+    /// </summary>
+    private static bool IsCompletionParked(Messages.Enums.WorkflowRunStatus status, DateTimeOffset? completionParkedAt) =>
+        status == Messages.Enums.WorkflowRunStatus.Suspended && completionParkedAt != null;
 
     /// <summary>
     /// The turn's wall-clock. A COMPLETED turn measures <c>CompletedAt − CreatedDate</c> — anchored on the immutable

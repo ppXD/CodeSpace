@@ -670,6 +670,32 @@ public class RoomProjectorFlowTests
     }
 
     [Fact]
+    public async Task A_parked_turns_clock_freezes_at_the_stamp_and_its_ladder_says_parked_too()
+    {
+        // A park is non-terminal, so every clock in the room ran the LIVE path: the sticky bar pulsed "Working" over a
+        // "running 3h12m" that grew with each poll, under a header already reading "Parked". The stamp IS the end of
+        // that clock. And each attempt is stamped independently, so the ladder must read its own rung rather than
+        // inherit the shown one — otherwise the chip says "Waiting" beside a header that says "Parked".
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Parked after a rerun");
+        var now = DateTimeOffset.UtcNow;
+
+        var original = await SeedAttemptAsync(teamId, sessionId, turnIndex: 1, rootRunId: null, status: WorkflowRunStatus.Failure, source: WorkflowRunSourceTypes.Snapshot, createdAt: now.AddHours(-4), completedAt: now.AddHours(-3));
+        var parked = await SeedAttemptAsync(teamId, sessionId, turnIndex: null, rootRunId: original, status: WorkflowRunStatus.Suspended, source: WorkflowRunSourceTypes.Rerun,
+            createdAt: now.AddHours(-3), startedAt: now.AddHours(-3), completionParkedAt: now.AddHours(-1));
+
+        var turn = (await ProjectByRunAsync(parked, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single();
+
+        turn.ParkedAt.ShouldNotBeNull("the room needs the instant to say how long it has been parked");
+        turn.DurationMs.ShouldNotBeNull();
+        TimeSpan.FromMilliseconds(turn.DurationMs!.Value).ShouldBe(TimeSpan.FromHours(2), tolerance: TimeSpan.FromMinutes(1),
+            customMessage: "the turn's clock stops at the stamp (created → parked = 2h); the live branch would report now − startedAt (3h) and grow on every poll");
+
+        turn.Attempts.Single(a => a.RunId == parked).StatusWord.ShouldBe(RoomNarrative.ParkedWord, "the parked rung must not read 'Waiting' beside a header reading 'Parked'");
+        turn.Attempts.Single(a => a.RunId == original).StatusWord.ShouldBeNull("an unparked attempt keeps the shared lexicon — nothing else moves");
+    }
+
+    [Fact]
     public async Task A_terminal_cache_hit_overlays_the_fresh_attempt_ladder_without_rebuilding_the_heavy_block()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -768,7 +794,7 @@ public class RoomProjectorFlowTests
     }
 
     /// <summary>Seed one attempt (a top-level turn run when turnIndex is set, else a rerun/replay fork with rootRunId) of a session turn, with an explicit created (and optional completed) time so the attempt ordering + wall-clock are deterministic.</summary>
-    private async Task<Guid> SeedAttemptAsync(Guid teamId, Guid sessionId, int? turnIndex, Guid? rootRunId, WorkflowRunStatus status, string source, DateTimeOffset createdAt, DateTimeOffset? completedAt = null)
+    private async Task<Guid> SeedAttemptAsync(Guid teamId, Guid sessionId, int? turnIndex, Guid? rootRunId, WorkflowRunStatus status, string source, DateTimeOffset createdAt, DateTimeOffset? completedAt = null, DateTimeOffset? startedAt = null, DateTimeOffset? completionParkedAt = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -786,7 +812,8 @@ public class RoomProjectorFlowTests
             Id = runId, TeamId = teamId, RunRequestId = requestId, SourceType = source,
             Status = status, SessionId = sessionId, SessionTurnIndex = turnIndex, RootRunId = rootRunId,
             DefinitionSnapshotJson = "{\"nodes\":[],\"edges\":[]}", DefinitionSnapshotHash = "sha256:test",
-            OutputsJson = "{}", CreatedDate = createdAt, CompletedAt = completedAt, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+            OutputsJson = "{}", CreatedDate = createdAt, StartedAt = startedAt, CompletedAt = completedAt, CompletionParkedAt = completionParkedAt,
+            CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
         });
         await db.SaveChangesAsync();
         return runId;

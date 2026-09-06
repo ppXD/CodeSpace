@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import type { AssistantTurnBlock, DiagnosticBlock, RoomAction } from "@/api/sessions";
 import { DialogProvider } from "@/components/dialog/dialog-context";
-import { ErrorCard, TurnActions, turnHeaderWord } from "./SessionRoomView";
+import { ErrorCard, LiveRunBar, TurnActions, turnHeaderWord, turnMeta } from "./SessionRoomView";
 
 /**
  * The completion-authority PARK — the default outcome of an unverified supervisor stop. It is `Suspended`, exactly
@@ -92,10 +92,55 @@ describe("completion-authority park", () => {
   });
 });
 
+/**
+ * A park is `Suspended`, which `isRunActive` calls LIVE — correctly, since the run can still change. But every live
+ * AFFORDANCE then claimed work was happening: a pulsing sticky bar hardcoding "Working", and a "running 3h12m" that
+ * grew on every poll, both sitting under a header that already read "Parked". The bar stays (it hosts the Stop the
+ * park card offers); its claims come from the backend.
+ */
+const NOW = Date.parse("2026-09-06T12:00:00Z");
+const parkedTurn = (over: Partial<AssistantTurnBlock> = {}) =>
+  turn({ statusWord: "Parked", parkedAt: "2026-09-06T09:00:00Z", durationMs: 7_200_000, at: "2026-09-06T07:00:00Z", ...over });
+
+describe("a parked turn's live affordances", () => {
+  it("names the park in the sticky bar and counts how long it has been parked", () => {
+    render(<LiveRunBar turn={parkedTurn()} nowMs={NOW} />);
+
+    expect(screen.getByText("Parked")).toBeInTheDocument();
+    expect(screen.getByText("parked for 3h 0m")).toBeInTheDocument();
+    expect(screen.queryByText(/running/)).toBeNull();
+  });
+
+  it("keeps the working bar exactly as it was for an ordinary live turn", () => {
+    const { container } = render(<LiveRunBar turn={turn({ status: "Running", durationMs: 7_200_000 })} nowMs={NOW} />);
+
+    expect(screen.getByText("Working")).toBeInTheDocument();
+    expect(screen.getByText("running 2h 0m")).toBeInTheDocument();
+    expect(container.querySelector(".room-livebar-parked")).toBeNull();
+  });
+
+  it("stops the pulse — the room's one live signal must not fire over a run that stopped", () => {
+    const { container } = render(<LiveRunBar turn={parkedTurn()} nowMs={NOW} />);
+    expect(container.querySelector(".room-livebar-parked")).not.toBeNull();
+  });
+
+  it("drops the 'running' prefix from the meta line, whose duration the backend already froze", () => {
+    // Mutation guard: revert either the FE gate or RoomProjector's frozen DurationMs and this reads "running 2h 0m".
+    expect(turnMeta(parkedTurn(), NOW, true)).toContain("2h 0m");
+    expect(turnMeta(parkedTurn(), NOW, true)).not.toContain("running");
+    expect(turnMeta(turn({ status: "Running", durationMs: 7_200_000 }), NOW, true)).toContain("running 2h 0m");
+  });
+});
+
 describe("turnHeaderWord", () => {
   it("prefers the backend's word so a park never reads like an approval wait", () => {
     expect(turnHeaderWord(turn({ statusWord: "Parked" }), true)).toBe("Parked");
     expect(turnHeaderWord(turn({ statusWord: "Parked" }), false)).toBe("Parked");
+  });
+
+  it("speaks for an attempt-ladder rung too, so the chip cannot disagree with the header above it", () => {
+    expect(turnHeaderWord({ status: "Suspended", statusWord: "Parked" }, false)).toBe("Parked");
+    expect(turnHeaderWord({ status: "Suspended" }, false)).toBe("Waiting");
   });
 
   it("keeps the shared lexicon for every ordinary turn", () => {

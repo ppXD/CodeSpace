@@ -400,6 +400,9 @@ export interface AssistantTurnBlock extends RoomBlockBase {
   /// completion-authority park is `Suspended`, the same status an approval wait carries, and both would read
   /// "Waiting". Null leaves the shared status lexicon in charge; the FE derives no word of its own.
   statusWord?: string | null;
+  /// When the completion authority parked this turn — the instant `durationMs` is frozen at, and the one the meta
+  /// counts "parked for …" from. Null unless parked, which is also how a reader knows the clock is still ticking.
+  parkedAt?: string | null;
   /// Backend-authored: which completion authority owned this attempt's terminal — "Completion: Enforced" (an
   /// unverified "completed" stop parks instead of stamping Success) or "Completion: Shadow". Null when there is
   /// nothing honest to say; rendered verbatim in the turn meta line.
@@ -413,6 +416,9 @@ export interface RoomTurnAttempt {
   runId: string;
   attemptNumber: number;
   status: WorkflowRunStatus;
+  /// Backend-authored OVERRIDE for this rung's status word, read per attempt (each is stamped independently) so the
+  /// ladder cannot call an attempt "Waiting" while the header above it reads "Parked". Null → the shared lexicon.
+  statusWord?: string | null;
   at: string;
   /// The attempt the turn currently shows (the newest) — rendered as "shown", not an open link.
   isCurrent: boolean;
