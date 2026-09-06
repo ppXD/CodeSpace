@@ -16,6 +16,22 @@ describe("statusWord", () => {
   it("returns an unknown future status verbatim rather than blank", () => {
     expect(statusWord("SomethingNew" as never)).toBe("SomethingNew");
   });
+
+  it("splits the one status that means two opposite things", () => {
+    // A completion-authority park and an approval wait are both Suspended. "Waiting" fits the second — its signal is
+    // coming — and misreads the first as pending when nothing but a person will ever move it.
+    expect(statusWord("Suspended", true)).toBe("Parked");
+    expect(statusWord("Suspended", false)).toBe("Waiting");
+    expect(statusWord("Suspended", undefined)).toBe("Waiting");
+  });
+
+  it("never lets the park flag rewrite a status that is already honest", () => {
+    // The stamp is cleared by Continue / Stop / the engine's own terminals, so a flag on any other status is stale
+    // data — and "Parked" over a Failed run would hide the failure behind the softer account.
+    expect(statusWord("Failure", true)).toBe("Failed");
+    expect(statusWord("Cancelled", true)).toBe("Stopped");
+    expect(statusWord("Running", true)).toBe("Working");
+  });
 });
 
 describe("outcomeWord — the honest account beside the graph status", () => {
@@ -24,6 +40,11 @@ describe("outcomeWord — the honest account beside the graph status", () => {
     expect(outcomeWord("Success", "Forced")).toBe("Cut short");
     expect(outcomeWord("Success", "NeedsClarification")).toBe("Needs input");
     expect(outcomeWord("Success", "AcceptanceFailed")).toBe("Checks failed");
+  });
+
+  it("carries the park flag through to the lexicon, so the Runs list says what the Room says", () => {
+    expect(outcomeWord("Suspended", null, true)).toBe("Parked");
+    expect(outcomeWord("Suspended", null, false)).toBe("Waiting");
   });
 
   it("never reuses the word already spent on a user-cancelled run", () => {

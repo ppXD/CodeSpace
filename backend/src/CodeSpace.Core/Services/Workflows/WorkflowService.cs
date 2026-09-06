@@ -1370,15 +1370,20 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
                 && !_db.WorkflowRunRecord.Any(rec => rec.RunId == r.Id && rec.OccurredAt >= now - StuckRunReconcilerService.LedgerLivenessWindow)));
 
     /// <summary>
-    /// A HUMAN-actionable suspend: Suspended on a pending Approval / Action wait. EXCLUDES self-advancing waits
-    /// (SupervisorDecision / SupervisorAgentWaits) and machine waits (Timer / Callback / Subworkflow / AgentRun) — a run
-    /// parked on those auto-resumes (e.g. a fan-out waiting on its agent runs is WORKING), so it needs no human and
-    /// belongs in the Live set, not Needs-attention. The single source for "a suspend a person must act on".
+    /// A HUMAN-actionable suspend: Suspended on a pending Approval / Action wait, OR stamped by the completion
+    /// authority. EXCLUDES self-advancing waits (SupervisorDecision / SupervisorAgentWaits) and machine waits (Timer /
+    /// Callback / Subworkflow / AgentRun) — a run parked on those auto-resumes (e.g. a fan-out waiting on its agent runs
+    /// is WORKING), so it needs no human and belongs in the Live set, not Needs-attention. A completion park is the
+    /// opposite: it holds NO wait at all and the stranded-run reconciler deliberately skips a stamped row, so nothing
+    /// will ever resume it but a person — counting it Live claimed progress that could not happen. The single source
+    /// for "a suspend a person must act on"; both disjuncts stay inside Suspended, which
+    /// <see cref="SummarizeTeamRunsAsync"/>'s card/zone equivalence depends on.
     /// </summary>
     private Expression<Func<WorkflowRun, bool>> ActionableSuspendPredicate() => r =>
         r.Status == WorkflowRunStatus.Suspended
-        && _db.WorkflowRunWait.Any(w => w.RunId == r.Id && w.Status == WorkflowWaitStatuses.Pending
-            && (w.WaitKind == WorkflowWaitKinds.Approval || w.WaitKind == WorkflowWaitKinds.Action));
+        && (r.CompletionParkedAt != null
+            || _db.WorkflowRunWait.Any(w => w.RunId == r.Id && w.Status == WorkflowWaitStatuses.Pending
+                && (w.WaitKind == WorkflowWaitKinds.Approval || w.WaitKind == WorkflowWaitKinds.Action)));
 
     /// <summary>
     /// EXISTS a pending decision for the run, on EITHER park backend: a node-grain <c>workflow_run_wait</c> in
@@ -1411,6 +1416,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         WasSuspended = _db.WorkflowRunWait.Any(w => w.RunId == r.Id),
         Status = r.Status,
         Outcome = r.Outcome,
+        Parked = r.Status == WorkflowRunStatus.Suspended && r.CompletionParkedAt != null,
         Error = r.Error,
         StartedAt = r.StartedAt,
         CompletedAt = r.CompletedAt,

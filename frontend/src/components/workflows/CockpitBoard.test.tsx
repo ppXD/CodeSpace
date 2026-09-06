@@ -11,7 +11,7 @@ vi.mock("@/hooks/use-workflows", () => ({ useAnswerDecision: () => ({ mutate: vi
 const NOW = new Date(2026, 5, 22, 15, 0, 0).getTime();
 
 function run(id: string, status: WorkflowRunStatus, o: Partial<WorkflowRunSummary> = {}): WorkflowRunSummary {
-  const r = { id, runNumber: 1, workflowId: "w", workflowVersion: 1, workflowName: null, sessionTitle: null, repositoryIds: [], runKind: "workflow", wasSuspended: false, sourceType: "manual", status, error: null, startedAt: new Date(NOW - 18 * 60_000).toISOString(), completedAt: null, createdDate: new Date(NOW).toISOString(), rootRunId: id, attemptCount: 1, hasSession: true, ...o };
+  const r = { id, runNumber: 1, workflowId: "w", workflowVersion: 1, workflowName: null, sessionTitle: null, repositoryIds: [], runKind: "workflow", wasSuspended: false, parked: false, sourceType: "manual", status, error: null, startedAt: new Date(NOW - 18 * 60_000).toISOString(), completedAt: null, createdDate: new Date(NOW).toISOString(), rootRunId: id, attemptCount: 1, hasSession: true, ...o };
   return { ...r, rootSourceType: o.rootSourceType ?? r.sourceType };   // a non-rerun run's root source == its own
 }
 
@@ -90,6 +90,19 @@ describe("CockpitBoard", () => {
       attention: attn([run("s1", "Suspended"), run("s2", "Suspended")]),
     });
     expect(container.querySelectorAll(".cockpit-attn-row").length).toBe(2);   // both suspended runs the zone was given
+  });
+
+  it("tells a completion park apart from an ordinary suspend, in the attention zone and in history", () => {
+    // Both are Suspended and both need a person, but only one of them is waiting for something. The backend decides
+    // which (`parked`); before it did, the park read "Waiting" here and "Parked" in the Room.
+    board({
+      attention: attn([run("s1", "Suspended", { parked: true }), run("s2", "Suspended")]),
+      history: hist([run("h1", "Suspended", { parked: true })]),
+    });
+
+    expect(screen.getByText("parked")).toBeInTheDocument();
+    expect(screen.getByText("suspended")).toBeInTheDocument();
+    expect(screen.getByText("Parked")).toBeInTheDocument();   // the history row's status word
   });
 
   it("previews the first few suspended runs and offers 'View all N' (the true total) when there are more", () => {

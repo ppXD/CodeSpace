@@ -142,7 +142,8 @@ function SuspendedRow({ run, nowMs, onOpen }: { run: WorkflowRunSummary; nowMs: 
     <div className="cockpit-attn-row" onClick={() => onOpen(run)}>
       <span className="run-row2-tile" data-tone="suspended" aria-hidden="true"><Ic.Pause size={13} /></span>
       <div className="cockpit-attn-body">
-        <div className="cockpit-attn-title" title={title}>{shortRunTitle(title)} <span className="cockpit-attn-sub">suspended</span></div>
+        {/* A completion park is the one suspend nothing will resume on its own, so the row says which kind it is. */}
+        <div className="cockpit-attn-title" title={title}>{shortRunTitle(title)} <span className="cockpit-attn-sub">{run.parked ? "parked" : "suspended"}</span></div>
         <div className="cockpit-attn-meta">{sourceLabel(run.rootSourceType)} · waiting {compactAge(run.startedAt ?? run.createdDate, nowMs)}</div>
       </div>
       <button type="button" className="btn cockpit-attn-act" onClick={(e) => { e.stopPropagation(); onOpen(run); }}>Review →</button>
@@ -224,7 +225,7 @@ function RunRow({ run, nowMs, onOpen, repoName }: { run: WorkflowRunSummary; now
           <span className="run-row2-when">{relativeTime(when)}</span>
         </div>
         <div className="run-row2-l2">
-          <span className="run-row2-sw" data-tone={tone}>{outcomeWord(run.status, run.outcome)}</span>
+          <span className="run-row2-sw" data-tone={tone}>{outcomeWord(run.status, run.outcome, run.parked)}</span>
           {repos.length > 0 && (
             <span className="run-row2-repo" title={repos.join(", ")}>
               <Ic.Repo size={11} aria-hidden="true" />
