@@ -179,6 +179,44 @@ public class RunRecordTimelineMapTests
     }
 
     [Fact]
+    public void An_APPROVED_review_is_a_success_milestone_carrying_the_reviewers_words()
+    {
+        // The beat that says a review RAN mapped to nothing while its "I did not run" sibling was a milestone — so the
+        // one row recording what an independent reviewer DECIDED was the quietest thing on the timeline.
+        var ev = RunRecordTimelineMap.ToEvent(Record(WorkflowRunRecordTypes.ReviewCompleted, nodeId: "agent", payloadJson: """{"kind":"critic.output","approved":true,"reason":"The comparison holds."}""")).ShouldNotBeNull();
+
+        ev.Title.ShouldBe("Review passed", "the backend owns the copy");
+        ev.Severity.ShouldBe(TimelineSeverity.Success);
+        ev.Level.ShouldBe(TimelineLevel.Milestone, "whether an independent reviewer accepted the output is the story, not folded detail");
+        ev.Summary.ShouldBe("The comparison holds.");
+        ev.NodeId.ShouldBe("agent");
+    }
+
+    [Fact]
+    public void A_FLAGGED_review_is_a_warning_milestone_that_cannot_share_the_approvals_word()
+    {
+        var ev = RunRecordTimelineMap.ToEvent(Record(WorkflowRunRecordTypes.ReviewCompleted, nodeId: "agent", payloadJson: """{"kind":"critic.output","approved":false,"reason":"The migration drops a column with no backfill."}""")).ShouldNotBeNull();
+
+        ev.Title.ShouldBe("Review flagged", "an approval and a rejection say opposite things about the result — one word for both is the over-claim this beat exists to end");
+        ev.Severity.ShouldBe(TimelineSeverity.Warning);
+        ev.Level.ShouldBe(TimelineLevel.Milestone);
+        ev.Summary.ShouldBe("The migration drops a column with no backfill.");
+    }
+
+    [Fact]
+    public void A_malformed_review_beat_reads_as_a_FLAG_like_every_other_reader_of_those_bytes()
+    {
+        RunRecordTimelineMap.ToEvent(Record(WorkflowRunRecordTypes.ReviewCompleted, payloadJson: """{"kind":"critic.output"}"""))!.Title.ShouldBe("Review flagged");
+        RunRecordTimelineMap.ToEvent(Record(WorkflowRunRecordTypes.ReviewCompleted, payloadJson: "not json at all"))!.Title.ShouldBe("Review flagged");
+    }
+
+    [Fact]
+    public void A_completed_review_is_narrative_so_the_pushed_down_record_filter_selects_it()
+    {
+        RunRecordTimelineMap.NarrativeRecordTypes.ShouldContain(WorkflowRunRecordTypes.ReviewCompleted);
+    }
+
+    [Fact]
     public void A_failed_model_call_is_a_detail_error_carrying_the_kind_and_error()
     {
         var ev = RunRecordTimelineMap.ToEvent(Record(WorkflowRunRecordTypes.InteractionFailed, nodeId: "gen", payloadJson: """{"kind":"llm.complete","provider":"anthropic","error":"gateway timed out"}""")).ShouldNotBeNull();
