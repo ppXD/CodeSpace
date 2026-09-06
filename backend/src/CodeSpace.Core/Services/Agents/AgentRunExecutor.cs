@@ -2319,7 +2319,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // HAPPENED was its interaction.completed row — which says a model call was made, never what it concluded — so
         // every reader downstream (the Session Room's "Verified" chip first among them) could only ask "did anything
         // look at this?" and counted a FLAG as a pass. Recorded for BOTH verdicts, so the answer is the review's own.
-        await RecordOutputReviewVerdictAsync(run, verdict.Approved, feedback, cancellationToken).ConfigureAwait(false);
+        await RecordOutputReviewVerdictAsync(run, verdict, feedback, cancellationToken).ConfigureAwait(false);
 
         if (verdict.Approved) return result;   // a clean pass ⇒ byte-identical
 
@@ -2333,18 +2333,29 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// (<c>approved</c>) and its words (<c>reason</c> — the same <see cref="RenderReviewFeedback"/> string the result
     /// persists, so the ledger and the result can never tell different stories about one review).
     ///
+    /// <para><c>agentRunId</c> rides because the ledger CELL cannot identify the reviewed unit: a supervisor's whole
+    /// per-turn fan-out shares ONE <c>(NodeId, IterationKey)</c> — <c>&lt;nodeId&gt;#turn{N}</c>, stamped per TURN, not
+    /// per agent (<c>RealSupervisorActionExecutor.Spawn</c>) — so K sibling reviews would be indistinguishable and a
+    /// reader folding them could only keep the last one written. The verdict is about ONE agent run, so the beat says
+    /// which.</para>
+    ///
+    /// <para><c>reviewerModel</c> rides as its OWN key rather than only inside the prose: the independence claim is
+    /// the one thing a reader most needs to check mechanically (a reviewer on the producer's own model is the
+    /// one-model pool's honest fallback, not a second opinion), and mining it back out of a rendered sentence is not
+    /// a query anyone should have to write. Null for a reviewer AGENT's verdict, whose own run carries the attribution.</para>
+    ///
     /// <para>FAIL-OPEN in both directions, exactly like the critic's <c>review.skipped</c> sibling: a STANDALONE run
     /// (no <see cref="AgentRun.WorkflowRunId"/>) has no workflow ledger to land on and records nothing, and a ledger
     /// write that faults is swallowed — saying what a review decided may never itself break the run.</para>
     /// </summary>
-    private async Task RecordOutputReviewVerdictAsync(AgentRun run, bool approved, string reason, CancellationToken cancellationToken)
+    private async Task RecordOutputReviewVerdictAsync(AgentRun run, CriticVerdict verdict, string reason, CancellationToken cancellationToken)
     {
         if (run.WorkflowRunId is not { } workflowRunId) return;
 
         try
         {
             using var scope = _scopeFactory.CreateScope();
-            var payload = JsonSerializer.SerializeToElement(new { kind = LlmStructuredCritic.OutputReviewCallKind, approved, reason });
+            var payload = JsonSerializer.SerializeToElement(new { kind = LlmStructuredCritic.OutputReviewCallKind, agentRunId = run.Id, approved = verdict.Approved, reason, reviewerModel = verdict.ReviewerModel });
 
             await scope.ServiceProvider.GetRequiredService<IRunRecordLogger>()
                 .RecordInteractionAsync(workflowRunId, WorkflowRunRecordTypes.ReviewCompleted, run.NodeId, run.IterationKey, Guid.NewGuid(), parentRecordId: null, payload, cancellationToken).ConfigureAwait(false);
