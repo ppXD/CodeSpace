@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Messages.Dtos.Sessions;
@@ -80,7 +81,13 @@ public sealed record SessionTurn
     /// Non-null is the discriminator between the two Suspended shapes: a completion park (this) resumes ONLY through the
     /// operator's Continue — the stranded-run reconciler skips a stamped row — while an ask-park (null) is legitimately
     /// waiting on its own approval / timer / callback. Null on every unparked run.
+    /// <para>
+    /// Read by <c>RoomProjector</c> only, never sent: the wire form of this fact is the word the projection already
+    /// authors (<c>AssistantTurnBlock.StatusWord</c>) and the gate it already resolves, so shipping the raw instant too
+    /// would offer a client a second, un-authored way to decide what a park means.
+    /// </para>
     /// </summary>
+    [JsonIgnore]
     public DateTimeOffset? CompletionParkedAt { get; init; }
 
     /// <summary>The newest attempt's stamped completion-enforcement mode, verbatim from its row — <c>"Enforced"</c> (the completion authority owns this run's terminal) or <c>"Shadow"</c>. Null on a pre-protocol row; read it through <c>CompletionPolicy.ModeFor</c> so an unreadable value stays fail-closed Legacy.</summary>
@@ -116,6 +123,14 @@ public sealed record SessionTurnAttempt
 
     /// <summary>This attempt's terminal failure reason, when it failed — so a reader (or the next attempt's fork note) sees WHY it was reran. Null when it succeeded / is in flight.</summary>
     public string? Error { get; init; }
+
+    /// <summary>
+    /// This attempt's own completion park stamp — the ladder's copy of <see cref="SessionTurn.CompletionParkedAt"/>, so
+    /// a superseded attempt that was parked reads as parked rather than borrowing the newest attempt's state. Read by
+    /// <c>RoomProjector</c> only; the wire form is the per-attempt word it authors (<c>RoomTurnAttempt.StatusWord</c>).
+    /// </summary>
+    [JsonIgnore]
+    public DateTimeOffset? CompletionParkedAt { get; init; }
 }
 
 /// <summary>One repo's produced branch within a multi-repo turn.</summary>

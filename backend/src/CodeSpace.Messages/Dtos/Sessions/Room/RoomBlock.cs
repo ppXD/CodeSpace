@@ -73,6 +73,13 @@ public sealed record AssistantTurnBlock : RoomBlock
     /// </summary>
     public string? StatusWord { get; init; }
 
+    /// <summary>
+    /// When the completion authority parked this turn — the instant <see cref="DurationMs"/> is frozen at, and the one
+    /// the header meta counts from ("parked for 3h"). Null unless the turn is parked, which is also how a reader knows
+    /// its clock has stopped: a turn with no terminal and no park stamp is genuinely still running.
+    /// </summary>
+    public DateTimeOffset? ParkedAt { get; init; }
+
     /// <summary>Backend-authored: WHICH completion authority owned this attempt's terminal — "Completion: Enforced" (an unverified 'completed' stop parks instead of stamping Success) or "Completion: Shadow" (observed only). Null when there is nothing honest to say (a pre-protocol stamp, or a focused prior attempt whose own stamp this projection didn't read).</summary>
     public string? CompletionNote { get; init; }
 
@@ -89,6 +96,14 @@ public sealed record RoomTurnAttempt
     public required int AttemptNumber { get; init; }
 
     public required WorkflowRunStatus Status { get; init; }
+
+    /// <summary>
+    /// A backend-authored OVERRIDE for this rung's status word — <see cref="AssistantTurnBlock.StatusWord"/> at attempt
+    /// grain, so the ladder cannot call an attempt "Waiting" while the header above it reads "Parked". Each attempt is
+    /// stamped independently, so this is read per rung rather than inherited from the shown one. Null (the overwhelming
+    /// case) leaves the shared status lexicon in charge.
+    /// </summary>
+    public string? StatusWord { get; init; }
 
     public required DateTimeOffset At { get; init; }
 

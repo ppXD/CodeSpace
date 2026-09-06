@@ -21,9 +21,9 @@ public interface IRunActionCapabilityResolver : IScopedDependency
     /// </summary>
     /// <param name="completionParked">
     /// True when the completion authority refused this run's terminal and stamped it parked. Supplied by
-    /// <c>RoomProjector</c>, which already reads the row — the resolver stays a pure function of its inputs, the same
-    /// bargain <see cref="RoomPublishState"/> makes. False on the light path, which is correct there: a collapsed card
-    /// offers no verbs to gate.
+    /// <c>RoomProjector</c> — the sole caller — which already reads the row, so the resolver stays a pure function of
+    /// its inputs, the same bargain <see cref="RoomPublishState"/> makes. Defaults to false: the conservative reading
+    /// for a caller that has not read the row, which offers the pre-park set of verbs rather than inventing an exit.
     /// </param>
     IReadOnlyList<RoomAction> ResolveTurnActions(Guid runId, WorkflowRunStatus status, RoomPublishState? publish = null, bool completionParked = false);
 }

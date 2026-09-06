@@ -781,7 +781,7 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onSummonPane, onSummo
 
               <TurnActions actions={turn.actions} turn={turn} onOpenCanvas={openCanvas} onOpenRun={onOpenRun} canvasOpen={canvasOpen} />
 
-              {live && <LiveRunBar turn={turn} />}
+              {live && <LiveRunBar turn={turn} nowMs={nowMs} />}
             </div>
           )}
         </div>
@@ -826,7 +826,7 @@ function TurnAttempts({ attempts, nowMs, onOpenRun }: { attempts: RoomTurnAttemp
               >
                 <span className="room-attempt-dot" />
                 <span className="room-attempt-n">attempt {a.attemptNumber}</span>
-                <span className="room-attempt-status">{pillLabel(a.status, false)}</span>
+                <span className="room-attempt-status">{turnHeaderWord(a, false)}</span>
                 <span className="room-attempt-when">· {compactAge(a.at, nowMs)}</span>
                 {a.isCurrent && <span className="room-attempt-shown">shown</span>}
               </button>
@@ -1480,16 +1480,23 @@ function StopButton({ runId }: { runId: string }) {
 /** The running turn's ONE live control — a bar pinned (position: sticky) to the bottom of the scroll while the turn runs,
  *  so the live progress and the Stop button travel together and stay one click away no matter how far the content scrolls.
  *  Carries the single running pulse (dot), the latest activity line, the ticking elapsed, and the Stop button. Unmounts
- *  when the turn goes terminal — the footer's Continue/Re-run/View trace/Open PR take over. */
-function LiveRunBar({ turn }: { turn: AssistantTurnBlock }) {
+ *  when the turn goes terminal — the footer's Continue/Re-run/View trace/Open PR take over.
+ *
+ *  A PARKED turn keeps the bar (it hosts the Stop the park card offers as the alternative to Continue) but not its
+ *  claims: the word is the backend's, the pulse goes steady, and the clock says how long it has been parked. Nothing
+ *  is working, so "Working · running 3h12m" under a header reading "Parked" was the room contradicting itself. */
+export function LiveRunBar({ turn, nowMs }: { turn: AssistantTurnBlock; nowMs: number }) {
   const { activity, canStop } = liveRunSummary(turn);
+  const parkedMs = turn.parkedAt ? Math.max(0, nowMs - Date.parse(turn.parkedAt)) : null;
 
   return (
-    <div className="room-livebar">
+    <div className={parkedMs != null ? "room-livebar room-livebar-parked" : "room-livebar"}>
       <span className="room-livebar-dot" />
       <div className="room-livebar-body">
-        <div className="room-livebar-head"><span className="room-livebar-label">Working</span>{activity && <> · <span className="room-livebar-text">{activity}</span></>}</div>
-        {turn.durationMs != null && <div className="room-livebar-meta">running {formatDurationMs(turn.durationMs)}</div>}
+        <div className="room-livebar-head"><span className="room-livebar-label">{turnHeaderWord(turn, true)}</span>{activity && <> · <span className="room-livebar-text">{activity}</span></>}</div>
+        {parkedMs != null
+          ? <div className="room-livebar-meta">parked for {formatDurationMs(parkedMs)}</div>
+          : turn.durationMs != null && <div className="room-livebar-meta">running {formatDurationMs(turn.durationMs)}</div>}
       </div>
       {canStop && <StopButton runId={turn.runId} />}
     </div>
@@ -2217,11 +2224,13 @@ function pillIcon(tone: string): SymName {
 }
 
 /**
- * The turn header's status word. The backend OVERRIDES it when the raw status would mislead — a completion-authority
- * park and an approval wait are both `Suspended`, and calling the first one "Waiting" says a run nobody will ever
- * resume is merely pending. Falls back to the shared lexicon for every ordinary turn, so nothing else moves.
+ * The status word for anything that carries one — the turn header, the sticky live bar, and each rung of the attempt
+ * ladder, so a park cannot read "Parked" in one and "Waiting" in the next. The backend OVERRIDES the word when the raw
+ * status would mislead: a completion-authority park and an approval wait are both `Suspended`, and calling the first
+ * one "Waiting" says a run nobody will ever resume is merely pending. Falls back to the shared lexicon for every
+ * ordinary turn, so nothing else moves.
  */
-export function turnHeaderWord(turn: Pick<AssistantTurnBlock, "status" | "statusWord">, live: boolean): string {
+export function turnHeaderWord(turn: { status: WorkflowRunStatus; statusWord?: string | null }, live: boolean): string {
   return turn.statusWord?.trim() || pillLabel(turn.status, live);
 }
 
@@ -2234,10 +2243,12 @@ function pillLabel(status: WorkflowRunStatus, live: boolean): string {
 }
 
 /** The turn's meta line after "Turn N" — the start time (when it ran), the duration, then which completion authority owned the terminal: " · Jun 29, 13:47 · 28m · Completion: Enforced". */
-function turnMeta(turn: AssistantTurnBlock, nowMs: number, live: boolean): string {
+export function turnMeta(turn: AssistantTurnBlock, nowMs: number, live: boolean): string {
   const parts: string[] = [];
   if (turn.at) parts.push(formatStartTime(turn.at, nowMs));
-  if (turn.durationMs != null) parts.push(live ? `running ${formatDurationMs(turn.durationMs)}` : formatDurationMs(turn.durationMs));
+  // "running X" is the LIVE form, and a parked turn is not live in that sense: the backend froze its duration at the
+  // park, so the prefix would keep calling a stopped run running over a number that no longer moves.
+  if (turn.durationMs != null) parts.push(live && turn.parkedAt == null ? `running ${formatDurationMs(turn.durationMs)}` : formatDurationMs(turn.durationMs));
   if (turn.completionNote) parts.push(turn.completionNote);   // backend-authored, rendered verbatim
   return parts.length ? ` · ${parts.join(" · ")}` : "";
 }
