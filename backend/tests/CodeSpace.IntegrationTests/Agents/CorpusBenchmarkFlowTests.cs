@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Agents.Harnesses.Codex;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.IntegrationTests.Infrastructure;
+using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Enums;
 using Shouldly;
@@ -43,7 +44,7 @@ public sealed class CorpusBenchmarkFlowTests
 
         // The proxy is what BuildMcpWiring fail-closed-checks for: without it NO declaration is written, both arms run
         // identically tool-less, and every cli-mcp cell records the mode it ASKED for while measuring nothing.
-        var proxy = ProxyBinaryPathOrNull();
+        var proxy = BuiltMcpProxy.ExecutablePathOrNull();
         proxy.ShouldNotBeNull("the codespace-mcp proxy must be built beside its dll (the build-only ProjectReference in CodeSpace.IntegrationTests.csproj) — without it the mcp arm degrades to a tool-less run and this suite measures half the matrix while reporting the mode it requested");
 
         using var cli = new NoopBenchmarkCli(proxy);   // a no-op agent: succeeds without editing the seeded failing fixtures
@@ -96,7 +97,7 @@ public sealed class CorpusBenchmarkFlowTests
     {
         if (OperatingSystem.IsWindows()) return;
 
-        var proxy = ProxyBinaryPathOrNull();
+        var proxy = BuiltMcpProxy.ExecutablePathOrNull();
         proxy.ShouldNotBeNull("the mcp-arm cell below is only a measurement while the proxy the declaration names exists — see the sibling test");
 
         using var cli = new NoopBenchmarkCli(proxy);
@@ -208,18 +209,5 @@ public sealed class CorpusBenchmarkFlowTests
             "printf '{\"type\":\"agent_message\",\"message\":\"done (no-op corpus CLI)\"}\\n'\n" +
             "printf '{\"type\":\"task_complete\",\"message\":\"completed\"}\\n'\n" +
             "exit 0\n";
-    }
-
-    /// <summary>The real codespace-mcp proxy EXECUTABLE built beside its dll (it is not copied into this test's bin), or null — with no proxy the wiring fails closed and the mcp arm has no declaration to load.</summary>
-    private static string? ProxyBinaryPathOrNull()
-    {
-        var configuration = AppContext.BaseDirectory.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}Release{Path.DirectorySeparatorChar}", StringComparison.Ordinal) ? "Release" : "Debug";
-
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "CodeSpace.sln"))) dir = dir.Parent;
-        if (dir is null) return null;
-
-        var binary = Path.Combine(dir.FullName, "src", "CodeSpace.Mcp", "bin", configuration, "net10.0", "codespace-mcp");
-        return File.Exists(binary) ? binary : null;
     }
 }

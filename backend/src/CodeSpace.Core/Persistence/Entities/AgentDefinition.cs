@@ -44,7 +44,7 @@ public class AgentDefinition : IEntity<Guid>, IAuditable
     /// <summary>Tool allow-list as JSON (array of names/patterns); NULL = the harness's default toolset (distinct from "[]" = no tools). jsonb.</summary>
     public string? ToolsJson { get; set; }
 
-    /// <summary>MCP server references / configs as JSON; the harness injects them at run. jsonb, default "[]".</summary>
+    /// <summary>MCP server references / configs as JSON, kept verbatim from the imported agent so a re-export is lossless. STORED ONLY — nothing projects it into a run: a run's declaration holds exactly one server (the per-run <c>codespace</c> endpoint the runner writes), and the claude harness loads that file with <c>--strict-mcp-config</c>, which shuts out every server not in it. jsonb, default "[]".</summary>
     public string McpServersJson { get; set; } = "[]";
 
     /// <summary>The original parsed frontmatter VERBATIM — lossless forward-compat; unknown keys pass through. jsonb, default "{}".</summary>
