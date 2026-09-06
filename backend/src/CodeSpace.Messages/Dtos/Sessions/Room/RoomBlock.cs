@@ -17,6 +17,7 @@ namespace CodeSpace.Messages.Dtos.Sessions.Room;
 [JsonDerivedType(typeof(StatBlock), "stat")]
 [JsonDerivedType(typeof(PlanChecklistBlock), "plan_checklist")]
 [JsonDerivedType(typeof(DeliveryBlock), "delivery")]
+[JsonDerivedType(typeof(DeliverablesBlock), "deliverables")]
 [JsonDerivedType(typeof(DecisionBlock), "decision")]
 [JsonDerivedType(typeof(DiagnosticBlock), "diagnostic")]
 [JsonDerivedType(typeof(FinalAnswerBlock), "final_answer")]

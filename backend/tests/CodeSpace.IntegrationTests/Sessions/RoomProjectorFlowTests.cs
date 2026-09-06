@@ -1,5 +1,6 @@
 using System.Data.Common;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -38,6 +39,9 @@ namespace CodeSpace.IntegrationTests.Sessions;
 public class RoomProjectorFlowTests
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
+
+    /// <summary>Mirrors CodeSpace.Api's <c>AddJsonOptions</c> — web defaults plus the string enum converter.</summary>
+    private static readonly JsonSerializerOptions ApiJson = new(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } };
 
     private readonly PostgresFixture _fixture;
 
@@ -173,6 +177,28 @@ public class RoomProjectorFlowTests
         var room = (await ProjectAsync(runId, teamId)).ShouldNotBeNull();
 
         AllBlocks(room).OfType<DeliverablesBlock>().ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task A_room_carrying_produced_files_serializes_through_the_apis_json_options()
+    {
+        // The endpoint writes the WHOLE RoomView as one document, so a block missing its [JsonDerivedType] throws
+        // mid-write and fails the entire room read rather than dropping one card. Projecting the block in-process proves
+        // nothing about that — the wire is where it breaks.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Wrote a report");
+        var runId = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Write the report", resultSummary: "done");
+        await SeedProducedFileAsync(teamId, runId, "DELIVERABLE.md", ArtifactManifestKind.Document, sizeBytes: 4096);
+
+        var room = (await ProjectAsync(runId, teamId)).ShouldNotBeNull();
+
+        var wire = JsonSerializer.Serialize(room, ApiJson);
+
+        wire.ShouldContain("\"type\":\"deliverables\"", Case.Sensitive, "the frontend switches on this exact discriminator");
+
+        var readBack = JsonSerializer.Deserialize<RoomView>(wire, ApiJson).ShouldNotBeNull();
+        AllBlocks(readBack).OfType<DeliverablesBlock>().ShouldHaveSingleItem()
+            .Files.ShouldHaveSingleItem().Path.ShouldBe("DELIVERABLE.md");
     }
 
     private async Task<DeliverablesBlock> DeliverablesOfAsync(Guid runId, Guid teamId)
