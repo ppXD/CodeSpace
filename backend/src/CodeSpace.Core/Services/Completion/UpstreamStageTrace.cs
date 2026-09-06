@@ -96,27 +96,36 @@ public static class UpstreamStageTrace
     /// deliberately RELEASES a single pushed accepted contributor with no merge at all — two authorities
     /// disagreeing about the same run.
     ///
-    /// <para><b>Never for a publish-permitting repository</b>, which is what the first two clauses buy: the run
-    /// must carry at least one BY-CHOICE patch-only agent row (<c>PublishState.PatchOnly</c> with no
-    /// <c>PublishError</c> — the guard chain's own "we did not push, by policy" record, as against a push that was
-    /// attempted and failed), and NOTHING of this run may have reached a branch. A mixed multi-repo run with a
-    /// publish-permitting sibling therefore still owes the stage.</para>
+    /// <para><b>Never for a publish-permitting repository</b>, which is what the first three clauses buy. The run
+    /// must carry at least one BY-CHOICE patch-only agent row — <c>PublishState.PatchOnly</c>, no
+    /// <c>PublishError</c>, AND the winning guard's reason on <c>Summary</c>
+    /// (<see cref="Messages.Agents.AgentRunResult.PublishSkipReason"/>, folded there by
+    /// <c>AgentRunExecutor.BuildManifestUpsert</c>). That reason is the guard chain's own POSITIVE "we did not push,
+    /// by policy" record; a null <c>PublishError</c> is merely the ABSENCE of a failed attempt, which three ordinary
+    /// paths on a publish-PERMITTING repository also produce (a handle that cannot push, the fence refusal on a
+    /// reclaimed run, and a push that returned no branch). NOTHING of the run may have reached a branch, and EVERY
+    /// repository it left branchless must carry such a record of its own — a mixed multi-repo run with a
+    /// publish-permitting sibling therefore still owes the stage, whichever repository the policy did bind.</para>
     ///
-    /// <para>The third clause demands that the policy block was actually ADJUDICATED or actually COVERS the work:
-    /// either a human answered the delivery gate's own policy-skip card (the <see cref="SupervisorGateAdjudication"/>
-    /// record both stop gates already release on), or EVERY unit on the unpublished frontier that produced
-    /// head-eligible work captured a patch. Without it, a run that produced work the capture pipeline silently
-    /// swallowed would read "not applicable" off one unrelated patch row.</para>
+    /// <para>The last clause demands that the policy block was actually ADJUDICATED or actually COVERS the work:
+    /// either a human answered the delivery gate's own policy-skip card FOR EVERY branchless repository (the
+    /// <see cref="SupervisorGateAdjudication"/> record both stop gates already release on), or EVERY unit on the
+    /// unpublished frontier that produced head-eligible work captured a patch. Without it, a run that produced work
+    /// the capture pipeline silently swallowed would read "not applicable" off one unrelated patch row.</para>
     /// </summary>
     public static UpstreamStageNotApplicable? NotApplicableIntegration(IReadOnlyList<SupervisorPriorDecision> decisions, IReadOnlyList<PublishManifest> manifests)
     {
         if (HasIntegratedCandidate(decisions, manifests)) return null;   // the stage was exercised — "not applicable" would be a lie about work that happened
 
-        var captured = manifests.Where(m => m.Kind == PublishManifestKind.Agent && m.PublishStateValue == PublishState.PatchOnly && m.PublishError is null).ToList();
+        var captured = manifests.Where(m => m.Kind == PublishManifestKind.Agent && m.PublishStateValue == PublishState.PatchOnly && m.PublishError is null && m.Summary is { Length: > 0 }).ToList();
 
         if (captured.Count == 0 || manifests.Any(m => m.PublishStateValue == PublishState.Pushed)) return null;
 
-        if (!AdjudicatedPolicySkip(decisions) && !EveryFrontierUnitCaptured(decisions, captured)) return null;
+        var branchless = BranchlessAliases(manifests);
+
+        if (!branchless.IsSubsetOf(captured.Select(m => m.RepositoryAlias))) return null;
+
+        if (!AdjudicatedPolicySkip(decisions, branchless) && !EveryFrontierUnitCaptured(decisions, captured)) return null;
 
         return new UpstreamStageNotApplicable
         {
@@ -125,10 +134,27 @@ public static class UpstreamStageTrace
         };
     }
 
-    /// <summary>Whether a human ANSWERED the delivery gate's own card about a publish-policy skip — the ONE durable record that a person was shown this repository's policy conflict and ruled on it. Read through the gates' shared adjudication surface, never re-derived, so what releases the stop and what excuses the stage can never disagree.</summary>
-    private static bool AdjudicatedPolicySkip(IReadOnlyList<SupervisorPriorDecision> decisions) =>
+    /// <summary>
+    /// Whether a human ANSWERED the delivery gate's own card about a publish-policy skip COVERING every repository
+    /// <paramref name="branchless"/> names — the ONE durable record that a person was shown this repository's policy
+    /// conflict and ruled on it. Read through the gates' shared adjudication surface, never re-derived, so what
+    /// releases the stop and what excuses the stage can never disagree.
+    ///
+    /// <para>The card's ALIASES are load-bearing, not decoration: the delivery gate mints them from exactly the
+    /// patch-only repositories the publish attempt reached, and a publish-permitting sibling contributes no entry at
+    /// all (<c>SupervisorPullRequestOpener.NothingToOpenAsync</c>). Matching the blocker's KIND alone let one
+    /// repository's answer excuse Integrate run-wide — the very "one repo's skip cannot speak for another" the gate
+    /// scopes its own card by.</para>
+    /// </summary>
+    private static bool AdjudicatedPolicySkip(IReadOnlyList<SupervisorPriorDecision> decisions, IReadOnlySet<string> branchless) =>
         SupervisorGateAdjudication.AnsweredCardBlockers(decisions, SupervisorDeliveryGate.QuestionPrefix)
-            .Any(blocker => blocker?.Kind == SupervisorDeliveryGateReason.PolicySkipped);
+            .Any(blocker => blocker?.Kind == SupervisorDeliveryGateReason.PolicySkipped && branchless.IsSubsetOf(blocker.Aliases ?? Array.Empty<string>()));
+
+    /// <summary>Every repository this run captured work for and left WITHOUT a branch — the Agent-kind rows, the same ledger the delivery gate mints its card's aliases from (<c>SupervisorPullRequestOpener.CapturedWorkByRepositoryAsync</c>), so "which repositories owed a branch" cannot drift between the card and this cell.</summary>
+    private static IReadOnlySet<string> BranchlessAliases(IReadOnlyList<PublishManifest> manifests) =>
+        manifests.Where(m => m.Kind == PublishManifestKind.Agent && m.Branch is not { Length: > 0 })
+            .Select(m => m.RepositoryAlias)
+            .ToHashSet(StringComparer.Ordinal);
 
     /// <summary>Whether EVERY unit on the unpublished frontier that produced head-eligible work has a captured patch of its own — the no-contract half: nobody ruled on a policy card because no pull request was ever contracted, so the evidence has to be that the policy caught all of the work, not some of it. The frontier and the withheld bar are I3's own readers (<see cref="Supervisor.SupervisorPublishGate"/>), so "which units owed a branch" cannot drift between the gate and this cell.</summary>
     private static bool EveryFrontierUnitCaptured(IReadOnlyList<SupervisorPriorDecision> decisions, IReadOnlyList<PublishManifest> captured)
