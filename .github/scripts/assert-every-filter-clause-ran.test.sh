@@ -279,6 +279,15 @@ expect_summary() {
 expect_output has "readonly DARK_RUNS_TO_RED=3" "the dark-run threshold is pinned at 3" \
   grep -F "readonly DARK_RUNS_TO_RED=3" "$guard"
 
+# The other two knobs decide the same thing from the other side: how far back evidence is looked for, and whose
+# history counts as a streak at all. Raising the scan bound silently changes how many censusless runs can be stepped
+# over; changing the branch silently turns the streak off everywhere. Pinned for the same reason as the threshold.
+expect_output has "readonly DARK_HISTORY_RUNS_TO_SCAN=12" "the history scan bound is pinned at 12" \
+  grep -F "readonly DARK_HISTORY_RUNS_TO_SCAN=12" "$guard"
+
+expect_output has "readonly DARK_STREAK_BRANCH=main" "the streak branch is pinned to main" \
+  grep -F "readonly DARK_STREAK_BRANCH=main" "$guard"
+
 # The history parser recovers a predecessor's census by matching the table header this guard prints. If the printer
 # and the matcher ever disagree, every predecessor silently becomes "no evidence" and the streak never grows.
 expect_output has "outcome   passed    failed    skipped   clause" "prints the exact census header its history parser matches" \

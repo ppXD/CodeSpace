@@ -97,13 +97,21 @@ done
 # would mean handing it to the collect step too, which widens its exposure to strike a needle that is never there.
 REDACTION_EXEMPT="GITHUB_TOKEN"
 
-workflow="${here}/../workflows/real-model.yml"
-if [ -f "$workflow" ]; then
-  missing=""
+# Every secret a workflow passes that the redaction list does not name.
+unredacted_secrets_of() {
+  local workflow="$1" var missing=""
+
   for var in $(grep -o 'secrets\.[A-Z_0-9]*' "$workflow" | sed 's/secrets\.//' | sort -u); do
     [ "$var" = "$REDACTION_EXEMPT" ] && continue
     grep -qF -- "$var" "$collect" || missing="${missing} ${var}"
   done
+
+  printf '%s' "$missing"
+}
+
+workflow="${here}/../workflows/real-model.yml"
+if [ -f "$workflow" ]; then
+  missing="$(unredacted_secrets_of "$workflow")"
 
   if [ -z "$missing" ]; then
     pass "every secret real-model.yml passes is on the redaction list"
@@ -111,6 +119,24 @@ if [ -f "$workflow" ]; then
     fail "every secret real-model.yml passes is on the redaction list — unredacted:${missing}"
   fi
 fi
+
+# The detector needs its own teeth checked, because the exemption above is a hole punched in it BY HAND: a typo that
+# widened that one name into a catch-all would leave every case here green while the next gateway secret ships
+# unredacted under a step named "redact". A synthetic workflow passing both names settles it in both directions.
+fixture_workflow="$(mktemp)"
+printf 'env:\n  A: ${{ secrets.%s }}\n  B: ${{ secrets.CODESPACE_NEW_GATEWAY_KEY }}\n' "$REDACTION_EXEMPT" > "$fixture_workflow"
+missing="$(unredacted_secrets_of "$fixture_workflow")"
+rm -f "$fixture_workflow"
+
+case " ${missing} " in
+  *" CODESPACE_NEW_GATEWAY_KEY "*) pass "a NON-exempt secret still trips the drift detector" ;;
+  *) fail "a NON-exempt secret still trips the drift detector — it reported:'${missing}'" ;;
+esac
+
+case " ${missing} " in
+  *" ${REDACTION_EXEMPT} "*) fail "the exemption covers the per-job token — it reported:'${missing}'" ;;
+  *) pass "the exemption covers the per-job token, and nothing else" ;;
+esac
 
 # ── THE case this exists for: no gateway secret survives into an uploaded file ───────────────────────────────────
 
