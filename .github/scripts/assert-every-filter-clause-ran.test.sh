@@ -292,7 +292,7 @@ expect 0 "two consecutive dark runs still only warn" \
 expect_output lacks "::error::" "two consecutive dark runs emit no error" \
   run_on refs/heads/main "$dark_trx" RealModelBenchmark
 
-expect_summary "| 2 |" "the step summary carries the streak per clause" \
+expect_summary '| `RealModelBenchmark` | UNMEASURED | 0 | 0 | 1 | 2 |' "the step summary carries the streak per clause" \
   run_on refs/heads/main "$dark_trx" RealModelBenchmark
 
 # Streak 3 — THE case this exists for. The lane has now spent three full live-API budgets measuring nothing.
@@ -350,7 +350,7 @@ expect_output lacks "::error::" "a measured run leaves only the one-off warning"
   run_on refs/heads/main "$dark_trx" RealModelBenchmark
 
 # A clause that measured something is never on a streak at all, whatever its neighbours did.
-expect_summary "| 0 |" "a measured clause reports a zero streak" \
+expect_summary '| `RealModelBenchmark` | ok | 1 | 0 | 0 | 0 |' "a measured clause reports a zero streak" \
   run_on refs/heads/main "$measured_trx" RealModelBenchmark
 
 # A predecessor whose census recorded the clause MISSING breaks the streak, and deliberately so: MISSING means the
