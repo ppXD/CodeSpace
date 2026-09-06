@@ -327,7 +327,7 @@ public sealed partial class SupervisorTurnService
 
             var mode = await Completion.RunModeReader.DeriveAsync(_db, supervisorRunId, teamId, cancellationToken).ConfigureAwait(false);
 
-            return Deciders.SupervisorStopNowRecital.Render(composed.Assessment, composed.ExercisedUpstreamStages, _modes?.Resolve(mode), composed.Mode);
+            return Deciders.SupervisorStopNowRecital.Render(composed.Assessment, composed.ExercisedUpstreamStages, _modes?.Resolve(mode), composed.Mode, composed.NotApplicableUpstream);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

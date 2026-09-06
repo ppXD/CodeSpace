@@ -1,6 +1,8 @@
+using System.Text.Json;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Supervisor;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Enums;
@@ -228,6 +230,105 @@ public class UpstreamStageTraceTests
         UpstreamStageTrace.MissingRequired(Supervisor, UpstreamStageTrace.Stages).ShouldBeEmpty();
     }
 
+    // ─── Integrate read as NOT APPLICABLE: the patch-only policy dead end (audit D nail 1) ───
+
+    [Theory]
+    [InlineData(true, false, true)]     // a human adjudicated the delivery gate's policy-skip card
+    [InlineData(false, true, true)]     // no card was ever contracted, but every frontier unit captured a patch
+    [InlineData(false, false, false)]   // neither — one stray patch row cannot excuse work nothing accounts for
+    public void A_patch_only_run_reads_integrate_not_applicable_only_with_adjudication_or_full_capture(bool adjudicated, bool captureTheFrontier, bool notApplicable)
+    {
+        var agentRunId = Guid.NewGuid();
+        var tape = new List<SupervisorPriorDecision> { Decision(1, SupervisorDecisionKinds.Spawn, outcomeJson: SpawnOutcome(agentRunId)) };
+
+        if (adjudicated) tape.Add(AnsweredPolicySkipCard(2));
+
+        var manifests = new[] { PatchOnlyAgentManifest(captureTheFrontier ? agentRunId : Guid.NewGuid()) };
+
+        UpstreamStageTrace.NotApplicableIntegration(tape, manifests)?.Stage.ShouldBe(CompletionStage.Integrate);
+
+        (UpstreamStageTrace.NotApplicableIntegration(tape, manifests) is not null).ShouldBe(notApplicable,
+            "the policy must have been RULED on, or have caught every unit that owed a branch — otherwise 'not applicable' excuses work the capture pipeline may simply have swallowed");
+    }
+
+    [Fact]
+    public void A_publish_permitting_repository_is_never_read_not_applicable()
+    {
+        // The invariant this whole reading must not break (#1762/#1771/#1774): a run that reached a branch owes the
+        // stage, and a MIXED multi-repo run — one patch-only repo beside a publishing sibling — is exactly that run.
+        var agentRunId = Guid.NewGuid();
+        var tape = new[] { Decision(1, SupervisorDecisionKinds.Spawn, outcomeJson: SpawnOutcome(agentRunId)), AnsweredPolicySkipCard(2) };
+
+        var manifests = new[] { PatchOnlyAgentManifest(agentRunId), IntegrationManifest(PublishState.Pushed, "codespace/agent/sibling", PublishManifestKind.Agent) };
+
+        UpstreamStageTrace.NotApplicableIntegration(tape, manifests).ShouldBeNull("a sibling reached a branch — this run was never policy-bounded");
+    }
+
+    [Fact]
+    public void An_ATTEMPTED_push_that_failed_is_never_read_as_policy()
+    {
+        // PublishError non-null is the ledger's own "attempted and failed", not "by choice" (PublishManifest.cs:72).
+        // A broken credential is a fixable fault a human must see, never a policy that excuses the stage.
+        var agentRunId = Guid.NewGuid();
+        var tape = new[] { Decision(1, SupervisorDecisionKinds.Spawn, outcomeJson: SpawnOutcome(agentRunId)), AnsweredPolicySkipCard(2) };
+
+        var attempted = PatchOnlyAgentManifest(agentRunId);
+        attempted.PublishError = "the remote rejected the push";
+        attempted.Summary = null;
+
+        UpstreamStageTrace.NotApplicableIntegration(tape, new[] { attempted })
+            .ShouldBeNull("a failed push attempt is a fault to fix, not a policy nobody owes");
+    }
+
+    [Fact]
+    public void A_run_that_DID_integrate_is_never_read_not_applicable()
+    {
+        var agentRunId = Guid.NewGuid();
+        var tape = new[]
+        {
+            Decision(1, SupervisorDecisionKinds.Spawn, outcomeJson: SpawnOutcome(agentRunId)),
+            AnsweredPolicySkipCard(2),
+            Decision(3, SupervisorDecisionKinds.Merge, outcomeJson: """{"integration":{"status":"Clean","integratedBranch":"codespace/integration/x"}}"""),
+        };
+
+        UpstreamStageTrace.NotApplicableIntegration(tape, new[] { PatchOnlyAgentManifest(agentRunId) })
+            .ShouldBeNull("the stage was exercised — calling it 'not applicable' would misreport work that actually happened");
+    }
+
+    [Fact]
+    public void An_UNANSWERED_policy_card_adjudicates_nothing()
+    {
+        var agentRunId = Guid.NewGuid();
+        var tape = new[] { Decision(1, SupervisorDecisionKinds.Spawn, outcomeJson: SpawnOutcome(agentRunId)), AnsweredPolicySkipCard(2, answer: null) };
+
+        UpstreamStageTrace.NotApplicableIntegration(tape, new[] { PatchOnlyAgentManifest(Guid.NewGuid()) })
+            .ShouldBeNull("a card nobody answered is a question, not a ruling");
+    }
+
+    [Theory]
+    [InlineData(1, "integration not applicable — patch-only policy; 1 patch delivered")]
+    [InlineData(3, "integration not applicable — patch-only policy; 3 patches delivered")]
+    public void The_policy_sentence_is_pinned_verbatim(int patches, string expected)
+    {
+        // Backend-authored words: the stop recital prints them to the model and the Room prints them to the
+        // operator, both verbatim — a rewording here moves both at once, which is the point of pinning it once.
+        var agentRunId = Guid.NewGuid();
+        var tape = new[] { Decision(1, SupervisorDecisionKinds.Spawn, outcomeJson: SpawnOutcome(agentRunId)), AnsweredPolicySkipCard(2) };
+
+        UpstreamStageTrace.NotApplicableIntegration(tape, Enumerable.Range(0, patches).Select(_ => PatchOnlyAgentManifest(agentRunId)).ToList())!
+            .Reason.ShouldBe(expected);
+    }
+
+    [Fact]
+    public void A_not_applicable_stage_is_no_longer_missing()
+    {
+        var exercised = new HashSet<CompletionStage> { CompletionStage.Contract, CompletionStage.Plan, CompletionStage.Execute };
+        var notApplicable = new UpstreamStageNotApplicable { Stage = CompletionStage.Integrate, Reason = "integration not applicable — patch-only policy; 1 patch delivered" };
+
+        UpstreamStageTrace.MissingRequired(Supervisor, exercised).ShouldBe(new[] { CompletionStage.Integrate }, customMessage: "without the policy reading the stage is owed");
+        UpstreamStageTrace.MissingRequired(Supervisor, exercised, notApplicable).ShouldBeEmpty("unevidenced and unowed are different verdicts — only the first parks");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private static RequirementEnvelope Requirement(string requirementRef) => new()
@@ -249,6 +350,30 @@ public class UpstreamStageTraceTests
     private static AttemptProjection Attempt() => new()
     {
         AttemptId = Guid.NewGuid(), UnitId = "s1", WorkUnit = null, AttemptOrdinal = 1, State = AttemptState.Settled,
+    };
+
+    /// <summary>A spawn whose single unit produced real, head-eligible work — the frontier the capture check is measured against.</summary>
+    private static string SpawnOutcome(Guid agentRunId) =>
+        $$"""{"agentRunIds":["{{agentRunId}}"],"agentCount":1,"agentResults":[{"agentRunId":"{{agentRunId}}","status":"Succeeded","changedFiles":["a.txt"]}]}""";
+
+    /// <summary>The delivery gate's OWN card recording a publish-policy skip, answered unless <paramref name="answer"/> is null — the durable record that a human was shown this repository's policy conflict and ruled on it.</summary>
+    private static SupervisorPriorDecision AnsweredPolicySkipCard(long sequence, string? answer = "patch-only is deliberate")
+    {
+        var question = $"{SupervisorDeliveryGate.QuestionPrefix}the required pull request was skipped by policy (primary: the repository requires patch-only publishing)";
+        var reason = new SupervisorDeliveryGateReason { Kind = SupervisorDeliveryGateReason.PolicySkipped, Aliases = new[] { "primary" } };
+
+        return Decision(sequence, SupervisorDecisionKinds.AskHuman) with
+        {
+            PayloadJson = $$"""{"question":{{JsonSerializer.Serialize(question)}},"{{SupervisorGateAdjudication.ReasonNode}}":{{JsonSerializer.Serialize(reason, AgentJson.Options)}}}""",
+            OutcomeJson = JsonSerializer.Serialize(new { question, askHumanToken = "tok", answer }, AgentJson.Options),
+        };
+    }
+
+    /// <summary>The BY-CHOICE branchless row <c>AgentRunExecutor</c> writes when the publish guard chain kept a captured diff off a branch: PatchOnly, no branch, and — the load-bearing detail — no <c>PublishError</c>.</summary>
+    private static PublishManifest PatchOnlyAgentManifest(Guid agentRunId) => new()
+    {
+        Id = Guid.NewGuid(), TeamId = Guid.NewGuid(), Kind = PublishManifestKind.Agent, WorkflowRunId = Guid.NewGuid(), AgentRunId = agentRunId,
+        RepositoryAlias = "primary", PublishStateValue = PublishState.PatchOnly, ChangedFileCount = 1, Summary = "the repository requires patch-only publishing",
     };
 
     private static PublishManifest IntegrationManifest(PublishState state, string? branch, PublishManifestKind kind = PublishManifestKind.Integration) => new()

@@ -10,7 +10,7 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// production renders it; a mirror that projected only the assessment showed the harness's brain four contract
 /// dimensions while production's prompt also named the stage the terminal authority objects to.
 /// </summary>
-public sealed record TapeStoppedNow(CompletionAssessment Assessment, IReadOnlySet<CompletionStage> ExercisedUpstreamStages);
+public sealed record TapeStoppedNow(CompletionAssessment Assessment, IReadOnlySet<CompletionStage> ExercisedUpstreamStages, UpstreamStageNotApplicable? NotApplicableUpstream = null);
 
 /// <summary>
 /// The supervisor tape's own projection into completion envelopes — the pure core of what
@@ -85,7 +85,13 @@ public static class SupervisorTapeCompletion
         // never the reverse.
         var stages = Completion.UpstreamStageTrace.Derive(requirements, decisions, attempts, []);
 
-        return new TapeStoppedNow(Completion.CompletionReducer.Reduce(requirements, admission.Admitted, StoppedNowFacts(decisions)), stages);
+        // The policy reading, asked through the SAME entry point rather than hard-coded null — a second derivation
+        // here is exactly what would let the mirror and production word one run differently. Its captured-patch
+        // evidence is a MANIFEST fact, so off an empty list it always reads "owed": the same one-directional
+        // conservatism as the cell above — the mirror can owe a stage production excuses, never the reverse.
+        var notApplicable = Completion.UpstreamStageTrace.NotApplicableIntegration(decisions, []);
+
+        return new TapeStoppedNow(Completion.CompletionReducer.Reduce(requirements, admission.Admitted, StoppedNowFacts(decisions)), stages, notApplicable);
     }
 
     /// <summary>

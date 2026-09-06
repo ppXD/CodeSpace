@@ -397,6 +397,70 @@ public sealed class SupervisorDeliveryGateFlowTests
     }
 
     [Fact]
+    public async Task A_patch_only_run_clears_BOTH_stop_gates_once_each_blocker_is_adjudicated()
+    {
+        // Audit D nail 1's first half. A patch-only repository trips BOTH stop gates on the same stop, one rung
+        // apart: I3 wants a published branch the policy forbids, then DC-2b wants a pull request the same policy
+        // forbids. I3's card had NO release rung at all, so the run dead-ended one rung ABOVE the delivery gate —
+        // the human answered and the very next stop re-minted the identical I3 card, forever, because no answer
+        // from inside the run can change a repository setting. Both gates now release on the blocker a human
+        // ruled on, so the run reaches its honest terminal: a stop, with zero pull requests and zero branches.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var conversationId = await SeedConversationAsync(teamId, userId);
+        var repoId = await SeedBoundRepositoryAsync(teamId);
+        await SetPublishModeAsync(repoId, RepositoryPublishMode.PatchOnly);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        // The ordinary patch-only shape: accepted work, captured branchlessly, and I3's own forced merge already
+        // back with the policy verdict — seeded because the executor's integrate step needs a real git remote,
+        // which is the real-model tier's subject (RealModelDeliveryGateE2ETests), not this one's.
+        var agentRunId = Guid.NewGuid();
+        await SeedSpawnAsync(runId, teamId, agentRunId);
+        await SeedCapturedPatchOnlyManifestAsync(runId, teamId, agentRunId, repoId);
+        await SeedPolicyBlockedMergeAsync(runId, teamId);
+
+        var goalConfig = GoalConfig(repoId, new DeliverySpec { OpenPullRequest = true });
+        var decider = new AlwaysStopDecider();
+
+        var i3Card = await RunTurnAsync(runId, teamId, decider, goalConfig, conversationId: conversationId);
+        i3Card.DecisionKind.ShouldBe(SupervisorDecisionKinds.AskHuman, "the merge already ran and produced no branch — I3 parks rather than retrying forever");
+        JsonSerializer.Deserialize<SupervisorAskHumanPayload>(i3Card.PayloadJson, AgentJson.Options)!
+            .Question.ShouldStartWith(SupervisorPublishGate.QuestionPrefix, Case.Sensitive, "the run dead-ends at I3, one rung ABOVE the delivery gate");
+
+        await AnswerPendingAskAsync(runId, teamId, userId, "the repository is patch-only on purpose — finish without an integrated branch");
+
+        var reMerge = await RunTurnAsync(runId, teamId, decider, goalConfig, conversationId: conversationId);
+        reMerge.DecisionKind.ShouldBe(SupervisorDecisionKinds.Merge, "the answer buys exactly ONE fresh server-authored attempt — had the human flipped the publish mode, THIS is where the branch would appear");
+
+        // That forced merge REALLY RAN — and reports contributor-integrity Partial, because this tape's spawn is
+        // seeded and its agent-run rows do not exist. So the verdict a production patch-only merge comes back with
+        // is seeded here instead: an integrate step that ran and was skipped by the same publish policy. What the
+        // release actually turns on is that it landed AFTER the answer — the human's ruling can never release a
+        // verdict that predates it.
+        await SeedPolicyBlockedMergeAsync(runId, teamId);
+
+        var publish = await RunTurnAsync(runId, teamId, decider, goalConfig, conversationId: conversationId);
+        publish.DecisionKind.ShouldBe(SupervisorDecisionKinds.Publish, "I3 released on the adjudicated blocker — the stop now reaches DC-2b, the rung it could never get past before");
+        JsonSerializer.Deserialize<RoomPullRequestResult>(publish.OutcomeJson!, AgentJson.Options)!
+            .PullRequests.Single().Disposition.ShouldBe(RoomPullRequestDisposition.Skipped, "the same policy forbids the pull request too");
+
+        var deliveryCard = await RunTurnAsync(runId, teamId, decider, goalConfig, conversationId: conversationId);
+        deliveryCard.DecisionKind.ShouldBe(SupervisorDecisionKinds.AskHuman);
+        JsonSerializer.Deserialize<SupervisorAskHumanPayload>(deliveryCard.PayloadJson, AgentJson.Options)!
+            .Question.ShouldStartWith(SupervisorDeliveryGate.QuestionPrefix, Case.Sensitive, "the SECOND gate asks its own question — one card per blocker, never one card for both");
+
+        await AnswerPendingAskAsync(runId, teamId, userId, "patch-only is deliberate — finish without the pull request");
+
+        (await RunTurnAsync(runId, teamId, decider, goalConfig, conversationId: conversationId)).DecisionKind.ShouldBe(SupervisorDecisionKinds.Publish, "DC-2b's own one fresh re-attempt");
+
+        var stop = await RunTurnAsync(runId, teamId, decider, goalConfig, conversationId: conversationId);
+        stop.DecisionKind.ShouldBe(SupervisorDecisionKinds.Stop, "both blockers adjudicated, both re-checked — the run finishes honestly instead of dead-ending");
+
+        (await ListManifestsAsync(runId, teamId)).ShouldAllBe(m => m.PullRequestNumber == null && m.Branch == null,
+            "the whole point of the policy held: nothing was pushed and no pull request was opened");
+    }
+
+    [Fact]
     public async Task A_no_progress_forced_stop_cannot_terminalize_around_the_delivery_contract()
     {
         // Run 29131608121's live evidence: a brain that never stops gets FORCE-stopped by the no-progress bound,
@@ -721,6 +785,25 @@ public sealed class SupervisorDeliveryGateFlowTests
     }
 
     /// <summary>Hand-seeds a TERMINAL single-repo Merge decision's outcome — the exact JSON shape <c>SupervisorOutcome.ReadFinalIntegratedBranch</c> reads. Merge-derived resolution takes precedence over the P0-5 ledger-direct fallback, so this simulates a genuinely NEW second round of work superseding the first round's branch.</summary>
+    /// <summary>The merge outcome a PATCH-ONLY repository produces: the integrate step ran and the SAME publish guard chain the per-agent push respects skipped it, so no branch exists and the reason names the policy. This is what I3's own forced merge comes back with on such a repo, every time — an immutable setting, so re-running it can only ever produce this again.</summary>
+    private async Task SeedPolicyBlockedMergeAsync(Guid runId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var outcome = JsonSerializer.Serialize(new { integration = new { status = "Skipped", integratedBranch = (string?)null, reason = "publish policy: the repository requires patch-only publishing" } }, AgentJson.Options);
+
+        var now = DateTimeOffset.UtcNow;
+        db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId,
+            DecisionKind = SupervisorDecisionKinds.Merge, IdempotencyKey = $"merge-{Guid.NewGuid():N}", InputHash = "test",
+            Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = outcome,
+            FenceEpoch = 1, CreatedDate = now, CreatedBy = Guid.Empty, LastModifiedDate = now, LastModifiedBy = Guid.Empty,
+        });
+        await db.SaveChangesAsync();
+    }
+
     private async Task SeedMergeAsync(Guid runId, Guid teamId, string integratedBranch)
     {
         using var scope = _fixture.BeginScope();

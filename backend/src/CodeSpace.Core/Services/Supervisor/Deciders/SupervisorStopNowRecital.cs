@@ -52,8 +52,8 @@ public static class SupervisorStopNowRecital
     /// </summary>
     private const string Steer = "Land that work, stop with outcome 'gave_up', or ask_human; do not claim completed.";
 
-    /// <summary>Render the recital, or null when there is no assessment to recite (contract-less / pre-F0 run). The stage trace, profile and enforcement mode are the terminal authority's own three inputs; omitting them (a tape mirror with no stage trace, an unregistered mode) renders the dimensions alone, byte-identically.</summary>
-    public static string? Render(CompletionAssessment? assessment, IReadOnlySet<CompletionStage>? exercisedUpstreamStages = null, ModeProfile? profile = null, CompletionEnforcementMode enforcementMode = CompletionEnforcementMode.Legacy)
+    /// <summary>Render the recital, or null when there is no assessment to recite (contract-less / pre-F0 run). The stage trace, profile and enforcement mode are the terminal authority's own three inputs; omitting them (a tape mirror with no stage trace, an unregistered mode) renders the dimensions alone, byte-identically. <paramref name="notApplicableUpstream"/> is the authority's fourth input — the stage this run's repository policy put out of reach — and renders as a FACT, never a warning: the model must not be steered to "land that work" when no answer from inside the run could.</summary>
+    public static string? Render(CompletionAssessment? assessment, IReadOnlySet<CompletionStage>? exercisedUpstreamStages = null, ModeProfile? profile = null, CompletionEnforcementMode enforcementMode = CompletionEnforcementMode.Legacy, UpstreamStageNotApplicable? notApplicableUpstream = null)
     {
         if (assessment is null) return null;
 
@@ -68,7 +68,7 @@ public static class SupervisorStopNowRecital
             ? "- every contract dimension reads SETTLED — a clean stop now reads Solved. If the goal is met, stop rather than spending further turns on a contract that is already satisfied."
             : $"- UNRESOLVED: {string.Join(", ", unresolved)} — a stop right now cannot read Solved. Settle what is owed (make the failing checks pass, land the owed delivery/output), or stop honestly / ask a human — never stop as if done.";
 
-        return $"{Header}\n{verdict}{StageRefusal(exercisedUpstreamStages, profile, enforcementMode)}";
+        return $"{Header}\n{verdict}{StageNote(notApplicableUpstream, profile)}{StageRefusal(exercisedUpstreamStages, profile, enforcementMode, notApplicableUpstream)}";
     }
 
     /// <summary>
@@ -83,11 +83,11 @@ public static class SupervisorStopNowRecital
     /// Only the lead-in moves, because only an Enforced run can actually be refused
     /// (<c>CompletionTerminalAuthority.cs:59</c>).</para>
     /// </summary>
-    private static string StageRefusal(IReadOnlySet<CompletionStage>? exercisedUpstreamStages, ModeProfile? profile, CompletionEnforcementMode enforcementMode)
+    private static string StageRefusal(IReadOnlySet<CompletionStage>? exercisedUpstreamStages, ModeProfile? profile, CompletionEnforcementMode enforcementMode, UpstreamStageNotApplicable? notApplicableUpstream)
     {
         if (profile is null) return string.Empty;
 
-        var missing = Completion.UpstreamStageTrace.MissingRequired(profile, exercisedUpstreamStages);
+        var missing = Completion.UpstreamStageTrace.MissingRequired(profile, exercisedUpstreamStages, notApplicableUpstream);
 
         if (missing.Count == 0) return string.Empty;
 
@@ -95,4 +95,17 @@ public static class SupervisorStopNowRecital
 
         return $"\n- {lead} mode '{profile.Mode}' requires {missing.Count} stage(s) with no evidence — {string.Join(", ", missing)}. {Steer}";
     }
+
+    /// <summary>
+    /// The stage the run's own repository policy put OUT OF REACH, stated as a settled fact. It renders BESIDE
+    /// the refusal line, never instead of it: other stages can still be genuinely missing, and a model told only
+    /// "integration is not applicable" would read that as permission to stop. Silent when nothing is
+    /// policy-bounded, so every run without one renders byte-identically to before.
+    ///
+    /// <para>Sentence authored HERE and nowhere else — <see cref="UpstreamStageNotApplicable.Reason"/> is the
+    /// backend's own words, which the Room prints verbatim too, so the prompt and the operator's view of the same
+    /// run cannot describe it differently.</para>
+    /// </summary>
+    private static string StageNote(UpstreamStageNotApplicable? notApplicableUpstream, ModeProfile? profile) =>
+        profile is null || notApplicableUpstream is null ? string.Empty : $"\n- {notApplicableUpstream.Reason}.";
 }
