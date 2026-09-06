@@ -3,6 +3,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark;
 using CodeSpace.Core.Services.Agents.Harnesses.Codex;
+using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Enums;
@@ -150,7 +151,92 @@ public sealed class BenchmarkRunnerFlowTests
         row.SuccessRate.ShouldBe(0.5);
     }
 
+    // ─── Gateway format fault: the cell recovers once, then stays infra-dead honestly ───
+
+    /// <summary>The verbatim text the gateway's Anthropic-compat layer kills the CLI with — the thing the whole repair exists for, so the test must fail on nothing less.</summary>
+    private const string LiveGatewayFormatFault = "API Error: Content block is not a thinking block";
+
+    /// <summary>
+    /// A CLI that dies on a mangled wire, and solves the task once it gets a clean one. It tells the two attempts apart
+    /// by the degrade ITSELF (<c>MAX_THINKING_TOKENS=0</c>) rather than a counter, so a mitigation that stopped at the
+    /// durable envelope and never reached the process would leave this fixture failing forever — the second half of the
+    /// repair is proven end to end here, not assumed.
+    /// </summary>
+    private static readonly string GatewayFaultThenSolveScript =
+        $"if [ \"${AgentRetryCauses.MaxThinkingTokensEnvVar}\" = \"0\" ]; then\n" +
+        "  printf '#!/bin/sh\\nexit 0\\n' > check.sh\n" +
+        "  printf '{\"type\":\"agent_message\",\"message\":\"solved once the wire was clean\"}\\n'\n" +
+        "  printf '{\"type\":\"task_complete\",\"message\":\"completed\"}\\n'\n" +
+        "  exit 0\n" +
+        "fi\n" +
+        $"echo '{LiveGatewayFormatFault}' >&2\n" +
+        "exit 1\n";
+
+    /// <summary>A gateway that stays broken: every attempt dies the same way, mitigated or not.</summary>
+    private static readonly string GatewayFaultAlwaysScript = $"echo '{LiveGatewayFormatFault}' >&2\nexit 1\n";
+
+    [Fact]
+    public async Task A_cell_the_gateway_mangled_is_respawned_once_and_gets_a_real_capability_verdict()
+    {
+        // The lost-instrument shape, on the production path: the CLI dies in seconds on a mangled wire before the model
+        // gets a turn. Before this, the benchmark lane had no respawn at all — the cell died where it stood, and with
+        // enough of them the M1a evaluator-health floor refused to grade the whole corpus (9/18 cells infra-dead for 7
+        // consecutive main runs). Now the cell buys the shared repair once and produces the verdict it was there for.
+        if (OperatingSystem.IsWindows()) return;   // the fake CLI + check are /bin/sh scripts the runner spawns
+
+        using var cli = new FakeBenchmarkCli(GatewayFaultThenSolveScript);
+        using var workspace = BenchmarkFixture.StageFailing();   // the check fails until an agent that GOT A TURN fixes it
+
+        var teamId = await SeedTeamAsync();
+        var task = TestsPassTask();
+
+        var result = await RunAsync(task, BenchmarkMode.HarnessCli, workspace.Directory, teamId);
+
+        result.FormatFaultRespawns.ShouldBe(1, "the cell reports how hard the instrument had to work — the gateway's health, next to the number it produced");
+        result.RunStatus.ShouldBe(AgentRunStatus.Succeeded, "the GRADED attempt is the respawn, the one that actually got a turn — not the death that preceded it");
+        result.Grade.Passed.ShouldBeTrue("the respawned agent fixed the check — a real solve, which a cell that died where it stood could never have reported");
+
+        // Two REAL runs, each with its own row + event log — a respawn is a second attempt, never a re-labelled first.
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().CountAsync(r => r.TeamId == teamId))
+                .ShouldBe(2, "the mitigated respawn is a real second agent run, and exactly one of them");
+
+        CellStateOf(task, result).ShouldBe(CorpusCellState.Solved, "the cell counts toward capability instead of leaving a hole in the fixed denominator");
+    }
+
+    [Fact]
+    public async Task A_second_format_fault_leaves_the_cell_infra_dead_with_the_repair_spent_exactly_once()
+    {
+        // The honest other half: a mitigated attempt that hits the SAME fault has proven the repair does not hold here,
+        // so the cell stays infra-dead exactly as it does today rather than re-billing a broken gateway. The cli-mcp arm
+        // is the live shape — a CLI that dies in seconds never handshakes the fabric, so the arm's own rule classes the
+        // cell Environment (infra), which is precisely what the evaluator-health floor counts.
+        if (OperatingSystem.IsWindows()) return;
+
+        using var cli = new FakeBenchmarkCli(GatewayFaultAlwaysScript);
+        using var workspace = BenchmarkFixture.StageFailing();
+
+        var teamId = await SeedTeamAsync();
+        var task = TestsPassTask() with { Modes = new[] { BenchmarkMode.HarnessCliWithMcp } };
+
+        var result = await RunAsync(task, BenchmarkMode.HarnessCliWithMcp, workspace.Directory, teamId);
+
+        result.FormatFaultRespawns.ShouldBe(1, "ONE repair, never a loop against a gateway that is simply down");
+        result.RunStatus.ShouldBe(AgentRunStatus.Failed, "the mitigated attempt died too — the cell is honestly lost");
+        result.Grade.Class.ShouldBe(GradeFailureClass.Environment, "infra, never a model verdict");
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().CountAsync(r => r.TeamId == teamId))
+                .ShouldBe(2, "the second fault buys nothing further — two attempts, not three");
+
+        CellStateOf(task, result).ShouldBe(CorpusCellState.InfraUnknown, "infra-dead, exactly as before — the respawn never launders a broken gateway into a capability verdict");
+    }
+
     // ─── Helpers ───
+
+    /// <summary>The cell's M1a four-state verdict, through the REAL classifier over a one-cell manifest — what the evaluator-health floor actually counts, never a re-derivation of it here.</summary>
+    private static CorpusCellState CellStateOf(BenchmarkTask task, BenchmarkResult result) =>
+        EvalSuite.Classify(EvalSuite.ManifestFor(new[] { task }), new[] { result }, Array.Empty<CorpusBenchmarkError>()).Single().State;
 
     private async Task<BenchmarkResult> RunAsync(BenchmarkTask task, BenchmarkMode mode, string workspaceDir, Guid teamId)
     {

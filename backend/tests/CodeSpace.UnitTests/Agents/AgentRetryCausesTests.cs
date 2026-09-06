@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Eval.Benchmark;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Executors;
 using CodeSpace.Core.Services.Workflows.Nodes;
@@ -111,13 +112,14 @@ public class AgentRetryCausesTests
     }
 
     [Fact]
-    public async Task Both_retry_lanes_repair_a_format_fault_through_the_same_helper()
+    public async Task Every_retry_lane_repairs_a_format_fault_through_the_same_helper()
     {
-        // Drift detector (Rule 12.5, behavioural form): the supervisor's `retry` and agent.run's respawn resolve
-        // their prior attempt from different sources — a DB-loaded ResumableSession vs. a flat resume payload — but
-        // the repair they apply must be the ONE the helper owns. A lane that copies the literal instead passes today
-        // and silently un-repairs the moment the helper changes (a renamed env var, a third half added), so both
-        // lanes are asserted through the helper's own predicate, never through a re-typed "MAX_THINKING_TOKENS".
+        // Drift detector (Rule 12.5, behavioural form): the supervisor's `retry`, agent.run's respawn and the
+        // benchmark cell's respawn resolve their prior attempt from three different sources — a DB-loaded
+        // ResumableSession, a flat resume payload, and the terminal AgentRun row — but the repair they apply must be
+        // the ONE the helper owns. A lane that copies the literal instead passes today and silently un-repairs the
+        // moment the helper changes (a renamed env var, a third half added), so every lane is asserted through the
+        // helper's own predicate, never through a re-typed "MAX_THINKING_TOKENS".
         const string liveError = "API Error: Content block is not a thinking block";
 
         var supervisorTask = RealSupervisorActionExecutor.ApplyRetryDisposition(
@@ -130,7 +132,12 @@ public class AgentRetryCausesTests
         var node = await new AgentCodeNode().RunAsync(NodeContext(priorAttempt), CancellationToken.None);
         var nodeTask = JsonSerializer.Deserialize<AgentTask>(node.SuspendUntil!.Payload, AgentJson.Options)!;
 
-        foreach (var (lane, task) in new[] { ("supervisor retry", supervisorTask), ("agent.run respawn", nodeTask) })
+        // The third lane: a benchmark/qualification cell builds its OWN AgentTask and drives the executor directly,
+        // so it inherits neither the node's retry budget nor the supervisor's verdict — it must buy the repair itself,
+        // and through the same helper. It reads the fault off the terminal AgentRun.Error the executor persisted.
+        var benchmarkTask = BenchmarkRunner.RespawnFor(Task_(), liveError)!;
+
+        foreach (var (lane, task) in new[] { ("supervisor retry", supervisorTask), ("agent.run respawn", nodeTask), ("benchmark cell respawn", benchmarkTask) })
         {
             AgentRetryCauses.IsFormatFaultMitigated(task).ShouldBeTrue($"the {lane} lane must apply the SHARED mitigation, not its own copy of it");
             task.ResumeFromSessionId.ShouldBeNull($"the {lane} lane must start FRESH — a replay re-triggers the fault deterministically");

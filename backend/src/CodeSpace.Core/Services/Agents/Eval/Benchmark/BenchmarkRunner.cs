@@ -57,11 +57,7 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
         // result so the cli vs cli-mcp rows can never be mislabeled relative to what the run actually did.
         var mcpFullCatalog = AgentRunExecutor.UsesFullToolCatalog(agentTask);
 
-        var run = await _runs.CreateAsync(agentTask, teamId, null, null, iterationKey: "", cancellationToken).ConfigureAwait(false);
-
-        await _executor.ExecuteAsync(run.Id, cancellationToken).ConfigureAwait(false);
-
-        var completed = await _runs.GetAsync(run.Id, cancellationToken).ConfigureAwait(false);
+        var (completed, formatFaultRespawns) = await RunWithFormatFaultRespawnAsync(agentTask, teamId, cancellationToken).ConfigureAwait(false);
 
         var grade = await GradeAsync(task, workspaceDirectory, cancellationToken).ConfigureAwait(false);
 
@@ -69,8 +65,56 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
 
         grade = await CaptureEvidenceAsync(grade, teamId, cancellationToken).ConfigureAwait(false);
 
-        return BuildResult(task, mode, completed, grade, mcpFullCatalog);
+        return BuildResult(task, mode, completed, grade, mcpFullCatalog, formatFaultRespawns);
     }
+
+    /// <summary>
+    /// Drive the cell's agent run, buying the gateway-format-fault repair EXACTLY ONCE (see <see cref="RespawnFor"/>).
+    /// The benchmark lane builds its own <c>AgentTask</c>s and drives the executor directly, so it inherits neither the
+    /// quick lane's node-retry budget nor the supervisor's retry verdict — without this, every cell the gateway mangled
+    /// died where it stood and the whole instrument went blind while the gateway misbehaved (9/18 cells infra-dead for
+    /// 7 consecutive main runs, 2026-09). The grade is taken AFTER this returns, so it judges the attempt that actually
+    /// got a turn. The returned count is reported, never scored.
+    /// </summary>
+    private async Task<(AgentRun Run, int Respawns)> RunWithFormatFaultRespawnAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken)
+    {
+        var completed = await ExecuteOnceAsync(task, teamId, cancellationToken).ConfigureAwait(false);
+
+        if (RespawnFor(task, completed.Error) is not { } mitigated) return (completed, 0);
+
+        _logger.LogWarning("Benchmark cell agent run {RunId} died of {Cause} — respawning ONCE on a fresh conversation with extended thinking disabled; a second fault leaves the cell infra-dead", completed.Id, Supervisor.AgentRetryCauses.GatewayFormatFault);
+
+        return (await ExecuteOnceAsync(mitigated, teamId, cancellationToken).ConfigureAwait(false), 1);
+    }
+
+    /// <summary>Create + drive ONE agent run to its terminal row — the single production seam both the cell's first attempt and its one mitigated respawn go through, so a respawn is a real second run with its own event log, never a re-labelled first.</summary>
+    private async Task<AgentRun> ExecuteOnceAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken)
+    {
+        var run = await _runs.CreateAsync(task, teamId, null, null, iterationKey: "", cancellationToken).ConfigureAwait(false);
+
+        await _executor.ExecuteAsync(run.Id, cancellationToken).ConfigureAwait(false);
+
+        return await _runs.GetAsync(run.Id, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The cell's ONE respawn verdict: the mitigated task to re-stage, or null to leave the cell exactly as it stands
+    /// today. A gateway format fault (<see cref="Supervisor.AgentRetryCauses.GatewayFormatFault"/>) is INFRA — the
+    /// gateway mangled the Anthropic wire and the model never got a turn — so this lane buys the same repair the quick
+    /// lane and the supervisor lane already buy, composed through the ONE shared
+    /// <see cref="Supervisor.AgentRetryCauses.ApplyFormatFaultMitigation"/> (fresh conversation + extended thinking
+    /// disabled) rather than a third copy of it.
+    ///
+    /// <para>The bound is read off the DISPATCHED envelope itself (<see cref="Supervisor.AgentRetryCauses.IsFormatFaultMitigated"/>
+    /// — the same fact the executor announces the repair from), so an attempt that ALREADY ran mitigated and hit the
+    /// same fault has proven the repair does not hold here: it returns null and the cell stays infra-dead, honestly,
+    /// instead of re-billing a broken gateway. Every other cause returns null too — the benchmark is @1 by design, and
+    /// this is not a general retry.</para>
+    /// </summary>
+    internal static AgentTask? RespawnFor(AgentTask task, string? error) =>
+        Supervisor.AgentRetryCauses.Classify(error) == Supervisor.AgentRetryCauses.GatewayFormatFault && !Supervisor.AgentRetryCauses.IsFormatFaultMitigated(task)
+            ? Supervisor.AgentRetryCauses.ApplyFormatFaultMitigation(task)
+            : null;
 
     /// <summary>
     /// Build the agent-task envelope for this (task, mode): the pre-staged workspace is pinned directly (no RepositoryId →
@@ -180,8 +224,8 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
         return await grader.GradeAsync(context, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Fold the recorded run + the grade into a result row. Duration is the run's wall-clock when both timestamps exist (mirroring the scorecard's own projection); null otherwise. The run's normalized <c>ResultJson</c> is deserialized ONCE to project the token usage / revise rounds / exit reason a critic A/B reports (all null/0 when the run recorded no result). <paramref name="mcpFullCatalog"/> is the executor's resolved catalog width for this run — the observable cli vs cli-mcp distinction (the endpoint itself opens in both).</summary>
-    private static BenchmarkResult BuildResult(BenchmarkTask task, BenchmarkMode mode, AgentRun run, BenchmarkGrade grade, bool mcpFullCatalog)
+    /// <summary>Fold the recorded run + the grade into a result row. Duration is the run's wall-clock when both timestamps exist (mirroring the scorecard's own projection); null otherwise. The run's normalized <c>ResultJson</c> is deserialized ONCE to project the token usage / revise rounds / exit reason a critic A/B reports (all null/0 when the run recorded no result). <paramref name="mcpFullCatalog"/> is the executor's resolved catalog width for this run — the observable cli vs cli-mcp distinction (the endpoint itself opens in both). <paramref name="formatFaultRespawns"/> is informational (see <see cref="BenchmarkResult.FormatFaultRespawns"/>).</summary>
+    private static BenchmarkResult BuildResult(BenchmarkTask task, BenchmarkMode mode, AgentRun run, BenchmarkGrade grade, bool mcpFullCatalog, int formatFaultRespawns)
     {
         var result = run.ResultJson is { } json ? JsonSerializer.Deserialize<AgentRunResult>(json, AgentJson.Options) : null;
 
@@ -194,6 +238,7 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
             DurationSeconds = run.StartedAt is { } started && run.CompletedAt is { } completed ? (completed - started).TotalSeconds : null,
             Grade = grade,
             McpFullCatalog = mcpFullCatalog,
+            FormatFaultRespawns = formatFaultRespawns,
             TokenUsage = result?.TokenUsage,
             ReviseRounds = result?.ReviseRounds ?? 0,
             ExitReason = result?.ExitReason,
