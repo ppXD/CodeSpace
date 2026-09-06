@@ -656,6 +656,22 @@ jobs:
             backend/TestResults/real-model-benchmark.trx \
             RealModelBenchmark
 
+      # REPORT-ONLY: does the REAL claude CLI actually load the MCP declaration the runner writes for it? The benchmark
+      # above answers that only in aggregate (a cli-mcp cell whose fabric never handshook classifies InfraUnknown), and
+      # for 8 consecutive runs the answer was "no" on all 9 of them while nothing red-ed: the harness never named the
+      # declaration on the argv, and CLAUDE_CONFIG_DIR is not a place the CLI ever looks. This step isolates that one
+      # leg — real binary, real proxy, real per-run socket, cwd = the workspace — so a regression is legible as itself
+      # instead of as a halved evaluator-health number. Non-gating while it earns its keep.
+      - name: Smoke (report only) — the real claude CLI loads the run's MCP declaration
+        continue-on-error: true
+        env:
+          CODESPACE_RUN_REAL_CLI_MCP_SMOKE: '1'
+        run: >
+          dotnet test backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
+          --filter "FullyQualifiedName~On_demand_the_real_claude_cli"
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=real-cli-mcp-smoke.trx"
+          --results-directory backend/TestResults
 
       # The trx + the step-summary verdicts are the only record of WHAT the live model actually did — how many golden
       # points it scored, which wire skipped, which model answered. They were written to the runner and thrown away

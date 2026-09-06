@@ -7,6 +7,8 @@ using CodeSpace.Core.Services.Agents.AgentRunLogging;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
+using CodeSpace.Core.Services.Agents.Harnesses.Claude;
+using CodeSpace.Core.Services.Agents.Harnesses.Codex;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Messages.Agents;
 using Shouldly;
@@ -1201,6 +1203,87 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         json.ShouldContain("codespace-mcp");
         json.ShouldContain("/tmp/cs/mcp.sock");
         json.ShouldContain("tok-xyz", customMessage: "the run token rides the declaration so the proxy authenticates");
+    }
+
+    [Fact]
+    public void The_claude_argv_loads_the_declaration_at_exactly_the_path_the_runner_wrote_it_to()
+    {
+        // The drift guard for the fix: ONE value — WriteMcpDeclaration's return — is both where the bytes landed and
+        // what the CLI is told to load. A future change to the config-home layout moves both together or reds here.
+        var configHome = TempDir();
+        var task = new AgentTask
+        {
+            Goal = "Fix the failing billing tests",
+            Harness = ClaudeCodeHarness.HarnessKind,
+            WorkspaceDirectory = "/tmp/ws",
+            Permissions = new AgentPermissions(),
+            TimeoutSeconds = 900,
+        };
+        var spec = new ClaudeCodeHarness().BuildInvocation(task) with { Mcp = Wiring("/tmp/cs/mcp.sock") };
+
+        var written = LocalProcessRunner.WriteMcpDeclaration(spec.Mcp, configHome);
+        var argv = LocalProcessRunner.ArgsWithMcpDeclaration(spec, written);
+
+        written.ShouldBe(Path.Combine(configHome, ".mcp.json"));
+
+        var at = argv.ToList().IndexOf("--mcp-config");
+        at.ShouldBeGreaterThanOrEqualTo(0, "the claude CLI never discovers a declaration inside CLAUDE_CONFIG_DIR — it has to be pointed at it");
+        argv[at + 1].ShouldBe(written, "the argv names EXACTLY the file the runner wrote — not a second, independently-computed path");
+        File.Exists(argv[at + 1]).ShouldBeTrue("a --mcp-config path that does not exist is a hard CLI startup error");
+        argv[at + 2].ShouldBe("--strict-mcp-config", "terminates the variadic --mcp-config AND shuts out the target repo's own untrusted .mcp.json");
+
+        // Position: ahead of the harness's own args, so the variadic value list is nowhere near the trailing prompt.
+        argv[0].ShouldBe("--mcp-config");
+        argv[3].ShouldBe("--print", "the harness's own argv follows, unchanged");
+        argv[^1].ShouldBe("Fix the failing billing tests", "the trailing positional prompt survives — it must never be swallowed as a config path");
+    }
+
+    [Fact]
+    public void A_launch_that_writes_no_declaration_carries_no_mcp_config_flag_at_all()
+    {
+        // A --mcp-config pointing at a missing file is a HARD startup error, so a fabric-less run (no wiring, or a
+        // deployment whose proxy binary is absent) must carry NO flag — its honest degradation is tool-less, not dead.
+        var configHome = TempDir();
+        var task = new AgentTask
+        {
+            Goal = "Fix the failing billing tests",
+            Harness = ClaudeCodeHarness.HarnessKind,
+            WorkspaceDirectory = "/tmp/ws",
+            Permissions = new AgentPermissions(),
+            TimeoutSeconds = 900,
+        };
+        var spec = new ClaudeCodeHarness().BuildInvocation(task);
+
+        var argv = LocalProcessRunner.ArgsWithMcpDeclaration(spec, LocalProcessRunner.WriteMcpDeclaration(spec.Mcp, configHome));
+
+        argv.ShouldBe(spec.Args, "no declaration written ⇒ argv byte-identical to the harness's own");
+    }
+
+    [Fact]
+    public void The_codex_argv_is_untouched_because_that_cli_reads_its_declaration_out_of_its_config_home()
+    {
+        var configHome = TempDir();
+        var task = new AgentTask
+        {
+            Goal = "Fix the failing billing tests",
+            Harness = CodexHarness.HarnessKind,
+            WorkspaceDirectory = "/tmp/ws",
+            Permissions = new AgentPermissions(),
+            TimeoutSeconds = 900,
+        };
+        var wiring = new McpServerWiring
+        {
+            RelativeFileName = "config.toml",
+            Content = McpDeclarationWriter.RenderCodexToml(new McpDeclarationContext { ProxyCommand = "/abs/codespace-mcp", SocketPath = "/tmp/cs/mcp.sock", Token = "tok-xyz", ServerName = "codespace" }),
+            SocketPath = "/tmp/cs/mcp.sock",
+        };
+        var spec = new CodexHarness().BuildInvocation(task) with { Mcp = wiring };
+
+        spec.McpDeclarationArgs.ShouldBeEmpty("Codex loads CODEX_HOME/config.toml natively — pointing at it would be a second, driftable source");
+
+        var argv = LocalProcessRunner.ArgsWithMcpDeclaration(spec, LocalProcessRunner.WriteMcpDeclaration(spec.Mcp, configHome));
+
+        argv.ShouldBe(spec.Args, "the codex invocation is byte-identical — this fix touches only the harness that must be pointed at its declaration");
     }
 
     [Fact]

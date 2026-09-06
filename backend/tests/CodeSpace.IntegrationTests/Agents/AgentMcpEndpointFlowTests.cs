@@ -21,6 +21,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
+using CodeSpace.Core.Services.Agents.Harnesses.Claude;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 
 namespace CodeSpace.IntegrationTests.Agents;
@@ -46,7 +47,9 @@ namespace CodeSpace.IntegrationTests.Agents;
 /// <para>The three <c>..._proxy_..</c> tests raise the fidelity another notch: instead of the in-test <c>McpClient</c>
 /// they spawn the REAL <c>codespace-mcp</c> proxy BINARY (a <c>dotnet codespace-mcp.dll --proxy</c> child process) and
 /// pipe JSON-RPC over its stdin/stdout — proving the WHOLE production transport chain stdio↔proxy↔UDS↔endpoint↔handler
-/// end-to-end (the only un-runnable leg being the CLI's own config-loading, which is deployment-gated). The proxy dll
+/// end-to-end. The last leg — the CLI reading the declaration off its own argv and starting that proxy — is
+/// <c>A_claude_run_reaches_the_fabric_...</c> (CI-runnable, stand-in CLI) and its on-demand real-binary twin. That leg
+/// went unmeasured for as long as it existed, and was broken for all of it. The proxy dll
 /// is built via a build-only ProjectReference in the csproj; these tests skip if it isn't found (Rule 12.1).</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
@@ -56,12 +59,12 @@ public class AgentMcpEndpointFlowTests
     private const string ProtocolVersion = "2024-11-05";
 
     /// <summary>
-    /// ON-DEMAND gate for the real-CLI config-load smoke. Default-OFF so CI (which has no proprietary <c>claude</c>
-    /// binary) skips it; a developer sets it to "1" with a real <c>claude</c> on PATH (or via
-    /// <c>CODESPACE_CLAUDE_CODE_PATH</c>) to prove the REAL CLI loads the harness-rendered <c>.mcp.json</c> and lists
-    /// the codespace MCP tools over the real proxy + endpoint. We do NOT fake the CLI — the CI-runnable proof is the
-    /// 🟢 <c>A_real_codespace_mcp_proxy_process_...</c> tests (real proxy binary over the real UDS); this closes the
-    /// last (deployment-gated) leg on demand.
+    /// ON-DEMAND gate for the real-CLI config-load smoke. Default-OFF so an ordinary CI job (which has no proprietary
+    /// <c>claude</c> binary) skips it; the real-model benchmark lane, which installs one, runs it report-only, and a
+    /// developer sets it to "1" with a real <c>claude</c> on PATH (or via <c>CODESPACE_CLAUDE_CODE_PATH</c>). It proves
+    /// the REAL CLI, driven through the REAL production invocation, connects the codespace MCP server the runner
+    /// declared for the run. We do NOT fake the CLI there — the CI-runnable proof is
+    /// <c>A_claude_run_reaches_the_fabric_...</c> (a stand-in CLI over the real proxy, socket and endpoint).
     /// </summary>
     private const string RealCliSmokeEnvVar = "CODESPACE_RUN_REAL_CLI_MCP_SMOKE";
 
@@ -273,57 +276,94 @@ public class AgentMcpEndpointFlowTests
     }
 
     [Fact]
-    public async Task On_demand_the_real_claude_cli_loads_the_rendered_declaration_and_lists_the_codespace_tools()
+    public async Task On_demand_the_real_claude_cli_loads_the_declaration_the_runner_wrote_and_serves_an_initialize()
     {
-        // ON-DEMAND ONLY (Rule 12 fidelity honesty): default-OFF so CI — which lacks the proprietary `claude` binary —
-        // skips. A developer sets CODESPACE_RUN_REAL_CLI_MCP_SMOKE=1 with a real `claude` on PATH to prove the LAST,
-        // deployment-gated leg: the real CLI parses the harness-rendered .mcp.json + connects the codespace MCP server
-        // through the real proxy + endpoint and lists its tools. We do NOT fake the CLI — if the gate is off or the
-        // binary is absent we skip rather than assert a stand-in.
+        // ON-DEMAND ONLY (Rule 12 fidelity honesty): default-OFF so an ordinary CI job — which has no `claude` binary —
+        // skips. The real-model benchmark lane, which DOES install it, runs this report-only; a developer with a real
+        // `claude` on PATH sets CODESPACE_RUN_REAL_CLI_MCP_SMOKE=1. We do NOT fake the CLI here — the CI-runnable arm
+        // is the sibling test below, which drives the same production path with a stand-in.
+        //
+        // This drives the WHOLE production shape: the real executor opens the endpoint, the real harness builds the
+        // argv, the real runner writes the declaration into the per-run config home and splices the load flag, and the
+        // real CLI runs with cwd = the WORKSPACE. That last part is the whole point. The version of this test it
+        // replaces wrote the declaration into a temp dir and ran `claude mcp list` with cwd SET TO that same dir — so
+        // the CLI's project-scope discovery found it at the cwd and the test went green while production, where the two
+        // directories are never the same, loaded nothing. A fixture production cannot produce proves nothing.
+        //
+        // No model credential is seeded: the CLI starts its MCP servers BEFORE it fails authentication, so the run
+        // lands Failed while the fabric evidence is still recorded — and the fabric is all this asserts.
         if (Environment.GetEnvironmentVariable(RealCliSmokeEnvVar) is not ("1" or "true" or "TRUE")) return;
         if (OperatingSystem.IsWindows()) return;
         if (!Socket.OSSupportsUnixDomainSockets) return;
-        var proxyDll = ProxyDllPathOrNull();
-        if (proxyDll is null) return;
-        var claude = ResolveClaudeOrNull();
-        if (claude is null) return;   // no real CLI present → skip (do not fake)
+        var proxy = ProxyBinaryPathOrNull();
+        if (proxy is null) return;
+        if (ResolveClaudeOrNull() is null) return;   // no real CLI present (or a sibling armed a fake) → skip, never fake
 
         var teamId = await SeedTeamAsync();
-        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed);
+        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Standard, enableMcp: true, harnessKind: ClaudeCodeHarness.HarnessKind, model: null);
 
-        using var connects = ConnectRegistryFromFixture();
-        using var workerCts = new CancellationTokenSource();
-        var run = Task.Run(() => ExecuteAsync(runId, new ScriptedHarness("sleep 120"), cancellationToken: workerCts.Token));
+        await ExecuteAsync(runId, new ClaudeCodeHarness(), proxyPath: proxy);
 
-        try
-        {
-            var connect = await WaitForConnectAsync(connects, runId, run);
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+        var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
 
-            // Render the REAL Claude harness declaration (the production .mcp.json) pointing at this run's socket+token
-            // and the real proxy dll launcher, then write it into a temp config home the CLI will read.
-            using var home = new TempDir();
-            var context = new McpDeclarationContext { ProxyCommand = "dotnet", SocketPath = connect.SocketPath, Token = connect.Token, ServerName = "codespace" };
-            var declaration = ((IMcpHarnessDeclaration)new CodeSpace.Core.Services.Agents.Harnesses.Claude.ClaudeCodeHarness()).BuildMcpDeclaration(context);
-            await File.WriteAllTextAsync(Path.Combine(home.Path, declaration.RelativeFileName), declaration.Content);
+        result.McpEvidence!.DeclarationWritten.ShouldBeTrue("the runner wrote the declaration the CLI is pointed at");
+        result.McpEvidence!.HandshakeObserved.ShouldBeTrue(
+            customMessage: "the REAL claude CLI did not connect the codespace MCP server. Check `claude --help` for --mcp-config / --strict-mcp-config on the "
+                         + "installed version, and that ClaudeCodeHarness still names the declaration on the argv — a CLI that is not pointed at it never "
+                         + $"finds it in CLAUDE_CONFIG_DIR. Run error was: {result.Error}");
+    }
 
-            // Run the real CLI's MCP listing against the rendered config home. `claude mcp list` connects each declared
-            // server and reports it — no model call, so no gateway needed. Assert it sees the codespace server.
-            var psi = new ProcessStartInfo { FileName = claude, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, WorkingDirectory = home.Path };
-            psi.Environment["CLAUDE_CONFIG_DIR"] = home.Path;
-            psi.ArgumentList.Add("mcp");
-            psi.ArgumentList.Add("list");
+    [Fact]
+    public async Task A_claude_run_reaches_the_fabric_because_its_argv_names_the_declaration_the_runner_wrote()
+    {
+        // The CI-runnable half of the last leg. Everything here is production except the CLI's own intelligence: the
+        // REAL ClaudeCodeHarness builds the argv, the REAL LocalProcessRunner writes the declaration into the per-run
+        // config home and splices the load flag, the REAL codespace-mcp proxy binary is what the declaration names,
+        // and the initialize crosses the REAL per-run UDS. The stand-in CLI does exactly what the real one does with
+        // that argv: read --mcp-config, spawn the declared server, speak initialize.
+        //
+        // Before the fix this run recorded endpointBound=true, declarationWritten=true, proxyResolved=true and
+        // handshakeObserved=FALSE — the shape 9 of the benchmark's 18 cells carried on every real run, and the shape
+        // every claude-code agent run in the product carried, silently, with no MCP tools at all.
+        if (OperatingSystem.IsWindows()) return;
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+        var proxy = ProxyBinaryPathOrNull();
+        if (proxy is null) return;   // the proxy binary was not built beside these tests → nothing to hand the CLI
 
-            using var proc = Process.Start(psi)!;
-            var stdout = await proc.StandardOutput.ReadToEndAsync();
-            await proc.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+        using var cli = new McpConfigLoadingFakeCli();
 
-            stdout.ShouldContain("codespace", customMessage: $"the real claude CLI must load the rendered declaration and list the codespace server. stdout was:\n{stdout}");
-        }
-        finally
-        {
-            workerCts.Cancel();
-            try { await run; } catch (OperationCanceledException) { /* worker death — expected */ }
-        }
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Standard, enableMcp: true, harnessKind: ClaudeCodeHarness.HarnessKind, model: null);
+
+        await ExecuteAsync(runId, new ClaudeCodeHarness(), proxyPath: proxy);
+
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+        var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+
+        result.McpEvidence.ShouldNotBeNull();
+        result.McpEvidence!.DeclarationWritten.ShouldBeTrue("the harness declares an MCP server and the proxy resolved, so the runner wrote the declaration");
+        result.McpEvidence!.HandshakeObserved.ShouldBeTrue(
+            customMessage: $"the fabric served NO initialize — the CLI was never pointed at the declaration. Run's summary was '{result.Summary}'; "
+                         + "check that ClaudeCodeHarness still emits SandboxSpec.McpDeclarationArgs and that LocalProcessRunner still splices them.");
+
+        // …and it got there through the ARGV, not through the CLI's own project-scope discovery: no .mcp.json ever sat
+        // in the cwd. This is the half the on-demand real-CLI smoke below used to fake away by running the CLI with its
+        // cwd SET TO the config home — a fixture production cannot produce, which is why it never caught this.
+        result.Summary.ShouldBe($"{McpConfigLoadingFakeCli.HandshakeSummary} {McpConfigLoadingFakeCli.CwdDeclarationAbsent}",
+            customMessage: "the declaration must be reachable ONLY via --mcp-config: the cwd is the workspace, and a token-bearing declaration must never be written there");
+    }
+
+    /// <summary>The real codespace-mcp proxy EXECUTABLE (the apphost beside the dll — what a declaration can name as its <c>command</c>), or null to skip. Sibling of <see cref="ProxyDllPathOrNull"/>: the proxy is built by a build-only ProjectReference but not copied into this test's bin.</summary>
+    private static string? ProxyBinaryPathOrNull()
+    {
+        var dll = ProxyDllPathOrNull();
+        if (dll is null) return null;
+
+        var binary = Path.Combine(Path.GetDirectoryName(dll)!, "codespace-mcp");
+        return File.Exists(binary) ? binary : null;
     }
 
     /// <summary>The real claude binary: the CODESPACE_CLAUDE_CODE_PATH override, else `claude` on PATH if present; null to skip the on-demand smoke.</summary>
@@ -979,12 +1019,13 @@ public class AgentMcpEndpointFlowTests
     /// at a real existing stand-in (the test only File.Exists-checks it; the scripted harness runs /bin/sh, not the proxy);
     /// when false we point it at a missing path to exercise the fail-closed "no declaration" branch.
     /// </summary>
-    private async Task ExecuteAsync(Guid runId, IAgentHarness harness, bool proxyPresent = true, bool useGovernanceContainer = false, CancellationToken cancellationToken = default)
+    private async Task ExecuteAsync(Guid runId, IAgentHarness harness, bool proxyPresent = true, bool useGovernanceContainer = false, string? proxyPath = null, CancellationToken cancellationToken = default)
     {
         // The catalog choice rides the RUN now (CreateRunAsync's enableMcp) and governance is a committed constant, so
         // the only environment this still drives is the proxy path — a genuine filesystem seam, not a feature flag.
+        // A caller whose CLI actually SPAWNS the declared server passes the real proxy binary instead of the stand-in.
         var previousProxy = Environment.GetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar);
-        Environment.SetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar, proxyPresent ? StandInProxyPath() : "/nonexistent/codespace-mcp");
+        Environment.SetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar, proxyPresent ? proxyPath ?? StandInProxyPath() : "/nonexistent/codespace-mcp");
 
         try
         {
@@ -1321,11 +1362,11 @@ public class AgentMcpEndpointFlowTests
     // ── Seeding (mirrors McpToolTeamScopeFlowTests + AgentRunExecutorTests) ──
 
     /// <summary><paramref name="enableMcp"/> is the per-run catalog choice — null takes the committed default (full), false narrows the run to the read-only slice. It replaced the ambient env flag the helpers used to set.</summary>
-    private async Task<Guid> CreateRunAsync(Guid teamId, AgentAutonomyLevel autonomy, IReadOnlyList<string>? tools = null, bool? enableMcp = null)
+    private async Task<Guid> CreateRunAsync(Guid teamId, AgentAutonomyLevel autonomy, IReadOnlyList<string>? tools = null, bool? enableMcp = null, string harnessKind = "scripted", string? model = "test-model")
     {
         using var scope = _fixture.BeginScope();
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
-            new AgentTask { Goal = "scripted", Harness = "scripted", Model = "test-model", TimeoutSeconds = 1800, Autonomy = autonomy, Tools = tools, EnableMcpEndpoint = enableMcp },
+            new AgentTask { Goal = "scripted", Harness = harnessKind, Model = model, TimeoutSeconds = 1800, Autonomy = autonomy, Tools = tools, EnableMcpEndpoint = enableMcp },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
         return run.Id;
     }

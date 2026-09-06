@@ -851,8 +851,9 @@ public sealed partial class LocalProcessRunner
 
         // Write the run-scoped MCP server declaration (0600 — it carries the run token) into the config-home BEFORE
         // launch so the harness reads it on start. No-op when the run has no tool fabric (spec.Mcp null) or no
-        // config-home (the declaration has nowhere harness-isolated to live).
-        WriteMcpDeclaration(spec.Mcp, configHome);
+        // config-home (the declaration has nowhere harness-isolated to live). The path it WROTE is what a harness that
+        // must be POINTED at its declaration (Claude Code) gets on its argv — one value, so the two cannot drift.
+        var mcpDeclarationPath = WriteMcpDeclaration(spec.Mcp, configHome);
 
         // Materialize the harness's projected config-home files (e.g. skills/<slug>/SKILL.md) so the CLI discovers
         // them on start. PURE (task-derived) + not secret, so — unlike the MCP declaration — the harness's
@@ -862,7 +863,7 @@ public sealed partial class LocalProcessRunner
         // The actual command "$@": CONFINED under bwrap when this host supports it (fresh namespaces + read-only
         // minimal root + only the workspace/config-home writable), else the bare command (unconfined fallback). A
         // filtered-egress netns prefix (B3.2b), when present, wraps the whole chain outermost.
-        AppendChildCommand(info.ArgumentList, spec, configHome, egressExecPrefix ?? Array.Empty<string>(), cgroupExecPrefix ?? Array.Empty<string>());
+        AppendChildCommand(info.ArgumentList, spec, configHome, mcpDeclarationPath, egressExecPrefix ?? Array.Empty<string>(), cgroupExecPrefix ?? Array.Empty<string>());
 
         ApplyEnvironment(info, spec);
 
@@ -905,13 +906,16 @@ public sealed partial class LocalProcessRunner
     /// <see cref="BubblewrapSandbox.Available"/>, else the bare command — the unconfined fallback on macOS dev, a
     /// host without <c>bwrap</c>, or one that denies unprivileged user namespaces.
     /// </summary>
-    private static void AppendChildCommand(System.Collections.ObjectModel.Collection<string> argv, SandboxSpec spec, string? configHome, IReadOnlyList<string> egressExecPrefix, IReadOnlyList<string> cgroupExecPrefix)
+    private static void AppendChildCommand(System.Collections.ObjectModel.Collection<string> argv, SandboxSpec spec, string? configHome, string? mcpDeclarationPath, IReadOnlyList<string> egressExecPrefix, IReadOnlyList<string> cgroupExecPrefix)
     {
         // Fail-closed: a deployment that mandates isolation (Sandbox:RequireConfinement) must never run unconfined.
         BubblewrapSandbox.EnsureSatisfiable(BubblewrapSandbox.Available, BubblewrapSandbox.IsRequired);
 
         var command = spec.Command;
-        IReadOnlyList<string> args = spec.Args;
+
+        // The declaration the write above laid down is inside the config-home, which bwrap binds writable at its own
+        // absolute path below — so the path on the argv resolves inside the sandbox exactly as it does outside it.
+        IReadOnlyList<string> args = ArgsWithMcpDeclaration(spec, mcpDeclarationPath);
 
         // 1. Filesystem + namespace confinement (bubblewrap), innermost.
         if (BubblewrapSandbox.Available is { } bwrap)
@@ -1019,10 +1023,14 @@ public sealed partial class LocalProcessRunner
     /// isolation can't host the proxy declaration without leaking it into a shared dir). The relative path is joined onto
     /// the config-home; on POSIX the file is then chmod'd 0600 (a no-op on Windows where unix modes don't apply — the
     /// per-run dir + token are the gate).
+    ///
+    /// <para>Returns the ABSOLUTE path it wrote, or null when it wrote nothing. That return is the ONLY source of the
+    /// path <see cref="ArgsWithMcpDeclaration"/> puts on the argv of a harness that must be pointed at its declaration
+    /// — write and argv cannot name different files.</para>
     /// </summary>
-    internal static void WriteMcpDeclaration(McpServerWiring? wiring, string? configHome)
+    internal static string? WriteMcpDeclaration(McpServerWiring? wiring, string? configHome)
     {
-        if (wiring is null || configHome is null) return;
+        if (wiring is null || configHome is null) return null;
 
         var path = Path.Combine(configHome, wiring.RelativeFileName);
 
@@ -1032,6 +1040,33 @@ public sealed partial class LocalProcessRunner
 
         if (!OperatingSystem.IsWindows())
             File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+
+        return path;
+    }
+
+    /// <summary>
+    /// The child's argv: the harness's <see cref="SandboxSpec.McpDeclarationArgs"/> — its own flags for LOADING the
+    /// declaration, with <see cref="SandboxSpec.McpDeclarationPathToken"/> resolved to
+    /// <paramref name="declarationPath"/> — spliced AHEAD of <see cref="SandboxSpec.Args"/>, then the harness's own
+    /// args unchanged. Ahead, because a variadic load flag adjacent to a trailing positional prompt swallows it.
+    ///
+    /// <para>Returns <see cref="SandboxSpec.Args"/> UNCHANGED — byte-identical argv — whenever the harness declares no
+    /// such flags (Codex reads its declaration out of <c>CODEX_HOME</c> itself) or the launch wrote no declaration
+    /// (no fabric / no config home). The second case is not cosmetic: pointing a CLI at a declaration file that does
+    /// not exist is a hard startup error, which would turn today's honest tool-less degradation into a dead run.</para>
+    /// </summary>
+    internal static IReadOnlyList<string> ArgsWithMcpDeclaration(SandboxSpec spec, string? declarationPath)
+    {
+        if (spec.McpDeclarationArgs.Count == 0 || declarationPath is null) return spec.Args;
+
+        var args = new List<string>(spec.McpDeclarationArgs.Count + spec.Args.Count);
+
+        foreach (var arg in spec.McpDeclarationArgs)
+            args.Add(arg == SandboxSpec.McpDeclarationPathToken ? declarationPath : arg);
+
+        args.AddRange(spec.Args);
+
+        return args;
     }
 
     /// <summary>

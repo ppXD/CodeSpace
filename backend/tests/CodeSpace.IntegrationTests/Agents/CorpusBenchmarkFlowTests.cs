@@ -3,6 +3,8 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark;
 using CodeSpace.Core.Services.Agents.Harnesses.Codex;
+using CodeSpace.Core.Services.Agents.Mcp;
+using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Enums;
@@ -39,7 +41,12 @@ public sealed class CorpusBenchmarkFlowTests
     {
         if (OperatingSystem.IsWindows()) return;   // the fake CLI + seed checks are /bin/sh scripts the runner spawns
 
-        using var cli = new NoopBenchmarkCli();     // a no-op agent: succeeds without editing the seeded failing fixtures
+        // The proxy is what BuildMcpWiring fail-closed-checks for: without it NO declaration is written, both arms run
+        // identically tool-less, and every cli-mcp cell records the mode it ASKED for while measuring nothing.
+        var proxy = ProxyBinaryPathOrNull();
+        proxy.ShouldNotBeNull("the codespace-mcp proxy must be built beside its dll (the build-only ProjectReference in CodeSpace.IntegrationTests.csproj) — without it the mcp arm degrades to a tool-less run and this suite measures half the matrix while reporting the mode it requested");
+
+        using var cli = new NoopBenchmarkCli(proxy);   // a no-op agent: succeeds without editing the seeded failing fixtures
         var teamId = await SeedTeamAsync();
 
         var corpus = SeedBenchmarkCorpus.Tasks;
@@ -70,16 +77,18 @@ public sealed class CorpusBenchmarkFlowTests
         run.Results.ShouldAllBe(r => !string.IsNullOrEmpty(r.ExitReason), "the terminal ExitReason is projected from the run's ResultJson, never blank");
         run.Results.ShouldAllBe(r => r.ExitReason != "output-flagged", "no critic ran ⇒ no pair is critic-flagged");
 
-        // M1a — the run names its suite and classifies EVERY cell over the FIXED denominator. P0-B2 makes the
-        // offline rig's REACH honest: the no-op fake never speaks MCP, so every cli-mcp cell is an INFRA-UNKNOWN
-        // measurement (the fabric never handshook — the cell measured nothing about the mcp arm), while every
-        // bare-cli cell stays an honest Unsolved. The instrument reads half-healthy because that is the truth of
-        // a fake-CLI corpus; the REAL-model corpus (a live CLI that does handshake) measures the full matrix.
+        // M1a — the run names its suite and classifies EVERY cell over the FIXED denominator, and now over the WHOLE
+        // matrix: the fake loads its declaration and speaks initialize, so an mcp-arm cell is a real measurement of a
+        // REACHED fabric (an honest Unsolved — the no-op still fixes nothing) instead of InfraUnknown.
+        //
+        // This pin used to read 0.5, with the comment "the REAL-model corpus (a live CLI that does handshake) measures
+        // the full matrix". The live corpus did NOT: the claude CLI was never pointed at the declaration the runner
+        // wrote, so all 9 cli-mcp cells came back mcp-required-no-handshake on 8 consecutive real runs. The instrument
+        // read half-healthy for the LIVE reason too, and the offline pin was where that stopped being visible.
         run.SuiteVersion.ShouldBe(EvalSuite.ManifestFor(corpus).Version, "every percentage claim names EXACTLY the suite it measured");
         run.Cells!.Count.ShouldBe(expectedPairs, "the FIXED denominator: every (task × mode) cell classified");
-        run.Cells!.Where(c => c.Mode == BenchmarkMode.HarnessCli).ShouldAllBe(c => c.State == CorpusCellState.Unsolved, "graded-but-not-passed cli cells are honest Unsolved — never dropped, never infra");
-        run.Cells!.Where(c => c.Mode == BenchmarkMode.HarnessCliWithMcp).ShouldAllBe(c => c.State == CorpusCellState.InfraUnknown, "the fake CLI never handshakes — an mcp-arm cell it ran measured nothing about the fabric");
-        EvalSuite.Score(run.Cells!).EvaluatorHealth.ShouldBe(0.5, "the offline rig can only exercise half the matrix — a VISIBLE instrument reading, never a silently-healthy fake");
+        run.Cells!.ShouldAllBe(c => c.State == CorpusCellState.Unsolved, "every cell is a real measurement now: the bare-cli arm ran, and the mcp arm's fabric served an initialize — nothing is infra-dead");
+        EvalSuite.Score(run.Cells!).EvaluatorHealth.ShouldBe(1.0, "the offline rig exercises the WHOLE matrix once its CLI actually loads the declaration — a cli-mcp cell that classifies InfraUnknown means the fabric was never reached");
     }
 
     [Fact]
@@ -87,7 +96,10 @@ public sealed class CorpusBenchmarkFlowTests
     {
         if (OperatingSystem.IsWindows()) return;
 
-        using var cli = new NoopBenchmarkCli();
+        var proxy = ProxyBinaryPathOrNull();
+        proxy.ShouldNotBeNull("the mcp-arm cell below is only a measurement while the proxy the declaration names exists — see the sibling test");
+
+        using var cli = new NoopBenchmarkCli(proxy);
         var teamId = await SeedTeamAsync();
 
         // A one-task corpus whose fixture ref does not exist: staging throws → the pair is recorded errored.
@@ -108,10 +120,10 @@ public sealed class CorpusBenchmarkFlowTests
         run.Cells!.Count.ShouldBe(expectedCells, "the denominator NEVER shrinks — an errored cell is a cell");
 
         var score = EvalSuite.Score(run.Cells!);
-        score.InfraUnknown.ShouldBe(3, "the ghost task's two mode-cells PLUS the good task's never-handshook mcp cell (P0-B2) classify as InfraUnknown");
-        score.Unsolved.ShouldBe(1, "the good task's bare-cli cell graded honestly Unsolved (the no-op CLI fixed nothing)");
+        score.InfraUnknown.ShouldBe(2, "the ghost task's two mode-cells — a fixture that cannot stage measures nothing; the good task's BOTH cells now do");
+        score.Unsolved.ShouldBe(2, "the good task's two cells graded honestly Unsolved (the no-op CLI fixed nothing, on either arm)");
         score.Total.ShouldBe(expectedCells);
-        score.EvaluatorHealth.ShouldBe(0.25, "a sick instrument is VISIBLE — three of four cells carry no capability verdict — never silently healthy via a shrunken divisor");
+        score.EvaluatorHealth.ShouldBe(0.5, "a sick instrument is VISIBLE — half the cells carry no capability verdict — never silently healthy via a shrunken divisor");
 
         // The pre-M1a shape (scorecard over graded results only) reported the SAME rate with or without the ghost
         // task; the fixed-denominator score cannot — the infra-dead cells occupy their slots in the divisor.
@@ -134,33 +146,80 @@ public sealed class CorpusBenchmarkFlowTests
         return teamId;
     }
 
-    /// <summary>A no-op fake codex CLI: emits a minimal codex-shaped event stream and exits 0 WITHOUT touching the workspace, so the grade is driven purely by the fixture's start-state (failing) — the deterministic corpus plumbing proof. Restores the env var + deletes the dir on dispose.</summary>
+    /// <summary>
+    /// A no-op fake codex CLI: emits a minimal codex-shaped event stream and exits 0 WITHOUT touching the workspace, so
+    /// the grade is driven purely by the fixture's start-state (failing) — the deterministic corpus plumbing proof.
+    ///
+    /// <para>It DOES do one real thing: when the run wired a tool fabric, it loads its MCP declaration out of
+    /// <c>CODEX_HOME</c> (where the real codex CLI reads it), spawns the <c>codespace-mcp</c> proxy the declaration
+    /// names, and speaks one <c>initialize</c> — so the <c>cli-mcp</c> arm's cells measure a REACHED fabric instead of
+    /// classifying InfraUnknown on a fake that could never speak MCP at all. It also arms the proxy path, without which
+    /// <c>BuildMcpWiring</c> fails closed and no declaration is written anywhere.</para>
+    ///
+    /// <para>Restores both env vars + deletes the dir on dispose.</para>
+    /// </summary>
     private sealed class NoopBenchmarkCli : IDisposable
     {
         private readonly string? _original;
+        private readonly string? _originalProxy;
         private readonly string _dir;
 
-        public NoopBenchmarkCli()
+        public NoopBenchmarkCli(string? proxyBinaryPath)
         {
             _dir = Path.Combine(Path.GetTempPath(), "cs-corpus-cli-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(_dir);
 
             var script = Path.Combine(_dir, "fake-codex.sh");
-            File.WriteAllText(script,
-                "#!/bin/sh\n" +
-                "printf '{\"type\":\"agent_message\",\"message\":\"done (no-op corpus CLI)\"}\\n'\n" +
-                "printf '{\"type\":\"task_complete\",\"message\":\"completed\"}\\n'\n" +
-                "exit 0\n");
+            File.WriteAllText(script, ScriptBody);
             File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
 
             _original = Environment.GetEnvironmentVariable(CodexHarness.CommandEnvVar);
             Environment.SetEnvironmentVariable(CodexHarness.CommandEnvVar, script);
+
+            _originalProxy = Environment.GetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar);
+            if (proxyBinaryPath is not null) Environment.SetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar, proxyBinaryPath);
         }
 
         public void Dispose()
         {
             Environment.SetEnvironmentVariable(CodexHarness.CommandEnvVar, _original);
+            Environment.SetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar, _originalProxy);
             try { Directory.Delete(_dir, recursive: true); } catch { /* best-effort */ }
         }
+
+        /// <summary>
+        /// Read the run's declaration where the real codex CLI reads it (<c>$CODEX_HOME/config.toml</c>), take the
+        /// server command + its arg + the socket/token env OUT OF THAT FILE — never from a constant here, so a change
+        /// to what the harness renders reds this rather than passing against a stale mirror (Rule 12.5) — and pipe one
+        /// JSON-RPC <c>initialize</c> through the proxy. <c>head -n 1</c> bounds the read; the trailing <c>sleep</c>
+        /// holds stdin open long enough for the reply. A run with no fabric finds no file and does nothing.
+        /// </summary>
+        private static string ScriptBody =>
+            "#!/bin/sh\n" +
+            "cfg=\"$" + CodexHarness.ConfigHomeEnvVar + "/" + CodexHarness.McpDeclarationFile + "\"\n" +
+            "if [ -f \"$cfg\" ]; then\n" +
+            "  cmd=$(sed -n 's/^command = \"\\(.*\\)\"$/\\1/p' \"$cfg\" | head -1)\n" +
+            "  arg=$(grep -o '\"--[a-z-]*\"' \"$cfg\" | head -1 | tr -d '\"')\n" +
+            "  sock=$(sed -n 's/.*" + McpDeclarationWriter.SocketEnvVar + " = \"\\([^\"]*\\)\".*/\\1/p' \"$cfg\" | head -1)\n" +
+            "  tok=$(sed -n 's/.*" + McpDeclarationWriter.TokenEnvVar + " = \"\\([^\"]*\\)\".*/\\1/p' \"$cfg\" | head -1)\n" +
+            "  { printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\\n'; sleep 3; } | " +
+            "env " + McpDeclarationWriter.SocketEnvVar + "=\"$sock\" " + McpDeclarationWriter.TokenEnvVar + "=\"$tok\" \"$cmd\" \"$arg\" 2>/dev/null | head -n 1 > /dev/null\n" +
+            "fi\n" +
+            "printf '{\"type\":\"agent_message\",\"message\":\"done (no-op corpus CLI)\"}\\n'\n" +
+            "printf '{\"type\":\"task_complete\",\"message\":\"completed\"}\\n'\n" +
+            "exit 0\n";
+    }
+
+    /// <summary>The real codespace-mcp proxy EXECUTABLE built beside its dll (it is not copied into this test's bin), or null — with no proxy the wiring fails closed and the mcp arm has no declaration to load.</summary>
+    private static string? ProxyBinaryPathOrNull()
+    {
+        var configuration = AppContext.BaseDirectory.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}Release{Path.DirectorySeparatorChar}", StringComparison.Ordinal) ? "Release" : "Debug";
+
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "CodeSpace.sln"))) dir = dir.Parent;
+        if (dir is null) return null;
+
+        var binary = Path.Combine(dir.FullName, "src", "CodeSpace.Mcp", "bin", configuration, "net10.0", "codespace-mcp");
+        return File.Exists(binary) ? binary : null;
     }
 }

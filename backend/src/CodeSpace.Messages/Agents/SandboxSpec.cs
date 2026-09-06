@@ -134,6 +134,31 @@ public sealed record SandboxSpec
     public McpServerWiring? Mcp { get; init; }
 
     /// <summary>
+    /// The token that stands in for the ABSOLUTE path of this run's <see cref="Mcp"/> declaration inside
+    /// <see cref="McpDeclarationArgs"/>. Only the RUNNER knows that path — the per-launch config home lives under a
+    /// round-scoped spool dir the harness cannot see at <c>BuildInvocation</c> time — so the harness writes this token
+    /// and the runner substitutes the path it actually wrote the declaration to.
+    /// </summary>
+    public const string McpDeclarationPathToken = "{codespace:mcp-declaration-path}";
+
+    /// <summary>
+    /// The harness's own CLI flags for LOADING the run's <see cref="Mcp"/> declaration (Claude Code:
+    /// <c>--mcp-config &lt;path&gt; --strict-mcp-config</c>), which the runner splices AHEAD of <see cref="Args"/> at
+    /// launch with <see cref="McpDeclarationPathToken"/> replaced by the path it wrote the declaration to. Ahead, never
+    /// appended: <c>--mcp-config</c> is VARIADIC, so sitting next to a trailing positional prompt would swallow it.
+    ///
+    /// <para>DROPPED WHOLE when the launch writes no declaration (no tool fabric, or no config home): a
+    /// <c>--mcp-config</c> pointing at a missing file is a HARD CLI error, so a fabric-less run must not carry the
+    /// flags — its honest degradation is a tool-less run, not a refused one.</para>
+    ///
+    /// <para>Empty (the default) ⇒ argv byte-identical. That is the right answer for a CLI that discovers its own
+    /// declaration inside its config home — Codex reads <c>CODEX_HOME/config.toml</c> natively — and the WRONG one for
+    /// Claude Code, which discovers a project <c>.mcp.json</c> at the cwd (the workspace) and never inside
+    /// <c>CLAUDE_CONFIG_DIR</c>.</para>
+    /// </summary>
+    public IReadOnlyList<string> McpDeclarationArgs { get; init; } = Array.Empty<string>();
+
+    /// <summary>
     /// Files the runner materializes into the per-run config home (<see cref="ConfigHomeEnvVars"/>) BEFORE launch — e.g.
     /// a projected skill's <c>skills/&lt;slug&gt;/SKILL.md</c>, which the harness's CLI then discovers natively. Unlike the
     /// run-scoped <see cref="Mcp"/> declaration (injected by the executor because it carries a minted token), these are a
