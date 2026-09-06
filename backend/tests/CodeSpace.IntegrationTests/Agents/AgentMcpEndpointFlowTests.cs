@@ -23,6 +23,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 using CodeSpace.Core.Services.Agents.Harnesses.Claude;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
+using CodeSpace.IntegrationTests.Workflows.Supervisor;
 
 namespace CodeSpace.IntegrationTests.Agents;
 
@@ -60,13 +61,16 @@ public class AgentMcpEndpointFlowTests
 
     /// <summary>
     /// ON-DEMAND gate for the real-CLI config-load smoke. Default-OFF so an ordinary CI job (which has no proprietary
-    /// <c>claude</c> binary) skips it; the real-model benchmark lane, which installs one, runs it report-only, and a
+    /// <c>claude</c> binary) skips it VISIBLY; the real-model benchmark lane, which installs one, arms it, and a
     /// developer sets it to "1" with a real <c>claude</c> on PATH (or via <c>CODESPACE_CLAUDE_CODE_PATH</c>). It proves
     /// the REAL CLI, driven through the REAL production invocation, connects the codespace MCP server the runner
     /// declared for the run. We do NOT fake the CLI there — the CI-runnable proof is
     /// <c>A_claude_run_reaches_the_fabric_...</c> (a stand-in CLI over the real proxy, socket and endpoint).
     /// </summary>
     private const string RealCliSmokeEnvVar = "CODESPACE_RUN_REAL_CLI_MCP_SMOKE";
+
+    /// <summary>The wire the real-CLI smoke's skip/RED lines are attributed to in the job summary — the CLI it drives is Claude Code, and <see cref="RealModelGate"/> names the provider on every verdict it writes.</summary>
+    private const string Provider = "Anthropic";
 
     private readonly PostgresFixture _fixture;
 
@@ -131,7 +135,7 @@ public class AgentMcpEndpointFlowTests
         if (OperatingSystem.IsWindows()) return;
         if (!Socket.OSSupportsUnixDomainSockets) return;
         if (!await GitAvailableAsync()) return;
-        var proxyDll = ProxyDllPathOrNull();
+        var proxyDll = BuiltMcpProxy.DllPathOrNull();
         if (proxyDll is null) return;   // the build-only reference should have produced it; skip rather than fail for portability
 
         var teamId = await SeedTeamAsync();
@@ -204,7 +208,7 @@ public class AgentMcpEndpointFlowTests
         if (OperatingSystem.IsWindows()) return;
         if (!Socket.OSSupportsUnixDomainSockets) return;
         if (!await GitAvailableAsync()) return;
-        var proxyDll = ProxyDllPathOrNull();
+        var proxyDll = BuiltMcpProxy.DllPathOrNull();
         if (proxyDll is null) return;
 
         var teamId = await SeedTeamAsync();
@@ -242,7 +246,7 @@ public class AgentMcpEndpointFlowTests
         if (OperatingSystem.IsWindows()) return;
         if (!Socket.OSSupportsUnixDomainSockets) return;
         if (!await GitAvailableAsync()) return;
-        var proxyDll = ProxyDllPathOrNull();
+        var proxyDll = BuiltMcpProxy.DllPathOrNull();
         if (proxyDll is null) return;
 
         var teamId = await SeedTeamAsync();
@@ -275,13 +279,13 @@ public class AgentMcpEndpointFlowTests
         }
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task On_demand_the_real_claude_cli_loads_the_declaration_the_runner_wrote_and_serves_an_initialize()
     {
         // ON-DEMAND ONLY (Rule 12 fidelity honesty): default-OFF so an ordinary CI job — which has no `claude` binary —
-        // skips. The real-model benchmark lane, which DOES install it, runs this report-only; a developer with a real
-        // `claude` on PATH sets CODESPACE_RUN_REAL_CLI_MCP_SMOKE=1. We do NOT fake the CLI here — the CI-runnable arm
-        // is the sibling test below, which drives the same production path with a stand-in.
+        // skips. The real-model benchmark lane, which DOES install it, runs this as a gating step; a developer with a
+        // real `claude` on PATH sets CODESPACE_RUN_REAL_CLI_MCP_SMOKE=1. We do NOT fake the CLI here — the CI-runnable
+        // arm is the sibling test below, which drives the same production path with a stand-in.
         //
         // This drives the WHOLE production shape: the real executor opens the endpoint, the real harness builds the
         // argv, the real runner writes the declaration into the per-run config home and splices the load flag, and the
@@ -292,12 +296,26 @@ public class AgentMcpEndpointFlowTests
         //
         // No model credential is seeded: the CLI starts its MCP servers BEFORE it fails authentication, so the run
         // lands Failed while the fabric evidence is still recorded — and the fabric is all this asserts.
-        if (Environment.GetEnvironmentVariable(RealCliSmokeEnvVar) is not ("1" or "true" or "TRUE")) return;
-        if (OperatingSystem.IsWindows()) return;
-        if (!Socket.OSSupportsUnixDomainSockets) return;
-        var proxy = ProxyBinaryPathOrNull();
-        if (proxy is null) return;
-        if (ResolveClaudeOrNull() is null) return;   // no real CLI present (or a sibling armed a fake) → skip, never fake
+        //
+        // Every exit below is VISIBLE. The bare `return`s these replace recorded a Passed over zero measurements, and
+        // on the lane that ran this behind `continue-on-error` with a filter that exits 0 on zero matches, that was the
+        // third silence in a row: nothing could tell "the real CLI still loads the declaration" from "nothing ran".
+        if (Environment.GetEnvironmentVariable(RealCliSmokeEnvVar) is not ("1" or "true" or "TRUE"))
+            throw RealModelGate.ReportSkipped(Provider, $"{RealCliSmokeEnvVar} is not set — the real-CLI MCP smoke is armed by the benchmark lane and on demand");
+
+        if (OperatingSystem.IsWindows() || !Socket.OSSupportsUnixDomainSockets)
+            throw RealModelGate.ReportSkipped(Provider, "the per-run MCP endpoint needs POSIX unix-domain sockets");
+
+        var proxy = BuiltMcpProxy.ExecutablePathOrNull();
+
+        if (proxy is null)
+            throw RealModelGate.ReportSkipped(Provider, "the codespace-mcp proxy was not built beside its dll — the declaration would name a command that does not exist");
+
+        // A missing `claude` is a skip on a developer's machine and a RED on the lane, whose own FATAL install step is
+        // what puts it on PATH (see RealModelGate.MissingRealBinary). Absent OR a fake a sibling class armed — either
+        // way this gate does not run: it exists to measure the REAL binary.
+        if (ResolveClaudeOrNull() is null)
+            throw RealModelGate.MissingRealBinary(Provider, "claude", "run `which claude` and `claude --version` on the runner; on the benchmark lane the \"Install the real coding-agent CLI (Claude Code)\" step is what installs it", RealModelGate.InCiLane);
 
         var teamId = await SeedTeamAsync();
         var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Standard, enableMcp: true, harnessKind: ClaudeCodeHarness.HarnessKind, model: null);
@@ -329,7 +347,7 @@ public class AgentMcpEndpointFlowTests
         // every claude-code agent run in the product carried, silently, with no MCP tools at all.
         if (OperatingSystem.IsWindows()) return;
         if (!Socket.OSSupportsUnixDomainSockets) return;
-        var proxy = ProxyBinaryPathOrNull();
+        var proxy = BuiltMcpProxy.ExecutablePathOrNull();
         if (proxy is null) return;   // the proxy binary was not built beside these tests → nothing to hand the CLI
 
         using var cli = new McpConfigLoadingFakeCli();
@@ -354,16 +372,6 @@ public class AgentMcpEndpointFlowTests
         // cwd SET TO the config home — a fixture production cannot produce, which is why it never caught this.
         result.Summary.ShouldBe($"{McpConfigLoadingFakeCli.HandshakeSummary} {McpConfigLoadingFakeCli.CwdDeclarationAbsent}",
             customMessage: "the declaration must be reachable ONLY via --mcp-config: the cwd is the workspace, and a token-bearing declaration must never be written there");
-    }
-
-    /// <summary>The real codespace-mcp proxy EXECUTABLE (the apphost beside the dll — what a declaration can name as its <c>command</c>), or null to skip. Sibling of <see cref="ProxyDllPathOrNull"/>: the proxy is built by a build-only ProjectReference but not copied into this test's bin.</summary>
-    private static string? ProxyBinaryPathOrNull()
-    {
-        var dll = ProxyDllPathOrNull();
-        if (dll is null) return null;
-
-        var binary = Path.Combine(Path.GetDirectoryName(dll)!, "codespace-mcp");
-        return File.Exists(binary) ? binary : null;
     }
 
     /// <summary>The real claude binary: the CODESPACE_CLAUDE_CODE_PATH override, else `claude` on PATH if present; null to skip the on-demand smoke.</summary>
@@ -881,7 +889,7 @@ public class AgentMcpEndpointFlowTests
         // raise→park→answer→resume lifecycle is observable.
         if (OperatingSystem.IsWindows()) return;
         if (!Socket.OSSupportsUnixDomainSockets) return;
-        var proxyDll = ProxyDllPathOrNull();
+        var proxyDll = BuiltMcpProxy.DllPathOrNull();
         if (proxyDll is null) return;   // the build-only proxy ref should produce it; skip (not fail) for portability
 
         var teamId = await SeedTeamAsync();
@@ -1331,27 +1339,6 @@ public class AgentMcpEndpointFlowTests
             try { await _process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false); } catch { /* best-effort */ }
             _process.Dispose();
         }
-    }
-
-    // ── Driving the REAL codespace-mcp proxy BINARY over the real UDS ────────
-
-    /// <summary>
-    /// Resolve the built <c>codespace-mcp.dll</c> path, or null to SKIP. From the test bin (<c>AppContext.BaseDirectory</c>,
-    /// e.g. <c>.../tests/CodeSpace.IntegrationTests/bin/Debug/net10.0/</c>) we walk UP to the directory holding
-    /// <c>CodeSpace.sln</c>, then build <c>&lt;root&gt;/src/CodeSpace.Mcp/bin/&lt;Configuration&gt;/net10.0/codespace-mcp.dll</c>,
-    /// deriving <c>&lt;Configuration&gt;</c> from the test bin path. A build-only ProjectReference (csproj) guarantees the
-    /// dll is produced before these tests run; we still skip (not fail) if it's absent so the suite stays portable.
-    /// </summary>
-    private static string? ProxyDllPathOrNull()
-    {
-        var configuration = AppContext.BaseDirectory.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}Release{Path.DirectorySeparatorChar}", StringComparison.Ordinal) ? "Release" : "Debug";
-
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "CodeSpace.sln"))) dir = dir.Parent;
-        if (dir is null) return null;
-
-        var dll = Path.Combine(dir.FullName, "src", "CodeSpace.Mcp", "bin", configuration, "net10.0", "codespace-mcp.dll");
-        return File.Exists(dll) ? dll : null;
     }
 
     private static string[] ToolNames(JsonElement listResponse) =>
