@@ -239,9 +239,10 @@ public sealed record SupervisorDeliveryGateReason
     /// <summary>The repository aliases the blocker names, ordinal-sorted at mint so two attempts reporting the same repositories in a different order compare equal. Empty when the blocker names none.</summary>
     public IReadOnlyList<string> Aliases { get; init; } = Array.Empty<string>();
 
-    /// <summary>Whether an ALREADY-ADJUDICATED reason describes the SAME blocker as <paramref name="current"/>. A card that recorded none (null — a run parked before this field existed) matches nothing: what it adjudicated is unknowable, so it earns a fresh card naming the blocker rather than a release nobody can audit.</summary>
+    /// <summary>Whether an ALREADY-ADJUDICATED reason describes the SAME blocker as <paramref name="current"/>. A card that recorded none (null — a run parked before this field existed) matches nothing: what it adjudicated is unknowable, so it earns a fresh card naming the blocker rather than a release nobody can audit. Tolerates tape bytes spelling <c>"aliases":null</c> instead of an empty array on either side — <see cref="Aliases"/> can never construct that way in C#, but older/foreign tape rows can, and SequenceEqual has no null-safety of its own.</summary>
     public static bool SameBlocker(SupervisorDeliveryGateReason? adjudicated, SupervisorDeliveryGateReason current) =>
-        adjudicated is not null && adjudicated.Kind == current.Kind && adjudicated.Aliases.SequenceEqual(current.Aliases, StringComparer.Ordinal);
+        adjudicated is not null && adjudicated.Kind == current.Kind
+        && (adjudicated.Aliases ?? Array.Empty<string>()).SequenceEqual(current.Aliases ?? Array.Empty<string>(), StringComparer.Ordinal);
 }
 
 /// <summary>
