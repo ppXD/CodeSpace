@@ -6,14 +6,17 @@ namespace CodeSpace.Core.Services.Agents.Harnesses.Claude;
 /// Reproduces Claude Code's transcript-file location so a CONTINUE can RESTORE a prior session's JSONL where the CLI
 /// looks for it on <c>--resume</c>. Claude stores a session at
 /// <c>&lt;CLAUDE_CONFIG_DIR&gt;/projects/&lt;sanitized-cwd&gt;/&lt;session-id&gt;.jsonl</c>. The sanitizer is a BYTE-FOR-BYTE
-/// port of the real claude 2.1.193 encoder (extracted from the binary): replace every char outside <c>[A-Za-z0-9]</c>
+/// port of the real claude 2.1.263 encoder (extracted from the binary): replace every char outside <c>[A-Za-z0-9]</c>
 /// with <c>-</c>, and when the result exceeds 200 chars truncate to 200 and append <c>-&lt;base36 hash&gt;</c> of the
 /// ORIGINAL cwd (so deep paths still map to a stable, collision-resistant dir). Pinned by <c>ClaudeTranscriptPathTests</c>
-/// against ground-truth pairs produced by the real algorithm.
+/// against ground-truth pairs produced by the real algorithm. Unchanged since the 2.1.193 pin this port was first taken
+/// from — only the minifier's symbol names moved (<c>ab/Byu/hRe/pXe</c> became <c>RA/Te/gz/az</c>), and
+/// <c>defaultPath()</c> still builds the segment as <c>RA(cwd)</c> under <c>projects/</c>.
 /// <code>
-/// function ab(e){let t=e.replace(/[^a-zA-Z0-9]/g,"-");if(t.length&lt;=200)return t;return `${t.slice(0,200)}-${Byu(e)}`}
-/// function Byu(e){return Math.abs(hRe(e)).toString(36)}
-/// function hRe(e){let t=0;for(let n=0;n&lt;e.length;n++)t=(t&lt;&lt;5)-t+e.charCodeAt(n)|0;return t}
+/// function RA(e){let n=k(e);if(n.length&lt;=az)return n;return `${n.slice(0,az)}-${Te(e)}`}   // az=200
+/// function k(e){return e.replace(/[^a-zA-Z0-9]/g,"-")}
+/// function Te(e){return Math.abs(gz(e)).toString(36)}
+/// function gz(t){let e=0;for(let r=0;r&lt;t.length;r++)e=(e&lt;&lt;5)-e+t.charCodeAt(r)|0;return e}
 /// </code>
 /// <para><b>The sharpest P3 hazard</b>: the cwd MUST be the RESOLVED real path the agent process runs in — on macOS
 /// <c>/var/…</c> resolves to <c>/private/var/…</c>, and under bubblewrap it is the <c>--chdir</c> host path. Encoding the

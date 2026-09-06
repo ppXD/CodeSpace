@@ -6,7 +6,7 @@ namespace CodeSpace.UnitTests.Workflows;
 /// <summary>
 /// 🟢 Unit: <see cref="ClaudeTranscriptPath"/> reproduces Claude Code's transcript-file location so a CONTINUE can
 /// RESTORE a prior session's JSONL where the CLI looks for it on <c>--resume</c>. The known-pairs are the LOAD-BEARING
-/// pin: they are REAL <c>~/.claude/projects</c> directory names observed on a machine running claude 2.1.193, so a
+/// pin: they are REAL <c>~/.claude/projects</c> directory names observed on a machine running claude 2.1.263, so a
 /// drift in the cwd→sanitized-dir encoding fails HERE at test time rather than as a silent failed real-CLI resume
 /// (the sharpest P3 hazard — a mismatch lands the transcript under the wrong dir and <c>--resume</c> cold-starts with
 /// no error).
@@ -15,14 +15,17 @@ namespace CodeSpace.UnitTests.Workflows;
 public class ClaudeTranscriptPathTests
 {
     [Theory]
-    // Ground truth — a byte-exact port of the real claude 2.1.193 `ab()`: replace every char outside [A-Za-z0-9] with
+    // Ground truth — a byte-exact port of the real claude 2.1.263 `RA()`: replace every char outside [A-Za-z0-9] with
     // '-' (so '/', '.', AND '_' all become '-'); alphanumerics + existing '-' survive (they map to themselves).
     [InlineData("/Users/mars/Projects/CodeSpace", "-Users-mars-Projects-CodeSpace")]                              // real ~/.claude/projects dir
     [InlineData("/Users/mars/Projects/CodeSpace/backend/src/CodeSpace.Core", "-Users-mars-Projects-CodeSpace-backend-src-CodeSpace-Core")]   // real dir; the '.' in CodeSpace.Core → '-'
     [InlineData("/private/var/folders/z7/qrtkqj255vs6dg3wjfkgcn380000gn/T/codespace-agent-workspaces/05e4e233e0c5482985cbddd01d1a72a4",
                 "-private-var-folders-z7-qrtkqj255vs6dg3wjfkgcn380000gn-T-codespace-agent-workspaces-05e4e233e0c5482985cbddd01d1a72a4")]   // resolved agent-workspace cwd (/private, not /var)
-    [InlineData("/Users/john_doe/my_project", "-Users-john-doe-my-project")]   // UNDERSCORE → '-' (the real binary does NOT preserve '_') — ground truth via the extracted ab()
+    [InlineData("/Users/john_doe/my_project", "-Users-john-doe-my-project")]   // UNDERSCORE → '-' (the real binary does NOT preserve '_') — ground truth via the extracted RA()
     [InlineData("/Users/a_b/x.y/z", "-Users-a-b-x-y-z")]                       // mixed '_' + '.' → '-'
+    // Observed live on 2.1.263: the real CLI, run from this cwd, created exactly this dir under its projects/ home.
+    // Covers the classes the pairs above miss — a SPACE and NON-ASCII (each UTF-16 unit → its own '-', so '项目' → '--').
+    [InlineData("/private/tmp/cs enc/my_project.v2/项目-x", "-private-tmp-cs-enc-my-project-v2----x")]
     public void EncodeCwd_matches_the_real_claude_encoder(string cwd, string expected) =>
         ClaudeTranscriptPath.EncodeCwd(cwd).ShouldBe(expected);
 
