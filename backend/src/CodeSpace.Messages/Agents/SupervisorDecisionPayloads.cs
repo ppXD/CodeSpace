@@ -209,11 +209,13 @@ public sealed record SupervisorAskHumanPayload
 }
 
 /// <summary>
-/// WHAT a delivery-gate card asked a human to adjudicate — the blocker's IDENTITY, carried as a root
+/// WHAT a server stop gate's card asked a human to adjudicate — the blocker's IDENTITY, carried as a root
 /// <c>gateReason</c> node beside the card's question (the same server-attached shape
 /// <see cref="SupervisorAmendAcceptancePayload"/> rides in). The gate's release rung compares THIS against the
-/// blocker the latest publish attempt reports: same blocker ⇒ the human already ruled on it, release the stop;
-/// a different one ⇒ a genuinely new question they have never seen, park on a fresh card.
+/// blocker the latest attempt reports: same blocker ⇒ the human already ruled on it, release the stop;
+/// a different one ⇒ a genuinely new question they have never seen, park on a fresh card. Shared by BOTH gates on
+/// the stop — the delivery gate's publish blockers and the publish gate's own unpublished-merge blocker — because
+/// a run under an immutable policy hits both, and two mirrored notions of "the same question" would dead-end it.
 ///
 /// <para>Structured deliberately, never lexical on the card's prose: the card text carries provider error strings
 /// and repository lists that change between attempts for the same blocker, so a text comparison would both
@@ -233,10 +235,13 @@ public sealed record SupervisorDeliveryGateReason
     /// <summary>Every repository the attempt REACHED skipped by publish policy — <see cref="Aliases"/> names exactly those, never the ones it never reached.</summary>
     public const string PolicySkipped = "policy-skipped";
 
+    /// <summary>I3's own blocker: the frontier's accepted work has no published branch and a later merge could not produce one — <see cref="Aliases"/> names the integration STATUS that merge diagnosed ("Conflicted" / "Skipped" / "Failed"), or nothing when it diagnosed none. A conflict and a policy block are different questions, so they must not release each other's card.</summary>
+    public const string UnpublishedMerge = "unpublished-merge";
+
     /// <summary>Which blocker (one of the four constants above). These strings are durable TAPE bytes a later turn reads back, so a rename orphans every in-flight parked run's release — they are test-pinned for the same reason the card's question prefix is.</summary>
     public required string Kind { get; init; }
 
-    /// <summary>The repository aliases the blocker names, ordinal-sorted at mint so two attempts reporting the same repositories in a different order compare equal. Empty when the blocker names none.</summary>
+    /// <summary>The names that SCOPE the blocker within its kind — the repository aliases a publish blocker reached, or the integration status an <see cref="UnpublishedMerge"/> blocker diagnosed. Ordinal-sorted at mint so two attempts reporting the same names in a different order compare equal. Empty when the blocker names none.</summary>
     public IReadOnlyList<string> Aliases { get; init; } = Array.Empty<string>();
 
     /// <summary>Whether an ALREADY-ADJUDICATED reason describes the SAME blocker as <paramref name="current"/>. A card that recorded none (null — a run parked before this field existed) matches nothing: what it adjudicated is unknowable, so it earns a fresh card naming the blocker rather than a release nobody can audit. Tolerates tape bytes spelling <c>"aliases":null</c> instead of an empty array on either side — <see cref="Aliases"/> can never construct that way in C#, but older/foreign tape rows can, and SequenceEqual has no null-safety of its own.</summary>

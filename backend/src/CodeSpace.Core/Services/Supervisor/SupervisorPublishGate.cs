@@ -25,9 +25,20 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// turn, through the SAME publish-policy guard chain the per-agent push already respects
 /// (<see cref="Executors.RealSupervisorActionExecutor"/>'s integrate path); once a merge already ran with no real
 /// integrate diagnosis and STILL nothing published, the NEXT stop attempt is substituted to <c>ask_human</c> instead
-/// of retrying merge forever. A stop with NO accepted work at all (nothing was ever produced) is entirely out of
-/// I3's scope — a legitimately empty-handed stop (e.g. every subtask was investigate-only) is never touched by this
-/// gate. An UNVERIFIED resolve is likewise out of scope: its work was never accepted (the resolver loop's own
+/// of retrying merge forever.</para>
+///
+/// <para><b>That card is ADJUDICABLE, not a dead end</b> (<see cref="AdjudicateUnpublishedMerge"/>): a repository
+/// whose <c>PublishMode</c> forbids the push can never produce an integrated branch, so a card that only ever
+/// re-asked would strand every patch-only run with accepted work — the same dead end
+/// <see cref="SupervisorDeliveryGate"/> hit one rung below, and both rungs fire on the same stop. So this gate runs
+/// DC-2b's ladder over the SAME shared surface (<see cref="SupervisorGateAdjudication"/>): the card RECORDS the
+/// blocker it asks about (<see cref="Messages.Agents.SupervisorDeliveryGateReason.UnpublishedMerge"/>, scoped by
+/// the integration status the merge diagnosed), an answer buys exactly ONE fresh server-authored merge, and a
+/// re-check that still reports the SAME blocker releases the stop. A different status — a conflict where a policy
+/// block was ruled on — is a question the human has never seen and earns its own card.</para>
+///
+/// <para>A stop with NO accepted work at all (nothing was ever produced) is entirely out of I3's scope — a
+/// legitimately empty-handed stop (e.g. every subtask was investigate-only) is never touched by this gate. An UNVERIFIED resolve is likewise out of scope: its work was never accepted (the resolver loop's own
 /// withhold contract already excludes it from any merge), so I3 lets that stop through as-is rather than
 /// auto-merging a recovery attempt that already failed its own verification.</para>
 /// </summary>
@@ -78,7 +89,7 @@ public static class SupervisorPublishGate
         // two. An ordinary merge that never ran a real integrate step at all (ReadIntegration null — e.g. the
         // opt-in integrate gate was off) carries no such diagnosis and falls through to the shortcut untouched.
         if (attemptedMerge is not null && SupervisorOutcome.ReadIntegration(attemptedMerge.OutcomeJson) is { } integration)
-            return AskHumanForUnpublishedMerge(integration.Reason);
+            return AdjudicateUnpublishedMerge(priorDecisions, attemptedMerge, integration.Status, integration.Reason);
 
         // The frontier's OWN accepted contributor(s) may already have a genuinely published PublishManifest row
         // (Pushed, or an opened PR/MR) even though no SEPARATE Integration-kind manifest exists for a later merge
@@ -95,12 +106,44 @@ public static class SupervisorPublishGate
         if (attemptedMerge is null) return ServerAuthoredMerge();   // first attempt — auto-integrate-at-stop
 
         // A merge already ran after this frontier and STILL nothing published (and no independent raw push covers
-        // it either) — never retry blindly, park instead.
-        return AskHumanForUnpublishedMerge(null);
+        // it either) — never retry blindly, adjudicate instead.
+        return AdjudicateUnpublishedMerge(priorDecisions, attemptedMerge, integrationStatus: null, reason: null);
     }
 
-    private static SupervisorDecision AskHumanForUnpublishedMerge(string? reason) =>
-        IntoAskHuman($"the run has accepted work that could not be published ({reason ?? "the integration did not produce a published branch"}) — a human must resolve this before the run can complete");
+    /// <summary>
+    /// The unpublished-merge rung's three-step adjudication — the SAME ladder DC-2b runs one rung below, over the
+    /// SAME shared surface (<see cref="SupervisorGateAdjudication"/>), because a run whose repository policy forbids
+    /// pushing hits BOTH gates and an immutable policy can never be satisfied from inside the run: an answer AFTER
+    /// the latest merge buys exactly ONE fresh server-authored re-attempt (the card invites fixing the blocker, and
+    /// only this gate can re-issue a merge, so an answer that fixed the world produces the branch, not a waiver);
+    /// a re-check that already ran after an answer and STILL reports the SAME blocker stands as the interim waiver
+    /// and releases the stop; anything else parks on a card RECORDING the blocker it asks about.
+    ///
+    /// <para>Anchored on WHAT was adjudicated, never on WHERE the answer sits relative to later work — the live
+    /// dead end <see cref="SupervisorDeliveryGate"/>'s own class doc records (run 34001620515). Freshness is still
+    /// enforced by the rungs above: fresh work is a NEW frontier, whose merge lookup is scoped
+    /// <c>Sequence &gt; frontier.Sequence</c> and therefore empty, forcing <see cref="ServerAuthoredMerge"/> first —
+    /// so a release only ever rides a verdict produced AFTER the human ruled. <paramref name="integrationStatus"/>
+    /// scopes the blocker: a merge that CONFLICTED is a question a human who ruled on a policy Skip has never seen.
+    /// </para>
+    /// </summary>
+    private static SupervisorDecision? AdjudicateUnpublishedMerge(IReadOnlyList<SupervisorPriorDecision> priorDecisions, SupervisorPriorDecision attemptedMerge, string? integrationStatus, string? reason)
+    {
+        var blocker = new SupervisorDeliveryGateReason
+        {
+            Kind = SupervisorDeliveryGateReason.UnpublishedMerge,
+            Aliases = integrationStatus is { Length: > 0 } ? new[] { integrationStatus } : Array.Empty<string>(),
+        };
+
+        if (SupervisorGateAdjudication.AnsweredCardExists(priorDecisions, QuestionPrefix, after: attemptedMerge.Sequence, before: long.MaxValue))
+            return ServerAuthoredMerge();
+
+        if (SupervisorGateAdjudication.AdjudicatedSameBlocker(priorDecisions, QuestionPrefix, blocker, before: attemptedMerge.Sequence))
+            return null;
+
+        return SupervisorGateAdjudication.IntoAskHuman(QuestionPrefix, blocker,
+            $"the run has accepted work that could not be published ({reason ?? "the integration did not produce a published branch"}) — fix the cause and answer to re-attempt once; if it is still blocked, the run completes without an integrated branch");
+    }
 
     private static bool HasSummary(SupervisorDecision decision) => !string.IsNullOrWhiteSpace(ReadStopSummaryFromPayload(decision.PayloadJson));
 
