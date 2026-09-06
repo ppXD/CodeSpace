@@ -407,6 +407,37 @@ public class RoomNarrativeTests
         n.Blocks.OfType<DecisionBlock>().ShouldHaveSingleItem();
     }
 
+    [Theory]
+    [InlineData("nothing", true)]
+    [InlineData("changed-files", false)]
+    [InlineData("deliverable", false)]
+    [InlineData("pull-request", false)]
+    public void A_park_claims_nothing_was_delivered_only_when_nothing_was(string produced, bool expectClause)
+    {
+        // The commonest park is a required stage holding no evidence — Integrate — and that one lands AFTER the agents
+        // changed files and pushed a branch. "Nothing was delivered" then contradicts the changed-file card sitting
+        // directly above it and reads as work lost, when what actually happened is that the claim went uncertified.
+        var facts = ParkedWith(produced);
+
+        var park = Build(new[] { Tape("stop", 1) }, WorkflowRunStatus.Suspended, ParkReason, facts)
+            .Blocks.OfType<DiagnosticBlock>().ShouldHaveSingleItem();
+
+        park.Text.Contains("Nothing was delivered").ShouldBe(expectClause,
+            customMessage: $"the no-delivery clause is a claim about the turn's OWN artifacts ({produced}) — it must be read off them, never asserted");
+        park.Text.ShouldContain("still resumable", customMessage: "…while the resumability half is true of every park");
+    }
+
+    private const string ParkReason = "completion-authority: Park — required stage(s) without evidence for mode 'supervisor': Integrate";
+
+    /// <summary>A completion park whose turn produced ONE of the three things the room can show for it — or nothing at all.</summary>
+    private static RoomTurnFacts ParkedWith(string produced) => produced switch
+    {
+        "changed-files" => new RoomTurnFacts { CompletionParked = true, ChangedFiles = new[] { "src/Program.cs" } },
+        "deliverable" => new RoomTurnFacts { CompletionParked = true, Deliverables = new[] { new DeliverableFile { Path = "report.md", Kind = "document", SizeBytes = 12, ContentType = "text/markdown", ArtifactId = Guid.NewGuid(), AgentRunId = Guid.NewGuid() } } },
+        "pull-request" => new RoomTurnFacts { CompletionParked = true, Delivery = new RoomDelivery { Title = "Pull request #7" } },
+        _ => new RoomTurnFacts { CompletionParked = true },
+    };
+
     [Fact]
     public void A_park_stamp_on_a_non_suspended_turn_emits_nothing()
     {
