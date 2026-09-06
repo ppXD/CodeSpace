@@ -706,7 +706,7 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onSummonPane, onSummo
             <span className="room-av-name">CodeSpace</span>
             <span className={`room-pill room-pill-${tone}${open && live ? " room-pill-steady" : ""}`}>
               {tone === "run" ? <i className="room-pill-dot" /> : <Sym n={pillIcon(tone)} s={11} />}
-              {pillLabel(turn.status, live)}
+              {turnHeaderWord(turn, live)}
             </span>
             <span className="room-turn-meta">Turn {turn.turnIndex}{turnMeta(turn, nowMs, live)}</span>
             <TurnAttempts attempts={turn.attempts ?? []} nowMs={nowMs} onOpenRun={onOpenRun} />
@@ -1956,12 +1956,18 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function ErrorCard({ diag, onOpenTrace }: { diag: DiagnosticBlock; onOpenTrace?: () => void }) {
+/**
+ * The backend's diagnostic card — humanized title + cause + typed remediation + the raw error behind a toggle. An
+ * `Info` tone is the completion-authority PARK: nothing failed, so it wears the warm attention palette rather than the
+ * error red, which would tell an operator their run broke when it is simply waiting on them.
+ */
+export function ErrorCard({ diag, onOpenTrace }: { diag: DiagnosticBlock; onOpenTrace?: () => void }) {
   const [showRaw, setShowRaw] = useState(false);
   const actions = diag.actions ?? [];
+  const attention = diag.tone === "Info";
 
   return (
-    <div className="room-err">
+    <div className={attention ? "room-err room-err-attn" : "room-err"}>
       <span className="room-err-av"><Sym n="alert" s={16} /></span>
       <div className="room-err-main">
         {diag.title && <div className="room-err-title">{diag.title}</div>}
@@ -2029,8 +2035,9 @@ function DecisionPreview({ decision }: { decision: DecisionBlock }) {
 
 /** The turn footer actions — the doing-actions first (Continue / Re-run / Open PR), then "Open canvas" LAST. Re-run
  *  confirms before firing. Stop is NOT here: while running it lives in the pinned LiveRunBar with the progress it stops.
- *  Capability-gated by the backend (never 422s). */
-function TurnActions({ actions, turn, onOpenCanvas, onOpenRun, canvasOpen }: { actions: RoomAction[]; turn: AssistantTurnBlock; onOpenCanvas?: () => void; onOpenRun: (runId: string) => void; canvasOpen?: boolean }) {
+ *  Capability-gated by the backend (never 422s) — including which turns may Continue, which is the only exit a
+ *  completion-parked run has. */
+export function TurnActions({ actions, turn, onOpenCanvas, onOpenRun, canvasOpen }: { actions: RoomAction[]; turn: AssistantTurnBlock; onOpenCanvas?: () => void; onOpenRun: (runId: string) => void; canvasOpen?: boolean }) {
   const replay = useReplayRun();
   const cont = useContinueRun(turn.runId);
   const openPr = useOpenPullRequest(turn.runId);
@@ -2207,6 +2214,15 @@ function pillIcon(tone: string): SymName {
   if (tone === "err") return "x";
   if (tone === "wait") return "clock";
   return "dot";
+}
+
+/**
+ * The turn header's status word. The backend OVERRIDES it when the raw status would mislead — a completion-authority
+ * park and an approval wait are both `Suspended`, and calling the first one "Waiting" says a run nobody will ever
+ * resume is merely pending. Falls back to the shared lexicon for every ordinary turn, so nothing else moves.
+ */
+export function turnHeaderWord(turn: Pick<AssistantTurnBlock, "status" | "statusWord">, live: boolean): string {
+  return turn.statusWord?.trim() || pillLabel(turn.status, live);
 }
 
 function pillLabel(status: WorkflowRunStatus, live: boolean): string {

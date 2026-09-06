@@ -66,6 +66,13 @@ public sealed record RoomTurnFacts
     /// <summary>The delivered change set (the PR card), when the turn opened one.</summary>
     public RoomDelivery? Delivery { get; init; }
 
+    /// <summary>
+    /// True when the completion authority REFUSED this attempt's terminal and parked it. The reason itself arrives as
+    /// the run's own error, so this is only the discriminator the narrative needs between the two Suspended shapes:
+    /// a completion park (this — refused, resumable only by an operator) and an ask-park (waiting on its own signal).
+    /// </summary>
+    public bool CompletionParked { get; init; }
+
     /// <summary>The raw engine error, surfaced behind "Show raw error" on a failure diagnostic. Null when there's nothing rawer than the humanized text.</summary>
     public string? RawError { get; init; }
 

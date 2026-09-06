@@ -12,15 +12,19 @@ namespace CodeSpace.Core.Services.Sessions.Room;
 /// </summary>
 public sealed class RunActionCapabilityResolver : IRunActionCapabilityResolver, IScopedDependency
 {
-    public IReadOnlyList<RoomAction> ResolveTurnActions(Guid runId, WorkflowRunStatus status, RoomPublishState? publish = null)
+    public IReadOnlyList<RoomAction> ResolveTurnActions(Guid runId, WorkflowRunStatus status, RoomPublishState? publish = null, bool completionParked = false)
     {
         var terminal = WorkflowRunState.IsTerminal(status);
         var target = runId.ToString();
 
         // Continue resumes IN PLACE from where the run halted — the same-run-id revival ContinueRunAsync performs for a
-        // stopped (Cancelled) or failed run. Offered ONLY there: Success has nothing to resume, an active run stops
-        // first, and a Suspended run resumes via its wait / the stranded-continue control, not the turn footer.
-        var continuable = status is WorkflowRunStatus.Cancelled or WorkflowRunStatus.Failure;
+        // stopped (Cancelled) or failed run, PLUS the one Suspended shape that verb also accepts: a run the completion
+        // authority refused and stamped parked. That park waits on nobody — the stranded reconciler skips a stamped
+        // row — so leaving Continue disabled left it with no exit at all. Every other Suspended run is genuinely
+        // waiting on its own approval / timer / callback and resumes through that, not the turn footer; Success has
+        // nothing to resume; an active run stops first.
+        var continuable = status is WorkflowRunStatus.Cancelled or WorkflowRunStatus.Failure
+            || (status == WorkflowRunStatus.Suspended && completionParked);
 
         var actions = new List<RoomAction>
         {
@@ -31,7 +35,7 @@ public sealed class RunActionCapabilityResolver : IRunActionCapabilityResolver, 
                 Kind = RoomActionKind.Continue,
                 Label = "Continue",
                 Enabled = continuable,
-                DisabledReason = continuable ? null : "Only a stopped or failed turn can be resumed in place.",
+                DisabledReason = continuable ? null : "Only a stopped, failed, or completion-parked turn can be resumed in place.",
                 Target = target,
             },
 

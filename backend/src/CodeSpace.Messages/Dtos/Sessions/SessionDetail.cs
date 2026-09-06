@@ -75,6 +75,14 @@ public sealed record SessionTurn
     public DateTimeOffset? CompletedAt { get; init; }
     public string? Error { get; init; }
 
+    /// <summary>
+    /// When the completion authority REFUSED this attempt's terminal and parked it (<c>workflow_run.completion_parked_at</c>).
+    /// Non-null is the discriminator between the two Suspended shapes: a completion park (this) resumes ONLY through the
+    /// operator's Continue — the stranded-run reconciler skips a stamped row — while an ask-park (null) is legitimately
+    /// waiting on its own approval / timer / callback. Null on every unparked run.
+    /// </summary>
+    public DateTimeOffset? CompletionParkedAt { get; init; }
+
     /// <summary>The newest attempt's stamped completion-enforcement mode, verbatim from its row — <c>"Enforced"</c> (the completion authority owns this run's terminal) or <c>"Shadow"</c>. Null on a pre-protocol row; read it through <c>CompletionPolicy.ModeFor</c> so an unreadable value stays fail-closed Legacy.</summary>
     public string? CompletionEnforcementMode { get; init; }
 

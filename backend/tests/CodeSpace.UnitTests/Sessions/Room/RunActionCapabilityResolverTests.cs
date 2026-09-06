@@ -49,6 +49,24 @@ public class RunActionCapabilityResolverTests
         trace.Target.ShouldBe(runId.ToString());
     }
 
+    [Theory]
+    [InlineData(WorkflowRunStatus.Suspended, true, true)]     // the completion park — the operator's re-arbitration channel
+    [InlineData(WorkflowRunStatus.Suspended, false, false)]   // an ask-park — resumes via its wait, not this verb
+    [InlineData(WorkflowRunStatus.Running, true, false)]      // a cleared stamp on a live run claims nothing
+    [InlineData(WorkflowRunStatus.Success, true, false)]      // a stamped Success is a contradiction, never continuable
+    public void A_completion_parked_turn_is_continuable(WorkflowRunStatus status, bool completionParked, bool expected)
+    {
+        // The gap this closes: a completion-authority park is Suspended, so Continue rendered disabled and the run had
+        // NO operable exit — the reconciler skips a stamped row, and ContinueStrandedSuspendedRunAsync is the one
+        // deliberate re-arbitration channel. The footer must offer exactly what that verb accepts.
+        var actions = new RunActionCapabilityResolver().ResolveTurnActions(Guid.NewGuid(), status, publish: null, completionParked);
+
+        var cont = actions.Single(a => a.Kind == RoomActionKind.Continue);
+        cont.Enabled.ShouldBe(expected, "continue must be offered exactly where ContinueRunAsync would accept it");
+        cont.Attempt.ShouldBeFalse("continue re-arbitrates the SAME run in place — it is not a fresh attempt");
+        (cont.DisabledReason == null).ShouldBe(expected, "a disabled continue carries a reason");
+    }
+
     [Fact]
     public void OpenPullRequest_is_omitted_when_no_publish_signal_is_supplied()
     {

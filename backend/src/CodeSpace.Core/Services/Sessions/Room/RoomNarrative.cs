@@ -35,6 +35,20 @@ public static class RoomNarrative
     /// </summary>
     public const string WithheldWord = "withheld — checks failed";
 
+    /// <summary>
+    /// The header word for a run the completion authority PARKED. Distinct from the "Waiting" every other Suspended
+    /// run shows, because the two mean opposite things: an ask-park is waiting on a signal that is coming, while this
+    /// run waits on nobody — the stranded reconciler skips it, so only an operator's Continue moves it. Pinned (Rule 8):
+    /// it is the one word that tells an operator the run is theirs to act on.
+    /// </summary>
+    public const string ParkedWord = "Parked";
+
+    /// <summary>The park card's headline — the qualifier the short header word has no room for. Pinned (Rule 8): it is a user-facing claim about WHY the run stopped short of a terminal.</summary>
+    public const string ParkedTitle = "Parked — completion not verified";
+
+    /// <summary>The park card's account when the run recorded no readable reason — legibility must not depend on the reason surviving. Pinned (Rule 8).</summary>
+    public const string ParkedWithoutReasonText = "The completion authority would not certify this run's result, and recorded no reason.";
+
     /// <summary>The map + summary + inner blocks for one turn — everything <see cref="AssistantTurnBlock"/> needs below its header.</summary>
     public sealed record TurnNarrative(string? Summary, ExecutionMapBlock? Map, IReadOnlyList<RoomBlock> Blocks);
 
@@ -237,6 +251,12 @@ public static class RoomNarrative
 
         if (status is WorkflowRunStatus.Failure or WorkflowRunStatus.Cancelled)
             blocks.Add(RichDiagnostic(idPrefix, seq, status, error, facts, narrativePhases));
+
+        // A completion-authority park is the OTHER way a turn stops short of an answer, and the only one with no
+        // terminal at all. It renders in the same outcome position as the failure diagnostic — never both, since a
+        // parked run is Suspended.
+        if (status == WorkflowRunStatus.Suspended && facts.CompletionParked)
+            blocks.Add(ParkDiagnostic(idPrefix, seq, facts.RawError ?? error));
 
         // The green "RESULT" card is a SUCCESS artifact — only a succeeded run delivers an answer. A failed / cancelled
         // run's outcome is the error diagnostic above, never a green Result echoing the failure text.
@@ -632,6 +652,44 @@ public static class RoomNarrative
                 : Array.Empty<RoomAction>(),
             RawDetail = raw is { Length: > 0 } r && r != text ? r : null,
         };
+    }
+
+    /// <summary>
+    /// The completion-authority PARK card — the reason a run stopped short of a terminal, and the two ways out.
+    /// The authority's own words carry the specifics (which stages hold no evidence, which integrity check failed),
+    /// so this states them rather than re-deriving a second account that could disagree with the row. The way out is
+    /// named because a park is otherwise indistinguishable from a run that hung: Continue re-arbitrates against the
+    /// then-current facts, which is the ONLY channel that clears the stamp.
+    /// </summary>
+    private static DiagnosticBlock ParkDiagnostic(string idPrefix, long seq, string? error)
+    {
+        var reason = ParkReason(error);
+
+        return new DiagnosticBlock
+        {
+            Id = $"{idPrefix}:park",
+            Seq = seq,
+            Tone = NarrativeTone.Info,
+            Title = ParkedTitle,
+            Text = $"{reason} Nothing was delivered and no terminal was stamped, so the work is still resumable. Continue gives the run another turn to produce what is missing, publish it, or ask you a question — and if it still cannot, it stops honestly instead of claiming success. Stop the run to end it here instead.",
+            RawDetail = error is { Length: > 0 } raw ? raw : null,
+        };
+    }
+
+    /// <summary>The authority's refusal in the reader's words — its engine prefix dropped, its specifics kept verbatim, and a period so it reads as a sentence before the guidance that follows.</summary>
+    private static string ParkReason(string? error)
+    {
+        const string prefix = "completion-authority:";
+
+        if (string.IsNullOrWhiteSpace(error)) return ParkedWithoutReasonText;
+
+        var text = error.Trim();
+        var idx = text.IndexOf(prefix, StringComparison.OrdinalIgnoreCase);
+        var reason = (idx >= 0 ? text[(idx + prefix.Length)..] : text).Trim();
+
+        if (reason.Length == 0) return ParkedWithoutReasonText;
+
+        return reason.EndsWith('.') ? reason : reason + ".";
     }
 
     /// <summary>A rejected model credential — the one error class with a typed remediation (Fix credentials) rather than just a rerun.</summary>

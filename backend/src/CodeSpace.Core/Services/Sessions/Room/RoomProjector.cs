@@ -145,9 +145,14 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             ? await DecisionBlocksAsync(runId, teamId, watermark, cancellationToken).ConfigureAwait(false)
             : Array.Empty<DecisionBlock>();
 
+        // The completion authority REFUSED this attempt's terminal: Suspended AND stamped. Both Suspended shapes reach
+        // here, so the stamp is the only honest discriminator — an ask-park is waiting on its own signal, while this one
+        // waits on nobody (the stranded reconciler skips a stamped row) until an operator continues it.
+        var parked = focus.Status == Messages.Enums.WorkflowRunStatus.Suspended && focus.CompletionParkedAt != null;
+
         var facts = await GatherFactsAsync(runId, teamId, phases, focus.Status, focus.Error, cancellationToken).ConfigureAwait(false);
 
-        var narrative = RoomNarrative.Build($"turn-{turn.TurnIndex}", watermark, phases, focus.Status, focus.Error, decisions, facts);
+        var narrative = RoomNarrative.Build($"turn-{turn.TurnIndex}", watermark, phases, focus.Status, focus.Error, decisions, facts with { CompletionParked = parked });
 
         var publish = await PublishStateAsync(runId, teamId, focus.Status, cancellationToken).ConfigureAwait(false);
 
@@ -164,9 +169,10 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             Summary = narrative.Summary ?? (focus.IsLatest && turn.Result is { Length: > 0 } r ? r : null),
             Map = narrative.Map,
             Blocks = narrative.Blocks,
-            Actions = _actions.ResolveTurnActions(runId, focus.Status, publish),
+            Actions = _actions.ResolveTurnActions(runId, focus.Status, publish, parked),
             At = focus.CreatedDate,
             DurationMs = DurationOf(focus.CreatedDate, focus.StartedAt, focus.CompletedAt),
+            StatusWord = parked ? RoomNarrative.ParkedWord : null,
             CompletionNote = CompletionNoteOf(turn, focus),
             Attempts = AttemptsOf(turn, runId),
         };
@@ -211,7 +217,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         return new RoomPublishState { HasPublishedBranch = true, OpenedPullRequestUrl = openedUrl };
     }
 
-    private sealed record FocusRun(Guid RunId, Messages.Enums.WorkflowRunStatus Status, string? Error, DateTimeOffset CreatedDate, DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt, bool IsLatest);
+    private sealed record FocusRun(Guid RunId, Messages.Enums.WorkflowRunStatus Status, string? Error, DateTimeOffset CreatedDate, DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt, DateTimeOffset? CompletionParkedAt, bool IsLatest);
 
     /// <summary>
     /// Resolve which attempt to focus. Reads the ANCHOR run's OWN status / error / timing whenever it's one of this
@@ -222,17 +228,17 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// </summary>
     private async Task<FocusRun> FocusAsync(SessionTurn turn, Guid? anchorRunId, Guid teamId, CancellationToken cancellationToken)
     {
-        var latest = new FocusRun(turn.RunId, turn.RunStatus, turn.Error, turn.CreatedDate, turn.StartedAt, turn.CompletedAt, IsLatest: true);
+        var latest = new FocusRun(turn.RunId, turn.RunStatus, turn.Error, turn.CreatedDate, turn.StartedAt, turn.CompletedAt, turn.CompletionParkedAt, IsLatest: true);
 
         if (anchorRunId is not { } anchor || (turn.Attempts?.All(a => a.RunId != anchor) ?? true))
             return latest;
 
         var row = await _db.WorkflowRun.AsNoTracking()
             .Where(r => r.Id == anchor && r.TeamId == teamId)
-            .Select(r => new { r.Status, r.Error, r.CreatedDate, r.StartedAt, r.CompletedAt })
+            .Select(r => new { r.Status, r.Error, r.CreatedDate, r.StartedAt, r.CompletedAt, r.CompletionParkedAt })
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
-        return row is null ? latest : new FocusRun(anchor, row.Status, row.Error, row.CreatedDate, row.StartedAt, row.CompletedAt, IsLatest: anchor == turn.RunId);
+        return row is null ? latest : new FocusRun(anchor, row.Status, row.Error, row.CreatedDate, row.StartedAt, row.CompletedAt, row.CompletionParkedAt, IsLatest: anchor == turn.RunId);
     }
 
     /// <summary>The turn's attempt timeline (oldest → newest) — projected only when it was rerun (&gt; 1 attempt). <paramref name="focusRunId"/> marks the shown one (the attempt the room is currently focused on), so switching to a prior attempt re-marks it "shown".</summary>

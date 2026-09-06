@@ -6467,6 +6467,11 @@ body.chat-resizing .acs-root .app { transition: none; }
 .room-err-raw-toggle { margin-top: 11px; display: inline-flex; align-items: center; gap: 6px; font: inherit; font-size: 11px; color: var(--muted); background: transparent; border: 0; padding: 0; cursor: pointer; }
 .room-err-raw-toggle:hover { color: var(--ink-2); }
 .room-err-raw { margin: 8px 0 0; background: #fff; border: 1px solid var(--rm-err-line); border-radius: 8px; padding: 10px 12px; font-size: 11px; line-height: 1.6; color: var(--rm-danger); overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+/* An attention (Info-tone) diagnostic — the completion-authority park. Nothing failed, so it wears the warm warn
+   palette instead of the error red; the layout is the error card's, unchanged. */
+.room-err-attn { border-color: var(--rm-warn-line); background: var(--rm-warn-bg); }
+.room-err-attn .room-err-av { border-color: var(--rm-warn-line); color: var(--rm-warn); }
+.room-err-attn .room-err-raw { border-color: var(--rm-warn-line); color: var(--rm-warn); }
 
 /* buttons (turn footer + error remediation) */
 .room-btn, .room-btn-primary, .room-btn-ghost { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 13px; border-radius: 8px; font: inherit; font-size: 12.5px; cursor: pointer; }

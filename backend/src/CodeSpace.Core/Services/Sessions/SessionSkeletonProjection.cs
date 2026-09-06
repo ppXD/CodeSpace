@@ -9,7 +9,7 @@ internal static class SessionSkeletonProjection
     internal sealed record RunRow(
         Guid Id, Guid? RootRunId, int? SessionTurnIndex, WorkflowRunStatus Status, string? ProjectionKind,
         string SourceType, string? RerunFromNodeId, DateTimeOffset CreatedDate, DateTimeOffset? StartedAt,
-        DateTimeOffset? CompletedAt, string? Error, string? CompletionEnforcementMode, string? Goal, string? Result, bool HasPendingDecision);
+        DateTimeOffset? CompletedAt, string? Error, string? CompletionEnforcementMode, DateTimeOffset? CompletionParkedAt, string? Goal, string? Result, bool HasPendingDecision);
 
     internal static IReadOnlyList<SessionTurn> BuildTurns(IEnumerable<RunRow> runs)
     {
@@ -41,6 +41,7 @@ internal static class SessionSkeletonProjection
                 CompletedAt = effective.CompletedAt,
                 Error = effective.Error,
                 CompletionEnforcementMode = effective.CompletionEnforcementMode,
+                CompletionParkedAt = effective.CompletionParkedAt,
                 AttemptCount = ordered.Count,
                 Attempts = ordered.Count > 1 ? BuildLadder(ordered, effective.Id) : null,
             });

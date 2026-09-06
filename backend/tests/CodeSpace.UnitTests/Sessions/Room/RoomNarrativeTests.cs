@@ -362,6 +362,60 @@ public class RoomNarrativeTests
         n.Blocks.OfType<DecisionBlock>().ShouldHaveSingleItem().ShouldBe(decision);
     }
 
+    // ── the completion-authority park: the reason, and the way out ──────────────────
+
+    [Fact]
+    public void A_completion_park_states_the_authoritys_reason_and_the_way_out()
+    {
+        // The default outcome of an unverified supervisor stop since C5. Before this, the authority's refusal lived
+        // ONLY in workflow_run.error: the room emitted no block for a Suspended run, so the reason rendered nowhere
+        // and the turn read "Waiting" forever with no operable exit.
+        const string reason = "completion-authority: Park — required stage(s) without evidence for mode 'supervisor': Integrate";
+
+        var n = Build(new[] { Tape("plan", 1), Tape("stop", 2) }, WorkflowRunStatus.Suspended, reason, new RoomTurnFacts { CompletionParked = true });
+
+        var park = n.Blocks.OfType<DiagnosticBlock>().ShouldHaveSingleItem();
+        park.Title.ShouldBe(RoomNarrative.ParkedTitle, "the card names the park, not a failure");
+        park.Tone.ShouldBe(NarrativeTone.Info, "a park is not an error — nothing failed, the claim was simply not certified");
+        park.Text.ShouldContain("Integrate", customMessage: "the exact stage the authority found no evidence for must reach the reader");
+        park.Text.ShouldContain("Continue", customMessage: "the card states what the way out actually does");
+        park.Text.ShouldContain("Stop", customMessage: "…and the alternative to resuming");
+        park.Text.ShouldNotContain("completion-authority:", customMessage: "the engine prefix is jargon — the humanized reason carries the words");
+        park.RawDetail.ShouldBe(reason, customMessage: "the verbatim arbitration reason stays available behind the raw toggle");
+    }
+
+    [Fact]
+    public void A_park_with_an_unreadable_reason_still_says_what_happened()
+    {
+        var n = Build(new[] { Tape("stop", 1) }, WorkflowRunStatus.Suspended, error: null, new RoomTurnFacts { CompletionParked = true });
+
+        var park = n.Blocks.OfType<DiagnosticBlock>().ShouldHaveSingleItem();
+        park.Text.ShouldStartWith(RoomNarrative.ParkedWithoutReasonText, customMessage: "a park with no recorded reason must still be legible — silence is the bug this closes");
+        park.RawDetail.ShouldBeNull();
+    }
+
+    [Fact]
+    public void An_ask_park_renders_its_decision_and_no_park_card()
+    {
+        // Both park shapes are Suspended. Only the completion park carries the stamp, so an approval / timer wait
+        // must project exactly as it did — a decision card, and no claim that its completion went unverified.
+        var decision = new DecisionBlock { Id = "decision-x", Seq = 7, DecisionId = Guid.NewGuid(), Question = "Proceed?", Shape = "confirm" };
+
+        var n = RoomNarrative.Build("turn-1", 7, new[] { Tape("plan", 1) }, WorkflowRunStatus.Suspended, null, new[] { decision }, RoomTurnFacts.Empty);
+
+        n.Blocks.OfType<DiagnosticBlock>().ShouldBeEmpty("an ask-park is legitimately waiting on a human — it was never refused");
+        n.Blocks.OfType<DecisionBlock>().ShouldHaveSingleItem();
+    }
+
+    [Fact]
+    public void A_park_stamp_on_a_non_suspended_turn_emits_nothing()
+    {
+        // The Continue path clears the stamp as it flips the run; a stale pairing must never claim a live run is parked.
+        var n = Build(new[] { Tape("stop", 1) }, WorkflowRunStatus.Running, error: null, new RoomTurnFacts { CompletionParked = true });
+
+        n.Blocks.OfType<DiagnosticBlock>().ShouldBeEmpty();
+    }
+
     [Fact]
     public void An_empty_run_has_no_map_and_no_lead()
     {

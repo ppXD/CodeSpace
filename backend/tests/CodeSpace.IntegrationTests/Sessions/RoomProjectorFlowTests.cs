@@ -317,6 +317,36 @@ public class RoomProjectorFlowTests
     }
 
     [Fact]
+    public async Task The_two_suspended_shapes_project_differently()
+    {
+        // Both parks are Suspended, and before this both rendered identically — "Waiting", no reason, Continue
+        // disabled. They mean opposite things: the ask-park is waiting on a signal that is coming and resumes
+        // through its own wait, while a completion park waits on nobody (the stranded sweep skips a stamped row)
+        // and Continue is its only exit. The stamp is the ONLY discriminator, so pin that the projection reads it.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Both parks");
+
+        var asking = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Ask me", resultSummary: null, status: WorkflowRunStatus.Suspended);
+        await SeedNodeDecisionAsync(teamId, asking, "Pick a path", DateTimeOffset.UtcNow.AddMinutes(10), Array.Empty<DecisionOption>());
+
+        var parked = await SeedTurnAsync(teamId, sessionId, turn: 2, goal: "Verify me", resultSummary: null, status: WorkflowRunStatus.Suspended,
+            error: "completion-authority: Park — required stage(s) without evidence for mode 'supervisor': Integrate", completionParkedAt: DateTimeOffset.UtcNow);
+
+        var turns = (await ProjectByRunAsync(parked, teamId))!.Blocks.OfType<AssistantTurnBlock>().ToDictionary(t => t.TurnIndex);
+
+        var ask = turns[1];
+        ask.StatusWord.ShouldBeNull("an ask-park keeps the shared status lexicon — it is genuinely waiting");
+        ask.Blocks.OfType<DiagnosticBlock>().ShouldBeEmpty("nothing refused this run — it was never asked to certify anything");
+        ask.Blocks.OfType<DecisionBlock>().ShouldNotBeEmpty("…and its ask still renders exactly as before");
+        ask.Actions.Single(a => a.Kind == RoomActionKind.Continue).Enabled.ShouldBeFalse("an ask-park resumes via its wait, not the turn footer");
+
+        var park = turns[2];
+        park.StatusWord.ShouldBe(RoomNarrative.ParkedWord);
+        park.Blocks.OfType<DiagnosticBlock>().ShouldHaveSingleItem().Text.ShouldContain("Integrate");
+        park.Actions.Single(a => a.Kind == RoomActionKind.Continue).Enabled.ShouldBeTrue("the stamped park's one exit must be offered");
+    }
+
+    [Fact]
     public async Task A_past_failed_turn_is_richly_projected_and_keeps_its_actions()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -1407,7 +1437,7 @@ public class RoomProjectorFlowTests
         return id;
     }
 
-    private async Task<Guid> SeedTurnAsync(Guid teamId, Guid sessionId, int turn, string goal, string? resultSummary, WorkflowRunStatus status = WorkflowRunStatus.Success, string? enforcementMode = null)
+    private async Task<Guid> SeedTurnAsync(Guid teamId, Guid sessionId, int turn, string goal, string? resultSummary, WorkflowRunStatus status = WorkflowRunStatus.Success, string? enforcementMode = null, string? error = null, DateTimeOffset? completionParkedAt = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -1429,6 +1459,7 @@ public class RoomProjectorFlowTests
             Id = runId, TeamId = teamId, RunRequestId = requestId, SourceType = WorkflowRunSourceTypes.Snapshot,
             Status = status, SessionId = sessionId, SessionTurnIndex = turn,
             CompletionEnforcementMode = enforcementMode,
+            Error = error, CompletionParkedAt = completionParkedAt,
             DefinitionSnapshotJson = "{\"nodes\":[],\"edges\":[]}", DefinitionSnapshotHash = "sha256:test",
             OutputsJson = outputs,
             CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
