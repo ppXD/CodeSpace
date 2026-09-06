@@ -22,6 +22,10 @@ concurrency:
 
 permissions:
   contents: read
+  # The clause guard reads THIS workflow's own previous runs (their logs carry each run's clause census) to tell a
+  # one-off gateway skip from a gate that has measured nothing for runs on end. Read-only, and the only thing it
+  # widens over `contents: read`.
+  actions: read
 
 env:
   DOTNET_NOLOGO: 'true'
@@ -62,6 +66,11 @@ jobs:
       # this lane green over nothing at all — the exact failure the real-model lanes were bitten by twice.
       - name: Assert the lane actually selected its class
         if: always()
+        env:
+          # The consecutive-dark check reads the PREVIOUS runs' own logs (see the script) to tell a one-off gateway
+          # skip from an instrument that has measured nothing for runs on end. Read-only, and scoped to THIS step so
+          # the token never reaches the environment of the steps that run live agent code.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash .github/scripts/assert-every-filter-clause-ran.sh backend/TestResults/real-bucket.trx AliyunOssRealBucketConformanceTests
 
       - name: Upload test results
