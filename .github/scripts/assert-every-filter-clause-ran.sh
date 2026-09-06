@@ -174,8 +174,13 @@ census_rows() {
 # over UNMEASURED: one lane that measured it is enough. And absence is its own answer: a run whose census has no row
 # for the clause is a run where that LANE never reported (cancelled by concurrency, red before the guard, or the
 # clause not yet listed), which is evidence of NOTHING either way.
+#
+# A MISSING row breaks the streak exactly as an `ok` one does, and on purpose: MISSING means the clause selected no
+# test at all, which exits this guard RED on the spot. The streak exists to catch a lane measuring nothing while
+# reporting GREEN, and a run that went red already told a human. Read the MEASURED label below as "this predecessor
+# broke the streak", not as "this predecessor took a measurement".
 state_in() {
-  awk -v t="$2" '$2 == t { seen++; if ($1 != "UNMEASURED") measured++ } END { print !seen ? "" : (measured ? "MEASURED" : "UNMEASURED") }' "$1"
+  awk -v t="$2" '$2 == t { seen++; if ($1 == "ok" || $1 == "MISSING") measured++ } END { print !seen ? "" : (measured ? "MEASURED" : "UNMEASURED") }' "$1"
 }
 
 # How many runs (this one included) recorded the clause UNMEASURED with no run in between recording it MEASURED.
