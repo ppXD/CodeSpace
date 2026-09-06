@@ -63,7 +63,7 @@ public static class SupervisorDeliveryGate
 {
     /// <summary>
     /// Every card this gate parks on carries this pinned question prefix — it is the gate's IDENTITY on the tape:
-    /// the adjudication release (see <c>HumanAdjudicatedSince</c>) recognizes its OWN answered cards by this
+    /// the adjudication release (see <c>AdjudicatedSameBlocker</c>) recognizes its OWN answered cards by this
     /// prefix and nothing else. Renaming it orphans every in-flight parked run's release, so it is test-pinned.
     /// </summary>
     public const string QuestionPrefix = "Delivery gate: ";
