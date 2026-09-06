@@ -353,6 +353,20 @@ expect_output lacks "::error::" "a measured run leaves only the one-off warning"
 expect_summary "| 0 |" "a measured clause reports a zero streak" \
   run_on refs/heads/main "$measured_trx" RealModelBenchmark
 
+# A predecessor whose census recorded the clause MISSING breaks the streak, and deliberately so: MISSING means the
+# clause selected no test at all, which exits the guard RED on the spot — that run already told a human, and the
+# streak counts runs that measured nothing while reporting GREEN. Pinned because the two readings differ by three
+# live-API budgets: 222 and 333 are still dark behind this run, so reading MISSING as no-evidence would red the lane.
+make_predecessor 111 "$trx" RealModelBenchmark
+
+expect 0 "a predecessor that recorded the clause MISSING breaks the streak — that run was already red" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+# ...and the streak it reports is the one a human can check: 1, over the evidence of exactly one predecessor.
+expect_summary '| `RealModelBenchmark` | UNMEASURED | 0 | 0 | 1 | 1 |' \
+  "a MISSING predecessor resets the streak to 1 rather than stepping over it" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
 if [ "$failures" -ne 0 ]; then
   echo "${failures} guard self-test(s) failed"
   exit 1
