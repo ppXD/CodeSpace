@@ -66,8 +66,11 @@ public sealed class RealModelQualificationRehearsalE2ETests
             using (var scope = _fixture.BeginScope())
                 outcome = await scope.Resolve<IQualificationRunner>().QualifyAsync("supervisor", "git-branch", spec, teamId, selection, CancellationToken.None);
 
+            // The gateway-health disclosure the corpus lanes carry, on the round a real claim would be minted from:
+            // the mitigation disables extended thinking, so a bound leaning on respawned solves was measured under a
+            // different configuration than the receipt names — read it before minting against this bar.
             var report = $"suite {outcome.SuiteDigest} ({suite.Tasks.Count} task(s)): solved {outcome.Score.Solved}/{outcome.Score.Total}, "
-                       + $"one-sided 95% lower bound {outcome.SolveRateLowerBound:P1}, evaluator health {outcome.Score.EvaluatorHealth:P1} "
+                       + $"one-sided 95% lower bound {outcome.SolveRateLowerBound:P1}, evaluator health {outcome.Score.EvaluatorHealth:P1}, {outcome.FormatFaults} "
                        + $"→ at the {RehearsalBar:P0} rehearsal bar this round would grant {outcome.Granted}. "
                        + "Compare the BOUND to the bar you intend to mint with — the rehearsal receipt lives in the job-local db and dies with it.";
             Console.WriteLine($"[qualification-rehearsal] {report}");

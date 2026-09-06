@@ -53,6 +53,7 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IScopedDepen
             Scorecard = BenchmarkScorecard.Compute(results),
             SuiteVersion = manifest.Version,
             Cells = EvalSuite.Classify(manifest, results, errored),
+            FormatFaults = BenchmarkScorecard.TallyFormatFaults(results),
         };
     }
 

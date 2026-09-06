@@ -15,7 +15,7 @@ namespace CodeSpace.UnitTests.Agents.Benchmark;
 [Trait("Category", "Unit")]
 public class BenchmarkScorecardTests
 {
-    private static BenchmarkResult Result(BenchmarkMode mode, bool passed, AgentRunStatus runStatus = AgentRunStatus.Succeeded, double? duration = null) => new()
+    private static BenchmarkResult Result(BenchmarkMode mode, bool passed, AgentRunStatus runStatus = AgentRunStatus.Succeeded, double? duration = null, int respawns = 0) => new()
     {
         TaskId = "t",
         Mode = mode,
@@ -24,6 +24,7 @@ public class BenchmarkScorecardTests
         DurationSeconds = duration,
         Grade = new BenchmarkGrade { Passed = passed, Detail = passed ? "tests-passed" : "tests-failed" },
         McpFullCatalog = mode == BenchmarkMode.HarnessCliWithMcp,
+        FormatFaultRespawns = respawns,
     };
 
     [Fact]
@@ -97,5 +98,49 @@ public class BenchmarkScorecardTests
         var row = card.Harnesses.Single();
         row.Total.ShouldBe(1, "a timed-out run is terminal, so it's scored");
         row.Succeeded.ShouldBe(0);
+    }
+
+    // ── The gateway-health tally reported NEXT TO the rate (never inside it) ──
+
+    [Fact]
+    public void The_tally_separates_how_often_the_gateway_was_repaired_from_how_many_solves_the_repair_produced()
+    {
+        // The reader's problem this exists for: the run solved 2 cells and needed the repair on 2 cells, but only ONE
+        // of the solves came out of a respawn. The mitigation runs with extended thinking DISABLED — a materially
+        // different configuration from the one the corpus claims to measure — so a line reporting only the respawn
+        // count leaves "how much of solved=2 was measured under the degraded config?" unanswerable.
+        var tally = BenchmarkScorecard.TallyFormatFaults(new[]
+        {
+            Result(BenchmarkMode.HarnessCli, passed: true),                  // a clean solve — the declared configuration
+            Result(BenchmarkMode.HarnessCli, passed: true, respawns: 1),     // solved ONLY after the repair
+            Result(BenchmarkMode.HarnessCli, passed: false, respawns: 1),    // repaired and still unsolved
+        });
+
+        tally.Respawns.ShouldBe(2, "two cells needed the repair");
+        tally.SolvedAfterMitigation.ShouldBe(1, "…but only ONE of the run's solves was produced with extended thinking disabled");
+        tally.SolvedAfterMitigation.ShouldNotBe(tally.Respawns, "neither count is derivable from the other — which is exactly why both are reported");
+    }
+
+    [Fact]
+    public void A_run_the_gateway_never_mangled_tallies_zero_on_both_counts()
+    {
+        var tally = BenchmarkScorecard.TallyFormatFaults(new[]
+        {
+            Result(BenchmarkMode.HarnessCli, passed: true),
+            Result(BenchmarkMode.HarnessCliWithMcp, passed: false),
+        });
+
+        tally.Respawns.ShouldBe(0);
+        tally.SolvedAfterMitigation.ShouldBe(0, "no repair was bought, so no solve can be attributed to one");
+    }
+
+    [Fact]
+    public void The_tally_renders_under_ONE_wording_every_lane_reports_it_by()
+    {
+        // Three real-model lanes print this verbatim (blessed corpus × 2 lines, extended corpus, qualification
+        // rehearsal). Pinning the rendering keeps two runs comparable under the same two names instead of three
+        // hand-written interpolations drifting apart.
+        new FormatFaultTally { Respawns = 9, SolvedAfterMitigation = 4 }.ToString()
+            .ShouldBe("formatFaultRespawns=9, solvedAfterMitigation=4");
     }
 }

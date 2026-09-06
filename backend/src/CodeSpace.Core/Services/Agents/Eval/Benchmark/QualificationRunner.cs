@@ -20,8 +20,8 @@ public sealed record QualificationSpec
     public required int ValidityDays { get; init; }
 }
 
-/// <summary>One qualification round's outcome: the frozen-denominator score, the one-sided lower bound, the tier granted, and the immutable receipt minted for it.</summary>
-public sealed record QualificationOutcome(CorpusCellScore Score, double SolveRateLowerBound, PerformanceQualification Granted, Guid ReceiptId, string SuiteDigest);
+/// <summary>One qualification round's outcome: the frozen-denominator score, the one-sided lower bound, the tier granted, the immutable receipt minted for it, and the gateway-health tally the score was produced under (how many cells the format-fault mitigation respawned, and how many of those were solved with extended thinking disabled).</summary>
+public sealed record QualificationOutcome(CorpusCellScore Score, double SolveRateLowerBound, PerformanceQualification Granted, Guid ReceiptId, string SuiteDigest, FormatFaultTally FormatFaults);
 
 /// <summary>The sealed-suite source seam — production reads THE conventional owner-held location; a test injects its own directory. Never an env toggle: pointing production elsewhere is a code change.</summary>
 public interface IHiddenSuiteSource
@@ -104,7 +104,7 @@ public sealed class QualificationRunner : IQualificationRunner, DependencyInject
         _logger.LogInformation("Qualification round for ({Mode}, {Capability}): {Granted} — solved {Solved}/{Total}, lower bound {Bound:F3}, evaluator health {Health:F3}, suite {Digest}",
             mode, capabilityKey, granted, score.Solved, score.Total, lowerBound, score.EvaluatorHealth, suite.SuiteContentHash);
 
-        return new QualificationOutcome(score, lowerBound, granted, receipt.Id, suite.SuiteContentHash);
+        return new QualificationOutcome(score, lowerBound, granted, receipt.Id, suite.SuiteContentHash, run.FormatFaults);
     }
 
     /// <summary>The grant fold: Sealed only when the LOWER BOUND clears the bar AND the evaluator itself was healthy — an infra-riddled round or a thin suite mints Shadow evidence, never a sealed claim.</summary>

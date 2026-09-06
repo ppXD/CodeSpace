@@ -36,6 +36,9 @@ public sealed record CorpusBenchmarkRun
 
     /// <summary>M1a — EVERY suite cell classified into the four-state vocabulary over the FIXED denominator (an errored/unreached cell is <see cref="CorpusCellState.InfraUnknown"/>, never dropped from the divisor). Each cell is @1: the FIRST authorized attempt's outcome — no best-of-N, no retry, no seed-picking. Null only on legacy shapes.</summary>
     public IReadOnlyList<CorpusCellOutcome>? Cells { get; init; }
+
+    /// <summary>The gateway's health over this run — how many cells the format-fault mitigation respawned, and how many of THOSE were graded solved (i.e. solved with extended thinking disabled). Reported beside the rate, scores nothing. Zeroed on a run the gateway never mangled.</summary>
+    public FormatFaultTally FormatFaults { get; init; } = new();
 }
 
 /// <summary>One (task,mode) pair the corpus runner could not execute (an infra fault during fixture staging or the run) — kept so a flaky pair is visible without aborting the whole corpus or polluting the solve-rate.</summary>

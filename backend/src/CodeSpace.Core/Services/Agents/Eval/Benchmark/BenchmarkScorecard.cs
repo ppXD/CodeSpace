@@ -23,6 +23,19 @@ public static class BenchmarkScorecard
         EvalScorecard.Compute(results.Select(ToOutcome).ToList());
 
     /// <summary>
+    /// The gateway-health tally reported next to the solve rate: how many cells the format-fault mitigation
+    /// respawned, and how many of those the oracle then graded SOLVED. The SECOND count is the one a reader needs —
+    /// a solve produced after the mitigation was produced with extended thinking DISABLED, a materially different
+    /// configuration from the one the corpus declares, and without it "solved=N" hides how much of N leaned on it.
+    /// Counted here, in the ONE place that reduces results, so every lane reports the same two numbers.
+    /// </summary>
+    public static FormatFaultTally TallyFormatFaults(IReadOnlyList<BenchmarkResult> results) => new()
+    {
+        Respawns = results.Sum(r => r.FormatFaultRespawns),
+        SolvedAfterMitigation = results.Count(r => r.FormatFaultRespawns > 0 && r.Grade.Passed),
+    };
+
+    /// <summary>
     /// Project a benchmark result onto the pure scorer's input: the row label is the MODE (so rows group per-mode),
     /// and the scored status is Succeeded IFF the grader passed — the solve-rate semantics. A non-passing result
     /// keeps the run's own terminal status (Failed / TimedOut / Cancelled) so the row still counts it as a scored
