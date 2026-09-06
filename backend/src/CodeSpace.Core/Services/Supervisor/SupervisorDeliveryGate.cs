@@ -115,16 +115,23 @@ public static class SupervisorDeliveryGate
         if (AdjudicatedSameBlocker(context.PriorDecisions, reason, before: latestPublish.Sequence))
             return null;
 
+        // A LEGACY answered card (parked before blocker tracking existed) can never satisfy AdjudicatedSameBlocker
+        // above — what it adjudicated is unknowable — so the fresh card below must say WHY it looks like the same
+        // question again, or it silently re-mints the identical words as a question nobody has ever answered.
+        var reAskNotice = AnsweredLegacyCardExists(context.PriorDecisions, before: latestPublish.Sequence)
+            ? $" (your earlier answer predates blocker tracking — confirm once more for: {reason.Kind})"
+            : "";
+
         if (failed.Count > 0)
-            return ParkOrForceStop(context, reason, $"a pull request could not be opened ({string.Join("; ", failed.Select(f => $"{f.Alias}: {f.Error}"))}) — fix the cause and answer to re-attempt once; if it still fails, the run completes without the pull request (it can still be opened from Room afterwards)");
+            return ParkOrForceStop(context, reason, $"a pull request could not be opened ({string.Join("; ", failed.Select(f => $"{f.Alias}: {f.Error}"))}) — fix the cause and answer to re-attempt once; if it still fails, the run completes without the pull request (it can still be opened from Room afterwards){reAskNotice}");
 
         // NAME the skipped repositories rather than claim "every repository here is configured patch-only" — a claim
         // this gate can never see the evidence for. A skip entry only ever describes a repository the publish
         // attempt actually reached: a publish-permitting sibling with nothing to open contributes NO entry at all,
         // so under a multi-repo run one patch-only repo's skip used to speak for repositories it knows nothing about.
         return pullRequests.Count == 0
-            ? ParkOrForceStop(context, reason, "the delivery contract requires a pull request, but the publish attempt found no published branch to open one from — answering re-attempts the publish once; if there is still nothing to open, the run completes without it")
-            : ParkOrForceStop(context, reason, $"the required pull request was skipped by policy ({string.Join("; ", pullRequests.Select(p => $"{p.Alias}: {p.Error}"))}) — change the publish mode there and answer to re-attempt once; if still blocked, the run completes without the pull request");
+            ? ParkOrForceStop(context, reason, $"the delivery contract requires a pull request, but the publish attempt found no published branch to open one from — answering re-attempts the publish once; if there is still nothing to open, the run completes without it{reAskNotice}")
+            : ParkOrForceStop(context, reason, $"the required pull request was skipped by policy ({string.Join("; ", pullRequests.Select(p => $"{p.Alias}: {p.Error}"))}) — change the publish mode there and answer to re-attempt once; if still blocked, the run completes without the pull request{reAskNotice}");
     }
 
     /// <summary>
@@ -154,6 +161,10 @@ public static class SupervisorDeliveryGate
     /// </summary>
     private static bool AdjudicatedSameBlocker(IReadOnlyList<SupervisorPriorDecision> priorDecisions, SupervisorDeliveryGateReason reason, long before) =>
         priorDecisions.Any(d => d.Sequence < before && IsAnsweredGateCard(d) && SupervisorDeliveryGateReason.SameBlocker(ReadReason(d.PayloadJson), reason));
+
+    /// <summary>Whether an answered gate card before <paramref name="before"/> recorded NO blocker at all — a run parked before <see cref="ReasonNode"/> existed. <see cref="AdjudicatedSameBlocker"/> can never match it (what it adjudicated is unknowable), so the fresh card minted below must tell the human why they are asked again instead of silently repeating the first card's exact words.</summary>
+    private static bool AnsweredLegacyCardExists(IReadOnlyList<SupervisorPriorDecision> priorDecisions, long before) =>
+        priorDecisions.Any(d => d.Sequence < before && IsAnsweredGateCard(d) && ReadReason(d.PayloadJson) is null);
 
     /// <summary>
     /// Whether one of THIS gate's own cards (question pinned to <see cref="QuestionPrefix"/>) was ANSWERED at a

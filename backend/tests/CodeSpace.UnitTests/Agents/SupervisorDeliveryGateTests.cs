@@ -456,6 +456,24 @@ public class SupervisorDeliveryGateTests
     }
 
     [Fact]
+    public void A_legacy_answered_card_with_no_recorded_blocker_tells_the_human_why_they_are_asked_again()
+    {
+        // Same tape shape as the test above, but this asserts the CARD TEXT: a re-ask after a legacy (reason-less)
+        // answer must say so, or it silently mints the exact same words as a question nobody has ever answered.
+        var context = Context(new DeliverySpec { OpenPullRequest = true },
+            Plan(1, openPullRequest: true),
+            Decision(SupervisorDecisionKinds.Publish, 2, SkippedPublishOutcome("repoA")),
+            AskCard(3, question: $"{SupervisorDeliveryGate.QuestionPrefix}the required pull request was skipped by policy (repoA: patch-only)", answer: "fine"),
+            Decision(SupervisorDecisionKinds.Spawn, 4, "{}"),
+            Decision(SupervisorDecisionKinds.Publish, 5, SkippedPublishOutcome("repoA")));
+
+        var substituted = SupervisorDeliveryGate.Validate(context, StopDecision())!;
+
+        var question = JsonSerializer.Deserialize<SupervisorAskHumanPayload>(substituted.PayloadJson, AgentJson.Options)!.Question;
+        question.ShouldContain("predates blocker tracking", Case.Insensitive);
+    }
+
+    [Fact]
     public void An_adjudicated_reason_with_null_aliases_on_the_tape_does_not_throw()
     {
         // Defensive tape hygiene — SupervisorDeliveryGateReason.Aliases defaults to Array.Empty<string>() at
