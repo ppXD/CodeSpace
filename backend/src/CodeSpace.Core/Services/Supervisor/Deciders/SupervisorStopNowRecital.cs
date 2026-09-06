@@ -1,3 +1,4 @@
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Contracts;
 
 namespace CodeSpace.Core.Services.Supervisor.Deciders;
@@ -43,17 +44,34 @@ public static class SupervisorStopNowRecital
     public const string AdvisoryLead = "A 'completed' stop now would be recorded against missing evidence:";
 
     /// <summary>
-    /// The stage line's shared steer. It names the HONEST EXIT beside the two work-it-off options, because
-    /// landing the work is not always available: past <c>SupervisorLane.DefaultMaxResolveAttempts</c> (one) a
-    /// further <c>resolve</c> force-stops the run, and a prompt offering only "land it or ask_human" then reads as
-    /// a dead end. A <c>stop</c> carrying outcome <c>gave_up</c> is NOT refused by this gate — it reduces to
-    /// Unsolved, which <c>TerminalDecider</c> maps to HonestFailure long before the stage gate, which only ever
-    /// sees a CleanSuccess. Only the <c>completed</c> claim is what this block is warning about.
+    /// The stage line's shared steer. It names the HONEST EXIT beside the work-it-off option, because landing the
+    /// work is not always available: past <c>SupervisorLane.DefaultMaxResolveAttempts</c> (one) a further
+    /// <c>resolve</c> force-stops the run, and a prompt offering only "land it or ask_human" then reads as a dead
+    /// end. A <c>stop</c> carrying outcome <c>gave_up</c> is NOT refused by this gate — it reduces to Unsolved,
+    /// which <c>TerminalDecider</c> maps to HonestFailure long before the stage gate, which only ever sees a
+    /// CleanSuccess. Only the <c>completed</c> claim is what this block is warning about.
+    ///
+    /// <para>The LANDING half is state-dependent, and that is the whole point of this function. Naming a landing
+    /// verb the tape cannot reach is what sent run 34027621996 into a blind re-merge: a conflicted integration was
+    /// recorded, the resolve cap was spent, and this line still said "Land that work" while <c>merge</c> was the
+    /// only landing reading left — a merge that just repeats the same conflicted integration. The honest exits are
+    /// the constant part; the landing clause is whatever <see cref="SupervisorActionMask.LandingReachFor"/> says is
+    /// actually reachable, off the SAME facts the mask masks <c>resolve</c> on three lines below.</para>
     /// </summary>
-    private const string Steer = "Land that work, stop with outcome 'gave_up', or ask_human; do not claim completed.";
+    internal static string SteerFor(SupervisorLandingReach reach) => reach switch
+    {
+        SupervisorLandingReach.ReconcileFirst => $"Resolve the recorded conflict, {HonestExits}",
+        SupervisorLandingReach.NoLandingReachable => $"Stop with outcome 'gave_up', or ask_human; {DoNotClaim}",
+        _ => $"Land that work, {HonestExits}",
+    };
 
-    /// <summary>Render the recital, or null when there is no assessment to recite (contract-less / pre-F0 run). The stage trace, profile and enforcement mode are the terminal authority's own three inputs; omitting them (a tape mirror with no stage trace, an unregistered mode) renders the dimensions alone, byte-identically. <paramref name="notApplicableUpstream"/> is the authority's fourth input — the stage this run's repository policy put out of reach — and renders as a FACT, never a warning: the model must not be steered to "land that work" when no answer from inside the run could.</summary>
-    public static string? Render(CompletionAssessment? assessment, IReadOnlySet<CompletionStage>? exercisedUpstreamStages = null, ModeProfile? profile = null, CompletionEnforcementMode enforcementMode = CompletionEnforcementMode.Legacy, UpstreamStageNotApplicable? notApplicableUpstream = null)
+    /// <summary>The constant half — the exits that stay open on every tape. A <c>stop</c> carrying <c>gave_up</c> is never refused by this gate, so it costs nothing to offer and it is the one move that always exists.</summary>
+    private const string HonestExits = "stop with outcome 'gave_up', or ask_human; " + DoNotClaim;
+
+    private const string DoNotClaim = "do not claim completed.";
+
+    /// <summary>Render the recital, or null when there is no assessment to recite (contract-less / pre-F0 run). The stage trace, profile and enforcement mode are the terminal authority's own three inputs; omitting them (a tape mirror with no stage trace, an unregistered mode) renders the dimensions alone, byte-identically. <paramref name="notApplicableUpstream"/> is the authority's fourth input — the stage this run's repository policy put out of reach — and renders as a FACT, never a warning: the model must not be steered to "land that work" when no answer from inside the run could. <paramref name="landingReach"/> answers that same question for the run's own tape rather than its repository policy (<see cref="SupervisorActionMask.LandingReachFor"/>); its default leaves every pre-existing call site byte-identical.</summary>
+    public static string? Render(CompletionAssessment? assessment, IReadOnlySet<CompletionStage>? exercisedUpstreamStages = null, ModeProfile? profile = null, CompletionEnforcementMode enforcementMode = CompletionEnforcementMode.Legacy, UpstreamStageNotApplicable? notApplicableUpstream = null, SupervisorLandingReach landingReach = SupervisorLandingReach.Unconstrained)
     {
         if (assessment is null) return null;
 
@@ -68,7 +86,7 @@ public static class SupervisorStopNowRecital
             ? "- every contract dimension reads SETTLED — a clean stop now reads Solved. If the goal is met, stop rather than spending further turns on a contract that is already satisfied."
             : $"- UNRESOLVED: {string.Join(", ", unresolved)} — a stop right now cannot read Solved. Settle what is owed (make the failing checks pass, land the owed delivery/output), or stop honestly / ask a human — never stop as if done.";
 
-        return $"{Header}\n{verdict}{StageNote(notApplicableUpstream, profile)}{StageRefusal(exercisedUpstreamStages, profile, enforcementMode, notApplicableUpstream)}";
+        return $"{Header}\n{verdict}{StageNote(notApplicableUpstream, profile)}{StageRefusal(exercisedUpstreamStages, profile, enforcementMode, notApplicableUpstream, landingReach)}";
     }
 
     /// <summary>
@@ -81,9 +99,11 @@ public static class SupervisorStopNowRecital
     ///
     /// <para>The FACTS are identical in both modes — the same profile, count and stage list, from the same reader.
     /// Only the lead-in moves, because only an Enforced run can actually be refused
-    /// (<c>CompletionTerminalAuthority.cs:59</c>).</para>
+    /// (<c>CompletionTerminalAuthority.cs:59</c>). The STEER is identical in both modes too, for the same reason
+    /// in reverse: which verbs a tape leaves reachable is a fact about the run, not about the cohort that grades
+    /// it, so the mode picks the lead word and nothing else.</para>
     /// </summary>
-    private static string StageRefusal(IReadOnlySet<CompletionStage>? exercisedUpstreamStages, ModeProfile? profile, CompletionEnforcementMode enforcementMode, UpstreamStageNotApplicable? notApplicableUpstream)
+    private static string StageRefusal(IReadOnlySet<CompletionStage>? exercisedUpstreamStages, ModeProfile? profile, CompletionEnforcementMode enforcementMode, UpstreamStageNotApplicable? notApplicableUpstream, SupervisorLandingReach landingReach)
     {
         if (profile is null) return string.Empty;
 
@@ -93,7 +113,7 @@ public static class SupervisorStopNowRecital
 
         var lead = enforcementMode == CompletionEnforcementMode.Enforced ? RefusalLead : AdvisoryLead;
 
-        return $"\n- {lead} mode '{profile.Mode}' requires {missing.Count} stage(s) with no evidence — {string.Join(", ", missing)}. {Steer}";
+        return $"\n- {lead} mode '{profile.Mode}' requires {missing.Count} stage(s) with no evidence — {string.Join(", ", missing)}. {SteerFor(landingReach)}";
     }
 
     /// <summary>

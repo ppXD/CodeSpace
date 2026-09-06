@@ -72,7 +72,7 @@ public static class SupervisorTrajectory
                 MaxResolveAttempts = environment.MaxResolveAttempts,
                 TotalSpawnedAgents = SupervisorTurnService.FoldTotalSpawnedAgents(priors),
                 NoProgressDecisions = SupervisorTurnService.FoldNoProgressDecisions(priors),
-                CompletionRecital = RenderRecital(priors),
+                CompletionRecital = RenderRecital(priors, environment.MaxResolveAttempts),
             };
 
             SupervisorDecision decision;
@@ -121,7 +121,7 @@ public static class SupervisorTrajectory
     /// went on rendering dimensions-only for a release after this one started carrying the stage trace, and no test
     /// could see the gap. One function is the only version of that guarantee which cannot rot.</para>
     /// </summary>
-    private static string? RenderRecital(IReadOnlyList<SupervisorPriorDecision> priors) => SupervisorDecisionGoldenScenarios.RenderStoppedNowRecital(priors);
+    private static string? RenderRecital(IReadOnlyList<SupervisorPriorDecision> priors, int? maxResolveAttempts) => SupervisorDecisionGoldenScenarios.RenderStoppedNowRecital(priors, maxResolveAttempts);
 }
 
 /// <summary>An environment the trajectory harness drives the decider over: it folds the decided action into the durable-shape outcome the NEXT turn reads, given the ledger so far — the SAME <c>SupervisorOutcome</c> shapes the engine writes, so the decider reads exactly what it would in production.</summary>

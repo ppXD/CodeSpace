@@ -225,6 +225,116 @@ public class SupervisorStopNowRecitalTests
         block.ShouldContain("requires 1 stage(s) with no evidence — Plan.", Case.Sensitive, "Integrate drops out of the missing list; Plan is still owed and still refused");
     }
 
+    // ── The STEER may name only a verb the tape still leaves reachable ───────────────────────────────
+
+    /// <summary>
+    /// The live miss (main 64f80f07, run 34027621996 — the golden corpus's one failing scenario,
+    /// <c>resolve-cap-spent</c>): "got 'merge' — kind 'merge' is not in the accepted set {stop, ask_human}". The tape
+    /// had a conflicted integration recorded and the resolve cap SPENT, so <c>merge</c> was the only landing reading
+    /// of "Land that work" — and merging there just repeats the same conflicted integration. The prompt's other two
+    /// blocks (the action mask, and the decider's resolution-verdict copy) both said to stop or ask in the same
+    /// breath; the model followed this, the newer line.
+    ///
+    /// <para>Swept over BOTH cohorts, because the steer is a fact about the RUN and the lead word is a fact about the
+    /// COHORT: a landing verb that is unreachable under Enforced is just as unreachable under Shadow, so a mode that
+    /// borrowed a different steer would be re-introducing the split this fixes.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(CompletionEnforcementMode.Enforced, SupervisorLandingReach.NoLandingReachable)]
+    [InlineData(CompletionEnforcementMode.Shadow, SupervisorLandingReach.NoLandingReachable)]
+    public void A_spent_resolve_cap_over_a_recorded_conflict_names_no_landing_verb(CompletionEnforcementMode mode, SupervisorLandingReach reach)
+    {
+        var block = SupervisorStopNowRecital.Render(Assessment(), AllButIntegrate, Supervisor, mode, null, reach)!;
+
+        block.ShouldNotContain("Land that work", Case.Insensitive, "the only landing reading left was 'merge', which blindly repeats the conflicted integration that is already recorded");
+        block.ShouldNotContain("merge", Case.Insensitive, "naming the verb even once is what run 34027621996 followed");
+        block.ShouldNotContain("resolve", Case.Insensitive, "a further resolve does not get refused here — it FORCE-STOPS the run");
+        block.ShouldContain("Stop with outcome 'gave_up', or ask_human; do not claim completed.", Case.Sensitive, "the honest exits are all that is left, and they must still be named");
+    }
+
+    /// <summary>
+    /// The other half of Audit B (2026-09-06) nail 4: an INTEGRATION FAILED tape whose resolve cap is NOT spent had
+    /// no steer toward the one verb that can actually clear it. "Land that work" left <c>resolve</c> masked out of
+    /// the model's reading even though the mask says it is available.
+    /// </summary>
+    [Theory]
+    [InlineData(CompletionEnforcementMode.Enforced)]
+    [InlineData(CompletionEnforcementMode.Shadow)]
+    public void A_recorded_conflict_with_runway_left_steers_to_resolve(CompletionEnforcementMode mode)
+    {
+        var block = SupervisorStopNowRecital.Render(Assessment(), AllButIntegrate, Supervisor, mode, null, SupervisorLandingReach.ReconcileFirst)!;
+
+        block.ShouldContain("Resolve the recorded conflict, stop with outcome 'gave_up', or ask_human; do not claim completed.", Case.Sensitive);
+        block.ShouldNotContain("Land that work", Case.Insensitive, "the conflict is the thing standing between this tape and Integrate; 'land it' is a guess");
+        block.ShouldNotContain("merge", Case.Insensitive, "merging over a recorded conflict is the miss, cap spent or not");
+    }
+
+    /// <summary>
+    /// The FULL mapping, and the BOND that makes it safe: every (mode × reach) cell renders exactly one steer, the
+    /// steer never names a verb <see cref="SupervisorActionMask"/> would forbid on the same tape, and the two modes
+    /// differ by their lead word ALONE. Swept rather than spot-checked because the defect was a single cell.
+    /// </summary>
+    [Theory]
+    [InlineData(SupervisorLandingReach.Unconstrained, "Land that work, stop with outcome 'gave_up', or ask_human; do not claim completed.")]
+    [InlineData(SupervisorLandingReach.ReconcileFirst, "Resolve the recorded conflict, stop with outcome 'gave_up', or ask_human; do not claim completed.")]
+    [InlineData(SupervisorLandingReach.NoLandingReachable, "Stop with outcome 'gave_up', or ask_human; do not claim completed.")]
+    public void Each_reach_maps_to_one_steer_and_the_mode_moves_only_the_lead_word(SupervisorLandingReach reach, string steer)
+    {
+        SupervisorStopNowRecital.SteerFor(reach).ShouldBe(steer);
+
+        foreach (var mode in new[] { CompletionEnforcementMode.Enforced, CompletionEnforcementMode.Shadow })
+        {
+            var lead = mode == CompletionEnforcementMode.Enforced ? SupervisorStopNowRecital.RefusalLead : SupervisorStopNowRecital.AdvisoryLead;
+
+            SupervisorStopNowRecital.Render(Assessment(), AllButIntegrate, Supervisor, mode, null, reach)
+                .ShouldBe("IF YOU STOPPED NOW (the completion reducer's verdict on the facts so far):"
+                    + "\n- every contract dimension reads SETTLED — a clean stop now reads Solved. If the goal is met, stop rather than spending further turns on a contract that is already satisfied."
+                    + $"\n- {lead} mode 'supervisor' requires 1 stage(s) with no evidence — Integrate. {steer}");
+        }
+    }
+
+    /// <summary>
+    /// The steer is derived from the SAME two facts the mask masks <c>resolve</c> on, so the prompt cannot offer a
+    /// verb it forbids three lines below. Swept over the four (conflict recorded × cap spent) tapes, and over an
+    /// UNMERGED-RESULTS axis that must NOT move the clause: whether settled work is still unmerged is a judgement
+    /// about what to do next, not a structural fact about what is reachable, and naming <c>merge</c> off it would
+    /// steer <c>three-subtask-partial-failure</c> (golden answer: retry the FAILED unit) straight past its answer.
+    /// </summary>
+    [Theory]
+    [InlineData(false, false, 1, SupervisorLandingReach.Unconstrained)]   // no conflict recorded → nothing narrows the landing move
+    [InlineData(false, true, 1, SupervisorLandingReach.Unconstrained)]    // …unmerged results do not narrow it either
+    [InlineData(true, false, 2, SupervisorLandingReach.ReconcileFirst)]   // conflict + runway (1 of 2 spent) → resolve
+    [InlineData(true, true, 2, SupervisorLandingReach.ReconcileFirst)]
+    [InlineData(true, false, 1, SupervisorLandingReach.NoLandingReachable)] // conflict + cap SPENT → the live miss
+    [InlineData(true, true, 1, SupervisorLandingReach.NoLandingReachable)]
+    public void The_reach_is_the_masks_own_reading_of_the_tape(bool conflicted, bool unmergedResults, int cap, SupervisorLandingReach expected)
+    {
+        var tape = new List<SupervisorPriorDecision> { Decision(1, SupervisorDecisionKinds.Plan) };
+
+        if (unmergedResults) tape.Add(Decision(2, SupervisorDecisionKinds.Spawn));
+
+        tape.Add(Decision(3, SupervisorDecisionKinds.Merge, conflicted ? ConflictedOutcome : "{}"));
+        tape.Add(Decision(4, SupervisorDecisionKinds.Resolve));
+
+        var reach = SupervisorActionMask.LandingReachFor(tape, cap);
+
+        reach.ShouldBe(expected);
+
+        // The BOND: 'resolve' is named in the steer exactly when the mask would let a resolve through.
+        var maskAllowsResolve = SupervisorActionMask.ResolveUnavailableReason(tape, cap) is null;
+
+        SupervisorStopNowRecital.SteerFor(reach).Contains("Resolve", StringComparison.OrdinalIgnoreCase).ShouldBe(maskAllowsResolve,
+            "the steer and the mask sit in one prompt — one offering a verb the other forbids is the split this shares a reader to prevent");
+    }
+
+    private const string ConflictedOutcome = """{"integration":{"status":"Conflicted","conflictedFiles":["src/Foo.cs"],"preservedBranches":[],"outcomes":[]}}""";
+
+    private static SupervisorPriorDecision Decision(long seq, string kind, string outcomeJson = "{}") => new()
+    {
+        Id = Guid.NewGuid(), Sequence = seq, DecisionKind = kind, Status = SupervisorDecisionStatus.Succeeded,
+        PayloadJson = "{}", OutcomeJson = outcomeJson,
+    };
+
     /// <summary>
     /// The BOND: the line renders exactly when <c>CompletionTerminalAuthority</c> would object to the stop, because
     /// it asks the same reader the same question — <c>UpstreamStageTrace.MissingRequired(profile, trace)</c>, the
