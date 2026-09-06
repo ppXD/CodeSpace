@@ -157,9 +157,10 @@ public static class SupervisorDeliveryGate
 
     /// <summary>
     /// Whether one of THIS gate's own cards (question pinned to <see cref="QuestionPrefix"/>) was ANSWERED at a
-    /// sequence in (<paramref name="after"/>, <paramref name="before"/>) — the human adjudicated the delivery
-    /// state that window describes. See the satisfaction rung for why an answer AFTER the latest publish re-arms
-    /// one attempt while an answer BEFORE it (the already-re-checked case) releases.
+    /// sequence in (<paramref name="after"/>, <paramref name="before"/>) — the POSITIONAL read, which the two
+    /// rungs that genuinely turn on tape position use: the re-arm (an answer AFTER the latest publish buys one
+    /// fresh attempt) and the UNAUTHORIZED park (no publish attempt exists to anchor on at all). The release
+    /// rung does NOT use it — see <see cref="AdjudicatedSameBlocker"/> for why position cannot decide that one.
     /// </summary>
     private static bool AnsweredGateCardExists(IReadOnlyList<SupervisorPriorDecision> priorDecisions, long after, long before) =>
         priorDecisions.Any(d => d.Sequence > after && d.Sequence < before && IsAnsweredGateCard(d));
