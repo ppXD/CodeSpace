@@ -200,41 +200,6 @@ public sealed class BenchmarkRunnerFlowTests
     }
 
     /// <summary>
-    /// A no-op fake codex CLI: emits a minimal codex-shaped event stream and exits 0 WITHOUT touching the
-    /// workspace. The real <c>AgentRunExecutor</c> + <c>LocalProcessRunner</c> drive it; because it never edits
-    /// code, the grade is determined PURELY by the fixture's start-state — which is exactly what makes this a
-    /// deterministic PLUMBING proof, not a real-quality claim. Restores the env var + deletes the dir on dispose.
-    /// </summary>
-    private sealed class FakeBenchmarkCli : IDisposable
-    {
-        private readonly string? _original;
-        private readonly string _dir;
-
-        public FakeBenchmarkCli()
-        {
-            _dir = Path.Combine(Path.GetTempPath(), "cs-bench-fakecli-" + Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(_dir);
-
-            var script = Path.Combine(_dir, "fake-codex.sh");
-            File.WriteAllText(script,
-                "#!/bin/sh\n" +
-                "printf '{\"type\":\"agent_message\",\"message\":\"done (no-op benchmark CLI)\"}\\n'\n" +
-                "printf '{\"type\":\"task_complete\",\"message\":\"completed\"}\\n'\n" +
-                "exit 0\n");
-            File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
-
-            _original = Environment.GetEnvironmentVariable(CodexHarness.CommandEnvVar);
-            Environment.SetEnvironmentVariable(CodexHarness.CommandEnvVar, script);
-        }
-
-        public void Dispose()
-        {
-            Environment.SetEnvironmentVariable(CodexHarness.CommandEnvVar, _original);
-            try { Directory.Delete(_dir, recursive: true); } catch { /* best-effort */ }
-        }
-    }
-
-    /// <summary>
     /// Stages a benchmark fixture as a self-contained, offline local workspace — a dir with a <c>check.sh</c>
     /// whose exit code is the fixture's start-state. <see cref="StageSolved"/> already passes (exit 0);
     /// <see cref="StageFailing"/> fails (exit 1). The runner runs the agent here; the grader re-runs the check
