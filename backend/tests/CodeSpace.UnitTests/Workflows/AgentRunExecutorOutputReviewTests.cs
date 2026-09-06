@@ -230,11 +230,30 @@ public sealed class AgentRunExecutorOutputReviewTests
         beat.NodeId.ShouldBe("agent-node");
         beat.IterationKey.ShouldBe("agent-node#2", "the full cell key rides, so a fanned-out branch's review is attributable");
 
+        JsonDocument.Parse(beat.Payload).RootElement.GetProperty("agentRunId").GetString().ShouldBe(runId.ToString(),
+            customMessage: "the CELL cannot identify the unit — a supervisor stamps its whole per-turn fan-out with one (NodeId, IterationKey) — so the beat names the agent run its verdict is ABOUT");
+
         var payload = JsonDocument.Parse(beat.Payload).RootElement;
         payload.GetProperty("kind").GetString().ShouldBe(LlmStructuredCritic.OutputReviewCallKind, "probed by the same kind the OUTPUT review's own call names — a plan/decision review must never satisfy it");
         payload.GetProperty("approved").GetBoolean().ShouldBe(approved);
         payload.GetProperty("reason").GetString().ShouldBe(AgentRunExecutor.RenderReviewFeedback(verdict),
             customMessage: "the ledger's words and the result's ReviewFeedback come off ONE renderer — the two surfaces cannot tell different stories about one review");
+        payload.GetProperty("reviewerModel").GetString().ShouldBe("claude-sonnet-4-6",
+            customMessage: "the independence claim rides as its OWN key — a reviewer on the producer's own model is the one-model fallback, and nobody should have to mine that back out of a rendered sentence");
+    }
+
+    [Fact]
+    public async Task A_reviewer_AGENTs_verdict_records_a_null_reviewerModel_rather_than_omitting_the_key()
+    {
+        // An agent reviewer's own run carries the attribution, so the model name is genuinely unknown here. The key
+        // still rides, valued null: a consumer reads "no reviewer model recorded" off one stable shape instead of
+        // having to tell an absent key from an absent value.
+        var (runId, executor, _, _, _, ledger) = NewExecutorWithStore(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "clean" });
+
+        await executor.ReviewOutputIfEnabledAsync(GatedTask, SucceededWithChanges(), Run(runId, workflowRunId: Guid.NewGuid()), CancellationToken.None);
+
+        JsonDocument.Parse(ledger.Records.ShouldHaveSingleItem().Payload).RootElement
+            .GetProperty("reviewerModel").ValueKind.ShouldBe(JsonValueKind.Null);
     }
 
     [Fact]
