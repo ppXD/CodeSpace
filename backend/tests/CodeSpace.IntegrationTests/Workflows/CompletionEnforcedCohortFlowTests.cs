@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Variables;
 using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Reconciliation;
+using CodeSpace.Core.Services.Sessions.Room;
 using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -12,6 +13,7 @@ using CodeSpace.Messages.Authorization;
 using CodeSpace.Messages.Commands.Workflows;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Contracts;
+using CodeSpace.Messages.Dtos.Sessions.Room;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks;
@@ -382,6 +384,108 @@ public class CompletionEnforcedCohortFlowTests
             .ShouldBe("42", "a continued park must terminalize with the value it produced, not with what a re-derivation happened to resolve");
     }
 
+    [Fact]
+    public async Task A_parked_run_names_its_reason_in_the_room_and_offers_the_one_verb_that_moves_it()
+    {
+        // The legibility half of the durable park. The stamp made the park survive the sweep; nothing made it
+        // LEGIBLE: the authority's reason lived only in workflow_run.error, the room emitted no block for a
+        // Suspended run, the header read "Waiting" (the same word an approval wait shows), and Continue rendered
+        // disabled — so the default outcome of an unverified supervisor stop was a run parked forever, silently,
+        // with no operable exit. Everything asserted here is the BACKEND's own words and the backend's own gate.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId);
+        var runId = await RunToUnintegratedParkAsync(teamId, userId, sessionId);
+
+        var parked = await ReadRunAsync(runId);
+        parked.Status.ShouldBe(WorkflowRunStatus.Suspended);
+        parked.CompletionParkedAt.ShouldNotBeNull("this test is only meaningful over a real completion park");
+
+        var turn = await ProjectTurnAsync(runId, teamId);
+
+        turn.StatusWord.ShouldBe(RoomNarrative.ParkedWord, "a park must not wear the word an approval wait wears — they mean opposite things");
+
+        var card = turn.Blocks.OfType<DiagnosticBlock>().ShouldHaveSingleItem();
+        card.Title.ShouldBe(RoomNarrative.ParkedTitle);
+        card.Text.ShouldContain("Continue", customMessage: "the card must state the way out — a park is otherwise indistinguishable from a hang");
+        card.RawDetail.ShouldBe(parked.Error, customMessage: "the authority's verbatim refusal must survive to the reader");
+
+        // The refusal's specifics — which required stage holds no evidence — are what an operator acts on. They are
+        // the AUTHORITY's words, so assert they survive the projection rather than re-deriving a second account that
+        // could quietly disagree with the row.
+        card.Text.ShouldContain(nameof(CompletionStage.Integrate), customMessage: $"the card must name the stage the run never evidenced; the authority said: {parked.Error}");
+        card.Text.ShouldContain("supervisor", customMessage: "…and the mode whose profile required it");
+        card.Text.ShouldNotContain("completion-authority:", customMessage: "the engine prefix is jargon — it belongs behind the raw toggle, not in the reader's sentence");
+
+        var cont = turn.Actions.Single(a => a.Kind == RoomActionKind.Continue);
+        cont.Enabled.ShouldBeTrue("the room must offer the one verb that moves a parked run — the reconciler skips a stamped row, so this is its only exit");
+
+        // The offered verb is the real one: it clears the stamp and hands the run back to the engine.
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+            (await scope.Resolve<IMediator>().Send(new ContinueRunCommand { RunId = runId })).ShouldBeTrue("a room action must never be offered where the command would refuse it");
+
+        (await ReadRunAsync(runId)).CompletionParkedAt.ShouldBeNull("Continue clears the stamp — the room's exit and the engine's re-arbitration channel are the same door");
+
+        var resumed = await ProjectTurnAsync(runId, teamId);
+        resumed.Blocks.OfType<DiagnosticBlock>().ShouldBeEmpty("a continued run is no longer parked — the card must not outlive the stamp it describes");
+        resumed.StatusWord.ShouldBeNull("…nor the header word");
+    }
+
+    private async Task<AssistantTurnBlock> ProjectTurnAsync(Guid runId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var room = await scope.Resolve<Core.Services.Sessions.Room.IRoomProjector>().ProjectByRunAsync(runId, teamId, CancellationToken.None);
+
+        room.ShouldNotBeNull();
+        return room!.Blocks.OfType<AssistantTurnBlock>().ShouldHaveSingleItem();
+    }
+
+    /// <summary>
+    /// The park an operator actually meets: a supervisor run that planned, ran its unit to a PASSING check and pushed
+    /// its branch — everything a CleanSuccess needs except an integration. The profile requires the Integrate stage,
+    /// nothing evidences it, so the authority refuses and names it. One turn of a real session, so the room can
+    /// project it.
+    /// </summary>
+    private async Task<Guid> RunToUnintegratedParkAsync(Guid teamId, Guid userId, Guid sessionId)
+    {
+        var runId = await StartSupervisorSnapshotAsync(teamId, userId, terminalInputsJson: DeclaredOutputs, session: new SessionAssignment { SessionId = sessionId, TurnIndex = 1 });
+
+        var attemptId = await SeedUnintegratedTapeAsync(runId, teamId);
+        var repositoryId = await SeedRepositoryAsync(teamId);
+        await SeedManifestAsync(teamId, attemptId, repositoryId);
+        await StakeAsync(runId, teamId, "acceptance:s1", ContractKinds.Acceptance);
+        await StakeAsync(runId, teamId, "delivery:s1", ContractKinds.Delivery);
+        await StakeAsync(runId, teamId, "output:s1", ContractKinds.Output);
+
+        await ForceEnqueuedAsync(runId);
+        await RunEngineAsync(runId);
+
+        return runId;
+    }
+
+    /// <summary>The graded tape with its MERGE removed — the unit passed and pushed, but nothing ever integrated it, which is the Integrate stage's only evidence.</summary>
+    private async Task<Guid> SeedUnintegratedTapeAsync(Guid runId, Guid teamId)
+    {
+        var attemptId = Guid.NewGuid();
+
+        await SeedPlanAsync(runId, teamId, "s1");
+        await SeedDecisionAsync(runId, teamId, 2, SupervisorDecisionKinds.Spawn,
+            """{"subtaskIds":["s1"]}""",
+            JsonSerializer.Serialize(new { agentResults = new[] { AgentResult(attemptId, "s1", accepted: true) } }));
+        await SeedDecisionAsync(runId, teamId, 3, SupervisorDecisionKinds.Stop, "{}", "{}");
+        return attemptId;
+    }
+
+    private async Task<Guid> SeedSessionAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var id = Guid.NewGuid();
+        db.WorkSession.Add(new WorkSession { Id = id, TeamId = teamId, Title = "Parked turn", Kind = WorkSessionKind.Task, Status = WorkSessionStatus.Open });
+        await db.SaveChangesAsync();
+        return id;
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     /// <summary>The Terminal's declared output mapping — a run that reaches it produces <c>{"answer":"42"}</c>, the value the terminal row owes every reader of <c>workflow_run.outputs_jsonb</c>.</summary>
@@ -611,13 +715,13 @@ public class CompletionEnforcedCohortFlowTests
     }
 
     /// <summary>The tasks lane's admitted shape: launched with the SUPERVISOR projection kind — the Enforceable cohort — through the real snapshot starter, optionally declaring terminal outputs. A null <paramref name="completionMode"/> is the LAUNCH-REALISTIC shape (the FE sends none), which C5 resolves to Enforced from the mode profile; <paramref name="projectionKind"/> picks the cohort under test.</summary>
-    private async Task<Guid> StartSupervisorSnapshotAsync(Guid teamId, Guid userId, string? completionMode = WorkflowDefinition.CompletionModeEnforced, string? terminalInputsJson = null, string projectionKind = TaskProjectionKinds.Supervisor)
+    private async Task<Guid> StartSupervisorSnapshotAsync(Guid teamId, Guid userId, string? completionMode = WorkflowDefinition.CompletionModeEnforced, string? terminalInputsJson = null, string projectionKind = TaskProjectionKinds.Supervisor, SessionAssignment? session = null)
     {
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(
             Definition(completionMode, terminalInputsJson), teamId, userId,
             launchPayloadJson: null, scopeRepositoryIds: null,
-            projectionKind: projectionKind, session: null, CancellationToken.None);
+            projectionKind: projectionKind, session, CancellationToken.None);
     }
 
     /// <summary>Tests run the engine inline (no Hangfire worker), so the dispatcher's Pending→Enqueued CAS is mirrored directly — same discipline as <c>ErrorRoutingFlowTests.ReEnqueueAsync</c>.</summary>

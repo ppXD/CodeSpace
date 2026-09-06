@@ -396,6 +396,10 @@ export interface AssistantTurnBlock extends RoomBlockBase {
   at?: string | null;
   /// Wall-clock so far — final once terminal, else live elapsed. Null before it starts.
   durationMs?: number | null;
+  /// Backend-authored OVERRIDE for the turn's header word, when the raw status word would mislead — a
+  /// completion-authority park is `Suspended`, the same status an approval wait carries, and both would read
+  /// "Waiting". Null leaves the shared status lexicon in charge; the FE derives no word of its own.
+  statusWord?: string | null;
   /// Backend-authored: which completion authority owned this attempt's terminal — "Completion: Enforced" (an
   /// unverified "completed" stop parks instead of stamping Success) or "Completion: Shadow". Null when there is
   /// nothing honest to say; rendered verbatim in the turn meta line.

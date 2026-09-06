@@ -16,9 +16,16 @@ public interface IRunActionCapabilityResolver : IScopedDependency
     /// <summary>
     /// The turn-level actions for a run in <paramref name="status"/> — open-trace (always), rerun-the-turn (terminal
     /// only), stop (non-terminal only), open-pull-request (PR-6, only when <paramref name="publish"/> is supplied —
-    /// null on the light collapsed-card path, which skips the extra reads needed to compute it).
+    /// null on the light collapsed-card path, which skips the extra reads needed to compute it), and continue (which
+    /// <paramref name="completionParked"/> extends to the one Suspended shape the operator alone can move).
     /// </summary>
-    IReadOnlyList<RoomAction> ResolveTurnActions(Guid runId, WorkflowRunStatus status, RoomPublishState? publish = null);
+    /// <param name="completionParked">
+    /// True when the completion authority refused this run's terminal and stamped it parked. Supplied by
+    /// <c>RoomProjector</c>, which already reads the row — the resolver stays a pure function of its inputs, the same
+    /// bargain <see cref="RoomPublishState"/> makes. False on the light path, which is correct there: a collapsed card
+    /// offers no verbs to gate.
+    /// </param>
+    IReadOnlyList<RoomAction> ResolveTurnActions(Guid runId, WorkflowRunStatus status, RoomPublishState? publish = null, bool completionParked = false);
 }
 
 /// <summary>

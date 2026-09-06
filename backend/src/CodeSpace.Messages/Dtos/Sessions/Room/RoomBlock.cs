@@ -65,6 +65,14 @@ public sealed record AssistantTurnBlock : RoomBlock
     /// <summary>The turn's wall-clock so far — final once terminal, else live elapsed at projection time. Null before it starts.</summary>
     public long? DurationMs { get; init; }
 
+    /// <summary>
+    /// A backend-authored OVERRIDE for the turn's header word, when the raw status word would mislead. A
+    /// completion-authority park is <c>Suspended</c>, the same status an approval / timer wait carries, so both would
+    /// read "Waiting" — a word that says a park nobody will ever resume is merely pending. Null (the overwhelming case)
+    /// leaves the shared status lexicon in charge; the frontend never derives this word itself.
+    /// </summary>
+    public string? StatusWord { get; init; }
+
     /// <summary>Backend-authored: WHICH completion authority owned this attempt's terminal — "Completion: Enforced" (an unverified 'completed' stop parks instead of stamping Success) or "Completion: Shadow" (observed only). Null when there is nothing honest to say (a pre-protocol stamp, or a focused prior attempt whose own stamp this projection didn't read).</summary>
     public string? CompletionNote { get; init; }
 
