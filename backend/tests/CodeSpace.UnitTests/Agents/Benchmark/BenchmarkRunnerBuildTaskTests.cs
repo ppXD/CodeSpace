@@ -1,4 +1,5 @@
 using CodeSpace.Core.Services.Agents.Eval.Benchmark;
+using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Enums;
@@ -187,4 +188,45 @@ public class BenchmarkRunnerBuildTaskTests
         BenchmarkRunner.ApplyMcpFabricRule(PassingGrade, BenchmarkMode.HarnessCliWithMcp, new Core.Persistence.Entities.AgentRun { Id = Guid.NewGuid(), ResultJson = null })
             .ShouldBeSameAs(PassingGrade);
     }
+
+    // ── The cell's ONE respawn verdict: a mangled wire is infra the benchmark lane may repair, exactly once ──
+
+    /// <summary>The verbatim text the gateway's Anthropic-compat layer kills the claude CLI with — the thing the whole repair exists for, so the decision must turn on nothing less.</summary>
+    private const string LiveGatewayFormatFault = "API Error: Content block is not a thinking block";
+
+    [Theory]
+    [InlineData(LiveGatewayFormatFault, false, true)]    // the fault, on a cell that has not spent the repair → respawn
+    [InlineData(LiveGatewayFormatFault, true, false)]    // the SAME fault on an already-mitigated attempt → the repair does not hold here; the cell stays infra-dead
+    [InlineData("tests-failed-exit-1", false, false)]    // a capability verdict — the benchmark is @1, never a general retry
+    [InlineData("Anthropic API error (HTTP 429, RateLimited)", false, false)]   // transient, but not the fault this repair fixes
+    [InlineData("", false, false)]
+    [InlineData(null, false, false)]                     // a clean run reports no error at all
+    public void Only_an_unrepaired_gateway_format_fault_buys_a_respawn(string? error, bool alreadyMitigated, bool expectRespawn)
+    {
+        var dispatched = alreadyMitigated ? AgentRetryCauses.ApplyFormatFaultMitigation(AgentTask_()) : AgentTask_();
+
+        (BenchmarkRunner.RespawnFor(dispatched, error) is not null).ShouldBe(expectRespawn);
+    }
+
+    [Fact]
+    public void The_respawn_is_the_same_task_repaired_through_the_shared_mitigation()
+    {
+        // A cell's respawn must be the SAME task on the SAME model — the gateway mangled the wire, not the model — and
+        // the repair must be the ONE the helper owns, never a third copy of "fresh conversation + thinking disabled".
+        var dispatched = AgentTask_() with { ResumeFromSessionId = "sess-poisoned", RestoredTranscript = "{\"role\":\"user\"}" };
+
+        var respawn = BenchmarkRunner.RespawnFor(dispatched, LiveGatewayFormatFault).ShouldNotBeNull();
+
+        AgentRetryCauses.IsFormatFaultMitigated(respawn).ShouldBeTrue("the benchmark lane must apply the SHARED mitigation, not its own copy of it");
+        respawn.ResumeFromSessionId.ShouldBeNull("resuming re-sends the transcript the mangled block lives in — the respawn MUST start fresh");
+        respawn.RestoredTranscript.ShouldBeNull();
+        respawn.Goal.ShouldBe(dispatched.Goal, "the same task");
+        respawn.Model.ShouldBe(dispatched.Model, "the same model — the gateway broke the wire, not the brain");
+        respawn.EnableMcpEndpoint.ShouldBe(dispatched.EnableMcpEndpoint, "the cell's arm is untouched — a respawn that quietly changed arms would mislabel the A/B");
+
+        // …and the repair is bought exactly once: the very envelope it produced buys nothing further.
+        BenchmarkRunner.RespawnFor(respawn, LiveGatewayFormatFault).ShouldBeNull("a second identical respawn would only re-bill a broken gateway");
+    }
+
+    private static AgentTask AgentTask_() => BenchmarkRunner.BuildAgentTask(Task(), BenchmarkMode.HarnessCliWithMcp, Workspace, new BenchmarkAgentSelection { Model = "gw-model" });
 }

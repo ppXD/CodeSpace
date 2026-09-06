@@ -61,6 +61,15 @@ public sealed record BenchmarkResult
     public required bool McpFullCatalog { get; init; }
 
     /// <summary>
+    /// How many times this cell's agent run was RESPAWNED under the gateway-format-fault mitigation — 0 or 1, because
+    /// the repair is bought exactly once per cell (a second fault has proven it does not hold, and the cell stays
+    /// infra-dead honestly). INFORMATIONAL: it moves no verdict, no grade and no denominator; it is the gateway's own
+    /// health reported next to the solve rate, so a corpus whose respawn count climbs reads as an instrument fighting a
+    /// misbehaving gateway rather than a model that got worse.
+    /// </summary>
+    public int FormatFaultRespawns { get; init; }
+
+    /// <summary>
     /// PLAN-QUALITY hook (defined now for PR-D's plan-review gate; only meaningful for <see cref="BenchmarkMode.WorkflowMap"/>):
     /// did the generated plan run all the way to a successful composed result with ZERO human edits. Null for the
     /// non-planning modes (no plan to assess) and until PR-D wires the no-human-edits signal — defining the field now

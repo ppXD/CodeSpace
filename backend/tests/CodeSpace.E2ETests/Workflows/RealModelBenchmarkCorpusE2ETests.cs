@@ -102,13 +102,20 @@ public sealed class RealModelBenchmarkCorpusE2ETests
             // capability verdict over the WHOLE suite.
             var score = EvalSuite.Score(run.Cells!);
 
+            // The gateway's own health, reported NEXT TO the capability number it produced: how many cells only got a
+            // verdict because the format-fault mitigation respawned them. It scores nothing — but a rate read off a
+            // corpus that needed the repair on half its cells is a rate measured against a misbehaving gateway, and a
+            // human comparing two runs must be able to see that trend instead of inferring it from a solve rate that
+            // moved for reasons no line names.
+            var respawns = run.Results.Sum(r => r.FormatFaultRespawns);
+
             if (score.EvaluatorHealth < MinEvaluatorHealth)
                 throw new AgentExecutionInfraException(
-                    $"the benchmark instrument itself is sick — evaluator health {score.EvaluatorHealth:P0} (infra-dead cells {score.InfraUnknown}/{score.Total}) below the {MinEvaluatorHealth:P0} floor on suite {run.SuiteVersion}; fix the evaluator, never read this as capability");
+                    $"the benchmark instrument itself is sick — evaluator health {score.EvaluatorHealth:P0} (infra-dead cells {score.InfraUnknown}/{score.Total}, formatFaultRespawns={respawns}) below the {MinEvaluatorHealth:P0} floor on suite {run.SuiteVersion}; fix the evaluator, never read this as capability");
 
             var rate = score.SolveRateOverSuite;
             var outcome = rate >= MinSolveRate ? RealModelOutcome.Drove : RealModelOutcome.CapabilityMiss;   // GATING FLOOR — short of the floor REDs the blessed wire (CapabilityMiss)
-            return (outcome, $"{Provider} model '{model}' seed-corpus solve-rate {score.Solved}/{score.Total} ({rate:P0}, FIXED denominator) vs floor {MinSolveRate:P0} → {outcome} on suite {run.SuiteVersion} — solved={score.Solved}, unsolved={score.Unsolved}, infraUnknown={score.InfraUnknown}, evaluatorHealth={score.EvaluatorHealth:P0}");
+            return (outcome, $"{Provider} model '{model}' seed-corpus solve-rate {score.Solved}/{score.Total} ({rate:P0}, FIXED denominator) vs floor {MinSolveRate:P0} → {outcome} on suite {run.SuiteVersion} — solved={score.Solved}, unsolved={score.Unsolved}, infraUnknown={score.InfraUnknown}, evaluatorHealth={score.EvaluatorHealth:P0}, formatFaultRespawns={respawns}");
         }, attempts: 1);
     }
 
