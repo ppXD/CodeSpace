@@ -209,6 +209,63 @@ public class RoomProjectorFlowTests
     }
 
     [Theory]
+    [InlineData(false, "Completion: Enforced · integration not applicable — patch-only policy; 1 patch delivered")]
+    [InlineData(true, "Completion: Enforced")]
+    public async Task A_patch_only_turn_says_where_its_branch_went(bool pushed, string expected)
+    {
+        // A patch-only run finishes clean with NOTHING integrated and NO pull request — by policy. Without this
+        // line the Room showed an operator a green turn and no account of the missing branch at all: a completion
+        // park writes its reason to workflow_run.error, but a SUCCESS writes none, and the run really did succeed.
+        // The words are the completion authority's own reader, so the operator's view and the decider's prompt
+        // cannot describe the same run differently. A run that reached a branch keeps the bare authority note.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Ship it");
+        var runId = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Ship it", resultSummary: "done", enforcementMode: "Enforced");
+
+        await SeedPolicyBoundedWorkAsync(teamId, runId, pushed);
+
+        var room = (await ProjectAsync(runId, teamId)).ShouldNotBeNull();
+
+        room.Blocks.OfType<AssistantTurnBlock>().ShouldHaveSingleItem().CompletionNote.ShouldBe(expected);
+    }
+
+    /// <summary>One captured unit whose diff the publish guard chain kept off a branch (<paramref name="pushed"/> false — branchless PatchOnly, no PublishError), plus the delivery gate's own ANSWERED policy-skip card that ruled on it.</summary>
+    private async Task SeedPolicyBoundedWorkAsync(Guid teamId, Guid runId, bool pushed)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var agentRunId = Guid.NewGuid();
+        db.PublishManifest.Add(new PublishManifest
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, Kind = PublishManifestKind.Agent, WorkflowRunId = runId, AgentRunId = agentRunId,
+            RepositoryAlias = "primary", ChangedFileCount = 1, PatchArtifactId = Guid.NewGuid(),
+            Branch = pushed ? "codespace/agent/s1" : null,
+            CommitSha = pushed ? "c1" : null,
+            PublishStateValue = pushed ? PublishState.Pushed : PublishState.PatchOnly,
+            Summary = pushed ? null : "the repository requires patch-only publishing",
+        });
+
+        var question = SupervisorDeliveryGate.QuestionPrefix + "the required pull request was skipped by policy (primary: the repository requires patch-only publishing)";
+        var reason = new SupervisorDeliveryGateReason { Kind = SupervisorDeliveryGateReason.PolicySkipped, Aliases = new[] { "primary" } };
+        var payload = System.Text.Json.Nodes.JsonNode.Parse(JsonSerializer.Serialize(new SupervisorAskHumanPayload { Question = question }, AgentJson.Options))!.AsObject();
+        payload[SupervisorGateAdjudication.ReasonNode] = JsonSerializer.SerializeToNode(reason, AgentJson.Options);
+
+        var now = DateTimeOffset.UtcNow;
+        db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId, Sequence = 1,
+            DecisionKind = SupervisorDecisionKinds.AskHuman, IdempotencyKey = $"ask-{Guid.NewGuid():N}", InputHash = "test",
+            Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = payload.ToJsonString(AgentJson.Options),
+            OutcomeJson = JsonSerializer.Serialize(new { question, askHumanToken = "tok", answer = "patch-only is deliberate" }, AgentJson.Options),
+            FenceEpoch = 1, CreatedDate = now, CreatedBy = Guid.Empty, LastModifiedDate = now, LastModifiedBy = Guid.Empty,
+        });
+
+        await db.SaveChangesAsync();
+    }
+
+    [Theory]
     [InlineData("Enforced", "Completion: Enforced")]   // C5: the completion authority owned this terminal
     [InlineData("Shadow", "Completion: Shadow")]       // observed only — the engine's own claim stood
     [InlineData(null, null)]                           // a pre-protocol row reads Legacy — say nothing rather than guess

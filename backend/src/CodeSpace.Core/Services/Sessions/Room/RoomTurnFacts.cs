@@ -76,6 +76,9 @@ public sealed record RoomTurnFacts
     /// <summary>The raw engine error, surfaced behind "Show raw error" on a failure diagnostic. Null when there's nothing rawer than the humanized text.</summary>
     public string? RawError { get; init; }
 
+    /// <summary>The completion stage this run's repository policy put out of reach, in the BACKEND's own words (<c>UpstreamStageTrace.NotApplicableIntegration</c>) — a patch-only run finishes with nothing integrated BY POLICY, and without this line the Room shows an operator a clean Success and no account of where the branch went. Null (the overwhelming case) whenever every stage was genuinely owed.</summary>
+    public string? PolicyBoundedStage { get; init; }
+
     /// <summary>The run's EFFECTIVE network posture as one line (<c>AgentAutonomyPolicy.DescribeNetwork</c>) — whether these agents had the internet, and whether that was the launcher's choice, the route's ceiling, or this deployment's own. Null when nothing can say it: a run with no route provenance (an authored workflow run, or a task run staged before the launch stamped its resolved tier) speaks only when the deployment ceiling clamped it — never guessed.</summary>
     public string? NetworkPosture { get; init; }
 
