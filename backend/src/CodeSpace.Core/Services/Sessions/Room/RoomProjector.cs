@@ -322,7 +322,18 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         var agentFiles = agentFileIdentities.ToDictionary(pair => pair.Key, pair => (IReadOnlyList<string>)pair.Value.Select(file => file.Path).ToList());
 
         var stop = decisions.LastOrDefault(d => d.DecisionKind == SupervisorDecisionKinds.Stop);
-        var acceptance = SupervisorOutcome.ReadAcceptanceGradePassed(stop?.OutcomeJson);
+
+        // The per-UNIT objective grades, folded ONCE for every consumer below (the card's verdict + the Verified chip),
+        // named by the same label the agent cards carry so a failed unit is identifiable rather than a bare id.
+        var units = UnitGrades(agentResults, phases.SelectMany(p => p.Agents).GroupBy(a => a.AgentRunId).ToDictionary(g => g.Key, g => RoomNarrative.UnitLabel(g.First())));
+
+        // The run's objective verdict. A SUPERVISOR run has one: its stop's own grade, which is the head's verdict over
+        // the units it kept. The quick (single-agent) and standard (plan-map) lanes have NO stop tape at all, so their
+        // per-unit grades ARE the only objective verdict the run produced — reading acceptance off the absent stop
+        // alone is what let a plan-map run under `errorHandling: continue` reach Success with a REJECTED branch and
+        // still paint the green, verified Result.
+        var acceptance = stop is null ? units.Passed : SupervisorOutcome.ReadAcceptanceGradePassed(stop.OutcomeJson);
+        var failedUnits = stop is null ? units.Failed : Array.Empty<string>();
 
         // A stop is a clean terminal Success at the ENGINE level even when the run did NOT finish well — a fail-closed
         // model GIVE-UP (no-decision / no-model / unknown-decision), OR a SERVER-FORCED stop (a budget / governance /
@@ -331,7 +342,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         // step + the terminal can never drift. Generic: never a per-kind string. A THIRD shape — an orderly stop whose
         // objective acceptance grade FAILED — degrades the card too; see <see cref="ResultVerdict"/>.
         var stopClass = SupervisorOutcome.ClassifyStop(stop?.PayloadJson, stop?.OutcomeJson);
-        var verdict = ResultVerdict(acceptance, stopClass);
+        var verdict = ResultVerdict(acceptance, stopClass, failedUnits);
 
         // The delivered answer text: the supervisor's closing line (or, for a forced stop, WHY it stopped — "budget
         // exhausted" — so the RESULT never renders blank), else — for a single-agent run with no supervisor — that one
@@ -425,7 +436,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             Rounds = rounds,
             Checklist = checklist,
             FinalAnswer = BuildFinalAnswer(finalAnswerText, changedFileIdentities, delivery, verdict,
-                await VerificationOf(runId, status, verdict, acceptance, SupervisorOutcome.ReadAcceptanceGradeJudgedSummary(stop?.OutcomeJson), agentResults, cancellationToken).ConfigureAwait(false)),
+                await VerificationOf(runId, status, verdict, acceptance, SupervisorOutcome.ReadAcceptanceGradeJudgedSummary(stop?.OutcomeJson), units, cancellationToken).ConfigureAwait(false)),
             LatestLines = latestLines,
             AgentFiles = agentFiles,
             AgentFileIdentities = agentFileIdentities,
@@ -658,14 +669,62 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// IS the classifier's account of why it stopped, whereas a failed grade leaves the model's closing line intact,
     /// so the verdict needs its own line. Copy is authored here (Rule: the backend owns the room's words).</para>
     ///
+    /// <para><paramref name="failedUnits"/> names the REJECTED units behind a lane whose verdict was folded from its
+    /// units rather than from a stop (the quick / plan-map lanes, which have no stop tape) — so the reason line says
+    /// WHICH branch failed instead of leaving the reader to open every card. Empty on the supervisor lane, whose
+    /// reason line stays byte-identical.</para>
+    ///
     /// <para>Pure; internal so it is unit-pinned directly (InternalsVisibleTo) rather than only through the DB tier.</para>
     /// </summary>
-    internal static (bool Degraded, string? Reason) ResultVerdict(bool? acceptancePassed, SupervisorStopClassification stopClass)
+    internal static (bool Degraded, string? Reason) ResultVerdict(bool? acceptancePassed, SupervisorStopClassification stopClass, IReadOnlyList<string>? failedUnits = null)
     {
         var acceptanceFailed = SupervisorOutcome.HonestOutcomeOf(acceptancePassed, stopClass) == SupervisorOutcome.AcceptanceFailedOutcome;
 
-        return (acceptanceFailed || stopClass.Degraded, acceptanceFailed ? AcceptanceFailedReason : null);
+        return (acceptanceFailed || stopClass.Degraded, acceptanceFailed ? AcceptanceFailedReasonFor(failedUnits) : null);
     }
+
+    /// <summary>
+    /// The per-UNIT objective fold — the ONE reader of "did every graded unit PASS", shared by the RESULT card's
+    /// verdict and the Verified chip so the two can never derive it differently. <c>true</c> = at least one unit was
+    /// really graded and every graded unit passed; <c>false</c> = at least one graded unit was REJECTED (its labels
+    /// ride <c>Failed</c>); <c>null</c> = nothing was graded, which is an absence, never a verdict.
+    ///
+    /// <para>A VACUOUS pass (<see cref="AgentAcceptanceContract.NotApplicableDetail"/> — the contract's owner declared
+    /// no diff was expected and none came) is NOT a graded unit: no check ran, so counting it would launder "nothing
+    /// to do" into "checked and correct", which is the same silence this fold exists to end one rung down.</para>
+    ///
+    /// <para>Pure; internal so it is unit-pinned directly.</para>
+    /// </summary>
+    internal static (bool? Passed, IReadOnlyList<string> Failed) UnitGrades(IReadOnlyList<SupervisorAgentResult> results, IReadOnlyDictionary<Guid, string> labels)
+    {
+        var graded = results.Where(r => r.AcceptancePassed is not null && !AgentAcceptanceContract.IsVacuousPass(r.AcceptanceDetail)).ToList();
+
+        if (graded.Count == 0) return (null, Array.Empty<string>());
+
+        var failed = graded
+            .Where(r => r.AcceptancePassed is false)
+            .Select(r => labels.TryGetValue(r.AgentRunId, out var label) ? label : UnnamedUnit)
+            .ToList();
+
+        return (failed.Count == 0, failed);
+    }
+
+    /// <summary>The reason line for a failed grade, naming the rejected units when the fold knows them (bounded — a wide fan-out must not turn one line into forty). Copy is authored here, like every other word on the card.</summary>
+    private static string AcceptanceFailedReasonFor(IReadOnlyList<string>? failedUnits)
+    {
+        if (failedUnits is not { Count: > 0 }) return AcceptanceFailedReason;
+
+        var named = failedUnits.Distinct(StringComparer.Ordinal).ToList();
+        var shown = string.Join(", ", named.Take(MaxNamedFailedUnits));
+
+        return named.Count <= MaxNamedFailedUnits ? $"{AcceptanceFailedReason}: {shown}" : $"{AcceptanceFailedReason}: {shown} and {named.Count - MaxNamedFailedUnits} more";
+    }
+
+    /// <summary>How many rejected units the reason line names before it summarizes the rest.</summary>
+    private const int MaxNamedFailedUnits = 3;
+
+    /// <summary>What the reason line calls a rejected unit no phase carried a label for — honest about the gap rather than printing a raw id.</summary>
+    private const string UnnamedUnit = "an unnamed unit";
 
     /// <summary>The card's account of a FAILED objective acceptance grade — the same word the Runs list already uses for the <c>AcceptanceFailed</c> outcome, so the two surfaces read alike.</summary>
     private const string AcceptanceFailedReason = "Checks failed";
@@ -675,6 +734,22 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
 
     /// <summary>The chip's copy for a stop whose only grade read the model's own closing PROSE. A real verdict, but not one that examined a result — so the card says which it was rather than claiming the stronger thing.</summary>
     internal const string SummaryJudgedNote = "Unverified — judged from the stop summary";
+
+    /// <summary>The chip's copy for a result the OUTPUT critic READ and REJECTED. A flag is the strongest evidence the room has that a result was examined, and it says the opposite of verified — so it can never be spent as one.</summary>
+    internal const string FlaggedNoteLead = "Unverified — the output review flagged this result";
+
+    /// <summary>How much of the reviewer's own critique rides the chip. The full text stays on the agent's result; the card carries enough to act on without becoming a wall.</summary>
+    private const int MaxFlagReasonChars = 240;
+
+    /// <summary>The flagged chip's copy — the lead plus the REVIEWER's own words (the same <c>ReviewFeedback</c> string the result persists), bounded. The words are the critic's; the framing is the backend's.</summary>
+    internal static string FlaggedNote(string? reason)
+    {
+        var trimmed = reason?.Trim();
+
+        if (string.IsNullOrEmpty(trimmed)) return $"{FlaggedNoteLead}.";
+
+        return $"{FlaggedNoteLead}: {(trimmed.Length <= MaxFlagReasonChars ? trimmed : trimmed[..MaxFlagReasonChars].TrimEnd() + "…")}";
+    }
 
     /// <summary>
     /// The containment probe for an interaction record written by the OUTPUT critic — <c>payload_json @&gt;
@@ -693,11 +768,14 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// nothing at all: no operator floor, no model-authored acceptance, no output critic. That card used to read
     /// exactly like a fully-verified one, which is the most expensive silence in the room — so it now says so.
     ///
-    /// <para>Verification is claimed from three independent facts, cheapest first: the STOP's acceptance grade, any
-    /// UNIT's acceptance grade (both already in hand), and — only when neither exists — ONE bounded ledger probe for a
-    /// recorded critic review. The probe is the only way an APPROVED critic leaves a trace (a flag or a skip writes a
-    /// warning; a clean pass writes nothing but its interaction row), and it is paid only on the ungraded-Success path,
-    /// so every verified run and every live turn costs zero extra query.</para>
+    /// <para>Verification is claimed from two independent facts, cheapest first: an acceptance grade EVERY graded unit
+    /// passed (the stop's on the supervisor lane, the per-unit fold on the others — both already in hand), and — only
+    /// when nothing was graded — a bounded ledger read of the output critic's recorded VERDICT. That read is paid only
+    /// on the ungraded-Success path, so every graded run and every live turn still costs zero extra query.</para>
+    ///
+    /// <para>Both facts must say PASSED, not merely "happened". A grade that any unit FAILED and a review that FLAGGED
+    /// the output are the two strongest pieces of evidence the room can hold that a result was examined — and both say
+    /// the opposite of verified, so neither may be spent as one. A flag carries the reviewer's own words onto the chip.</para>
     ///
     /// <para>A stop grade the model reached by judging its OWN closing prose (C1's summary fallback, marked
     /// <c>judgedSummary</c> on the tape) does not count as having examined a result: the model's account of its work is
@@ -705,26 +783,75 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// <c>Solved</c> / acceptance outcome is the grade's, exactly as before.</para>
     ///
     /// <para>Null when the question does not arise — a non-Success or an already-degraded card carries its own account
-    /// and must not gain a second, competing one.</para>
+    /// and must not gain a second, competing one (a rejected grade degrades the card, so its reason line is the one
+    /// place that names the failure).</para>
     /// </summary>
-    private async Task<(bool? Verified, string? Note)> VerificationOf(Guid runId, Messages.Enums.WorkflowRunStatus status, (bool Degraded, string? Reason) verdict, bool? acceptance, bool judgedSummary, IReadOnlyList<Messages.Agents.SupervisorAgentResult> agentResults, CancellationToken cancellationToken)
+    private async Task<(bool? Verified, string? Note)> VerificationOf(Guid runId, Messages.Enums.WorkflowRunStatus status, (bool Degraded, string? Reason) verdict, bool? acceptance, bool judgedSummary, (bool? Passed, IReadOnlyList<string> Failed) units, CancellationToken cancellationToken)
     {
         if (status != Messages.Enums.WorkflowRunStatus.Success || verdict.Degraded) return (null, null);
 
-        var graded = (acceptance is not null && !judgedSummary) || agentResults.Any(r => r.AcceptancePassed is not null);
+        var graded = (acceptance is true && !judgedSummary) || units.Passed is true;
 
-        return Verification(graded, graded || await CriticReviewedAsync(runId, cancellationToken).ConfigureAwait(false), judgedSummary);
+        return graded
+            ? Verification(graded: true, review: null, judgedSummary)
+            : Verification(graded: false, await OutputReviewAsync(runId, cancellationToken).ConfigureAwait(false), judgedSummary);
     }
 
-    /// <summary>The pure half of <see cref="VerificationOf"/> — pinned directly so the claim "something checked this" can never be widened by accident.</summary>
-    internal static (bool? Verified, string? Note) Verification(bool graded, bool criticReviewed, bool judgedSummary = false) =>
-        graded || criticReviewed ? (true, null) : (false, judgedSummary ? SummaryJudgedNote : UnverifiedNote);
+    /// <summary>The pure half of <see cref="VerificationOf"/> — pinned directly so the claim "something checked this" can never be widened by accident. <paramref name="review"/> is the output critic's recorded verdict, or null when it never recorded one.</summary>
+    internal static (bool? Verified, string? Note) Verification(bool graded, (bool Approved, string? Reason)? review, bool judgedSummary = false)
+    {
+        if (graded || review is { Approved: true }) return (true, null);
 
-    /// <summary>Whether a model critic ever recorded an OUTPUT review for this run — the ONLY durable trace an APPROVED verdict leaves (a flag or a skip writes its own warning; a clean pass writes nothing but this interaction row).</summary>
-    private async Task<bool> CriticReviewedAsync(Guid runId, CancellationToken cancellationToken) =>
-        await _db.WorkflowRunRecord.AsNoTracking()
+        if (review is { Approved: false } flag) return (false, FlaggedNote(flag.Reason));
+
+        return (false, judgedSummary ? SummaryJudgedNote : UnverifiedNote);
+    }
+
+    /// <summary>
+    /// The OUTPUT critic's own verdict for this run, off its durable <c>review.completed</c> beat — the LATEST one, so
+    /// an Improve-mode revise round that turned a flag into an approval is read at its final word. Null when the critic
+    /// recorded no verdict at all.
+    ///
+    /// <para>A run older than that beat has only the review's <c>interaction.completed</c> row, which records that a
+    /// call HAPPENED and not what it decided. Reading it as an approval is exactly the over-claim this method exists to
+    /// end — but it is the only evidence such a run will ever have, and re-reading history as "no check ran" would be
+    /// the same over-claim pointed the other way. So it stands as the legacy fallback, and ONLY there: every run with a
+    /// recorded verdict is judged by the verdict.</para>
+    /// </summary>
+    private async Task<(bool Approved, string? Reason)?> OutputReviewAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        var payload = await _db.WorkflowRunRecord.AsNoTracking()
+            .Where(r => r.RunId == runId && r.RecordType == WorkflowRunRecordTypes.ReviewCompleted)
+            .Where(r => EF.Functions.JsonContains(r.PayloadJson, CriticOutputReviewProbe))
+            .OrderByDescending(r => r.Sequence)
+            .Select(r => r.PayloadJson)
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (payload is not null) return ReadReviewVerdict(payload);
+
+        return await _db.WorkflowRunRecord.AsNoTracking()
             .Where(r => r.RunId == runId && r.RecordType == WorkflowRunRecordTypes.InteractionCompleted)
-            .AnyAsync(r => EF.Functions.JsonContains(r.PayloadJson, CriticOutputReviewProbe), cancellationToken).ConfigureAwait(false);
+            .AnyAsync(r => EF.Functions.JsonContains(r.PayloadJson, CriticOutputReviewProbe), cancellationToken).ConfigureAwait(false)
+            ? (true, null)
+            : null;
+    }
+
+    /// <summary>Parse <c>approved</c> + <c>reason</c> out of a <c>review.completed</c> payload. A malformed / half-written beat reads as a FLAG carrying no reason — the conservative direction, since the one thing it proves is that a review ran. Internal for direct unit pinning.</summary>
+    internal static (bool Approved, string? Reason) ReadReviewVerdict(string payloadJson)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(payloadJson);
+
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return (false, null);
+
+            var approved = doc.RootElement.TryGetProperty("approved", out var a) && a.ValueKind == JsonValueKind.True;
+            var reason = doc.RootElement.TryGetProperty("reason", out var r) && r.ValueKind == JsonValueKind.String ? r.GetString() : null;
+
+            return (approved, reason);
+        }
+        catch (JsonException) { return (false, null); }
+    }
 
     /// <summary>The rich final answer — the stop summary text + typed attachments (the changed files + the PR). Images are a true gap (no run output exposes them). Null when there's nothing to deliver. <paramref name="verdict"/> marks a stop that did NOT finish well (a give-up / forced stop, or a failed acceptance grade) so the card renders neutral, not a green success.</summary>
     private static RoomFinalAnswer? BuildFinalAnswer(string? text, IReadOnlyList<RoomFileIdentity> files, RoomDelivery? pr, (bool Degraded, string? Reason) verdict, (bool? Verified, string? Note) verification)

@@ -145,6 +145,15 @@ public static class WorkflowRunRecordTypes
     /// </summary>
     public const string ReviewSkipped = "review.skipped";
 
+    /// <summary>
+    /// An independent REVIEW that DID happen, and what it decided. Payload:
+    /// {"kind":"critic.output","approved":bool,"reason":"..."}. The sibling of <see cref="ReviewSkipped"/> for the
+    /// review that ran: an APPROVED verdict otherwise leaves nothing behind but its <see cref="InteractionCompleted"/>
+    /// row, which records that a model call HAPPENED and not what it concluded — so a consumer asking "was this
+    /// result approved?" could only answer "something looked at it", and counted a FLAG as a pass.
+    /// </summary>
+    public const string ReviewCompleted = "review.completed";
+
     // ─── Wait control (operator overrides) ────────────────────────────────────
 
     /// <summary>An operator force-resolved a STRANDED signal-driven wait — a Timer whose scheduled wake was dropped, or a Callback whose external system never posted — to un-strand the run. The audit trail for the override. Payload: {"wait_kind":"Timer|Callback","wait_id":"...","by":"<userId>"}.</summary>

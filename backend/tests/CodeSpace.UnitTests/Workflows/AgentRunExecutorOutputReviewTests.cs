@@ -7,6 +7,7 @@ using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Lifecycle;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Enums;
@@ -205,6 +206,59 @@ public sealed class AgentRunExecutorOutputReviewTests
         critic.ObservedScope.ShouldBeNull("no workflow run ⇒ no scope pushed ⇒ the call records nothing (fail-open)");
     }
 
+    // ── the review's own VERDICT on the ledger ──
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_review_that_HAPPENED_records_its_verdict_on_the_workflow_ledger(bool approved)
+    {
+        // The interaction row records that a model call was MADE; it never records what the call decided. So every
+        // downstream reader — the Session Room's "Verified" chip first among them — could only ask "did anything look
+        // at this?", and answered YES for a review that had just REJECTED the result. The verdict now rides its own beat.
+        var verdict = new CriticVerdict { Mode = ReviewMode.Gate, Approved = approved, Rationale = "the migration drops a column", ReviewerModel = "claude-sonnet-4-6" };
+        var (runId, executor, _, _, _, ledger) = NewExecutorWithStore(verdict);
+
+        var workflowRunId = Guid.NewGuid();
+        var run = Run(runId, workflowRunId: workflowRunId, nodeId: "agent-node", iterationKey: "agent-node#2");
+
+        await executor.ReviewOutputIfEnabledAsync(GatedTask, SucceededWithChanges(), run, CancellationToken.None);
+
+        var beat = ledger.Records.ShouldHaveSingleItem();
+        beat.RecordType.ShouldBe(WorkflowRunRecordTypes.ReviewCompleted, "a verdict that happened is a ledger record, not only a re-graded status");
+        beat.RunId.ShouldBe(workflowRunId, "the beat is bound to the OWNING workflow run, where every reader of this run's ledger will look");
+        beat.NodeId.ShouldBe("agent-node");
+        beat.IterationKey.ShouldBe("agent-node#2", "the full cell key rides, so a fanned-out branch's review is attributable");
+
+        var payload = JsonDocument.Parse(beat.Payload).RootElement;
+        payload.GetProperty("kind").GetString().ShouldBe(LlmStructuredCritic.OutputReviewCallKind, "probed by the same kind the OUTPUT review's own call names — a plan/decision review must never satisfy it");
+        payload.GetProperty("approved").GetBoolean().ShouldBe(approved);
+        payload.GetProperty("reason").GetString().ShouldBe(AgentRunExecutor.RenderReviewFeedback(verdict),
+            customMessage: "the ledger's words and the result's ReviewFeedback come off ONE renderer — the two surfaces cannot tell different stories about one review");
+    }
+
+    [Fact]
+    public async Task A_review_that_did_NOT_happen_records_no_verdict()
+    {
+        // Fail-open: BOTH rungs failed to produce a verdict, so there is nothing to claim. The critic's own
+        // review.skipped beat is the record of that, and inventing a verdict here would be the over-claim inverted.
+        var (runId, executor, _, _, _, ledger) = NewExecutorWithStore(CriticVerdict.ReviewFailed(ReviewMode.Gate, "the reviewer credential was revoked"));
+
+        await executor.ReviewOutputIfEnabledAsync(GatedTask, SucceededWithChanges(), Run(runId, workflowRunId: Guid.NewGuid()), CancellationToken.None);
+
+        ledger.Records.ShouldBeEmpty("no verdict exists, so none is recorded");
+    }
+
+    [Fact]
+    public async Task A_standalone_run_records_no_verdict_because_it_has_no_workflow_ledger()
+    {
+        var (runId, executor, _, _, _, ledger) = NewExecutorWithStore(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "clean" });
+
+        await executor.ReviewOutputIfEnabledAsync(GatedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);   // WorkflowRunId == null
+
+        ledger.Records.ShouldBeEmpty("no workflow run ⇒ no ledger to land on ⇒ fail-open, byte-identical");
+    }
+
     // ── D②: the approve co-sign — an AGENT reviewer's approval needs an independent MODEL consensus ──
 
     [Fact]
@@ -365,7 +419,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         // The request is built for the two MODEL rungs only (the ladder and the co-sign), and an agent DISAPPROVAL
         // reaches neither — so the answer render's manifest listing plus one blob read per captured deliverable would
         // be paid for a string nobody looks at. Building it lazily is the whole point; this is the probe that says so.
-        var (runId, executor, _, critic, store) = NewExecutorWithStore(
+        var (runId, executor, _, critic, store, _) = NewExecutorWithStore(
             new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "would have passed" },
             agentVerdict: new CriticVerdict { Mode = ReviewMode.Gate, Approved = false, Rationale = "the report answers a different question" },
             deliverables: new[] { new FakeDeliverable("DELIVERABLE.md", "# Comparison") });
@@ -381,7 +435,7 @@ public sealed class AgentRunExecutorOutputReviewTests
     [Fact]
     public async Task A_model_rung_that_DOES_run_still_reads_the_deliverables_once()
     {
-        var (runId, executor, _, critic, store) = NewExecutorWithStore(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true }, deliverables: new[] { new FakeDeliverable("DELIVERABLE.md", "# Comparison") });
+        var (runId, executor, _, critic, store, _) = NewExecutorWithStore(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true }, deliverables: new[] { new FakeDeliverable("DELIVERABLE.md", "# Comparison") });
 
         var captured = SucceededWithAnswer() with { CapturedArtifactCount = 1 };
         await executor.ReviewOutputIfEnabledAsync(AnswerTask, captured, Run(runId), CancellationToken.None);
@@ -428,10 +482,10 @@ public sealed class AgentRunExecutorOutputReviewTests
     private static (Guid RunId, AgentRunExecutor Executor, StubRuns Runs, RecordingCritic Critic) NewExecutor(CriticVerdict verdict, Guid? pendingDecision = null, CriticVerdict? agentVerdict = null, IReadOnlyList<FakeDeliverable>? deliverables = null, bool deliverableReadThrows = false) =>
         NewExecutorWithStore(verdict, pendingDecision, agentVerdict, deliverables, deliverableReadThrows) switch
         {
-            var (runId, executor, runs, critic, _) => (runId, executor, runs, critic),
+            var (runId, executor, runs, critic, _, _) => (runId, executor, runs, critic),
         };
 
-    private static (Guid RunId, AgentRunExecutor Executor, StubRuns Runs, RecordingCritic Critic, FakeArtifactManifestStore Store) NewExecutorWithStore(CriticVerdict verdict, Guid? pendingDecision = null, CriticVerdict? agentVerdict = null, IReadOnlyList<FakeDeliverable>? deliverables = null, bool deliverableReadThrows = false)
+    private static (Guid RunId, AgentRunExecutor Executor, StubRuns Runs, RecordingCritic Critic, FakeArtifactManifestStore Store, NoopRecordLogger Ledger) NewExecutorWithStore(CriticVerdict verdict, Guid? pendingDecision = null, CriticVerdict? agentVerdict = null, IReadOnlyList<FakeDeliverable>? deliverables = null, bool deliverableReadThrows = false)
     {
         var runId = Guid.NewGuid();
         var runs = new StubRuns(runId);
@@ -439,7 +493,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         var scopeFactory = new FakeScopeFactory(new FakeLedger(pendingDecision), agentVerdict is null ? null : new FakeAgentReviewer(agentVerdict));
         var captured = new FakeArtifactManifestStore(deliverables ?? Array.Empty<FakeDeliverable>(), deliverableReadThrows);
         var executor = new AgentRunExecutor(runs, null!, null!, null!, null!, null!, null!, null!, scopeFactory, null!, critic, null!, captured, null!, captured, new FakeCaptureIntentService(), null!, NullLogger<AgentRunExecutor>.Instance);
-        return (runId, executor, runs, critic, captured);
+        return (runId, executor, runs, critic, captured, scopeFactory.RecordLogger);
     }
 
     /// <summary>One captured deliverable the answer review reads back — its logical path plus the bytes the store resolves for it.</summary>
@@ -498,11 +552,14 @@ public sealed class AgentRunExecutorOutputReviewTests
         private readonly CodeSpace.Core.Services.Agents.Review.IAgentOutputReviewer? _agentReviewer;
         public FakeScopeFactory(IToolCallLedgerService ledger, CodeSpace.Core.Services.Agents.Review.IAgentOutputReviewer? agentReviewer = null) { _ledger = ledger; _agentReviewer = agentReviewer; }
 
+        /// <summary>The ONE ledger writer every fresh scope resolves — so a test can read the beats the executor appended.</summary>
+        public NoopRecordLogger RecordLogger { get; } = new();
+
         public IServiceScope CreateScope() => this;
         public IServiceProvider ServiceProvider => this;
         public object? GetService(Type serviceType) =>
             serviceType == typeof(IToolCallLedgerService) ? _ledger
-            : serviceType == typeof(IRunRecordLogger) ? new NoopRecordLogger()
+            : serviceType == typeof(IRunRecordLogger) ? RecordLogger
             : serviceType == typeof(IArtifactOffloader) ? new NoopOffloader()
             : serviceType == typeof(CodeSpace.Core.Services.Agents.Review.IAgentOutputReviewer) ? _agentReviewer
             : null;
@@ -524,10 +581,17 @@ public sealed class AgentRunExecutorOutputReviewTests
         public Task<string> ResolveAsync(Guid teamId, string? inline, Guid? artifactId, CancellationToken ct) => Task.FromResult(inline ?? "");
     }
 
-    /// <summary>The ledger writer carried on the pushed scope. Never exercised here (the fake critic never reaches the recording decorator) — every member is an inert no-op; it only needs to be resolvable and non-null.</summary>
+    /// <summary>The ledger writer carried on the pushed scope. The recording decorator is never reached (the fake critic short-circuits it), so every member below is an inert no-op — but the executor's OWN beats (the output review's verdict) go through <see cref="RecordInteractionAsync"/>, so that one records what it was handed.</summary>
     private sealed class NoopRecordLogger : IRunRecordLogger
     {
-        public Task<Guid> RecordInteractionAsync(Guid runId, string recordType, string? nodeId, string iterationKey, Guid correlationId, Guid? parentRecordId, JsonElement payload, CancellationToken ct) => Task.FromResult(Guid.NewGuid());
+        public List<(Guid RunId, string RecordType, string? NodeId, string IterationKey, string Payload)> Records { get; } = new();
+
+        public Task<Guid> RecordInteractionAsync(Guid runId, string recordType, string? nodeId, string iterationKey, Guid correlationId, Guid? parentRecordId, JsonElement payload, CancellationToken ct)
+        {
+            Records.Add((runId, recordType, nodeId, iterationKey, payload.GetRawText()));
+            return Task.FromResult(Guid.NewGuid());
+        }
+
         public Task RunQueuedAsync(Guid runId, string sourceType, Guid? actorId, CancellationToken ct) => Task.CompletedTask;
         public Task RunStartedAsync(Guid runId, CancellationToken ct) => Task.CompletedTask;
         public Task ReleaseLoadedAsync(Guid runId, int version, string definitionHash, int nodeCount, int edgeCount, CancellationToken ct) => Task.CompletedTask;

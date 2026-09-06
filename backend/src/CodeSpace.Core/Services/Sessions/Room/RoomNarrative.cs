@@ -517,10 +517,13 @@ public static class RoomNarrative
         };
     }
 
+    /// <summary>The one display name for a unit — its model-authored role, else the subtask it was assigned, else its goal, else the cheap harness label. Shared so the RESULT card's "which unit failed" line and the agent card the reader then opens name it identically.</summary>
+    internal static string UnitLabel(PhaseAgentRef a) => a.Role ?? a.AssignedSubtask ?? a.Goal ?? a.Label ?? "Agent";
+
     private static RoomAgentCard ToCard(PhaseAgentRef a, RoomTurnFacts facts) => new()
     {
         AgentRunId = a.AgentRunId,
-        Label = a.Role ?? a.AssignedSubtask ?? a.Goal ?? a.Label ?? "Agent",
+        Label = UnitLabel(a),
         Role = a.Role,
         Status = a.Status,
         AssignedSubtask = a.AssignedSubtask,

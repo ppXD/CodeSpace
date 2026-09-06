@@ -483,12 +483,130 @@ public class RoomProjectorFlowTests
         var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Which runtime should we pick?", resultSummary: null);
 
         await SeedStopDecisionAsync(teamId, run, outcome: "completed", summary: "Rust is the safer choice.");
+        await SeedReviewVerdictAsync(run, approved: true, reason: "The comparison holds and the recommendation follows from it.");
+
+        var result = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<FinalAnswerBlock>().Single();
+
+        result.Verified.ShouldBe(true, "the review's own recorded verdict APPROVED — that verdict, not the mere existence of the call, is the verification");
+        result.VerificationNote.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task A_run_whose_OUTPUT_critic_FLAGGED_the_result_is_NOT_verified_and_carries_the_reviewers_reason()
+    {
+        // The defect: the probe matched ANY recorded critic.output call, so the reviewer's OBJECTION was spent as its
+        // endorsement — and the objection itself (persisted as AgentRunResult.ReviewFeedback) reached no room surface.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Flagged answer");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Which runtime should we pick?", resultSummary: null);
+
+        await SeedStopDecisionAsync(teamId, run, outcome: "completed", summary: "Rust is the safer choice.");
+        await SeedReviewVerdictAsync(run, approved: false, reason: "The answer never addresses the team's existing Go services. (reviewed on gpt-5)");
+
+        var result = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<FinalAnswerBlock>().Single();
+
+        result.Verified.ShouldBe(false, "a flag is evidence the result WAS examined — and it says the opposite of verified");
+        result.VerificationNote.ShouldBe("Unverified — the output review flagged this result: The answer never addresses the team's existing Go services. (reviewed on gpt-5)",
+            "the reviewer's own words reach the card; the framing around them is backend-authored");
+        result.Text.ShouldBe("Rust is the safer choice.", "the answer is preserved verbatim — the chip qualifies it, it does not replace it");
+    }
+
+    [Fact]
+    public async Task The_LATEST_output_review_verdict_wins_so_a_revise_round_that_fixed_the_flag_reads_verified()
+    {
+        // Improve mode: the first pass was flagged, the agent revised, the second review approved. The run's final
+        // word is the approval — an any-match probe over the two rows could not tell which came last.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Flagged then fixed");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Which runtime should we pick?", resultSummary: null);
+
+        await SeedStopDecisionAsync(teamId, run, outcome: "completed", summary: "Rust is the safer choice.");
+        await SeedReviewVerdictAsync(run, approved: false, reason: "No mention of the Go services.");
+        await SeedReviewVerdictAsync(run, approved: true, reason: "The revision covers the Go services.");
+
+        var result = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<FinalAnswerBlock>().Single();
+
+        result.Verified.ShouldBe(true);
+        result.VerificationNote.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task A_run_older_than_the_verdict_beat_still_reads_its_review_as_the_only_evidence_it_has()
+    {
+        // Back-compat: a run recorded before review.completed existed has only the review's interaction row, which says
+        // a call HAPPENED and not what it decided. Re-reading that as "no check ran" would be the same over-claim
+        // pointed the other way, so it stands — and ONLY where no verdict was recorded.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Legacy review");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Which runtime should we pick?", resultSummary: null);
+
+        await SeedStopDecisionAsync(teamId, run, outcome: "completed", summary: "Rust is the safer choice.");
         await SeedCriticInteractionAsync(run, LlmStructuredCritic.OutputReviewCallKind);
 
         var result = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<FinalAnswerBlock>().Single();
 
-        result.Verified.ShouldBe(true, "an approved output review leaves only this interaction row — finding it IS the verification");
+        result.Verified.ShouldBe(true);
         result.VerificationNote.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task A_plan_map_run_that_reached_Success_with_a_REJECTED_branch_names_it_instead_of_claiming_verified()
+    {
+        // The defect: the RESULT card read acceptance ONLY off the supervisor stop tape, which the quick and plan-map
+        // lanes never write — and the Verified chip asked whether any unit carried a grade AT ALL, not whether the
+        // grades PASSED. So a fan-out under `errorHandling: continue` drained to Success with a rejected branch and
+        // painted a green, verified Result with no note anywhere.
+        //
+        // Seeded as the shape the ROOM sees: several graded units and NO decision tape. Whether the fan-out container
+        // was a flow.map or a hand-wired pair of agent nodes is workflow topology the room's fold never reads.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Fan out and continue");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Split the work across branches", resultSummary: null);
+
+        await SeedAgentNodeAsync(teamId, run, summary: "Migration written.", changedFiles: new[] { "m.sql" }, nodeId: "write-migration", goal: "Write the migration", acceptancePassed: true, acceptanceDetail: "tests-passed");
+        await SeedAgentNodeAsync(teamId, run, summary: "Parser written.", changedFiles: new[] { "p.cs" }, nodeId: "implement-parser", goal: "Implement the parser", acceptancePassed: false, acceptanceDetail: "tests-failed-exit-1");
+
+        var result = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<FinalAnswerBlock>().Single();
+
+        result.Degraded.ShouldBeTrue("one branch missed its own definition of done — a green Result would be a lie about the whole turn");
+        result.DegradedReason.ShouldBe("Checks failed: Implement the parser", "the card NAMES the rejected branch, so the reader knows which card to open");
+        result.Verified.ShouldNotBe(true, "presence of a grade is not a pass — the run must never claim verification a check refused it");
+    }
+
+    [Fact]
+    public async Task A_plan_map_run_whose_every_branch_PASSED_stays_green_and_verified()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Fan out, all green");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Split the work across branches", resultSummary: null);
+
+        await SeedAgentNodeAsync(teamId, run, summary: "Migration written.", changedFiles: new[] { "m.sql" }, nodeId: "write-migration", goal: "Write the migration", acceptancePassed: true, acceptanceDetail: "tests-passed");
+        await SeedAgentNodeAsync(teamId, run, summary: "Parser written.", changedFiles: new[] { "p.cs" }, nodeId: "implement-parser", goal: "Implement the parser", acceptancePassed: true, acceptanceDetail: "tests-passed");
+
+        var result = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<FinalAnswerBlock>().Single();
+
+        result.Degraded.ShouldBeFalse();
+        result.DegradedReason.ShouldBeNull();
+        result.Verified.ShouldBe(true, "every graded unit passed — that IS the verification, no ledger probe needed");
+    }
+
+    [Fact]
+    public async Task A_plan_map_branch_whose_only_pass_was_VACUOUS_leaves_the_card_unverified()
+    {
+        // "no changes were expected and none were produced" is the contract satisfied by construction. Nothing ran, so
+        // it cannot be spent as evidence that something checked the result.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Nothing to do");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Split the work across branches", resultSummary: null);
+
+        await SeedAgentNodeAsync(teamId, run, summary: "Nothing needed changing.", changedFiles: Array.Empty<string>(), nodeId: "write-migration", goal: "Write the migration",
+            acceptancePassed: true, acceptanceDetail: AgentAcceptanceContract.NotApplicableDetail);
+
+        var result = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<FinalAnswerBlock>().Single();
+
+        result.Degraded.ShouldBeFalse("a vacuous pass is not a failure either — absence of a check is not a verdict in either direction");
+        result.Verified.ShouldBe(false);
+        result.VerificationNote.ShouldBe("Unverified — no check ran on this result");
     }
 
     [Fact]
@@ -994,34 +1112,37 @@ public class RoomProjectorFlowTests
         tools.Items.Single(i => i.Text == "tool (payload not inspected)").Detail.ShouldBe("1", "calls beyond the hydrate budget stay visible and explicitly classified");
     }
 
-    /// <summary>Seed a plain single-agent (non-supervisor) run: a node.started/completed ledger pair for the "agent" node (the workflow_run_node view surfaces it), the AgentRun wait that links the node to its run, and the AgentRun row whose persisted AgentRunResult carries the summary + changed files. No supervisor decisions.</summary>
-    private async Task SeedAgentNodeAsync(Guid teamId, Guid runId, string summary, string[] changedFiles)
+    /// <summary>Seed a plain single-agent (non-supervisor) run: a node.started/completed ledger pair for the agent node (the workflow_run_node view surfaces it), the AgentRun wait that links the node to its run, and the AgentRun row whose persisted AgentRunResult carries the summary + changed files. No supervisor decisions. Call it MORE THAN ONCE with distinct <paramref name="nodeId"/>s for the multi-unit (fanned-out) shape; <paramref name="goal"/> gives that unit the display name the room labels it by; <paramref name="acceptancePassed"/> stamps its per-unit objective grade.</summary>
+    private async Task<Guid> SeedAgentNodeAsync(Guid teamId, Guid runId, string summary, string[] changedFiles, string nodeId = "agent", string? goal = null, bool? acceptancePassed = null, string? acceptanceDetail = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         var now = DateTimeOffset.UtcNow;
         var agentId = Guid.NewGuid();
 
-        db.WorkflowRunRecord.Add(new WorkflowRunRecord { Id = Guid.NewGuid(), RunId = runId, RecordType = "node.started", NodeId = "agent", IterationKey = "", OccurredAt = now.AddSeconds(-5), PayloadJson = "{}" });
-        db.WorkflowRunRecord.Add(new WorkflowRunRecord { Id = Guid.NewGuid(), RunId = runId, RecordType = "node.completed", NodeId = "agent", IterationKey = "", OccurredAt = now, PayloadJson = "{}" });
+        db.WorkflowRunRecord.Add(new WorkflowRunRecord { Id = Guid.NewGuid(), RunId = runId, RecordType = "node.started", NodeId = nodeId, IterationKey = "", OccurredAt = now.AddSeconds(-5), PayloadJson = "{}" });
+        db.WorkflowRunRecord.Add(new WorkflowRunRecord { Id = Guid.NewGuid(), RunId = runId, RecordType = "node.completed", NodeId = nodeId, IterationKey = "", OccurredAt = now, PayloadJson = "{}" });
 
         db.WorkflowRunWait.Add(new WorkflowRunWait
         {
-            Id = Guid.NewGuid(), RunId = runId, NodeId = "agent", IterationKey = "",
+            Id = Guid.NewGuid(), RunId = runId, NodeId = nodeId, IterationKey = "",
             WaitKind = WorkflowWaitKinds.AgentRun, Token = agentId.ToString(), WakeAt = now,
             Status = WorkflowWaitStatuses.Resolved, PayloadJson = "{}", CreatedAt = now,
         });
 
-        var result = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = summary, ChangedFiles = changedFiles };
+        var result = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = summary, ChangedFiles = changedFiles, AcceptancePassed = acceptancePassed, AcceptanceDetail = acceptanceDetail };
         db.AgentRun.Add(new AgentRun
         {
-            Id = agentId, TeamId = teamId, WorkflowRunId = runId, NodeId = "agent", IterationKey = "",
-            Harness = "codex-cli", Status = AgentRunStatus.Succeeded, TaskJson = "{}",
+            Id = agentId, TeamId = teamId, WorkflowRunId = runId, NodeId = nodeId, IterationKey = "",
+            Harness = "codex-cli", Status = AgentRunStatus.Succeeded,
+            TaskJson = goal is null ? "{}" : JsonSerializer.Serialize(new { goal }, Json),
             ResultJson = JsonSerializer.Serialize(result, AgentJson.Options),
             CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId,
         });
 
         await db.SaveChangesAsync();
+
+        return agentId;
     }
 
     [Fact]
@@ -1198,6 +1319,20 @@ public class RoomProjectorFlowTests
     }
 
     /// <summary>Stamp a supervisor STOP decision with its { stopped, outcome, summary } outcome — the terminal verb that drives the RESULT card. A non-success outcome (no-decision / no-model) marks a degraded give-up stop. <paramref name="acceptancePassed"/> folds the objective acceptance grade onto the SAME outcome bytes the terminal writer does (<c>SupervisorOutcome.AppendAcceptanceGrade</c>); null leaves the stop ungraded.</summary>
+    /// <summary>The OUTPUT review's own recorded verdict on the run's ledger — the <c>review.completed</c> beat the executor writes for BOTH an approval and a flag, and the only durable trace that says what a review DECIDED.</summary>
+    private async Task SeedReviewVerdictAsync(Guid runId, bool approved, string reason)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.WorkflowRunRecord.Add(new WorkflowRunRecord
+        {
+            Id = Guid.NewGuid(), RunId = runId, RecordType = WorkflowRunRecordTypes.ReviewCompleted, NodeId = "agent", IterationKey = "", OccurredAt = DateTimeOffset.UtcNow,
+            PayloadJson = JsonSerializer.Serialize(new { kind = LlmStructuredCritic.OutputReviewCallKind, approved, reason }),
+        });
+        await db.SaveChangesAsync();
+    }
+
     /// <summary>One recorded critic model call on the run's ledger under <paramref name="callKind"/> — the shape the Room's "did anything check this?" probe reads (an APPROVED review leaves nothing else behind).</summary>
     private async Task SeedCriticInteractionAsync(Guid runId, string callKind)
     {
