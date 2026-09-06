@@ -36,6 +36,12 @@ public sealed class RealModelAnswerReviewE2ETests
 {
     private const string Provider = "Anthropic";
 
+    /// <summary>The deliverable this arm's Acceptance oracle checks for (<see cref="BenchmarkGradingKind.ArtifactPresent"/> below) — <see cref="AnswerReviewGoal"/> must ask the agent for this exact file, or the contract is unsatisfiable by construction (run 34015323751: the goal forbade file writes while acceptance demanded one, so the run re-graded Failed before the review gate below ever ran). Guarded by <see cref="RealModelAnswerReviewGuardTests"/>.</summary>
+    internal const string AnswerFilePath = "ANSWER.md";
+
+    // ANSWER.md is the graded deliverable (Acceptance.Command below) — the goal asks for it by name.
+    internal const string AnswerReviewGoal = $"Answer in two or three sentences: what is the main practical difference between a mutex and a semaphore? Write your answer to {AnswerFilePath} in the working directory.";
+
     private readonly PostgresFixture _fixture;
 
     public RealModelAnswerReviewE2ETests(PostgresFixture fixture) { _fixture = fixture; }
@@ -69,7 +75,7 @@ public sealed class RealModelAnswerReviewE2ETests
             // A QUESTION at Delivery tier: no repository, so the agent writes no diff — its whole output is the answer.
             var task = new AgentTask
             {
-                Goal = "Answer in two or three sentences: what is the main practical difference between a mutex and a semaphore? Do not create or edit any files.",
+                Goal = AnswerReviewGoal,
                 Harness = "claude-code",
                 Model = model,
                 ModelCredentialId = credId,
@@ -77,7 +83,7 @@ public sealed class RealModelAnswerReviewE2ETests
                 Permissions = AgentAutonomyPolicy.Derive(AgentAutonomyLevel.Trusted),
                 OutputReviewMode = ReviewMode.Gate,
                 ReviewerModelId = reviewerRowId,
-                Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "ANSWER.md" }, Kind = BenchmarkGradingKind.ArtifactPresent, Description = "the answer names both primitives and states the difference" },
+                Acceptance = new SupervisorAcceptanceSpec { Command = new[] { AnswerFilePath }, Kind = BenchmarkGradingKind.ArtifactPresent, Description = "the answer names both primitives and states the difference" },
                 TimeoutSeconds = 240,
             };
 
