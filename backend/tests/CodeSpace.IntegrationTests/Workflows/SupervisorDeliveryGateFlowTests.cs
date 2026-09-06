@@ -334,6 +334,69 @@ public sealed class SupervisorDeliveryGateFlowTests
     }
 
     [Fact]
+    public async Task A_policy_blocked_run_completes_after_ONE_adjudication_even_though_the_brain_kept_working()
+    {
+        // Live run 34001620515 (the required real-model delivery gate, self-classified CodeFault: "the gate
+        // RE-PARKED on the state the human already adjudicated"). The human answered the patch-only card, the
+        // brain kept working, the forced re-check reported the SAME policy skip — and the gate re-minted the
+        // IDENTICAL card, because the release used to clamp the answer's freshness against the newest
+        // STATE-CHANGING decision (a later spawn) instead of the blocker the human actually ruled on. A PatchOnly
+        // policy is immutable from inside the run, so that card could only ever be re-asked: a dead end.
+        // The trail, end to end here: publish(skip) → ask → ANSWER → spawn → publish(skip) → the run COMPLETES.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var conversationId = await SeedConversationAsync(teamId, userId);
+        var repoId = await SeedBoundRepositoryAsync(teamId);
+        await SetPublishModeAsync(repoId, RepositoryPublishMode.PatchOnly);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        // A captured branchless diff — the row that makes the attempt REACH the repository and record the policy
+        // skip by name, rather than resolving zero targets and parking on the work-free card instead.
+        await SeedCapturedPatchOnlyManifestAsync(runId, teamId, Guid.NewGuid(), repoId);
+
+        var goalConfig = GoalConfig(repoId, new DeliverySpec { OpenPullRequest = true });
+        var decider = new AlwaysStopDecider();
+
+        var publish = await RunTurnAsync(runId, teamId, decider, goalConfig, conversationId: conversationId);
+        publish.DecisionKind.ShouldBe(SupervisorDecisionKinds.Publish);
+        JsonSerializer.Deserialize<RoomPullRequestResult>(publish.OutcomeJson!, AgentJson.Options)!
+            .PullRequests.Single().Disposition.ShouldBe(RoomPullRequestDisposition.Skipped);
+
+        var parked = await RunTurnAsync(runId, teamId, decider, goalConfig, conversationId: conversationId);
+        parked.DecisionKind.ShouldBe(SupervisorDecisionKinds.AskHuman);
+        JsonSerializer.Deserialize<SupervisorAskHumanPayload>(parked.PayloadJson, AgentJson.Options)!
+            .Question.ShouldContain("patch-only", Case.Insensitive);
+
+        await AnswerPendingAskAsync(runId, teamId, userId, "patch-only is deliberate — finish without the pull request");
+
+        // The brain kept working AFTER the human ruled — the live trail's spawn. Work-free on purpose: a frontier
+        // that produced work belongs to I3's own ladder, and this test measures DC-2b's release rung.
+        await SeedSpawnAsync(runId, teamId, Guid.NewGuid(), producedWork: false);
+
+        var reCheck = await RunTurnAsync(runId, teamId, decider, goalConfig, conversationId: conversationId);
+        reCheck.DecisionKind.ShouldBe(SupervisorDecisionKinds.Publish, "new work always forces a FRESH attempt — a release must never ride a verdict predating it");
+        JsonSerializer.Deserialize<RoomPullRequestResult>(reCheck.OutcomeJson!, AgentJson.Options)!
+            .PullRequests.Single().Disposition.ShouldBe(RoomPullRequestDisposition.Skipped, "the policy did not change — the fresh verdict names the SAME blocker the human already ruled on");
+
+        var stop = await RunTurnAsync(runId, teamId, decider, goalConfig, conversationId: conversationId);
+        stop.DecisionKind.ShouldBe(SupervisorDecisionKinds.Stop, "one adjudication is enough — work the brain did after the answer does not un-ask the answered question");
+
+        (await GateCardsAsync(runId, teamId)).Count.ShouldBe(1, "a SECOND card for the blocker the human already ruled on is the live dead end — the policy can never change from inside the run, so it could only be re-asked forever");
+    }
+
+    /// <summary>Every one of the delivery gate's OWN cards on the run's tape, recognized by its pinned question prefix.</summary>
+    private async Task<IReadOnlyList<string>> GateCardsAsync(Guid runId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        var asks = await scope.Resolve<CodeSpaceDbContext>().SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.AskHuman)
+            .Select(d => d.PayloadJson).ToListAsync();
+
+        return asks.Where(payload => JsonSerializer.Deserialize<SupervisorAskHumanPayload>(payload, AgentJson.Options)?.Question
+            .StartsWith(SupervisorDeliveryGate.QuestionPrefix, StringComparison.Ordinal) == true).ToList();
+    }
+
+    [Fact]
     public async Task A_no_progress_forced_stop_cannot_terminalize_around_the_delivery_contract()
     {
         // Run 29131608121's live evidence: a brain that never stops gets FORCE-stopped by the no-progress bound,
@@ -610,12 +673,13 @@ public sealed class SupervisorDeliveryGateFlowTests
         await db.SaveChangesAsync();
     }
 
-    private async Task SeedSpawnAsync(Guid runId, Guid teamId, Guid agentRunId)
+    /// <summary><paramref name="producedWork"/> false stages a genuinely work-FREE unit (an investigate-only subtask): a real state change for DC-2b's freshness rung that I3's publish ladder is explicitly out of scope for, so a test can move the world without also owing a merge.</summary>
+    private async Task SeedSpawnAsync(Guid runId, Guid teamId, Guid agentRunId, bool producedWork = true)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
 
-        var result = new SupervisorAgentResult { AgentRunId = agentRunId, Status = "Succeeded", ChangedFiles = new[] { "a.txt" } };
+        var result = new SupervisorAgentResult { AgentRunId = agentRunId, Status = "Succeeded", ChangedFiles = producedWork ? new[] { "a.txt" } : Array.Empty<string>() };
         var outcome = JsonSerializer.Serialize(new { agentRunIds = new[] { agentRunId }, agentCount = 1, agentResults = new[] { result } }, AgentJson.Options);
 
         var now = DateTimeOffset.UtcNow;

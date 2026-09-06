@@ -1,4 +1,4 @@
-using System.Text.Json.Serialization;
+﻿using System.Text.Json.Serialization;
 
 namespace CodeSpace.Messages.Agents;
 
@@ -206,6 +206,42 @@ public sealed record SupervisorResolvePayload
 public sealed record SupervisorAskHumanPayload
 {
     public required string Question { get; init; }
+}
+
+/// <summary>
+/// WHAT a delivery-gate card asked a human to adjudicate — the blocker's IDENTITY, carried as a root
+/// <c>gateReason</c> node beside the card's question (the same server-attached shape
+/// <see cref="SupervisorAmendAcceptancePayload"/> rides in). The gate's release rung compares THIS against the
+/// blocker the latest publish attempt reports: same blocker ⇒ the human already ruled on it, release the stop;
+/// a different one ⇒ a genuinely new question they have never seen, park on a fresh card.
+///
+/// <para>Structured deliberately, never lexical on the card's prose: the card text carries provider error strings
+/// and repository lists that change between attempts for the same blocker, so a text comparison would both
+/// re-ask an already-answered question and (worse) equate two different ones.</para>
+/// </summary>
+public sealed record SupervisorDeliveryGateReason
+{
+    /// <summary>The contract wants a PR that nothing authorized — no publish attempt is involved, so no alias names it.</summary>
+    public const string Unauthorized = "unauthorized";
+
+    /// <summary>At least one target FAILED to open (a provider rejection) — <see cref="Aliases"/> names those repositories.</summary>
+    public const string PublishFailed = "publish-failed";
+
+    /// <summary>The attempt resolved NOTHING to open a pull request from — an empty result names no repository at all.</summary>
+    public const string NothingToOpen = "nothing-to-open";
+
+    /// <summary>Every repository the attempt REACHED skipped by publish policy — <see cref="Aliases"/> names exactly those, never the ones it never reached.</summary>
+    public const string PolicySkipped = "policy-skipped";
+
+    /// <summary>Which blocker (one of the four constants above). These strings are durable TAPE bytes a later turn reads back, so a rename orphans every in-flight parked run's release — they are test-pinned for the same reason the card's question prefix is.</summary>
+    public required string Kind { get; init; }
+
+    /// <summary>The repository aliases the blocker names, ordinal-sorted at mint so two attempts reporting the same repositories in a different order compare equal. Empty when the blocker names none.</summary>
+    public IReadOnlyList<string> Aliases { get; init; } = Array.Empty<string>();
+
+    /// <summary>Whether an ALREADY-ADJUDICATED reason describes the SAME blocker as <paramref name="current"/>. A card that recorded none (null — a run parked before this field existed) matches nothing: what it adjudicated is unknowable, so it earns a fresh card naming the blocker rather than a release nobody can audit.</summary>
+    public static bool SameBlocker(SupervisorDeliveryGateReason? adjudicated, SupervisorDeliveryGateReason current) =>
+        adjudicated is not null && adjudicated.Kind == current.Kind && adjudicated.Aliases.SequenceEqual(current.Aliases, StringComparer.Ordinal);
 }
 
 /// <summary>
