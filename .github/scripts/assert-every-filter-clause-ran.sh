@@ -129,6 +129,10 @@ fi
 # and no seeding period, because the runs that already went dark recorded their census the same way.
 
 census_count=0
+# How many predecessors were downloaded and looked at, census-bearing or not. The streak is only as trustworthy as
+# the evidence under it: "streak 1" read from one predecessor that MEASURED the clause and "streak 1" read from a
+# dozen runs that recorded nothing about it are the same number over opposite facts, so both counts are reported.
+history_runs_seen=0
 streaks_measured=0
 history_blocker=""
 
@@ -227,6 +231,8 @@ collect_history() {
   for run_id in $runs; do
     if [ "$run_id" = "${GITHUB_RUN_ID}" ]; then continue; fi
 
+    history_runs_seen=$((history_runs_seen + 1))
+
     # `unzip -p` streams every member to stdout, so the whole run's log is read in one pass without extracting a
     # single file — which also keeps unzip away from the interactive "Continue? (y/n)" prompt a failed extraction
     # would otherwise hang this step on.
@@ -304,7 +310,13 @@ write_step_summary() {
       printf '| `%s` | %s | %s | %s | %s | %s |\n' "$token" "$state" "$passed" "$failed" "$skipped" "$(streak_cell "$token" "$state")"
     done < "$rows"
 
-    printf '\nA clause that measures nothing reds this lane once it has done so on %s consecutive `%s` runs; a shorter streak only warns.\n\n' "$DARK_RUNS_TO_RED" "$DARK_STREAK_BRANCH"
+    printf '\nA clause that measures nothing reds this lane once it has done so on %s consecutive `%s` runs; a shorter streak only warns.\n' "$DARK_RUNS_TO_RED" "$DARK_STREAK_BRANCH"
+
+    if [ "$streaks_measured" -eq 1 ]; then
+      printf '\nStreaks read from %s of the %s predecessor runs scanned — the rest carried no census for the clause and are evidence of nothing either way.\n' "$census_count" "$history_runs_seen"
+    fi
+
+    printf '\n'
   } >> "$GITHUB_STEP_SUMMARY"
 }
 
@@ -328,8 +340,8 @@ if [ "$streaks_measured" -eq 1 ]; then
 
     if [ "$streak" -ge "$DARK_RUNS_TO_RED" ]; then
       persistently_dark="${persistently_dark} ${token}(${streak} runs)"
-      printf '::error::%s has now measured NOTHING on %s consecutive %s runs of this workflow (the lane reds at %s). A single dark run is a by-design infra skip; a streak means this gate has been reporting green over an instrument that never ran, while still spending the lane its full live-API budget every time. Last recorded skip reason: %s. Fix the instrument, or drop the clause from this lane on purpose — the lane stays red until a run actually measures it.\n' \
-        "$token" "$streak" "$DARK_STREAK_BRANCH" "$DARK_RUNS_TO_RED" "$(skip_reason "$token")"
+      printf '::error::%s has now measured NOTHING on %s consecutive %s runs of this workflow (the lane reds at %s; %s of the %s predecessor runs scanned carried a census). A single dark run is a by-design infra skip; a streak means this gate has been reporting green over an instrument that never ran, while still spending the lane its full live-API budget every time. Last recorded skip reason: %s. Fix the instrument, or drop the clause from this lane on purpose — the lane stays red until a run actually measures it.\n' \
+        "$token" "$streak" "$DARK_STREAK_BRANCH" "$DARK_RUNS_TO_RED" "$census_count" "$history_runs_seen" "$(skip_reason "$token")"
     fi
   done
 fi
