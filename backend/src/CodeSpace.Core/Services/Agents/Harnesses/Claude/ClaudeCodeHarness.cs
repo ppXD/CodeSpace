@@ -25,8 +25,32 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessContractGene
 {
     public const string HarnessKind = "claude-code";
 
-    /// <summary>The config-home-relative file Claude Code reads MCP-server declarations from (a JSON <c>mcpServers</c> map). Pinned by a test — the runner writes the run-scoped server here.</summary>
+    /// <summary>
+    /// The config-home-relative file the runner writes the run-scoped MCP-server declaration to (a JSON
+    /// <c>mcpServers</c> map). Pinned by a test.
+    ///
+    /// <para>Claude Code does NOT discover it there: its own discovery finds a project <c>.mcp.json</c> at the CWD —
+    /// which is the workspace, never the config home — and a project-scoped server is in any case only "pending
+    /// approval" until a human accepts it. The declaration carries the run token, so the workspace (a git clone whose
+    /// diff becomes the run's patch) is exactly where it must NOT live. It stays in the per-run config home and
+    /// <see cref="McpConfigArgs"/> points the CLI at it.</para>
+    /// </summary>
     public const string McpDeclarationFile = ".mcp.json";
+
+    /// <summary>
+    /// The flags that make the CLI LOAD the declaration the runner wrote — the runner substitutes
+    /// <see cref="SandboxSpec.McpDeclarationPathToken"/> with the absolute path (per-launch, so only it knows) and
+    /// drops the whole fragment when a run writes no declaration.
+    ///
+    /// <para><c>--strict-mcp-config</c> ("only use MCP servers from --mcp-config, ignoring all other MCP
+    /// configurations") does double duty: it makes OUR declaration the only fabric the agent sees — the target repo's
+    /// own <c>.mcp.json</c> is untrusted input, exactly like the <c>.claude</c> settings <c>--setting-sources user</c>
+    /// already shuts out — AND it terminates <c>--mcp-config</c>'s VARIADIC value list, which would otherwise keep
+    /// eating following argv tokens. Both are documented, long-standing <c>claude</c> flags and were verified live on
+    /// 2.1.x — the same line as the pinned <see cref="DefaultVersion"/> — by observing that the declared server IS
+    /// spawned with them and is NOT spawned without them.</para>
+    /// </summary>
+    private static readonly string[] McpConfigArgs = { "--mcp-config", SandboxSpec.McpDeclarationPathToken, "--strict-mcp-config" };
 
     /// <summary>Air-gapped operators pin a private build via this env var (Rule 8). Renaming it breaks their pin — see the pin test.</summary>
     public const string VersionEnvVar = "CODESPACE_CLAUDE_CODE_VERSION";
@@ -211,6 +235,9 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessContractGene
             TimeoutSeconds = task.TimeoutSeconds,
             // Isolate Claude Code's config dir per run so it ignores the operator's personal ~/.claude.
             ConfigHomeEnvVars = new[] { ConfigDirEnvVar },
+            // Point the CLI at the declaration the runner writes into that config dir — it would never find it there
+            // otherwise (see McpConfigArgs).
+            McpDeclarationArgs = McpConfigArgs,
             // Project the persona's skills as SKILL.md files the runner writes under CLAUDE_CONFIG_DIR/skills/<slug>/;
             // Claude Code's native loader discovers them there (personal scope) and does the progressive disclosure.
             // On a CONTINUE the prior session's transcript is restored alongside them (see BuildConfigHomeFiles).

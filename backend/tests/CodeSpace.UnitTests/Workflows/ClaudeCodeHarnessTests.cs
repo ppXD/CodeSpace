@@ -313,6 +313,27 @@ public class ClaudeCodeHarnessTests
     }
 
     [Fact]
+    public void Points_the_cli_at_the_declaration_the_runner_writes_since_it_would_never_find_it_itself()
+    {
+        // THE defect this pins: the runner writes .mcp.json into CLAUDE_CONFIG_DIR, but the CLI runs with cwd = the
+        // WORKSPACE and only ever auto-discovers a project .mcp.json THERE. Without these flags the declaration is
+        // written, the endpoint is bound, the proxy resolves — and no MCP server is ever loaded, so no run of this
+        // harness ever had tools. The absolute path is per-launch, so the harness names a token and the runner
+        // substitutes the path it actually wrote (LocalProcessRunner.ArgsWithMcpDeclaration).
+        var spec = Harness.BuildInvocation(Task());
+
+        spec.McpDeclarationArgs.ShouldBe(new[] { "--mcp-config", SandboxSpec.McpDeclarationPathToken, "--strict-mcp-config" });
+
+        // --strict-mcp-config sits immediately after the path: --mcp-config is VARIADIC, so its value list must be
+        // terminated by another flag or it keeps eating argv tokens.
+        spec.McpDeclarationArgs[^1].ShouldBe("--strict-mcp-config", "the variadic --mcp-config must be terminated by a flag");
+
+        // The flags are NOT in Args: only the runner knows the per-launch path, so it splices them at launch. Args
+        // stays byte-identical to a pre-fabric invocation (pinned exactly by Builds_a_claude_print_stream_json_invocation).
+        spec.Args.ShouldNotContain("--mcp-config");
+    }
+
+    [Fact]
     public void Builds_a_claude_print_stream_json_invocation_from_the_task()
     {
         var spec = Harness.BuildInvocation(Task());
