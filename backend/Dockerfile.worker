@@ -64,9 +64,14 @@ RUN SHA="${SOURCE_REVISION_ID:-$(git rev-parse HEAD 2>/dev/null || echo unknown)
 # strings, so the harness-reported version can NEVER silently drift from what the worker actually installs — bump
 # here and the test fails until the C# constants follow. `deploy/sync-local-harnesses.sh` installs these same pins
 # locally, so a dev box matches the worker. Keep all three (this file · the harness consts · a local install) in lockstep.
-FROM node:20-bookworm-slim AS agent-cli
+#
+# The Node major must satisfy the STRICTEST `engines.node` of the two pinned CLIs: claude-code 2.1.263 declares
+# >=22 (2.1.193 declared >=18), codex 0.142.2 declares >=16. On node:20 npm still installs claude-code, but only
+# because EBADENGINE is a WARNING — an `engine-strict` npm, or a future release that actually uses node-22 syntax
+# in its install script, turns that warning into a failed image build. Track the floor rather than the warning.
+FROM node:22-bookworm-slim AS agent-cli
 ARG CODEX_CLI_VERSION=0.142.2
-ARG CLAUDE_CODE_VERSION=2.1.193
+ARG CLAUDE_CODE_VERSION=2.1.263
 RUN npm install -g "@openai/codex@${CODEX_CLI_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
 # ── 3. Runtime: agent-execution + isolation deps + the Node runtime & CLIs + the published app ──

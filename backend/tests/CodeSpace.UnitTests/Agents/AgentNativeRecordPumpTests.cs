@@ -247,7 +247,7 @@ public sealed class AgentNativeRecordPumpTests
     [Theory]
     [InlineData("codex-cli", "0.142.2", 1, "codex-cli/v1")]
     [InlineData("codex-cli", "0.142.2", null, "codex-cli/v1")]
-    [InlineData("claude-code", "2.1.193", 2, "claude-code/v2")]
+    [InlineData("claude-code", "2.1.263", 2, "claude-code/v2")]
     [InlineData("claude-code", "3.0.0", 2, "claude-code/v2")]
     [InlineData("scripted", "9.9.9", 2, "scripted/v2")]
     [InlineData("scripted", "2.0.0", null, "scripted/v1")]

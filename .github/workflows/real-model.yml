@@ -1058,12 +1058,12 @@ jobs:
         # BOTH harness binaries: claude (ClaudeCodeHarness) drives the blessed behavioral gate; codex (CodexHarness)
         # drives the informational behavioral proof + the deterministic real-binary proofs. FATAL install (a missing
         # binary must RED the lane, never let a gating arm self-skip green — "skip ≠ pass"). Pins match the worker image
-        # ARGs + the harness DefaultVersion consts the CLI surface is verified against (claude 2.1.193 / codex 0.142.2),
+        # ARGs + the harness DefaultVersion consts the CLI surface is verified against (claude 2.1.263 / codex 0.142.2),
         # so a future CLI flag change is a visible lane break to fix, not a silent harness regression.
         run: |
           # One retry each to absorb a transient npm-registry blip (ECONNRESET / 5xx) without false-red-ing the lane; a
           # genuinely missing/yanked binary still fails after the retry → reds (the install is fatal, not flaky).
-          npm install -g '@anthropic-ai/claude-code@2.1.193' || { sleep 5; npm install -g '@anthropic-ai/claude-code@2.1.193'; }
+          npm install -g '@anthropic-ai/claude-code@2.1.263' || { sleep 5; npm install -g '@anthropic-ai/claude-code@2.1.263'; }
           npm install -g '@openai/codex@0.142.2' || { sleep 5; npm install -g '@openai/codex@0.142.2'; }
           claude --version
           codex --version
@@ -1206,7 +1206,7 @@ jobs:
       - name: Install the real coding-agent CLI (Claude Code)
         # FATAL install (a missing binary must RED the lane, never let the gating arm self-skip green — "skip ≠ pass").
         run: |
-          npm install -g '@anthropic-ai/claude-code@2.1.193' || { sleep 5; npm install -g '@anthropic-ai/claude-code@2.1.193'; }
+          npm install -g '@anthropic-ai/claude-code@2.1.263' || { sleep 5; npm install -g '@anthropic-ai/claude-code@2.1.263'; }
           claude --version
           git --version
 
@@ -1333,7 +1333,7 @@ jobs:
       - name: Install the real coding-agent CLI (Claude Code)
         # FATAL install (a missing binary must RED the lane, never let the gating agent-feed arm self-skip green — "skip ≠ pass").
         run: |
-          npm install -g '@anthropic-ai/claude-code@2.1.193' || { sleep 5; npm install -g '@anthropic-ai/claude-code@2.1.193'; }
+          npm install -g '@anthropic-ai/claude-code@2.1.263' || { sleep 5; npm install -g '@anthropic-ai/claude-code@2.1.263'; }
           claude --version
           git --version
 
@@ -1460,7 +1460,7 @@ jobs:
         # drives the hooks.json Stop hook. FATAL install (a missing binary must RED the lane, never let it self-skip
         # green — "skip ≠ pass"). Pins match the injection lane's own pinned versions.
         run: |
-          npm install -g '@anthropic-ai/claude-code@2.1.193' || { sleep 5; npm install -g '@anthropic-ai/claude-code@2.1.193'; }
+          npm install -g '@anthropic-ai/claude-code@2.1.263' || { sleep 5; npm install -g '@anthropic-ai/claude-code@2.1.263'; }
           npm install -g '@openai/codex@0.142.2' || { sleep 5; npm install -g '@openai/codex@0.142.2'; }
           claude --version
           codex --version
