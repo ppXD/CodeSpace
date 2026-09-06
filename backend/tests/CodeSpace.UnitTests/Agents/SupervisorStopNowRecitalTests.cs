@@ -197,6 +197,34 @@ public class SupervisorStopNowRecitalTests
             .ShouldBe("IF YOU STOPPED NOW (the completion reducer's verdict on the facts so far):\n- UNRESOLVED: outcome=Unsolved — a stop right now cannot read Solved. Settle what is owed (make the failing checks pass, land the owed delivery/output), or stop honestly / ask a human — never stop as if done.");
     }
 
+    [Fact]
+    public void A_policy_bounded_stage_renders_as_a_FACT_and_replaces_no_refusal_of_its_own()
+    {
+        // A patch-only run can never integrate, so the refusal line's steer ("Land that work") would be a dead
+        // end — the authority no longer objects, and the block states why instead. Spelled out, because these
+        // words are the SAME ones the Room prints to the operator for the same run.
+        var patchOnly = new UpstreamStageNotApplicable { Stage = CompletionStage.Integrate, Reason = "integration not applicable — patch-only policy; 1 patch delivered" };
+
+        SupervisorStopNowRecital.Render(Assessment(), AllButIntegrate, Supervisor, CompletionEnforcementMode.Enforced, patchOnly)
+            .ShouldBe("IF YOU STOPPED NOW (the completion reducer's verdict on the facts so far):"
+                + "\n- every contract dimension reads SETTLED — a clean stop now reads Solved. If the goal is met, stop rather than spending further turns on a contract that is already satisfied."
+                + "\n- integration not applicable — patch-only policy; 1 patch delivered.");
+    }
+
+    [Fact]
+    public void A_policy_bounded_stage_never_silences_a_genuinely_missing_sibling()
+    {
+        // The note renders BESIDE the refusal, never instead of it — a model told only "integration is not
+        // applicable" while Plan is still unevidenced would read that as permission to stop.
+        var patchOnly = new UpstreamStageNotApplicable { Stage = CompletionStage.Integrate, Reason = "integration not applicable — patch-only policy; 2 patches delivered" };
+        var contractAndExecuteOnly = new HashSet<CompletionStage> { CompletionStage.Contract, CompletionStage.Execute };
+
+        var block = SupervisorStopNowRecital.Render(Assessment(), contractAndExecuteOnly, Supervisor, CompletionEnforcementMode.Enforced, patchOnly)!;
+
+        block.ShouldContain("integration not applicable — patch-only policy; 2 patches delivered.");
+        block.ShouldContain("requires 1 stage(s) with no evidence — Plan.", Case.Sensitive, "Integrate drops out of the missing list; Plan is still owed and still refused");
+    }
+
     /// <summary>
     /// The BOND: the line renders exactly when <c>CompletionTerminalAuthority</c> would object to the stop, because
     /// it asks the same reader the same question — <c>UpstreamStageTrace.MissingRequired(profile, trace)</c>, the

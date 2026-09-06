@@ -10,8 +10,8 @@ using System.Text.Json;
 
 namespace CodeSpace.Core.Services.Completion;
 
-/// <summary>One composed verdict, TWO isolated projections (P0-A dual projection): the operational assessment (terminal authority's input) plus the metric@1 projection (the solve-rate's only verdict), both from the same facts and admission rules, plus every integrity diagnostic met on the way (admission rejections, projection contract errors). <c>ExercisedUpstreamStages</c> is P4's stage trace (<see cref="UpstreamStageTrace"/>) — null when never derived (a legacy compose), which the stage gate reads fail-close as "evidences nothing". Shadow consumers RECORD it; nothing mutates a terminal from it until P2b (Lock Clause 1).</summary>
-public sealed record ComposedAssessment(CompletionAssessment Assessment, CompletionEnforcementMode Mode, IReadOnlyList<ReceiptRejection> Rejections, IReadOnlyList<string> ContractErrors, MetricAt1Projection MetricAt1, IReadOnlySet<CompletionStage>? ExercisedUpstreamStages = null);
+/// <summary>One composed verdict, TWO isolated projections (P0-A dual projection): the operational assessment (terminal authority's input) plus the metric@1 projection (the solve-rate's only verdict), both from the same facts and admission rules, plus every integrity diagnostic met on the way (admission rejections, projection contract errors). <c>ExercisedUpstreamStages</c> is P4's stage trace (<see cref="UpstreamStageTrace"/>) — null when never derived (a legacy compose), which the stage gate reads fail-close as "evidences nothing"; <c>NotApplicableUpstream</c> is the same trace's per-run policy reading (<see cref="UpstreamStageTrace.NotApplicableIntegration"/>), the ONE stage this run's repository policy put out of reach. Shadow consumers RECORD it; nothing mutates a terminal from it until P2b (Lock Clause 1).</summary>
+public sealed record ComposedAssessment(CompletionAssessment Assessment, CompletionEnforcementMode Mode, IReadOnlyList<ReceiptRejection> Rejections, IReadOnlyList<string> ContractErrors, MetricAt1Projection MetricAt1, IReadOnlySet<CompletionStage>? ExercisedUpstreamStages = null, UpstreamStageNotApplicable? NotApplicableUpstream = null);
 
 public interface ICompletionAssessmentComposer
 {
@@ -133,14 +133,16 @@ public sealed class CompletionAssessmentComposer : ICompletionAssessmentComposer
 
         var metricAt1 = MetricAt1.Project(requirements, receipts, executableSet, attempts, facts, run.CompletionPolicyVersion, currentRevisions);
 
-        // P4 (the Integrate cell's second ledger): the run-level Integration manifest rows a git.integrate_run
-        // step records — the plan-map lane's candidate fact; a supervisor lane evidences the same cell off its
-        // tape and never needs these rows.
-        var integrationManifests = await _db.PublishManifest.AsNoTracking()
-            .Where(m => m.WorkflowRunId == workflowRunId && m.TeamId == teamId && m.Kind == PublishManifestKind.Integration)
+        // P4 (the Integrate cell's ledgers beyond the tape): the run-level Integration manifest rows a
+        // git.integrate_run step records — the plan-map lane's candidate fact — AND the per-agent rows, whose
+        // branchless patch-only shape is what tells the cell the repository policy forbade a branch at all. Read
+        // as ONE run-scoped list rather than two filtered queries: the trace filters by kind per reading.
+        var manifests = await _db.PublishManifest.AsNoTracking()
+            .Where(m => m.WorkflowRunId == workflowRunId && m.TeamId == teamId)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        return new ComposedAssessment(CompletionReducer.Reduce(requirements, admission.Admitted, facts), mode, admission.Rejections, projection?.ContractErrors ?? Array.Empty<string>(), metricAt1, UpstreamStageTrace.Derive(requirements, decisions, attempts, integrationManifests));
+        return new ComposedAssessment(CompletionReducer.Reduce(requirements, admission.Admitted, facts), mode, admission.Rejections, projection?.ContractErrors ?? Array.Empty<string>(), metricAt1,
+            UpstreamStageTrace.Derive(requirements, decisions, attempts, manifests), UpstreamStageTrace.NotApplicableIntegration(decisions, manifests));
     }
 
     /// <summary>One projected workflow-agents lane: every contract-bearing attempt on its (node, iteration) unit, plus each attempt's result for the receipt bridge.</summary>

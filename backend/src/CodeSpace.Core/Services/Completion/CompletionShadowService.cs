@@ -237,7 +237,7 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
     {
         if (CompletionIntegrity.Violations(composed.Rejections, composed.ContractErrors, structural.Requirements) is { Count: > 0 }) return false;
 
-        return structural.Profile is not { } profile || UpstreamStageTrace.MissingRequired(profile, composed.ExercisedUpstreamStages).Count == 0;
+        return structural.Profile is not { } profile || UpstreamStageTrace.MissingRequired(profile, composed.ExercisedUpstreamStages, composed.NotApplicableUpstream).Count == 0;
     }
 
     /// <summary>

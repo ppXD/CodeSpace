@@ -120,7 +120,7 @@ public sealed class CompletionTerminalAuthority : ICompletionTerminalAuthority, 
         // profile declares Required — an un-staked contract, a plan-less tape, an attempt-less run, or fresh work
         // nothing ever integrated parks naming the exact stage(s). The completion-side six stages are the
         // decision's own conjuncts; this gate closes the four the decider cannot see.
-        if (decision == TerminalDecision.CleanSuccess && UpstreamStageTrace.MissingRequired(profile, composed.ExercisedUpstreamStages) is { Count: > 0 } missingStages)
+        if (decision == TerminalDecision.CleanSuccess && UpstreamStageTrace.MissingRequired(profile, composed.ExercisedUpstreamStages, composed.NotApplicableUpstream) is { Count: > 0 } missingStages)
         {
             _logger.LogWarning("Terminal authority refused a CleanSuccess for run {RunId} — mode '{Mode}' requires stage(s) with no evidence: {Stages}", workflowRunId, mode, string.Join(", ", missingStages));
 

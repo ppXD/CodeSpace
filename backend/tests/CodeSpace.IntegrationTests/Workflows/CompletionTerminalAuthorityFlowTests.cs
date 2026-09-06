@@ -1,7 +1,9 @@
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Completion;
+using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
@@ -10,6 +12,7 @@ using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace CodeSpace.IntegrationTests.Workflows;
 
@@ -167,6 +170,44 @@ public sealed class CompletionTerminalAuthorityFlowTests
         arbitration.Decision.ShouldBe(TerminalDecision.Park);
         arbitration.Reason!.ShouldContain("Integrate", customMessage: "the park must name the exact missing stage");
         arbitration.Reason!.ShouldContain("mode 'supervisor'", customMessage: "…and the profile it was judged against");
+    }
+
+    [Theory]
+    [InlineData(false, TerminalDecision.CleanSuccess)]   // patch-only: the policy put Integrate out of reach — nobody owes it
+    [InlineData(true, TerminalDecision.Park)]            // the SAME tape on a repository that DID reach a branch still owes it
+    public async Task A_patch_only_runs_completed_stop_finishes_while_a_publish_permitting_one_still_parks(bool pushed, TerminalDecision expected)
+    {
+        // Audit D nail 1's second half. A PATCH-ONLY repository captures its work as branchless patch manifests BY
+        // POLICY, so no merge head and no run-level Integration row can EVER exist — and the Integrate cell read
+        // that as "missing" and parked the run's honest `completed` stop forever, with no answer from inside the run
+        // able to change it. The stage reads NOT APPLICABLE here, and ONLY here: flip the same run's ledger to a
+        // branch that arrived and the identical claim is refused again, so #1762/#1771/#1774's fragmented-delivery
+        // park (the test above) keeps its full force on every repository that permits a push.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunningRunAsync(teamId, userId, mode: "Enforced");
+        var attemptId = await SeedGradedTapeAsync(runId, teamId, acceptancePassed: true, merged: false, adjudicatedPolicySkip: true);
+        var repositoryId = await SeedRepositoryAsync(teamId);
+        await SeedRunScopedAgentManifestAsync(teamId, runId, attemptId, repositoryId, pushed);
+        await StakeAsync(runId, teamId, "acceptance:s1", ContractKinds.Acceptance);
+        await StakeAsync(runId, teamId, "output:s1", ContractKinds.Output);
+
+        using var scope = _fixture.BeginScope();
+        var arbitration = await scope.Resolve<ICompletionTerminalAuthority>().ArbitrateAsync(runId, teamId, "Enforced", WorkflowRunStatus.Success, CancellationToken.None);
+
+        arbitration.Decision.ShouldBe(expected);
+        arbitration.Status.ShouldBe(pushed ? WorkflowRunStatus.Suspended : WorkflowRunStatus.Success);
+
+        if (pushed) arbitration.Reason!.ShouldContain("Integrate", customMessage: "a run that reached a branch was never policy-bounded — the stage is still owed and still named");
+
+        // The recital the decider reads mid-run must agree with the arbitration it is predicting, in BOTH arms.
+        var composed = await scope.Resolve<ICompletionAssessmentComposer>().ComposeIfStoppedNowAsync(runId, teamId, CancellationToken.None);
+        var mode = await RunModeReader.DeriveAsync(scope.Resolve<CodeSpaceDbContext>(), runId, teamId, CancellationToken.None);
+        var recital = Core.Services.Supervisor.Deciders.SupervisorStopNowRecital.Render(composed?.Assessment, composed?.ExercisedUpstreamStages, scope.Resolve<IModeProfileRegistry>().Resolve(mode), composed!.Mode, composed.NotApplicableUpstream);
+
+        recital!.Contains("integration not applicable — patch-only policy; 1 patch delivered.", StringComparison.Ordinal).ShouldBe(!pushed,
+            "the model must be told the stage is unreachable, never steered to land work it cannot");
+        recital.Contains(Core.Services.Supervisor.Deciders.SupervisorStopNowRecital.RefusalLead, StringComparison.Ordinal).ShouldBe(pushed,
+            "the refusal warning renders exactly when the authority raises it — never over a stage nobody owes");
     }
 
     /// <summary>
@@ -489,7 +530,8 @@ public sealed class CompletionTerminalAuthorityFlowTests
     }
 
     /// <summary>The canonical graded supervisor tape: plan → spawn → merge → stop. <paramref name="merged"/> false drops the merge decision — the exact tape P4's stage gate must refuse (fresh spawned work nothing ever integrated). <paramref name="unverifiedResolveAfterMerge"/> appends an UNVERIFIED resolve between the merge and the stop — the live shape whose stale barrier hid the merge that did land.</summary>
-    private async Task<Guid> SeedGradedTapeAsync(Guid runId, Guid teamId, bool acceptancePassed, bool merged = true, bool unverifiedResolveAfterMerge = false)
+    /// <summary><paramref name="adjudicatedPolicySkip"/> inserts the delivery gate's OWN answered card recording a publish-policy skip — the durable record that a human was shown this repository's patch-only conflict and ruled on it, minted in the shape <c>SupervisorGateAdjudication.IntoAskHuman</c> writes.</summary>
+    private async Task<Guid> SeedGradedTapeAsync(Guid runId, Guid teamId, bool acceptancePassed, bool merged = true, bool unverifiedResolveAfterMerge = false, bool adjudicatedPolicySkip = false)
     {
         var attemptId = Guid.NewGuid();
         var planId = Guid.NewGuid();
@@ -507,6 +549,9 @@ public sealed class CompletionTerminalAuthorityFlowTests
                 $$$"""{"integration":{"status":"integrated","integratedBranch":"codespace/integration/{{{runId:N}}}"}}""");
 
         var sequence = merged ? 4 : 3;
+
+        if (adjudicatedPolicySkip)
+            await SeedAnsweredPolicySkipCardAsync(runId, teamId, sequence++);
 
         if (unverifiedResolveAfterMerge)
             await SeedDecisionAsync(runId, teamId, sequence++, SupervisorDecisionKinds.Resolve, "{}", "{}");
@@ -539,6 +584,40 @@ public sealed class CompletionTerminalAuthorityFlowTests
             Id = Guid.NewGuid(), TeamId = teamId, Kind = PublishManifestKind.Agent, AgentRunId = agentRunId, RepositoryId = repositoryId,
             RepositoryAlias = "primary", Branch = "codespace/agent/s1", BaseSha = "b1", CommitSha = "c1",
             PublishStateValue = PublishState.Pushed,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>The delivery gate's own ANSWERED card for a publish-policy skip — question under the gate's pinned prefix, structured blocker under the shared reason node, a human answer on the outcome.</summary>
+    private async Task SeedAnsweredPolicySkipCardAsync(Guid runId, Guid teamId, int sequence)
+    {
+        var question = SupervisorDeliveryGate.QuestionPrefix + "the required pull request was skipped by policy (primary: the repository requires patch-only publishing)";
+        var reason = new SupervisorDeliveryGateReason { Kind = SupervisorDeliveryGateReason.PolicySkipped, Aliases = new[] { "primary" } };
+
+        var payload = JsonNode.Parse(JsonSerializer.Serialize(new SupervisorAskHumanPayload { Question = question }, AgentJson.Options))!.AsObject();
+        payload[SupervisorGateAdjudication.ReasonNode] = JsonSerializer.SerializeToNode(reason, AgentJson.Options);
+
+        await SeedDecisionAsync(runId, teamId, sequence, SupervisorDecisionKinds.AskHuman, payload.ToJsonString(AgentJson.Options),
+            JsonSerializer.Serialize(new { question, askHumanToken = "tok", answer = "patch-only is deliberate - finish without the pull request" }, AgentJson.Options));
+    }
+
+    /// <summary>The BY-CHOICE branchless row <c>AgentRunExecutor</c> writes when the publish guard chain kept a captured diff off a branch: PatchOnly, no branch, and — the load-bearing detail — no <c>PublishError</c>. <paramref name="pushed"/> flips it to the publish-permitting shape the SAME tape must still be refused over.</summary>
+    private async Task SeedRunScopedAgentManifestAsync(Guid teamId, Guid runId, Guid agentRunId, Guid repositoryId, bool pushed)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.PublishManifest.Add(new PublishManifest
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, Kind = PublishManifestKind.Agent, WorkflowRunId = runId, AgentRunId = agentRunId, RepositoryId = repositoryId,
+            RepositoryAlias = "primary", BaseSha = "b1", ChangedFileCount = 1,
+            // The captured diff's artifact — production offloads it BEFORE the guard chain decides whether to push
+            // (I1 holds regardless), so it is present on both shapes. Without it the output obligation would never
+            // settle and this test would measure the artifact dimension instead of the stage gate it is about.
+            PatchArtifactId = Guid.NewGuid(),
+            Branch = pushed ? "codespace/agent/s1" : null,
+            CommitSha = pushed ? "c1" : null,
+            PublishStateValue = pushed ? PublishState.Pushed : PublishState.PatchOnly,
+            Summary = pushed ? null : "the repository requires patch-only publishing",
         });
         await db.SaveChangesAsync();
     }
