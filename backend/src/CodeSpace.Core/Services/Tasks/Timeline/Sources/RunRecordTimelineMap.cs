@@ -100,6 +100,12 @@ public static class RunRecordTimelineMap
             // copy — "Review skipped" + the machine-readable reason the critic recorded.
             WorkflowRunRecordTypes.ReviewSkipped => Event(r, "Review skipped", TimelineSeverity.Warning, TimelineLevel.Milestone, ReadString(r, "reason")),
 
+            // The sibling of review.skipped for the review that RAN, and a MILESTONE for the same reason: nothing
+            // failed at the engine level, but whether an independent reviewer ACCEPTED the run's output is the story.
+            // It was mapped by nothing, so the one beat that records what a review DECIDED was invisible on the
+            // timeline while its "I did not run" sibling was not — the strongest evidence, the quietest row.
+            WorkflowRunRecordTypes.ReviewCompleted => ReviewCompletedEvent(r),
+
             // An operator force-resolved a stranded wait — a manual intervention that explains WHY a parked run resumed,
             // so it's a story MILESTONE (Warning-toned: it's an override of the normal signal path).
             WorkflowRunRecordTypes.WaitReissued  => Event(r, "Wait re-issued", TimelineSeverity.Warning, TimelineLevel.Milestone, ReadString(r, "wait_kind")),
@@ -127,6 +133,12 @@ public static class RunRecordTimelineMap
 
         return Event(r, title, severity, TimelineLevel.Detail, ModelCallSummary(r));
     }
+
+    /// <summary>A review that RAN reads as its own VERDICT: Success "Review passed" for an approval, Warning "Review flagged" for a rejection — the two say opposite things about the result, so they can never share one word. The reviewer's own <c>reason</c> rides the summary. A malformed / half-written beat reads as a FLAG, the same conservative direction the Room's own reader takes on the same bytes.</summary>
+    private static RunTimelineEvent ReviewCompletedEvent(WorkflowRunRecord r) =>
+        ReadTrue(r, "approved")
+            ? Event(r, "Review passed", TimelineSeverity.Success, TimelineLevel.Milestone, ReadString(r, "reason"))
+            : Event(r, "Review flagged", TimelineSeverity.Warning, TimelineLevel.Milestone, ReadString(r, "reason"));
 
     /// <summary>The provider stop reason off the completion's nested <c>usage.finishReason</c> — null when absent/malformed (a usage-silent call reads as a clean stop, never a false truncation).</summary>
     private static string? ReadUsageFinishReason(WorkflowRunRecord r)
@@ -224,6 +236,10 @@ public static class RunRecordTimelineMap
 
     private static string? ReadString(WorkflowRunRecord r, string prop) =>
         Read(r, prop, e => e.ValueKind == JsonValueKind.String ? e.GetString() : null);
+
+    /// <summary>Whether <paramref name="prop"/> is JSON <c>true</c>. Absent / malformed / any other kind reads FALSE — never an accidental affirmative for a beat that says nothing.</summary>
+    private static bool ReadTrue(WorkflowRunRecord r, string prop) =>
+        Read<bool>(r, prop, e => e.ValueKind == JsonValueKind.True) is true;
 
     private static int? ReadInt(WorkflowRunRecord r, string prop) =>
         Read(r, prop, e => e.ValueKind == JsonValueKind.Number && e.TryGetInt32(out var n) ? n : (int?)null);
