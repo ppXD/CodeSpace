@@ -574,6 +574,118 @@ public class RoomProjectorFlowTests
     }
 
     [Fact]
+    public async Task One_branchs_APPROVED_review_cannot_outrank_a_siblings_FLAG()
+    {
+        // The defect: a run is ONE ledger but a review is per UNIT — every fanned-out branch reviews its own output
+        // and writes its own review.completed beat onto this same run. Reading the run's single NEWEST beat made write
+        // order the arbiter, so the branch that finished last decided the whole card: the approval below lands AFTER
+        // the flag and used to erase it.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Two branches, one flagged");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Split the work across branches", resultSummary: null);
+
+        var parser = await SeedAgentNodeAsync(teamId, run, summary: "Parser written.", changedFiles: new[] { "p.cs" }, nodeId: "implement-parser", goal: "Implement the parser");
+        var migration = await SeedAgentNodeAsync(teamId, run, summary: "Migration written.", changedFiles: new[] { "m.sql" }, nodeId: "write-migration", goal: "Write the migration");
+
+        await SeedReviewVerdictAsync(run, approved: false, reason: "The parser drops the trailing field.", nodeId: "implement-parser", agentRunId: parser);
+        await SeedReviewVerdictAsync(run, approved: true, reason: "The migration is reversible.", nodeId: "write-migration", agentRunId: migration);
+
+        var result = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<FinalAnswerBlock>().Single();
+
+        result.Verified.ShouldBe(false, "a run is verified only when EVERY reviewed unit approved — one sibling's endorsement is not a verdict about the flagged one");
+        result.VerificationNote.ShouldBe("Unverified — the output review flagged Implement the parser: The parser drops the trailing field.",
+            "the card NAMES the flagged branch, so a reader of a wide fan-out knows which card to open");
+    }
+
+    [Fact]
+    public async Task Every_branchs_review_approving_is_what_verifies_a_fanned_out_run()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Two branches, both clean");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Split the work across branches", resultSummary: null);
+
+        var parser = await SeedAgentNodeAsync(teamId, run, summary: "Parser written.", changedFiles: new[] { "p.cs" }, nodeId: "implement-parser", goal: "Implement the parser");
+        var migration = await SeedAgentNodeAsync(teamId, run, summary: "Migration written.", changedFiles: new[] { "m.sql" }, nodeId: "write-migration", goal: "Write the migration");
+
+        await SeedReviewVerdictAsync(run, approved: true, reason: "Handles the trailing field.", nodeId: "implement-parser", agentRunId: parser);
+        await SeedReviewVerdictAsync(run, approved: true, reason: "The migration is reversible.", nodeId: "write-migration", agentRunId: migration);
+
+        var result = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<FinalAnswerBlock>().Single();
+
+        result.Verified.ShouldBe(true);
+        result.VerificationNote.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task A_SUPERVISOR_fan_outs_siblings_are_told_apart_though_they_share_ONE_turn_cell()
+    {
+        // A supervisor stamps its whole per-turn fan-out with ONE (NodeId, IterationKey) — `sup#turn1`, per TURN, not
+        // per agent — so the two reviews below land on the SAME ledger cell. Folding by cell would re-collapse them and
+        // hand the verdict back to the later write; the beat names the agent run its verdict is about, and that is the
+        // unit the fold reads.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Supervisor fan-out, one flagged");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Fix the importer", resultSummary: null);
+
+        var migration = Guid.NewGuid();
+        var parser = Guid.NewGuid();
+
+        await SeedPlanDecisionAsync(teamId, run, "Write the migration", "Implement the parser");
+        await SeedSubtaskSpawnDecisionAsync(teamId, run, (migration, "s0", null), (parser, "s1", null));
+        await SeedStopDecisionAsync(teamId, run, outcome: "completed", summary: "Both subtasks are done.");
+
+        await SeedReviewVerdictAsync(run, approved: false, reason: "The parser drops the trailing field.", nodeId: "sup", agentRunId: parser, iterationKey: "sup#turn1");
+        await SeedReviewVerdictAsync(run, approved: true, reason: "The migration is reversible.", nodeId: "sup", agentRunId: migration, iterationKey: "sup#turn1");
+
+        var result = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<FinalAnswerBlock>().Single();
+
+        result.Verified.ShouldBe(false, "the sibling's later approval is a verdict about a DIFFERENT unit — sharing a turn cell does not make it this one's");
+        result.VerificationNote.ShouldBe("Unverified — the output review flagged Implement the parser: The parser drops the trailing field.");
+    }
+
+    [Fact]
+    public async Task A_supervisor_stop_that_recorded_NO_grade_falls_through_to_its_units_rather_than_to_silence()
+    {
+        // The defect: acceptance was read off the stop ALONE the moment a stop existed, so a supervisor that stopped
+        // without folding a run-level grade — over a unit its own check had REJECTED — left acceptance null. The card
+        // then read "Unverified — no check ran on this result" about a run where a check ran and refused the work,
+        // which is the same over-claim as a green chip, only quieter.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Stopped without grading");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Fix the importer", resultSummary: null);
+
+        await SeedPlanDecisionAsync(teamId, run, "Write the migration", "Implement the parser");
+        await SeedSubtaskSpawnDecisionAsync(teamId, run, (Guid.NewGuid(), "s0", true), (Guid.NewGuid(), "s1", false));
+        await SeedStopDecisionAsync(teamId, run, outcome: "completed", summary: "Both subtasks are done.");   // NO acceptancePassed — the stop graded nothing
+
+        var result = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<FinalAnswerBlock>().Single();
+
+        result.Degraded.ShouldBeTrue("a unit's check REJECTED it — the ungraded stop is an absence at the run level, not an acquittal at the unit level");
+        result.DegradedReason.ShouldBe("Checks failed: Implement the parser", "the card names the unit whose check refused it");
+        result.VerificationNote.ShouldNotBe("Unverified — no check ran on this result", "a check ran; saying otherwise erases the very verdict the card is degrading on");
+    }
+
+    [Fact]
+    public async Task A_supervisor_stop_that_DID_grade_still_owns_the_verdict()
+    {
+        // Byte-identity pin for the untouched lane: where the stop recorded its own grade, that grade is the run's
+        // verdict exactly as before — the per-unit fold is the fallback for its ABSENCE, never an override.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Stopped and graded");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Fix the importer", resultSummary: null);
+
+        await SeedPlanDecisionAsync(teamId, run, "Write the migration", "Implement the parser");
+        await SeedSubtaskSpawnDecisionAsync(teamId, run, (Guid.NewGuid(), "s0", true), (Guid.NewGuid(), "s1", false));
+        await SeedStopDecisionAsync(teamId, run, outcome: "completed", summary: "Both subtasks are done.", acceptancePassed: true);
+
+        var result = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<FinalAnswerBlock>().Single();
+
+        result.Degraded.ShouldBeFalse("the head's own grade over the units it KEPT is the supervisor lane's verdict — the rejected unit was withheld from it");
+        result.DegradedReason.ShouldBeNull();
+        result.Verified.ShouldBe(true);
+    }
+
+    [Fact]
     public async Task A_plan_map_run_whose_every_branch_PASSED_stays_green_and_verified()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -1217,7 +1329,49 @@ public class RoomProjectorFlowTests
         foreach (var (agentRunId, _) in agents)
             db.AgentRun.Add(new AgentRun
             {
-                Id = agentRunId, TeamId = teamId, WorkflowRunId = runId, NodeId = "sup", IterationKey = "sup",
+                Id = agentRunId, TeamId = teamId, WorkflowRunId = runId, NodeId = "sup", IterationKey = "sup#turn1",
+                Harness = "codex-cli", Status = AgentRunStatus.Succeeded, TaskJson = "{}",
+                CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId,
+            });
+
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>A supervisor SPAWN staged against the plan's subtask ids, so each agent inherits that subtask's title as its display name (the same join <c>SupervisorAgentAllocation</c> does in production), with each folded <c>agentResult</c> carrying its per-unit objective GRADE — or, for a null one, none at all. Seed the matching plan with <see cref="SeedPlanDecisionAsync"/> first: its subtasks are ids <c>s0…sN</c> in order.</summary>
+    private async Task SeedSubtaskSpawnDecisionAsync(Guid teamId, Guid runId, params (Guid AgentRunId, string SubtaskId, bool? AcceptancePassed)[] agents)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+
+        var payload = JsonSerializer.Serialize(new { subtaskIds = agents.Select(a => a.SubtaskId).ToArray() });
+        var outcome = JsonSerializer.Serialize(new
+        {
+            agentCount = agents.Length,
+            agentRunIds = agents.Select(a => a.AgentRunId).ToArray(),
+            agentResults = agents.Select(a => new
+            {
+                agentRunId = a.AgentRunId,
+                status = "Succeeded",
+                changedFiles = new[] { $"{a.SubtaskId}.cs" },
+                summary = $"Worked {a.SubtaskId}",
+                acceptancePassed = a.AcceptancePassed,
+                acceptanceDetail = a.AcceptancePassed is not { } passed ? null : passed ? "tests-passed" : "tests-failed-exit-1",
+            }).ToArray(),
+        });
+
+        db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId,
+            DecisionKind = SupervisorDecisionKinds.Spawn, IdempotencyKey = $"spawn:{Guid.NewGuid():N}", InputHash = new string('0', 64),
+            Status = SupervisorDecisionStatus.Succeeded, PayloadJson = payload, OutcomeJson = outcome,
+            CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        foreach (var (agentRunId, _, _) in agents)
+            db.AgentRun.Add(new AgentRun
+            {
+                Id = agentRunId, TeamId = teamId, WorkflowRunId = runId, NodeId = "sup", IterationKey = "sup#turn1",
                 Harness = "codex-cli", Status = AgentRunStatus.Succeeded, TaskJson = "{}",
                 CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId,
             });
@@ -1318,17 +1472,16 @@ public class RoomProjectorFlowTests
         await db.SaveChangesAsync();
     }
 
-    /// <summary>Stamp a supervisor STOP decision with its { stopped, outcome, summary } outcome — the terminal verb that drives the RESULT card. A non-success outcome (no-decision / no-model) marks a degraded give-up stop. <paramref name="acceptancePassed"/> folds the objective acceptance grade onto the SAME outcome bytes the terminal writer does (<c>SupervisorOutcome.AppendAcceptanceGrade</c>); null leaves the stop ungraded.</summary>
-    /// <summary>The OUTPUT review's own recorded verdict on the run's ledger — the <c>review.completed</c> beat the executor writes for BOTH an approval and a flag, and the only durable trace that says what a review DECIDED.</summary>
-    private async Task SeedReviewVerdictAsync(Guid runId, bool approved, string reason)
+    /// <summary>The OUTPUT review's own recorded verdict on the run's ledger — the <c>review.completed</c> beat the executor writes for BOTH an approval and a flag, and the only durable trace that says what a review DECIDED. <paramref name="agentRunId"/> names the unit the verdict is about (the beat's own key); <paramref name="nodeId"/> / <paramref name="iterationKey"/> are the CELL it lands on, which a supervisor's whole per-turn fan-out SHARES.</summary>
+    private async Task SeedReviewVerdictAsync(Guid runId, bool approved, string reason, string nodeId = "agent", Guid? agentRunId = null, string iterationKey = "")
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
 
         db.WorkflowRunRecord.Add(new WorkflowRunRecord
         {
-            Id = Guid.NewGuid(), RunId = runId, RecordType = WorkflowRunRecordTypes.ReviewCompleted, NodeId = "agent", IterationKey = "", OccurredAt = DateTimeOffset.UtcNow,
-            PayloadJson = JsonSerializer.Serialize(new { kind = LlmStructuredCritic.OutputReviewCallKind, approved, reason }),
+            Id = Guid.NewGuid(), RunId = runId, RecordType = WorkflowRunRecordTypes.ReviewCompleted, NodeId = nodeId, IterationKey = iterationKey, OccurredAt = DateTimeOffset.UtcNow,
+            PayloadJson = JsonSerializer.Serialize(new { kind = LlmStructuredCritic.OutputReviewCallKind, agentRunId, approved, reason }),
         });
         await db.SaveChangesAsync();
     }
@@ -1347,6 +1500,7 @@ public class RoomProjectorFlowTests
         await db.SaveChangesAsync();
     }
 
+    /// <summary>Stamp a supervisor STOP decision with its { stopped, outcome, summary } outcome — the terminal verb that drives the RESULT card. A non-success outcome (no-decision / no-model) marks a degraded give-up stop. <paramref name="acceptancePassed"/> folds the objective acceptance grade onto the SAME outcome bytes the terminal writer does (<c>SupervisorOutcome.AppendAcceptanceGrade</c>); null leaves the stop ungraded.</summary>
     private async Task SeedStopDecisionAsync(Guid teamId, Guid runId, string outcome, string summary, bool? acceptancePassed = null, bool judgedSummary = false)
     {
         using var scope = _fixture.BeginScope();
