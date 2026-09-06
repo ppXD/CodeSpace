@@ -1,3 +1,4 @@
+using System.Text.Json;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Llm;
@@ -154,9 +155,64 @@ public sealed class RealModelRunClassifierTests
     [InlineData(AgentRunStatus.Running, "", false)]
     public void Only_output_bearing_terminal_runs_are_inspectable_by_behavioral_gates(AgentRunStatus status, string exitReason, bool expected)
     {
+        // No reply persisted on any of these — status alone decides, exactly as before.
         var run = new AgentRun { Status = status, ResultJson = $"{{\"exitReason\":\"{exitReason}\"}}" };
 
         RealModelRunClassifier.HasInspectableModelReply(run).ShouldBe(expected);
+    }
+
+    /// <summary>
+    /// The reply the status-only rule threw away. A run that RAN, REPLIED, and then failed its own deliverable is the
+    /// single most gate-relevant outcome there is — and it arrived as
+    /// <c>status=Failed; exitReason=acceptance-failed; error=…artifact-missing: ANSWER.md</c>, was called "no
+    /// inspectable reply", and became a non-gating skip. That contradicts this class's own premise: a gate that
+    /// buckets a ran-but-failed run as infra cannot red on the regression class it exists to catch.
+    ///
+    /// <para>Both directions, because the fix must not disarm the infra skip: a reply the GATEWAY ate (a TimedOut run,
+    /// an announced 429) stays a skip however much text it left behind, and a run that produced no words at all is
+    /// still nothing to inspect.</para>
+    /// </summary>
+    [Theory]
+    // ── RAN and REPLIED → a GENUINE miss the gate must red on, whatever the terminal status says ──
+    [InlineData(AgentRunStatus.Failed, "acceptance-failed", "the answer, in full: a mutex is owned, a semaphore counts", "acceptance failed — artifact-missing: ANSWER.md", true)]
+    [InlineData(AgentRunStatus.Failed, "non-zero-exit", "here is the answer the agent wrote", "claude exited with code 1", true)]
+    [InlineData(AgentRunStatus.NeedsReview, "output-flagged", "the reply the critic flagged", null, true)]
+    [InlineData(AgentRunStatus.Cancelled, "cancelled", "the partial answer written before the cancel", null, true)]
+    // ── The GATEWAY ate it → still a non-gating skip, however much text survived ──
+    [InlineData(AgentRunStatus.TimedOut, "timed-out", "a partial answer cut off mid-", "the agent run exceeded its time budget", false)]
+    [InlineData(AgentRunStatus.Failed, "non-zero-exit", "a partial answer", "API Error: 429 rate limited", false)]
+    [InlineData(AgentRunStatus.Failed, "executor-error", "", "AgentOperatingContract.Compose threw", false)]
+    // ── No words at all → nothing to inspect, as before ──
+    [InlineData(AgentRunStatus.Failed, "acceptance-failed", "", "acceptance failed — artifact-missing: ANSWER.md", false)]
+    [InlineData(AgentRunStatus.Failed, "acceptance-failed", "   ", "acceptance failed", false)]
+    public void A_run_that_replied_and_then_failed_its_deliverable_is_a_miss_not_an_infra_skip(AgentRunStatus status, string exitReason, string summary, string? error, bool expected)
+    {
+        var run = new AgentRun
+        {
+            Status = status,
+            Error = error,
+            ResultJson = JsonSerializer.Serialize(new { exitReason, summary }),
+        };
+
+        RealModelRunClassifier.HasInspectableModelReply(run).ShouldBe(expected,
+            customMessage: $"status={status}, exitReason={exitReason}, summary='{summary}', error='{error ?? "(none)"}' — a reply the model actually produced must reach the gate unless a MACHINE marker names the failure environmental");
+    }
+
+    /// <summary>A reply is a reply wherever the harness put it: the final-message slot or the conversation it came from. Reading only one of them would make the rule depend on which harness ran.</summary>
+    [Theory]
+    [InlineData("summary")]
+    [InlineData("transcript")]
+    [InlineData("sessionTranscript")]
+    public void Any_reply_bearing_result_field_makes_a_failed_run_inspectable(string field)
+    {
+        var run = new AgentRun
+        {
+            Status = AgentRunStatus.Failed,
+            Error = "acceptance failed — artifact-missing: ANSWER.md",
+            ResultJson = $$"""{"exitReason":"acceptance-failed","{{field}}":"the model's words"}""",
+        };
+
+        RealModelRunClassifier.HasInspectableModelReply(run).ShouldBeTrue($"'{field}' carries the model's own output — a gate that reads only one slot skips whichever harness fills a different one");
     }
 
     [Fact]

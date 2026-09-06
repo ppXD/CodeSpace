@@ -66,13 +66,25 @@ public sealed class RealModelSpecPreviewE2ETests
             if (result.Suggestion is not { } suggestion)
                 return (false, $"{Provider} '{live.Model}': the compiler returned NO suggestion at all, so nothing about abstention was observed — check that the live model is the team's only structured option");
 
-            // THE gating assertion. Criteria and rationale are prose the operator reads and edits; a check is argv the
+            // THE gating verdict. Criteria and rationale are prose the operator reads and edits; a check is argv the
             // launch EXECUTES, so it is the one field where a confident guess does damage.
-            suggestion.AcceptanceChecks.ShouldBeEmpty(
-                $"the live model invented an executable acceptance check with no repository to confirm it against: [{string.Join(" | ", suggestion.AcceptanceChecks)}]. "
-              + $"Its own rationale was: '{suggestion.Rationale}'. A wrong argv does not go unused — it fails, mints Failed/InfraUnknown noise, and withholds work that was good.");
+            //
+            // RETURNED as a failed attempt, never THROWN. AssessLiveBestOfNAsync catches gateway infra only — a
+            // non-infra exception PROPAGATES by design (RealModelGate.cs, pinned in RealModelGateTests) — so a
+            // ShouldAssertException here escapes the gate on attempt #1 and the declared N attempts never run: the
+            // best-of-N budget is silently zero and one unlucky sample reds the blessed wire. Model variance is
+            // exactly what this gate's capability floor exists to absorb, and it can only absorb an attempt that
+            // comes back as (false, verdict) — the same shape the arms above already return.
+            if (suggestion.AcceptanceChecks.Count > 0)
+                return (false, $"{Provider} '{live.Model}': the live model invented an executable acceptance check with no repository to confirm it against: [{string.Join(" | ", suggestion.AcceptanceChecks)}]. "
+                             + $"Its own rationale was: '{suggestion.Rationale}'. A wrong argv does not go unused — it fails, mints Failed/InfraUnknown noise, and withholds work that was good.");
 
-            suggestion.Rationale.ShouldNotBeNullOrWhiteSpace("a suggestion the operator cannot interrogate is worse than none — the card shows this line verbatim");
+            if (string.IsNullOrWhiteSpace(suggestion.Rationale))
+                return (false, $"{Provider} '{live.Model}': a suggestion the operator cannot interrogate is worse than none — the card shows this line verbatim, and the model wrote nothing on it");
+
+            // THROWS deliberately, and must keep throwing: the compiler CLAMPS this field (TaskSpecCompiler.cs:146),
+            // so an out-of-range value is a CODE regression in the mapping, never model variance — the one shape
+            // best-of-N must not retry past.
             suggestion.Confidence.ShouldBeInRange(0d, 1d, "the FE de-emphasizes low-confidence cards, so an out-of-range value would render nonsense");
 
             return (true, $"{Provider} '{live.Model}': ungrounded compile ABSTAINED from executable checks (criteria={suggestion.AcceptanceCriteria.Count}, confidence={suggestion.Confidence:0.00}) — rationale: '{Clip(suggestion.Rationale)}'");
@@ -100,16 +112,19 @@ public sealed class RealModelSpecPreviewE2ETests
             // does not already exclude. The blank-bullet check that used to stand here could never fail: the compiler
             // filters whitespace before it builds the suggestion, and an all-must-hold assertion over an empty list
             // passes vacuously — so a completely empty card sailed through the one assertion meant to catch it.
-            suggestion.AcceptanceCriteria.Count.ShouldBeGreaterThan(0,
-                "the compiler returned a card with no definition-of-done bullets at all; criteria need no repository to write, so an empty list here is the model declining a question it could answer");
+            // Each verdict below is RETURNED, not thrown, for the reason spelled out in the sibling fact: a
+            // ShouldAssertException escapes AssessLiveBestOfNAsync and takes the whole N-attempt budget with it.
+            if (suggestion.AcceptanceCriteria.Count == 0)
+                return (false, $"{Provider} '{live.Model}': the compiler returned a card with no definition-of-done bullets at all; criteria need no repository to write, so an empty list here is the model declining a question it could answer");
 
             // The SAME floor its sibling fact measures. Without this the two contradict each other: a model that
             // invented `["npm","test"]` against a repository-less goal FAILED the abstention fact and PASSED here,
             // so the pair could report a green wire over exactly the behaviour one of them exists to forbid.
-            suggestion.AcceptanceChecks.ShouldBeEmpty(
-                $"no repository is bound, so any executable check is invented — got [{string.Join(", ", suggestion.AcceptanceChecks)}]");
+            if (suggestion.AcceptanceChecks.Count > 0)
+                return (false, $"{Provider} '{live.Model}': no repository is bound, so any executable check is invented — got [{string.Join(", ", suggestion.AcceptanceChecks)}]");
 
-            suggestion.TargetBranch.ShouldBeNull("the goal names no branch, so inventing one would silently retarget the operator's pull request");
+            if (suggestion.TargetBranch is not null)
+                return (false, $"{Provider} '{live.Model}': the goal names no branch, so inventing '{suggestion.TargetBranch}' would silently retarget the operator's pull request");
 
             return (true, $"{Provider} '{live.Model}': compiled criteria={suggestion.AcceptanceCriteria.Count}, checks={suggestion.AcceptanceChecks.Count}, openPr={suggestion.OpenPullRequest?.ToString() ?? "none"}, confidence={suggestion.Confidence:0.00}");
         });

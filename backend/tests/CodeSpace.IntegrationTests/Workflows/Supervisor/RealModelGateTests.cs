@@ -1134,6 +1134,35 @@ public sealed class RealModelGateTests
         await Should.ThrowAsync<InvalidOperationException>(() => RealModelGate.AssessLiveBestOfNAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
     }
 
+    /// <summary>
+    /// The COST of that propagation, stated as a fact so a closure author can see it: an attempt that throws its own
+    /// <c>ShouldXxx</c> assertion escapes the gate on attempt #1 and the rest of the declared budget NEVER RUNS. The
+    /// gate is right to propagate — a non-infra exception is a real bug and is never swallowed, which the arms above
+    /// and <see cref="RealModelGate.AssessLiveAsync"/>'s deliberate <c>ShouldAssertException</c> exclusion both pin —
+    /// so the obligation sits on the DRIVE CLOSURE: a model-variance miss must come back as <c>(false, verdict)</c>,
+    /// which is the only shape best-of-N can retry.
+    ///
+    /// <para>Live: <c>RealModelSpecPreviewE2ETests</c> gated its abstention fact with <c>ShouldBeEmpty</c> inside the
+    /// closure, so its declared N-attempt capability floor was silently ZERO and one off-sample could red the blessed
+    /// wire. Both of its arms return the tuple now.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_drive_closure_that_THROWS_its_assertion_spends_no_further_attempt()
+    {
+        // Attempt #1 throws the way a `ShouldBeEmpty` inside a closure does; attempt #2 would have passed.
+        var (drive, calls) = BoolSequence(new ShouldAssertException("the live model invented an executable acceptance check"), true);
+
+        // try/catch, not Should.ThrowAsync: Shouldly deliberately lets its OWN ShouldAssertException through rather
+        // than catching it, so the escape this test is about can only be observed directly.
+        ShouldAssertException? thrown = null;
+        try { await RealModelGate.AssessLiveBestOfNAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null); }
+        catch (ShouldAssertException ex) { thrown = ex; }
+
+        thrown.ShouldNotBeNull("the closure's own assertion must escape the gate — a non-infra exception is never swallowed");
+        thrown!.Message.ShouldContain("invented an executable acceptance check", customMessage: "it is the CLOSURE's own assertion that escapes, not a gate verdict — so the gate never got to report an attempt at all");
+        calls().ShouldBe(1, "the throw escaped the loop, so the second declared attempt never ran — a closure that throws has a best-of-N budget of ZERO, which is why a model-variance miss must be RETURNED as (false, verdict). The RETURNED form's own budget is pinned by The_eval_best_of_N_passes_on_any_Ok_among_the_N_attempts.");
+    }
+
     [Fact]
     public async Task An_infra_exhausted_budget_that_still_MEASURED_a_fail_verdict_is_not_reported_as_a_skip()
     {

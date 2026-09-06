@@ -124,21 +124,44 @@ public static class RealModelRunClassifier
     /// True when a behavioral gate can inspect the model's persisted reply. The completion-review form of
     /// <see cref="AgentRunStatus.NeedsReview"/> deliberately remains inspectable: the completion contract can honestly
     /// park an otherwise successful reply when it ends with an unresolved question, but that does not erase the reply
-    /// or prove that a persona/skill injection failed. Other NeedsReview reasons remain non-inspectable here so a stalled,
-    /// critic-flagged, or decision-blocked run cannot borrow this narrow exception.
+    /// or prove that a persona/skill injection failed. Other NeedsReview reasons carry no reply of their own and fall
+    /// to the general rule below.
+    ///
+    /// <para><b>A reply the run FAILED over is still a reply.</b> Statuses alone used to decide this, so everything but
+    /// Succeeded / <c>needs-review</c> was "no inspectable reply" → an <c>AgentExecutionInfraException</c> → a
+    /// non-gating skip. That swallowed the single most gate-relevant outcome there is:
+    /// <c>status=Failed; exitReason=acceptance-failed; error=…artifact-missing: ANSWER.md</c> — the agent RAN, REPLIED,
+    /// and failed its own deliverable. Skipping it contradicts this class's whole premise (see the summary above): a
+    /// gate that buckets a ran-but-failed run as infra cannot red on the regression class it exists to catch.</para>
+    ///
+    /// <para>So the general rule is the one the summary states: a run whose result PERSISTED a reply is inspectable
+    /// unless some machine vocabulary names its failure environmental (<see cref="IsGatewayInfra"/> — a TimedOut run, a
+    /// harness-announced 429, a dropped connection). Only a run that produced NO reply at all, or one the gateway ate,
+    /// stays infra. Conservative in the same direction as every other arm here: an unrecognised failure that still
+    /// carries the model's words GATES.</para>
     /// </summary>
     public static bool HasInspectableModelReply(AgentRun run) => run.Status == AgentRunStatus.Succeeded
-        || run.Status == AgentRunStatus.NeedsReview && ExitReasonOf(run) == "needs-review";
+        || run.Status == AgentRunStatus.NeedsReview && ExitReasonOf(run) == "needs-review"
+        || HasPersistedModelReply(run) && !IsGatewayInfra(run);
+
+    /// <summary>The result fields a model's own words land in — its final message and the conversation it came from. Any one of them non-empty means output exists for a behavioral gate to read, whatever the run's terminal status.</summary>
+    private static bool HasPersistedModelReply(AgentRun run) =>
+        !string.IsNullOrWhiteSpace(ReadResultString(run, "summary"))
+        || !string.IsNullOrWhiteSpace(ReadResultString(run, "transcript"))
+        || !string.IsNullOrWhiteSpace(ReadResultString(run, "sessionTranscript"));
 
     /// <summary>The run's ExitReason, read from the serialized <c>AgentRunResult</c> in <see cref="AgentRun.ResultJson"/> (there is no ExitReason column on the entity). Empty when absent/unparseable.</summary>
-    public static string ExitReasonOf(AgentRun run)
+    public static string ExitReasonOf(AgentRun run) => ReadResultString(run, "exitReason");
+
+    /// <summary>One string field of the serialized <c>AgentRunResult</c>, read under either casing a serializer may have written it in. Empty when the field is absent, non-string, or the JSON is unparseable.</summary>
+    private static string ReadResultString(AgentRun run, string camelName)
     {
         if (string.IsNullOrWhiteSpace(run.ResultJson)) return "";
 
         try
         {
             using var doc = JsonDocument.Parse(run.ResultJson);
-            foreach (var name in new[] { "exitReason", "ExitReason" })
+            foreach (var name in new[] { camelName, char.ToUpperInvariant(camelName[0]) + camelName[1..] })
                 if (doc.RootElement.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String)
                     return v.GetString() ?? "";
         }

@@ -26,8 +26,22 @@ public static class SupervisorTrajectory
 {
     private static readonly Guid Brain = SupervisorDecisionGoldenScenarios.BrainModelRowId;
 
-    /// <summary>The turn cap an arc gets unless it declares its own — headroom for a replan or an ask over a 4-6 turn sound run. See <see cref="ISupervisorTrajectoryEnvironment.MaxTurns"/>.</summary>
+    /// <summary>The turn cap an arc gets unless it declares its own — headroom for a replan or an ask over a 4-6 turn sound run. Counts only turns the brain actually got to spend; see <see cref="MaxRefusedDecisions"/> and <see cref="ISupervisorTrajectoryEnvironment.MaxTurns"/>.</summary>
     public const int DefaultMaxTurns = 8;
+
+    /// <summary>
+    /// How many REFUSED decisions an attempt may absorb without spending a turn. A decision the executor refuses
+    /// outright (a spawn naming no <c>subtaskIds</c>, a retry naming no <c>subtaskId</c>) is not a decision the brain
+    /// got to make: production stages nothing, hands back a correction, and the arc is exactly where it was. Charging
+    /// it against <see cref="DefaultMaxTurns"/> measures the malformed turn, not the judgment — the red run's
+    /// <c>[failure]</c> arc burned turn #1 on a refused spawn and then hit the cap at exactly 8.
+    ///
+    /// <para>Bounded SEPARATELY rather than ignored, because "not charged" must not mean "free forever": a brain that
+    /// only ever emits refusals authored no action the server would take, and past this budget the attempt ends as a
+    /// MISS. Two — one malformed decision plus one more after reading the correction; a brain that cannot re-author
+    /// against an explicit reason twice is not being measured on turns.</para>
+    /// </summary>
+    public const int MaxRefusedDecisions = 2;
 
     /// <summary>Drive <paramref name="decider"/> over the SUCCESS path (back-compat overload).</summary>
     public static Task<SupervisorTrajectoryResult> RunAsync(ISupervisorDecider decider, int maxTurns, CancellationToken cancellationToken) =>
@@ -38,8 +52,9 @@ public static class SupervisorTrajectory
     {
         var priors = new List<SupervisorPriorDecision>();
         var kinds = new List<string>();
+        var refusals = 0;   // decisions the executor REFUSED — bounded on their own (MaxRefusedDecisions), never charged against maxTurns
 
-        for (var turn = 0; turn < maxTurns; turn++)
+        for (var turn = 0; turn - refusals < maxTurns && refusals <= MaxRefusedDecisions; turn++)
         {
             if (cancellationToken.IsCancellationRequested) break;
 
@@ -74,12 +89,26 @@ public static class SupervisorTrajectory
 
             if (decision.IsTerminal) return new SupervisorTrajectoryResult { Kinds = kinds, ReachedStop = true, HitTurnCap = false, Ledger = priors };
 
-            priors.Add(environment.Fold(decision, turn, priors));
+            var folded = environment.Fold(decision, turn, priors);
+
+            // A REFUSED decision buys no turn. Read through the SAME production reader the decider's own correction
+            // block keys on (SupervisorOutcome.ReadRejectionReason), so what this harness calls a refusal can never
+            // disagree with what the model was told — the standing rule everywhere else in this file.
+            if (SupervisorOutcome.ReadRejectionReason(folded.OutcomeJson) is not null) refusals++;
+
+            priors.Add(folded);
         }
 
-        // Exhausted the turn cap (the brain loops) OR a deadline cancelled it — HitTurnCap distinguishes the two so the
-        // scorer names the failure precisely (a true loop vs. a slow run that never converged inside the time budget).
-        return new SupervisorTrajectoryResult { Kinds = kinds, ReachedStop = false, HitTurnCap = !cancellationToken.IsCancellationRequested, Ledger = priors };
+        // Three distinct non-stop endings, kept apart so the scorer names the failure precisely: a true loop into the
+        // turn cap, a refusal loop that never earned a turn, and a slow run that never converged inside the time budget.
+        return new SupervisorTrajectoryResult
+        {
+            Kinds = kinds,
+            ReachedStop = false,
+            HitTurnCap = !cancellationToken.IsCancellationRequested && refusals <= MaxRefusedDecisions,
+            ExhaustedRefusals = refusals > MaxRefusedDecisions,
+            Ledger = priors,
+        };
     }
 
     /// <summary>
@@ -493,6 +522,10 @@ public sealed record SupervisorTrajectoryResult
     public required IReadOnlyList<string> Kinds { get; init; }
     public required bool ReachedStop { get; init; }
     public required bool HitTurnCap { get; init; }
+
+    /// <summary>The attempt ended because more than <see cref="SupervisorTrajectory.MaxRefusedDecisions"/> decisions were REFUSED, not because it ran out of turns. Still a miss — a brain that only emits refusals authored no action the server would take — but a different one, and the verdict has to say which.</summary>
+    public bool ExhaustedRefusals { get; init; }
+
     public required IReadOnlyList<SupervisorPriorDecision> Ledger { get; init; }
 }
 
@@ -568,15 +601,29 @@ public static class SupervisorTrajectoryScore
         }
     }
 
+    /// <summary>
+    /// Why a trajectory never reached a terminal stop, named precisely. A refusal loop and a genuine turn-cap loop are
+    /// completely different bugs — one brain never authored an action the server would take, the other authored plenty
+    /// and never converged — and rendering them identically is the same defect <see cref="DescribeStagingVerbs"/>
+    /// exists to close one level down.
+    /// </summary>
+    private static string NonStopReason(SupervisorTrajectoryResult t, string trail)
+    {
+        if (t.ExhaustedRefusals)
+            return $"never stopped — more than {SupervisorTrajectory.MaxRefusedDecisions} decision(s) were REFUSED by the executor, so the brain never authored an action the server would take (refusals are not charged against the turn cap; exceeding their own budget is still a miss). Trajectory: {trail}";
+
+        if (t.HitTurnCap)
+            return $"never stopped — hit the turn cap (the brain loops / doesn't drive to completion). Trajectory: {trail}";
+
+        return $"did not reach a terminal stop within the time budget (deadline/cancellation). Trajectory: {trail}";
+    }
+
     public static (bool Ok, string Note) Score(SupervisorTrajectoryResult t)
     {
         var trail = string.Join("→", t.Kinds);
 
         if (!t.ReachedStop)
-            return (false, (t.HitTurnCap
-                ? $"never stopped — hit the turn cap (the brain loops / doesn't drive to completion). Trajectory: {trail}"
-                : $"did not reach a terminal stop within the time budget (deadline/cancellation). Trajectory: {trail}")
-                + DescribeStagingVerbs(t.Ledger));
+            return (false, NonStopReason(t, trail) + DescribeStagingVerbs(t.Ledger));
 
         // SHIP = a REAL reviewable head at the stop (a clean integration OR a verified resolution), read off the ledger by
         // the production reader — so a conflicted merge / unverified resolve / un-integrated fresh work does NOT count.

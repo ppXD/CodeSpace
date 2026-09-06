@@ -674,6 +674,55 @@ public sealed class SupervisorTrajectoryEvalTests
     }
 
     /// <summary>
+    /// A REFUSED decision is not a turn the brain got to spend. Production stages nothing for it, hands back a
+    /// correction, and leaves the arc exactly where it was — so charging it against the cap measures the malformed
+    /// decision rather than the judgment. In the red run the <c>[failure]</c> arc burned turn #1 on a spawn the
+    /// executor refused (schema-valid, no <c>subtaskIds</c>, and the repair ladder could not invent them) and then
+    /// hit the cap at exactly 8.
+    ///
+    /// <para>The tape here is the same shape, sized to the boundary: plan→spawn(refused)→spawn→merge→stop is FIVE
+    /// decisions but only FOUR the brain got to make, and the cap is four. Charged, it dies one turn short of the
+    /// stop it had already earned.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_refused_decision_is_not_charged_against_the_turn_cap()
+    {
+        var result = await SupervisorTrajectory.RunAsync(new RefusedSpawnThenConvergingDecider(), SupervisorTrajectoryEnvironments.HappyPath, maxTurns: 4, CancellationToken.None);
+
+        result.Kinds.ShouldBe(new[]
+        {
+            SupervisorDecisionKinds.Plan, SupervisorDecisionKinds.Spawn, SupervisorDecisionKinds.Spawn,
+            SupervisorDecisionKinds.Merge, SupervisorDecisionKinds.Stop,
+        }, "five decisions under a cap of four — the refused spawn is the one that must not have cost a turn");
+
+        result.ReachedStop.ShouldBeTrue("the brain reached its stop within four decisions it actually got to make");
+        result.ExhaustedRefusals.ShouldBeFalse("one refusal is inside the separate refusal budget");
+
+        var (ok, note) = SupervisorTrajectoryScore.Score(result);
+        ok.ShouldBeTrue($"a sound arc preceded by ONE refused decision must still pass — otherwise the gate scores the malformed turn instead of the brain ({note})");
+    }
+
+    /// <summary>
+    /// The other side of that boundary, and the reason refusals are BOUNDED rather than ignored: a brain that only
+    /// ever emits decisions the server refuses authored no action at all, and must still MISS. Uncharged-forever
+    /// would make an endless-refusal model unfailable.
+    /// </summary>
+    [Fact]
+    public async Task A_brain_that_only_emits_refused_decisions_still_misses()
+    {
+        var result = await SupervisorTrajectory.RunAsync(new AlwaysRefusedSpawnDecider(), SupervisorTrajectoryEnvironments.HappyPath, maxTurns: 8, CancellationToken.None);
+
+        result.ReachedStop.ShouldBeFalse();
+        result.ExhaustedRefusals.ShouldBeTrue("past its own budget the refusal loop ends the attempt");
+        result.HitTurnCap.ShouldBeFalse("it did NOT hit the turn cap — saying so would send the next reader after a loop that never happened");
+        result.Kinds.Count.ShouldBe(SupervisorTrajectory.MaxRefusedDecisions + 1, "the refusal budget bounds the attempt on its own — it must not ride to the turn cap");
+
+        var (ok, note) = SupervisorTrajectoryScore.Score(result);
+        ok.ShouldBeFalse("no action the server would take is not a trajectory that drove to completion");
+        note.ShouldContain("REFUSED", Case.Sensitive, "the verdict must name the refusal loop — a turn-cap message would point the reader at the wrong bug");
+    }
+
+    /// <summary>
     /// A tape that never OWED a unit must not read as unrecovered. The gate returned <c>recovered &amp;&amp; owed.Count == 0</c>
     /// with <c>recovered</c> flipped only by a re-dispatch overlapping something owed, so a run where nothing ever
     /// failed was VACUOUSLY false — every merge behind it came back Incomplete no matter what the brain did. That is
@@ -1148,6 +1197,37 @@ public sealed class SupervisorTrajectoryEvalTests
 
             return SupervisorOutcome.ReadSpawnSubtaskIds(spawn.PayloadJson).Where((_, i) => i < results.Count && results[i].Status != "Succeeded");
         }
+    }
+
+    /// <summary>
+    /// The converging arc with ONE refused decision at the front: plan→spawn(no subtaskIds, refused)→spawn→merge→stop.
+    /// Ledger-aware rather than turn-indexed — it re-authors the spawn once it sees the refusal, exactly as a brain
+    /// reading the executor's correction would, so the refused decision is genuinely a decision it did not get to make.
+    /// </summary>
+    private sealed class RefusedSpawnThenConvergingDecider : ISupervisorDecider
+    {
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+        {
+            var priors = context.PriorDecisions;
+            var refused = priors.Any(d => SupervisorOutcome.ReadRejectionReason(d.OutcomeJson) is not null);
+            var staged = priors.Any(d => SupervisorOutcome.ReadStagedAgentCount(d.OutcomeJson) > 0);
+
+            var (kind, payload) =
+                !priors.Any(d => d.DecisionKind == SupervisorDecisionKinds.Plan) ? (SupervisorDecisionKinds.Plan, ScriptedPayload(SupervisorDecisionKinds.Plan))
+                : !refused ? (SupervisorDecisionKinds.Spawn, "{}")   // schema-valid, names no unit — production REFUSES it and stages nothing
+                : !staged ? (SupervisorDecisionKinds.Spawn, ScriptedPayload(SupervisorDecisionKinds.Spawn))
+                : !priors.Any(d => d.DecisionKind == SupervisorDecisionKinds.Merge) ? (SupervisorDecisionKinds.Merge, "{}")
+                : (SupervisorDecisionKinds.Stop, """{"outcome":"completed"}""");
+
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = payload });
+        }
+    }
+
+    /// <summary>A brain that never authors an action the server will take — every decision is a spawn naming no unit, so every one is refused.</summary>
+    private sealed class AlwaysRefusedSpawnDecider : ISupervisorDecider
+    {
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken) =>
+            Task.FromResult(new SupervisorDecision { Kind = SupervisorDecisionKinds.Spawn, PayloadJson = "{}" });
     }
 
     /// <summary>A hasty brain that retries only ONCE then merges: plan→spawn→retry→merge→stop. Against the multi-failure environment one failure is still unrecovered at merge, so it integrates nothing clean — the scorer must fail it.</summary>
