@@ -3,12 +3,14 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.E2ETests.Infrastructure;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Sessions;
 using CodeSpace.Messages.Dtos.Sessions.Journal;
@@ -118,6 +120,29 @@ public sealed class SessionsEndpointE2ETests : IClassFixture<TaskLaunchApiFactor
         // The by-session room focuses the latest turn when no focus is given.
         var bySession = await GetAsync<RoomView>(userId, teamId, $"/api/sessions/{turn1.SessionId}/room");
         bySession.AnchorBlockId.ShouldBe("turn-2", "the session room defaults to the latest turn");
+    }
+
+    [Fact]
+    public async Task A_room_whose_turn_produced_a_file_reads_back_over_http()
+    {
+        // A repo-less run's only trace is the produced file, and the room is the one surface that reaches it. The
+        // room serializes as ONE document, so a deliverables block the polymorphic contract does not know about
+        // fails the WHOLE read mid-write — every card, not just this one. Only an HTTP read proves the wire.
+        var (userId, teamId) = await SeedTeamMembershipAsync();
+
+        var turn = await LaunchAsync(userId, teamId, "Write the report", continueSessionId: null);
+        await SeedProducedFileAsync(teamId, turn.RunId, "DELIVERABLE.md");
+
+        var response = await SendAsync(userId, teamId, $"/api/sessions/by-run/{turn.RunId}/room");
+        response.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: $"GET room failed: {(int)response.StatusCode} {await response.Content.ReadAsStringAsync()}");
+
+        var body = await response.Content.ReadAsStringAsync();
+        body.ShouldContain("\"type\":\"deliverables\"", Case.Sensitive, "the frontend switches on this exact discriminator");
+
+        var room = JsonSerializer.Deserialize<RoomView>(body, Json).ShouldNotBeNull();
+        var deliverables = room.Blocks.Concat(room.Blocks.OfType<AssistantTurnBlock>().SelectMany(t => t.Blocks))
+            .OfType<DeliverablesBlock>().ShouldHaveSingleItem();
+        deliverables.Files.ShouldHaveSingleItem().Path.ShouldBe("DELIVERABLE.md");
     }
 
     [Fact]
@@ -278,6 +303,33 @@ public sealed class SessionsEndpointE2ETests : IClassFixture<TaskLaunchApiFactor
 
         await db.SaveChangesAsync();
         return (userId, teamId);
+    }
+
+    /// <summary>Stages the ledger row a repo-less run leaves behind — the produced file the room's deliverables card reaches.</summary>
+    private async Task SeedProducedFileAsync(Guid teamId, Guid runId, string path)
+    {
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<CodeSpaceDbContext>();
+
+        var payload = Encoding.UTF8.GetBytes($"{path} {Guid.NewGuid():N}");
+        var sha = Convert.ToHexStringLower(SHA256.HashData(payload));
+        var artifactId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+
+        db.WorkflowArtifact.Add(new WorkflowArtifact
+        {
+            Id = artifactId, TeamId = teamId, Sha256 = sha, ContentType = "text/markdown",
+            SizeBytes = payload.Length, InlineBytes = payload, CreatedAt = now,
+        });
+        db.ArtifactManifest.Add(new ArtifactManifest
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, AgentRunId = Guid.NewGuid(), WorkflowRunId = runId, FenceEpoch = 1,
+            Kind = ArtifactManifestKind.Document, LogicalPath = path, ContentArtifactId = artifactId, Sha256 = sha,
+            SizeBytes = payload.Length, ContentType = "text/markdown",
+            CreatedDate = now, LastModifiedDate = now,
+        });
+
+        await db.SaveChangesAsync();
     }
 
     /// <summary>Delegates to the shared helper so the security-stamp claim cannot be forgotten here.</summary>
