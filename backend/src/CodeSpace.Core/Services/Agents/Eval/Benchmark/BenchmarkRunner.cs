@@ -32,16 +32,18 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
     private readonly IAgentRunExecutor _executor;
     private readonly Sandbox.ISandboxRunnerRegistry _runners;
     private readonly IBenchmarkGraderRegistry _graders;
+    private readonly IBenchmarkFixtureStager _stager;
 
     private readonly Workflows.Artifacts.IArtifactStore _artifacts;
     private readonly Microsoft.Extensions.Logging.ILogger<BenchmarkRunner> _logger;
 
-    public BenchmarkRunner(IAgentRunService runs, IAgentRunExecutor executor, Sandbox.ISandboxRunnerRegistry runners, IBenchmarkGraderRegistry graders, Workflows.Artifacts.IArtifactStore artifacts, Microsoft.Extensions.Logging.ILogger<BenchmarkRunner> logger)
+    public BenchmarkRunner(IAgentRunService runs, IAgentRunExecutor executor, Sandbox.ISandboxRunnerRegistry runners, IBenchmarkGraderRegistry graders, IBenchmarkFixtureStager stager, Workflows.Artifacts.IArtifactStore artifacts, Microsoft.Extensions.Logging.ILogger<BenchmarkRunner> logger)
     {
         _runs = runs;
         _executor = executor;
         _runners = runners;
         _graders = graders;
+        _stager = stager;
         _artifacts = artifacts;
         _logger = logger;
     }
@@ -57,34 +59,62 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
         // result so the cli vs cli-mcp rows can never be mislabeled relative to what the run actually did.
         var mcpFullCatalog = AgentRunExecutor.UsesFullToolCatalog(agentTask);
 
-        var (completed, formatFaultRespawns) = await RunWithFormatFaultRespawnAsync(agentTask, teamId, cancellationToken).ConfigureAwait(false);
+        var attempts = await RunWithFormatFaultRespawnAsync(task, agentTask, workspaceDirectory, teamId, cancellationToken).ConfigureAwait(false);
 
         var grade = await GradeAsync(task, workspaceDirectory, cancellationToken).ConfigureAwait(false);
 
-        grade = ApplyMcpFabricRule(grade, mode, completed);
+        grade = ApplyMcpFabricRule(grade, mode, attempts[^1]);
 
         grade = await CaptureEvidenceAsync(grade, teamId, cancellationToken).ConfigureAwait(false);
 
-        return BuildResult(task, mode, completed, grade, mcpFullCatalog, formatFaultRespawns);
+        return BuildResult(task, mode, attempts, grade, mcpFullCatalog);
     }
 
     /// <summary>
-    /// Drive the cell's agent run, buying the gateway-format-fault repair EXACTLY ONCE (see <see cref="RespawnFor"/>).
-    /// The benchmark lane builds its own <c>AgentTask</c>s and drives the executor directly, so it inherits neither the
-    /// quick lane's node-retry budget nor the supervisor's retry verdict — without this, every cell the gateway mangled
-    /// died where it stood and the whole instrument went blind while the gateway misbehaved (9/18 cells infra-dead for
-    /// 7 consecutive main runs, 2026-09). The grade is taken AFTER this returns, so it judges the attempt that actually
-    /// got a turn. The returned count is reported, never scored.
+    /// Drive the cell's agent run, buying the gateway-format-fault repair EXACTLY ONCE (see <see cref="RespawnFor"/>),
+    /// and return EVERY attempt in dispatch order (the LAST one is the graded attempt). The benchmark lane builds its
+    /// own <c>AgentTask</c>s and drives the executor directly, so it inherits neither the quick lane's node-retry budget
+    /// nor the supervisor's retry verdict — without this, every cell the gateway mangled died where it stood and the
+    /// whole instrument went blind while the gateway misbehaved (9/18 cells infra-dead for 7 consecutive main runs,
+    /// 2026-09). The grade is taken AFTER this returns, so it judges the attempt that actually got a turn.
+    ///
+    /// <para>The respawn RE-STAGES the fixture first (see <see cref="RestageWorkspace"/>) — the grade is taken over the
+    /// workspace, so without it the oracle would judge the UNION of both attempts.</para>
     /// </summary>
-    private async Task<(AgentRun Run, int Respawns)> RunWithFormatFaultRespawnAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<AgentRun>> RunWithFormatFaultRespawnAsync(BenchmarkTask task, AgentTask agentTask, string workspaceDirectory, Guid teamId, CancellationToken cancellationToken)
     {
-        var completed = await ExecuteOnceAsync(task, teamId, cancellationToken).ConfigureAwait(false);
+        var completed = await ExecuteOnceAsync(agentTask, teamId, cancellationToken).ConfigureAwait(false);
 
-        if (RespawnFor(task, completed.Error) is not { } mitigated) return (completed, 0);
+        if (RespawnFor(agentTask, completed.Error) is not { } mitigated) return new[] { completed };
 
-        _logger.LogWarning("Benchmark cell agent run {RunId} died of {Cause} — respawning ONCE on a fresh conversation with extended thinking disabled; a second fault leaves the cell infra-dead", completed.Id, Supervisor.AgentRetryCauses.GatewayFormatFault);
+        _logger.LogWarning("Benchmark cell agent run {RunId} died of {Cause} — re-staging fixture {FixtureRef} and respawning ONCE on a fresh conversation with extended thinking disabled; a second fault leaves the cell infra-dead", completed.Id, Supervisor.AgentRetryCauses.GatewayFormatFault, task.FixtureRef);
 
-        return (await ExecuteOnceAsync(mitigated, teamId, cancellationToken).ConfigureAwait(false), 1);
+        RestageWorkspace(task, workspaceDirectory);
+
+        return new[] { completed, await ExecuteOnceAsync(mitigated, teamId, cancellationToken).ConfigureAwait(false) };
+    }
+
+    /// <summary>
+    /// Reset the cell's workspace to the fixture's FAILING start-state before the respawn — the same
+    /// <see cref="IBenchmarkFixtureStager"/> seam the corpus loop stages each cell through, over the same directory.
+    ///
+    /// <para>The faulted attempt is documented as one where "the model never got a turn", but nothing ENFORCED that:
+    /// the respawn re-executed into the SAME directory and <see cref="GradeAsync"/> runs the oracle over the workspace
+    /// AFTERWARDS, so anything the first attempt wrote before the gateway killed it — a partial edit, a forged check —
+    /// was graded as the respawn's work. Wiping and re-staging makes the respawn's grade about the respawn alone.</para>
+    ///
+    /// <para>FAIL-CLOSED: a stager throw propagates, so the cell is recorded as an infra error rather than graded over a
+    /// tree we cannot vouch for — a polluted verdict is worse than a lost cell.</para>
+    /// </summary>
+    private void RestageWorkspace(BenchmarkTask task, string workspaceDirectory)
+    {
+        // GetX, not EnumerateX: the lazy walk holds the directory open while we delete out from under it, which is
+        // free to skip entries — and a leftover the wipe skipped is exactly what this method exists to remove.
+        foreach (var directory in Directory.GetDirectories(workspaceDirectory)) Directory.Delete(directory, recursive: true);
+
+        foreach (var file in Directory.GetFiles(workspaceDirectory)) File.Delete(file);
+
+        _stager.Stage(task.FixtureRef, workspaceDirectory);
     }
 
     /// <summary>Create + drive ONE agent run to its terminal row — the single production seam both the cell's first attempt and its one mitigated respawn go through, so a respawn is a real second run with its own event log, never a re-labelled first.</summary>
@@ -224,25 +254,55 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
         return await grader.GradeAsync(context, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Fold the recorded run + the grade into a result row. Duration is the run's wall-clock when both timestamps exist (mirroring the scorecard's own projection); null otherwise. The run's normalized <c>ResultJson</c> is deserialized ONCE to project the token usage / revise rounds / exit reason a critic A/B reports (all null/0 when the run recorded no result). <paramref name="mcpFullCatalog"/> is the executor's resolved catalog width for this run — the observable cli vs cli-mcp distinction (the endpoint itself opens in both). <paramref name="formatFaultRespawns"/> is informational (see <see cref="BenchmarkResult.FormatFaultRespawns"/>).</summary>
-    private static BenchmarkResult BuildResult(BenchmarkTask task, BenchmarkMode mode, AgentRun run, BenchmarkGrade grade, bool mcpFullCatalog, int formatFaultRespawns)
+    /// <summary>
+    /// Fold the cell's attempts + the grade into a result row. <paramref name="attempts"/> is every dispatched attempt
+    /// in order — normally one, two when the gateway-format-fault repair was bought — and the LAST is the GRADED one:
+    /// the verdict fields (status, run id, exit reason, revise rounds) are read off it, because the grade judges the
+    /// tree that attempt left behind.
+    ///
+    /// <para>COST fields are summed across ALL attempts, never read off the graded one alone: a respawned cell BILLED
+    /// both dispatches, and a cost/latency number that reported only the survivor would under-report exactly the cells
+    /// the gateway made expensive — the opposite of what the respawn count is reported for. Duration is the sum of each
+    /// attempt's wall-clock (null only when NO attempt carries both timestamps); token usage folds through the SAME
+    /// <see cref="AgentRunExecutor.SumTokenUsage"/> the executor bills its own revise rounds with, so a null-reporting
+    /// attempt (the deterministic fake CLI) never zeroes a real one.</para>
+    ///
+    /// <para><paramref name="mcpFullCatalog"/> is the executor's resolved catalog width for this run — the observable
+    /// cli vs cli-mcp distinction (the endpoint itself opens in both).</para>
+    /// </summary>
+    internal static BenchmarkResult BuildResult(BenchmarkTask task, BenchmarkMode mode, IReadOnlyList<AgentRun> attempts, BenchmarkGrade grade, bool mcpFullCatalog)
     {
-        var result = run.ResultJson is { } json ? JsonSerializer.Deserialize<AgentRunResult>(json, AgentJson.Options) : null;
+        var graded = attempts[^1];
+        var result = graded.ResultJson is { } json ? JsonSerializer.Deserialize<AgentRunResult>(json, AgentJson.Options) : null;
 
         return new BenchmarkResult
         {
             TaskId = task.Id,
             Mode = mode,
-            AgentRunId = run.Id,
-            RunStatus = run.Status,
-            DurationSeconds = run.StartedAt is { } started && run.CompletedAt is { } completed ? (completed - started).TotalSeconds : null,
+            AgentRunId = graded.Id,
+            RunStatus = graded.Status,
+            DurationSeconds = SumDuration(attempts),
             Grade = grade,
             McpFullCatalog = mcpFullCatalog,
-            FormatFaultRespawns = formatFaultRespawns,
-            TokenUsage = result?.TokenUsage,
+            FormatFaultRespawns = attempts.Count - 1,
+            TokenUsage = SumTokenUsage(attempts),
             ReviseRounds = result?.ReviseRounds ?? 0,
             ExitReason = result?.ExitReason,
             PlanRanCleanWithNoHumanEdits = null,   // only meaningful for WorkflowMap (reserved, not wired in this slice); PR-D wires the no-human-edits signal.
         };
     }
+
+    /// <summary>The cell's wall-clock: every attempt's own duration added up (mirroring the scorecard's per-run projection), null when no attempt recorded both timestamps.</summary>
+    private static double? SumDuration(IReadOnlyList<AgentRun> attempts)
+    {
+        var timed = attempts.Where(a => a.StartedAt is not null && a.CompletedAt is not null).ToList();
+
+        return timed.Count == 0 ? null : timed.Sum(a => (a.CompletedAt!.Value - a.StartedAt!.Value).TotalSeconds);
+    }
+
+    /// <summary>The cell's billed tokens: every attempt's usage folded through the executor's OWN summing rule, so a respawned cell reports what it actually cost.</summary>
+    private static AgentTokenUsage? SumTokenUsage(IReadOnlyList<AgentRun> attempts) =>
+        attempts
+            .Select(a => a.ResultJson is { } json ? JsonSerializer.Deserialize<AgentRunResult>(json, AgentJson.Options)?.TokenUsage : null)
+            .Aggregate((AgentTokenUsage?)null, AgentRunExecutor.SumTokenUsage);
 }

@@ -229,4 +229,82 @@ public class BenchmarkRunnerBuildTaskTests
     }
 
     private static AgentTask AgentTask_() => BenchmarkRunner.BuildAgentTask(Task(), BenchmarkMode.HarnessCliWithMcp, Workspace, new BenchmarkAgentSelection { Model = "gw-model" });
+
+    // ── The respawned cell's row: the GRADED attempt's verdict, but BOTH attempts' cost ──
+
+    private static Core.Persistence.Entities.AgentRun Attempt(int inputTokens, int outputTokens, double seconds, AgentRunStatus status = AgentRunStatus.Succeeded, string exitReason = "completed")
+    {
+        var startedAt = DateTimeOffset.UnixEpoch;
+
+        return new Core.Persistence.Entities.AgentRun
+        {
+            Id = Guid.NewGuid(),
+            Status = status,
+            StartedAt = startedAt,
+            CompletedAt = startedAt.AddSeconds(seconds),
+            ResultJson = System.Text.Json.JsonSerializer.Serialize(new AgentRunResult
+            {
+                Status = status, ExitReason = exitReason, ReviseRounds = 2,
+                TokenUsage = new AgentTokenUsage { InputTokens = inputTokens, OutputTokens = outputTokens },
+            }, Core.Services.Agents.AgentJson.Options),
+        };
+    }
+
+    [Fact]
+    public void A_respawned_cell_bills_BOTH_attempts_while_the_verdict_stays_the_graded_ones()
+    {
+        // The gateway made this cell cost twice. Reading cost off the survivor alone would under-report exactly the
+        // cells the respawn count exists to flag — a corpus fighting a broken gateway would look CHEAPER than a clean
+        // one. The VERDICT fields still come from the graded (last) attempt, because the oracle judged its tree.
+        var died = Attempt(inputTokens: 100, outputTokens: 40, seconds: 3, status: AgentRunStatus.Failed, exitReason: "error");
+        var graded = Attempt(inputTokens: 700, outputTokens: 260, seconds: 12);
+
+        var result = BenchmarkRunner.BuildResult(Task(), BenchmarkMode.HarnessCli, new[] { died, graded }, PassingGrade, mcpFullCatalog: false);
+
+        result.TokenUsage.ShouldNotBeNull().InputTokens.ShouldBe(800, "the dead attempt billed 100 input tokens too — the cell cost both");
+        result.TokenUsage.OutputTokens.ShouldBe(300);
+        result.DurationSeconds.ShouldBe(15, "the cell occupied the instrument for both attempts, not just the survivor's 12s");
+
+        result.FormatFaultRespawns.ShouldBe(1, "two attempts ⇒ exactly one repair was bought");
+        result.AgentRunId.ShouldBe(graded.Id, "the row traces to the attempt the grade judged");
+        result.RunStatus.ShouldBe(AgentRunStatus.Succeeded, "the graded attempt's terminal status, never the death that preceded it");
+        result.ExitReason.ShouldBe("completed", "the graded attempt's exit reason — the dead one's would mislabel the cell");
+    }
+
+    [Fact]
+    public void An_unrespawned_cell_reports_its_single_attempt_unchanged()
+    {
+        var only = Attempt(inputTokens: 700, outputTokens: 260, seconds: 12);
+
+        var result = BenchmarkRunner.BuildResult(Task(), BenchmarkMode.HarnessCli, new[] { only }, PassingGrade, mcpFullCatalog: false);
+
+        result.FormatFaultRespawns.ShouldBe(0);
+        result.TokenUsage.ShouldNotBeNull().InputTokens.ShouldBe(700, "one attempt ⇒ byte-identical to the pre-respawn projection");
+        result.DurationSeconds.ShouldBe(12);
+        result.ReviseRounds.ShouldBe(2);
+    }
+
+    [Fact]
+    public void An_attempt_that_reported_no_usage_never_zeroes_the_one_that_did()
+    {
+        // The deterministic fake CLI reports no usage at all; a naive sum that treated null as zero — or that let the
+        // last attempt win — would erase a real attempt's bill. Same fold the executor sums its revise rounds with.
+        var silent = new Core.Persistence.Entities.AgentRun { Id = Guid.NewGuid(), Status = AgentRunStatus.Failed };
+        var billed = Attempt(inputTokens: 500, outputTokens: 20, seconds: 8);
+
+        BenchmarkRunner.BuildResult(Task(), BenchmarkMode.HarnessCli, new[] { silent, billed }, PassingGrade, mcpFullCatalog: false)
+            .TokenUsage.ShouldNotBeNull().InputTokens.ShouldBe(500);
+
+        BenchmarkRunner.BuildResult(Task(), BenchmarkMode.HarnessCli, new[] { billed, silent }, PassingGrade, mcpFullCatalog: false)
+            .TokenUsage.ShouldNotBeNull().InputTokens.ShouldBe(500, "the graded attempt reporting nothing must not erase what the first one billed");
+    }
+
+    [Fact]
+    public void A_cell_where_no_attempt_recorded_timestamps_reports_no_duration()
+    {
+        var untimed = new Core.Persistence.Entities.AgentRun { Id = Guid.NewGuid(), Status = AgentRunStatus.Failed };
+
+        BenchmarkRunner.BuildResult(Task(), BenchmarkMode.HarnessCli, new[] { untimed, untimed }, PassingGrade, mcpFullCatalog: false)
+            .DurationSeconds.ShouldBeNull("null, never 0 — 0 would enter the latency percentiles as a real measurement");
+    }
 }
