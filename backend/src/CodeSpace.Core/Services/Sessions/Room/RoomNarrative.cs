@@ -256,7 +256,7 @@ public static class RoomNarrative
         // terminal at all. It renders in the same outcome position as the failure diagnostic — never both, since a
         // parked run is Suspended.
         if (status == WorkflowRunStatus.Suspended && facts.CompletionParked)
-            blocks.Add(ParkDiagnostic(idPrefix, seq, facts.RawError ?? error));
+            blocks.Add(ParkDiagnostic(idPrefix, seq, facts.RawError ?? error, facts));
 
         // The green "RESULT" card is a SUCCESS artifact — only a succeeded run delivers an answer. A failed / cancelled
         // run's outcome is the error diagnostic above, never a green Result echoing the failure text.
@@ -661,7 +661,7 @@ public static class RoomNarrative
     /// named because a park is otherwise indistinguishable from a run that hung: Continue re-arbitrates against the
     /// then-current facts, which is the ONLY channel that clears the stamp.
     /// </summary>
-    private static DiagnosticBlock ParkDiagnostic(string idPrefix, long seq, string? error)
+    private static DiagnosticBlock ParkDiagnostic(string idPrefix, long seq, string? error, RoomTurnFacts facts)
     {
         var reason = ParkReason(error);
 
@@ -671,10 +671,21 @@ public static class RoomNarrative
             Seq = seq,
             Tone = NarrativeTone.Info,
             Title = ParkedTitle,
-            Text = $"{reason} Nothing was delivered and no terminal was stamped, so the work is still resumable. Continue gives the run another turn to produce what is missing, publish it, or ask you a question — and if it still cannot, it stops honestly instead of claiming success. Stop the run to end it here instead.",
+            Text = $"{reason} {StandingWork(facts)} Continue gives the run another turn to produce what is missing, publish it, or ask you a question — and if it still cannot, it stops honestly instead of claiming success. Stop the run to end it here instead.",
             RawDetail = error is { Length: > 0 } raw ? raw : null,
         };
     }
+
+    /// <summary>
+    /// What the park leaves behind. The commonest park — a required stage holding no evidence — follows work that DID
+    /// produce something (a changed file set, a produced file, an opened PR); telling that operator "nothing was
+    /// delivered" contradicts the cards directly above the message. So the no-delivery clause is claimed only when the
+    /// turn's own facts carry no produced artifact at all; the resumability half is true either way.
+    /// </summary>
+    private static string StandingWork(RoomTurnFacts facts) =>
+        facts.Delivery != null || facts.Deliverables.Count > 0 || facts.ChangedFiles.Count > 0
+            ? "No terminal was stamped, so the work it already produced is still resumable."
+            : "Nothing was delivered and no terminal was stamped, so the work is still resumable.";
 
     /// <summary>The authority's refusal in the reader's words — its engine prefix dropped, its specifics kept verbatim, and a period so it reads as a sentence before the guidance that follows.</summary>
     private static string ParkReason(string? error)
