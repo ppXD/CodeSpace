@@ -430,6 +430,29 @@ public class CompletionEnforcedCohortFlowTests
         resumed.StatusWord.ShouldBeNull("…nor the header word");
     }
 
+    [Fact]
+    public async Task Stopping_a_parked_run_ends_the_park_rather_than_leaving_its_label_behind()
+    {
+        // Stop is the OTHER exit the park card offers, and it must end the park as completely as Continue does. Left
+        // behind, the stamp outlives the state it describes: LessonDistiller labels any stamped row "Parked" whatever
+        // its status, and ActionableSuspendPredicate reads one as a run still awaiting a person — so a run the operator
+        // deliberately ended would keep asking for attention and keep teaching the distiller it was parked.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId);
+        var runId = await RunToUnintegratedParkAsync(teamId, userId, sessionId);
+
+        (await ReadRunAsync(runId)).CompletionParkedAt.ShouldNotBeNull("this test is only meaningful over a real completion park");
+
+        // The service directly, as every other operator-cancel flow test does: CancelRunAsync opens its own terminal
+        // transaction, which cannot nest inside the mediator pipeline's.
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+            (await scope.Resolve<IWorkflowService>().CancelRunAsync(runId, teamId, CancellationToken.None))!.Cancelled.ShouldBeTrue();
+
+        var stopped = await ReadRunAsync(runId);
+        stopped.Status.ShouldBe(WorkflowRunStatus.Cancelled);
+        stopped.CompletionParkedAt.ShouldBeNull("a stopped run is not parked — the stamp goes out with the terminal, exactly as Continue and the engine's own terminals clear it");
+    }
+
     private async Task<AssistantTurnBlock> ProjectTurnAsync(Guid runId, Guid teamId)
     {
         using var scope = _fixture.BeginScope();
