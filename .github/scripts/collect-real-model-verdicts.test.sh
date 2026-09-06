@@ -90,10 +90,18 @@ for var in CODESPACE_LLM_MODEL_ID CODESPACE_LLM_BASE_URL CODESPACE_LLM_API_KEY C
   fi
 done
 
+# The ONE exemption, named literally so that every OTHER secret still trips the check: the automatic per-job token.
+# It is not a repository secret, it is passed to a single script-only step (the clause guard, which reads this
+# workflow's own run history) and never to the test process, so it cannot reach a trx or a step summary the way a
+# gateway id did — and it is revoked when the job ends, before the artifact can be downloaded at all. Redacting it
+# would mean handing it to the collect step too, which widens its exposure to strike a needle that is never there.
+REDACTION_EXEMPT="GITHUB_TOKEN"
+
 workflow="${here}/../workflows/real-model.yml"
 if [ -f "$workflow" ]; then
   missing=""
   for var in $(grep -o 'secrets\.[A-Z_0-9]*' "$workflow" | sed 's/secrets\.//' | sort -u); do
+    [ "$var" = "$REDACTION_EXEMPT" ] && continue
     grep -qF -- "$var" "$collect" || missing="${missing} ${var}"
   done
 

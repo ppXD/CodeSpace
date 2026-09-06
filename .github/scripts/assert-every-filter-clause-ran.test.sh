@@ -150,6 +150,198 @@ expect_output lacks "UNMEASURED" "reports a failed+skipped clause as measured, n
 expect 0 "a failed+skipped clause does not fail the guard" \
   bash "$guard" "$mixed_trx" RealModelSupervisor
 
+# ── The consecutive-dark streak: a clause that measures nothing run after run reds the lane ──────────────────────
+#
+# A one-off skip warns; a STREAK is a broken instrument reporting green, and the warning above had no notion of
+# persistence — RealModelBenchmark stayed dark for five consecutive main runs, ~30 min of live API budget each, while
+# the lane read green every time.
+#
+# The streak is read back out of the predecessor runs' own logs, so the fixtures here are REAL ones: each synthetic
+# predecessor log is produced by RUNNING THIS GUARD and stamping GitHub's timestamp prefix onto its output. Drift in
+# the census table's shape therefore drifts the fixture with it, and the parser is always tested against exactly what
+# the printer prints — never against a hand-typed approximation of it.
+
+# A predecessor's log arrives as a zip from the run-log endpoint, so building one needs zip and reading it needs
+# unzip. Both ship on the runner image — but if either ever stops shipping, say so instead of letting every streak
+# case quietly assert nothing, which is the failure mode this whole section exists to abolish.
+if ! command -v zip >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1; then
+  echo "  FAILED  the streak self-tests need zip AND unzip to build and read a predecessor log archive"
+  failures=$((failures + 1))
+fi
+
+history="${tmp}/history"
+stub_bin="${tmp}/stub-bin"
+summary="${tmp}/step-summary.md"
+mkdir -p "$history" "$stub_bin"
+
+# The `gh` stub answers the only two calls the guard makes — list this workflow's completed runs, and download one
+# run's log archive. Stubbing the CLI rather than the guard's own lookup keeps the guard's real endpoints, its real
+# `unzip -p` streaming and its real census parser under test; only the network is replaced.
+cat > "${stub_bin}/gh" <<'STUB'
+#!/usr/bin/env bash
+endpoint="$2"
+case "$endpoint" in
+  *"/runs?branch="*) cat "${GUARD_TEST_HISTORY}/run-ids" ;;
+  */logs) run_id="${endpoint%/logs}"; exec cat "${GUARD_TEST_HISTORY}/${run_id##*/}.zip" ;;
+  *) exit 1 ;;
+esac
+STUB
+chmod +x "${stub_bin}/gh"
+
+dark_trx="${tmp}/dark.trx"
+cat > "$dark_trx" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<TestRun>
+  <Results>
+    <UnitTestResult testName="CodeSpace.E2ETests.Workflows.RealModelBenchmarkCorpusE2ETests.A_real_coding_agent_runs_the_seed_corpus" outcome="NotExecuted">
+      <Output>
+        <ErrorInfo>
+          <Message>real-model gate NON-GATING infra skip: evaluator health 50 % (infra-dead cells 9/18) below the 90 % floor</Message>
+        </ErrorInfo>
+      </Output>
+    </UnitTestResult>
+  </Results>
+</TestRun>
+XML
+
+measured_trx="${tmp}/measured.trx"
+cat > "$measured_trx" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<TestRun>
+  <Results>
+    <UnitTestResult testName="CodeSpace.E2ETests.Workflows.RealModelBenchmarkCorpusE2ETests.A_real_coding_agent_runs_the_seed_corpus" outcome="Passed" />
+  </Results>
+</TestRun>
+XML
+
+# One predecessor run's log archive: this guard's own census output, timestamp-prefixed the way GitHub's log API
+# returns it, zipped the way the run-log endpoint serves it.
+make_predecessor() {
+  local run_id="$1" src_trx="$2"; shift 2
+  local dir="${tmp}/pred-${run_id}"
+
+  rm -rf "$dir" && mkdir -p "$dir"
+  bash "$guard" "$src_trx" "$@" 2>&1 | sed 's/^/2026-09-01T00:00:00.0000000Z /' > "${dir}/0_real model (a lane).txt"
+  rm -f "${history}/${run_id}.zip"
+  (cd "$dir" && zip -qq "${history}/${run_id}.zip" "0_real model (a lane).txt")
+}
+
+# A run whose job never reached the guard — cancelled by concurrency, or red before it. Its log carries no census, so
+# it is evidence of NOTHING and must be stepped over rather than counted as a reset.
+make_censusless_predecessor() {
+  local run_id="$1"
+  local dir="${tmp}/pred-${run_id}"
+
+  rm -rf "$dir" && mkdir -p "$dir"
+  printf '2026-09-01T00:00:00.0000000Z The operation was canceled.\n' > "${dir}/0_real model (a lane).txt"
+  rm -f "${history}/${run_id}.zip"
+  (cd "$dir" && zip -qq "${history}/${run_id}.zip" "0_real model (a lane).txt")
+}
+
+set_history() { printf '%s\n' "$@" > "${history}/run-ids"; }
+
+# The guard as GitHub runs it on the streak branch: run 999 is THIS run and must be skipped in its own history.
+run_on() {
+  local ref="$1"; shift
+
+  : > "$summary"
+  env PATH="${stub_bin}:${PATH}" \
+    GUARD_TEST_HISTORY="$history" \
+    GH_TOKEN=stub-token \
+    GITHUB_REF="$ref" \
+    GITHUB_REPOSITORY=owner/repo \
+    GITHUB_RUN_ID=999 \
+    GITHUB_WORKFLOW_REF='owner/repo/.github/workflows/real-model.yml@refs/heads/main' \
+    GITHUB_STEP_SUMMARY="$summary" \
+    bash "$guard" "$@"
+}
+
+expect_summary() {
+  local needle="$1" name="$2"; shift 2
+  "$@" >/dev/null 2>&1
+
+  if grep -qF -- "$needle" "$summary"; then
+    echo "  ok      ${name}"
+  else
+    echo "  FAILED  ${name} — step summary lacks '${needle}'"
+    sed 's/^/          | /' "$summary"
+    failures=$((failures + 1))
+  fi
+}
+
+# Rule 8: the threshold is a named constant, changed by a PR. Pinned literally, because moving it silently changes
+# how long a gate may report green over an instrument that never ran.
+expect_output has "readonly DARK_RUNS_TO_RED=3" "the dark-run threshold is pinned at 3" \
+  grep -F "readonly DARK_RUNS_TO_RED=3" "$guard"
+
+# The history parser recovers a predecessor's census by matching the table header this guard prints. If the printer
+# and the matcher ever disagree, every predecessor silently becomes "no evidence" and the streak never grows.
+expect_output has "outcome   passed    failed    skipped   clause" "prints the exact census header its history parser matches" \
+  bash "$guard" "$trx" RealModelSupervisor
+
+set_history 999 111 222 333
+
+# Streak 2 — one dark predecessor plus this run. Below the threshold, so today's warning still stands alone.
+make_predecessor 111 "$dark_trx" RealModelBenchmark
+make_predecessor 222 "$measured_trx" RealModelBenchmark
+make_predecessor 333 "$measured_trx" RealModelBenchmark
+
+expect 0 "two consecutive dark runs still only warn" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+expect_output lacks "::error::" "two consecutive dark runs emit no error" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+expect_summary "| 2 |" "the step summary carries the streak per clause" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+# Streak 3 — THE case this exists for. The lane has now spent three full live-API budgets measuring nothing.
+make_predecessor 222 "$dark_trx" RealModelBenchmark
+
+expect 1 "three consecutive dark runs RED the lane" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+expect_output has "::error::RealModelBenchmark has now measured NOTHING on 3 consecutive main runs" \
+  "the error names the clause and the streak" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+expect_output has "evaluator health 50 % (infra-dead cells 9/18) below the 90 % floor" \
+  "the error names the last recorded skip reason" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+# A branch run has no streak to be consecutive with, so the same history must never red it.
+expect 0 "a run off the streak branch never reds on a streak" \
+  run_on refs/heads/feature/whatever "$dark_trx" RealModelBenchmark
+
+# A run that never reached the guard recorded no census. Counting its silence as a reset would let one cancelled run
+# launder a five-run streak — the exact laundering that kept RealModelBenchmark's darkness invisible.
+make_censusless_predecessor 111
+make_predecessor 333 "$dark_trx" RealModelBenchmark
+
+expect 1 "a run with no census is stepped over, not counted as a measurement" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+# The same laundering one step subtler, and the one a live rehearsal actually caught: a run this lane was cancelled
+# in still ships a census — its OTHER lanes' tables — so the archive is not empty, the clause is merely ABSENT from
+# it. Reading that absence as "measured" reset a real four-run streak back to one.
+make_predecessor 111 "$trx" RealModelSupervisor
+
+expect 1 "a census that never mentions the clause is stepped over too" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+# ...and a run that actually measured the clause resets it, however long the darkness behind that run was.
+make_predecessor 111 "$measured_trx" RealModelBenchmark
+
+expect 0 "a measured run resets the streak" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+expect_output lacks "::error::" "a measured run leaves only the one-off warning" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+# A clause that measured something is never on a streak at all, whatever its neighbours did.
+expect_summary "| 0 |" "a measured clause reports a zero streak" \
+  run_on refs/heads/main "$measured_trx" RealModelBenchmark
+
 if [ "$failures" -ne 0 ]; then
   echo "${failures} guard self-test(s) failed"
   exit 1

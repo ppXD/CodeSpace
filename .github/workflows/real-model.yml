@@ -19,6 +19,10 @@ concurrency:
 
 permissions:
   contents: read
+  # The clause guard reads THIS workflow's own previous runs (their logs carry each run's clause census) to tell a
+  # one-off gateway skip from a gate that has measured nothing for runs on end. Read-only, and the only thing it
+  # widens over `contents: read`.
+  actions: read
 
 env:
   DOTNET_NOLOGO: 'true'
@@ -111,6 +115,11 @@ jobs:
         # satisfied by any one surviving class, so it waves through exactly the de-selection it exists to catch the
         # moment a lane carries more than one clause — which is how this bit twice. Add a clause to the filter above
         # and add it to the argument list below.
+        env:
+          # The consecutive-dark check reads the PREVIOUS runs' own logs (see the script) to tell a one-off gateway
+          # skip from an instrument that has measured nothing for runs on end. Read-only, and scoped to THIS step so
+          # the token never reaches the environment of the steps that run live agent code.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           bash .github/scripts/assert-every-filter-clause-ran.sh \
             backend/TestResults/real-model.trx \
@@ -287,6 +296,11 @@ jobs:
         # satisfied by any one surviving class, so it waves through exactly the de-selection it exists to catch the
         # moment a lane carries more than one clause — which is how this bit twice. Add a clause to the filter above
         # and add it to the argument list below.
+        env:
+          # The consecutive-dark check reads the PREVIOUS runs' own logs (see the script) to tell a one-off gateway
+          # skip from an instrument that has measured nothing for runs on end. Read-only, and scoped to THIS step so
+          # the token never reaches the environment of the steps that run live agent code.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           bash .github/scripts/assert-every-filter-clause-ran.sh \
             backend/TestResults/real-model-wholeloop.trx \
@@ -471,6 +485,11 @@ jobs:
         # satisfied by any one surviving class, so it waves through exactly the de-selection it exists to catch the
         # moment a lane carries more than one clause — which is how this bit twice. Add a clause to the filter above
         # and add it to the argument list below.
+        env:
+          # The consecutive-dark check reads the PREVIOUS runs' own logs (see the script) to tell a one-off gateway
+          # skip from an instrument that has measured nothing for runs on end. Read-only, and scoped to THIS step so
+          # the token never reaches the environment of the steps that run live agent code.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           bash .github/scripts/assert-every-filter-clause-ran.sh \
             backend/TestResults/real-model-wholeloop-aux.trx \
@@ -607,6 +626,11 @@ jobs:
         # satisfied by any one surviving class, so it waves through exactly the de-selection it exists to catch the
         # moment a lane carries more than one clause — which is how this bit twice. Add a clause to the filter above
         # and add it to the argument list below.
+        env:
+          # The consecutive-dark check reads the PREVIOUS runs' own logs (see the script) to tell a one-off gateway
+          # skip from an instrument that has measured nothing for runs on end. Read-only, and scoped to THIS step so
+          # the token never reaches the environment of the steps that run live agent code.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           bash .github/scripts/assert-every-filter-clause-ran.sh \
             backend/TestResults/real-model-benchmark.trx \
@@ -723,6 +747,11 @@ jobs:
           --results-directory backend/TestResults
 
       - name: Assert the rehearsal actually ran (no silent skip)
+        env:
+          # The consecutive-dark check reads the PREVIOUS runs' own logs (see the script) to tell a one-off gateway
+          # skip from an instrument that has measured nothing for runs on end. Read-only, and scoped to THIS step so
+          # the token never reaches the environment of the steps that run live agent code.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash .github/scripts/assert-every-filter-clause-ran.sh backend/TestResults/real-model-qualification-rehearsal.trx RealModelQualificationRehearsal
 
 
@@ -839,6 +868,11 @@ jobs:
         # Checked PER CLAUSE by the shared script, not as a total: `dotnet test --filter` exits 0 on zero
         # matches, and a count floor of one is satisfied by any single surviving class. Add a clause to the
         # filter above and add it to the argument list below.
+        env:
+          # The consecutive-dark check reads the PREVIOUS runs' own logs (see the script) to tell a one-off gateway
+          # skip from an instrument that has measured nothing for runs on end. Read-only, and scoped to THIS step so
+          # the token never reaches the environment of the steps that run live agent code.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           bash .github/scripts/assert-every-filter-clause-ran.sh \
             backend/TestResults/real-model-benchmark-extended.trx \
@@ -990,6 +1024,11 @@ jobs:
         # satisfied by any one surviving class, so it waves through exactly the de-selection it exists to catch the
         # moment a lane carries more than one clause — which is how this bit twice. Add a clause to the filter above
         # and add it to the argument list below.
+        env:
+          # The consecutive-dark check reads the PREVIOUS runs' own logs (see the script) to tell a one-off gateway
+          # skip from an instrument that has measured nothing for runs on end. Read-only, and scoped to THIS step so
+          # the token never reaches the environment of the steps that run live agent code.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           bash .github/scripts/assert-every-filter-clause-ran.sh \
             backend/TestResults/real-model-injection.trx \
@@ -1110,6 +1149,11 @@ jobs:
         # Checked PER CLAUSE by the shared script, not as a total: `dotnet test --filter` exits 0 on zero
         # matches, and a count floor of one is satisfied by any single surviving class. Add a clause to the
         # filter above and add it to the argument list below.
+        env:
+          # The consecutive-dark check reads the PREVIOUS runs' own logs (see the script) to tell a one-off gateway
+          # skip from an instrument that has measured nothing for runs on end. Read-only, and scoped to THIS step so
+          # the token never reaches the environment of the steps that run live agent code.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           bash .github/scripts/assert-every-filter-clause-ran.sh \
             backend/TestResults/real-model-publish-manifest.trx \
@@ -1227,6 +1271,11 @@ jobs:
         # Checked PER CLAUSE by the shared script, not as a total: `dotnet test --filter` exits 0 on zero
         # matches, and a count floor of one is satisfied by any single surviving class. Add a clause to the
         # filter above and add it to the argument list below.
+        env:
+          # The consecutive-dark check reads the PREVIOUS runs' own logs (see the script) to tell a one-off gateway
+          # skip from an instrument that has measured nothing for runs on end. Read-only, and scoped to THIS step so
+          # the token never reaches the environment of the steps that run live agent code.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           bash .github/scripts/assert-every-filter-clause-ran.sh \
             backend/TestResults/real-model-footer-signals.trx \
@@ -1345,6 +1394,11 @@ jobs:
         # Checked PER CLAUSE by the shared script, not as a total: `dotnet test --filter` exits 0 on zero
         # matches, and a count floor of one is satisfied by any single surviving class. Add a clause to the
         # filter above and add it to the argument list below.
+        env:
+          # The consecutive-dark check reads the PREVIOUS runs' own logs (see the script) to tell a one-off gateway
+          # skip from an instrument that has measured nothing for runs on end. Read-only, and scoped to THIS step so
+          # the token never reaches the environment of the steps that run live agent code.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           bash .github/scripts/assert-every-filter-clause-ran.sh \
             backend/TestResults/real-model-stop-hook.trx \
