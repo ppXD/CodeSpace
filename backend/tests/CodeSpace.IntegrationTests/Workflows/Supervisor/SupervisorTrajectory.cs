@@ -87,7 +87,7 @@ public static class SupervisorTrajectory
 
             kinds.Add(decision.Kind);
 
-            if (decision.IsTerminal) return new SupervisorTrajectoryResult { Kinds = kinds, ReachedStop = true, HitTurnCap = false, Ledger = priors };
+            if (decision.IsTerminal) return new SupervisorTrajectoryResult { Kinds = kinds, ReachedStop = true, HitTurnCap = false, Refusals = refusals, Ledger = priors };
 
             var folded = environment.Fold(decision, turn, priors);
 
@@ -107,6 +107,7 @@ public static class SupervisorTrajectory
             ReachedStop = false,
             HitTurnCap = !cancellationToken.IsCancellationRequested && refusals <= MaxRefusedDecisions,
             ExhaustedRefusals = refusals > MaxRefusedDecisions,
+            Refusals = refusals,
             Ledger = priors,
         };
     }
@@ -305,6 +306,8 @@ internal static class TrajectoryOutcomes
     /// </summary>
     public static SupervisorPriorDecision RetrySucceeded(SupervisorDecision d, long seq)
     {
+        if (string.IsNullOrWhiteSpace(SupervisorOutcome.ReadRetrySubtaskId(d.PayloadJson))) return RefusedRetry(d, seq);
+
         var id = Guid.NewGuid();
         var subtaskId = RetriedSubtaskId(d.PayloadJson);
         var staged = JsonSerializer.Serialize(new { agentRunIds = new[] { id }, agentCount = 1 }, AgentJson.Options);
@@ -374,6 +377,10 @@ internal static class TrajectoryOutcomes
     /// </summary>
     private static SupervisorPriorDecision RefusedSpawn(SupervisorDecision d, long seq) =>
         Prior(d, seq, JsonSerializer.Serialize(RealSupervisorActionExecutor.BuildRejectedSpawnOutcome(), AgentJson.Options));
+
+    /// <summary>The retry twin of <see cref="RefusedSpawn"/>: what PRODUCTION does with a retry that names no subtaskId, serialized from the executor's own builder rather than hand-copied. A <c>{}</c> retry used to fall through to <see cref="RetriedSubtaskId"/>'s historic "s1" default and mint a fabricated success — this is the same malformed decision the executor actually refuses.</summary>
+    private static SupervisorPriorDecision RefusedRetry(SupervisorDecision d, long seq) =>
+        Prior(d, seq, JsonSerializer.Serialize(RealSupervisorActionExecutor.BuildRejectedRetryOutcome(), AgentJson.Options));
 
     public static SupervisorPriorDecision AllSucceeded(SupervisorDecision d, long seq)
     {
@@ -526,6 +533,14 @@ public sealed record SupervisorTrajectoryResult
     /// <summary>The attempt ended because more than <see cref="SupervisorTrajectory.MaxRefusedDecisions"/> decisions were REFUSED, not because it ran out of turns. Still a miss — a brain that only emits refusals authored no action the server would take — but a different one, and the verdict has to say which.</summary>
     public bool ExhaustedRefusals { get; init; }
 
+    /// <summary>
+    /// How many decisions this attempt had REFUSED by the executor — carried on a STOPPED result too, not only a
+    /// non-stop one. A brain that recovers from a malformed decision and still reaches a real stop authored a refusal
+    /// same as one that doesn't; a passing note that never mentions it hides the exact signal (a decision the server
+    /// staged nothing for) at the one moment the model got away with it.
+    /// </summary>
+    public int Refusals { get; init; }
+
     public required IReadOnlyList<SupervisorPriorDecision> Ledger { get; init; }
 }
 
@@ -650,6 +665,11 @@ public static class SupervisorTrajectoryScore
         var restaged = RestagedUnits(t.Ledger);
         if (restaged.Count > 0)
             return (false, $"re-staged the SAME unit(s) more than {MaxAttemptsPerUnit} times ({string.Join(", ", restaged)}) — churning, not converging. Trajectory: {trail}");
+
+        // A refusal absorbed en route to a real stop is still a decision the server staged nothing for — surfaced
+        // here so a passing arc cannot quietly recover from one without the note saying so.
+        if (t.Refusals > 0)
+            return (true, $"drove to completion: {trail} ({t.Refusals} server-refused decision(s))");
 
         return (true, $"drove to completion: {trail}");
     }

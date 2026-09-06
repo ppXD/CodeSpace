@@ -697,9 +697,11 @@ public sealed class SupervisorTrajectoryEvalTests
 
         result.ReachedStop.ShouldBeTrue("the brain reached its stop within four decisions it actually got to make");
         result.ExhaustedRefusals.ShouldBeFalse("one refusal is inside the separate refusal budget");
+        result.Refusals.ShouldBe(1, "the refused spawn must still be counted, even though it reached a real stop");
 
         var (ok, note) = SupervisorTrajectoryScore.Score(result);
         ok.ShouldBeTrue($"a sound arc preceded by ONE refused decision must still pass — otherwise the gate scores the malformed turn instead of the brain ({note})");
+        note.ShouldContain("1 server-refused decision(s)", Case.Insensitive, "a PASSING arc must still report its refusals — the signal must not disappear just because the model recovered");
     }
 
     /// <summary>
@@ -741,6 +743,47 @@ public sealed class SupervisorTrajectoryEvalTests
         var merge = environment.Fold(new SupervisorDecision { Kind = SupervisorDecisionKinds.Merge, PayloadJson = "{}" }, 2, new[] { allGreen });
 
         SupervisorOutcome.ReadIntegration(merge.OutcomeJson)!.IntegratedBranch.ShouldNotBeNullOrEmpty("a merge over a wave that failed nothing has a real head to integrate");
+    }
+
+    /// <summary>
+    /// A retry naming no subtaskId is a malformed decision — production REFUSES it
+    /// (<c>RealSupervisorActionExecutor.BuildRejectedRetryOutcome</c>), the retry twin of a spawn naming no unit. This
+    /// used to fall through to a historic "s1" default and fold a fabricated "retried s1; unit tests green" success,
+    /// rewarding a decision the server never staged an agent for.
+    /// </summary>
+    [Fact]
+    public void A_retry_naming_no_unit_is_refused_not_fabricated()
+    {
+        var retry = new SupervisorDecision { Kind = SupervisorDecisionKinds.Retry, PayloadJson = "{}" };
+
+        var folded = TrajectoryOutcomes.RetrySucceeded(retry, seq: 1);
+
+        SupervisorOutcome.ReadRejectionReason(folded.OutcomeJson).ShouldNotBeNull("a retry naming no subtaskId must be REFUSED, mirroring RefusedSpawn — not accepted with a fabricated success");
+        folded.OutcomeJson.ShouldNotContain("retried s1", Case.Insensitive, "the historic 's1' default must never mint a fabricated success for a malformed retry");
+    }
+
+    /// <summary>
+    /// The retry twin of <see cref="A_refused_decision_is_not_charged_against_the_turn_cap"/>: a malformed retry (no
+    /// subtaskId) must cost no turn, and the recovered attempt's passing note must still report the refusal.
+    /// </summary>
+    [Fact]
+    public async Task A_refused_retry_is_not_charged_against_the_turn_cap_and_still_reported()
+    {
+        var result = await SupervisorTrajectory.RunAsync(new RefusedRetryThenConvergingDecider(), SupervisorTrajectoryEnvironments.HappyPath, maxTurns: 4, CancellationToken.None);
+
+        result.Kinds.ShouldBe(new[]
+        {
+            SupervisorDecisionKinds.Plan, SupervisorDecisionKinds.Spawn, SupervisorDecisionKinds.Retry,
+            SupervisorDecisionKinds.Merge, SupervisorDecisionKinds.Stop,
+        }, "five decisions under a cap of four — the refused retry is the one that must not have cost a turn");
+
+        result.ReachedStop.ShouldBeTrue("the brain reached its stop within four decisions it actually got to make");
+        result.ExhaustedRefusals.ShouldBeFalse("one refusal is inside the separate refusal budget");
+        result.Refusals.ShouldBe(1, "the refused retry must still be counted, even though it reached a real stop");
+
+        var (ok, note) = SupervisorTrajectoryScore.Score(result);
+        ok.ShouldBeTrue($"a sound arc preceded by ONE refused retry must still pass — otherwise the gate scores the malformed turn instead of the brain ({note})");
+        note.ShouldContain("1 server-refused decision(s)", Case.Insensitive, "a PASSING arc must still report its refusals — the signal must not disappear just because the model recovered");
     }
 
     /// <summary>The agent statuses a folded outcome carries, read by the SAME production reader the decider's context is rendered from.</summary>
@@ -1216,6 +1259,31 @@ public sealed class SupervisorTrajectoryEvalTests
                 !priors.Any(d => d.DecisionKind == SupervisorDecisionKinds.Plan) ? (SupervisorDecisionKinds.Plan, ScriptedPayload(SupervisorDecisionKinds.Plan))
                 : !refused ? (SupervisorDecisionKinds.Spawn, "{}")   // schema-valid, names no unit — production REFUSES it and stages nothing
                 : !staged ? (SupervisorDecisionKinds.Spawn, ScriptedPayload(SupervisorDecisionKinds.Spawn))
+                : !priors.Any(d => d.DecisionKind == SupervisorDecisionKinds.Merge) ? (SupervisorDecisionKinds.Merge, "{}")
+                : (SupervisorDecisionKinds.Stop, """{"outcome":"completed"}""");
+
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = payload });
+        }
+    }
+
+    /// <summary>
+    /// The retry twin of <see cref="RefusedSpawnThenConvergingDecider"/>: plan→spawn→retry(no subtaskId,
+    /// refused)→merge→stop. The retry-outcome fold must refuse a malformed retry (production's
+    /// <c>BuildRejectedRetryOutcome</c>) rather than fabricate a "retried s1" success, and that refusal must still let
+    /// the arc reach its stop uncharged.
+    /// </summary>
+    private sealed class RefusedRetryThenConvergingDecider : ISupervisorDecider
+    {
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+        {
+            var priors = context.PriorDecisions;
+            var refused = priors.Any(d => SupervisorOutcome.ReadRejectionReason(d.OutcomeJson) is not null);
+            var staged = priors.Any(d => SupervisorOutcome.ReadStagedAgentCount(d.OutcomeJson) > 0);
+
+            var (kind, payload) =
+                !priors.Any(d => d.DecisionKind == SupervisorDecisionKinds.Plan) ? (SupervisorDecisionKinds.Plan, ScriptedPayload(SupervisorDecisionKinds.Plan))
+                : !staged ? (SupervisorDecisionKinds.Spawn, ScriptedPayload(SupervisorDecisionKinds.Spawn))
+                : !refused ? (SupervisorDecisionKinds.Retry, "{}")   // schema-valid, names no subtaskId — production REFUSES it and stages nothing
                 : !priors.Any(d => d.DecisionKind == SupervisorDecisionKinds.Merge) ? (SupervisorDecisionKinds.Merge, "{}")
                 : (SupervisorDecisionKinds.Stop, """{"outcome":"completed"}""");
 

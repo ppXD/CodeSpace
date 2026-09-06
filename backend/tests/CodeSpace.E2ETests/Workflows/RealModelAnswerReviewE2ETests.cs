@@ -91,10 +91,18 @@ public sealed class RealModelAnswerReviewE2ETests
             using var read = _fixture.BeginScope();
             var run = await read.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
 
-            // A run that never produced a reply tells us nothing about the review wiring — gateway/exec infra, retried
-            // by the best-of-N wrapper and skipped (never a red) if every attempt fails there.
+            // A run that never produced a reply is gateway/exec infra ONLY when RealModelRunClassifier says so — retried
+            // by the best-of-N wrapper and skipped (never a red) if every attempt fails there. A run that completed but
+            // genuinely never answered is a real miss, classified exactly as the injection gate classifies its own.
             if (!RealModelRunClassifier.HasInspectableModelReply(run))
-                throw new AgentExecutionInfraException($"the claude run produced no inspectable reply — gateway/exec infra: status={run.Status}; exitReason={RealModelRunClassifier.ExitReasonOf(run)}; error={run.Error ?? "(none)"}");
+            {
+                var reason = $"status={run.Status}; exitReason={RealModelRunClassifier.ExitReasonOf(run)}; error={run.Error ?? "(none)"}";
+
+                if (RealModelRunClassifier.IsGatewayInfra(run))
+                    throw new AgentExecutionInfraException($"the claude run did not complete — gateway/exec infra (non-gating skip): {reason}");
+
+                return (false, $"{Provider} '{model}': the claude run produced no inspectable reply — a real miss, not gateway infra: {reason}");
+            }
 
             var reviewed = await read.Resolve<CodeSpaceDbContext>().WorkflowRunRecord.AsNoTracking()
                 .CountAsync(r => r.RunId == workflowRunId
