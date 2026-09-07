@@ -4,7 +4,7 @@ using Microsoft.EntityFrameworkCore.ChangeTracking;
 
 namespace CodeSpace.Core.Services.Tasks.RoutePreview;
 
-/// <summary>Restore only this nested staging operation after its DB savepoint rolls back. Caller edits already pending at entry retain their values, original values and change flags.</summary>
+/// <summary>Restore only this staging operation after its DB savepoint or owned transaction rolls back. Caller edits already pending at entry retain their values, original values and change flags.</summary>
 internal sealed class TaskRouteChangeTrackerCheckpoint
 {
     private readonly CodeSpaceDbContext _db;

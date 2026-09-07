@@ -1,3 +1,5 @@
+using System.Data.Common;
+using System.Diagnostics;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -7,11 +9,15 @@ using CodeSpace.Core.Services.Tasks;
 using CodeSpace.Core.Services.Tasks.Launch.Providers.Chat;
 using CodeSpace.Core.Services.Tasks.RoutePreview;
 using CodeSpace.Core.Services.Tasks.RoutePreview.Exceptions;
+using CodeSpace.Core.Services.Workflows.Reconciliation;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Tasks;
+using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Npgsql;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows;
@@ -130,6 +136,190 @@ public sealed class TaskRouteSnapshotFlowTests
         (await read.Resolve<CodeSpaceDbContext>().WorkflowRun.CountAsync(r => r.TeamId == input.TeamId)).ShouldBe(1);
         (await read.Resolve<CodeSpaceDbContext>().Team.SingleAsync(t => t.Id == input.TeamId)).Name.ShouldBe("caller pending edit");
         (await read.Resolve<CodeSpaceDbContext>().User.SingleAsync(u => u.Id == pendingUser.Id)).Name.ShouldBe("caller pending insert");
+    }
+
+    [Fact]
+    public async Task Owned_commit_abort_restores_caller_work_and_removes_rolled_back_dispatch_before_same_scope_retry()
+    {
+        var input = await InputAsync();
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var postCommit = scope.Resolve<IPostCommitActions>();
+        var observed = new List<string>();
+        var preview = await scope.Resolve<ITaskRoutePreviewService>().PreviewAsync(input, CancellationToken.None);
+        input = input with { RouteSnapshotId = preview.RouteSnapshotId };
+        var seed = await new ChatSeedProvider().SeedAsync(input, CancellationToken.None);
+        await db.Database.OpenConnectionAsync();
+        await db.Database.ExecuteSqlRawAsync("CREATE TEMP TABLE route_commit_guard (id int PRIMARY KEY, parent_id int REFERENCES route_commit_guard(id) DEFERRABLE INITIALLY DEFERRED)");
+        await using (var callerTransaction = await db.Database.BeginTransactionAsync())
+        {
+            await postCommit.RunAfterCommitAsync(_ => { observed.Add("caller"); return Task.CompletedTask; }, CancellationToken.None);
+            await callerTransaction.CommitAsync();
+        }
+        var team = await db.Team.SingleAsync(t => t.Id == input.TeamId);
+        team.Name = "caller edit pending at owned commit";
+        var pendingUser = new User { Id = Guid.NewGuid(), Email = $"commit-{Guid.NewGuid():N}@test.local", Name = "caller insert pending at owned commit", CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId };
+        db.User.Add(pendingUser);
+        Guid failedRunId = default;
+        var exception = await Should.ThrowAsync<PostgresException>(() => scope.Resolve<ITaskRouteSnapshotService>().ConsumeAsync(new TaskRouteSnapshotConsumption(input, seed, async () =>
+        {
+            var staged = await scope.Resolve<ITaskLaunchService>().LaunchAsync(input with { RouteSnapshotId = null }, CancellationToken.None);
+            failedRunId = staged.RunId;
+            await postCommit.RunAfterCommitAsync(_ => { observed.Add("rolled-back"); return Task.CompletedTask; }, CancellationToken.None);
+            // The insert succeeds and the snapshot service saves/binds/releases its savepoint. PostgreSQL
+            // refuses only the final COMMIT, outside the nested savepoint's original recovery boundary.
+            await db.Database.ExecuteSqlRawAsync("INSERT INTO route_commit_guard (id, parent_id) VALUES (1, 2)");
+            return staged;
+        }), CancellationToken.None));
+        exception.SqlState.ShouldBe(PostgresErrorCodes.ForeignKeyViolation);
+        failedRunId.ShouldNotBe(Guid.Empty);
+        observed.ShouldBeEmpty();
+        db.Database.CurrentTransaction.ShouldBeNull();
+        team.Name.ShouldBe("caller edit pending at owned commit");
+        db.Entry(team).State.ShouldBe(EntityState.Modified);
+        db.Entry(pendingUser).State.ShouldBe(EntityState.Added);
+        using (var beforeRetry = _fixture.BeginScope())
+        {
+            var read = beforeRetry.Resolve<CodeSpaceDbContext>();
+            (await read.WorkflowRun.CountAsync(r => r.TeamId == input.TeamId)).ShouldBe(0);
+            (await read.TaskRouteSnapshot.SingleAsync(s => s.Id == preview.RouteSnapshotId)).ConsumedRunId.ShouldBeNull();
+        }
+        var retry = await scope.Resolve<ITaskLaunchService>().LaunchAsync(input, CancellationToken.None);
+        retry.RunId.ShouldNotBe(failedRunId);
+        observed.ShouldBe(["caller"]);
+        using var verified = _fixture.BeginScope();
+        var verifiedDb = verified.Resolve<CodeSpaceDbContext>();
+        (await verifiedDb.WorkflowRun.CountAsync(r => r.TeamId == input.TeamId)).ShouldBe(1);
+        (await verifiedDb.TaskRouteSnapshot.SingleAsync(s => s.Id == preview.RouteSnapshotId)).ConsumedRunId.ShouldBe(retry.RunId);
+        (await verifiedDb.Team.SingleAsync(t => t.Id == input.TeamId)).Name.ShouldBe("caller edit pending at owned commit");
+        (await verifiedDb.User.SingleAsync(u => u.Id == pendingUser.Id)).Name.ShouldBe("caller insert pending at owned commit");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Lost_commit_ack_retries_the_durable_result_without_staging_or_restoring_committed_caller_inserts(bool referenceDeleted)
+    {
+        var input = await InputAsync();
+        var fault = new LoseCommitAcknowledgement();
+        using var scope = _fixture.BeginScope(builder =>
+        {
+            var options = new DbContextOptionsBuilder<CodeSpaceDbContext>().UseNpgsql(_fixture.ConnectionString).UseSnakeCaseNamingConvention().AddInterceptors(fault).Options;
+            builder.RegisterInstance(options).As<DbContextOptions<CodeSpaceDbContext>>().SingleInstance();
+        });
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var preview = await scope.Resolve<ITaskRoutePreviewService>().PreviewAsync(input, CancellationToken.None);
+        input = input with { RouteSnapshotId = preview.RouteSnapshotId };
+        var seed = await new ChatSeedProvider().SeedAsync(input, CancellationToken.None);
+        var pendingUser = new User { Id = Guid.NewGuid(), Email = $"ack-{Guid.NewGuid():N}@test.local", Name = "caller insert committed without acknowledgement", CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId };
+        db.User.Add(pendingUser);
+        Guid committedRunId = default;
+        if (referenceDeleted) fault.BeforeThrow = async () =>
+        {
+            using var deleting = _fixture.BeginScope();
+            await deleting.Resolve<CodeSpaceDbContext>().TaskRouteSnapshot.Where(s => s.Id == preview.RouteSnapshotId).ExecuteDeleteAsync();
+        };
+        fault.Armed = true;
+        await Should.ThrowAsync<IOException>(() => scope.Resolve<ITaskRouteSnapshotService>().ConsumeAsync(new TaskRouteSnapshotConsumption(input, seed, async () =>
+        {
+            var staged = await scope.Resolve<ITaskLaunchService>().LaunchAsync(input with { RouteSnapshotId = null }, CancellationToken.None);
+            committedRunId = staged.RunId;
+            return staged;
+        }), CancellationToken.None));
+        db.Database.CurrentTransaction.ShouldBeNull();
+        if (referenceDeleted)
+        {
+            var stageInvoked = false;
+            await Should.ThrowAsync<InvalidOperationException>(() => scope.Resolve<ITaskRouteSnapshotService>().ConsumeAsync(new TaskRouteSnapshotConsumption(input, seed, () => { stageInvoked = true; throw new IOException("a missing recovery reference is not proof of abort"); }), CancellationToken.None));
+            stageInvoked.ShouldBeFalse();
+            db.Entry(pendingUser).State.ShouldBe(EntityState.Unchanged, "absence after a committed reference was deleted cannot justify restoring committed caller inserts");
+            await db.SaveChangesAsync();
+            using var read = _fixture.BeginScope();
+            (await read.Resolve<CodeSpaceDbContext>().WorkflowRun.CountAsync(r => r.TeamId == input.TeamId)).ShouldBe(1);
+            return;
+        }
+        using (var durable = _fixture.BeginScope())
+            (await durable.Resolve<CodeSpaceDbContext>().TaskRouteSnapshot.SingleAsync(s => s.Id == preview.RouteSnapshotId)).ConsumedRunId.ShouldBe(committedRunId);
+        var retry = await scope.Resolve<ITaskRouteSnapshotService>().ConsumeAsync(new TaskRouteSnapshotConsumption(input, seed, () => throw new InvalidOperationException("The durable committed snapshot must prevent a second launch.")), CancellationToken.None);
+        retry.RunId.ShouldBe(committedRunId);
+        db.Entry(pendingUser).State.ShouldBe(EntityState.Unchanged, "the caller insert really committed; restoring Added would duplicate it on the next SaveChanges");
+        await db.SaveChangesAsync();
+        using var verified = _fixture.BeginScope();
+        var verifiedDb = verified.Resolve<CodeSpaceDbContext>();
+        (await verifiedDb.WorkflowRun.CountAsync(r => r.TeamId == input.TeamId)).ShouldBe(1);
+        (await verifiedDb.User.CountAsync(u => u.Id == pendingUser.Id)).ShouldBe(1);
+        (await verifiedDb.WorkflowRun.SingleAsync(r => r.Id == committedRunId)).Status.ShouldBe(WorkflowRunStatus.Pending);
+        var jobs = verified.Resolve<InMemoryBackgroundJobClient>();
+        jobs.Calls.Count(c => c.RunId == committedRunId).ShouldBe(0, "uncertain commit actions are discarded; durable recovery must provide dispatch instead");
+        await verifiedDb.WorkflowRun.Where(r => r.Id == committedRunId).ExecuteUpdateAsync(s => s.SetProperty(r => r.CreatedDate, DateTimeOffset.UtcNow - StuckRunReconcilerService.PendingStuckAfter - TimeSpan.FromSeconds(1)));
+        var recovered = await verified.Resolve<IStuckRunReconcilerService>().ReconcileAsync(CancellationToken.None);
+        recovered.RedispatchedFromPending.ShouldBeGreaterThanOrEqualTo(1);
+        (await verifiedDb.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == committedRunId)).Status.ShouldBe(WorkflowRunStatus.Enqueued);
+        jobs.Calls.Count(c => c.RunId == committedRunId).ShouldBe(1, "the real reconciler and dispatcher must enqueue the original run without restaging");
+        await verified.Resolve<IStuckRunReconcilerService>().ReconcileAsync(CancellationToken.None);
+        jobs.Calls.Count(c => c.RunId == committedRunId).ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task Unknown_commit_recovery_has_its_own_deadline_and_blocks_same_scope_staging_until_durable_result_is_readable()
+    {
+        var input = await InputAsync();
+        var fault = new LoseCommitAcknowledgement();
+        using var scope = _fixture.BeginScope(builder =>
+        {
+            var options = new DbContextOptionsBuilder<CodeSpaceDbContext>().UseNpgsql(_fixture.ConnectionString).UseSnakeCaseNamingConvention().AddInterceptors(fault).Options;
+            builder.RegisterInstance(options).As<DbContextOptions<CodeSpaceDbContext>>().SingleInstance();
+        });
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var preview = await scope.Resolve<ITaskRoutePreviewService>().PreviewAsync(input, CancellationToken.None);
+        input = input with { RouteSnapshotId = preview.RouteSnapshotId };
+        var seed = await new ChatSeedProvider().SeedAsync(input, CancellationToken.None);
+        using var holderScope = _fixture.BeginScope();
+        var holder = holderScope.Resolve<CodeSpaceDbContext>();
+        using var cancelledCaller = new CancellationTokenSource();
+        fault.BeforeThrow = async () =>
+        {
+            await holder.Database.BeginTransactionAsync();
+            await holder.Database.ExecuteSqlInterpolatedAsync($"UPDATE task_route_snapshot SET created_at = created_at WHERE id = {preview.RouteSnapshotId}");
+            cancelledCaller.Cancel();
+        };
+        fault.Armed = true;
+        Guid committedRunId = default;
+        var elapsed = Stopwatch.StartNew();
+        await Should.ThrowAsync<IOException>(() => scope.Resolve<ITaskRouteSnapshotService>().ConsumeAsync(new TaskRouteSnapshotConsumption(input, seed, async () =>
+        {
+            var staged = await scope.Resolve<ITaskLaunchService>().LaunchAsync(input with { RouteSnapshotId = null }, CancellationToken.None);
+            committedRunId = staged.RunId;
+            return staged;
+        }), cancelledCaller.Token));
+        elapsed.Elapsed.ShouldBeGreaterThan(TimeSpan.FromSeconds(4), "recovery has an independent deadline even when the caller is already cancelled");
+        elapsed.Elapsed.ShouldBeLessThan(TimeSpan.FromSeconds(15), "a locked recovery read must not wait without a bound");
+        var invoked = false;
+        elapsed.Restart();
+        await Should.ThrowAsync<OperationCanceledException>(() => scope.Resolve<ITaskRouteSnapshotService>().ConsumeAsync(new TaskRouteSnapshotConsumption(input, seed, () => { invoked = true; throw new InvalidOperationException("unresolved commit must block staging"); }), CancellationToken.None));
+        elapsed.Elapsed.ShouldBeLessThan(TimeSpan.FromSeconds(15));
+        invoked.ShouldBeFalse();
+        var heldTransaction = holder.Database.CurrentTransaction!;
+        await heldTransaction.RollbackAsync();
+        await heldTransaction.DisposeAsync();
+        var retried = await scope.Resolve<ITaskRouteSnapshotService>().ConsumeAsync(new TaskRouteSnapshotConsumption(input, seed, () => { invoked = true; throw new InvalidOperationException("the committed run cannot be staged again"); }), CancellationToken.None);
+        retried.RunId.ShouldBe(committedRunId);
+        invoked.ShouldBeFalse();
+        (await db.WorkflowRun.AsNoTracking().CountAsync(r => r.TeamId == input.TeamId)).ShouldBe(1);
+    }
+
+    private sealed class LoseCommitAcknowledgement : DbTransactionInterceptor
+    {
+        public bool Armed { get; set; }
+        public Func<Task>? BeforeThrow { get; set; }
+
+        public override async Task TransactionCommittedAsync(DbTransaction transaction, TransactionEndEventData eventData, CancellationToken cancellationToken = default)
+        {
+            if (!Armed) return;
+            Armed = false;
+            if (BeforeThrow is not null) await BeforeThrow();
+            throw new IOException("The database committed, but the caller lost the acknowledgement.");
+        }
     }
 
     [Fact]

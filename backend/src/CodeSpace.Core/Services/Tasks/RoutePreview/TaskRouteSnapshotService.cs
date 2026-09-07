@@ -11,6 +11,7 @@ using CodeSpace.Messages.Commands.Tasks;
 using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Tasks;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 
 namespace CodeSpace.Core.Services.Tasks.RoutePreview;
 
@@ -22,6 +23,7 @@ public sealed class TaskRouteSnapshotService : ITaskRouteSnapshotService, IScope
     private readonly TaskRoutePolicyFingerprint _policy;
     private readonly CodeSpaceDbContext _db;
     private readonly IPostCommitActions _postCommit;
+    private PendingCommitRecovery? _pendingCommitRecovery;
 
     public TaskRouteSnapshotService(IEffortRouter router, TaskRoutePolicyFingerprint policy, CodeSpaceDbContext db, IPostCommitActions postCommit)
     {
@@ -33,6 +35,7 @@ public sealed class TaskRouteSnapshotService : ITaskRouteSnapshotService, IScope
 
     public async Task<TaskRoutePreviewResult> CreateAsync(TaskLaunchRequest request, TaskLaunchSeed seed, CancellationToken cancellationToken)
     {
+        await ResolvePendingCommitAsync().ConfigureAwait(false);
         var policy = _policy.Capture();
         var route = await _router.RouteAsync(TaskLaunchService.BuildRouteRequest(seed, request), cancellationToken).ConfigureAwait(false);
         if (policy != _policy.Capture()) throw new TaskRouteSnapshotMismatchException();
@@ -57,25 +60,69 @@ public sealed class TaskRouteSnapshotService : ITaskRouteSnapshotService, IScope
 
     public async Task<TaskRouteSnapshotDecision> ReadAsync(TaskLaunchRequest request, TaskLaunchSeed seed, CancellationToken cancellationToken)
     {
+        await ResolvePendingCommitAsync().ConfigureAwait(false);
         var snapshot = await _db.TaskRouteSnapshot.AsNoTracking().SingleOrDefaultAsync(s => s.Id == request.RouteSnapshotId && s.TeamId == request.TeamId && s.ActorUserId == request.ActorUserId, cancellationToken).ConfigureAwait(false);
         return await ValidateAsync(snapshot, request, seed, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<LaunchTaskResult> ConsumeAsync(TaskRouteSnapshotConsumption consumption, CancellationToken cancellationToken)
     {
-        // The command middleware owns the production transaction. Direct service callers receive the same atomicity,
-        // including delayed dispatch; rollback leaves the preview reusable after cancellation or process loss.
+        await ResolvePendingCommitAsync().ConfigureAwait(false);
+        // The command middleware owns the production transaction. Direct callers need a checkpoint
+        // covering COMMIT as well: deferred constraints can fail after staging/savepoints succeed.
         if (_db.Database.CurrentTransaction is not null) return await ConsumeWithSavepointAsync(consumption, cancellationToken).ConfigureAwait(false);
 
-        LaunchTaskResult result;
-        await using (var transaction = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false))
+        var actions = _postCommit.CreateCheckpoint();
+        var tracker = new TaskRouteChangeTrackerCheckpoint(_db);
+        LaunchTaskResult? result = null;
+        try
         {
-            result = await ConsumeWithSavepointAsync(consumption, cancellationToken).ConfigureAwait(false);
+            await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            result = await ConsumeInTransactionAsync(consumption, cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            // The owned transaction is disposed before recovery. Never drain an action whose commit
+            // is uncertain. A committed Pending run remains recoverable by StuckRunReconcilerService.
+            _postCommit.RollbackTo(actions);
+            if (result is null) tracker.Restore();
+            else
+            {
+                _pendingCommitRecovery = new PendingCommitRecovery(consumption.Request, result.RunId, tracker);
+                try { await ResolvePendingCommitAsync().ConfigureAwait(false); }
+                catch
+                {
+                    // Keep the original commit failure. If the database is still unreachable, every
+                    // subsequent entry point resolves this checkpoint before it can route or stage again.
+                }
+            }
+            throw;
         }
         await _postCommit.RunAllAsync(cancellationToken).ConfigureAwait(false);
         return result;
     }
+
+    private async Task ResolvePendingCommitAsync()
+    {
+        if (_pendingCommitRecovery is not { } pending) return;
+        // A fresh connection and its own deadline also work after caller cancellation/connection loss.
+        // FOR UPDATE waits for the earlier transaction's final outcome; an MVCC read of an unconsumed
+        // version could otherwise mistake an in-flight COMMIT for an abort and replay caller inserts.
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await using var connection = (NpgsqlConnection)((ICloneable)_db.Database.GetDbConnection()).Clone();
+        await connection.OpenAsync(deadline.Token).ConfigureAwait(false);
+        await using var command = new NpgsqlCommand("SELECT consumed_run_id FROM task_route_snapshot WHERE id = @id AND team_id = @team AND actor_user_id = @actor FOR UPDATE", connection);
+        command.Parameters.AddWithValue("id", pending.Request.RouteSnapshotId!.Value);
+        command.Parameters.AddWithValue("team", pending.Request.TeamId);
+        command.Parameters.AddWithValue("actor", pending.Request.ActorUserId);
+        var consumedRunId = await command.ExecuteScalarAsync(deadline.Token).ConfigureAwait(false);
+        if (consumedRunId is null) throw new InvalidOperationException("The route consumption outcome cannot be resolved because its durable reference is no longer available.");
+        if (consumedRunId is not Guid runId || runId != pending.RunId) pending.Tracker.Restore();
+        _pendingCommitRecovery = null;
+    }
+
+    private sealed record PendingCommitRecovery(TaskLaunchRequest Request, Guid RunId, TaskRouteChangeTrackerCheckpoint Tracker);
 
     private async Task<LaunchTaskResult> ConsumeWithSavepointAsync(TaskRouteSnapshotConsumption consumption, CancellationToken cancellationToken)
     {
