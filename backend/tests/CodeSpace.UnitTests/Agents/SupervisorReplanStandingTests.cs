@@ -99,6 +99,59 @@ public class SupervisorReplanStandingTests
             "the check could not RUN, so where the verdict really did survive, the server's own amend gate admits a proposal for it");
     }
 
+    /// <summary>
+    /// THE hole the newest-generation scoping left, and the reason the re-graded reading is over ANY boundary: the
+    /// tape below is the amendment arm's own tape with ONE more plan on the end — exactly the move a model makes
+    /// when it is told "do not author another plan" and authors one anyway. Scoped to the newest generation, that
+    /// plan moved the boundary PAST the identical re-grade, the reading fell back to "authored and unrun", and the
+    /// run cycled <c>spawn → identical re-grade → amend → plan → …</c> with only the total-spawn and cost caps
+    /// underneath it (an infra-classed rejection with work present keeps its settled evidence, so every staging
+    /// turn resets the no-progress streak). The evidence is a TAPE fact; a later plan cannot unmake it.
+    /// </summary>
+    [Fact]
+    public void A_plan_authored_after_an_identical_re_grade_does_not_launder_it()
+    {
+        var spent = new[]
+        {
+            Plan(1), Staged(2, SupervisorDecisionKinds.Spawn, passed: false, InfraDetail), Plan(3),
+            Staged(4, SupervisorDecisionKinds.Retry, passed: false, InfraDetail),
+        };
+        var andOneMorePlan = spent.Append(Plan(5)).ToArray();
+
+        SupervisorReplanStanding.ExitFor(spent, "s1").ShouldBe(SupervisorReplanExit.ToAmendment, "fixture check — this is the tape the newest plan is authored over");
+
+        SupervisorReplanStanding.VerdictSurvivedAReplan(andOneMorePlan, "s1").ShouldBeTrue(
+            "the identical re-grade happened across the boundary at 3 — the boundary at 5 does not un-witness it");
+        SupervisorReplanStanding.AwaitsItsReplannedStaging(andOneMorePlan, "s1").ShouldBeTrue(
+            "…and the newest plan IS authored-and-unrun, which is exactly why the exit cannot be resolved from that arm alone");
+        SupervisorReplanStanding.ExitFor(andOneMorePlan, "s1").ShouldBe(SupervisorReplanExit.ToAmendment,
+            "the spent-evidence arm takes precedence, or the withdrawal is one 'plan' away from being lifted every time");
+
+        SupervisorReplanStanding.ExitFor(andOneMorePlan.Append(Staged(6, SupervisorDecisionKinds.Retry, passed: false, "grade-error: dotnet not found")).ToArray(), "s1")
+            .ShouldBe(SupervisorReplanExit.None, "…and a re-grade that genuinely MOVED the verdict still gives the plan verb back, however many boundaries precede it");
+    }
+
+    /// <summary>
+    /// The staging arm, ORDERED: the unit is re-declared with its <c>DependsOn</c> intact, but the dependency was
+    /// accepted under the EARLIER generation and <see cref="SupervisorDependencyGate"/> reads "satisfied" inside the
+    /// current one only — so the spawn the plain arm names is clamped and stages nothing (an all-deferred spawn is
+    /// accepted-empty), one screen from a frontier block calling the unit blocked.
+    /// </summary>
+    [Fact]
+    public void An_unrun_re_plan_the_dependency_rail_defers_names_the_order_instead()
+    {
+        var tape = new[] { PlanWithS1AfterS2(1), StagedPair(2), PlanWithS1AfterS2(3) };
+
+        SupervisorDependencyGate.Frontier(tape).Blocked.Select(b => b.Id).ShouldContain("s1",
+            "fixture check — the gate really does defer it, off the same reader the prompt's frontier block prints");
+
+        SupervisorReplanStanding.AwaitsItsReplannedStaging(tape, "s1").ShouldBeTrue("the tape fact is unchanged: a plan for it is authored and unrun");
+        SupervisorReplanStanding.ExitFor(tape, "s1").ShouldBe(SupervisorReplanExit.ToStagingBehindADependency);
+
+        SupervisorReplanStanding.ExitFor(new[] { Plan(1, subtaskIds: new[] { "s1", "s2" }), StagedPair(2), Plan(3, subtaskIds: new[] { "s1", "s2" }) }, "s1")
+            .ShouldBe(SupervisorReplanExit.ToStaging, "…and the same tape with no DAG edge on it keeps the unqualified staging exit");
+    }
+
     [Fact]
     public void A_work_classed_verdict_that_survived_a_re_plan_has_only_the_human_left()
     {
@@ -212,6 +265,41 @@ public class SupervisorReplanStandingTests
         SupervisorAmendObligation.StandingFor(tape, "s1").ShouldBe(SupervisorAmendStanding.AwaitingRetry, "the card outlives the newest plan, and no staging has consumed it");
         SupervisorReplanStanding.ExitFor(tape, "s1").ShouldBe(SupervisorReplanExit.ToStaging,
             "the tape fact is unchanged by the co-sign — a plan for this unit is authored and unrun, and staging it is exactly what the AwaitingRetry steer asks for by name");
+    }
+
+    /// <summary>A plan declaring both units with the DAG edge s1 → s2 (s1 waits on s2 to be accepted) — re-declared, it is the tape whose dependency was satisfied in an EARLIER generation only.</summary>
+    private static SupervisorPriorDecision PlanWithS1AfterS2(long seq)
+    {
+        var payload = new SupervisorPlanPayload
+        {
+            Goal = "ship",
+            Subtasks = new[]
+            {
+                new SupervisorPlannedSubtask { Id = "s1", Title = "Audit", Instruction = "audit it", DependsOn = new[] { "s2" } },
+                new SupervisorPlannedSubtask { Id = "s2", Title = "Seed", Instruction = "seed it" },
+            },
+        };
+
+        return new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = seq, Status = SupervisorDecisionStatus.Succeeded, DecisionKind = SupervisorDecisionKinds.Plan, PayloadJson = JsonSerializer.Serialize(payload, AgentJson.Options), OutcomeJson = """{"planned":["s1","s2"],"count":2}""" };
+    }
+
+    /// <summary>One spawn that staged BOTH units and folded a result for each — s1's check COULD NOT RUN, s2 was ACCEPTED. What <see cref="Staged"/> cannot express, and the dependency case needs: s2's acceptance is the satisfaction a later generation no longer sees.</summary>
+    private static SupervisorPriorDecision StagedPair(long seq)
+    {
+        var unrunnable = Guid.NewGuid();
+        var accepted = Guid.NewGuid();
+        var results = new[]
+        {
+            new SupervisorAgentResult { AgentRunId = unrunnable, Status = "Succeeded", Summary = "did it", ProducedBranch = "codespace/agent/s1", AcceptancePassed = false, AcceptanceDetail = InfraDetail },
+            new SupervisorAgentResult { AgentRunId = accepted, Status = "Succeeded", Summary = "seeded it", ProducedBranch = "codespace/agent/s2", AcceptancePassed = true, AcceptanceDetail = "tests-passed" },
+        };
+
+        return new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = seq, Status = SupervisorDecisionStatus.Succeeded, DecisionKind = SupervisorDecisionKinds.Spawn,
+            PayloadJson = """{"subtaskIds":["s1","s2"]}""",
+            OutcomeJson = SupervisorOutcome.FoldAgentResults($$"""{"agentRunIds":["{{unrunnable}}","{{accepted}}"],"agentCount":2}""", results),
+        };
     }
 
     /// <summary>An amend card the human APPROVED, built from the PRODUCTION card builder so the marker sentence and the structured proposal are exactly what the obligation walk and the co-sign overlay read back.</summary>

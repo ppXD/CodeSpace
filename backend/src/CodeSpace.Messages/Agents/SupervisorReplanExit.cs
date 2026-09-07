@@ -13,17 +13,25 @@ namespace CodeSpace.Messages.Agents;
 /// co-sign in it, and had an exit ramp first; this is the reading for the far commoner tape that never reached a
 /// co-sign at all.</para>
 ///
-/// <para>THE ARMS SPLIT ON WHAT THE TAPE CAN ACTUALLY WITNESS, which is the whole reason there are three of them.
+/// <para>THE ARMS SPLIT ON WHAT THE TAPE CAN ACTUALLY WITNESS, which is the whole reason there is more than one.
 /// A plan authored after a verdict that nothing has re-graded since has NOT been shown to change nothing — the
-/// observed loop's very next honest move is to STAGE it (<see cref="ToStaging"/>), and telling that tape "another
-/// plan changes nothing, propose an amendment" would withdraw the plan verb one turn after the model correctly
-/// authored one and name no verb that could ever grade the repaired check. Only a unit RE-GRADED under the new plan
-/// that came back with the identical verdict is evidence the re-plan changed nothing, and only that unit is sent at
-/// the oracle (<see cref="ToAmendment"/>) or at a human (<see cref="ToHuman"/>).</para>
+/// observed loop's very next honest move is to STAGE it (<see cref="ToStaging"/>, or
+/// <see cref="ToStagingBehindADependency"/> when the dependency rail defers that staging), and telling that tape
+/// "another plan changes nothing, propose an amendment" would withdraw the plan verb one turn after the model
+/// correctly authored one and name no verb that could ever grade the repaired check. Only a unit RE-GRADED under a
+/// new plan that came back with the identical verdict is evidence a re-plan changed nothing, and only that unit is
+/// sent at the oracle (<see cref="ToAmendment"/>) or at a human (<see cref="ToHuman"/>).</para>
 ///
-/// <para><see cref="ToAmendment"/> and <see cref="ToStaging"/> additionally require the NEWEST plan generation to
-/// still declare the unit: a co-sign minted for a unit the current plan dropped can never be consumed by a retry,
-/// and a spawn cannot stage a unit the plan does not declare. A dropped unit's only exit is a human ruling.</para>
+/// <para>The re-graded reading is over ANY plan boundary the unit was re-graded across, never only the newest one,
+/// and it WINS over the staging arms. Scoped to the newest generation it had a hole the size of the loop it closes:
+/// on a tape whose re-grade came back identical, the model's authoring one MORE plan moved the boundary past the
+/// evidence, the reading fell back to "a plan is authored and unrun", and <c>spawn → identical re-grade → amend →
+/// plan → …</c> ran as a longer cycle of the same fixed point. The tape's memory that a re-plan already failed to
+/// move this verdict must not be erasable by authoring another one.</para>
+///
+/// <para>Every live exit but <see cref="ToHuman"/> additionally requires the NEWEST plan generation to still
+/// declare the unit: a co-sign minted for a unit the current plan dropped can never be consumed by a retry, and a
+/// spawn cannot stage a unit the plan does not declare. A dropped unit's only exit is a human ruling.</para>
 ///
 /// <para>Which of <see cref="ToAmendment"/> / <see cref="ToHuman"/> a re-graded unit gets is a server verdict
 /// (<c>SupervisorAmendPrecondition</c>) and the same one the turn's roster reads: a steer that named
@@ -43,4 +51,15 @@ public enum SupervisorReplanExit
 
     /// <summary>A plan for this unit was authored AFTER its standing verdict and nothing has been staged under it since — the re-plan is not spent yet, it is unrun. The exit is <c>spawn</c>: stage the plan the run already has, and do not author a second one over the same verdict.</summary>
     ToStaging = 3,
+
+    /// <summary>
+    /// <see cref="ToStaging"/>'s tape, with the dependency rail across it: the re-declared unit is still waiting on
+    /// a <c>DependsOn</c> the CURRENT generation has not satisfied, so the spawn the plain staging arm names would
+    /// be clamped and stage nothing (<c>SupervisorDependencyGate.Partition</c> defers it, and an all-deferred spawn
+    /// is accepted-empty). The exit is still the staging — never another plan — but ORDERED: spawn what it waits on
+    /// first. Its own arm rather than a footnote on <see cref="ToStaging"/>, because the two copies differ in the
+    /// one place a model reads for its verb, and the frontier block one screen away already contradicts the
+    /// unqualified sentence.
+    /// </summary>
+    ToStagingBehindADependency = 4,
 }

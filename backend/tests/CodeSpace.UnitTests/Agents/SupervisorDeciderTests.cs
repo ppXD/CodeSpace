@@ -668,6 +668,7 @@ public class SupervisorDeciderTests
     [Theory]
     [InlineData(SupervisorReplanExit.None, null)]
     [InlineData(SupervisorReplanExit.ToStaging, "'spawn' this item so its re-planned check grades it.")]
+    [InlineData(SupervisorReplanExit.ToStagingBehindADependency, "spawn what the dependency frontier above says this item waits on, then 'spawn' this item so its re-planned check grades it.")]
     [InlineData(SupervisorReplanExit.ToAmendment, "Propose 'amend_acceptance' for this item's check, or 'ask_human' to rule.")]
     [InlineData(SupervisorReplanExit.ToHuman, "repairing its check cannot move it either, so do not propose that: 'ask_human' to rule.")]
     public void Each_replan_exit_maps_to_one_exit_ramp(SupervisorReplanExit replanExit, string? namedExit)
@@ -841,6 +842,51 @@ public class SupervisorDeciderTests
             "the re-planned check ran and produced a DIFFERENT verdict — the run is not at a fixed point");
         prompt.ShouldNotContain("ALREADY authored", Case.Sensitive);
         prompt.ShouldNotContain("A re-plan ALREADY left this verdict unchanged", Case.Sensitive);
+    }
+
+    /// <summary>
+    /// The withdrawal must survive the model IGNORING it. The tape is the amendment arm's, plus the one plan the
+    /// steer just told the model not to author — the commonest next tape there is. Read against the newest
+    /// generation only, that plan moved the boundary past the identical re-grade and the prompt flipped back to
+    /// "STAGE the plan this run already has", handing the run a longer cycle of the same fixed point:
+    /// <c>spawn → identical re-grade → amend → plan → …</c>, bounded only by the total-spawn and cost caps.
+    /// </summary>
+    [Fact]
+    public void The_withdrawal_survives_one_more_plan_authored_over_the_same_verdict()
+    {
+        var graded = StagedInfraFailure(2, SupervisorDecisionKinds.Spawn, "grade-error: npm not found");
+        var reGraded = StagedInfraFailure(4, SupervisorDecisionKinds.Retry, "grade-error: npm not found");
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 6, PlanAt(1), graded, PlanAt(3), reGraded, PlanAt(5)));
+
+        prompt.ShouldContain(LlmSupervisorDecider.ReplanExitRampFor(SupervisorReplanExit.ToAmendment)!, Case.Sensitive,
+            "the spent re-plan is a tape fact — authoring another plan does not un-spend it");
+        prompt.ShouldNotContain(LlmSupervisorDecider.ReplanExitRampFor(SupervisorReplanExit.ToStaging)!, Case.Sensitive,
+            "…and it must not fall back to 'stage the plan you already have', which is the same loop one turn longer");
+        prompt.ShouldNotContain("Re-plan this item", Case.Insensitive);
+        prompt.ShouldNotContain("re-plan the check", Case.Insensitive, "…in the plan-state recitation either");
+    }
+
+    /// <summary>
+    /// The two re-plan steers are ASYMMETRIC and this pins WHY that is safe rather than lucky: the infra arm reads
+    /// the amend standing first (a co-signed unit must never be steered at the plan that discards the co-sign),
+    /// while the measured-red-baseline arm substitutes the ramp unconditionally and never reads it. What closes the
+    /// gap is a SERVER ruling — <see cref="SupervisorAmendPrecondition"/> refuses a proposal whose target's latest
+    /// verdict is work-classed, so no co-sign can be minted against the verdict shape that arm renders, and the
+    /// turn's roster withholds the verb on the same reading. The day the gate admits a work-classed target, that arm
+    /// silently offers a re-plan to a unit whose co-sign the re-plan destroys, and this test is what says so.
+    /// </summary>
+    [Fact]
+    public void No_cosign_can_be_minted_for_the_verdict_the_baseline_arm_renders()
+    {
+        var context = Context(turnNumber: 3, PlanAt(1), StagedRedBaseline(2, SupervisorDecisionKinds.Spawn));
+
+        SupervisorAmendPrecondition.IsAmendable(context.PriorDecisions, "s1").ShouldBeFalse(
+            "a check that RAN and rejected the work is evidence against the WORK — the gate refuses to amend it away");
+        SupervisorActionRoster.Withheld(context).ShouldContain(SupervisorDecisionKinds.AmendAcceptance,
+            "…and the turn's own menu says the same, off the same gate");
+        SupervisorAmendObligation.StandingFor(context.PriorDecisions, "s1").ShouldBe(SupervisorAmendStanding.None,
+            "so this arm's indifference to the amend standing cannot render a co-signed unit's steer wrong: there is no standing to read");
     }
 
     /// <summary>A spawn or retry that staged 's1' and folded one WORK-classed rejection for it against a MEASURED-RED baseline — the second re-plan steer's own tape.</summary>
